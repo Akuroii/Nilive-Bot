@@ -18,6 +18,7 @@ async def load_cogs():
         "cogs.boost",
         "cogs.reactionroles",
         "cogs.tickets",
+        "cogs.embedbuilder",
     ]
     for cog in cog_files:
         try:
