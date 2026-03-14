@@ -16,6 +16,7 @@ async def load_cogs():
         "cogs.leveling",
         "cogs.economy",
         "cogs.boost",
+        "cogs.reactionroles",
     ]
     for cog in cog_files:
         try:
