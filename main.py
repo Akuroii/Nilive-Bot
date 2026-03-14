@@ -19,6 +19,9 @@ async def load_cogs():
         "cogs.reactionroles",
         "cogs.tickets",
         "cogs.embedbuilder",
+        "cogs.sticky",
+        "cogs.roleplay",
+        "cogs.youtube",
     ]
     for cog in cog_files:
         try:
