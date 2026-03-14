@@ -50,12 +50,3 @@ async def init_db():
         """)
         await db.commit()
     print("Database initialized")
-```
-
-Commit it.
-
----
-
-**File 3 — "Add file" → "Create new file", filename — type this carefully:**
-```
-cogs/mvp.py
