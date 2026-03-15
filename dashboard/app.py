@@ -41,7 +41,7 @@ def login():
 
 @app.route("/discord_login")
 def discord_login():
-    scope = "identify guilds"
+    scope = "identify"
     return redirect(
         f"https://discord.com/oauth2/authorize"
         f"?client_id={CLIENT_ID}"
@@ -68,14 +68,15 @@ def callback():
     access_token = tokens.get("access_token")
     if not access_token:
         return redirect(url_for("login"))
-    user_r = requests.get(f"{DISCORD_API}/users/@me",
-                          headers={"Authorization": f"Bearer {access_token}"})
+    user_r = requests.get(
+        f"{DISCORD_API}/users/@me",
+        headers={"Authorization": f"Bearer {access_token}"})
     user = user_r.json()
-    guilds_r = requests.get(f"{DISCORD_API}/users/@me/guilds",
-                            headers={"Authorization": f"Bearer {access_token}"})
-    guilds = guilds_r.json()
-    session["user"] = user
-    session["guilds"] = guilds
+    session["user"] = {
+        "id": user.get("id"),
+        "username": user.get("username"),
+        "avatar": user.get("avatar"),
+    }
     session["access_token"] = access_token
     return redirect(url_for("index"))
 
@@ -178,17 +179,21 @@ def triggers():
             await db.commit()
             cursor = await db.execute("SELECT * FROM triggers")
             return await cursor.fetchall()
+
     async def add_trigger(trigger, response, embed_title, embed_color, input_ch, output_ch):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                INSERT INTO triggers (guild_id, trigger, response, embed_title, embed_color, input_channel_id, output_channel_id)
+                INSERT INTO triggers
+                (guild_id, trigger, response, embed_title, embed_color, input_channel_id, output_channel_id)
                 VALUES (0, ?, ?, ?, ?, ?, ?)
             """, (trigger, response, embed_title, embed_color, input_ch, output_ch))
             await db.commit()
+
     async def delete_trigger(trigger_id):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("DELETE FROM triggers WHERE id=?", (trigger_id,))
             await db.commit()
+
     if request.method == "POST":
         action = request.form.get("action")
         if action == "add":
@@ -203,6 +208,7 @@ def triggers():
         elif action == "delete":
             run_async(delete_trigger(request.form.get("trigger_id")))
         return redirect(url_for("triggers"))
+
     rows = run_async(get_triggers())
     return render_template("triggers.html", user=session["user"], triggers=rows)
 
