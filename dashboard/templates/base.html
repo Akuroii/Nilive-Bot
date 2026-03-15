@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nero Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root[data-theme="dark"] {
+            --bg: #0d0d0d;
+            --bg2: #141414;
+            --bg3: #1a1a1a;
+            --bg4: #222222;
+            --border: #2a2a2a;
+            --text: #ffffff;
+            --text2: #a0a0a0;
+            --text3: #666666;
+            --accent: #5865F2;
+            --accent2: #4752c4;
+            --success: #57F287;
+            --warning: #FEE75C;
+            --danger: #ED4245;
+            --gold: #FFD700;
+        }
+        :root[data-theme="light"] {
+            --bg: #f0f2f5;
+            --bg2: #ffffff;
+            --bg3: #f8f9fa;
+            --bg4: #e9ecef;
+            --border: #dee2e6;
+            --text: #1a1a2e;
+            --text2: #555555;
+            --text3: #999999;
+            --accent: #5865F2;
+            --accent2: #4752c4;
+            --success: #2d8a4e;
+            --warning: #b8860b;
+            --danger: #c0392b;
+            --gold: #b8860b;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); display: flex; min-height: 100vh; }
+        .sidebar {
+            width: 260px; background: var(--bg2); border-right: 1px solid var(--border);
+            display: flex; flex-direction: column; position: fixed; height: 100vh; z-index: 100;
+        }
+        .sidebar-header {
+            padding: 24px 20px; border-bottom: 1px solid var(--border);
+            display: flex; align-items: center; gap: 12px;
+        }
+        .sidebar-logo {
+            width: 40px; height: 40px; border-radius: 50%;
+            background: var(--accent); display: flex; align-items: center;
+            justify-content: center; font-weight: 700; font-size: 18px; color: white;
+        }
+        .sidebar-title { font-weight: 700; font-size: 18px; }
+        .sidebar-subtitle { font-size: 12px; color: var(--text3); }
+        .sidebar-nav { flex: 1; padding: 16px 12px; overflow-y: auto; }
+        .nav-section { font-size: 11px; font-weight: 600; color: var(--text3);
+            text-transform: uppercase; letter-spacing: 0.08em; padding: 8px 8px 4px; }
+        .nav-item {
+            display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+            border-radius: 8px; text-decoration: none; color: var(--text2);
+            font-size: 14px; font-weight: 500; margin-bottom: 2px; transition: all 0.15s;
+        }
+        .nav-item:hover { background: var(--bg4); color: var(--text); }
+        .nav-item.active { background: var(--accent); color: white; }
+        .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+        .sidebar-footer {
+            padding: 16px; border-top: 1px solid var(--border);
+            display: flex; align-items: center; gap: 10px;
+        }
+        .user-avatar {
+            width: 36px; height: 36px; border-radius: 50%; overflow: hidden;
+        }
+        .user-avatar img { width: 100%; height: 100%; object-fit: cover; }
+        .user-info { flex: 1; }
+        .user-name { font-size: 13px; font-weight: 600; }
+        .user-tag { font-size: 11px; color: var(--text3); }
+        .logout-btn {
+            padding: 6px 10px; border-radius: 6px; background: transparent;
+            border: 1px solid var(--border); color: var(--text2); font-size: 12px;
+            cursor: pointer; text-decoration: none; transition: all 0.15s;
+        }
+        .logout-btn:hover { background: var(--danger); color: white; border-color: var(--danger); }
+        .main { margin-left: 260px; flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+        .topbar {
+            background: var(--bg2); border-bottom: 1px solid var(--border);
+            padding: 16px 32px; display: flex; align-items: center; justify-content: space-between;
+            position: sticky; top: 0; z-index: 50;
+        }
+        .page-title { font-size: 20px; font-weight: 700; }
+        .topbar-actions { display: flex; align-items: center; gap: 12px; }
+        .theme-toggle {
+            width: 40px; height: 22px; border-radius: 11px; background: var(--bg4);
+            border: 1px solid var(--border); cursor: pointer; position: relative;
+            transition: background 0.2s;
+        }
+        .theme-toggle-thumb {
+            width: 16px; height: 16px; border-radius: 50%; background: var(--accent);
+            position: absolute; top: 2px; left: 2px; transition: transform 0.2s;
+        }
+        [data-theme="light"] .theme-toggle-thumb { transform: translateX(18px); }
+        .content { padding: 32px; flex: 1; }
+        .card {
+            background: var(--bg2); border: 1px solid var(--border);
+            border-radius: 12px; padding: 24px; margin-bottom: 20px;
+        }
+        .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .stat-card {
+            background: var(--bg3); border: 1px solid var(--border);
+            border-radius: 10px; padding: 20px;
+        }
+        .stat-label { font-size: 12px; color: var(--text3); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+        .stat-value { font-size: 28px; font-weight: 700; }
+        .stat-sub { font-size: 12px; color: var(--text3); margin-top: 4px; }
+        .table { width: 100%; border-collapse: collapse; }
+        .table th { text-align: left; padding: 10px 16px; font-size: 12px; font-weight: 600;
+            color: var(--text3); text-transform: uppercase; letter-spacing: 0.05em;
+            border-bottom: 1px solid var(--border); }
+        .table td { padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--border); }
+        .table tr:last-child td { border-bottom: none; }
+        .table tr:hover td { background: var(--bg3); }
+        .badge {
+            display: inline-block; padding: 3px 10px; border-radius: 999px;
+            font-size: 11px; font-weight: 600;
+        }
+        .badge-success { background: rgba(87,242,135,0.15); color: var(--success); }
+        .badge-danger  { background: rgba(237,66,69,0.15);  color: var(--danger); }
+        .badge-warning { background: rgba(254,231,92,0.15); color: var(--warning); }
+        .badge-accent  { background: rgba(88,101,242,0.15); color: var(--accent); }
+        .btn {
+            padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 500;
+            cursor: pointer; border: none; transition: all 0.15s; text-decoration: none;
+            display: inline-block;
+        }
+        .btn-primary { background: var(--accent); color: white; }
+        .btn-primary:hover { background: var(--accent2); }
+        .btn-danger { background: rgba(237,66,69,0.15); color: var(--danger); }
+        .btn-danger:hover { background: var(--danger); color: white; }
+        .form-group { margin-bottom: 16px; }
+        .form-label { font-size: 13px; font-weight: 500; color: var(--text2); margin-bottom: 6px; display: block; }
+        .form-input {
+            width: 100%; padding: 10px 14px; border-radius: 8px;
+            background: var(--bg3); border: 1px solid var(--border);
+            color: var(--text); font-size: 14px; font-family: inherit; outline: none;
+            transition: border-color 0.15s;
+        }
+        .form-input:focus { border-color: var(--accent); }
+        .rank-badge {
+            width: 28px; height: 28px; border-radius: 50%; display: flex;
+            align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+        }
+        .rank-1 { background: var(--gold); color: #000; }
+        .rank-2 { background: #C0C0C0; color: #000; }
+        .rank-3 { background: #CD7F32; color: #fff; }
+        .rank-n { background: var(--bg4); color: var(--text2); }
+        .empty-state { text-align: center; padding: 48px; color: var(--text3); }
+        .empty-icon { font-size: 48px; margin-bottom: 12px; }
+        .empty-text { font-size: 15px; }
+    </style>
+</head>
+<body>
+<div class="sidebar">
+    <div class="sidebar-header">
+        <div class="sidebar-logo">N</div>
+        <div>
+            <div class="sidebar-title">Nero</div>
+            <div class="sidebar-subtitle">Dashboard</div>
+        </div>
+    </div>
+    <nav class="sidebar-nav">
+        <div class="nav-section">General</div>
+        <a href="/" class="nav-item {% if request.path == '/' %}active{% endif %}">
+            <span class="nav-icon">🏠</span> Overview
+        </a>
+        <div class="nav-section">Features</div>
+        <a href="/mvp" class="nav-item {% if request.path == '/mvp' %}active{% endif %}">
+            <span class="nav-icon">🏆</span> MVP System
+        </a>
+        <a href="/leveling" class="nav-item {% if request.path == '/leveling' %}active{% endif %}">
+            <span class="nav-icon">⭐</span> Leveling
+        </a>
+        <a href="/economy" class="nav-item {% if request.path == '/economy' %}active{% endif %}">
+            <span class="nav-icon">🪙</span> Economy
+        </a>
+        <a href="/triggers" class="nav-item {% if request.path == '/triggers' %}active{% endif %}">
+            <span class="nav-icon">⚡</span> Triggers
+        </a>
+        <a href="/tickets" class="nav-item {% if request.path == '/tickets' %}active{% endif %}">
+            <span class="nav-icon">🎫</span> Tickets
+        </a>
+        <a href="/moderation" class="nav-item {% if request.path == '/moderation' %}active{% endif %}">
+            <span class="nav-icon">🛡️</span> Moderation
+        </a>
+    </nav>
+    <div class="sidebar-footer">
+        <div class="user-avatar">
+            {% if user.avatar %}
+            <img src="https://cdn.discordapp.com/avatars/{{ user.id }}/{{ user.avatar }}.png">
+            {% else %}
+            <div style="width:100%;height:100%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;color:white;">
+                {{ user.username[0].upper() }}
+            </div>
+            {% endif %}
+        </div>
+        <div class="user-info">
+            <div class="user-name">{{ user.username }}</div>
+            <div class="user-tag">Admin</div>
+        </div>
+        <a href="/logout" class="logout-btn">Out</a>
+    </div>
+</div>
+<div class="main">
+    <div class="topbar">
+        <div class="page-title">{% block title %}Dashboard{% endblock %}</div>
+        <div class="topbar-actions">
+            <div class="theme-toggle" onclick="toggleTheme()">
+                <div class="theme-toggle-thumb"></div>
+            </div>
+        </div>
+    </div>
+    <div class="content">
+        {% block content %}{% endblock %}
+    </div>
+</div>
+<script>
+    function toggleTheme() {
+        const html = document.documentElement;
+        html.setAttribute('data-theme', html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+        localStorage.setItem('theme', html.getAttribute('data-theme'));
+    }
+    const saved = localStorage.getItem('theme');
+    if (saved) document.documentElement.setAttribute('data-theme', saved);
+</script>
+</body>
+</html>
