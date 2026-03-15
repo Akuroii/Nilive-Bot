@@ -25,6 +25,29 @@
             <input class="form-input" id="panel-channel" placeholder="Right click channel → Copy ID">
         </div>
     </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:8px">
+        <div>
+            <label class="form-label">Mode</label>
+            <select class="form-input" id="panel-exclusive">
+                <option value="0">Multiple (pick many)</option>
+                <option value="1">Exclusive (pick one)</option>
+            </select>
+        </div>
+        <div>
+            <label class="form-label">Max roles (0 = unlimited)</label>
+            <input class="form-input" type="number" id="panel-max" value="0" min="0" max="25">
+        </div>
+        <div>
+            <label class="form-label">Required role ID (optional)</label>
+            <input class="form-input" id="panel-required-role" placeholder="Role ID needed to use panel">
+        </div>
+    </div>
+    <div style="margin-top:12px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text2)">
+            <input type="checkbox" id="panel-confirm">
+            Require confirmation before giving/removing roles
+        </label>
+    </div>
 </div>
 
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start">
@@ -53,11 +76,18 @@
                         <option value="red">Red</option>
                     </select>
                 </div>
+                <div class="form-group">
+                    <label class="form-label">Required role ID (optional)</label>
+                    <input class="form-input" id="btn-required" placeholder="Role needed to click this">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Expiry days (0 = never)</label>
+                    <input class="form-input" type="number" id="btn-expiry" value="0" min="0">
+                </div>
             </div>
-            <div class="form-group">
-                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text2)">
-                    <input type="checkbox" id="btn-booster">
-                    Boosters only
+            <div style="display:flex;gap:16px;margin-bottom:12px">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text2)">
+                    <input type="checkbox" id="btn-booster"> Boosters only
                 </label>
             </div>
             <button class="btn btn-primary" onclick="addButton()">Add Button</button>
@@ -71,17 +101,14 @@
         </div>
 
         <div class="card">
-            <div class="card-title">📤 Create Panel</div>
-            <p style="color:var(--text2);font-size:13px;margin-bottom:16px">
-                This will save the panel config. Then use
-                <code style="background:var(--bg4);padding:2px 6px;border-radius:4px">/reactionrole_create</code>
-                and <code style="background:var(--bg4);padding:2px 6px;border-radius:4px">/reactionrole_add</code>
-                in Discord with the details below.
+            <div class="card-title">📤 Discord Commands</div>
+            <p style="color:var(--text2);font-size:13px;margin-bottom:12px">
+                Use these commands in Discord to create your panel:
             </p>
-            <div id="panel-commands" style="background:var(--bg3);border-radius:8px;padding:14px;font-family:var(--font-mono);font-size:12px;color:var(--text2);line-height:1.8">
-                Fill in the panel details to see commands...
+            <div id="panel-commands" style="background:var(--bg3);border-radius:8px;padding:14px;font-family:var(--font-mono);font-size:11px;color:var(--text2);line-height:2;white-space:pre-wrap;word-break:break-all">
+                Fill in the panel details above to see commands...
             </div>
-            <button class="btn btn-primary" style="margin-top:12px" onclick="savePanel()">Save Panel Config</button>
+            <button class="btn btn-primary" style="margin-top:12px" onclick="savePanel()">Save Panel</button>
             <div id="save-status" style="margin-top:8px;font-size:13px"></div>
         </div>
     </div>
@@ -93,6 +120,7 @@
                 <div id="preview-embed" style="border-left:4px solid #5865F2;background:#2b2d31;border-radius:0 4px 4px 0;padding:12px 16px;margin-bottom:12px">
                     <div id="prev-title" style="font-weight:700;color:#fff;font-size:15px">Pick Your Roles</div>
                     <div id="prev-desc" style="color:#dbdee1;font-size:13px;margin-top:4px">Click a button to get a role!</div>
+                    <div id="prev-settings" style="font-size:11px;color:#72767d;margin-top:6px"></div>
                 </div>
                 <div id="prev-buttons" style="display:flex;flex-wrap:wrap;gap:8px">
                     <div style="color:#72767d;font-size:13px">Buttons will appear here...</div>
@@ -109,12 +137,8 @@
 
 <script>
 let buttons = [];
-
 const colorMap = {
-    blurple: '#5865F2',
-    gray: '#4e5058',
-    green: '#248046',
-    red: '#da373c'
+    blurple: '#5865F2', gray: '#4e5058', green: '#248046', red: '#da373c'
 };
 
 function syncPanelColor(hex) {
@@ -128,10 +152,18 @@ function updatePreview() {
     const title = document.getElementById('panel-title').value || 'Pick Your Roles';
     const desc = document.getElementById('panel-desc').value || 'Click a button to get a role!';
     const color = document.getElementById('panel-color').value;
+    const exclusive = document.getElementById('panel-exclusive').value === '1';
+    const max = document.getElementById('panel-max').value;
+    const confirm = document.getElementById('panel-confirm').checked;
     document.getElementById('panel-color-hex').value = color;
     document.getElementById('preview-embed').style.borderLeftColor = color;
     document.getElementById('prev-title').textContent = title;
     document.getElementById('prev-desc').textContent = desc;
+    const settings = [];
+    if (exclusive) settings.push('Exclusive mode');
+    if (max > 0) settings.push(`Max ${max} roles`);
+    if (confirm) settings.push('Confirmation required');
+    document.getElementById('prev-settings').textContent = settings.join(' • ');
     updateCommands();
 }
 
@@ -141,14 +173,15 @@ function addButton() {
     const emoji = document.getElementById('btn-emoji').value;
     const color = document.getElementById('btn-color').value;
     const booster = document.getElementById('btn-booster').checked;
-    if (!label || !role) {
-        alert('Please fill in both Label and Role ID!');
-        return;
-    }
-    buttons.push({ label, role, emoji, color, booster });
+    const required = document.getElementById('btn-required').value;
+    const expiry = document.getElementById('btn-expiry').value;
+    if (!label || !role) { alert('Please fill in Label and Role ID!'); return; }
+    buttons.push({ label, role, emoji, color, booster, required, expiry: parseInt(expiry) });
     document.getElementById('btn-label').value = '';
     document.getElementById('btn-role').value = '';
     document.getElementById('btn-emoji').value = '';
+    document.getElementById('btn-required').value = '';
+    document.getElementById('btn-expiry').value = '0';
     document.getElementById('btn-booster').checked = false;
     renderButtons();
     updatePreview();
@@ -174,15 +207,21 @@ function renderButtons() {
                 <div style="width:10px;height:10px;border-radius:50%;background:${colorMap[b.color]}"></div>
                 <div>
                     <div style="font-size:13px;font-weight:500">${b.emoji ? b.emoji + ' ' : ''}${b.label}</div>
-                    <div style="font-size:11px;color:var(--text3)">Role: ${b.role} ${b.booster ? '• Boosters only' : ''}</div>
+                    <div style="font-size:11px;color:var(--text3)">
+                        Role: ${b.role}
+                        ${b.booster ? ' • Boosters only' : ''}
+                        ${b.required ? ' • Requires role: ' + b.required : ''}
+                        ${b.expiry > 0 ? ' • Expires in ' + b.expiry + ' days' : ''}
+                    </div>
                 </div>
             </div>
             <button onclick="removeButton(${i})" class="btn btn-danger" style="font-size:11px;padding:4px 8px">Remove</button>
         </div>
     `).join('');
     prevBtns.innerHTML = buttons.map(b => `
-        <div style="background:${colorMap[b.color]};color:white;padding:8px 16px;border-radius:4px;font-size:13px;font-weight:500;cursor:pointer">
-            ${b.emoji ? b.emoji + ' ' : ''}${b.label}${b.booster ? ' 🔒' : ''}
+        <div style="background:${colorMap[b.color]};color:white;padding:8px 16px;border-radius:4px;font-size:13px;font-weight:500;cursor:pointer;position:relative">
+            ${b.emoji ? b.emoji + ' ' : ''}${b.label}
+            ${b.booster ? '<span style="font-size:10px;position:absolute;top:-4px;right:-4px;background:#FFD700;color:#000;border-radius:999px;padding:1px 5px">B</span>' : ''}
         </div>
     `).join('');
 }
@@ -190,38 +229,48 @@ function renderButtons() {
 function updateCommands() {
     const title = document.getElementById('panel-title').value || 'Pick Your Roles';
     const desc = document.getElementById('panel-desc').value || 'Click a button to get a role!';
-    const channel = document.getElementById('panel-channel').value || 'CHANNEL_ID';
-    let cmds = `Step 1 — Create the panel:\n/reactionrole_create channel:#your-channel title:${title} description:${desc}\n\n`;
+    const exclusive = document.getElementById('panel-exclusive').value === '1';
+    const max = document.getElementById('panel-max').value;
+    const confirm = document.getElementById('panel-confirm').checked;
+    let cmd = `/reactionrole_create channel:#your-channel title:${title} description:${desc}`;
+    if (exclusive) cmd += ' exclusive:True';
+    if (max > 0) cmd += ` max_roles:${max}`;
+    if (confirm) cmd += ' require_confirmation:True';
+    cmd += '\n\n';
     if (buttons.length > 0) {
-        cmds += 'Step 2 — Add each button (use the message ID from Step 1):\n';
+        cmd += 'Then add each button (replace MSG_ID with the message ID from above):\n';
         buttons.forEach(b => {
-            cmds += `/reactionrole_add message_id:MSG_ID role:ROLE label:${b.label} color:${b.color}${b.emoji ? ' emoji:' + b.emoji : ''}${b.booster ? ' booster_only:True' : ''}\n`;
+            cmd += `/reactionrole_add message_id:MSG_ID role:ROLE_NAME label:${b.label} color:${b.color}`;
+            if (b.emoji) cmd += ` emoji:${b.emoji}`;
+            if (b.booster) cmd += ' booster_only:True';
+            if (b.required) cmd += ` required_role:ROLE_NAME`;
+            if (b.expiry > 0) cmd += ` expiry_days:${b.expiry}`;
+            cmd += '\n';
         });
     }
-    document.getElementById('panel-commands').textContent = cmds;
+    document.getElementById('panel-commands').textContent = cmd;
 }
 
 async function savePanel() {
     const title = document.getElementById('panel-title').value;
-    const desc = document.getElementById('panel-desc').value;
-    const color = document.getElementById('panel-color').value;
-    const channel = document.getElementById('panel-channel').value;
-    if (!title) {
-        showStatus('Please enter a panel title!', 'danger');
-        return;
-    }
+    if (!title) { showStatus('Please enter a panel title!', 'danger'); return; }
     const res = await fetch('/api/save_rr_panel', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ title, desc, color, channel, buttons })
+        body: JSON.stringify({
+            title,
+            desc: document.getElementById('panel-desc').value,
+            color: document.getElementById('panel-color').value,
+            channel: document.getElementById('panel-channel').value,
+            exclusive: document.getElementById('panel-exclusive').value,
+            max_roles: document.getElementById('panel-max').value,
+            require_confirmation: document.getElementById('panel-confirm').checked,
+            buttons
+        })
     });
     const data = await res.json();
-    if (data.success) {
-        showStatus('Panel saved!', 'success');
-        loadPanels();
-    } else {
-        showStatus('Error saving panel', 'danger');
-    }
+    if (data.success) { showStatus('Panel saved!', 'success'); loadPanels(); }
+    else { showStatus('Error saving!', 'danger'); }
 }
 
 function showStatus(msg, type) {
