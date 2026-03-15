@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Triggers{% endblock %}
+{% block content %}
+<div class="card">
+    <div class="card-title">⚡ Add New Trigger</div>
+    <form method="POST">
+        <input type="hidden" name="action" value="add">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+            <div class="form-group">
+                <label class="form-label">Trigger Word/Phrase</label>
+                <input class="form-input" name="trigger" placeholder="e.g. !rules" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Embed Title</label>
+                <input class="form-input" name="embed_title" placeholder="e.g. Server Rules">
+            </div>
+            <div class="form-group" style="grid-column:1/-1">
+                <label class="form-label">Response Message</label>
+                <textarea class="form-input" name="response" rows="3" placeholder="The message the bot will send..."></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Embed Color (hex)</label>
+                <input class="form-input" name="embed_color" placeholder="#5865F2" value="#5865F2">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Input Channel ID (optional)</label>
+                <input class="form-input" name="input_channel_id" placeholder="Channel where trigger is detected">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Output Channel ID (optional)</label>
+                <input class="form-input" name="output_channel_id" placeholder="Channel where response is sent">
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary">Add Trigger</button>
+    </form>
+</div>
+<div class="card">
+    <div class="card-title">⚡ Active Triggers</div>
+    {% if triggers %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Trigger</th>
+                <th>Title</th>
+                <th>Response</th>
+                <th>Color</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for t in triggers %}
+            <tr>
+                <td><code style="background:var(--bg4);padding:2px 8px;border-radius:4px">{{ t[2] }}</code></td>
+                <td>{{ t[4] or "—" }}</td>
+                <td>{{ t[3][:60] + "..." if t[3] and t[3]|length > 60 else t[3] or "—" }}</td>
+                <td>
+                    <div style="display:flex;align-items:center;gap:6px">
+                        <div style="width:14px;height:14px;border-radius:3px;background:{{ t[5] or '#5865F2' }}"></div>
+                        {{ t[5] or "#5865F2" }}
+                    </div>
+                </td>
+                <td>
+                    <form method="POST" style="display:inline">
+                        <input type="hidden" name="action" value="delete">
+                        <input type="hidden" name="trigger_id" value="{{ t[0] }}">
+                        <button type="submit" class="btn btn-danger">Delete</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">⚡</div>
+        <div class="empty-text">No triggers yet! Add one above.</div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
