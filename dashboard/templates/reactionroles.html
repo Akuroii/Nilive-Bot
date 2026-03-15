@@ -17,7 +17,8 @@
             <div style="display:flex;gap:8px;align-items:center">
                 <input type="color" id="panel-color" value="#5865F2" oninput="updatePreview()"
                     style="width:44px;height:36px;border-radius:8px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:2px">
-                <input class="form-input" id="panel-color-hex" value="#5865F2" oninput="syncPanelColor(this.value)" style="flex:1">
+                <input class="form-input" id="panel-color-hex" value="#5865F2"
+                    oninput="syncPanelColor(this.value)" style="flex:1">
             </div>
         </div>
         <div class="form-group">
@@ -28,23 +29,23 @@
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:8px">
         <div>
             <label class="form-label">Mode</label>
-            <select class="form-input" id="panel-exclusive">
+            <select class="form-input" id="panel-exclusive" onchange="updatePreview()">
                 <option value="0">Multiple (pick many)</option>
-                <option value="1">Exclusive (pick one)</option>
+                <option value="1">Exclusive (pick one only)</option>
             </select>
         </div>
         <div>
             <label class="form-label">Max roles (0 = unlimited)</label>
-            <input class="form-input" type="number" id="panel-max" value="0" min="0" max="25">
+            <input class="form-input" type="number" id="panel-max" value="0" min="0" max="25" oninput="updatePreview()">
         </div>
         <div>
-            <label class="form-label">Required role ID (optional)</label>
-            <input class="form-input" id="panel-required-role" placeholder="Role ID needed to use panel">
+            <label class="form-label">Required role ID to use panel</label>
+            <input class="form-input" id="panel-required-role" placeholder="Role ID — lose it = lose all roles">
         </div>
     </div>
     <div style="margin-top:12px">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text2)">
-            <input type="checkbox" id="panel-confirm">
+            <input type="checkbox" id="panel-confirm" onchange="updatePreview()">
             Require confirmation before giving/removing roles
         </label>
     </div>
@@ -57,7 +58,7 @@
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
                 <div class="form-group">
                     <label class="form-label">Button Label</label>
-                    <input class="form-input" id="btn-label" placeholder="e.g. Gamer">
+                    <input class="form-input" id="btn-label" placeholder="e.g. Red Color">
                 </div>
                 <div class="form-group">
                     <label class="form-label">Role ID</label>
@@ -65,7 +66,7 @@
                 </div>
                 <div class="form-group">
                     <label class="form-label">Emoji (optional)</label>
-                    <input class="form-input" id="btn-emoji" placeholder="e.g. 🎮">
+                    <input class="form-input" id="btn-emoji" placeholder="e.g. 🔴">
                 </div>
                 <div class="form-group">
                     <label class="form-label">Button Color</label>
@@ -77,8 +78,8 @@
                     </select>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Required role ID (optional)</label>
-                    <input class="form-input" id="btn-required" placeholder="Role needed to click this">
+                    <label class="form-label">Required role ID</label>
+                    <input class="form-input" id="btn-required" placeholder="Lose this role = lose button role">
                 </div>
                 <div class="form-group">
                     <label class="form-label">Expiry days (0 = never)</label>
@@ -103,12 +104,18 @@
         <div class="card">
             <div class="card-title">📤 Discord Commands</div>
             <p style="color:var(--text2);font-size:13px;margin-bottom:12px">
-                Use these commands in Discord to create your panel:
+                Copy and paste these commands in your Discord server:
             </p>
-            <div id="panel-commands" style="background:var(--bg3);border-radius:8px;padding:14px;font-family:var(--font-mono);font-size:11px;color:var(--text2);line-height:2;white-space:pre-wrap;word-break:break-all">
+            <div id="panel-commands" style="background:var(--bg3);border-radius:8px;padding:14px;
+                font-family:var(--font-mono);font-size:11px;color:var(--text2);
+                line-height:2;white-space:pre-wrap;word-break:break-all">
                 Fill in the panel details above to see commands...
             </div>
-            <button class="btn btn-primary" style="margin-top:12px" onclick="savePanel()">Save Panel</button>
+            <div style="display:flex;gap:10px;margin-top:12px">
+                <button class="btn btn-primary" onclick="savePanel()">Save Panel</button>
+                <button class="btn" style="background:var(--bg4);color:var(--text)"
+                    onclick="copyCommands()">Copy Commands</button>
+            </div>
             <div id="save-status" style="margin-top:8px;font-size:13px"></div>
         </div>
     </div>
@@ -117,9 +124,14 @@
         <div class="card">
             <div class="card-title">👁️ Live Preview</div>
             <div style="background:#313338;border-radius:8px;padding:16px">
-                <div id="preview-embed" style="border-left:4px solid #5865F2;background:#2b2d31;border-radius:0 4px 4px 0;padding:12px 16px;margin-bottom:12px">
-                    <div id="prev-title" style="font-weight:700;color:#fff;font-size:15px">Pick Your Roles</div>
-                    <div id="prev-desc" style="color:#dbdee1;font-size:13px;margin-top:4px">Click a button to get a role!</div>
+                <div id="preview-embed" style="border-left:4px solid #5865F2;background:#2b2d31;
+                    border-radius:0 4px 4px 0;padding:12px 16px;margin-bottom:12px">
+                    <div id="prev-title" style="font-weight:700;color:#fff;font-size:15px">
+                        Pick Your Roles
+                    </div>
+                    <div id="prev-desc" style="color:#dbdee1;font-size:13px;margin-top:4px">
+                        Click a button to get a role!
+                    </div>
                     <div id="prev-settings" style="font-size:11px;color:#72767d;margin-top:6px"></div>
                 </div>
                 <div id="prev-buttons" style="display:flex;flex-wrap:wrap;gap:8px">
@@ -153,7 +165,7 @@ function updatePreview() {
     const desc = document.getElementById('panel-desc').value || 'Click a button to get a role!';
     const color = document.getElementById('panel-color').value;
     const exclusive = document.getElementById('panel-exclusive').value === '1';
-    const max = document.getElementById('panel-max').value;
+    const max = parseInt(document.getElementById('panel-max').value);
     const confirm = document.getElementById('panel-confirm').checked;
     document.getElementById('panel-color-hex').value = color;
     document.getElementById('preview-embed').style.borderLeftColor = color;
@@ -161,7 +173,7 @@ function updatePreview() {
     document.getElementById('prev-desc').textContent = desc;
     const settings = [];
     if (exclusive) settings.push('Exclusive mode');
-    if (max > 0) settings.push(`Max ${max} roles`);
+    if (max > 0) settings.push('Max ' + max + ' roles');
     if (confirm) settings.push('Confirmation required');
     document.getElementById('prev-settings').textContent = settings.join(' • ');
     updateCommands();
@@ -174,9 +186,9 @@ function addButton() {
     const color = document.getElementById('btn-color').value;
     const booster = document.getElementById('btn-booster').checked;
     const required = document.getElementById('btn-required').value;
-    const expiry = document.getElementById('btn-expiry').value;
+    const expiry = parseInt(document.getElementById('btn-expiry').value) || 0;
     if (!label || !role) { alert('Please fill in Label and Role ID!'); return; }
-    buttons.push({ label, role, emoji, color, booster, required, expiry: parseInt(expiry) });
+    buttons.push({ label, role, emoji, color, booster, required, expiry });
     document.getElementById('btn-label').value = '';
     document.getElementById('btn-role').value = '';
     document.getElementById('btn-emoji').value = '';
@@ -202,26 +214,33 @@ function renderButtons() {
         return;
     }
     list.innerHTML = buttons.map((b, i) => `
-        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;justify-content:space-between;
+            padding:10px 0;border-bottom:1px solid var(--border)">
             <div style="display:flex;align-items:center;gap:10px">
-                <div style="width:10px;height:10px;border-radius:50%;background:${colorMap[b.color]}"></div>
+                <div style="width:10px;height:10px;border-radius:50%;
+                    background:${colorMap[b.color]}"></div>
                 <div>
-                    <div style="font-size:13px;font-weight:500">${b.emoji ? b.emoji + ' ' : ''}${b.label}</div>
+                    <div style="font-size:13px;font-weight:500">
+                        ${b.emoji ? b.emoji + ' ' : ''}${b.label}
+                    </div>
                     <div style="font-size:11px;color:var(--text3)">
-                        Role: ${b.role}
+                        Role ID: ${b.role}
                         ${b.booster ? ' • Boosters only' : ''}
-                        ${b.required ? ' • Requires role: ' + b.required : ''}
-                        ${b.expiry > 0 ? ' • Expires in ' + b.expiry + ' days' : ''}
+                        ${b.required ? ' • Required role: ' + b.required : ''}
+                        ${b.expiry > 0 ? ' • Expires: ' + b.expiry + 'd' : ''}
                     </div>
                 </div>
             </div>
-            <button onclick="removeButton(${i})" class="btn btn-danger" style="font-size:11px;padding:4px 8px">Remove</button>
+            <button onclick="removeButton(${i})" class="btn btn-danger"
+                style="font-size:11px;padding:4px 8px">Remove</button>
         </div>
     `).join('');
     prevBtns.innerHTML = buttons.map(b => `
-        <div style="background:${colorMap[b.color]};color:white;padding:8px 16px;border-radius:4px;font-size:13px;font-weight:500;cursor:pointer;position:relative">
+        <div style="background:${colorMap[b.color]};color:white;padding:8px 16px;
+            border-radius:4px;font-size:13px;font-weight:500;cursor:pointer;position:relative">
             ${b.emoji ? b.emoji + ' ' : ''}${b.label}
-            ${b.booster ? '<span style="font-size:10px;position:absolute;top:-4px;right:-4px;background:#FFD700;color:#000;border-radius:999px;padding:1px 5px">B</span>' : ''}
+            ${b.booster ? '<span style="font-size:9px;position:absolute;top:-4px;right:-4px;background:#FFD700;color:#000;border-radius:999px;padding:1px 5px">B</span>' : ''}
+            ${b.required ? '<span style="font-size:9px;position:absolute;bottom:-4px;right:-4px;background:#ED4245;color:#fff;border-radius:999px;padding:1px 5px">R</span>' : ''}
         </div>
     `).join('');
 }
@@ -230,25 +249,30 @@ function updateCommands() {
     const title = document.getElementById('panel-title').value || 'Pick Your Roles';
     const desc = document.getElementById('panel-desc').value || 'Click a button to get a role!';
     const exclusive = document.getElementById('panel-exclusive').value === '1';
-    const max = document.getElementById('panel-max').value;
+    const max = parseInt(document.getElementById('panel-max').value);
     const confirm = document.getElementById('panel-confirm').checked;
     let cmd = `/reactionrole_create channel:#your-channel title:${title} description:${desc}`;
     if (exclusive) cmd += ' exclusive:True';
-    if (max > 0) cmd += ` max_roles:${max}`;
+    if (max > 0) cmd += ' max_roles:' + max;
     if (confirm) cmd += ' require_confirmation:True';
-    cmd += '\n\n';
     if (buttons.length > 0) {
-        cmd += 'Then add each button (replace MSG_ID with the message ID from above):\n';
+        cmd += '\n\nThen add each button (replace MSG_ID with the message ID from above):\n';
         buttons.forEach(b => {
-            cmd += `/reactionrole_add message_id:MSG_ID role:ROLE_NAME label:${b.label} color:${b.color}`;
-            if (b.emoji) cmd += ` emoji:${b.emoji}`;
+            cmd += `/reactionrole_add message_id:MSG_ID role:ROLE label:${b.label} color:${b.color}`;
+            if (b.emoji) cmd += ' emoji:' + b.emoji;
             if (b.booster) cmd += ' booster_only:True';
-            if (b.required) cmd += ` required_role:ROLE_NAME`;
-            if (b.expiry > 0) cmd += ` expiry_days:${b.expiry}`;
+            if (b.required) cmd += ' required_role:ROLE';
+            if (b.expiry > 0) cmd += ' expiry_days:' + b.expiry;
             cmd += '\n';
         });
     }
     document.getElementById('panel-commands').textContent = cmd;
+}
+
+function copyCommands() {
+    const text = document.getElementById('panel-commands').textContent;
+    navigator.clipboard.writeText(text);
+    showStatus('Commands copied!', 'success');
 }
 
 async function savePanel() {
@@ -265,6 +289,7 @@ async function savePanel() {
             exclusive: document.getElementById('panel-exclusive').value,
             max_roles: document.getElementById('panel-max').value,
             require_confirmation: document.getElementById('panel-confirm').checked,
+            required_role: document.getElementById('panel-required-role').value,
             buttons
         })
     });
@@ -291,7 +316,9 @@ async function loadPanels() {
     container.innerHTML = data.panels.map(p => `
         <div style="padding:10px 0;border-bottom:1px solid var(--border)">
             <div style="font-weight:500;font-size:13px">${p.title}</div>
-            <div style="font-size:11px;color:var(--text3);margin-top:2px">${p.buttons} buttons</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">
+                ${p.buttons} buttons
+            </div>
         </div>
     `).join('');
 }
