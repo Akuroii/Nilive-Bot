@@ -4,6 +4,7 @@ import os
 import aiosqlite
 import asyncio
 import json
+import math
 from functools import wraps
 
 app = Flask(__name__)
@@ -30,6 +31,13 @@ def run_async(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+def calculate_level(xp):
+    level = 0
+    while xp >= math.floor(100 * ((level + 1) ** 1.5)):
+        xp -= math.floor(100 * ((level + 1) ** 1.5))
+        level += 1
+    return level
 
 @app.route("/")
 @login_required
@@ -185,7 +193,8 @@ def triggers():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO triggers
-                (guild_id, trigger, response, embed_title, embed_color, input_channel_id, output_channel_id)
+                (guild_id, trigger, response, embed_title, embed_color,
+                 input_channel_id, output_channel_id)
                 VALUES (0, ?, ?, ?, ?, ?, ?)
             """, (trigger, response, embed_title, embed_color, input_ch, output_ch))
             await db.commit()
@@ -272,6 +281,151 @@ def embedbuilder():
 def reactionroles():
     return render_template("reactionroles.html", user=session["user"])
 
+@app.route("/settings")
+@login_required
+def settings():
+    async def get_settings():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS bot_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            await db.commit()
+            cursor = await db.execute("SELECT key, value FROM bot_settings")
+            rows = await cursor.fetchall()
+            return {row[0]: row[1] for row in rows}
+    raw = run_async(get_settings())
+    settings_data = {
+        "mvp_role_id": raw.get("mvp_role_id", ""),
+        "mvp_channel_id": raw.get("mvp_channel_id", ""),
+        "reset_hours": int(raw.get("reset_hours", 24)),
+        "boost_role1": raw.get("boost_role1", ""),
+        "boost_role2": raw.get("boost_role2", ""),
+        "boost_channel": raw.get("boost_channel", ""),
+        "xp_per_word": int(raw.get("xp_per_word", 2)),
+        "xp_max": int(raw.get("xp_max", 50)),
+        "levelup_channel": raw.get("levelup_channel", ""),
+        "staff_role": raw.get("staff_role", ""),
+        "ticket_log": raw.get("ticket_log", ""),
+        "ticket_categories": raw.get("ticket_categories",
+                                      "General Support,Report,Ban Appeal,Other"),
+        "daily_min": int(raw.get("daily_min", 100)),
+        "daily_max": int(raw.get("daily_max", 300)),
+        "work_min": int(raw.get("work_min", 20)),
+        "work_max": int(raw.get("work_max", 80)),
+        "welcome_channel": raw.get("welcome_channel", ""),
+        "welcome_msg": raw.get("welcome_msg", ""),
+        "welcome_color": raw.get("welcome_color", "#5865F2"),
+    }
+    saved = request.args.get("saved")
+    return render_template("settings.html", user=session["user"],
+                           settings=settings_data, saved=saved)
+
+async def save_setting(key, value):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)
+        """)
+        await db.execute(
+            "INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)",
+            (key, str(value)))
+        await db.commit()
+
+@app.route("/settings/mvp", methods=["POST"])
+@login_required
+def settings_mvp():
+    run_async(save_setting("mvp_role_id", request.form.get("mvp_role_id", "")))
+    run_async(save_setting("mvp_channel_id", request.form.get("mvp_channel_id", "")))
+    run_async(save_setting("reset_hours", request.form.get("reset_hours", "24")))
+    return redirect(url_for("settings") + "?saved=1")
+
+@app.route("/settings/boost", methods=["POST"])
+@login_required
+def settings_boost():
+    run_async(save_setting("boost_role1", request.form.get("role1_id", "")))
+    run_async(save_setting("boost_role2", request.form.get("role2_id", "")))
+    run_async(save_setting("boost_channel", request.form.get("boost_channel_id", "")))
+    return redirect(url_for("settings") + "?saved=1")
+
+@app.route("/settings/leveling", methods=["POST"])
+@login_required
+def settings_leveling():
+    run_async(save_setting("xp_per_word", request.form.get("xp_per_word", "2")))
+    run_async(save_setting("xp_max", request.form.get("xp_max", "50")))
+    run_async(save_setting("levelup_channel", request.form.get("levelup_channel", "")))
+    return redirect(url_for("settings") + "?saved=1")
+
+@app.route("/settings/tickets", methods=["POST"])
+@login_required
+def settings_tickets():
+    run_async(save_setting("staff_role", request.form.get("staff_role_id", "")))
+    run_async(save_setting("ticket_log", request.form.get("log_channel_id", "")))
+    run_async(save_setting("ticket_categories", request.form.get("categories", "")))
+    return redirect(url_for("settings") + "?saved=1")
+
+@app.route("/settings/economy", methods=["POST"])
+@login_required
+def settings_economy():
+    run_async(save_setting("daily_min", request.form.get("daily_min", "100")))
+    run_async(save_setting("daily_max", request.form.get("daily_max", "300")))
+    run_async(save_setting("work_min", request.form.get("work_min", "20")))
+    run_async(save_setting("work_max", request.form.get("work_max", "80")))
+    return redirect(url_for("settings") + "?saved=1")
+
+@app.route("/settings/welcome", methods=["POST"])
+@login_required
+def settings_welcome():
+    run_async(save_setting("welcome_channel", request.form.get("welcome_channel", "")))
+    run_async(save_setting("welcome_msg", request.form.get("welcome_msg", "")))
+    run_async(save_setting("welcome_color", request.form.get("welcome_color", "#5865F2")))
+    return redirect(url_for("settings") + "?saved=1")
+
+@app.route("/members")
+@login_required
+def members():
+    async def get_members():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT l.user_id, l.xp, l.level, COALESCE(e.balance, 0) as coins
+                FROM levels l
+                LEFT JOIN economy e ON l.user_id = e.user_id
+                ORDER BY l.xp DESC LIMIT 50
+            """)
+            rows = await cursor.fetchall()
+            return [{"user_id": r[0], "xp": r[1], "level": r[2], "coins": r[3]}
+                    for r in rows]
+    try:
+        member_list = run_async(get_members())
+    except:
+        member_list = []
+    return render_template("members.html", user=session["user"], members=member_list)
+
+@app.route("/api/edit_member", methods=["POST"])
+@login_required
+def api_edit_member():
+    data = request.json
+    user_id = data.get("user_id")
+    xp = data.get("xp", 0)
+    coins = data.get("coins", 0)
+    new_level = calculate_level(xp)
+    async def update():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO levels (guild_id, user_id, xp, level)
+                VALUES (0, ?, ?, ?)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET xp=?, level=?
+            """, (user_id, xp, new_level, xp, new_level))
+            await db.execute("""
+                INSERT INTO economy (guild_id, user_id, balance)
+                VALUES (0, ?, ?)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET balance=?
+            """, (user_id, coins, coins))
+            await db.commit()
+    run_async(update())
+    return jsonify({"success": True})
+
 @app.route("/api/save_embed_template", methods=["POST"])
 @login_required
 def api_save_embed_template():
@@ -282,9 +436,7 @@ def api_save_embed_template():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS embed_templates (
-                    guild_id INTEGER,
-                    name TEXT,
-                    data TEXT,
+                    guild_id INTEGER, name TEXT, data TEXT,
                     PRIMARY KEY (guild_id, name)
                 )
             """)
@@ -303,9 +455,7 @@ def api_embed_templates():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS embed_templates (
-                    guild_id INTEGER,
-                    name TEXT,
-                    data TEXT,
+                    guild_id INTEGER, name TEXT, data TEXT,
                     PRIMARY KEY (guild_id, name)
                 )
             """)
@@ -327,16 +477,14 @@ def api_embed_template(name):
         async def delete():
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
-                    "DELETE FROM embed_templates WHERE guild_id=0 AND name=?",
-                    (name,))
+                    "DELETE FROM embed_templates WHERE guild_id=0 AND name=?", (name,))
                 await db.commit()
         run_async(delete())
         return jsonify({"success": True})
     async def get():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT data FROM embed_templates WHERE guild_id=0 AND name=?",
-                (name,))
+                "SELECT data FROM embed_templates WHERE guild_id=0 AND name=?", (name,))
             row = await cursor.fetchone()
             return row[0] if row else None
     data = run_async(get())
@@ -347,7 +495,8 @@ def api_embed_template(name):
 @app.route("/api/send_embed", methods=["POST"])
 @login_required
 def api_send_embed():
-    return jsonify({"success": False, "error": "Use /embed_create in Discord instead!"})
+    return jsonify({"success": False,
+                    "error": "Use /embed_create in Discord instead!"})
 
 @app.route("/api/save_rr_panel", methods=["POST"])
 @login_required
@@ -358,18 +507,30 @@ def api_save_rr_panel():
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS rr_panels (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT,
-                    description TEXT,
-                    color TEXT,
-                    channel_id TEXT,
-                    buttons TEXT
+                    title TEXT, description TEXT, color TEXT,
+                    channel_id TEXT, buttons TEXT,
+                    exclusive INTEGER DEFAULT 0,
+                    max_roles INTEGER DEFAULT 0,
+                    require_confirmation INTEGER DEFAULT 0,
+                    required_role TEXT
                 )
             """)
             await db.execute("""
-                INSERT INTO rr_panels (title, description, color, channel_id, buttons)
-                VALUES (?, ?, ?, ?, ?)
-            """, (data.get("title"), data.get("desc"), data.get("color"),
-                  data.get("channel"), json.dumps(data.get("buttons", []))))
+                INSERT INTO rr_panels
+                (title, description, color, channel_id, buttons,
+                 exclusive, max_roles, require_confirmation, required_role)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                data.get("title"),
+                data.get("desc"),
+                data.get("color"),
+                data.get("channel"),
+                json.dumps(data.get("buttons", [])),
+                int(data.get("exclusive", 0)),
+                int(data.get("max_roles", 0)),
+                int(data.get("require_confirmation", False)),
+                data.get("required_role", "")
+            ))
             await db.commit()
     run_async(save())
     return jsonify({"success": True})
@@ -382,11 +543,12 @@ def api_rr_panels():
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS rr_panels (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT,
-                    description TEXT,
-                    color TEXT,
-                    channel_id TEXT,
-                    buttons TEXT
+                    title TEXT, description TEXT, color TEXT,
+                    channel_id TEXT, buttons TEXT,
+                    exclusive INTEGER DEFAULT 0,
+                    max_roles INTEGER DEFAULT 0,
+                    require_confirmation INTEGER DEFAULT 0,
+                    required_role TEXT
                 )
             """)
             await db.commit()
