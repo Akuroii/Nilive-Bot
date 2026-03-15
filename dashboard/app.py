@@ -267,6 +267,11 @@ def commands_page():
 def embedbuilder():
     return render_template("embedbuilder.html", user=session["user"])
 
+@app.route("/reactionroles")
+@login_required
+def reactionroles():
+    return render_template("reactionroles.html", user=session["user"])
+
 @app.route("/api/save_embed_template", methods=["POST"])
 @login_required
 def api_save_embed_template():
@@ -343,6 +348,59 @@ def api_embed_template(name):
 @login_required
 def api_send_embed():
     return jsonify({"success": False, "error": "Use /embed_create in Discord instead!"})
+
+@app.route("/api/save_rr_panel", methods=["POST"])
+@login_required
+def api_save_rr_panel():
+    data = request.json
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS rr_panels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT,
+                    description TEXT,
+                    color TEXT,
+                    channel_id TEXT,
+                    buttons TEXT
+                )
+            """)
+            await db.execute("""
+                INSERT INTO rr_panels (title, description, color, channel_id, buttons)
+                VALUES (?, ?, ?, ?, ?)
+            """, (data.get("title"), data.get("desc"), data.get("color"),
+                  data.get("channel"), json.dumps(data.get("buttons", []))))
+            await db.commit()
+    run_async(save())
+    return jsonify({"success": True})
+
+@app.route("/api/rr_panels")
+@login_required
+def api_rr_panels():
+    async def get():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS rr_panels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT,
+                    description TEXT,
+                    color TEXT,
+                    channel_id TEXT,
+                    buttons TEXT
+                )
+            """)
+            await db.commit()
+            cursor = await db.execute(
+                "SELECT id, title, buttons FROM rr_panels ORDER BY id DESC")
+            rows = await cursor.fetchall()
+            return [{"id": r[0], "title": r[1],
+                     "buttons": len(json.loads(r[2])) if r[2] else 0}
+                    for r in rows]
+    try:
+        panels = run_async(get())
+    except:
+        panels = []
+    return jsonify({"panels": panels})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
