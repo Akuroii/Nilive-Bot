@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
 import aiosqlite
 from datetime import datetime, date
@@ -19,6 +19,8 @@ class MVP(commands.Cog):
         if message.author.bot or not message.guild:
             return
         word_count = len(message.content.split())
+        if word_count < 1:
+            return
         score = word_count * 1.5
         today = date.today().isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
@@ -58,9 +60,12 @@ class MVP(commands.Cog):
                             voice_minutes = voice_minutes + ?,
                             total_score = message_score + voice_minutes + ?
                     """, (member.guild.id, member.id, today, voice_score, voice_score, voice_score, voice_score))
-                    await db.execute("DELETE FROM voice_sessions WHERE guild_id=? AND user_id=?",
-                                     (member.guild.id, member.id))
+                    await db.execute(
+                        "DELETE FROM voice_sessions WHERE guild_id=? AND user_id=?",
+                        (member.guild.id, member.id))
                     await db.commit()
+
+    from discord.ext import tasks
 
     @tasks.loop(hours=24)
     async def mvp_reset_loop(self):
@@ -69,7 +74,8 @@ class MVP(commands.Cog):
     async def announce_and_reset(self):
         yesterday = date.today().isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
-            guilds_cursor = await db.execute("SELECT DISTINCT guild_id FROM mvp_config")
+            guilds_cursor = await db.execute(
+                "SELECT DISTINCT guild_id FROM mvp_config")
             guilds = await guilds_cursor.fetchall()
             for (guild_id,) in guilds:
                 cfg_cursor = await db.execute(
@@ -96,11 +102,17 @@ class MVP(commands.Cog):
                 if role:
                     for m in guild.members:
                         if role in m.roles:
-                            await m.remove_roles(role)
+                            try:
+                                await m.remove_roles(role)
+                            except:
+                                pass
                     for uid in winners:
                         member = guild.get_member(uid)
                         if member:
-                            await member.add_roles(role)
+                            try:
+                                await member.add_roles(role)
+                            except Exception as e:
+                                print(f"Could not give MVP role to {uid}: {e}")
                 if channel_id:
                     channel = guild.get_channel(channel_id)
                     if channel:
@@ -115,7 +127,8 @@ class MVP(commands.Cog):
     @app_commands.command(name="mvp_setup", description="Set the MVP role and announcement channel")
     @app_commands.checks.has_permissions(administrator=True)
     async def mvp_setup(self, interaction: discord.Interaction,
-                        role: discord.Role, channel: discord.TextChannel):
+                        role: discord.Role,
+                        channel: discord.TextChannel):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO mvp_config (guild_id, mvp_role_id, announce_channel_id)
@@ -123,7 +136,8 @@ class MVP(commands.Cog):
             """, (interaction.guild.id, role.id, channel.id))
             await db.commit()
         await interaction.response.send_message(
-            f"MVP system set up! Role: {role.mention} | Channel: {channel.mention}", ephemeral=True)
+            f"MVP system set up! Role: {role.mention} | Channel: {channel.mention}",
+            ephemeral=True)
 
     @app_commands.command(name="mvp_scores", description="See today's top active members")
     async def mvp_scores(self, interaction: discord.Interaction):
@@ -136,12 +150,25 @@ class MVP(commands.Cog):
             """, (interaction.guild.id, today))
             rows = await cursor.fetchall()
         if not rows:
-            await interaction.response.send_message("No activity recorded today yet!", ephemeral=True)
+            await interaction.response.send_message(
+                "No activity recorded today yet!", ephemeral=True)
             return
-        embed = discord.Embed(title="Today's MVP Leaderboard", color=discord.Color.gold())
+        embed = discord.Embed(
+            title="Today's MVP Leaderboard",
+            color=discord.Color.gold())
         for i, (uid, score) in enumerate(rows, 1):
-            embed.add_field(name=f"#{i}", value=f"<@{uid}> — {score:.1f} pts", inline=False)
+            embed.add_field(
+                name=f"#{i}",
+                value=f"<@{uid}> — {score:.1f} pts",
+                inline=False)
         await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="mvp_force", description="Force trigger MVP announcement now (admin only)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def mvp_force(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        await self.announce_and_reset()
+        await interaction.followup.send("MVP announcement triggered!", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(MVP(bot))
