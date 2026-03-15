@@ -1,8 +1,15 @@
 #!/bin/bash
 echo "Starting bot..."
-python main.py > /proc/1/fd/1 2> /proc/1/fd/2 &
+cd /app
+python -u main.py 2>&1 &
 BOT_PID=$!
 echo "Bot PID: $BOT_PID"
-sleep 3
+sleep 5
+echo "Bot status check..."
+if kill -0 $BOT_PID 2>/dev/null; then
+    echo "Bot is running!"
+else
+    echo "Bot crashed! Exit code: $?"
+fi
 echo "Starting dashboard..."
-python dashboard/app.py
+python -u dashboard/app.py 2>&1
