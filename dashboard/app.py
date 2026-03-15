@@ -211,6 +211,53 @@ def triggers():
 
     rows = run_async(get_triggers())
     return render_template("triggers.html", user=session["user"], triggers=rows)
+@app.route("/commands", methods=["GET", "POST"])
+@login_required
+def commands_page():
+    all_commands = [
+        "kick", "ban", "unban", "timeout", "untimeout",
+        "warn", "warnings", "clearwarnings", "purge",
+        "lock", "unlock", "slowmode", "modlogs"
+    ]
+    async def get_disabled():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS disabled_commands (
+                    guild_id INTEGER,
+                    command TEXT,
+                    PRIMARY KEY (guild_id, command)
+                )
+            """)
+            await db.commit()
+            cursor = await db.execute(
+                "SELECT command FROM disabled_commands WHERE guild_id=?",
+                (0,))
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
 
+    async def toggle_command(command, enable):
+        async with aiosqlite.connect(DB_PATH) as db:
+            if enable:
+                await db.execute(
+                    "DELETE FROM disabled_commands WHERE guild_id=? AND command=?",
+                    (0, command))
+            else:
+                await db.execute(
+                    "INSERT OR IGNORE INTO disabled_commands (guild_id, command) VALUES (?, ?)",
+                    (0, command))
+            await db.commit()
+
+    if request.method == "POST":
+        command = request.form.get("command")
+        action = request.form.get("action")
+        if command and action:
+            run_async(toggle_command(command, action == "enable"))
+        return redirect(url_for("commands_page"))
+
+    disabled = run_async(get_disabled())
+    return render_template("commands.html",
+                           user=session["user"],
+                           all_commands=all_commands,
+                           disabled=disabled)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
