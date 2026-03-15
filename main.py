@@ -2,9 +2,13 @@ import discord
 from discord.ext import commands
 import asyncio
 import os
+import traceback
 from dotenv import load_dotenv
 
 load_dotenv()
+
+print("Starting Nero bot...")
+print(f"Token exists: {bool(os.getenv('DISCORD_TOKEN'))}")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -29,6 +33,7 @@ async def load_cogs():
             print(f"Loaded {cog}")
         except Exception as e:
             print(f"Failed to load {cog}: {e}")
+            traceback.print_exc()
 
 @bot.event
 async def on_ready():
@@ -41,6 +46,7 @@ async def on_ready():
             print(f"  - /{cmd.name}")
     except Exception as e:
         print(f"Sync error: {e}")
+        traceback.print_exc()
 
 @bot.command()
 @commands.is_owner()
@@ -50,7 +56,17 @@ async def sync(ctx):
     await ctx.send(f"Synced {len(cmds)} commands!")
 
 async def main():
-    from database import init_db
-    await init_db()
-    await load_cogs()
-    await bot.start(os.getenv("DISCORD_TOKEN"))
+    try:
+        print("Initializing database...")
+        from database import init_db
+        await init_db()
+        print("Loading cogs...")
+        await load_cogs()
+        print("Starting bot...")
+        await bot.start(os.getenv("DISCORD_TOKEN"))
+    except Exception as e:
+        print(f"FATAL ERROR: {e}")
+        traceback.print_exc()
+
+print("Running main...")
+asyncio.run(main())
