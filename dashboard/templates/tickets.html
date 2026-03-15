@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Tickets{% endblock %}
+{% block content %}
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">Total Tickets</div>
+        <div class="stat-value">{{ tickets|length }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Open</div>
+        <div class="stat-value" style="color:var(--success)">
+            {{ tickets|selectattr(4, 'equalto', 'open')|list|length }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Closed</div>
+        <div class="stat-value" style="color:var(--text2)">
+            {{ tickets|selectattr(4, 'equalto', 'closed')|list|length }}
+        </div>
+    </div>
+</div>
+<div class="card">
+    <div class="card-title">🎫 All Tickets</div>
+    {% if tickets %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>User ID</th>
+                <th>Category</th>
+                <th>Status</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for ticket in tickets %}
+            <tr>
+                <td><strong>#{{ ticket[0] }}</strong></td>
+                <td>{{ ticket[2] }}</td>
+                <td>{{ ticket[5] or "General" }}</td>
+                <td>
+                    <span class="badge {% if ticket[4] == 'open' %}badge-success{% else %}badge-danger{% endif %}">
+                        {{ ticket[4] }}
+                    </span>
+                </td>
+                <td style="color:var(--text3)">{{ ticket[6][:10] if ticket[6] else "—" }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">🎫</div>
+        <div class="empty-text">No tickets yet!</div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
