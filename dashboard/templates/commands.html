@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Commands{% endblock %}
+{% block content %}
+<div class="card">
+    <div class="card-title">🛡️ Moderation Commands</div>
+    <p style="color:var(--text2);font-size:13px;margin-bottom:20px">
+        Toggle commands on or off. Disabled commands will show an error when used in Discord.
+    </p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px">
+        {% for cmd in all_commands %}
+        {% set is_disabled = cmd in disabled %}
+        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;align-items:center;justify-content:space-between">
+            <div>
+                <div style="font-weight:500;font-size:14px">/{{ cmd }}</div>
+                <div style="font-size:12px;color:var(--text3);margin-top:2px">
+                    {% if is_disabled %}
+                    <span style="color:var(--danger)">Disabled</span>
+                    {% else %}
+                    <span style="color:var(--success)">Enabled</span>
+                    {% endif %}
+                </div>
+            </div>
+            <form method="POST">
+                <input type="hidden" name="command" value="{{ cmd }}">
+                {% if is_disabled %}
+                <input type="hidden" name="action" value="enable">
+                <button type="submit" class="btn btn-primary" style="padding:6px 14px;font-size:12px">Enable</button>
+                {% else %}
+                <input type="hidden" name="action" value="disable">
+                <button type="submit" class="btn btn-danger" style="padding:6px 14px;font-size:12px">Disable</button>
+                {% endif %}
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}
