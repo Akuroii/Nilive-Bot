@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Members{% endblock %}
+{% block content %}
+<div class="card">
+    <div class="card-title">👥 Member Manager</div>
+    <input class="form-input" id="search-input" placeholder="Search by User ID..."
+        oninput="filterMembers()" style="max-width:300px;margin-bottom:20px">
+    <table class="table" id="members-table">
+        <thead>
+            <tr>
+                <th>User ID</th>
+                <th>Level</th>
+                <th>XP</th>
+                <th>Coins</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for m in members %}
+            <tr class="member-row" data-id="{{ m.user_id }}">
+                <td><code style="background:var(--bg4);padding:2px 8px;border-radius:4px">{{ m.user_id }}</code></td>
+                <td><span class="badge badge-accent">Level {{ m.level }}</span></td>
+                <td>{{ m.xp }} XP</td>
+                <td>🪙 {{ "{:,}".format(m.coins) }}</td>
+                <td>
+                    <button class="btn" style="font-size:12px;padding:5px 10px;background:var(--bg4);color:var(--text)"
+                        onclick="openEdit('{{ m.user_id }}', {{ m.xp }}, {{ m.coins }})">Edit</button>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" style="text-align:center;color:var(--text3);padding:32px">No members found</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div id="edit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);
+    z-index:999;align-items:center;justify-content:center">
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:16px;
+        padding:32px;width:400px">
+        <h3 style="margin-bottom:20px;font-size:16px">Edit Member — <span id="modal-uid"></span></h3>
+        <div class="form-group">
+            <label class="form-label">XP</label>
+            <input class="form-input" id="modal-xp" type="number">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Coins</label>
+            <input class="form-input" id="modal-coins" type="number">
+        </div>
+        <div style="display:flex;gap:10px;margin-top:8px">
+            <button class="btn btn-primary" onclick="saveEdit()">Save</button>
+            <button class="btn" style="background:var(--bg4);color:var(--text)"
+                onclick="closeEdit()">Cancel</button>
+        </div>
+        <div id="modal-status" style="margin-top:10px;font-size:13px"></div>
+    </div>
+</div>
+
+<script>
+let currentUid = null;
+
+function filterMembers() {
+    const q = document.getElementById('search-input').value.toLowerCase();
+    document.querySelectorAll('.member-row').forEach(row => {
+        row.style.display = row.dataset.id.includes(q) ? '' : 'none';
+    });
+}
+
+function openEdit(uid, xp, coins) {
+    currentUid = uid;
+    document.getElementById('modal-uid').textContent = uid;
+    document.getElementById('modal-xp').value = xp;
+    document.getElementById('modal-coins').value = coins;
+    document.getElementById('edit-modal').style.display = 'flex';
+}
+
+function closeEdit() {
+    document.getElementById('edit-modal').style.display = 'none';
+    currentUid = null;
+}
+
+async function saveEdit() {
+    const xp = parseInt(document.getElementById('modal-xp').value);
+    const coins = parseInt(document.getElementById('modal-coins').value);
+    const res = await fetch('/api/edit_member', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ user_id: currentUid, xp, coins })
+    });
+    const data = await res.json();
+    if (data.success) {
+        document.getElementById('modal-status').textContent = 'Saved!';
+        document.getElementById('modal-status').style.color = 'var(--success)';
+        setTimeout(() => { closeEdit(); location.reload(); }, 1000);
+    } else {
+        document.getElementById('modal-status').textContent = 'Error!';
+        document.getElementById('modal-status').style.color = 'var(--danger)';
+    }
+}
+</script>
+{% endblock %}
