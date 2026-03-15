@@ -1,8 +1,9 @@
-from flask import Flask, redirect, url_for, session, request, render_template
+from flask import Flask, redirect, url_for, session, request, render_template, jsonify
 import requests
 import os
 import aiosqlite
 import asyncio
+import json
 from functools import wraps
 
 app = Flask(__name__)
@@ -211,6 +212,7 @@ def triggers():
 
     rows = run_async(get_triggers())
     return render_template("triggers.html", user=session["user"], triggers=rows)
+
 @app.route("/commands", methods=["GET", "POST"])
 @login_required
 def commands_page():
@@ -219,6 +221,7 @@ def commands_page():
         "warn", "warnings", "clearwarnings", "purge",
         "lock", "unlock", "slowmode", "modlogs"
     ]
+
     async def get_disabled():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -230,8 +233,7 @@ def commands_page():
             """)
             await db.commit()
             cursor = await db.execute(
-                "SELECT command FROM disabled_commands WHERE guild_id=?",
-                (0,))
+                "SELECT command FROM disabled_commands WHERE guild_id=?", (0,))
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
 
@@ -259,5 +261,19 @@ def commands_page():
                            user=session["user"],
                            all_commands=all_commands,
                            disabled=disabled)
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+
+@app.route("/embedbuilder")
+@login_required
+def embedbuilder():
+    return render_template("embedbuilder.html", user=session["user"])
+
+@app.route("/api/save_embed_template", methods=["POST"])
+@login_required
+def api_save_embed_template():
+    data = request.json
+    name = data.get("name")
+    embed = data.get("embed")
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                CR
