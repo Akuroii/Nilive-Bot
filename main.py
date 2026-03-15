@@ -34,15 +34,23 @@ async def load_cogs():
 async def on_ready():
     print(f"Nero is online as {bot.user}")
     try:
-        synced = await bot.tree.sync()
+        await bot.tree.sync()
+        synced = await bot.tree.fetch_commands()
         print(f"Synced {len(synced)} slash commands")
+        for cmd in synced:
+            print(f"  - /{cmd.name}")
     except Exception as e:
         print(f"Sync error: {e}")
+
+@bot.command()
+@commands.is_owner()
+async def sync(ctx):
+    await bot.tree.sync()
+    cmds = await bot.tree.fetch_commands()
+    await ctx.send(f"Synced {len(cmds)} commands!")
 
 async def main():
     from database import init_db
     await init_db()
     await load_cogs()
     await bot.start(os.getenv("DISCORD_TOKEN"))
-
-asyncio.run(main())
