@@ -1,0 +1,305 @@
+{% extends "base.html" %}
+{% block title %}Embed Builder{% endblock %}
+{% block content %}
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start">
+  <div>
+    <div class="card">
+      <div class="card-title">✉️ Build Your Embed</div>
+      <div class="form-group">
+        <label class="form-label">Title</label>
+        <input class="form-input" id="e-title" placeholder="Embed title..." oninput="updatePreview()">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Description</label>
+        <textarea class="form-input" id="e-desc" rows="4" placeholder="Embed description..." oninput="updatePreview()"></textarea>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="form-group">
+          <label class="form-label">Color</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="color" id="e-color" value="#5865F2" oninput="updatePreview()"
+              style="width:44px;height:36px;border-radius:8px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:2px">
+            <input class="form-input" id="e-color-hex" value="#5865F2" placeholder="#5865F2"
+              oninput="syncColor(this.value)" style="flex:1">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Author</label>
+          <input class="form-input" id="e-author" placeholder="Author name..." oninput="updatePreview()">
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="form-group">
+          <label class="form-label">Footer</label>
+          <input class="form-input" id="e-footer" placeholder="Footer text..." oninput="updatePreview()">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Thumbnail URL</label>
+          <input class="form-input" id="e-thumbnail" placeholder="https://..." oninput="updatePreview()">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Image URL</label>
+        <input class="form-input" id="e-image" placeholder="https://..." oninput="updatePreview()">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Fields</label>
+        <div id="fields-container"></div>
+        <button class="btn btn-primary" style="margin-top:8px;font-size:12px" onclick="addField()">+ Add Field</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">📤 Send or Save</div>
+      <div class="form-group">
+        <label class="form-label">Channel ID</label>
+        <input class="form-input" id="send-channel" placeholder="Right click channel → Copy ID">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Save as template (optional)</label>
+        <input class="form-input" id="save-name" placeholder="e.g. welcome, rules...">
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="sendEmbed()">Send to Channel</button>
+        <button class="btn" style="background:var(--bg4);color:var(--text)" onclick="saveTemplate()">Save Template</button>
+        <button class="btn" style="background:var(--bg4);color:var(--text)" onclick="copyJSON()">Copy JSON</button>
+      </div>
+      <div id="send-status" style="margin-top:10px;font-size:13px"></div>
+    </div>
+    <div class="card" id="templates-card">
+      <div class="card-title">📋 Saved Templates</div>
+      <div id="templates-list">Loading...</div>
+    </div>
+  </div>
+  <div style="position:sticky;top:80px">
+    <div class="card">
+      <div class="card-title">👁️ Live Preview</div>
+      <div style="background:#313338;border-radius:8px;padding:16px;min-height:100px">
+        <div id="preview-box" style="border-left:4px solid #5865F2;background:#2b2d31;border-radius:0 4px 4px 0;padding:12px 16px;max-width:520px">
+          <div id="prev-author" style="font-size:12px;color:#b5bac1;margin-bottom:4px;display:none"></div>
+          <div id="prev-title" style="font-weight:700;color:#fff;font-size:15px;margin-bottom:4px;display:none"></div>
+          <div id="prev-desc" style="color:#dbdee1;font-size:14px;line-height:1.5;display:none;white-space:pre-wrap"></div>
+          <div id="prev-fields" style="display:grid;gap:8px;margin-top:8px"></div>
+          <div id="prev-image-container" style="margin-top:10px;display:none">
+            <img id="prev-image" style="max-width:100%;border-radius:4px" src="">
+          </div>
+          <div id="prev-thumbnail-container" style="position:absolute;top:12px;right:12px;display:none">
+            <img id="prev-thumbnail" style="width:80px;height:80px;border-radius:4px;object-fit:cover" src="">
+          </div>
+          <div id="prev-footer" style="font-size:12px;color:#b5bac1;margin-top:8px;display:none"></div>
+          <div id="prev-empty" style="color:#72767d;font-size:13px;text-align:center;padding:20px 0">
+            Start typing to see preview...
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let fieldCount = 0;
+
+function updatePreview() {
+  const title = document.getElementById('e-title').value;
+  const desc = document.getElementById('e-desc').value;
+  const color = document.getElementById('e-color').value;
+  const author = document.getElementById('e-author').value;
+  const footer = document.getElementById('e-footer').value;
+  const image = document.getElementById('e-image').value;
+  const thumbnail = document.getElementById('e-thumbnail').value;
+
+  document.getElementById('preview-box').style.borderLeftColor = color;
+  document.getElementById('e-color-hex').value = color;
+
+  const hasContent = title || desc || author || footer;
+  document.getElementById('prev-empty').style.display = hasContent ? 'none' : 'block';
+
+  setPreview('prev-author', author);
+  setPreview('prev-title', title);
+  setPreview('prev-desc', desc);
+  setPreview('prev-footer', footer);
+
+  const imgEl = document.getElementById('prev-image');
+  const imgContainer = document.getElementById('prev-image-container');
+  if (image) { imgEl.src = image; imgContainer.style.display = 'block'; }
+  else { imgContainer.style.display = 'none'; }
+
+  const thumbEl = document.getElementById('prev-thumbnail');
+  const thumbContainer = document.getElementById('prev-thumbnail-container');
+  if (thumbnail) { thumbEl.src = thumbnail; thumbContainer.style.display = 'block'; }
+  else { thumbContainer.style.display = 'none'; }
+
+  const fieldsContainer = document.getElementById('prev-fields');
+  fieldsContainer.innerHTML = '';
+  document.querySelectorAll('.field-row').forEach(row => {
+    const fname = row.querySelector('.field-name').value;
+    const fvalue = row.querySelector('.field-value').value;
+    const finline = row.querySelector('.field-inline').checked;
+    if (fname || fvalue) {
+      const fieldDiv = document.createElement('div');
+      fieldDiv.style.cssText = `display:inline-block;${finline ? 'width:45%;margin-right:8px;' : 'width:100%;'}vertical-align:top`;
+      fieldDiv.innerHTML = `<div style="font-weight:700;color:#fff;font-size:13px">${fname}</div><div style="color:#dbdee1;font-size:13px">${fvalue}</div>`;
+      fieldsContainer.appendChild(fieldDiv);
+    }
+  });
+}
+
+function setPreview(id, value) {
+  const el = document.getElementById(id);
+  el.textContent = value;
+  el.style.display = value ? 'block' : 'none';
+}
+
+function syncColor(hex) {
+  if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
+    document.getElementById('e-color').value = hex;
+    updatePreview();
+  }
+}
+
+function addField() {
+  fieldCount++;
+  const div = document.createElement('div');
+  div.className = 'field-row';
+  div.style.cssText = 'display:grid;grid-template-columns:1fr 1fr auto auto;gap:8px;margin-bottom:8px;align-items:center';
+  div.innerHTML = `
+    <input class="form-input field-name" placeholder="Field name" oninput="updatePreview()" style="font-size:13px;padding:8px">
+    <input class="form-input field-value" placeholder="Field value" oninput="updatePreview()" style="font-size:13px;padding:8px">
+    <label style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:4px;white-space:nowrap">
+      <input type="checkbox" class="field-inline" onchange="updatePreview()"> Inline
+    </label>
+    <button onclick="this.parentElement.remove();updatePreview()" style="background:var(--danger);color:white;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px">✕</button>
+  `;
+  document.getElementById('fields-container').appendChild(div);
+}
+
+function getEmbedData() {
+  const fields = [];
+  document.querySelectorAll('.field-row').forEach(row => {
+    fields.push({
+      name: row.querySelector('.field-name').value,
+      value: row.querySelector('.field-value').value,
+      inline: row.querySelector('.field-inline').checked
+    });
+  });
+  return {
+    title: document.getElementById('e-title').value,
+    description: document.getElementById('e-desc').value,
+    color: document.getElementById('e-color').value,
+    author: document.getElementById('e-author').value,
+    footer: document.getElementById('e-footer').value,
+    image: document.getElementById('e-image').value,
+    thumbnail: document.getElementById('e-thumbnail').value,
+    fields: fields
+  };
+}
+
+async function sendEmbed() {
+  const channelId = document.getElementById('send-channel').value;
+  if (!channelId) {
+    showStatus('Please enter a channel ID!', 'danger');
+    return;
+  }
+  const data = getEmbedData();
+  const res = await fetch('/api/send_embed', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({channel_id: channelId, embed: data})
+  });
+  const result = await res.json();
+  if (result.success) {
+    showStatus('Embed sent successfully!', 'success');
+  } else {
+    showStatus('Error: ' + result.error, 'danger');
+  }
+}
+
+async function saveTemplate() {
+  const name = document.getElementById('save-name').value;
+  if (!name) {
+    showStatus('Please enter a template name!', 'danger');
+    return;
+  }
+  const data = getEmbedData();
+  const res = await fetch('/api/save_embed_template', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: name, embed: data})
+  });
+  const result = await res.json();
+  if (result.success) {
+    showStatus('Template saved!', 'success');
+    loadTemplates();
+  } else {
+    showStatus('Error: ' + result.error, 'danger');
+  }
+}
+
+function copyJSON() {
+  const data = getEmbedData();
+  navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+  showStatus('JSON copied to clipboard!', 'success');
+}
+
+function showStatus(msg, type) {
+  const el = document.getElementById('send-status');
+  el.textContent = msg;
+  el.style.color = type === 'success' ? 'var(--success)' : 'var(--danger)';
+  setTimeout(() => el.textContent = '', 3000);
+}
+
+async function loadTemplates() {
+  const res = await fetch('/api/embed_templates');
+  const data = await res.json();
+  const container = document.getElementById('templates-list');
+  if (!data.templates || data.templates.length === 0) {
+    container.innerHTML = '<p style="color:var(--text3);font-size:13px">No saved templates yet.</p>';
+    return;
+  }
+  container.innerHTML = data.templates.map(t => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+      <span style="font-size:14px;font-weight:500">${t}</span>
+      <div style="display:flex;gap:8px">
+        <button class="btn" style="font-size:12px;padding:5px 10px;background:var(--bg4);color:var(--text)" onclick="loadTemplate('${t}')">Load</button>
+        <button class="btn btn-danger" style="font-size:12px;padding:5px 10px" onclick="deleteTemplate('${t}')">Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function loadTemplate(name) {
+  const res = await fetch('/api/embed_template/' + name);
+  const data = await res.json();
+  if (!data.template) return;
+  const t = data.template;
+  document.getElementById('e-title').value = t.title || '';
+  document.getElementById('e-desc').value = t.description || '';
+  document.getElementById('e-color').value = t.color || '#5865F2';
+  document.getElementById('e-color-hex').value = t.color || '#5865F2';
+  document.getElementById('e-author').value = t.author || '';
+  document.getElementById('e-footer').value = t.footer || '';
+  document.getElementById('e-image').value = t.image || '';
+  document.getElementById('e-thumbnail').value = t.thumbnail || '';
+  document.getElementById('fields-container').innerHTML = '';
+  if (t.fields) {
+    t.fields.forEach(f => {
+      addField();
+      const rows = document.querySelectorAll('.field-row');
+      const last = rows[rows.length - 1];
+      last.querySelector('.field-name').value = f.name || '';
+      last.querySelector('.field-value').value = f.value || '';
+      last.querySelector('.field-inline').checked = f.inline || false;
+    });
+  }
+  updatePreview();
+  showStatus('Template loaded!', 'success');
+}
+
+async function deleteTemplate(name) {
+  await fetch('/api/embed_template/' + name, {method: 'DELETE'});
+  loadTemplates();
+}
+
+loadTemplates();
+updatePreview();
+</script>
+{% endblock %}
