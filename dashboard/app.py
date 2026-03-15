@@ -276,4 +276,73 @@ def api_save_embed_template():
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                CR
+                CREATE TABLE IF NOT EXISTS embed_templates (
+                    guild_id INTEGER,
+                    name TEXT,
+                    data TEXT,
+                    PRIMARY KEY (guild_id, name)
+                )
+            """)
+            await db.execute("""
+                INSERT OR REPLACE INTO embed_templates (guild_id, name, data)
+                VALUES (0, ?, ?)
+            """, (name.lower(), json.dumps(embed)))
+            await db.commit()
+    run_async(save())
+    return jsonify({"success": True})
+
+@app.route("/api/embed_templates")
+@login_required
+def api_embed_templates():
+    async def get():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS embed_templates (
+                    guild_id INTEGER,
+                    name TEXT,
+                    data TEXT,
+                    PRIMARY KEY (guild_id, name)
+                )
+            """)
+            await db.commit()
+            cursor = await db.execute(
+                "SELECT name FROM embed_templates WHERE guild_id=0")
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+    try:
+        templates = run_async(get())
+    except:
+        templates = []
+    return jsonify({"templates": templates})
+
+@app.route("/api/embed_template/<name>", methods=["GET", "DELETE"])
+@login_required
+def api_embed_template(name):
+    if request.method == "DELETE":
+        async def delete():
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "DELETE FROM embed_templates WHERE guild_id=0 AND name=?",
+                    (name,))
+                await db.commit()
+        run_async(delete())
+        return jsonify({"success": True})
+    async def get():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT data FROM embed_templates WHERE guild_id=0 AND name=?",
+                (name,))
+            row = await cursor.fetchone()
+            return row[0] if row else None
+    data = run_async(get())
+    if not data:
+        return jsonify({"template": None})
+    return jsonify({"template": json.loads(data)})
+
+@app.route("/api/send_embed", methods=["POST"])
+@login_required
+def api_send_embed():
+    return jsonify({"success": False, "error": "Use /embed_create in Discord instead!"})
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=False)
