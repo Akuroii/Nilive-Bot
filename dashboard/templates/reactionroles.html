@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+{% block title %}Reaction Roles{% endblock %}
+{% block content %}
+<div class="card">
+    <div class="card-title">🎭 Create Reaction Role Panel</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div class="form-group">
+            <label class="form-label">Panel Title</label>
+            <input class="form-input" id="panel-title" placeholder="e.g. Pick Your Roles" oninput="updatePreview()">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Panel Description</label>
+            <input class="form-input" id="panel-desc" placeholder="e.g. Click a button to get a role!" oninput="updatePreview()">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Panel Color</label>
+            <div style="display:flex;gap:8px;align-items:center">
+                <input type="color" id="panel-color" value="#5865F2" oninput="updatePreview()"
+                    style="width:44px;height:36px;border-radius:8px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:2px">
+                <input class="form-input" id="panel-color-hex" value="#5865F2" oninput="syncPanelColor(this.value)" style="flex:1">
+            </div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Channel ID</label>
+            <input class="form-input" id="panel-channel" placeholder="Right click channel → Copy ID">
+        </div>
+    </div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start">
+    <div>
+        <div class="card">
+            <div class="card-title">➕ Add Button</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                <div class="form-group">
+                    <label class="form-label">Button Label</label>
+                    <input class="form-input" id="btn-label" placeholder="e.g. Gamer">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Role ID</label>
+                    <input class="form-input" id="btn-role" placeholder="Right click role → Copy ID">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Emoji (optional)</label>
+                    <input class="form-input" id="btn-emoji" placeholder="e.g. 🎮">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Button Color</label>
+                    <select class="form-input" id="btn-color">
+                        <option value="blurple">Blurple</option>
+                        <option value="gray">Gray</option>
+                        <option value="green">Green</option>
+                        <option value="red">Red</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text2)">
+                    <input type="checkbox" id="btn-booster">
+                    Boosters only
+                </label>
+            </div>
+            <button class="btn btn-primary" onclick="addButton()">Add Button</button>
+        </div>
+
+        <div class="card">
+            <div class="card-title">🔘 Buttons</div>
+            <div id="buttons-list">
+                <p style="color:var(--text3);font-size:13px">No buttons added yet.</p>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">📤 Create Panel</div>
+            <p style="color:var(--text2);font-size:13px;margin-bottom:16px">
+                This will save the panel config. Then use
+                <code style="background:var(--bg4);padding:2px 6px;border-radius:4px">/reactionrole_create</code>
+                and <code style="background:var(--bg4);padding:2px 6px;border-radius:4px">/reactionrole_add</code>
+                in Discord with the details below.
+            </p>
+            <div id="panel-commands" style="background:var(--bg3);border-radius:8px;padding:14px;font-family:var(--font-mono);font-size:12px;color:var(--text2);line-height:1.8">
+                Fill in the panel details to see commands...
+            </div>
+            <button class="btn btn-primary" style="margin-top:12px" onclick="savePanel()">Save Panel Config</button>
+            <div id="save-status" style="margin-top:8px;font-size:13px"></div>
+        </div>
+    </div>
+
+    <div style="position:sticky;top:80px">
+        <div class="card">
+            <div class="card-title">👁️ Live Preview</div>
+            <div style="background:#313338;border-radius:8px;padding:16px">
+                <div id="preview-embed" style="border-left:4px solid #5865F2;background:#2b2d31;border-radius:0 4px 4px 0;padding:12px 16px;margin-bottom:12px">
+                    <div id="prev-title" style="font-weight:700;color:#fff;font-size:15px">Pick Your Roles</div>
+                    <div id="prev-desc" style="color:#dbdee1;font-size:13px;margin-top:4px">Click a button to get a role!</div>
+                </div>
+                <div id="prev-buttons" style="display:flex;flex-wrap:wrap;gap:8px">
+                    <div style="color:#72767d;font-size:13px">Buttons will appear here...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">📋 Saved Panels</div>
+            <div id="panels-list">Loading...</div>
+        </div>
+    </div>
+</div>
+
+<script>
+let buttons = [];
+
+const colorMap = {
+    blurple: '#5865F2',
+    gray: '#4e5058',
+    green: '#248046',
+    red: '#da373c'
+};
+
+function syncPanelColor(hex) {
+    if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
+        document.getElementById('panel-color').value = hex;
+        updatePreview();
+    }
+}
+
+function updatePreview() {
+    const title = document.getElementById('panel-title').value || 'Pick Your Roles';
+    const desc = document.getElementById('panel-desc').value || 'Click a button to get a role!';
+    const color = document.getElementById('panel-color').value;
+    document.getElementById('panel-color-hex').value = color;
+    document.getElementById('preview-embed').style.borderLeftColor = color;
+    document.getElementById('prev-title').textContent = title;
+    document.getElementById('prev-desc').textContent = desc;
+    updateCommands();
+}
+
+function addButton() {
+    const label = document.getElementById('btn-label').value;
+    const role = document.getElementById('btn-role').value;
+    const emoji = document.getElementById('btn-emoji').value;
+    const color = document.getElementById('btn-color').value;
+    const booster = document.getElementById('btn-booster').checked;
+    if (!label || !role) {
+        alert('Please fill in both Label and Role ID!');
+        return;
+    }
+    buttons.push({ label, role, emoji, color, booster });
+    document.getElementById('btn-label').value = '';
+    document.getElementById('btn-role').value = '';
+    document.getElementById('btn-emoji').value = '';
+    document.getElementById('btn-booster').checked = false;
+    renderButtons();
+    updatePreview();
+}
+
+function removeButton(index) {
+    buttons.splice(index, 1);
+    renderButtons();
+    updatePreview();
+}
+
+function renderButtons() {
+    const list = document.getElementById('buttons-list');
+    const prevBtns = document.getElementById('prev-buttons');
+    if (buttons.length === 0) {
+        list.innerHTML = '<p style="color:var(--text3);font-size:13px">No buttons added yet.</p>';
+        prevBtns.innerHTML = '<div style="color:#72767d;font-size:13px">Buttons will appear here...</div>';
+        return;
+    }
+    list.innerHTML = buttons.map((b, i) => `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+            <div style="display:flex;align-items:center;gap:10px">
+                <div style="width:10px;height:10px;border-radius:50%;background:${colorMap[b.color]}"></div>
+                <div>
+                    <div style="font-size:13px;font-weight:500">${b.emoji ? b.emoji + ' ' : ''}${b.label}</div>
+                    <div style="font-size:11px;color:var(--text3)">Role: ${b.role} ${b.booster ? '• Boosters only' : ''}</div>
+                </div>
+            </div>
+            <button onclick="removeButton(${i})" class="btn btn-danger" style="font-size:11px;padding:4px 8px">Remove</button>
+        </div>
+    `).join('');
+    prevBtns.innerHTML = buttons.map(b => `
+        <div style="background:${colorMap[b.color]};color:white;padding:8px 16px;border-radius:4px;font-size:13px;font-weight:500;cursor:pointer">
+            ${b.emoji ? b.emoji + ' ' : ''}${b.label}${b.booster ? ' 🔒' : ''}
+        </div>
+    `).join('');
+}
+
+function updateCommands() {
+    const title = document.getElementById('panel-title').value || 'Pick Your Roles';
+    const desc = document.getElementById('panel-desc').value || 'Click a button to get a role!';
+    const channel = document.getElementById('panel-channel').value || 'CHANNEL_ID';
+    let cmds = `Step 1 — Create the panel:\n/reactionrole_create channel:#your-channel title:${title} description:${desc}\n\n`;
+    if (buttons.length > 0) {
+        cmds += 'Step 2 — Add each button (use the message ID from Step 1):\n';
+        buttons.forEach(b => {
+            cmds += `/reactionrole_add message_id:MSG_ID role:ROLE label:${b.label} color:${b.color}${b.emoji ? ' emoji:' + b.emoji : ''}${b.booster ? ' booster_only:True' : ''}\n`;
+        });
+    }
+    document.getElementById('panel-commands').textContent = cmds;
+}
+
+async function savePanel() {
+    const title = document.getElementById('panel-title').value;
+    const desc = document.getElementById('panel-desc').value;
+    const color = document.getElementById('panel-color').value;
+    const channel = document.getElementById('panel-channel').value;
+    if (!title) {
+        showStatus('Please enter a panel title!', 'danger');
+        return;
+    }
+    const res = await fetch('/api/save_rr_panel', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ title, desc, color, channel, buttons })
+    });
+    const data = await res.json();
+    if (data.success) {
+        showStatus('Panel saved!', 'success');
+        loadPanels();
+    } else {
+        showStatus('Error saving panel', 'danger');
+    }
+}
+
+function showStatus(msg, type) {
+    const el = document.getElementById('save-status');
+    el.textContent = msg;
+    el.style.color = type === 'success' ? 'var(--success)' : 'var(--danger)';
+    setTimeout(() => el.textContent = '', 3000);
+}
+
+async function loadPanels() {
+    const res = await fetch('/api/rr_panels');
+    const data = await res.json();
+    const container = document.getElementById('panels-list');
+    if (!data.panels || data.panels.length === 0) {
+        container.innerHTML = '<p style="color:var(--text3);font-size:13px">No saved panels yet.</p>';
+        return;
+    }
+    container.innerHTML = data.panels.map(p => `
+        <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+            <div style="font-weight:500;font-size:13px">${p.title}</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">${p.buttons} buttons</div>
+        </div>
+    `).join('');
+}
+
+loadPanels();
+updatePreview();
+</script>
+{% endblock %}
