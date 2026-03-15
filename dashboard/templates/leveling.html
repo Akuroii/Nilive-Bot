@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Leveling{% endblock %}
+{% block content %}
+<div class="card">
+    <div class="card-title">⭐ XP Leaderboard</div>
+    {% if levels %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Rank</th>
+                <th>User ID</th>
+                <th>Level</th>
+                <th>XP</th>
+                <th>Progress</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user_id, xp, level in levels %}
+            <tr>
+                <td>
+                    <div class="rank-badge {% if loop.index == 1 %}rank-1{% elif loop.index == 2 %}rank-2{% elif loop.index == 3 %}rank-3{% else %}rank-n{% endif %}">
+                        {{ loop.index }}
+                    </div>
+                </td>
+                <td>{{ user_id }}</td>
+                <td><span class="badge badge-accent">Level {{ level }}</span></td>
+                <td>{{ xp }} XP</td>
+                <td>
+                    <div style="background:var(--bg4);border-radius:999px;height:6px;width:120px">
+                        <div style="background:var(--accent);border-radius:999px;height:6px;width:{{ [((xp % 100) / 100 * 100)|int, 100]|min }}%"></div>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">⭐</div>
+        <div class="empty-text">No XP data yet!</div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
