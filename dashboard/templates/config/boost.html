@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Boost Roles{% endblock %}
+{% block content %}
+
+{% if saved %}
+<div class="save-banner">✅ Settings saved!</div>
+{% endif %}
+
+<form method="POST">
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title" style="margin:0;">🔰 Boost Role Configuration</div>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <label class="toggle">
+                    <input type="checkbox" name="enabled"
+                        {% if config.get('enabled', 1) %}checked{% endif %}>
+                    <span class="toggle-slider"></span>
+                </label>
+                <span style="font-size:13px;color:var(--text2);">Enabled</span>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">1st boost role ID</label>
+                <input class="form-input" name="boost1_role_id"
+                       value="{{ config.get('boost1_role_id', '') }}"
+                       placeholder="Role given on first boost">
+            </div>
+            <div class="form-group">
+                <label class="form-label">2nd boost role ID</label>
+                <input class="form-input" name="boost2_role_id"
+                       value="{{ config.get('boost2_role_id', '') }}"
+                       placeholder="Role given on second boost">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Boost announce channel ID</label>
+                <input class="form-input" name="boost2_channel_id"
+                       value="{{ config.get('boost2_channel_id', '') }}"
+                       placeholder="Where to announce new boosts">
+            </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:14px;margin-top:8px;">
+            <label class="form-check">
+                <input type="checkbox" name="auto_remove_on_unboost"
+                    {% if config.get('auto_remove_on_unboost', 1) %}checked{% endif %}>
+                Auto-remove boost roles when boost ends
+            </label>
+            <label class="form-check">
+                <input type="checkbox" name="color_roles_enabled"
+                    {% if config.get('color_roles_enabled') %}checked{% endif %}>
+                Enable color roles system (boosters only)
+            </label>
+        </div>
+        <div style="margin-top:20px;">
+            <button type="submit" class="btn btn-primary">Save Settings</button>
+        </div>
+    </div>
+</form>
+
+<div class="card">
+    <div class="card-title">ℹ️ How Boost Roles Work</div>
+    <div style="display:flex;flex-direction:column;gap:10px;font-size:13px;color:var(--text2);">
+        <div>• Member boosts server once → gets <strong>1st boost role</strong> automatically</div>
+        <div>• Member boosts server twice → gets <strong>2nd boost role</strong> automatically</div>
+        <div>• Member removes one boost → <strong>2nd boost role removed</strong>, keeps 1st</div>
+        <div>• Member removes all boosts → <strong>both roles removed</strong> automatically</div>
+        <div>• Color roles are managed via <strong>Reaction Roles</strong> with booster_only flag</div>
+    </div>
+</div>
+{% endblock %}
