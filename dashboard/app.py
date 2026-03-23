@@ -1,524 +1,951 @@
-from flask import Flask, redirect, url_for, session, request, render_template, jsonify
-import requests
 import os
-import aiosqlite
-import asyncio
 import json
 import math
-from functools import wraps
+import asyncio
+import aiosqlite
+from flask import (
+    Flask, redirect, url_for, session,
+    request, render_template, jsonify, abort
+)
+from database import DB_PATH
+from dashboard.auth import (
+    login_required, create_session, clear_session,
+    get_discord_oauth_url, exchange_code, fetch_discord_user,
+    fetch_discord_guilds, current_user, current_user_id,
+    get_current_user_level, run_async
+)
+from dashboard.permissions import (
+    require_page, require_owner, require_admin, require_moderator,
+    get_current_user_context, log_action, get_session_guild_id,
+    set_session_guild
+)
 
-app = Flask(__name__)
+app = Flask(__name__,
+            template_folder="templates",
+            static_folder="static")
 app.secret_key = os.getenv("SECRET_KEY", "nero-dashboard-secret-key-2024")
+app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7
 
-CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
-CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI")
-DISCORD_API = "https://discord.com/api/v10"
-DB_PATH = "nero.db"
 
-def login_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if "user" not in session:
-            return redirect(url_for("login"))
-        return f(*args, **kwargs)
-    return decorated
-
-def run_async(coro):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
-
-def calculate_level(xp):
+def calculate_level(xp: int) -> int:
     level = 0
     while xp >= math.floor(100 * ((level + 1) ** 1.5)):
         xp -= math.floor(100 * ((level + 1) ** 1.5))
         level += 1
     return level
 
-@app.route("/")
-@login_required
-def index():
-    return render_template("index.html", user=session["user"])
+
+# ══════════════════════════════════════════════════════
+# ERROR HANDLERS
+# ══════════════════════════════════════════════════════
+
+@app.errorhandler(403)
+def forbidden(e):
+    return render_template("errors/403.html"), 403
+
+
+@app.errorhandler(404)
+def not_found(e):
+    return render_template("errors/404.html"), 404
+
+
+@app.errorhandler(500)
+def server_error(e):
+    return render_template("errors/500.html"), 500
+
+
+# ══════════════════════════════════════════════════════
+# AUTH ROUTES
+# ══════════════════════════════════════════════════════
 
 @app.route("/login")
 def login():
+    if session.get("user"):
+        return redirect(url_for("server_select"))
     return render_template("login.html")
+
 
 @app.route("/discord_login")
 def discord_login():
-    scope = "identify"
-    return redirect(
-        f"https://discord.com/oauth2/authorize"
-        f"?client_id={CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&response_type=code"
-        f"&scope={scope}"
-    )
+    return redirect(get_discord_oauth_url())
+
 
 @app.route("/callback")
 def callback():
     code = request.args.get("code")
     if not code:
         return redirect(url_for("login"))
-    data = {
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": REDIRECT_URI,
-    }
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    r = requests.post(f"{DISCORD_API}/oauth2/token", data=data, headers=headers)
-    tokens = r.json()
-    access_token = tokens.get("access_token")
-    if not access_token:
+    tokens = exchange_code(code)
+    if not tokens or not tokens.get("access_token"):
         return redirect(url_for("login"))
-    user_r = requests.get(
-        f"{DISCORD_API}/users/@me",
-        headers={"Authorization": f"Bearer {access_token}"})
-    user = user_r.json()
-    session["user"] = {
-        "id": user.get("id"),
-        "username": user.get("username"),
-        "avatar": user.get("avatar"),
-    }
-    session["access_token"] = access_token
-    return redirect(url_for("index"))
+    user = fetch_discord_user(tokens["access_token"])
+    if not user:
+        return redirect(url_for("login"))
+    remember = session.pop("remember_me_pending", False)
+    create_session(user, remember_me=remember)
+    session["access_token"] = tokens["access_token"]
+    return redirect(url_for("server_select"))
+
 
 @app.route("/logout")
 def logout():
-    session.clear()
+    clear_session()
     return redirect(url_for("login"))
 
-@app.route("/mvp")
-@login_required
-def mvp():
-    async def get_mvp():
-        from datetime import date
-        today = date.today().isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT user_id, message_score, voice_minutes, total_score
-                FROM mvp_scores WHERE date=?
-                ORDER BY total_score DESC LIMIT 20
-            """, (today,))
-            return await cursor.fetchall()
-    rows = run_async(get_mvp())
-    return render_template("mvp.html", user=session["user"], scores=rows)
 
-@app.route("/leveling")
-@login_required
-def leveling():
-    async def get_levels():
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT user_id, xp, level FROM levels
-                ORDER BY xp DESC LIMIT 20
-            """)
-            return await cursor.fetchall()
-    rows = run_async(get_levels())
-    return render_template("leveling.html", user=session["user"], levels=rows)
+# ══════════════════════════════════════════════════════
+# SERVER SELECT
+# ══════════════════════════════════════════════════════
 
-@app.route("/economy")
+@app.route("/server-select")
 @login_required
-def economy():
-    async def get_economy():
+def server_select():
+    access_token = session.get("access_token", "")
+    guilds = fetch_discord_guilds(access_token) if access_token else []
+    async def get_accessible_guilds():
+        if not guilds:
+            return []
+        guild_ids = [int(g["id"]) for g in guilds]
+        user_id   = current_user_id()
+        accessible = []
+        async with aiosqlite.connect(DB_PATH) as db:
+            for gid in guild_ids:
+                cursor = await db.execute("""
+                    SELECT permission_level FROM dashboard_users
+                    WHERE guild_id = ? AND user_id = ? AND enabled = 1
+                """, (gid, user_id))
+                row = await cursor.fetchone()
+                if row:
+                    guild_data = next((g for g in guilds if int(g["id"]) == gid), None)
+                    if guild_data:
+                        accessible.append({
+                            "id":    gid,
+                            "name":  guild_data["name"],
+                            "icon":  guild_data.get("icon"),
+                            "level": row[0],
+                        })
+        return accessible
+    accessible = run_async(get_accessible_guilds())
+    return render_template("server_select.html",
+                           user=current_user(),
+                           guilds=accessible)
+
+
+@app.route("/select-guild/<int:guild_id>")
+@login_required
+def select_guild(guild_id: int):
+    user_id = current_user_id()
+    async def check():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT user_id, balance FROM economy
-                ORDER BY balance DESC LIMIT 20
-            """)
+                SELECT permission_level FROM dashboard_users
+                WHERE guild_id = ? AND user_id = ? AND enabled = 1
+            """, (guild_id, user_id))
+            return await cursor.fetchone()
+    row = run_async(check())
+    if not row:
+        abort(403)
+    set_session_guild(guild_id)
+    session["user_level"] = row[0]
+    return redirect(url_for("index"))
+
+
+# ══════════════════════════════════════════════════════
+# GENERAL
+# ══════════════════════════════════════════════════════
+
+@app.route("/")
+@require_page("overview")
+def index():
+    guild_id = get_session_guild_id()
+    async def get_stats():
+        async with aiosqlite.connect(DB_PATH) as db:
+            mvp_cursor = await db.execute(
+                "SELECT COUNT(*) FROM mvp_scores WHERE guild_id=?", (guild_id,))
+            mvp_count = (await mvp_cursor.fetchone())[0]
+            level_cursor = await db.execute(
+                "SELECT COUNT(*) FROM levels WHERE guild_id=?", (guild_id,))
+            member_count = (await level_cursor.fetchone())[0]
+            ticket_cursor = await db.execute(
+                "SELECT COUNT(*) FROM tickets WHERE guild_id=? AND status='open'",
+                (guild_id,))
+            open_tickets = (await ticket_cursor.fetchone())[0]
+            warn_cursor = await db.execute(
+                "SELECT COUNT(*) FROM warnings WHERE guild_id=?", (guild_id,))
+            warn_count = (await warn_cursor.fetchone())[0]
+        return {
+            "mvp_count":    mvp_count,
+            "member_count": member_count,
+            "open_tickets": open_tickets,
+            "warn_count":   warn_count,
+        }
+    stats = run_async(get_stats())
+    ctx   = get_current_user_context()
+    return render_template("general/overview.html", stats=stats, **ctx)
+
+
+@app.route("/members")
+@require_page("members_view")
+def members():
+    guild_id = get_session_guild_id()
+    async def get_members():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT l.user_id, l.xp, l.level,
+                       COALESCE(e.balance, 0) AS coins
+                FROM levels l
+                LEFT JOIN economy e
+                  ON l.user_id = e.user_id AND l.guild_id = e.guild_id
+                WHERE l.guild_id = ?
+                ORDER BY l.xp DESC
+                LIMIT 100
+            """, (guild_id,))
+            rows = await cursor.fetchall()
+            return [{"user_id": r[0], "xp": r[1],
+                     "level": r[2], "coins": r[3]} for r in rows]
+    member_list = run_async(get_members())
+    ctx = get_current_user_context()
+    return render_template("general/members.html",
+                           members=member_list, **ctx)
+
+
+@app.route("/audit-log")
+@require_page("audit_log")
+def audit_log():
+    guild_id = get_session_guild_id()
+    async def get_logs():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, user_id, user_display_name, target_id, target_name,
+                       action, details, page, created_at
+                FROM audit_log
+                WHERE guild_id = ?
+                ORDER BY created_at DESC
+                LIMIT 200
+            """, (guild_id,))
             return await cursor.fetchall()
-    rows = run_async(get_economy())
-    return render_template("economy.html", user=session["user"], balances=rows)
+    logs = run_async(get_logs())
+    ctx  = get_current_user_context()
+    return render_template("general/auditlog.html", logs=logs, **ctx)
+
+
+# ══════════════════════════════════════════════════════
+# MANAGE
+# ══════════════════════════════════════════════════════
 
 @app.route("/moderation")
-@login_required
+@require_page("moderation_view")
 def moderation():
-    async def get_warnings():
+    guild_id = get_session_guild_id()
+    async def get_data():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT user_id, reason, timestamp FROM warnings
-                ORDER BY timestamp DESC LIMIT 50
-            """)
-            return await cursor.fetchall()
-    try:
-        rows = run_async(get_warnings())
-    except:
-        rows = []
-    return render_template("moderation.html", user=session["user"], warnings=rows)
+                SELECT id, user_id, user_display_name, user_avatar_url,
+                       moderator_id, moderator_display_name,
+                       action, reason, source, created_at
+                FROM moderation_logs
+                WHERE guild_id = ? AND deleted = 0
+                ORDER BY created_at DESC LIMIT 100
+            """, (guild_id,))
+            logs = await cursor.fetchall()
+            w_cursor = await db.execute("""
+                SELECT guild_id, user_id, moderator_id, reason, timestamp,
+                       user_display_name, moderator_display_name
+                FROM warnings
+                WHERE guild_id = ?
+                ORDER BY timestamp DESC LIMIT 100
+            """, (guild_id,))
+            warnings = await w_cursor.fetchall()
+        return logs, warnings
+    logs, warnings = run_async(get_data())
+    ctx = get_current_user_context()
+    return render_template("manage/moderation.html",
+                           logs=logs, warnings=warnings, **ctx)
+
 
 @app.route("/tickets")
-@login_required
+@require_page("tickets")
 def tickets():
+    guild_id = get_session_guild_id()
     async def get_tickets():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT id, channel_id, user_id, status, category, created_at
-                FROM tickets ORDER BY created_at DESC LIMIT 50
-            """)
+                FROM tickets
+                WHERE guild_id = ?
+                ORDER BY created_at DESC LIMIT 100
+            """, (guild_id,))
             return await cursor.fetchall()
-    try:
-        rows = run_async(get_tickets())
-    except:
-        rows = []
-    return render_template("tickets.html", user=session["user"], tickets=rows)
+    ticket_list = run_async(get_tickets())
+    ctx = get_current_user_context()
+    return render_template("manage/tickets.html",
+                           tickets=ticket_list, **ctx)
 
-@app.route("/triggers", methods=["GET", "POST"])
-@login_required
-def triggers():
+
+@app.route("/embed-builder")
+@require_page("embedbuilder")
+def embed_builder():
+    ctx = get_current_user_context()
+    return render_template("manage/embedbuilder.html", **ctx)
+
+
+@app.route("/reaction-roles")
+@require_page("reactionroles")
+def reaction_roles():
+    ctx = get_current_user_context()
+    return render_template("manage/reactionroles.html", **ctx)
+
+
+@app.route("/triggers")
+@require_page("triggers")
+def triggers_page():
+    guild_id = get_session_guild_id()
     async def get_triggers():
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS triggers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER,
-                    trigger TEXT,
-                    response TEXT,
-                    embed_title TEXT,
-                    embed_color TEXT,
-                    input_channel_id INTEGER,
-                    output_channel_id INTEGER
-                )
-            """)
-            await db.commit()
-            cursor = await db.execute("SELECT * FROM triggers")
+            cursor = await db.execute(
+                "SELECT * FROM triggers WHERE guild_id = ? OR guild_id = 0",
+                (guild_id,))
             return await cursor.fetchall()
+    trigger_list = run_async(get_triggers())
+    ctx = get_current_user_context()
+    return render_template("manage/triggers.html",
+                           triggers=trigger_list, **ctx)
 
-    async def add_trigger(trigger, response, embed_title, embed_color, input_ch, output_ch):
+
+@app.route("/custom-commands")
+@require_page("customcommands")
+def custom_commands():
+    guild_id = get_session_guild_id()
+    async def get_cmds():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT * FROM custom_commands WHERE guild_id = ? OR guild_id = 0",
+                (guild_id,))
+            return await cursor.fetchall()
+    cmds = run_async(get_cmds())
+    ctx  = get_current_user_context()
+    return render_template("manage/customcommands.html",
+                           commands=cmds, **ctx)
+
+
+# ══════════════════════════════════════════════════════
+# SYSTEMS
+# ══════════════════════════════════════════════════════
+
+@app.route("/mvp")
+@require_page("mvp")
+def mvp():
+    from datetime import date
+    guild_id = get_session_guild_id()
+    today    = date.today().isoformat()
+    async def get_data():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT user_id, message_score, voice_minutes, total_score
+                FROM mvp_scores
+                WHERE guild_id = ? AND date = ?
+                ORDER BY total_score DESC LIMIT 20
+            """, (guild_id, today))
+            scores = await cursor.fetchall()
+            hist_cursor = await db.execute("""
+                SELECT user_id, user_display_name, score, cycle_start, cycle_end
+                FROM mvp_history
+                WHERE guild_id = ?
+                ORDER BY created_at DESC LIMIT 20
+            """, (guild_id,))
+            history = await hist_cursor.fetchall()
+        return scores, history
+    scores, history = run_async(get_data())
+    ctx = get_current_user_context()
+    return render_template("systems/mvp.html",
+                           scores=scores, history=history, **ctx)
+
+
+@app.route("/leveling")
+@require_page("leveling")
+def leveling():
+    guild_id = get_session_guild_id()
+    async def get_data():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT user_id, xp, level FROM levels
+                WHERE guild_id = ?
+                ORDER BY xp DESC LIMIT 50
+            """, (guild_id,))
+            levels = await cursor.fetchall()
+            rewards_cursor = await db.execute("""
+                SELECT id, level, role_id FROM leveling_rewards
+                WHERE guild_id = ?
+                ORDER BY level ASC
+            """, (guild_id,))
+            rewards = await rewards_cursor.fetchall()
+        return levels, rewards
+    levels, rewards = run_async(get_data())
+    ctx = get_current_user_context()
+    return render_template("systems/leveling.html",
+                           levels=levels, rewards=rewards, **ctx)
+
+
+@app.route("/economy")
+@require_page("economy")
+def economy():
+    guild_id = get_session_guild_id()
+    async def get_data():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT user_id, balance FROM economy
+                WHERE guild_id = ?
+                ORDER BY balance DESC LIMIT 50
+            """, (guild_id,))
+            return await cursor.fetchall()
+    balances = run_async(get_data())
+    ctx = get_current_user_context()
+    return render_template("systems/economy.html",
+                           balances=balances, **ctx)
+
+
+@app.route("/shop")
+@require_page("shop")
+def shop():
+    guild_id = get_session_guild_id()
+    async def get_items():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT * FROM shop_items
+                WHERE guild_id = ?
+                ORDER BY featured DESC, created_at DESC
+            """, (guild_id,))
+            return await cursor.fetchall()
+    items = run_async(get_items())
+    ctx   = get_current_user_context()
+    return render_template("systems/shop.html", items=items, **ctx)
+
+
+@app.route("/events")
+@require_page("events")
+def events():
+    guild_id = get_session_guild_id()
+    async def get_events():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT * FROM events
+                WHERE guild_id = ?
+                ORDER BY created_at DESC
+            """, (guild_id,))
+            return await cursor.fetchall()
+    event_list = run_async(get_events())
+    ctx = get_current_user_context()
+    return render_template("systems/events.html",
+                           events=event_list, **ctx)
+
+
+# ══════════════════════════════════════════════════════
+# CONFIG
+# ══════════════════════════════════════════════════════
+
+@app.route("/config/general", methods=["GET", "POST"])
+@require_page("general_settings")
+def config_general():
+    guild_id = get_session_guild_id()
+    async def get_settings():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT * FROM guild_settings WHERE guild_id = ?",
+                (guild_id,))
+            row = await cursor.fetchone()
+            if row:
+                cols = [d[0] for d in cursor.description]
+                return dict(zip(cols, row))
+        return {}
+    async def save_settings(data: dict):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                INSERT INTO triggers
-                (guild_id, trigger, response, embed_title, embed_color,
-                 input_channel_id, output_channel_id)
-                VALUES (0, ?, ?, ?, ?, ?, ?)
-            """, (trigger, response, embed_title, embed_color, input_ch, output_ch))
-            await db.commit()
-
-    async def delete_trigger(trigger_id):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM triggers WHERE id=?", (trigger_id,))
-            await db.commit()
-
-    if request.method == "POST":
-        action = request.form.get("action")
-        if action == "add":
-            run_async(add_trigger(
-                request.form.get("trigger"),
-                request.form.get("response"),
-                request.form.get("embed_title"),
-                request.form.get("embed_color", "#5865F2"),
-                request.form.get("input_channel_id") or None,
-                request.form.get("output_channel_id") or None,
+                INSERT INTO guild_settings
+                    (guild_id, prefix, timezone, language, log_channel_id,
+                     currency_name, currency_emoji_id,
+                     status_rotation_enabled, status_rotation_interval)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    prefix                   = excluded.prefix,
+                    timezone                 = excluded.timezone,
+                    language                 = excluded.language,
+                    log_channel_id           = excluded.log_channel_id,
+                    currency_name            = excluded.currency_name,
+                    currency_emoji_id        = excluded.currency_emoji_id,
+                    status_rotation_enabled  = excluded.status_rotation_enabled,
+                    status_rotation_interval = excluded.status_rotation_interval,
+                    updated_at               = CURRENT_TIMESTAMP
+            """, (
+                guild_id,
+                data.get("prefix", "/"),
+                data.get("timezone", "UTC"),
+                data.get("language", "en"),
+                data.get("log_channel_id") or None,
+                data.get("currency_name", "Coins"),
+                data.get("currency_emoji_id") or None,
+                int(data.get("status_rotation_enabled", 0)),
+                int(data.get("status_rotation_interval", 5)),
             ))
-        elif action == "delete":
-            run_async(delete_trigger(request.form.get("trigger_id")))
-        return redirect(url_for("triggers"))
+            await db.commit()
+    if request.method == "POST":
+        run_async(save_settings(request.form.to_dict()))
+        log_action(guild_id, "Updated general settings", "config_general")
+        return redirect(url_for("config_general") + "?saved=1")
+    settings = run_async(get_settings())
+    ctx = get_current_user_context()
+    return render_template("config/general.html",
+                           settings=settings,
+                           saved=request.args.get("saved"),
+                           **ctx)
 
-    rows = run_async(get_triggers())
-    return render_template("triggers.html", user=session["user"], triggers=rows)
 
-@app.route("/commands", methods=["GET", "POST"])
-@login_required
-def commands_page():
+@app.route("/config/welcome", methods=["GET", "POST"])
+@require_page("welcome")
+def config_welcome():
+    guild_id = get_session_guild_id()
+    async def get_config():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT * FROM welcome_config WHERE guild_id = ?",
+                (guild_id,))
+            row = await cursor.fetchone()
+            if row:
+                cols = [d[0] for d in cursor.description]
+                return dict(zip(cols, row))
+        return {}
+    async def save_config(data: dict):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO welcome_config
+                    (guild_id, join_enabled, join_channel_id, auto_role_id,
+                     join_message_mode, leave_enabled, leave_channel_id,
+                     rules_enabled, rules_channel_id, rules_role_id,
+                     rules_button_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    join_enabled      = excluded.join_enabled,
+                    join_channel_id   = excluded.join_channel_id,
+                    auto_role_id      = excluded.auto_role_id,
+                    join_message_mode = excluded.join_message_mode,
+                    leave_enabled     = excluded.leave_enabled,
+                    leave_channel_id  = excluded.leave_channel_id,
+                    rules_enabled     = excluded.rules_enabled,
+                    rules_channel_id  = excluded.rules_channel_id,
+                    rules_role_id     = excluded.rules_role_id,
+                    rules_button_text = excluded.rules_button_text,
+                    updated_at        = CURRENT_TIMESTAMP
+            """, (
+                guild_id,
+                int(data.get("join_enabled", 0)),
+                data.get("join_channel_id") or None,
+                data.get("auto_role_id") or None,
+                data.get("join_message_mode", "random"),
+                int(data.get("leave_enabled", 0)),
+                data.get("leave_channel_id") or None,
+                int(data.get("rules_enabled", 0)),
+                data.get("rules_channel_id") or None,
+                data.get("rules_role_id") or None,
+                data.get("rules_button_text", "✅ I Accept"),
+            ))
+            await db.commit()
+    if request.method == "POST":
+        run_async(save_config(request.form.to_dict()))
+        log_action(guild_id, "Updated welcome config", "config_welcome")
+        return redirect(url_for("config_welcome") + "?saved=1")
+    config = run_async(get_config())
+    ctx = get_current_user_context()
+    return render_template("config/welcome.html",
+                           config=config,
+                           saved=request.args.get("saved"),
+                           **ctx)
+
+
+@app.route("/config/boost", methods=["GET", "POST"])
+@require_page("boost")
+def config_boost():
+    guild_id = get_session_guild_id()
+    async def get_config():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT * FROM boost_config WHERE guild_id = ?",
+                (guild_id,))
+            row = await cursor.fetchone()
+            if row:
+                cols = [d[0] for d in cursor.description]
+                return dict(zip(cols, row))
+        return {}
+    async def save_config(data: dict):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO boost_config
+                    (guild_id, enabled, boost1_role_id, boost2_role_id,
+                     boost2_channel_id, color_roles_enabled,
+                     auto_remove_on_unboost)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    enabled                = excluded.enabled,
+                    boost1_role_id         = excluded.boost1_role_id,
+                    boost2_role_id         = excluded.boost2_role_id,
+                    boost2_channel_id      = excluded.boost2_channel_id,
+                    color_roles_enabled    = excluded.color_roles_enabled,
+                    auto_remove_on_unboost = excluded.auto_remove_on_unboost
+            """, (
+                guild_id,
+                int(data.get("enabled", 1)),
+                data.get("boost1_role_id") or None,
+                data.get("boost2_role_id") or None,
+                data.get("boost2_channel_id") or None,
+                int(data.get("color_roles_enabled", 0)),
+                int(data.get("auto_remove_on_unboost", 1)),
+            ))
+            await db.commit()
+    if request.method == "POST":
+        run_async(save_config(request.form.to_dict()))
+        log_action(guild_id, "Updated boost config", "config_boost")
+        return redirect(url_for("config_boost") + "?saved=1")
+    config = run_async(get_config())
+    ctx = get_current_user_context()
+    return render_template("config/boost.html",
+                           config=config,
+                           saved=request.args.get("saved"),
+                           **ctx)
+
+
+@app.route("/config/announcements")
+@require_page("announcements")
+def config_announcements():
+    guild_id = get_session_guild_id()
+    async def get_configs():
+        async with aiosqlite.connect(DB_PATH) as db:
+            yt_cursor = await db.execute(
+                "SELECT * FROM youtube_config WHERE guild_id = ?",
+                (guild_id,))
+            yt = await yt_cursor.fetchall()
+            tw_cursor = await db.execute(
+                "SELECT * FROM twitch_config WHERE guild_id = ?",
+                (guild_id,))
+            tw = await tw_cursor.fetchall()
+        return yt, tw
+    yt, tw = run_async(get_configs())
+    ctx = get_current_user_context()
+    return render_template("config/announcements.html",
+                           youtube=yt, twitch=tw, **ctx)
+
+
+@app.route("/config/commands", methods=["GET", "POST"])
+@require_page("commands")
+def config_commands():
+    guild_id = get_session_guild_id()
     all_commands = [
         "kick", "ban", "unban", "timeout", "untimeout",
         "warn", "warnings", "clearwarnings", "purge",
-        "lock", "unlock", "slowmode", "modlogs"
+        "lock", "unlock", "slowmode", "modlogs",
+        "rank", "leaderboard", "setxp",
+        "balance", "daily", "work", "give", "richest",
+        "addcoins", "removecoins",
+        "mvp_scores", "mvp_setup", "mvp_force",
+        "reactionrole_create", "reactionrole_add",
+        "ticket_setup", "ticket_close",
+        "embed_create", "embed_edit",
+        "sticky_set", "sticky_remove",
+        "boost_setup",
+        "hug", "pat", "slap", "kiss", "dance",
+        "youtube_setup", "youtube_remove",
     ]
-
-    async def get_disabled():
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS disabled_commands (
-                    guild_id INTEGER,
-                    command TEXT,
-                    PRIMARY KEY (guild_id, command)
-                )
-            """)
-            await db.commit()
-            cursor = await db.execute(
-                "SELECT command FROM disabled_commands WHERE guild_id=?", (0,))
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
-
-    async def toggle_command(command, enable):
-        async with aiosqlite.connect(DB_PATH) as db:
-            if enable:
-                await db.execute(
-                    "DELETE FROM disabled_commands WHERE guild_id=? AND command=?",
-                    (0, command))
-            else:
-                await db.execute(
-                    "INSERT OR IGNORE INTO disabled_commands (guild_id, command) VALUES (?, ?)",
-                    (0, command))
-            await db.commit()
-
-    if request.method == "POST":
-        command = request.form.get("command")
-        action = request.form.get("action")
-        if command and action:
-            run_async(toggle_command(command, action == "enable"))
-        return redirect(url_for("commands_page"))
-
-    disabled = run_async(get_disabled())
-    return render_template("commands.html",
-                           user=session["user"],
-                           all_commands=all_commands,
-                           disabled=disabled)
-
-@app.route("/embedbuilder")
-@login_required
-def embedbuilder():
-    return render_template("embedbuilder.html", user=session["user"])
-
-@app.route("/reactionroles")
-@login_required
-def reactionroles():
-    return render_template("reactionroles.html", user=session["user"])
-
-@app.route("/settings")
-@login_required
-def settings():
-    async def get_settings():
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS bot_settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-            """)
-            await db.commit()
-            cursor = await db.execute("SELECT key, value FROM bot_settings")
-            rows = await cursor.fetchall()
-            return {row[0]: row[1] for row in rows}
-    raw = run_async(get_settings())
-    settings_data = {
-        "mvp_role_id": raw.get("mvp_role_id", ""),
-        "mvp_channel_id": raw.get("mvp_channel_id", ""),
-        "reset_hours": int(raw.get("reset_hours", 24)),
-        "boost_role1": raw.get("boost_role1", ""),
-        "boost_role2": raw.get("boost_role2", ""),
-        "boost_channel": raw.get("boost_channel", ""),
-        "xp_per_word": int(raw.get("xp_per_word", 2)),
-        "xp_max": int(raw.get("xp_max", 50)),
-        "levelup_channel": raw.get("levelup_channel", ""),
-        "staff_role": raw.get("staff_role", ""),
-        "ticket_log": raw.get("ticket_log", ""),
-        "ticket_categories": raw.get("ticket_categories",
-                                      "General Support,Report,Ban Appeal,Other"),
-        "daily_min": int(raw.get("daily_min", 100)),
-        "daily_max": int(raw.get("daily_max", 300)),
-        "work_min": int(raw.get("work_min", 20)),
-        "work_max": int(raw.get("work_max", 80)),
-        "welcome_channel": raw.get("welcome_channel", ""),
-        "welcome_msg": raw.get("welcome_msg", ""),
-        "welcome_color": raw.get("welcome_color", "#5865F2"),
-    }
-    saved = request.args.get("saved")
-    return render_template("settings.html", user=session["user"],
-                           settings=settings_data, saved=saved)
-
-async def save_setting(key, value):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)
-        """)
-        await db.execute(
-            "INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)",
-            (key, str(value)))
-        await db.commit()
-
-@app.route("/settings/mvp", methods=["POST"])
-@login_required
-def settings_mvp():
-    run_async(save_setting("mvp_role_id", request.form.get("mvp_role_id", "")))
-    run_async(save_setting("mvp_channel_id", request.form.get("mvp_channel_id", "")))
-    run_async(save_setting("reset_hours", request.form.get("reset_hours", "24")))
-    return redirect(url_for("settings") + "?saved=1")
-
-@app.route("/settings/boost", methods=["POST"])
-@login_required
-def settings_boost():
-    run_async(save_setting("boost_role1", request.form.get("role1_id", "")))
-    run_async(save_setting("boost_role2", request.form.get("role2_id", "")))
-    run_async(save_setting("boost_channel", request.form.get("boost_channel_id", "")))
-    return redirect(url_for("settings") + "?saved=1")
-
-@app.route("/settings/leveling", methods=["POST"])
-@login_required
-def settings_leveling():
-    run_async(save_setting("xp_per_word", request.form.get("xp_per_word", "2")))
-    run_async(save_setting("xp_max", request.form.get("xp_max", "50")))
-    run_async(save_setting("levelup_channel", request.form.get("levelup_channel", "")))
-    return redirect(url_for("settings") + "?saved=1")
-
-@app.route("/settings/tickets", methods=["POST"])
-@login_required
-def settings_tickets():
-    run_async(save_setting("staff_role", request.form.get("staff_role_id", "")))
-    run_async(save_setting("ticket_log", request.form.get("log_channel_id", "")))
-    run_async(save_setting("ticket_categories", request.form.get("categories", "")))
-    return redirect(url_for("settings") + "?saved=1")
-
-@app.route("/settings/economy", methods=["POST"])
-@login_required
-def settings_economy():
-    run_async(save_setting("daily_min", request.form.get("daily_min", "100")))
-    run_async(save_setting("daily_max", request.form.get("daily_max", "300")))
-    run_async(save_setting("work_min", request.form.get("work_min", "20")))
-    run_async(save_setting("work_max", request.form.get("work_max", "80")))
-    return redirect(url_for("settings") + "?saved=1")
-
-@app.route("/settings/welcome", methods=["POST"])
-@login_required
-def settings_welcome():
-    run_async(save_setting("welcome_channel", request.form.get("welcome_channel", "")))
-    run_async(save_setting("welcome_msg", request.form.get("welcome_msg", "")))
-    run_async(save_setting("welcome_color", request.form.get("welcome_color", "#5865F2")))
-    return redirect(url_for("settings") + "?saved=1")
-
-@app.route("/members")
-@login_required
-def members():
-    async def get_members():
+    async def get_toggles():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT l.user_id, l.xp, l.level, COALESCE(e.balance, 0) as coins
-                FROM levels l
-                LEFT JOIN economy e ON l.user_id = e.user_id
-                ORDER BY l.xp DESC LIMIT 50
-            """)
+                SELECT command_name, enabled, allowed_roles,
+                       allowed_channels, cooldown_seconds
+                FROM command_toggles WHERE guild_id = ?
+            """, (guild_id,))
             rows = await cursor.fetchall()
-            return [{"user_id": r[0], "xp": r[1], "level": r[2], "coins": r[3]}
-                    for r in rows]
-    try:
-        member_list = run_async(get_members())
-    except:
-        member_list = []
-    return render_template("members.html", user=session["user"], members=member_list)
+            return {r[0]: {"enabled": r[1], "allowed_roles": r[2],
+                           "allowed_channels": r[3],
+                           "cooldown": r[4]} for r in rows}
+    async def toggle_cmd(command: str, enabled: bool):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO command_toggles (guild_id, command_name, enabled)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, command_name)
+                DO UPDATE SET enabled = excluded.enabled,
+                              updated_at = CURRENT_TIMESTAMP
+            """, (guild_id, command, int(enabled)))
+            await db.commit()
+    if request.method == "POST":
+        command = request.form.get("command")
+        action  = request.form.get("action")
+        if command and action:
+            run_async(toggle_cmd(command, action == "enable"))
+            log_action(guild_id,
+                       f"{'Enabled' if action == 'enable' else 'Disabled'} command /{command}",
+                       "config_commands")
+        return redirect(url_for("config_commands"))
+    toggles = run_async(get_toggles())
+    ctx = get_current_user_context()
+    return render_template("config/commands.html",
+                           all_commands=all_commands,
+                           toggles=toggles, **ctx)
 
-@app.route("/api/edit_member", methods=["POST"])
-@login_required
+
+@app.route("/config/access", methods=["GET", "POST"])
+@require_page("dashboard_access")
+def config_access():
+    guild_id = get_session_guild_id()
+    async def get_users():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, user_id, permission_level, added_by_name,
+                       enabled, added_at
+                FROM dashboard_users WHERE guild_id = ?
+                ORDER BY added_at DESC
+            """, (guild_id,))
+            return await cursor.fetchall()
+    async def add_user(user_id: int, level: str):
+        user = current_user()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO dashboard_users
+                    (guild_id, user_id, permission_level,
+                     added_by, added_by_name)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+            """, (guild_id, user_id, level,
+                  current_user_id(),
+                  user.get("username") if user else "Unknown"))
+            await db.commit()
+    async def remove_user(entry_id: int):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM dashboard_users WHERE id = ? AND guild_id = ?",
+                (entry_id, guild_id))
+            await db.commit()
+    if request.method == "POST":
+        action = request.form.get("action")
+        if action == "add":
+            uid   = int(request.form.get("user_id", 0))
+            level = request.form.get("level", "moderator")
+            run_async(add_user(uid, level))
+            log_action(guild_id,
+                       f"Added dashboard user {uid} as {level}",
+                       "config_access",
+                       target_id=uid)
+        elif action == "remove":
+            entry_id = int(request.form.get("entry_id", 0))
+            run_async(remove_user(entry_id))
+            log_action(guild_id,
+                       f"Removed dashboard access entry {entry_id}",
+                       "config_access")
+        return redirect(url_for("config_access"))
+    users = run_async(get_users())
+    ctx   = get_current_user_context()
+    return render_template("config/access.html", users=users, **ctx)
+
+
+# ══════════════════════════════════════════════════════
+# API ENDPOINTS (HTMX + JSON)
+# ══════════════════════════════════════════════════════
+
+@app.route("/api/edit-member", methods=["POST"])
+@require_page("members_edit")
 def api_edit_member():
-    data = request.json
-    user_id = data.get("user_id")
-    xp = data.get("xp", 0)
-    coins = data.get("coins", 0)
+    guild_id = get_session_guild_id()
+    data     = request.json
+    user_id  = data.get("user_id")
+    xp       = int(data.get("xp", 0))
+    coins    = int(data.get("coins", 0))
     new_level = calculate_level(xp)
     async def update():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO levels (guild_id, user_id, xp, level)
-                VALUES (0, ?, ?, ?)
-                ON CONFLICT(guild_id, user_id) DO UPDATE SET xp=?, level=?
-            """, (user_id, xp, new_level, xp, new_level))
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id, user_id)
+                DO UPDATE SET xp = ?, level = ?
+            """, (guild_id, user_id, xp, new_level, xp, new_level))
             await db.execute("""
                 INSERT INTO economy (guild_id, user_id, balance)
-                VALUES (0, ?, ?)
-                ON CONFLICT(guild_id, user_id) DO UPDATE SET balance=?
-            """, (user_id, coins, coins))
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, user_id)
+                DO UPDATE SET balance = ?
+            """, (guild_id, user_id, coins, coins))
             await db.commit()
     run_async(update())
+    log_action(guild_id,
+               f"Edited member {user_id}: xp={xp} coins={coins}",
+               "members",
+               target_id=int(user_id))
     return jsonify({"success": True})
 
-@app.route("/api/save_embed_template", methods=["POST"])
-@login_required
+
+@app.route("/api/save-embed-template", methods=["POST"])
+@require_page("embedbuilder")
 def api_save_embed_template():
-    data = request.json
-    name = data.get("name")
-    embed = data.get("embed")
+    guild_id = get_session_guild_id()
+    data     = request.json
+    name     = data.get("name", "").lower().strip()
+    embed    = data.get("embed", {})
+    if not name:
+        return jsonify({"success": False, "error": "Name required"})
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS embed_templates (
-                    guild_id INTEGER, name TEXT, data TEXT,
-                    PRIMARY KEY (guild_id, name)
-                )
-            """)
-            await db.execute("""
                 INSERT OR REPLACE INTO embed_templates (guild_id, name, data)
-                VALUES (0, ?, ?)
-            """, (name.lower(), json.dumps(embed)))
+                VALUES (?, ?, ?)
+            """, (guild_id, name, json.dumps(embed)))
             await db.commit()
     run_async(save())
+    log_action(guild_id, f"Saved embed template '{name}'", "embedbuilder")
     return jsonify({"success": True})
 
-@app.route("/api/embed_templates")
-@login_required
+
+@app.route("/api/embed-templates")
+@require_page("embedbuilder")
 def api_embed_templates():
+    guild_id = get_session_guild_id()
     async def get():
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS embed_templates (
-                    guild_id INTEGER, name TEXT, data TEXT,
-                    PRIMARY KEY (guild_id, name)
-                )
-            """)
-            await db.commit()
             cursor = await db.execute(
-                "SELECT name FROM embed_templates WHERE guild_id=0")
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
-    try:
-        templates = run_async(get())
-    except:
-        templates = []
-    return jsonify({"templates": templates})
+                "SELECT name FROM embed_templates WHERE guild_id = ?",
+                (guild_id,))
+            return [r[0] for r in await cursor.fetchall()]
+    return jsonify({"templates": run_async(get())})
 
-@app.route("/api/embed_template/<name>", methods=["GET", "DELETE"])
-@login_required
-def api_embed_template(name):
+
+@app.route("/api/embed-template/<name>", methods=["GET", "DELETE"])
+@require_page("embedbuilder")
+def api_embed_template(name: str):
+    guild_id = get_session_guild_id()
     if request.method == "DELETE":
         async def delete():
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
-                    "DELETE FROM embed_templates WHERE guild_id=0 AND name=?", (name,))
+                    "DELETE FROM embed_templates WHERE guild_id=? AND name=?",
+                    (guild_id, name))
                 await db.commit()
         run_async(delete())
         return jsonify({"success": True})
     async def get():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT data FROM embed_templates WHERE guild_id=0 AND name=?", (name,))
+                "SELECT data FROM embed_templates WHERE guild_id=? AND name=?",
+                (guild_id, name))
             row = await cursor.fetchone()
-            return row[0] if row else None
+            return json.loads(row[0]) if row else None
     data = run_async(get())
-    if not data:
-        return jsonify({"template": None})
-    return jsonify({"template": json.loads(data)})
+    return jsonify({"template": data})
 
-@app.route("/api/send_embed", methods=["POST"])
-@login_required
-def api_send_embed():
-    return jsonify({"success": False,
-                    "error": "Use /embed_create in Discord instead!"})
 
-@app.route("/api/save_rr_panel", methods=["POST"])
-@login_required
-def api_save_rr_panel():
-    data = request.json
+@app.route("/api/save-trigger", methods=["POST"])
+@require_page("triggers")
+def api_save_trigger():
+    guild_id = get_session_guild_id()
+    data     = request.json
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS rr_panels (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT, description TEXT, color TEXT,
-                    channel_id TEXT, buttons TEXT,
-                    exclusive INTEGER DEFAULT 0,
-                    max_roles INTEGER DEFAULT 0,
-                    require_confirmation INTEGER DEFAULT 0,
-                    required_role TEXT
-                )
-            """)
+                INSERT INTO triggers
+                    (guild_id, trigger_words, response_text, response_embed,
+                     response_type, match_type, fuzzy_match, case_sensitive,
+                     response_chance, allowed_channels, enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """, (
+                guild_id,
+                data.get("trigger_words"),
+                data.get("response_text"),
+                json.dumps(data.get("response_embed")) if data.get("response_embed") else None,
+                data.get("response_type", "text"),
+                data.get("match_type", "contains"),
+                int(data.get("fuzzy_match", 0)),
+                int(data.get("case_sensitive", 0)),
+                int(data.get("response_chance", 100)),
+                json.dumps(data.get("allowed_channels", [])),
+            ))
+            await db.commit()
+    run_async(save())
+    log_action(guild_id,
+               f"Added trigger: {data.get('trigger_words')}",
+               "triggers")
+    return jsonify({"success": True})
+
+
+@app.route("/api/delete-trigger/<int:trigger_id>", methods=["DELETE"])
+@require_page("triggers")
+def api_delete_trigger(trigger_id: int):
+    guild_id = get_session_guild_id()
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM triggers WHERE id = ? AND guild_id = ?",
+                (trigger_id, guild_id))
+            await db.commit()
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+@app.route("/api/save-custom-command", methods=["POST"])
+@require_page("customcommands")
+def api_save_custom_command():
+    guild_id = get_session_guild_id()
+    data     = request.json
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO custom_commands
+                    (guild_id, trigger, allowed_roles, actions,
+                     embed_title, embed_description, embed_color,
+                     log_channel_id, same_channel, dm_member,
+                     dm_message, requires_mention, requires_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                guild_id,
+                data.get("trigger"),
+                json.dumps(data.get("allowed_roles", [])),
+                json.dumps(data.get("actions", [])),
+                data.get("embed_title"),
+                data.get("embed_description"),
+                data.get("embed_color", "#ED4245"),
+                data.get("log_channel_id"),
+                int(data.get("same_channel", False)),
+                int(data.get("dm_member", False)),
+                data.get("dm_message"),
+                int(data.get("requires_mention", True)),
+                int(data.get("requires_reason", True)),
+            ))
+            await db.commit()
+    run_async(save())
+    log_action(guild_id,
+               f"Added custom command: !{data.get('trigger')}",
+               "customcommands")
+    return jsonify({"success": True})
+
+
+@app.route("/api/delete-custom-command/<int:cmd_id>", methods=["DELETE"])
+@require_page("customcommands")
+def api_delete_custom_command(cmd_id: int):
+    guild_id = get_session_guild_id()
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM custom_commands WHERE id = ? AND guild_id = ?",
+                (cmd_id, guild_id))
+            await db.commit()
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+@app.route("/api/save-rr-panel", methods=["POST"])
+@require_page("reactionroles")
+def api_save_rr_panel():
+    guild_id = get_session_guild_id()
+    data     = request.json
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO rr_panels
-                (title, description, color, channel_id, buttons,
-                 exclusive, max_roles, require_confirmation, required_role)
+                    (title, description, color, channel_id, buttons,
+                     exclusive, max_roles, require_confirmation, required_role)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data.get("title"),
@@ -529,40 +956,48 @@ def api_save_rr_panel():
                 int(data.get("exclusive", 0)),
                 int(data.get("max_roles", 0)),
                 int(data.get("require_confirmation", False)),
-                data.get("required_role", "")
+                data.get("required_role", ""),
             ))
             await db.commit()
     run_async(save())
+    log_action(guild_id,
+               f"Saved reaction role panel: {data.get('title')}",
+               "reactionroles")
     return jsonify({"success": True})
 
-@app.route("/api/rr_panels")
-@login_required
+
+@app.route("/api/rr-panels")
+@require_page("reactionroles")
 def api_rr_panels():
     async def get():
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS rr_panels (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT, description TEXT, color TEXT,
-                    channel_id TEXT, buttons TEXT,
-                    exclusive INTEGER DEFAULT 0,
-                    max_roles INTEGER DEFAULT 0,
-                    require_confirmation INTEGER DEFAULT 0,
-                    required_role TEXT
-                )
-            """)
-            await db.commit()
             cursor = await db.execute(
                 "SELECT id, title, buttons FROM rr_panels ORDER BY id DESC")
             rows = await cursor.fetchall()
             return [{"id": r[0], "title": r[1],
                      "buttons": len(json.loads(r[2])) if r[2] else 0}
                     for r in rows]
-    try:
-        panels = run_async(get())
-    except:
-        panels = []
-    return jsonify({"panels": panels})
+    return jsonify({"panels": run_async(get())})
+
+
+@app.route("/api/delete-warning/<int:warning_id>", methods=["DELETE"])
+@require_page("moderation_view")
+def api_delete_warning(warning_id: int):
+    guild_id   = get_session_guild_id()
+    user_level = session.get("user_level", "")
+    from utils.permissions import LEVEL_RANK, LEVEL_OWNER
+    if LEVEL_RANK.get(user_level, 0) < LEVEL_RANK[LEVEL_OWNER]:
+        return jsonify({"success": False, "error": "Owner only"}), 403
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM warnings WHERE rowid = ? AND guild_id = ?",
+                (warning_id, guild_id))
+            await db.commit()
+    run_async(delete())
+    log_action(guild_id, f"Deleted warning #{warning_id}", "moderation")
+    return jsonify({"success": True})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
