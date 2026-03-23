@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Tickets{% endblock %}
+{% block content %}
+
+<div class="stats-grid">
+    <div class="stat-card stat-success">
+        <div class="stat-label">Open</div>
+        <div class="stat-value">{{ tickets | selectattr(3, 'equalto', 'open') | list | length }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Closed</div>
+        <div class="stat-value">{{ tickets | selectattr(3, 'equalto', 'closed') | list | length }}</div>
+    </div>
+    <div class="stat-card stat-accent">
+        <div class="stat-label">Total</div>
+        <div class="stat-value">{{ tickets | length }}</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0">🎫 All Tickets</div>
+        <select class="form-input" style="width:140px;"
+                hx-get="/api/tickets/list"
+                hx-target="#tickets-tbody"
+                hx-trigger="change"
+                name="status">
+            <option value="">All</option>
+            <option value="open">Open</option>
+            <option value="closed">Closed</option>
+        </select>
+    </div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>User ID</th>
+                    <th>Category</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                </tr>
+            </thead>
+            <tbody id="tickets-tbody"
+                   hx-get="/api/tickets/list"
+                   hx-trigger="load"
+                   hx-swap="innerHTML">
+                {% for t in tickets %}
+                <tr>
+                    <td><strong>#{{ t[0] }}</strong></td>
+                    <td><code>{{ t[2] }}</code></td>
+                    <td>{{ t[4] or 'General' }}</td>
+                    <td>
+                        <span class="badge {% if t[3] == 'open' %}badge-success{% else %}badge-danger{% endif %}">
+                            {{ t[3] }}
+                        </span>
+                    </td>
+                    <td class="text-muted">{{ t[5][:10] if t[5] else '—' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="empty">No tickets yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
