@@ -1,0 +1,559 @@
+import json
+import aiosqlite
+import asyncio
+from flask import Blueprint, jsonify, request, session, abort
+from database import DB_PATH
+from dashboard.auth import login_required, current_user_id
+from dashboard.permissions import get_session_guild_id
+
+api_bp = Blueprint("api", __name__, url_prefix="/api")
+
+
+def run_async(coro):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def require_guild(f):
+    """Ensures a guild is selected before any API call."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("user"):
+            abort(401)
+        if not get_session_guild_id():
+            abort(400)
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ══════════════════════════════════════════════════════
+# SELECT2 DATA ENDPOINTS
+# These power the searchable dropdowns on every page.
+# The bot fetches guild roles/channels via Discord API
+# using the bot token — no OAuth needed here.
+# ══════════════════════════════════════════════════════
+
+@api_bp.route("/roles")
+@require_guild
+def get_roles():
+    """
+    Returns all roles in the selected guild.
+    Used by Select2 dropdowns everywhere roles are needed.
+    Frontend: select2 with ajax { url: '/api/roles' }
+    """
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT role_id, role_name FROM boost_color_roles
+                WHERE guild_id = ?
+            """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    roles = [{"id": r[0], "text": r[1]} for r in rows]
+    return jsonify({"results": roles})
+
+
+@api_bp.route("/channels")
+@require_guild
+def get_channels():
+    """
+    Returns saved channel IDs from the database.
+    Used by Select2 dropdowns for channel selectors.
+    """
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT DISTINCT announce_channel_id FROM mvp_config
+                WHERE guild_id = ? AND announce_channel_id IS NOT NULL
+                UNION
+                SELECT DISTINCT log_channel_id FROM ticket_config
+                WHERE guild_id = ? AND log_channel_id IS NOT NULL
+                UNION
+                SELECT DISTINCT discord_channel_id FROM youtube_config
+                WHERE guild_id = ?
+            """, (guild_id, guild_id, guild_id))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    channels = [{"id": r[0], "text": f"#{r[0]}"} for r in rows if r[0]]
+    return jsonify({"results": channels})
+
+
+# ══════════════════════════════════════════════════════
+# HTMX PARTIAL ENDPOINTS
+# Return rendered HTML fragments for partial page updates.
+# Called with hx-get, hx-post attributes in templates.
+# ══════════════════════════════════════════════════════
+
+@api_bp.route("/members/search")
+@require_guild
+def members_search():
+    """
+    HTMX endpoint — returns member table rows matching search.
+    Called by: hx-get="/api/members/search?q=..." on keyup
+    Target: #members-tbody
+    """
+    guild_id = get_session_guild_id()
+    query    = request.args.get("q", "").strip()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT l.user_id, l.xp, l.level,
+                       COALESCE(e.balance, 0) AS coins
+                FROM levels l
+                LEFT JOIN economy e
+                  ON l.user_id = e.user_id AND l.guild_id = e.guild_id
+                WHERE l.guild_id = ?
+                ORDER BY l.xp DESC LIMIT 100
+            """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    if query:
+        rows = [r for r in rows if query in str(r[0])]
+    from flask import render_template_string
+    html = ""
+    for r in rows:
+        html += f"""
+        <tr>
+          <td><code>{r[0]}</code></td>
+          <td><span class="badge badge-accent">Level {r[2]}</span></td>
+          <td>{r[1]:,} XP</td>
+          <td>🪙 {r[3]:,}</td>
+          <td>
+            <button class="btn btn-sm"
+              onclick="openEditModal('{r[0]}', {r[1]}, {r[3]})">
+              Edit
+            </button>
+          </td>
+        </tr>"""
+    return html or "<tr><td colspan='5' class='empty'>No members found</td></tr>"
+
+
+@api_bp.route("/moderation/logs")
+@require_guild
+def moderation_logs_partial():
+    """
+    HTMX endpoint — returns moderation log rows with filters.
+    Called by: hx-get="/api/moderation/logs?action=ban&page=1"
+    Target: #mod-logs-tbody
+    """
+    guild_id   = get_session_guild_id()
+    action_filter = request.args.get("action", "")
+    page       = int(request.args.get("page", 1))
+    per_page   = 25
+    offset     = (page - 1) * per_page
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            if action_filter:
+                cursor = await db.execute("""
+                    SELECT id, user_display_name, user_avatar_url,
+                           moderator_display_name, action, reason,
+                           source, created_at
+                    FROM moderation_logs
+                    WHERE guild_id = ? AND deleted = 0 AND action = ?
+                    ORDER BY created_at DESC
+                    LIMIT ? OFFSET ?
+                """, (guild_id, action_filter, per_page, offset))
+            else:
+                cursor = await db.execute("""
+                    SELECT id, user_display_name, user_avatar_url,
+                           moderator_display_name, action, reason,
+                           source, created_at
+                    FROM moderation_logs
+                    WHERE guild_id = ? AND deleted = 0
+                    ORDER BY created_at DESC
+                    LIMIT ? OFFSET ?
+                """, (guild_id, per_page, offset))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    html = ""
+    for r in rows:
+        avatar = r[2] or "https://cdn.discordapp.com/embed/avatars/0.png"
+        html += f"""
+        <tr>
+          <td>
+            <div class="user-cell">
+              <img src="{avatar}" class="avatar-sm">
+              <span>{r[1]}</span>
+            </div>
+          </td>
+          <td>{r[3]}</td>
+          <td><span class="badge badge-{_action_color(r[4])}">{r[4]}</span></td>
+          <td>{r[5] or '—'}</td>
+          <td><span class="badge badge-source">{r[6]}</span></td>
+          <td class="text-muted">{r[7][:10] if r[7] else '—'}</td>
+        </tr>"""
+    return html or "<tr><td colspan='6' class='empty'>No logs found</td></tr>"
+
+
+def _action_color(action: str) -> str:
+    colors = {
+        "ban": "danger", "kick": "warning",
+        "timeout": "warning", "warn": "accent",
+        "unban": "success", "lock": "danger",
+    }
+    return colors.get(action.lower(), "accent")
+
+
+@api_bp.route("/mvp/scores")
+@require_guild
+def mvp_scores_partial():
+    """
+    HTMX endpoint — returns MVP score rows for today.
+    Called by: hx-get="/api/mvp/scores" hx-trigger="load"
+    Target: #mvp-scores-tbody
+    """
+    from datetime import date
+    guild_id = get_session_guild_id()
+    today    = date.today().isoformat()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT user_id, message_score, voice_minutes, total_score
+                FROM mvp_scores
+                WHERE guild_id = ? AND date = ?
+                ORDER BY total_score DESC LIMIT 20
+            """, (guild_id, today))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    html = ""
+    for i, r in enumerate(rows, 1):
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"#{i}"
+        html += f"""
+        <tr>
+          <td>{medal}</td>
+          <td><code>{r[0]}</code></td>
+          <td>{r[1]:.1f}</td>
+          <td>{r[2]:.1f}</td>
+          <td><strong>{r[3]:.1f}</strong></td>
+        </tr>"""
+    return html or "<tr><td colspan='5' class='empty'>No activity today yet</td></tr>"
+
+
+@api_bp.route("/economy/leaderboard")
+@require_guild
+def economy_leaderboard_partial():
+    """HTMX endpoint — economy leaderboard rows."""
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT user_id, balance FROM economy
+                WHERE guild_id = ?
+                ORDER BY balance DESC LIMIT 50
+            """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    html = ""
+    for i, r in enumerate(rows, 1):
+        html += f"""
+        <tr>
+          <td>#{i}</td>
+          <td><code>{r[0]}</code></td>
+          <td><strong>🪙 {r[1]:,}</strong></td>
+        </tr>"""
+    return html or "<tr><td colspan='3' class='empty'>No data yet</td></tr>"
+
+
+@api_bp.route("/leveling/leaderboard")
+@require_guild
+def leveling_leaderboard_partial():
+    """HTMX endpoint — leveling leaderboard rows."""
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT user_id, xp, level FROM levels
+                WHERE guild_id = ?
+                ORDER BY xp DESC LIMIT 50
+            """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    html = ""
+    for i, r in enumerate(rows, 1):
+        html += f"""
+        <tr>
+          <td>#{i}</td>
+          <td><code>{r[0]}</code></td>
+          <td><span class="badge badge-accent">Lv {r[2]}</span></td>
+          <td>{r[1]:,} XP</td>
+        </tr>"""
+    return html or "<tr><td colspan='4' class='empty'>No data yet</td></tr>"
+
+
+@api_bp.route("/audit-log/entries")
+@require_guild
+def audit_log_partial():
+    """HTMX endpoint — audit log rows with pagination."""
+    guild_id = get_session_guild_id()
+    page     = int(request.args.get("page", 1))
+    per_page = 50
+    offset   = (page - 1) * per_page
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT user_display_name, action, details,
+                       page, created_at
+                FROM audit_log
+                WHERE guild_id = ?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+            """, (guild_id, per_page, offset))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    html = ""
+    for r in rows:
+        html += f"""
+        <tr>
+          <td>{r[0]}</td>
+          <td>{r[1]}</td>
+          <td class="text-muted">{r[2] or '—'}</td>
+          <td><span class="badge badge-accent">{r[3] or '—'}</span></td>
+          <td class="text-muted">{r[4][:16] if r[4] else '—'}</td>
+        </tr>"""
+    return html or "<tr><td colspan='5' class='empty'>No actions logged yet</td></tr>"
+
+
+@api_bp.route("/shop/items")
+@require_guild
+def shop_items_partial():
+    """HTMX endpoint — shop items table."""
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, name, description, price, type,
+                       role_id, duration_hours, featured, enabled
+                FROM shop_items
+                WHERE guild_id = ?
+                ORDER BY featured DESC, created_at DESC
+            """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    html = ""
+    for r in rows:
+        status = "badge-success" if r[8] else "badge-danger"
+        label  = "Active" if r[8] else "Disabled"
+        html += f"""
+        <tr>
+          <td><strong>{r[1]}</strong>{' ⭐' if r[7] else ''}</td>
+          <td class="text-muted">{r[2] or '—'}</td>
+          <td>🪙 {r[3]:,}</td>
+          <td>{r[4]}</td>
+          <td>{f'{r[6]}h temp' if r[6] else 'Permanent'}</td>
+          <td><span class="badge {status}">{label}</span></td>
+          <td>
+            <button class="btn btn-sm btn-danger"
+              hx-delete="/api/shop/item/{r[0]}"
+              hx-confirm="Delete this item?"
+              hx-target="closest tr"
+              hx-swap="outerHTML">
+              Delete
+            </button>
+          </td>
+        </tr>"""
+    return html or "<tr><td colspan='7' class='empty'>No shop items yet</td></tr>"
+
+
+@api_bp.route("/shop/item/<int:item_id>", methods=["DELETE"])
+@require_guild
+def delete_shop_item(item_id: int):
+    guild_id = get_session_guild_id()
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM shop_items WHERE id = ? AND guild_id = ?",
+                (item_id, guild_id))
+            await db.commit()
+    run_async(delete())
+    return ""
+
+
+@api_bp.route("/shop/item", methods=["POST"])
+@require_guild
+def add_shop_item():
+    guild_id = get_session_guild_id()
+    data = request.json or request.form.to_dict()
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO shop_items
+                    (guild_id, name, description, price, type,
+                     role_id, duration_hours, featured,
+                     required_level, required_role_id, enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """, (
+                guild_id,
+                data.get("name"),
+                data.get("description"),
+                int(data.get("price", 0)),
+                data.get("type", "role"),
+                data.get("role_id") or None,
+                data.get("duration_hours") or None,
+                int(data.get("featured", 0)),
+                int(data.get("required_level", 0)),
+                data.get("required_role_id") or None,
+            ))
+            await db.commit()
+    run_async(save())
+    from dashboard.permissions import log_action
+    log_action(guild_id, f"Added shop item: {data.get('name')}", "shop")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/tickets/list")
+@require_guild
+def tickets_partial():
+    """HTMX endpoint — ticket rows."""
+    guild_id    = get_session_guild_id()
+    status_filter = request.args.get("status", "")
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            if status_filter:
+                cursor = await db.execute("""
+                    SELECT id, channel_id, user_id, status, category, created_at
+                    FROM tickets
+                    WHERE guild_id = ? AND status = ?
+                    ORDER BY created_at DESC LIMIT 100
+                """, (guild_id, status_filter))
+            else:
+                cursor = await db.execute("""
+                    SELECT id, channel_id, user_id, status, category, created_at
+                    FROM tickets
+                    WHERE guild_id = ?
+                    ORDER BY created_at DESC LIMIT 100
+                """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    html = ""
+    for r in rows:
+        color = "badge-success" if r[3] == "open" else "badge-danger"
+        html += f"""
+        <tr>
+          <td><strong>#{r[0]}</strong></td>
+          <td><code>{r[2]}</code></td>
+          <td>{r[4] or 'General'}</td>
+          <td><span class="badge {color}">{r[3]}</span></td>
+          <td class="text-muted">{r[5][:10] if r[5] else '—'}</td>
+        </tr>"""
+    return html or "<tr><td colspan='5' class='empty'>No tickets found</td></tr>"
+
+
+@api_bp.route("/status-messages", methods=["GET"])
+@require_guild
+def get_status_messages():
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, text, type, position, enabled
+                FROM status_messages
+                WHERE guild_id = ?
+                ORDER BY position ASC
+            """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    return jsonify([{
+        "id": r[0], "text": r[1], "type": r[2],
+        "position": r[3], "enabled": r[4]
+    } for r in rows])
+
+
+@api_bp.route("/status-messages", methods=["POST"])
+@require_guild
+def add_status_message():
+    guild_id = get_session_guild_id()
+    data = request.json
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM status_messages WHERE guild_id = ?",
+                (guild_id,))
+            count = (await cursor.fetchone())[0]
+            await db.execute("""
+                INSERT INTO status_messages (guild_id, text, type, position)
+                VALUES (?, ?, ?, ?)
+            """, (guild_id, data.get("text"), data.get("type", "playing"), count))
+            await db.commit()
+    run_async(save())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/status-messages/<int:msg_id>", methods=["DELETE"])
+@require_guild
+def delete_status_message(msg_id: int):
+    guild_id = get_session_guild_id()
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM status_messages WHERE id = ? AND guild_id = ?",
+                (msg_id, guild_id))
+            await db.commit()
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/warning-thresholds", methods=["GET"])
+@require_guild
+def get_warning_thresholds():
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, warn_count, action, duration_minutes, role_id, enabled
+                FROM warning_thresholds WHERE guild_id = ?
+                ORDER BY warn_count ASC
+            """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    return jsonify([{
+        "id": r[0], "warn_count": r[1], "action": r[2],
+        "duration_minutes": r[3], "role_id": r[4], "enabled": r[5]
+    } for r in rows])
+
+
+@api_bp.route("/warning-thresholds", methods=["POST"])
+@require_guild
+def add_warning_threshold():
+    guild_id = get_session_guild_id()
+    data = request.json
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO warning_thresholds
+                    (guild_id, warn_count, action, duration_minutes, role_id)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                guild_id,
+                int(data.get("warn_count", 3)),
+                data.get("action", "timeout"),
+                data.get("duration_minutes") or None,
+                data.get("role_id") or None,
+            ))
+            await db.commit()
+    run_async(save())
+    from dashboard.permissions import log_action
+    log_action(guild_id,
+               f"Added warning threshold: {data.get('warn_count')} warns → {data.get('action')}",
+               "moderation")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/warning-thresholds/<int:threshold_id>", methods=["DELETE"])
+@require_guild
+def delete_warning_threshold(threshold_id: int):
+    guild_id = get_session_guild_id()
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM warning_thresholds WHERE id = ? AND guild_id = ?",
+                (threshold_id, guild_id))
+            await db.commit()
+    run_async(delete())
+    return jsonify({"success": True})
