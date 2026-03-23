@@ -5,7 +5,7 @@ import os
 import traceback
 from dotenv import load_dotenv
 import aiosqlite
-from database import DB_PATH
+from database import DB_PATH, add_guild_owner
 
 load_dotenv()
 
@@ -14,13 +14,6 @@ print(f"Token exists: {bool(os.getenv('DISCORD_TOKEN'))}")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-# ══════════════════════════════════════════════════════
-# STATUS ROTATION
-# Messages stored in: status_messages table
-# Enabled via: guild_settings.status_rotation_enabled
-# Configured from: dashboard Config > General Settings
-# ══════════════════════════════════════════════════════
 
 _status_index = 0
 
@@ -88,6 +81,17 @@ async def on_ready():
     rotate_status.start()
 
 
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """
+    When Nero joins a new server, immediately grant
+    the owner dashboard access for that guild.
+    No restart needed.
+    """
+    print(f"Joined new guild: {guild.name} ({guild.id})")
+    await add_guild_owner(guild.id)
+
+
 @bot.command()
 @commands.is_owner()
 async def sync(ctx):
@@ -121,3 +125,11 @@ async def main():
 
 print("Running main...")
 asyncio.run(main())
+```
+
+---
+
+**Commit both files. After Railway redeploys you'll see in the logs:**
+```
+Owner access confirmed for 1 guild(s)
+Owner access ensured for user ID: 704453350384730237
