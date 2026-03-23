@@ -1,7 +1,17 @@
 import aiosqlite
 import asyncio
+import os
 
 DB_PATH = "nero.db"
+
+# ══════════════════════════════════════════════════════
+# YOUR DISCORD USER ID — permanently you, never changes
+# This is read from the OWNER_ID environment variable
+# OR falls back to your hardcoded ID below.
+# To change it: set OWNER_ID in Railway environment vars.
+# ══════════════════════════════════════════════════════
+OWNER_DISCORD_ID = int(os.getenv("OWNER_ID", "704453350384730237"))
+
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -52,24 +62,24 @@ async def init_db():
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS tickets (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id   INTEGER,
-                channel_id INTEGER,
-                user_id    INTEGER,
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id      INTEGER,
+                channel_id    INTEGER,
+                user_id       INTEGER,
                 staff_role_id INTEGER,
-                status     TEXT DEFAULT 'open',
-                category   TEXT,
-                created_at TEXT
+                status        TEXT DEFAULT 'open',
+                category      TEXT,
+                created_at    TEXT
             )
         """)
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ticket_config (
-                guild_id         INTEGER PRIMARY KEY,
-                staff_role_id    INTEGER,
+                guild_id           INTEGER PRIMARY KEY,
+                staff_role_id      INTEGER,
                 ticket_category_id INTEGER,
-                log_channel_id   INTEGER,
-                categories       TEXT DEFAULT 'General Support,Report,Ban Appeal,Other'
+                log_channel_id     INTEGER,
+                categories         TEXT DEFAULT 'General Support,Report,Ban Appeal,Other'
             )
         """)
 
@@ -134,20 +144,20 @@ async def init_db():
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS custom_commands (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id         INTEGER,
-                trigger          TEXT,
-                allowed_roles    TEXT DEFAULT '[]',
-                actions          TEXT DEFAULT '[]',
-                embed_title      TEXT,
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id          INTEGER,
+                trigger           TEXT,
+                allowed_roles     TEXT DEFAULT '[]',
+                actions           TEXT DEFAULT '[]',
+                embed_title       TEXT,
                 embed_description TEXT,
-                embed_color      TEXT DEFAULT '#ED4245',
-                log_channel_id   INTEGER,
-                same_channel     INTEGER DEFAULT 0,
-                dm_member        INTEGER DEFAULT 0,
-                dm_message       TEXT,
-                requires_mention INTEGER DEFAULT 1,
-                requires_reason  INTEGER DEFAULT 0
+                embed_color       TEXT DEFAULT '#ED4245',
+                log_channel_id    INTEGER,
+                same_channel      INTEGER DEFAULT 0,
+                dm_member         INTEGER DEFAULT 0,
+                dm_message        TEXT,
+                requires_mention  INTEGER DEFAULT 1,
+                requires_reason   INTEGER DEFAULT 0
             )
         """)
 
@@ -168,10 +178,8 @@ async def init_db():
 
         # ══════════════════════════════════════════
         # EXISTING TABLES — ADD MISSING COLUMNS
-        # These use ALTER TABLE so existing data is safe
         # ══════════════════════════════════════════
 
-        # warnings table — add snapshot + moderator columns (Rule 1)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS warnings (
                 guild_id               INTEGER,
@@ -195,7 +203,6 @@ async def init_db():
             except Exception:
                 pass
 
-        # mod_logs table — add snapshot + source + evidence columns (Rule 1)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS mod_logs (
                 id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,7 +242,6 @@ async def init_db():
             except Exception:
                 pass
 
-        # mvp_config — add new Blueprint columns
         await db.execute("""
             CREATE TABLE IF NOT EXISTS mvp_config (
                 guild_id            INTEGER PRIMARY KEY,
@@ -262,7 +268,6 @@ async def init_db():
             except Exception:
                 pass
 
-        # boost_config — align with Blueprint column names
         await db.execute("""
             CREATE TABLE IF NOT EXISTS boost_config (
                 guild_id               INTEGER PRIMARY KEY,
@@ -291,27 +296,26 @@ async def init_db():
             except Exception:
                 pass
 
-        # triggers table — add Blueprint columns
         await db.execute("""
             CREATE TABLE IF NOT EXISTS triggers (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id         INTEGER,
-                trigger          TEXT,
-                response         TEXT,
-                embed_title      TEXT,
-                embed_color      TEXT,
-                input_channel_id INTEGER,
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id          INTEGER,
+                trigger           TEXT,
+                response          TEXT,
+                embed_title       TEXT,
+                embed_color       TEXT,
+                input_channel_id  INTEGER,
                 output_channel_id INTEGER,
-                trigger_words    TEXT,
-                response_text    TEXT,
-                response_embed   TEXT,
-                response_type    TEXT DEFAULT 'text',
-                match_type       TEXT DEFAULT 'contains',
-                fuzzy_match      INTEGER DEFAULT 0,
-                case_sensitive   INTEGER DEFAULT 0,
-                response_chance  INTEGER DEFAULT 100,
-                allowed_channels TEXT,
-                enabled          INTEGER DEFAULT 1
+                trigger_words     TEXT,
+                response_text     TEXT,
+                response_embed    TEXT,
+                response_type     TEXT DEFAULT 'text',
+                match_type        TEXT DEFAULT 'contains',
+                fuzzy_match       INTEGER DEFAULT 0,
+                case_sensitive    INTEGER DEFAULT 0,
+                response_chance   INTEGER DEFAULT 100,
+                allowed_channels  TEXT,
+                enabled           INTEGER DEFAULT 1
             )
         """)
         for col in [
@@ -336,9 +340,6 @@ async def init_db():
         # NEW TABLES — BLUEPRINT v2.0
         # ══════════════════════════════════════════
 
-        # guild_settings — core per-server config
-        # Connected to: dashboard Config > General Settings page
-        # Owner ID stored here indirectly via dashboard_users table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id                 INTEGER PRIMARY KEY,
@@ -358,7 +359,6 @@ async def init_db():
             ON guild_settings(guild_id)
         """)
 
-        # status_messages — bot status rotation
         await db.execute("""
             CREATE TABLE IF NOT EXISTS status_messages (
                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -370,7 +370,6 @@ async def init_db():
             )
         """)
 
-        # welcome_config — join/leave/rules gate
         await db.execute("""
             CREATE TABLE IF NOT EXISTS welcome_config (
                 guild_id          INTEGER PRIMARY KEY,
@@ -388,7 +387,6 @@ async def init_db():
             )
         """)
 
-        # welcome_messages — up to 3 per type per server
         await db.execute("""
             CREATE TABLE IF NOT EXISTS welcome_messages (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -404,7 +402,6 @@ async def init_db():
             ON welcome_messages(guild_id)
         """)
 
-        # warning_thresholds — auto-escalation on warnings
         await db.execute("""
             CREATE TABLE IF NOT EXISTS warning_thresholds (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -422,7 +419,6 @@ async def init_db():
             ON warning_thresholds(guild_id)
         """)
 
-        # moderation_logs — enhanced, with snapshots (Rule 1)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS moderation_logs (
                 id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -445,19 +441,15 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ml_guild
-            ON moderation_logs(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_ml_guild ON moderation_logs(guild_id)
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ml_user
-            ON moderation_logs(user_id)
+            CREATE INDEX IF NOT EXISTS idx_ml_user ON moderation_logs(user_id)
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ml_date
-            ON moderation_logs(created_at)
+            CREATE INDEX IF NOT EXISTS idx_ml_date ON moderation_logs(created_at)
         """)
 
-        # leveling_config — XP rates, voice XP, anti-spam
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_config (
                 guild_id               INTEGER PRIMARY KEY,
@@ -481,7 +473,6 @@ async def init_db():
             )
         """)
 
-        # leveling_rewards — level → role mapping
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_rewards (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -492,12 +483,9 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_lr_guild
-            ON leveling_rewards(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_lr_guild ON leveling_rewards(guild_id)
         """)
 
-        # leveling_bonus_roles — XP multiplier roles (Rule 3)
-        # xp_calculator.py reads this — max multiplier wins, no stacking
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_bonus_roles (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -512,7 +500,6 @@ async def init_db():
             ON leveling_bonus_roles(guild_id)
         """)
 
-        # leveling_blacklist_roles — roles that earn 0 XP
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_blacklist_roles (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -522,7 +509,6 @@ async def init_db():
             )
         """)
 
-        # mvp_history — winner log per cycle
         await db.execute("""
             CREATE TABLE IF NOT EXISTS mvp_history (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -536,11 +522,9 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_mvph_guild
-            ON mvp_history(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_mvph_guild ON mvp_history(guild_id)
         """)
 
-        # boost_color_roles — color roles for boosters
         await db.execute("""
             CREATE TABLE IF NOT EXISTS boost_color_roles (
                 id                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -552,7 +536,6 @@ async def init_db():
             )
         """)
 
-        # shop_items — economy shop
         await db.execute("""
             CREATE TABLE IF NOT EXISTS shop_items (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -576,11 +559,9 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_si_guild
-            ON shop_items(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_si_guild ON shop_items(guild_id)
         """)
 
-        # purchase_history — snapshot rule applied
         await db.execute("""
             CREATE TABLE IF NOT EXISTS purchase_history (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -595,15 +576,12 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ph_guild
-            ON purchase_history(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_ph_guild ON purchase_history(guild_id)
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ph_user
-            ON purchase_history(user_id)
+            CREATE INDEX IF NOT EXISTS idx_ph_user ON purchase_history(user_id)
         """)
 
-        # temp_roles — auto-removal tracking
         await db.execute("""
             CREATE TABLE IF NOT EXISTS temp_roles (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -616,11 +594,9 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_tr_expires
-            ON temp_roles(expires_at)
+            CREATE INDEX IF NOT EXISTS idx_tr_expires ON temp_roles(expires_at)
         """)
 
-        # events — challenges + button races
         await db.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -643,11 +619,9 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ev_guild
-            ON events(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_ev_guild ON events(guild_id)
         """)
 
-        # event_winners — snapshot rule applied
         await db.execute("""
             CREATE TABLE IF NOT EXISTS event_winners (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -659,7 +633,6 @@ async def init_db():
             )
         """)
 
-        # youtube_config — new Blueprint schema
         await db.execute("""
             CREATE TABLE IF NOT EXISTS youtube_config (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -677,7 +650,6 @@ async def init_db():
             )
         """)
 
-        # twitch_config — live alerts
         await db.execute("""
             CREATE TABLE IF NOT EXISTS twitch_config (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -695,13 +667,6 @@ async def init_db():
             )
         """)
 
-        # dashboard_users — permission levels per user
-        # IMPORTANT: This table is the source of truth for:
-        #   - Owner ID (permission_level = 'owner')
-        #   - Admin IDs (permission_level = 'admin')
-        #   - Moderator IDs (permission_level = 'moderator')
-        # utils/permissions.py reads this table to check access
-        # dashboard/permissions.py reads this for page-level gates
         await db.execute("""
             CREATE TABLE IF NOT EXISTS dashboard_users (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -715,17 +680,12 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_du_guild
-            ON dashboard_users(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_du_guild ON dashboard_users(guild_id)
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_du_user
-            ON dashboard_users(user_id)
+            CREATE INDEX IF NOT EXISTS idx_du_user ON dashboard_users(user_id)
         """)
 
-        # audit_log — every dashboard action logged here
-        # Connected to: dashboard/permissions.py logs every change
-        # Viewed on: dashboard > General > Audit Log page
         await db.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -742,17 +702,12 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_al_guild
-            ON audit_log(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_al_guild ON audit_log(guild_id)
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_al_date
-            ON audit_log(created_at)
+            CREATE INDEX IF NOT EXISTS idx_al_date ON audit_log(created_at)
         """)
 
-        # command_toggles — replaces disabled_commands (more powerful)
-        # Stores per-command on/off + allowed roles + allowed channels + cooldown
-        # Connected to: dashboard Config > Commands page
         await db.execute("""
             CREATE TABLE IF NOT EXISTS command_toggles (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -766,11 +721,9 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ct_guild
-            ON command_toggles(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_ct_guild ON command_toggles(guild_id)
         """)
 
-        # scheduled_messages — auto-post at time
         await db.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -788,7 +741,6 @@ async def init_db():
             )
         """)
 
-        # backup_log — tracks database backups
         await db.execute("""
             CREATE TABLE IF NOT EXISTS backup_log (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -799,7 +751,76 @@ async def init_db():
         """)
 
         await db.commit()
+
+    # ══════════════════════════════════════════════════════
+    # AUTO-OWNER SETUP
+    # Runs on every startup.
+    # Checks every guild the bot knows about from the DB
+    # and ensures OWNER_DISCORD_ID has owner access.
+    # This means when you join a new server, after the first
+    # message/event populates the guild_id, you get access
+    # automatically on the next restart.
+    # You never need to manually add yourself again.
+    # ══════════════════════════════════════════════════════
+    await ensure_owner_access()
+
     print("Database initialized — all tables ready")
+    print(f"Owner access ensured for user ID: {OWNER_DISCORD_ID}")
+
+
+async def ensure_owner_access():
+    """
+    Finds every guild_id that exists anywhere in the database
+    and ensures OWNER_DISCORD_ID has permission_level='owner'.
+    Safe to run on every startup — uses INSERT OR IGNORE.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Collect all known guild IDs from key tables
+        guild_ids = set()
+        for table in ["levels", "economy", "warnings", "tickets",
+                      "mvp_scores", "mod_logs", "boost_config",
+                      "mvp_config", "guild_settings"]:
+            try:
+                cursor = await db.execute(
+                    f"SELECT DISTINCT guild_id FROM {table} WHERE guild_id IS NOT NULL"
+                )
+                rows = await cursor.fetchall()
+                for row in rows:
+                    if row[0]:
+                        guild_ids.add(int(row[0]))
+            except Exception:
+                pass
+
+        if not guild_ids:
+            print("No guilds in DB yet — owner will be added when bot joins a server")
+            return
+
+        for gid in guild_ids:
+            # Add as owner if not already in dashboard_users
+            await db.execute("""
+                INSERT OR IGNORE INTO dashboard_users
+                    (guild_id, user_id, permission_level, added_by_name, enabled)
+                VALUES (?, ?, 'owner', 'auto-setup', 1)
+            """, (gid, OWNER_DISCORD_ID))
+
+        await db.commit()
+        print(f"Owner access confirmed for {len(guild_ids)} guild(s)")
+
+
+async def add_guild_owner(guild_id: int):
+    """
+    Call this when the bot joins a new guild.
+    Immediately grants owner access without needing a restart.
+    Called from: main.py on_guild_join event.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT OR IGNORE INTO dashboard_users
+                (guild_id, user_id, permission_level, added_by_name, enabled)
+            VALUES (?, ?, 'owner', 'auto-setup', 1)
+        """, (guild_id, OWNER_DISCORD_ID))
+        await db.commit()
+    print(f"Owner access granted for new guild: {guild_id}")
 
 
 if __name__ == "__main__":
