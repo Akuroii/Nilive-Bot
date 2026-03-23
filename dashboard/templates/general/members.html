@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Members{% endblock %}
+{% block content %}
+
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0">👥 Member Manager</div>
+        <input class="form-input" id="search-input"
+               placeholder="Search by User ID..."
+               oninput="filterMembers()"
+               style="max-width:260px;">
+    </div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>User ID</th>
+                    <th>Level</th>
+                    <th>XP</th>
+                    <th>Coins</th>
+                    {% if is_admin %}<th>Actions</th>{% endif %}
+                </tr>
+            </thead>
+            <tbody id="members-tbody">
+                {% for m in members %}
+                <tr class="member-row" data-id="{{ m.user_id }}">
+                    <td><code>{{ m.user_id }}</code></td>
+                    <td><span class="badge badge-accent">Level {{ m.level }}</span></td>
+                    <td>{{ "{:,}".format(m.xp) }} XP</td>
+                    <td>🪙 {{ "{:,}".format(m.coins) }}</td>
+                    {% if is_admin %}
+                    <td>
+                        <button class="btn btn-sm btn-secondary"
+                            onclick="openEditModal('{{ m.user_id }}', {{ m.xp }}, {{ m.coins }})">
+                            Edit
+                        </button>
+                    </td>
+                    {% endif %}
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="empty">No members found</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+function filterMembers() {
+    const q = document.getElementById('search-input').value.toLowerCase();
+    document.querySelectorAll('.member-row').forEach(row => {
+        row.style.display = row.dataset.id.includes(q) ? '' : 'none';
+    });
+}
+</script>
+{% endblock %}
+{% endblock %}
