@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Triggers{% endblock %}
+{% block content %}
+
+<div class="card">
+    <div class="card-title">⚡ Add Trigger</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div class="form-group">
+            <label class="form-label">Trigger words (comma separated)</label>
+            <input class="form-input" id="t-words" placeholder="hello, مرحبا, hi there">
+            <div class="form-hint">Supports Arabic and English</div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Match type</label>
+            <select class="form-input" id="t-match">
+                <option value="contains">Contains (anywhere in message)</option>
+                <option value="startswith">Starts with</option>
+                <option value="exact">Exact match</option>
+                <option value="endswith">Ends with</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Response type</label>
+            <select class="form-input" id="t-type" onchange="toggleResponseFields()">
+                <option value="text">Text message</option>
+                <option value="reply">Reply to message</option>
+                <option value="embed">Embed</option>
+                <option value="react">React with emoji</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Response chance (%)</label>
+            <input class="form-input" id="t-chance" type="number"
+                   min="1" max="100" value="100">
+        </div>
+        <div class="form-group" id="text-field">
+            <label class="form-label">Response text / emoji</label>
+            <textarea class="form-input" id="t-text" rows="3"
+                      placeholder="Bot's response..."></textarea>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Allowed channel IDs (comma separated, empty = all)</label>
+            <input class="form-input" id="t-channels" placeholder="Leave empty for all channels">
+        </div>
+    </div>
+    <div style="display:flex;gap:16px;margin-bottom:16px;">
+        <label class="form-check">
+            <input type="checkbox" id="t-fuzzy"> Fuzzy matching
+        </label>
+        <label class="form-check">
+            <input type="checkbox" id="t-case"> Case sensitive
+        </label>
+    </div>
+    <button class="btn btn-primary" onclick="addTrigger()">Add Trigger</button>
+    <div id="trigger-status" style="margin-top:10px;font-size:13px;"></div>
+</div>
+
+<div class="card">
+    <div class="card-title">📋 Active Triggers</div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Trigger Words</th>
+                    <th>Type</th>
+                    <th>Match</th>
+                    <th>Chance</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in triggers %}
+                <tr>
+                    <td>#{{ t[0] }}</td>
+                    <td><code>{{ t[1][:40] if t[1] else '—' }}</code></td>
+                    <td>{{ t[2] or 'text' }}</td>
+                    <td>{{ t[3] or 'contains' }}</td>
+                    <td>{{ t[4] or 100 }}%</td>
+                    <td>
+                        <span class="badge {% if t[6] %}badge-success{% else %}badge-danger{% endif %}">
+                            {% if t[6] %}Active{% else %}Disabled{% endif %}
+                        </span>
+                    </td>
+                    <td>
+                        <button class="btn btn-sm btn-danger"
+                            onclick="showConfirm('Delete this trigger?', () => deleteTrigger({{ t[0] }}))">
+                            Delete
+                        </button>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="7" class="empty">No triggers yet. Add one above.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+function toggleResponseFields() {
+    const type = document.getElementById('t-type').value;
+    document.getElementById('text-field').style.display =
+        type === 'embed' ? 'none' : 'block';
+}
+
+async function addTrigger() {
+    const channels = document.getElementById('t-channels').value
+        .split(',').map(c => c.trim()).filter(c => c);
+    const payload = {
+        trigger_words:    document.getElementById('t-words').value,
+        response_text:    document.getElementById('t-text').value,
+        response_type:    document.getElementById('t-type').value,
+        match_type:       document.getElementById('t-match').value,
+        fuzzy_match:      document.getElementById('t-fuzzy').checked ? 1 : 0,
+        case_sensitive:   document.getElementById('t-case').checked ? 1 : 0,
+        response_chance:  parseInt(document.getElementById('t-chance').value),
+        allowed_channels: channels,
+    };
+    if (!payload.trigger_words) {
+        showToast('Enter trigger words', 'danger');
+        return;
+    }
+    const res  = await fetch('/api/save-trigger', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.success) { showToast('Trigger added!'); setTimeout(() => location.reload(), 800); }
+    else showToast('Error saving trigger', 'danger');
+}
+
+async function deleteTrigger(id) {
+    const res  = await fetch(`/api/delete-trigger/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) { showToast('Trigger deleted'); setTimeout(() => location.reload(), 800); }
+    else showToast('Error', 'danger');
+}
+</script>
+{% endblock %}
+{% endblock %}
