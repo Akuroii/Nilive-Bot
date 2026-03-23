@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Events{% endblock %}
+{% block content %}
+
+<div class="card">
+    <div class="card-title">🎯 Events</div>
+    <p class="text-muted text-sm" style="margin-bottom:16px;">
+        Events will be fully configurable in Phase 5.
+        This page shows existing events from the database.
+    </p>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>Title</th><th>Type</th><th>Reward</th><th>Winners</th><th>Status</th><th>Created</th></tr>
+            </thead>
+            <tbody>
+                {% for e in events %}
+                <tr>
+                    <td><strong>{{ e[1] }}</strong></td>
+                    <td>{{ e[2] }}</td>
+                    <td>{{ e[3] }}: {{ e[4] }}</td>
+                    <td>{{ e[5] }}</td>
+                    <td>
+                        <span class="badge {% if e[6] %}badge-success{% else %}badge-danger{% endif %}">
+                            {% if e[6] %}Active{% else %}Disabled{% endif %}
+                        </span>
+                    </td>
+                    <td class="text-muted">{{ e[7][:10] if e[7] else '—' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6" class="empty">No events yet — coming in Phase 5</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
