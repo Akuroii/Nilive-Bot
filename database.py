@@ -2,18 +2,27 @@ import aiosqlite
 import asyncio
 import os
 
-DB_PATH = "nero.db"
+# ══════════════════════════════════════════════════════
+# IMPORTANT: DB_PATH points to a Railway persistent volume
+# Go to Railway → your service → Volumes → Add Volume
+# Mount path: /app/data
+# Without this, nero.db is wiped on every redeploy!
+# ══════════════════════════════════════════════════════
+DB_PATH = "/app/data/nero.db"
 
-# ══════════════════════════════════════════════════════
-# YOUR DISCORD USER ID — permanently you, never changes
-# This is read from the OWNER_ID environment variable
-# OR falls back to your hardcoded ID below.
-# To change it: set OWNER_ID in Railway environment vars.
-# ══════════════════════════════════════════════════════
 OWNER_DISCORD_ID = int(os.getenv("OWNER_ID", "704453350384730237"))
+
+# Your server IDs — owner access is guaranteed for these
+# even on a completely fresh database
+FALLBACK_GUILD_IDS = [
+    1360461358486913145,
+]
 
 
 async def init_db():
+    # Make sure the directory exists
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
     async with aiosqlite.connect(DB_PATH) as db:
 
         # ══════════════════════════════════════════
@@ -441,13 +450,16 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ml_guild ON moderation_logs(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_ml_guild
+            ON moderation_logs(guild_id)
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ml_user ON moderation_logs(user_id)
+            CREATE INDEX IF NOT EXISTS idx_ml_user
+            ON moderation_logs(user_id)
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ml_date ON moderation_logs(created_at)
+            CREATE INDEX IF NOT EXISTS idx_ml_date
+            ON moderation_logs(created_at)
         """)
 
         await db.execute("""
@@ -483,7 +495,8 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_lr_guild ON leveling_rewards(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_lr_guild
+            ON leveling_rewards(guild_id)
         """)
 
         await db.execute("""
@@ -522,7 +535,8 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_mvph_guild ON mvp_history(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_mvph_guild
+            ON mvp_history(guild_id)
         """)
 
         await db.execute("""
@@ -559,7 +573,8 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_si_guild ON shop_items(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_si_guild
+            ON shop_items(guild_id)
         """)
 
         await db.execute("""
@@ -576,10 +591,12 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ph_guild ON purchase_history(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_ph_guild
+            ON purchase_history(guild_id)
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ph_user ON purchase_history(user_id)
+            CREATE INDEX IF NOT EXISTS idx_ph_user
+            ON purchase_history(user_id)
         """)
 
         await db.execute("""
@@ -594,7 +611,8 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_tr_expires ON temp_roles(expires_at)
+            CREATE INDEX IF NOT EXISTS idx_tr_expires
+            ON temp_roles(expires_at)
         """)
 
         await db.execute("""
@@ -619,7 +637,8 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ev_guild ON events(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_ev_guild
+            ON events(guild_id)
         """)
 
         await db.execute("""
@@ -680,10 +699,12 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_du_guild ON dashboard_users(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_du_guild
+            ON dashboard_users(guild_id)
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_du_user ON dashboard_users(user_id)
+            CREATE INDEX IF NOT EXISTS idx_du_user
+            ON dashboard_users(user_id)
         """)
 
         await db.execute("""
@@ -702,10 +723,12 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_al_guild ON audit_log(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_al_guild
+            ON audit_log(guild_id)
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_al_date ON audit_log(created_at)
+            CREATE INDEX IF NOT EXISTS idx_al_date
+            ON audit_log(created_at)
         """)
 
         await db.execute("""
@@ -721,7 +744,8 @@ async def init_db():
             )
         """)
         await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ct_guild ON command_toggles(guild_id)
+            CREATE INDEX IF NOT EXISTS idx_ct_guild
+            ON command_toggles(guild_id)
         """)
 
         await db.execute("""
@@ -752,37 +776,28 @@ async def init_db():
 
         await db.commit()
 
-    # ══════════════════════════════════════════════════════
-    # AUTO-OWNER SETUP
-    # Runs on every startup.
-    # Checks every guild the bot knows about from the DB
-    # and ensures OWNER_DISCORD_ID has owner access.
-    # This means when you join a new server, after the first
-    # message/event populates the guild_id, you get access
-    # automatically on the next restart.
-    # You never need to manually add yourself again.
-    # ══════════════════════════════════════════════════════
     await ensure_owner_access()
-
     print("Database initialized — all tables ready")
     print(f"Owner access ensured for user ID: {OWNER_DISCORD_ID}")
 
 
 async def ensure_owner_access():
     """
-    Finds every guild_id that exists anywhere in the database
-    and ensures OWNER_DISCORD_ID has permission_level='owner'.
-    Safe to run on every startup — uses INSERT OR IGNORE.
+    Guarantees OWNER_DISCORD_ID has dashboard owner access
+    for every known guild, including FALLBACK_GUILD_IDS.
+    Safe to run on every startup.
     """
     async with aiosqlite.connect(DB_PATH) as db:
-        # Collect all known guild IDs from key tables
         guild_ids = set()
+
+        # Collect from DB
         for table in ["levels", "economy", "warnings", "tickets",
                       "mvp_scores", "mod_logs", "boost_config",
                       "mvp_config", "guild_settings"]:
             try:
                 cursor = await db.execute(
-                    f"SELECT DISTINCT guild_id FROM {table} WHERE guild_id IS NOT NULL"
+                    f"SELECT DISTINCT guild_id FROM {table} "
+                    f"WHERE guild_id IS NOT NULL"
                 )
                 rows = await cursor.fetchall()
                 for row in rows:
@@ -791,32 +806,29 @@ async def ensure_owner_access():
             except Exception:
                 pass
 
-        if not guild_ids:
-            print("No guilds in DB yet — owner will be added when bot joins a server")
-            return
+        # Always include your known servers
+        for gid in FALLBACK_GUILD_IDS:
+            guild_ids.add(gid)
 
         for gid in guild_ids:
-            # Add as owner if not already in dashboard_users
             await db.execute("""
                 INSERT OR IGNORE INTO dashboard_users
-                    (guild_id, user_id, permission_level, added_by_name, enabled)
+                    (guild_id, user_id, permission_level,
+                     added_by_name, enabled)
                 VALUES (?, ?, 'owner', 'auto-setup', 1)
             """, (gid, OWNER_DISCORD_ID))
 
         await db.commit()
-        print(f"Owner access confirmed for {len(guild_ids)} guild(s)")
+        print(f"Owner access confirmed for guilds: {guild_ids}")
 
 
 async def add_guild_owner(guild_id: int):
-    """
-    Call this when the bot joins a new guild.
-    Immediately grants owner access without needing a restart.
-    Called from: main.py on_guild_join event.
-    """
+    """Called from main.py on_guild_join for instant access on new servers."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT OR IGNORE INTO dashboard_users
-                (guild_id, user_id, permission_level, added_by_name, enabled)
+                (guild_id, user_id, permission_level,
+                 added_by_name, enabled)
             VALUES (?, ?, 'owner', 'auto-setup', 1)
         """, (guild_id, OWNER_DISCORD_ID))
         await db.commit()
