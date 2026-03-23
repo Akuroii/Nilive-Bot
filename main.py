@@ -125,11 +125,3 @@ async def main():
 
 print("Running main...")
 asyncio.run(main())
-```
-
----
-
-**Commit both files. After Railway redeploys you'll see in the logs:**
-```
-Owner access confirmed for 1 guild(s)
-Owner access ensured for user ID: 704453350384730237
