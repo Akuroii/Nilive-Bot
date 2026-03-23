@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Economy{% endblock %}
+{% block content %}
+
+<div class="card">
+    <div class="card-title">🪙 Richest Members</div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>Rank</th><th>User ID</th><th>Balance</th></tr>
+            </thead>
+            <tbody hx-get="/api/economy/leaderboard" hx-trigger="load" hx-swap="innerHTML">
+                {% for b in balances %}
+                <tr>
+                    <td>
+                        <div class="rank-badge {% if loop.index == 1 %}rank-1{% elif loop.index == 2 %}rank-2{% elif loop.index == 3 %}rank-3{% else %}rank-n{% endif %}">
+                            {{ loop.index }}
+                        </div>
+                    </td>
+                    <td><code>{{ b[0] }}</code></td>
+                    <td><strong style="color:var(--gold);">🪙 {{ "{:,}".format(b[1]) }}</strong></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="3" class="empty">No economy data yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
