@@ -1,4 +1,7 @@
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import time
 import requests
 from functools import wraps
@@ -7,14 +10,13 @@ import aiosqlite
 import asyncio
 from database import DB_PATH
 
-DISCORD_API      = "https://discord.com/api/v10"
-CLIENT_ID        = os.getenv("DISCORD_CLIENT_ID")
-CLIENT_SECRET    = os.getenv("DISCORD_CLIENT_SECRET")
-REDIRECT_URI     = os.getenv("DISCORD_REDIRECT_URI")
+DISCORD_API    = "https://discord.com/api/v10"
+CLIENT_ID      = os.getenv("DISCORD_CLIENT_ID")
+CLIENT_SECRET  = os.getenv("DISCORD_CLIENT_SECRET")
+REDIRECT_URI   = os.getenv("DISCORD_REDIRECT_URI")
 
-# Session duration constants
-SESSION_DURATION_DEFAULT    = 60 * 60 * 24        # 24 hours
-SESSION_DURATION_REMEMBER   = 60 * 60 * 24 * 7    # 7 days
+SESSION_DURATION_DEFAULT  = 60 * 60 * 24
+SESSION_DURATION_REMEMBER = 60 * 60 * 24 * 7
 
 
 def run_async(coro):
@@ -25,10 +27,6 @@ def run_async(coro):
     finally:
         loop.close()
 
-
-# ══════════════════════════════════════════════════════
-# DISCORD OAUTH2
-# ══════════════════════════════════════════════════════
 
 def get_discord_oauth_url() -> str:
     return (
@@ -81,12 +79,6 @@ def fetch_discord_guilds(access_token: str) -> list:
     return r.json()
 
 
-# ══════════════════════════════════════════════════════
-# SESSION MANAGEMENT
-# remember_me = True → 7 days
-# remember_me = False → 24 hours
-# ══════════════════════════════════════════════════════
-
 def create_session(user: dict, remember_me: bool = False):
     duration = SESSION_DURATION_REMEMBER if remember_me else SESSION_DURATION_DEFAULT
     session.permanent = remember_me
@@ -110,12 +102,10 @@ def is_session_valid() -> bool:
 
 
 def refresh_session_if_needed():
-    """Extends session expiry on activity if remember_me is set."""
     if not session.get("remember_me"):
         return
     expires_at = session.get("expires_at", 0)
     remaining  = expires_at - time.time()
-    # Refresh if less than 3 days remain
     if remaining < 60 * 60 * 24 * 3:
         session["expires_at"] = time.time() + SESSION_DURATION_REMEMBER
 
@@ -124,11 +114,8 @@ def clear_session():
     session.clear()
 
 
-# ══════════════════════════════════════════════════════
-# LOGIN REQUIRED DECORATOR
-# ══════════════════════════════════════════════════════
-
 def login_required(f):
+    from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
         if not is_session_valid():
@@ -137,12 +124,6 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
-
-# ══════════════════════════════════════════════════════
-# GUILD ACCESS CHECK
-# Checks if the logged-in user has any permission level
-# for a given guild in the dashboard_users table.
-# ══════════════════════════════════════════════════════
 
 async def _get_user_level_async(guild_id: int, user_id: int) -> str | None:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -155,11 +136,6 @@ async def _get_user_level_async(guild_id: int, user_id: int) -> str | None:
 
 
 def get_current_user_level(guild_id: int) -> str | None:
-    """
-    Returns the permission level of the currently logged-in user
-    for the given guild. Returns None if no access.
-    Reads from: dashboard_users table
-    """
     user = session.get("user")
     if not user:
         return None
