@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Leveling{% endblock %}
+{% block content %}
+
+<div class="card">
+    <div class="card-title">⭐ XP Leaderboard</div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>Rank</th><th>User ID</th><th>Level</th><th>XP</th><th>Progress</th></tr>
+            </thead>
+            <tbody hx-get="/api/leveling/leaderboard" hx-trigger="load" hx-swap="innerHTML">
+                {% for l in levels %}
+                <tr>
+                    <td>
+                        <div class="rank-badge {% if loop.index == 1 %}rank-1{% elif loop.index == 2 %}rank-2{% elif loop.index == 3 %}rank-3{% else %}rank-n{% endif %}">
+                            {{ loop.index }}
+                        </div>
+                    </td>
+                    <td><code>{{ l[0] }}</code></td>
+                    <td><span class="badge badge-accent">Lv {{ l[2] }}</span></td>
+                    <td>{{ "{:,}".format(l[1]) }}</td>
+                    <td>
+                        <div style="background:var(--bg4);border-radius:999px;height:5px;width:100px;">
+                            <div style="background:var(--accent);border-radius:999px;height:5px;
+                                        width:{{ [((l[1] % 100) / 100 * 100)|int, 100]|min }}%;"></div>
+                        </div>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="empty">No XP data yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">🎁 Level Rewards</div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>Level</th><th>Role ID</th></tr>
+            </thead>
+            <tbody>
+                {% for r in rewards %}
+                <tr>
+                    <td><span class="badge badge-accent">Level {{ r[1] }}</span></td>
+                    <td><code>{{ r[2] }}</code></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="2" class="empty">No level rewards configured yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
