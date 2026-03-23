@@ -1,9 +1,11 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import asyncio
 import os
 import traceback
 from dotenv import load_dotenv
+import aiosqlite
+from database import DB_PATH
 
 load_dotenv()
 
@@ -12,6 +14,41 @@ print(f"Token exists: {bool(os.getenv('DISCORD_TOKEN'))}")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ══════════════════════════════════════════════════════
+# STATUS ROTATION
+# Messages stored in: status_messages table
+# Enabled via: guild_settings.status_rotation_enabled
+# Configured from: dashboard Config > General Settings
+# ══════════════════════════════════════════════════════
+
+_status_index = 0
+
+@tasks.loop(minutes=5)
+async def rotate_status():
+    global _status_index
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT text, type FROM status_messages
+            WHERE enabled = 1
+            ORDER BY position ASC
+        """)
+        messages = await cursor.fetchall()
+    if not messages:
+        return
+    _status_index = _status_index % len(messages)
+    text, status_type = messages[_status_index]
+    _status_index += 1
+    type_map = {
+        "playing":   discord.ActivityType.playing,
+        "watching":  discord.ActivityType.watching,
+        "listening": discord.ActivityType.listening,
+        "competing": discord.ActivityType.competing,
+    }
+    activity_type = type_map.get(status_type, discord.ActivityType.playing)
+    await bot.change_presence(
+        activity=discord.Activity(type=activity_type, name=text))
+
 
 async def load_cogs():
     cog_files = [
@@ -27,14 +64,16 @@ async def load_cogs():
         "cogs.roleplay",
         "cogs.youtube",
         "cogs.triggers",
+        "cogs.customcommands",
     ]
     for cog in cog_files:
         try:
             await bot.load_extension(cog)
-            print(f"Loaded {cog}")
+            print(f"  Loaded {cog}")
         except Exception as e:
-            print(f"Failed to load {cog}: {e}")
+            print(f"  Failed to load {cog}: {e}")
             traceback.print_exc()
+
 
 @bot.event
 async def on_ready():
@@ -43,11 +82,11 @@ async def on_ready():
         await bot.tree.sync()
         synced = await bot.tree.fetch_commands()
         print(f"Synced {len(synced)} slash commands")
-        for cmd in synced:
-            print(f"  - /{cmd.name}")
     except Exception as e:
         print(f"Sync error: {e}")
         traceback.print_exc()
+    rotate_status.start()
+
 
 @bot.command()
 @commands.is_owner()
@@ -55,6 +94,17 @@ async def sync(ctx):
     await bot.tree.sync()
     cmds = await bot.tree.fetch_commands()
     await ctx.send(f"Synced {len(cmds)} commands!")
+
+
+@bot.command()
+@commands.is_owner()
+async def reload(ctx, cog: str):
+    try:
+        await bot.reload_extension(f"cogs.{cog}")
+        await ctx.send(f"Reloaded cogs.{cog}")
+    except Exception as e:
+        await ctx.send(f"Failed: {e}")
+
 
 async def main():
     try:
