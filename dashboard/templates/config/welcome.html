@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Welcome & Leave{% endblock %}
+{% block content %}
+
+{% if saved %}
+<div class="save-banner">✅ Settings saved!</div>
+{% endif %}
+
+<form method="POST">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+
+        <div class="card">
+            <div class="card-title">👋 Join Settings</div>
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                <label class="toggle">
+                    <input type="checkbox" name="join_enabled"
+                        {% if config.get('join_enabled') %}checked{% endif %}>
+                    <span class="toggle-slider"></span>
+                </label>
+                <span style="font-size:13px;color:var(--text2);">Enable welcome messages</span>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Welcome channel ID</label>
+                <input class="form-input" name="join_channel_id"
+                       value="{{ config.get('join_channel_id', '') }}"
+                       placeholder="Right click channel → Copy ID">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Auto-role ID (given on join)</label>
+                <input class="form-input" name="auto_role_id"
+                       value="{{ config.get('auto_role_id', '') }}"
+                       placeholder="Right click role → Copy ID">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Message mode</label>
+                <select class="form-input" name="join_message_mode">
+                    <option value="random" {% if config.get('join_message_mode') == 'random' %}selected{% endif %}>Random</option>
+                    <option value="all"    {% if config.get('join_message_mode') == 'all'    %}selected{% endif %}>Send All</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">🚪 Leave Settings</div>
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                <label class="toggle">
+                    <input type="checkbox" name="leave_enabled"
+                        {% if config.get('leave_enabled') %}checked{% endif %}>
+                    <span class="toggle-slider"></span>
+                </label>
+                <span style="font-size:13px;color:var(--text2);">Enable leave messages</span>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Leave channel ID</label>
+                <input class="form-input" name="leave_channel_id"
+                       value="{{ config.get('leave_channel_id', '') }}"
+                       placeholder="Right click channel → Copy ID">
+            </div>
+        </div>
+
+        <div class="card" style="grid-column:1/-1;">
+            <div class="card-title">📋 Rules Gate</div>
+            <p class="text-muted text-sm" style="margin-bottom:16px;">
+                Member must click a button in the rules channel to receive a role.
+            </p>
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                <label class="toggle">
+                    <input type="checkbox" name="rules_enabled"
+                        {% if config.get('rules_enabled') %}checked{% endif %}>
+                    <span class="toggle-slider"></span>
+                </label>
+                <span style="font-size:13px;color:var(--text2);">Enable rules gate</span>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">Rules channel ID</label>
+                    <input class="form-input" name="rules_channel_id"
+                           value="{{ config.get('rules_channel_id', '') }}"
+                           placeholder="Right click channel → Copy ID">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Role to give on accept</label>
+                    <input class="form-input" name="rules_role_id"
+                           value="{{ config.get('rules_role_id', '') }}"
+                           placeholder="Right click role → Copy ID">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Accept button text</label>
+                    <input class="form-input" name="rules_button_text"
+                           value="{{ config.get('rules_button_text', '✅ I Accept') }}"
+                           placeholder="✅ I Accept">
+                </div>
+            </div>
+        </div>
+
+    </div>
+    <button type="submit" class="btn btn-primary">Save Settings</button>
+</form>
+{% endblock %}
