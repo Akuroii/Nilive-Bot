@@ -1,4 +1,7 @@
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json
 import math
 import asyncio
@@ -38,10 +41,6 @@ def calculate_level(xp: int) -> int:
     return level
 
 
-# ══════════════════════════════════════════════════════
-# ERROR HANDLERS
-# ══════════════════════════════════════════════════════
-
 @app.errorhandler(403)
 def forbidden(e):
     return render_template("errors/403.html"), 403
@@ -56,10 +55,6 @@ def not_found(e):
 def server_error(e):
     return render_template("errors/500.html"), 500
 
-
-# ══════════════════════════════════════════════════════
-# AUTH ROUTES
-# ══════════════════════════════════════════════════════
 
 @app.route("/login")
 def login():
@@ -95,10 +90,6 @@ def logout():
     clear_session()
     return redirect(url_for("login"))
 
-
-# ══════════════════════════════════════════════════════
-# SERVER SELECT
-# ══════════════════════════════════════════════════════
 
 @app.route("/server-select")
 @login_required
@@ -158,10 +149,6 @@ def select_guild(guild_id: int):
     return redirect(url_for("index"))
 
 
-# ══════════════════════════════════════════════════════
-# GENERAL
-# ══════════════════════════════════════════════════════
-
 @app.route("/")
 @require_page("overview")
 def index():
@@ -211,8 +198,7 @@ def members():
                 LEFT JOIN economy e
                   ON l.user_id = e.user_id AND l.guild_id = e.guild_id
                 WHERE l.guild_id = ?
-                ORDER BY l.xp DESC
-                LIMIT 100
+                ORDER BY l.xp DESC LIMIT 100
             """, (guild_id,))
             rows = await cursor.fetchall()
             return [{"user_id": r[0], "xp": r[1],
@@ -236,8 +222,7 @@ def audit_log():
                        target_name, action, details, page, created_at
                 FROM audit_log
                 WHERE guild_id = ?
-                ORDER BY created_at DESC
-                LIMIT 200
+                ORDER BY created_at DESC LIMIT 200
             """, (guild_id,))
             return await cursor.fetchall()
 
@@ -245,10 +230,6 @@ def audit_log():
     ctx  = get_current_user_context()
     return render_template("general/auditlog.html", logs=logs, **ctx)
 
-
-# ══════════════════════════════════════════════════════
-# MANAGE
-# ══════════════════════════════════════════════════════
 
 @app.route("/moderation")
 @require_page("moderation_view")
@@ -291,8 +272,7 @@ def tickets():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT id, channel_id, user_id, status, category, created_at
-                FROM tickets
-                WHERE guild_id = ?
+                FROM tickets WHERE guild_id = ?
                 ORDER BY created_at DESC LIMIT 100
             """, (guild_id,))
             return await cursor.fetchall()
@@ -361,10 +341,6 @@ def custom_commands():
                            commands=cmds, **ctx)
 
 
-# ══════════════════════════════════════════════════════
-# SYSTEMS
-# ══════════════════════════════════════════════════════
-
 @app.route("/mvp")
 @require_page("mvp")
 def mvp():
@@ -412,8 +388,7 @@ def leveling():
             levels = await cursor.fetchall()
             rewards_cursor = await db.execute("""
                 SELECT id, level, role_id FROM leveling_rewards
-                WHERE guild_id = ?
-                ORDER BY level ASC
+                WHERE guild_id = ? ORDER BY level ASC
             """, (guild_id,))
             rewards = await rewards_cursor.fetchall()
         return levels, rewards
@@ -475,8 +450,7 @@ def events():
             cursor = await db.execute("""
                 SELECT id, title, type, reward_type, reward_value,
                        max_winners, enabled, created_at
-                FROM events
-                WHERE guild_id = ?
+                FROM events WHERE guild_id = ?
                 ORDER BY created_at DESC
             """, (guild_id,))
             return await cursor.fetchall()
@@ -486,10 +460,6 @@ def events():
     return render_template("systems/events.html",
                            events=event_list, **ctx)
 
-
-# ══════════════════════════════════════════════════════
-# CONFIG
-# ══════════════════════════════════════════════════════
 
 @app.route("/config/general", methods=["GET", "POST"])
 @require_page("general_settings")
@@ -547,8 +517,7 @@ def config_general():
     ctx = get_current_user_context()
     return render_template("config/general.html",
                            settings=settings,
-                           saved=request.args.get("saved"),
-                           **ctx)
+                           saved=request.args.get("saved"), **ctx)
 
 
 @app.route("/config/welcome", methods=["GET", "POST"])
@@ -612,8 +581,7 @@ def config_welcome():
     ctx = get_current_user_context()
     return render_template("config/welcome.html",
                            config=config,
-                           saved=request.args.get("saved"),
-                           **ctx)
+                           saved=request.args.get("saved"), **ctx)
 
 
 @app.route("/config/boost", methods=["GET", "POST"])
@@ -667,8 +635,7 @@ def config_boost():
     ctx = get_current_user_context()
     return render_template("config/boost.html",
                            config=config,
-                           saved=request.args.get("saved"),
-                           **ctx)
+                           saved=request.args.get("saved"), **ctx)
 
 
 @app.route("/config/announcements")
@@ -747,10 +714,9 @@ def config_commands():
         action  = request.form.get("action")
         if command and action:
             run_async(toggle_cmd(command, action == "enable"))
-            log_action(
-                guild_id,
-                f"{'Enabled' if action == 'enable' else 'Disabled'} /{command}",
-                "config_commands")
+            log_action(guild_id,
+                       f"{'Enabled' if action == 'enable' else 'Disabled'} /{command}",
+                       "config_commands")
         return redirect(url_for("config_commands"))
 
     toggles = run_async(get_toggles())
@@ -804,26 +770,18 @@ def config_access():
             uid   = int(request.form.get("user_id", 0))
             level = request.form.get("level", "moderator")
             run_async(add_user(uid, level))
-            log_action(guild_id,
-                       f"Added dashboard user {uid} as {level}",
-                       "config_access",
+            log_action(guild_id, f"Added {uid} as {level}", "config_access",
                        target_id=uid)
         elif action == "remove":
             entry_id = int(request.form.get("entry_id", 0))
             run_async(remove_user(entry_id))
-            log_action(guild_id,
-                       f"Removed dashboard entry {entry_id}",
-                       "config_access")
+            log_action(guild_id, f"Removed entry {entry_id}", "config_access")
         return redirect(url_for("config_access"))
 
     users = run_async(get_users())
     ctx   = get_current_user_context()
     return render_template("config/access.html", users=users, **ctx)
 
-
-# ══════════════════════════════════════════════════════
-# API ENDPOINTS (JSON)
-# ══════════════════════════════════════════════════════
 
 @app.route("/api/edit-member", methods=["POST"])
 @require_page("members_edit")
@@ -852,10 +810,8 @@ def api_edit_member():
             await db.commit()
 
     run_async(update())
-    log_action(guild_id,
-               f"Edited member {user_id}: xp={xp} coins={coins}",
-               "members",
-               target_id=int(user_id) if user_id else None)
+    log_action(guild_id, f"Edited member {user_id}: xp={xp} coins={coins}",
+               "members", target_id=int(user_id) if user_id else None)
     return jsonify({"success": True})
 
 
@@ -919,8 +875,7 @@ def api_embed_template(name: str):
             row = await cursor.fetchone()
             return json.loads(row[0]) if row else None
 
-    data = run_async(get())
-    return jsonify({"template": data})
+    return jsonify({"template": run_async(get())})
 
 
 @app.route("/api/save-trigger", methods=["POST"])
@@ -954,9 +909,7 @@ def api_save_trigger():
             await db.commit()
 
     run_async(save())
-    log_action(guild_id,
-               f"Added trigger: {data.get('trigger_words')}",
-               "triggers")
+    log_action(guild_id, f"Added trigger: {data.get('trigger_words')}", "triggers")
     return jsonify({"success": True})
 
 
@@ -1009,8 +962,7 @@ def api_save_custom_command():
             await db.commit()
 
     run_async(save())
-    log_action(guild_id,
-               f"Added custom command: !{data.get('trigger')}",
+    log_action(guild_id, f"Added custom command: !{data.get('trigger')}",
                "customcommands")
     return jsonify({"success": True})
 
@@ -1042,8 +994,7 @@ def api_save_rr_panel():
             await db.execute("""
                 INSERT INTO rr_panels
                     (title, description, color, channel_id, buttons,
-                     exclusive, max_roles, require_confirmation,
-                     required_role)
+                     exclusive, max_roles, require_confirmation, required_role)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data.get("title"),
@@ -1059,9 +1010,7 @@ def api_save_rr_panel():
             await db.commit()
 
     run_async(save())
-    log_action(guild_id,
-               f"Saved reaction role panel: {data.get('title')}",
-               "reactionroles")
+    log_action(guild_id, f"Saved RR panel: {data.get('title')}", "reactionroles")
     return jsonify({"success": True})
 
 
