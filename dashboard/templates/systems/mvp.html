@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}MVP System{% endblock %}
+{% block content %}
+
+<div class="card">
+    <div class="card-title">🏆 Today's MVP Scores</div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Rank</th><th>User ID</th>
+                    <th>Message Score</th><th>Voice (min)</th><th>Total</th>
+                </tr>
+            </thead>
+            <tbody hx-get="/api/mvp/scores" hx-trigger="load" hx-swap="innerHTML">
+                {% for s in scores %}
+                <tr>
+                    <td>
+                        {% if loop.index == 1 %}🥇
+                        {% elif loop.index == 2 %}🥈
+                        {% elif loop.index == 3 %}🥉
+                        {% else %}#{{ loop.index }}{% endif %}
+                    </td>
+                    <td><code>{{ s[0] }}</code></td>
+                    <td>{{ "%.1f"|format(s[1]) }}</td>
+                    <td>{{ "%.1f"|format(s[2]) }}</td>
+                    <td><strong>{{ "%.1f"|format(s[3]) }}</strong></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="empty">No activity recorded today yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">📜 MVP History</div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>User</th><th>Score</th><th>Cycle Start</th><th>Cycle End</th></tr>
+            </thead>
+            <tbody>
+                {% for h in history %}
+                <tr>
+                    <td>{{ h[1] }}</td>
+                    <td><strong>{{ h[2] }}</strong></td>
+                    <td class="text-muted">{{ h[3][:10] if h[3] else '—' }}</td>
+                    <td class="text-muted">{{ h[4][:10] if h[4] else '—' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="empty">No MVP history yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
