@@ -1,178 +1,294 @@
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Nero Dashboard</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        :root[data-theme="dark"] {
-            --bg: #0d0d0d; --bg2: #141414; --bg3: #1a1a1a; --bg4: #222222;
-            --border: #2a2a2a; --text: #ffffff; --text2: #a0a0a0; --text3: #666666;
-            --accent: #5865F2; --accent2: #4752c4; --success: #57F287;
-            --warning: #FEE75C; --danger: #ED4245; --gold: #FFD700;
-        }
-        :root[data-theme="light"] {
-            --bg: #f0f2f5; --bg2: #ffffff; --bg3: #f8f9fa; --bg4: #e9ecef;
-            --border: #dee2e6; --text: #1a1a2e; --text2: #555555; --text3: #999999;
-            --accent: #5865F2; --accent2: #4752c4; --success: #2d8a4e;
-            --warning: #b8860b; --danger: #c0392b; --gold: #b8860b;
-        }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); display: flex; min-height: 100vh; }
-        .sidebar { width: 260px; background: var(--bg2); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: fixed; height: 100vh; z-index: 100; }
-        .sidebar-header { padding: 24px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
-        .sidebar-logo { width: 40px; height: 40px; border-radius: 50%; background: var(--accent); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 18px; color: white; }
-        .sidebar-title { font-weight: 700; font-size: 18px; }
-        .sidebar-subtitle { font-size: 12px; color: var(--text3); }
-        .sidebar-nav { flex: 1; padding: 16px 12px; overflow-y: auto; }
-        .nav-section { font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.08em; padding: 8px 8px 4px; }
-        .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; text-decoration: none; color: var(--text2); font-size: 14px; font-weight: 500; margin-bottom: 2px; transition: all 0.15s; }
-        .nav-item:hover { background: var(--bg4); color: var(--text); }
-        .nav-item.active { background: var(--accent); color: white; }
-        .nav-icon { font-size: 16px; width: 20px; text-align: center; }
-        .sidebar-footer { padding: 16px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
-        .user-avatar { width: 36px; height: 36px; border-radius: 50%; overflow: hidden; }
-        .user-avatar img { width: 100%; height: 100%; object-fit: cover; }
-        .user-info { flex: 1; }
-        .user-name { font-size: 13px; font-weight: 600; }
-        .user-tag { font-size: 11px; color: var(--text3); }
-        .logout-btn { padding: 6px 10px; border-radius: 6px; background: transparent; border: 1px solid var(--border); color: var(--text2); font-size: 12px; cursor: pointer; text-decoration: none; transition: all 0.15s; }
-        .logout-btn:hover { background: var(--danger); color: white; border-color: var(--danger); }
-        .main { margin-left: 260px; flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
-        .topbar { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 16px 32px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 50; }
-        .page-title { font-size: 20px; font-weight: 700; }
-        .topbar-actions { display: flex; align-items: center; gap: 12px; }
-        .theme-toggle { width: 40px; height: 22px; border-radius: 11px; background: var(--bg4); border: 1px solid var(--border); cursor: pointer; position: relative; transition: background 0.2s; }
-        .theme-toggle-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--accent); position: absolute; top: 2px; left: 2px; transition: transform 0.2s; }
-        [data-theme="light"] .theme-toggle-thumb { transform: translateX(18px); }
-        .content { padding: 32px; flex: 1; }
-        .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; margin-bottom: 20px; }
-        .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
-        .stat-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
-        .stat-label { font-size: 12px; color: var(--text3); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
-        .stat-value { font-size: 28px; font-weight: 700; }
-        .stat-sub { font-size: 12px; color: var(--text3); margin-top: 4px; }
-        .table { width: 100%; border-collapse: collapse; }
-        .table th { text-align: left; padding: 10px 16px; font-size: 12px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
-        .table td { padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--border); }
-        .table tr:last-child td { border-bottom: none; }
-        .table tr:hover td { background: var(--bg3); }
-        .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; }
-        .badge-success { background: rgba(87,242,135,0.15); color: var(--success); }
-        .badge-danger { background: rgba(237,66,69,0.15); color: var(--danger); }
-        .badge-warning { background: rgba(254,231,92,0.15); color: var(--warning); }
-        .badge-accent { background: rgba(88,101,242,0.15); color: var(--accent); }
-        .btn { padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer; border: none; transition: all 0.15s; text-decoration: none; display: inline-block; }
-        .btn-primary { background: var(--accent); color: white; }
-        .btn-primary:hover { background: var(--accent2); }
-        .btn-danger { background: rgba(237,66,69,0.15); color: var(--danger); }
-        .btn-danger:hover { background: var(--danger); color: white; }
-        .form-group { margin-bottom: 16px; }
-        .form-label { font-size: 13px; font-weight: 500; color: var(--text2); margin-bottom: 6px; display: block; }
-        .form-input { width: 100%; padding: 10px 14px; border-radius: 8px; background: var(--bg3); border: 1px solid var(--border); color: var(--text); font-size: 14px; font-family: inherit; outline: none; transition: border-color 0.15s; }
-        .form-input:focus { border-color: var(--accent); }
-        .rank-badge { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
-        .rank-1 { background: var(--gold); color: #000; }
-        .rank-2 { background: #C0C0C0; color: #000; }
-        .rank-3 { background: #CD7F32; color: #fff; }
-        .rank-n { background: var(--bg4); color: var(--text2); }
-        .empty-state { text-align: center; padding: 48px; color: var(--text3); }
-        .empty-icon { font-size: 48px; margin-bottom: 12px; }
-        .empty-text { font-size: 15px; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nero Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css">
+<style>
+.select2-container--default .select2-selection--single,
+.select2-container--default .select2-selection--multiple {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+}
+.select2-container--default .select2-selection--single .select2-selection__rendered { color: var(--text); padding: 0 12px; }
+.select2-container--default .select2-results__option { background: var(--bg3); color: var(--text2); padding: 8px 12px; }
+.select2-container--default .select2-results__option--highlighted { background: var(--accent); color: #fff; }
+.select2-dropdown { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; }
+.select2-search--dropdown .select2-search__field { background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 10px; }
+</style>
 </head>
 <body>
+
+<!-- MOBILE HAMBURGER -->
+<button class="hamburger" onclick="toggleSidebar()"
+    style="display:none;position:fixed;top:14px;left:14px;z-index:200;
+           background:var(--bg2);border:1px solid var(--border);
+           border-radius:8px;padding:8px;cursor:pointer;flex-direction:column;gap:4px;">
+    <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
+    <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
+    <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
+</button>
+
+<!-- SIDEBAR -->
 <div class="sidebar">
-    <div class="sidebar-header">
-        <div class="sidebar-logo">N</div>
+    <div style="padding:20px 18px 16px;border-bottom:1px solid var(--border);
+                display:flex;align-items:center;gap:12px;">
+        <div style="width:38px;height:38px;border-radius:50%;background:var(--accent);
+                    display:flex;align-items:center;justify-content:center;
+                    font-weight:700;font-size:16px;color:#fff;flex-shrink:0;">N</div>
         <div>
-            <div class="sidebar-title">Nero</div>
-            <div class="sidebar-subtitle">Dashboard</div>
+            <div style="font-weight:700;font-size:16px;color:var(--text)">Nero</div>
+            <div style="font-size:11px;color:var(--text3)">Dashboard</div>
         </div>
     </div>
-    <nav class="sidebar-nav">
-        <div class="nav-section">General</div>
-        <a href="/" class="nav-item {% if request.path == '/' %}active{% endif %}">
+
+    <!-- SERVER SELECTOR -->
+    {% if guild_id %}
+    <div style="padding:10px 12px;border-bottom:1px solid var(--border);">
+        <a href="{{ url_for('server_select') }}"
+           style="display:flex;align-items:center;gap:8px;padding:8px 10px;
+                  border-radius:8px;background:var(--bg3);border:1px solid var(--border);
+                  text-decoration:none;color:var(--text2);font-size:12px;
+                  transition:all .15s;">
+            <span style="font-size:14px;">🖥️</span>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                Server: {{ guild_id }}
+            </span>
+            <span style="color:var(--text3);font-size:11px;">↗</span>
+        </a>
+    </div>
+    {% endif %}
+
+    <nav style="flex:1;padding:12px 10px;overflow-y:auto;">
+
+        <!-- GENERAL -->
+        <div style="font-size:10px;font-weight:600;color:var(--text3);
+                    text-transform:uppercase;letter-spacing:.08em;
+                    padding:8px 8px 4px;">General</div>
+
+        <a href="{{ url_for('index') }}"
+           class="nav-item {% if request.endpoint == 'index' %}active{% endif %}">
             <span class="nav-icon">🏠</span> Overview
         </a>
-        <a href="/members" class="nav-item {% if request.path == '/members' %}active{% endif %}">
+        <a href="{{ url_for('members') }}"
+           class="nav-item {% if request.endpoint == 'members' %}active{% endif %}">
             <span class="nav-icon">👥</span> Members
         </a>
-        <div class="nav-section">Features</div>
-        <a href="/mvp" class="nav-item {% if request.path == '/mvp' %}active{% endif %}">
-            <span class="nav-icon">🏆</span> MVP System
+        <a href="{{ url_for('audit_log') }}"
+           class="nav-item {% if request.endpoint == 'audit_log' %}active{% endif %}">
+            <span class="nav-icon">📝</span> Audit Log
         </a>
-        <a href="/leveling" class="nav-item {% if request.path == '/leveling' %}active{% endif %}">
-            <span class="nav-icon">⭐</span> Leveling
-        </a>
-        <a href="/economy" class="nav-item {% if request.path == '/economy' %}active{% endif %}">
-            <span class="nav-icon">🪙</span> Economy
-        </a>
-        <a href="/triggers" class="nav-item {% if request.path == '/triggers' %}active{% endif %}">
-            <span class="nav-icon">⚡</span> Triggers
-        </a>
-        <a href="/embedbuilder" class="nav-item {% if request.path == '/embedbuilder' %}active{% endif %}">
-            <span class="nav-icon">✉️</span> Embed Builder
-        </a>
-        <a href="/reactionroles" class="nav-item {% if request.path == '/reactionroles' %}active{% endif %}">
-            <span class="nav-icon">🎭</span> Reaction Roles
-        </a>
-        <a href="/tickets" class="nav-item {% if request.path == '/tickets' %}active{% endif %}">
-            <span class="nav-icon">🎫</span> Tickets
-        </a>
-        <a href="/moderation" class="nav-item {% if request.path == '/moderation' %}active{% endif %}">
+
+        <!-- MANAGE -->
+        <div style="font-size:10px;font-weight:600;color:var(--text3);
+                    text-transform:uppercase;letter-spacing:.08em;
+                    padding:14px 8px 4px;">Manage</div>
+
+        <a href="{{ url_for('moderation') }}"
+           class="nav-item {% if request.endpoint == 'moderation' %}active{% endif %}">
             <span class="nav-icon">🛡️</span> Moderation
         </a>
-        <div class="nav-section">Config</div>
-        <a href="/settings" class="nav-item {% if request.path == '/settings' %}active{% endif %}">
-            <span class="nav-icon">🔧</span> Settings
+        <a href="{{ url_for('tickets') }}"
+           class="nav-item {% if request.endpoint == 'tickets' %}active{% endif %}">
+            <span class="nav-icon">🎫</span> Tickets
         </a>
-        <a href="/commands" class="nav-item {% if request.path == '/commands' %}active{% endif %}">
-            <span class="nav-icon">⚙️</span> Commands
+        <a href="{{ url_for('embed_builder') }}"
+           class="nav-item {% if request.endpoint == 'embed_builder' %}active{% endif %}">
+            <span class="nav-icon">📦</span> Embed Builder
         </a>
+        <a href="{{ url_for('reaction_roles') }}"
+           class="nav-item {% if request.endpoint == 'reaction_roles' %}active{% endif %}">
+            <span class="nav-icon">🎭</span> Reaction Roles
+        </a>
+        <a href="{{ url_for('triggers_page') }}"
+           class="nav-item {% if request.endpoint == 'triggers_page' %}active{% endif %}">
+            <span class="nav-icon">⚡</span> Triggers
+        </a>
+        <a href="{{ url_for('custom_commands') }}"
+           class="nav-item {% if request.endpoint == 'custom_commands' %}active{% endif %}">
+            <span class="nav-icon">🔨</span> Custom Commands
+        </a>
+
+        <!-- SYSTEMS -->
+        <div style="font-size:10px;font-weight:600;color:var(--text3);
+                    text-transform:uppercase;letter-spacing:.08em;
+                    padding:14px 8px 4px;">Systems</div>
+
+        <a href="{{ url_for('mvp') }}"
+           class="nav-item {% if request.endpoint == 'mvp' %}active{% endif %}">
+            <span class="nav-icon">🏆</span> MVP System
+        </a>
+        <a href="{{ url_for('leveling') }}"
+           class="nav-item {% if request.endpoint == 'leveling' %}active{% endif %}">
+            <span class="nav-icon">⭐</span> Leveling
+        </a>
+        <a href="{{ url_for('economy') }}"
+           class="nav-item {% if request.endpoint == 'economy' %}active{% endif %}">
+            <span class="nav-icon">💰</span> Economy
+        </a>
+        <a href="{{ url_for('shop') }}"
+           class="nav-item {% if request.endpoint == 'shop' %}active{% endif %}">
+            <span class="nav-icon">🛒</span> Shop
+        </a>
+        <a href="{{ url_for('events') }}"
+           class="nav-item {% if request.endpoint == 'events' %}active{% endif %}">
+            <span class="nav-icon">🎯</span> Events
+        </a>
+
+        <!-- CONFIG -->
+        <div style="font-size:10px;font-weight:600;color:var(--text3);
+                    text-transform:uppercase;letter-spacing:.08em;
+                    padding:14px 8px 4px;">Config</div>
+
+        <a href="{{ url_for('config_general') }}"
+           class="nav-item {% if request.endpoint == 'config_general' %}active{% endif %}">
+            <span class="nav-icon">⚙️</span> General Settings
+        </a>
+        <a href="{{ url_for('config_welcome') }}"
+           class="nav-item {% if request.endpoint == 'config_welcome' %}active{% endif %}">
+            <span class="nav-icon">👋</span> Welcome & Leave
+        </a>
+        <a href="{{ url_for('config_boost') }}"
+           class="nav-item {% if request.endpoint == 'config_boost' %}active{% endif %}">
+            <span class="nav-icon">🔰</span> Boost Roles
+        </a>
+        <a href="{{ url_for('config_announcements') }}"
+           class="nav-item {% if request.endpoint == 'config_announcements' %}active{% endif %}">
+            <span class="nav-icon">📢</span> Announcements
+        </a>
+        <a href="{{ url_for('config_commands') }}"
+           class="nav-item {% if request.endpoint == 'config_commands' %}active{% endif %}">
+            <span class="nav-icon">🎮</span> Commands
+        </a>
+        {% if is_owner %}
+        <a href="{{ url_for('config_access') }}"
+           class="nav-item {% if request.endpoint == 'config_access' %}active{% endif %}">
+            <span class="nav-icon">🔐</span> Dashboard Access
+        </a>
+        {% endif %}
+
     </nav>
-    <div class="sidebar-footer">
-        <div class="user-avatar">
-            {% if user.avatar %}
-            <img src="https://cdn.discordapp.com/avatars/{{ user.id }}/{{ user.avatar }}.png">
-            {% else %}
-            <div style="width:100%;height:100%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;color:white;">
-                {{ user.username[0].upper() }}
+
+    <!-- USER FOOTER -->
+    <div style="padding:12px;border-top:1px solid var(--border);
+                display:flex;align-items:center;gap:10px;">
+        {% if user and user.avatar %}
+        <img src="https://cdn.discordapp.com/avatars/{{ user.id }}/{{ user.avatar }}.png"
+             class="avatar-md">
+        {% else %}
+        <div style="width:36px;height:36px;border-radius:50%;background:var(--accent);
+                    display:flex;align-items:center;justify-content:center;
+                    font-weight:700;color:#fff;font-size:14px;flex-shrink:0;">
+            {{ user.username[0].upper() if user else '?' }}
+        </div>
+        {% endif %}
+        <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;font-weight:600;color:var(--text);
+                        overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                {{ user.username if user else 'Unknown' }}
             </div>
-            {% endif %}
+            <div style="font-size:11px;color:var(--text3);text-transform:capitalize;">
+                {{ user_level or 'guest' }}
+            </div>
         </div>
-        <div class="user-info">
-            <div class="user-name">{{ user.username }}</div>
-            <div class="user-tag">Admin</div>
-        </div>
-        <a href="/logout" class="logout-btn">Out</a>
+        <a href="{{ url_for('logout') }}"
+           style="padding:5px 10px;border-radius:6px;background:transparent;
+                  border:1px solid var(--border);color:var(--text3);font-size:11px;
+                  text-decoration:none;transition:all .15s;"
+           onmouseover="this.style.background='var(--danger)';this.style.color='#fff';this.style.borderColor='var(--danger)'"
+           onmouseout="this.style.background='transparent';this.style.color='var(--text3)';this.style.borderColor='var(--border)'">
+            Out
+        </a>
     </div>
 </div>
-<div class="main">
+
+<!-- MAIN -->
+<div class="main-content">
     <div class="topbar">
-        <div class="page-title">{% block title %}Dashboard{% endblock %}</div>
+        <div style="display:flex;align-items:center;gap:12px;">
+            <div class="topbar-title">{% block title %}Dashboard{% endblock %}</div>
+            <div class="htmx-indicator" id="global-spinner"></div>
+        </div>
         <div class="topbar-actions">
-            <div class="theme-toggle" onclick="toggleTheme()">
+            <div class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
                 <div class="theme-toggle-thumb"></div>
             </div>
         </div>
     </div>
-    <div class="content">
+
+    <div class="page-content">
         {% block content %}{% endblock %}
     </div>
 </div>
+
+<!-- GLOBAL EDIT MEMBER MODAL -->
+<div id="edit-modal" class="modal-overlay" style="display:none;">
+    <div class="modal">
+        <div class="modal-title">Edit Member — <span id="edit-uid-label" style="color:var(--accent)"></span></div>
+        <div class="form-group">
+            <label class="form-label">XP</label>
+            <input class="form-input" id="edit-xp" type="number" min="0">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Coins</label>
+            <input class="form-input" id="edit-coins" type="number" min="0">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" onclick="closeEditModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="saveEditModal()">Save</button>
+        </div>
+        <div id="edit-modal-status" style="margin-top:10px;font-size:12px;"></div>
+    </div>
+</div>
+
+<!-- SCRIPTS -->
+<script src="https://unpkg.com/htmx.org@1.9.10"></script>
+<script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 <script>
-    function toggleTheme() {
-        const html = document.documentElement;
-        html.setAttribute('data-theme',
-            html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
-        localStorage.setItem('theme', html.getAttribute('data-theme'));
-    }
-    const saved = localStorage.getItem('theme');
-    if (saved) document.documentElement.setAttribute('data-theme', saved);
+    htmx.config.globalViewTransitions = false;
+    htmx.config.defaultSwapStyle = 'innerHTML';
 </script>
+{% block scripts %}{% endblock %}
+
+<style>
+.sidebar {
+    width: var(--sidebar-w);
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    height: 100vh;
+    z-index: 100;
+    overflow: hidden;
+}
+.nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text2);
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 1px;
+    transition: all .12s;
+}
+.nav-item:hover { background: var(--bg4); color: var(--text); }
+.nav-item.active { background: var(--accent); color: #fff; }
+.nav-icon { font-size: 15px; width: 18px; text-align: center; flex-shrink: 0; }
+</style>
 </body>
 </html>
