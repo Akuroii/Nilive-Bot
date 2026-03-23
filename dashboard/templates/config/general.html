@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}General Settings{% endblock %}
+{% block content %}
+
+{% if saved %}
+<div class="save-banner">✅ Settings saved successfully!</div>
+{% endif %}
+
+<form method="POST">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+
+        <div class="card">
+            <div class="card-title">⚙️ Server Settings</div>
+            <div class="form-group">
+                <label class="form-label">Bot prefix</label>
+                <input class="form-input" name="prefix"
+                       value="{{ settings.get('prefix', '/') }}" placeholder="/">
+                <div class="form-hint">Used for prefix commands (default: /)</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Timezone</label>
+                <select class="form-input" name="timezone">
+                    {% for tz in ['UTC','US/Eastern','US/Pacific','Europe/London','Europe/Paris','Asia/Dubai','Asia/Riyadh','Asia/Cairo'] %}
+                    <option value="{{ tz }}" {% if settings.get('timezone') == tz %}selected{% endif %}>{{ tz }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Log channel ID</label>
+                <input class="form-input" name="log_channel_id"
+                       value="{{ settings.get('log_channel_id', '') }}"
+                       placeholder="General log channel">
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">🪙 Currency</div>
+            <div class="form-group">
+                <label class="form-label">Currency name</label>
+                <input class="form-input" name="currency_name"
+                       value="{{ settings.get('currency_name', 'Coins') }}"
+                       placeholder="Coins">
+                <div class="form-hint">Shown in economy commands and shop</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Currency emoji ID (static emoji only)</label>
+                <input class="form-input" name="currency_emoji_id"
+                       value="{{ settings.get('currency_emoji_id', '') }}"
+                       placeholder="Leave empty for default 🪙">
+            </div>
+        </div>
+
+        <div class="card" style="grid-column:1/-1;">
+            <div class="card-title">🔄 Status Rotation</div>
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                <label class="toggle">
+                    <input type="checkbox" name="status_rotation_enabled"
+                        {% if settings.get('status_rotation_enabled') %}checked{% endif %}>
+                    <span class="toggle-slider"></span>
+                </label>
+                <span style="font-size:13px;color:var(--text2);">Enable status rotation</span>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Rotation interval (minutes)</label>
+                <input class="form-input" name="status_rotation_interval" type="number"
+                       min="1" max="60"
+                       value="{{ settings.get('status_rotation_interval', 5) }}"
+                       style="max-width:120px;">
+            </div>
+            <div id="status-messages-manager">
+                <label class="form-label">Status messages</label>
+                <div id="status-list" style="margin-bottom:10px;">
+                    <span class="text-muted text-sm">Loading...</span>
+                </div>
+                <div style="display:flex;gap:8px;">
+                    <input class="form-input" id="new-status-text" placeholder="Status message..." style="flex:1;">
+                    <select class="form-input" id="new-status-type" style="width:130px;">
+                        <option value="playing">Playing</option>
+                        <option value="watching">Watching</option>
+                        <option value="listening">Listening to</option>
+                        <option value="competing">Competing in</option>
+                    </select>
+                    <button type="button" class="btn btn-primary" onclick="addStatusMessage()">Add</button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+    <div style="margin-top:4px;">
+        <button type="submit" class="btn btn-primary">Save Settings</button>
+    </div>
+</form>
+
+{% block scripts %}
+<script>
+async function loadStatusMessages() {
+    const res  = await fetch('/api/status-messages');
+    const data = await res.json();
+    const c    = document.getElementById('status-list');
+    if (!data || !data.length) {
+        c.innerHTML = '<span class="text-muted text-sm">No status messages yet.</span>';
+        return;
+    }
+    c.innerHTML = data.map(m => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;
+                    border-bottom:1px solid var(--border);">
+            <span class="badge badge-accent">${m.type}</span>
+            <span style="flex:1;font-size:13px;">${m.text}</span>
+            <button type="button" class="btn btn-sm btn-danger"
+                onclick="deleteStatusMessage(${m.id})">Delete</button>
+        </div>`).join('');
+}
+
+async function addStatusMessage() {
+    const text = document.getElementById('new-status-text').value.trim();
+    const type = document.getElementById('new-status-type').value;
+    if (!text) { showToast('Enter a status message', 'danger'); return; }
+    const res  = await fetch('/api/status-messages', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ text, type }),
+    });
+    const data = await res.json();
+    if (data.success) {
+        document.getElementById('new-status-text').value = '';
+        loadStatusMessages();
+        showToast('Status message added!');
+    }
+}
+
+async function deleteStatusMessage(id) {
+    await fetch(`/api/status-messages/${id}`, { method: 'DELETE' });
+    loadStatusMessages();
+}
+
+loadStatusMessages();
+</script>
+{% endblock %}
+{% endblock %}
