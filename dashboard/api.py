@@ -40,10 +40,9 @@ def get_roles():
     guild_id = get_session_guild_id()
     async def fetch():
         async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT role_id, role_name FROM boost_color_roles
-                WHERE guild_id = ?
-            """, (guild_id,))
+            cursor = await db.execute(
+                "SELECT role_id, role_name FROM boost_color_roles WHERE guild_id = ?",
+                (guild_id,))
             return await cursor.fetchall()
     rows = run_async(fetch())
     return jsonify({"results": [{"id": r[0], "text": r[1]} for r in rows]})
@@ -67,7 +66,9 @@ def get_channels():
             """, (guild_id, guild_id, guild_id))
             return await cursor.fetchall()
     rows = run_async(fetch())
-    return jsonify({"results": [{"id": r[0], "text": f"#{r[0]}"} for r in rows if r[0]]})
+    return jsonify({"results": [
+        {"id": r[0], "text": f"#{r[0]}"} for r in rows if r[0]
+    ]})
 
 
 @api_bp.route("/members/search")
@@ -92,15 +93,16 @@ def members_search():
         rows = [r for r in rows if query in str(r[0])]
     html = ""
     for r in rows:
-        html += f"""
-        <tr>
-          <td><code>{r[0]}</code></td>
-          <td><span class="badge badge-accent">Level {r[2]}</span></td>
-          <td>{r[1]:,} XP</td>
-          <td>🪙 {r[3]:,}</td>
-          <td><button class="btn btn-sm btn-secondary"
-              onclick="openEditModal('{r[0]}', {r[1]}, {r[3]})">Edit</button></td>
-        </tr>"""
+        html += (
+            f"<tr>"
+            f"<td><code>{r[0]}</code></td>"
+            f"<td><span class='badge badge-accent'>Level {r[2]}</span></td>"
+            f"<td>{r[1]:,} XP</td>"
+            f"<td>🪙 {r[3]:,}</td>"
+            f"<td><button class='btn btn-sm btn-secondary' "
+            f"onclick=\"openEditModal('{r[0]}', {r[1]}, {r[3]})\">Edit</button></td>"
+            f"</tr>"
+        )
     return html or "<tr><td colspan='5' class='empty'>No members found</td></tr>"
 
 
@@ -134,23 +136,26 @@ def moderation_logs_partial():
                 """, (guild_id, per_page, offset))
             return await cursor.fetchall()
     rows = run_async(fetch())
-    colors = {"ban":"danger","kick":"warning","timeout":"warning",
-              "warn":"accent","unban":"success","lock":"danger"}
+    colors = {
+        "ban": "danger", "kick": "warning", "timeout": "warning",
+        "warn": "accent", "unban": "success", "lock": "danger",
+    }
     html = ""
     for r in rows:
         avatar = r[2] or "https://cdn.discordapp.com/embed/avatars/0.png"
         color  = colors.get(str(r[4]).lower(), "accent")
-        html  += f"""
-        <tr>
-          <td><div class="user-cell">
-              <img src="{avatar}" class="avatar-sm">
-              <span>{r[1]}</span></div></td>
-          <td>{r[3]}</td>
-          <td><span class="badge badge-{color}">{r[4]}</span></td>
-          <td>{r[5] or '—'}</td>
-          <td><span class="badge badge-source">{r[6]}</span></td>
-          <td class="text-muted">{str(r[7])[:10] if r[7] else '—'}</td>
-        </tr>"""
+        html  += (
+            f"<tr>"
+            f"<td><div class='user-cell'>"
+            f"<img src='{avatar}' class='avatar-sm'>"
+            f"<span>{r[1]}</span></div></td>"
+            f"<td>{r[3]}</td>"
+            f"<td><span class='badge badge-{color}'>{r[4]}</span></td>"
+            f"<td>{r[5] or '—'}</td>"
+            f"<td><span class='badge badge-source'>{r[6]}</span></td>"
+            f"<td class='text-muted'>{str(r[7])[:10] if r[7] else '—'}</td>"
+            f"</tr>"
+        )
     return html or "<tr><td colspan='6' class='empty'>No logs found</td></tr>"
 
 
@@ -173,14 +178,13 @@ def mvp_scores_partial():
     html = ""
     for i, r in enumerate(rows, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"#{i}"
-        html += f"""
-        <tr>
-          <td>{medal}</td>
-          <td><code>{r[0]}</code></td>
-          <td>{r[1]:.1f}</td>
-          <td>{r[2]:.1f}</td>
-          <td><strong>{r[3]:.1f}</strong></td>
-        </tr>"""
+        html += (
+            f"<tr><td>{medal}</td>"
+            f"<td><code>{r[0]}</code></td>"
+            f"<td>{r[1]:.1f}</td>"
+            f"<td>{r[2]:.1f}</td>"
+            f"<td><strong>{r[3]:.1f}</strong></td></tr>"
+        )
     return html or "<tr><td colspan='5' class='empty'>No activity today yet</td></tr>"
 
 
@@ -198,7 +202,11 @@ def economy_leaderboard_partial():
     rows = run_async(fetch())
     html = ""
     for i, r in enumerate(rows, 1):
-        html += f"<tr><td>#{i}</td><td><code>{r[0]}</code></td><td><strong>🪙 {r[1]:,}</strong></td></tr>"
+        html += (
+            f"<tr><td>#{i}</td>"
+            f"<td><code>{r[0]}</code></td>"
+            f"<td><strong>🪙 {r[1]:,}</strong></td></tr>"
+        )
     return html or "<tr><td colspan='3' class='empty'>No data yet</td></tr>"
 
 
@@ -216,7 +224,12 @@ def leveling_leaderboard_partial():
     rows = run_async(fetch())
     html = ""
     for i, r in enumerate(rows, 1):
-        html += f"<tr><td>#{i}</td><td><code>{r[0]}</code></td><td><span class='badge badge-accent'>Lv {r[2]}</span></td><td>{r[1]:,} XP</td></tr>"
+        html += (
+            f"<tr><td>#{i}</td>"
+            f"<td><code>{r[0]}</code></td>"
+            f"<td><span class='badge badge-accent'>Lv {r[2]}</span></td>"
+            f"<td>{r[1]:,} XP</td></tr>"
+        )
     return html or "<tr><td colspan='4' class='empty'>No data yet</td></tr>"
 
 
@@ -239,13 +252,14 @@ def audit_log_partial():
     rows = run_async(fetch())
     html = ""
     for r in rows:
-        html += f"""
-        <tr>
-          <td>{r[0]}</td><td>{r[1]}</td>
-          <td class="text-muted">{r[2] or '—'}</td>
-          <td><span class="badge badge-accent">{r[3] or '—'}</span></td>
-          <td class="text-muted">{str(r[4])[:16] if r[4] else '—'}</td>
-        </tr>"""
+        html += (
+            f"<tr>"
+            f"<td>{r[0]}</td><td>{r[1]}</td>"
+            f"<td class='text-muted'>{r[2] or '—'}</td>"
+            f"<td><span class='badge badge-accent'>{r[3] or '—'}</span></td>"
+            f"<td class='text-muted'>{str(r[4])[:16] if r[4] else '—'}</td>"
+            f"</tr>"
+        )
     return html or "<tr><td colspan='5' class='empty'>No actions logged yet</td></tr>"
 
 
@@ -267,20 +281,22 @@ def shop_items_partial():
     for r in rows:
         status = "badge-success" if r[8] else "badge-danger"
         label  = "Active" if r[8] else "Disabled"
-        html  += f"""
-        <tr>
-          <td><strong>{r[1]}</strong>{'⭐' if r[7] else ''}</td>
-          <td class="text-muted">{r[2] or '—'}</td>
-          <td>🪙 {r[3]:,}</td>
-          <td>{r[4]}</td>
-          <td>{str(r[6])+'h' if r[6] else 'Permanent'}</td>
-          <td><span class="badge {status}">{label}</span></td>
-          <td><button class="btn btn-sm btn-danger"
-              hx-delete="/api/shop/item/{r[0]}"
-              hx-confirm="Delete this item?"
-              hx-target="closest tr"
-              hx-swap="outerHTML">Delete</button></td>
-        </tr>"""
+        dur    = f"{r[6]}h" if r[6] else "Permanent"
+        html  += (
+            f"<tr>"
+            f"<td><strong>{r[1]}</strong>{'⭐' if r[7] else ''}</td>"
+            f"<td class='text-muted'>{r[2] or '—'}</td>"
+            f"<td>🪙 {r[3]:,}</td>"
+            f"<td>{r[4]}</td>"
+            f"<td>{dur}</td>"
+            f"<td><span class='badge {status}'>{label}</span></td>"
+            f"<td><button class='btn btn-sm btn-danger' "
+            f"hx-delete='/api/shop/item/{r[0]}' "
+            f"hx-confirm='Delete this item?' "
+            f"hx-target='closest tr' "
+            f"hx-swap='outerHTML'>Delete</button></td>"
+            f"</tr>"
+        )
     return html or "<tr><td colspan='7' class='empty'>No shop items yet</td></tr>"
 
 
@@ -354,14 +370,15 @@ def tickets_partial():
     html = ""
     for r in rows:
         color = "badge-success" if r[3] == "open" else "badge-danger"
-        html += f"""
-        <tr>
-          <td><strong>#{r[0]}</strong></td>
-          <td><code>{r[2]}</code></td>
-          <td>{r[4] or 'General'}</td>
-          <td><span class="badge {color}">{r[3]}</span></td>
-          <td class="text-muted">{str(r[5])[:10] if r[5] else '—'}</td>
-        </tr>"""
+        html += (
+            f"<tr>"
+            f"<td><strong>#{r[0]}</strong></td>"
+            f"<td><code>{r[2]}</code></td>"
+            f"<td>{r[4] or 'General'}</td>"
+            f"<td><span class='badge {color}'>{r[3]}</span></td>"
+            f"<td class='text-muted'>{str(r[5])[:10] if r[5] else '—'}</td>"
+            f"</tr>"
+        )
     return html or "<tr><td colspan='5' class='empty'>No tickets found</td></tr>"
 
 
@@ -378,8 +395,10 @@ def get_status_messages():
             """, (guild_id,))
             return await cursor.fetchall()
     rows = run_async(fetch())
-    return jsonify([{"id":r[0],"text":r[1],"type":r[2],
-                     "position":r[3],"enabled":r[4]} for r in rows])
+    return jsonify([{
+        "id": r[0], "text": r[1], "type": r[2],
+        "position": r[3], "enabled": r[4],
+    } for r in rows])
 
 
 @api_bp.route("/status-messages", methods=["POST"])
@@ -396,7 +415,7 @@ def add_status_message():
             await db.execute("""
                 INSERT INTO status_messages (guild_id, text, type, position)
                 VALUES (?, ?, ?, ?)
-            """, (guild_id, data.get("text"), data.get("type","playing"), count))
+            """, (guild_id, data.get("text"), data.get("type", "playing"), count))
             await db.commit()
     run_async(save())
     return jsonify({"success": True})
@@ -429,9 +448,10 @@ def get_warning_thresholds():
             """, (guild_id,))
             return await cursor.fetchall()
     rows = run_async(fetch())
-    return jsonify([{"id":r[0],"warn_count":r[1],"action":r[2],
-                     "duration_minutes":r[3],"role_id":r[4],"enabled":r[5]}
-                    for r in rows])
+    return jsonify([{
+        "id": r[0], "warn_count": r[1], "action": r[2],
+        "duration_minutes": r[3], "role_id": r[4], "enabled": r[5],
+    } for r in rows])
 
 
 @api_bp.route("/warning-thresholds", methods=["POST"])
@@ -456,7 +476,7 @@ def add_warning_threshold():
     run_async(save())
     from dashboard.permissions import log_action
     log_action(guild_id,
-               f"Added threshold: {data.get('warn_count')} warns → {data.get('action')}",
+               f"Added threshold: {data.get('warn_count')} warns -> {data.get('action')}",
                "moderation")
     return jsonify({"success": True})
 
@@ -473,12 +493,3 @@ def delete_warning_threshold(threshold_id: int):
             await db.commit()
     run_async(delete())
     return jsonify({"success": True})
-```
-
----
-
-**Fix 5 — `cogs/customcommands.py` is missing from GitHub.**
-
-Go to GitHub → Add file → Create new file → name it exactly:
-```
-cogs/customcommands.py
