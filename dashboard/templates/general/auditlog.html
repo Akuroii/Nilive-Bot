@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Audit Log{% endblock %}
+{% block content %}
+
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0">📝 Audit Log</div>
+        <span class="text-muted text-sm">Every dashboard action is logged here</span>
+    </div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>User</th>
+                    <th>Action</th>
+                    <th>Details</th>
+                    <th>Page</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody
+                hx-get="/api/audit-log/entries"
+                hx-trigger="load"
+                hx-swap="innerHTML">
+                {% for log in logs %}
+                <tr>
+                    <td>{{ log[2] }}</td>
+                    <td>{{ log[5] }}</td>
+                    <td class="text-muted">{{ log[6] or '—' }}</td>
+                    <td><span class="badge badge-accent">{{ log[7] or '—' }}</span></td>
+                    <td class="text-muted">{{ log[8][:16] if log[8] else '—' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="empty">No actions logged yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
