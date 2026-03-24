@@ -4,7 +4,7 @@
 
 <!-- TABS -->
 <div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--border);padding-bottom:0;">
-    {% for tab, label in [('leaderboard','⭐ Leaderboard'),('config','⚙️ Config'),('rewards','🎁 Rewards'),('bonuses','�� Bonus Roles')] %}
+    {% for tab, label in [('leaderboard','⭐ Leaderboard'),('config','⚙️ Config'),('rewards','🎁 Rewards'),('bonuses','✨ Bonus Roles')] %}
     <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
         style="padding:10px 18px;border:none;background:transparent;
                color:var(--text2);font-size:13px;font-weight:500;
@@ -323,6 +323,7 @@
 
 {% block scripts %}
 <script>
+// ── TAB SWITCHING ──
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(el => {
         el.style.display = 'none';
@@ -338,6 +339,7 @@ function switchTab(name) {
 }
 switchTab('leaderboard');
 
+// ── LOAD CONFIG ──
 async function loadConfig() {
     const res  = await fetch('/api/leveling/config');
     if (!res.ok) return;
@@ -409,6 +411,7 @@ async function saveConfig() {
     setTimeout(() => status.textContent = '', 3000);
 }
 
+// ── REWARDS ──
 async function addReward() {
     const level   = document.getElementById('reward-level').value;
     const role_id = document.getElementById('reward-role').value;
@@ -439,6 +442,7 @@ async function deleteReward(id) {
     else showToast('Error', 'danger');
 }
 
+// ── BONUS ROLES ──
 async function loadBonusRoles() {
     const res  = await fetch('/api/leveling/bonus-roles');
     if (!res.ok) return;
