@@ -58,6 +58,9 @@ async def load_cogs():
         "cogs.youtube",
         "cogs.triggers",
         "cogs.customcommands",
+        "cogs.welcome",
+        "cogs.shop",
+        "cogs.auditlog",
     ]
     for cog in cog_files:
         try:
