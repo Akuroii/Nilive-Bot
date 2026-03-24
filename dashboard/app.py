@@ -210,6 +210,66 @@ def members():
                            members=member_list, **ctx)
 
 
+@app.route("/members/<int:user_id>")
+@require_page("members_view")
+def member_profile(user_id: int):
+    guild_id = get_session_guild_id()
+
+    async def get_profile():
+        async with aiosqlite.connect(DB_PATH) as db:
+            lc = await db.execute("""
+                SELECT xp, level FROM levels
+                WHERE guild_id = ? AND user_id = ?
+            """, (guild_id, user_id))
+            level_row = await lc.fetchone()
+
+            ec = await db.execute("""
+                SELECT balance FROM economy
+                WHERE guild_id = ? AND user_id = ?
+            """, (guild_id, user_id))
+            econ_row = await ec.fetchone()
+
+            wc = await db.execute("""
+                SELECT reason, timestamp, moderator_display_name
+                FROM warnings
+                WHERE guild_id = ? AND user_id = ?
+                ORDER BY timestamp DESC LIMIT 10
+            """, (guild_id, user_id))
+            warnings = await wc.fetchall()
+
+            mc = await db.execute("""
+                SELECT action, reason, moderator_display_name,
+                       created_at, source
+                FROM moderation_logs
+                WHERE guild_id = ? AND user_id = ? AND deleted = 0
+                ORDER BY created_at DESC LIMIT 10
+            """, (guild_id, user_id))
+            mod_logs = await mc.fetchall()
+
+            pc = await db.execute("""
+                SELECT item_name, price_paid, purchased_at
+                FROM purchase_history
+                WHERE guild_id = ? AND user_id = ?
+                ORDER BY purchased_at DESC LIMIT 10
+            """, (guild_id, user_id))
+            purchases = await pc.fetchall()
+
+        return {
+            "xp":       level_row[0] if level_row else 0,
+            "level":    level_row[1] if level_row else 0,
+            "coins":    econ_row[0]  if econ_row  else 0,
+            "warnings": warnings,
+            "mod_logs": mod_logs,
+            "purchases": purchases,
+        }
+
+    profile = run_async(get_profile())
+    ctx     = get_current_user_context()
+    return render_template("general/member_profile.html",
+                           profile=profile,
+                           member_id=user_id, **ctx)
+
+
 @app.route("/audit-log")
 @require_page("audit_log")
 def audit_log():
