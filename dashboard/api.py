@@ -493,3 +493,204 @@ def delete_warning_threshold(threshold_id: int):
             await db.commit()
     run_async(delete())
     return jsonify({"success": True})
+
+@api_bp.route("/leveling/config", methods=["GET"])
+@require_guild
+def get_leveling_config_api():
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT * FROM leveling_config WHERE guild_id = ?",
+                (guild_id,))
+            row = await cursor.fetchone()
+            if row:
+                cols = [d[0] for d in cursor.description]
+                return dict(zip(cols, row))
+        return {}
+    return jsonify({"config": run_async(fetch())})
+
+
+@api_bp.route("/leveling/config", methods=["POST"])
+@require_guild
+def save_leveling_config_api():
+    guild_id = get_session_guild_id()
+    data     = request.json
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO leveling_config
+                    (guild_id, enabled, xp_per_word,
+                     xp_min_per_message, xp_max_per_message,
+                     xp_cooldown_seconds, voice_xp_enabled,
+                     voice_xp_per_minute, voice_require_unmuted,
+                     spam_detection_enabled, spam_threshold,
+                     spam_xp_penalty, levelup_announce,
+                     levelup_channel_id, levelup_message,
+                     remove_old_reward_role)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    enabled                = excluded.enabled,
+                    xp_per_word            = excluded.xp_per_word,
+                    xp_min_per_message     = excluded.xp_min_per_message,
+                    xp_max_per_message     = excluded.xp_max_per_message,
+                    xp_cooldown_seconds    = excluded.xp_cooldown_seconds,
+                    voice_xp_enabled       = excluded.voice_xp_enabled,
+                    voice_xp_per_minute    = excluded.voice_xp_per_minute,
+                    voice_require_unmuted  = excluded.voice_require_unmuted,
+                    spam_detection_enabled = excluded.spam_detection_enabled,
+                    spam_threshold         = excluded.spam_threshold,
+                    spam_xp_penalty        = excluded.spam_xp_penalty,
+                    levelup_announce       = excluded.levelup_announce,
+                    levelup_channel_id     = excluded.levelup_channel_id,
+                    levelup_message        = excluded.levelup_message,
+                    remove_old_reward_role = excluded.remove_old_reward_role,
+                    updated_at             = CURRENT_TIMESTAMP
+            """, (
+                guild_id,
+                int(data.get("enabled", 1)),
+                int(data.get("xp_per_word", 1)),
+                int(data.get("xp_min_per_message", 5)),
+                int(data.get("xp_max_per_message", 50)),
+                int(data.get("xp_cooldown_seconds", 30)),
+                int(data.get("voice_xp_enabled", 1)),
+                int(data.get("voice_xp_per_minute", 3)),
+                int(data.get("voice_require_unmuted", 1)),
+                int(data.get("spam_detection_enabled", 1)),
+                int(data.get("spam_threshold", 3)),
+                int(data.get("spam_xp_penalty", 10)),
+                int(data.get("levelup_announce", 1)),
+                data.get("levelup_channel_id") or None,
+                data.get("levelup_message") or None,
+                int(data.get("remove_old_reward_role", 0)),
+            ))
+            await db.commit()
+    run_async(save())
+    from dashboard.permissions import log_action
+    log_action(guild_id, "Updated leveling config", "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/reward", methods=["POST"])
+@require_guild
+def add_leveling_reward():
+    guild_id = get_session_guild_id()
+    data     = request.json
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO leveling_rewards (guild_id, level, role_id)
+                VALUES (?, ?, ?)
+            """, (guild_id, int(data.get("level")), data.get("role_id")))
+            await db.commit()
+    run_async(save())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/reward/<int:reward_id>", methods=["DELETE"])
+@require_guild
+def delete_leveling_reward(reward_id: int):
+    guild_id = get_session_guild_id()
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_rewards WHERE id=? AND guild_id=?",
+                (reward_id, guild_id))
+            await db.commit()
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/bonus-roles", methods=["GET"])
+@require_guild
+def get_bonus_roles():
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, role_id, multiplier FROM leveling_bonus_roles
+                WHERE guild_id = ? ORDER BY multiplier DESC
+            """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    return jsonify({"roles": [
+        {"id": r[0], "role_id": r[1], "multiplier": r[2]}
+        for r in rows]})
+
+
+@api_bp.route("/leveling/bonus-role", methods=["POST"])
+@require_guild
+def add_bonus_role():
+    guild_id = get_session_guild_id()
+    data     = request.json
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO leveling_bonus_roles
+                    (guild_id, role_id, multiplier)
+                VALUES (?, ?, ?)
+            """, (guild_id, data.get("role_id"),
+                  float(data.get("multiplier", 1.5))))
+            await db.commit()
+    run_async(save())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/bonus-role/<int:role_id>", methods=["DELETE"])
+@require_guild
+def delete_bonus_role(role_id: int):
+    guild_id = get_session_guild_id()
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_bonus_roles WHERE id=? AND guild_id=?",
+                (role_id, guild_id))
+            await db.commit()
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/blacklist", methods=["GET"])
+@require_guild
+def get_blacklist():
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, role_id FROM leveling_blacklist_roles
+                WHERE guild_id = ?
+            """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    return jsonify({"roles": [
+        {"id": r[0], "role_id": r[1]} for r in rows]})
+
+
+@api_bp.route("/leveling/blacklist", methods=["POST"])
+@require_guild
+def add_blacklist():
+    guild_id = get_session_guild_id()
+    data     = request.json
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO leveling_blacklist_roles (guild_id, role_id)
+                VALUES (?, ?)
+            """, (guild_id, data.get("role_id")))
+            await db.commit()
+    run_async(save())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/blacklist/<int:entry_id>", methods=["DELETE"])
+@require_guild
+def delete_blacklist(entry_id: int):
+    guild_id = get_session_guild_id()
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_blacklist_roles WHERE id=? AND guild_id=?",
+                (entry_id, guild_id))
+            await db.commit()
+    run_async(delete())
+    return jsonify({"success": True})
