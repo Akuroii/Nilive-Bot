@@ -2,58 +2,229 @@
 {% block title %}MVP System{% endblock %}
 {% block content %}
 
-<div class="card">
-    <div class="card-title">🏆 Today's MVP Scores</div>
-    <div class="table-wrap">
-        <table class="table">
-            <thead>
-                <tr>
-                    <th>Rank</th><th>User ID</th>
-                    <th>Message Score</th><th>Voice (min)</th><th>Total</th>
-                </tr>
-            </thead>
-            <tbody hx-get="/api/mvp/scores" hx-trigger="load" hx-swap="innerHTML">
-                {% for s in scores %}
-                <tr>
-                    <td>
-                        {% if loop.index == 1 %}🥇
-                        {% elif loop.index == 2 %}🥈
-                        {% elif loop.index == 3 %}🥉
-                        {% else %}#{{ loop.index }}{% endif %}
-                    </td>
-                    <td><code>{{ s[0] }}</code></td>
-                    <td>{{ "%.1f"|format(s[1]) }}</td>
-                    <td>{{ "%.1f"|format(s[2]) }}</td>
-                    <td><strong>{{ "%.1f"|format(s[3]) }}</strong></td>
-                </tr>
-                {% else %}
-                <tr><td colspan="5" class="empty">No activity recorded today yet</td></tr>
-                {% endfor %}
-            </tbody>
-        </table>
+<div style="display:flex;gap:4px;margin-bottom:20px;
+            border-bottom:1px solid var(--border);padding-bottom:0;">
+    {% for tab, label in [
+        ('scores',  '🏆 Today'),
+        ('history', '📜 History'),
+        ('config',  '⚙️ Config')
+    ] %}
+    <button onclick="switchTab('{{ tab }}')"
+            id="tab-{{ tab }}"
+        style="padding:10px 18px;border:none;background:transparent;
+               color:var(--text2);font-size:13px;font-weight:500;
+               cursor:pointer;border-bottom:2px solid transparent;
+               transition:all .15s;margin-bottom:-1px;"
+        class="tab-btn">{{ label }}</button>
+    {% endfor %}
+</div>
+
+<!-- TODAY TAB -->
+<div id="tab-content-scores" class="tab-content">
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title" style="margin:0">
+                🏆 Today's MVP Scores
+            </div>
+            <button class="btn btn-secondary"
+                    hx-get="/api/mvp/scores"
+                    hx-target="#mvp-scores-tbody"
+                    hx-swap="innerHTML">
+                🔄 Refresh
+            </button>
+        </div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Rank</th><th>User ID</th>
+                        <th>Message Score</th>
+                        <th>Voice (min)</th><th>Total</th>
+                    </tr>
+                </thead>
+                <tbody id="mvp-scores-tbody"
+                       hx-get="/api/mvp/scores"
+                       hx-trigger="load"
+                       hx-swap="innerHTML">
+                    {% for s in scores %}
+                    <tr>
+                        <td>
+                            {% if loop.index == 1 %}🥇
+                            {% elif loop.index == 2 %}🥈
+                            {% elif loop.index == 3 %}🥉
+                            {% else %}#{{ loop.index }}{% endif %}
+                        </td>
+                        <td><code>{{ s[0] }}</code></td>
+                        <td>{{ "%.1f"|format(s[1]) }}</td>
+                        <td>{{ "%.1f"|format(s[2]) }}</td>
+                        <td><strong>{{ "%.1f"|format(s[3]) }}</strong></td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="5" class="empty">
+                            No activity recorded today
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
-<div class="card">
-    <div class="card-title">📜 MVP History</div>
-    <div class="table-wrap">
-        <table class="table">
-            <thead>
-                <tr><th>User</th><th>Score</th><th>Cycle Start</th><th>Cycle End</th></tr>
-            </thead>
-            <tbody>
-                {% for h in history %}
-                <tr>
-                    <td>{{ h[1] }}</td>
-                    <td><strong>{{ h[2] }}</strong></td>
-                    <td class="text-muted">{{ h[3][:10] if h[3] else '—' }}</td>
-                    <td class="text-muted">{{ h[4][:10] if h[4] else '—' }}</td>
-                </tr>
-                {% else %}
-                <tr><td colspan="4" class="empty">No MVP history yet</td></tr>
-                {% endfor %}
-            </tbody>
-        </table>
+<!-- HISTORY TAB -->
+<div id="tab-content-history" class="tab-content"
+     style="display:none;">
+    <div class="card">
+        <div class="card-title">📜 MVP History</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Member</th><th>Score</th>
+                        <th>Cycle Start</th><th>Cycle End</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for h in history %}
+                    <tr>
+                        <td><strong>{{ h[1] }}</strong></td>
+                        <td>
+                            <span class="badge badge-accent">
+                                {{ "{:,}".format(h[2]) }}
+                            </span>
+                        </td>
+                        <td class="text-muted">
+                            {{ h[3][:10] if h[3] else '—' }}
+                        </td>
+                        <td class="text-muted">
+                            {{ h[4][:10] if h[4] else '—' }}
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="empty">
+                            No MVP history yet
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
+
+<!-- CONFIG TAB -->
+<div id="tab-content-config" class="tab-content"
+     style="display:none;">
+    <div class="card">
+        <div class="card-title">⚙️ MVP Configuration</div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">
+                    Cycle hours (how often MVP resets)
+                </label>
+                <input class="form-input" id="mvp-cycle"
+                       type="number" min="1" max="168"
+                       placeholder="6">
+                <div class="form-hint">
+                    Recommended: 6 or 8 hours
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">MVP role ID</label>
+                <input class="form-input" id="mvp-role"
+                       placeholder="Right click role → Copy ID">
+            </div>
+            <div class="form-group">
+                <label class="form-label">
+                    Announce channel ID
+                </label>
+                <input class="form-input" id="mvp-channel"
+                       placeholder="Right click channel → Copy ID">
+            </div>
+            <div class="form-group">
+                <label class="form-label">
+                    Chat word weight (XP per word)
+                </label>
+                <input class="form-input" id="mvp-chat-weight"
+                       type="number" step="0.1" min="0"
+                       placeholder="1.0">
+            </div>
+            <div class="form-group">
+                <label class="form-label">
+                    Voice weight (XP per minute)
+                </label>
+                <input class="form-input" id="mvp-voice-weight"
+                       type="number" step="0.1" min="0"
+                       placeholder="2.0">
+            </div>
+        </div>
+        <button class="btn btn-primary"
+                onclick="saveMVPConfig()">Save Config</button>
+        <div id="mvp-config-status"
+             style="display:inline;margin-left:12px;
+                    font-size:13px;"></div>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+function switchTab(name) {
+    document.querySelectorAll('.tab-content').forEach(
+        el => el.style.display = 'none');
+    document.getElementById('tab-content-' + name)
+            .style.display = 'block';
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.style.borderBottomColor = 'transparent';
+        btn.style.color = 'var(--text2)';
+    });
+    const active = document.getElementById('tab-' + name);
+    active.style.borderBottomColor = 'var(--accent)';
+    active.style.color = 'var(--text)';
+}
+switchTab('scores');
+
+async function loadMVPConfig() {
+    const res = await fetch('/api/mvp/config');
+    if (!res.ok) return;
+    const data = await res.json();
+    const c    = data.config;
+    if (!c) return;
+    document.getElementById('mvp-cycle').value        = c.cycle_hours        || 6;
+    document.getElementById('mvp-role').value         = c.mvp_role_id        || '';
+    document.getElementById('mvp-channel').value      = c.announce_channel_id|| '';
+    document.getElementById('mvp-chat-weight').value  = c.chat_word_weight   || 1.0;
+    document.getElementById('mvp-voice-weight').value = c.voice_minute_weight|| 2.0;
+}
+loadMVPConfig();
+
+async function saveMVPConfig() {
+    const payload = {
+        cycle_hours:          parseInt(document.getElementById('mvp-cycle').value)        || 6,
+        mvp_role_id:          document.getElementById('mvp-role').value                   || null,
+        announce_channel_id:  document.getElementById('mvp-channel').value                || null,
+        chat_word_weight:     parseFloat(document.getElementById('mvp-chat-weight').value)|| 1.0,
+        voice_minute_weight:  parseFloat(document.getElementById('mvp-voice-weight').value)|| 2.0,
+    };
+    const res  = await fetch('/api/mvp/config', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(payload),
+    });
+    const data = await res.json();
+    const st   = document.getElementById('mvp-config-status');
+    if (data.success) {
+        showToast('MVP config saved!');
+        st.textContent = '✅ Saved!';
+        st.style.color = 'var(--success)';
+    } else {
+        showToast('Error saving', 'danger');
+        st.textContent = '❌ Error';
+        st.style.color = 'var(--danger)';
+    }
+    setTimeout(() => st.textContent = '', 3000);
+}
+</script>
+{% endblock %}
 {% endblock %}
