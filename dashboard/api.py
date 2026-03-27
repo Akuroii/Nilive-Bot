@@ -494,6 +494,125 @@ def delete_warning_threshold(threshold_id: int):
     run_async(delete())
     return jsonify({"success": True})
 
+
+# ── MVP Config API ────────────────��─────────────────────────
+
+@api_bp.route("/mvp/config", methods=["GET"])
+@require_guild
+def get_mvp_config_api():
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT * FROM mvp_config WHERE guild_id = ?",
+                (guild_id,))
+            row = await cursor.fetchone()
+            if row:
+                cols = [d[0] for d in cursor.description]
+                return dict(zip(cols, row))
+        return {}
+    return jsonify({"config": run_async(fetch())})
+
+
+@api_bp.route("/mvp/config", methods=["POST"])
+@require_guild
+def save_mvp_config_api():
+    guild_id = get_session_guild_id()
+    data     = request.json
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO mvp_config
+                    (guild_id, cycle_hours, mvp_role_id,
+                     announce_channel_id, chat_word_weight,
+                     voice_minute_weight, enabled)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    cycle_hours         = excluded.cycle_hours,
+                    mvp_role_id         = excluded.mvp_role_id,
+                    announce_channel_id = excluded.announce_channel_id,
+                    chat_word_weight    = excluded.chat_word_weight,
+                    voice_minute_weight = excluded.voice_minute_weight
+            """, (
+                guild_id,
+                int(data.get("cycle_hours", 6)),
+                data.get("mvp_role_id") or None,
+                data.get("announce_channel_id") or None,
+                float(data.get("chat_word_weight", 1.0)),
+                float(data.get("voice_minute_weight", 2.0)),
+            ))
+            await db.commit()
+    run_async(save())
+    from dashboard.permissions import log_action
+    log_action(guild_id, "Updated MVP config", "mvp")
+    return jsonify({"success": True})
+
+
+# ── Shop Purchase History & Temp Roles ──────────────────────
+
+@api_bp.route("/shop/purchase-history")
+@require_guild
+def shop_purchase_history():
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT user_display_name, item_name,
+                       price_paid, purchased_at, expires_at
+                FROM purchase_history
+                WHERE guild_id = ?
+                ORDER BY purchased_at DESC LIMIT 50
+            """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    html = ""
+    for r in rows:
+        exp = r[4][:10] if r[4] else "Permanent"
+        html += (
+            f"<tr>"
+            f"<td>{r[0]}</td>"
+            f"<td><strong>{r[1]}</strong></td>"
+            f"<td>🪙 {r[2]:,}</td>"
+            f"<td class='text-muted'>{str(r[3])[:10] if r[3] else '—'}</td>"
+            f"<td class='text-muted'>{exp}</td>"
+            f"</tr>"
+        )
+    return html or (
+        "<tr><td colspan='5' class='empty'>"
+        "No purchases yet</td></tr>")
+
+
+@api_bp.route("/shop/temp-roles")
+@require_guild
+def shop_temp_roles():
+    guild_id = get_session_guild_id()
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT user_id, role_id, expires_at, source
+                FROM temp_roles
+                WHERE guild_id = ?
+                ORDER BY expires_at ASC
+            """, (guild_id,))
+            return await cursor.fetchall()
+    rows = run_async(fetch())
+    html = ""
+    for r in rows:
+        html += (
+            f"<tr>"
+            f"<td><code>{r[0]}</code></td>"
+            f"<td><code>{r[1]}</code></td>"
+            f"<td class='text-muted'>{str(r[2])[:16] if r[2] else '—'}</td>"
+            f"<td><span class='badge badge-accent'>{r[3]}</span></td>"
+            f"</tr>"
+        )
+    return html or (
+        "<tr><td colspan='4' class='empty'>"
+        "No active temp roles</td></tr>")
+
+
+# ── Leveling Config & Rewards ───────────────────────────────
+
 @api_bp.route("/leveling/config", methods=["GET"])
 @require_guild
 def get_leveling_config_api():
