@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+{% block title %}Shop{% endblock %}
+{% block content %}
+
+<div style="display:flex;gap:4px;margin-bottom:20px;
+            border-bottom:1px solid var(--border);padding-bottom:0;">
+    {% for tab, label in [
+        ('items',    '🛒 Items'),
+        ('history',  '📋 Purchases'),
+        ('temproles','⏱️ Temp Roles')
+    ] %}
+    <button onclick="switchTab('{{ tab }}')"
+            id="tab-{{ tab }}"
+        style="padding:10px 18px;border:none;background:transparent;
+               color:var(--text2);font-size:13px;font-weight:500;
+               cursor:pointer;border-bottom:2px solid transparent;
+               transition:all .15s;margin-bottom:-1px;"
+        class="tab-btn">{{ label }}</button>
+    {% endfor %}
+</div>
+
+<!-- ITEMS TAB -->
+<div id="tab-content-items" class="tab-content">
+    <div class="card">
+        <div class="card-title">➕ Add Shop Item</div>
+        <div style="display:grid;
+                    grid-template-columns:1fr 1fr;gap:16px;">
+            <div class="form-group">
+                <label class="form-label">Item name</label>
+                <input class="form-input" id="item-name"
+                       placeholder="e.g. VIP Role">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Price (coins)</label>
+                <input class="form-input" id="item-price"
+                       type="number" min="1" placeholder="500">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Type</label>
+                <select class="form-input" id="item-type">
+                    <option value="role">Permanent Role</option>
+                    <option value="temp_role">Temporary Role</option>
+                    <option value="custom">Custom</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Role ID</label>
+                <input class="form-input" id="item-role"
+                       placeholder="Right click role → Copy ID">
+            </div>
+            <div class="form-group">
+                <label class="form-label">
+                    Duration hours (0 = permanent)
+                </label>
+                <input class="form-input" id="item-duration"
+                       type="number" min="0" value="0">
+            </div>
+            <div class="form-group">
+                <label class="form-label">
+                    Required level (0 = none)
+                </label>
+                <input class="form-input" id="item-level"
+                       type="number" min="0" value="0">
+            </div>
+            <div class="form-group"
+                 style="grid-column:1/-1;">
+                <label class="form-label">Description</label>
+                <input class="form-input" id="item-desc"
+                       placeholder="Brief description...">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Max stock (0 = unlimited)</label>
+                <input class="form-input" id="item-stock"
+                       type="number" min="0" value="0">
+            </div>
+        </div>
+        <label class="form-check" style="margin-bottom:16px;">
+            <input type="checkbox" id="item-featured">
+            Featured item (shown first with ⭐)
+        </label>
+        <button class="btn btn-primary"
+                onclick="addItem()">Add Item</button>
+        <div id="shop-status"
+             style="margin-top:10px;font-size:13px;"></div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">🛒 Shop Items</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Name</th><th>Description</th>
+                        <th>Price</th><th>Type</th>
+                        <th>Duration</th><th>Status</th><th></th>
+                    </tr>
+                </thead>
+                <tbody hx-get="/api/shop/items"
+                       hx-trigger="load"
+                       hx-swap="innerHTML">
+                    {% for item in items %}
+                    <tr>
+                        <td>
+                            <strong>{{ item[1] }}</strong>
+                            {% if item[7] %}⭐{% endif %}
+                        </td>
+                        <td class="text-muted">
+                            {{ item[2] or '—' }}
+                        </td>
+                        <td>🪙 {{ "{:,}".format(item[3]) }}</td>
+                        <td>{{ item[4] }}</td>
+                        <td>
+                            {{ item[6]|string + 'h'
+                               if item[6] else 'Permanent' }}
+                        </td>
+                        <td>
+                            <span class="badge
+                                {% if item[8] %}badge-success
+                                {% else %}badge-danger{% endif %}">
+                                {% if item[8] %}Active
+                                {% else %}Disabled{% endif %}
+                            </span>
+                        </td>
+                        <td>
+                            <button class="btn btn-sm btn-danger"
+                                hx-delete="/api/shop/item/{{ item[0] }}"
+                                hx-confirm="Delete {{ item[1] }}?"
+                                hx-target="closest tr"
+                                hx-swap="outerHTML">
+                                Delete
+                            </button>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="7" class="empty">
+                            No shop items yet
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- PURCHASE HISTORY TAB -->
+<div id="tab-content-history" class="tab-content"
+     style="display:none;">
+    <div class="card">
+        <div class="card-title">📋 Purchase History</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Member</th><th>Item</th>
+                        <th>Price</th><th>Date</th><th>Expires</th>
+                    </tr>
+                </thead>
+                <tbody hx-get="/api/shop/purchase-history"
+                       hx-trigger="load"
+                       hx-swap="innerHTML">
+                    <tr>
+                        <td colspan="5" class="empty">
+                            Loading...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- TEMP ROLES TAB -->
+<div id="tab-content-temproles" class="tab-content"
+     style="display:none;">
+    <div class="card">
+        <div class="card-title">⏱️ Active Temp Roles</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            These roles will be auto-removed when they expire.
+        </p>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>User ID</th><th>Role ID</th>
+                        <th>Expires</th><th>Source</th>
+                    </tr>
+                </thead>
+                <tbody hx-get="/api/shop/temp-roles"
+                       hx-trigger="load"
+                       hx-swap="innerHTML">
+                    <tr>
+                        <td colspan="4" class="empty">
+                            Loading...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+function switchTab(name) {
+    document.querySelectorAll('.tab-content').forEach(
+        el => el.style.display = 'none');
+    document.getElementById('tab-content-' + name)
+            .style.display = 'block';
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.style.borderBottomColor = 'transparent';
+        btn.style.color = 'var(--text2)';
+    });
+    const active = document.getElementById('tab-' + name);
+    active.style.borderBottomColor = 'var(--accent)';
+    active.style.color = 'var(--text)';
+}
+switchTab('items');
+
+async function addItem() {
+    const stock = parseInt(
+        document.getElementById('item-stock').value) || 0;
+    const payload = {
+        name:          document.getElementById('item-name').value,
+        price:         parseInt(
+            document.getElementById('item-price').value),
+        type:          document.getElementById('item-type').value,
+        role_id:       document.getElementById('item-role').value
+                       || null,
+        duration_hours:parseInt(
+            document.getElementById('item-duration').value) || null,
+        required_level:parseInt(
+            document.getElementById('item-level').value) || 0,
+        description:   document.getElementById('item-desc').value,
+        featured:      document.getElementById('item-featured')
+                               .checked ? 1 : 0,
+        max_stock:     stock > 0 ? stock : null,
+        current_stock: stock > 0 ? stock : null,
+    };
+    if (!payload.name || !payload.price) {
+        showToast('Enter name and price', 'danger');
+        return;
+    }
+    const res  = await fetch('/api/shop/item', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast('Item added!');
+        setTimeout(() => location.reload(), 800);
+    } else {
+        showToast('Error saving', 'danger');
+    }
+}
+</script>
+{% endblock %}
+{% endblock %}
