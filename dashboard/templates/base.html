@@ -24,9 +24,22 @@
 .select2-container--default .select2-results__option--highlighted { background: var(--accent); color: #fff; }
 .select2-dropdown { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; }
 .select2-search--dropdown .select2-search__field { background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 10px; }
+
+/* HTMX loading indicator */
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator { display: inline-block; }
+.htmx-request.htmx-indicator { display: inline-block; }
+#global-spinner {
+    width: 16px; height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
-<body>
+<body hx-boost="true" hx-target="#content-area" hx-push-url="true" hx-indicator="#global-spinner" hx-select="#content-area">
 
 <!-- MOBILE HAMBURGER -->
 <button class="hamburger" onclick="toggleSidebar()"
@@ -215,7 +228,7 @@
 <div class="main-content">
     <div class="topbar">
         <div style="display:flex;align-items:center;gap:12px;">
-            <div class="topbar-title">{% block title %}Dashboard{% endblock %}</div>
+            <div class="topbar-title" id="page-title">{% block title %}Dashboard{% endblock %}</div>
             <div class="htmx-indicator" id="global-spinner"></div>
         </div>
         <div class="topbar-actions">
@@ -225,7 +238,8 @@
         </div>
     </div>
 
-    <div class="page-content">
+    <!-- ★ HTMX swaps content into this div — never the whole page -->
+    <div class="page-content" id="content-area">
         {% block content %}{% endblock %}
     </div>
 </div>
@@ -250,7 +264,7 @@
     </div>
 </div>
 
-<!-- SCRIPTS -->
+<!-- SCRIPTS — load HTMX first, then jQuery, then our JS -->
 <script src="https://unpkg.com/htmx.org@1.9.10"></script>
 <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
@@ -258,6 +272,36 @@
 <script>
     htmx.config.globalViewTransitions = false;
     htmx.config.defaultSwapStyle = 'innerHTML';
+
+    // After every HTMX swap: re-init Select2 widgets inside new content
+    document.body.addEventListener('htmx:afterSwap', function(evt) {
+        if (window.$ && $.fn.select2) {
+            $(evt.detail.target).find('.select2-widget').select2({
+                theme: 'default',
+                width: '100%'
+            });
+        }
+        // Re-run any inline <script> tags injected by the partial
+        evt.detail.target.querySelectorAll('script').forEach(function(oldScript) {
+            const newScript = document.createElement('script');
+            [...oldScript.attributes].forEach(a => newScript.setAttribute(a.name, a.value));
+            newScript.textContent = oldScript.textContent;
+            oldScript.parentNode.replaceChild(newScript, oldScript);
+        });
+        // Update active nav link
+        const path = window.location.pathname;
+        document.querySelectorAll('.nav-item').forEach(function(a) {
+            a.classList.toggle('active', a.getAttribute('href') === path);
+        });
+    });
+
+    // Mark nav link active on click (hx-boost handles the actual swap)
+    document.querySelectorAll('.nav-item').forEach(function(a) {
+        a.addEventListener('click', function() {
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            a.classList.add('active');
+        });
+    });
 </script>
 {% block scripts %}{% endblock %}
 
