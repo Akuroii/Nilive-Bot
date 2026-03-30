@@ -31,7 +31,17 @@ app.secret_key = os.getenv("SECRET_KEY", "nero-dashboard-secret-key-2024")
 app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7
 
 app.register_blueprint(api_bp)
-
+def render(template, **ctx):
+    """
+    If the request came from HTMX (sidebar nav), return only the
+    inner content block so the sidebar stays in place.
+    Full-page load returns the complete base template as normal.
+    """
+    if request.headers.get('HX-Request'):
+        # Derive the partial template name: 'leveling.html' → 'leveling_partial.html'
+        # We use a single convention: pass partial=True into the template context
+        ctx['_htmx'] = True
+    return render_template(template, **ctx)
 
 def calculate_level(xp: int) -> int:
     level = 0
