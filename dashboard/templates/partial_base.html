@@ -1,0 +1,15 @@
+def render(template, **ctx):
+    """
+    Smart render: full page for browser nav, partial for HTMX nav.
+    Partials are loaded from templates/partials/<name> which only
+    contain the {% block content %} body, no base wrapper.
+    """
+    if request.headers.get('HX-Request'):
+        # Try partials/<template> first, fall back to full template
+        import os
+        partial_path = os.path.join('partials', template)
+        tpl_folder = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'templates')
+        if os.path.exists(os.path.join(tpl_folder, partial_path)):
+            return render_template(partial_path, **ctx)
+    return render_template(template, **ctx)
