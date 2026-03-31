@@ -131,31 +131,60 @@
             <span class="nav-icon">🔨</span> Custom Commands
         </a>
 
-        <!-- SYSTEMS -->
-        <div style="font-size:10px;font-weight:600;color:var(--text3);
-                    text-transform:uppercase;letter-spacing:.08em;
-                    padding:14px 8px 4px;">Systems</div>
-
-        <a href="{{ url_for('mvp') }}"
-           class="nav-item {% if request.endpoint == 'mvp' %}active{% endif %}">
-            <span class="nav-icon">🏆</span> MVP System
-        </a>
-        <a href="{{ url_for('leveling') }}"
-           class="nav-item {% if request.endpoint == 'leveling' %}active{% endif %}">
-            <span class="nav-icon">⭐</span> Leveling
-        </a>
-        <a href="{{ url_for('economy') }}"
-           class="nav-item {% if request.endpoint == 'economy' %}active{% endif %}">
-            <span class="nav-icon">💰</span> Economy
-        </a>
-        <a href="{{ url_for('shop') }}"
-           class="nav-item {% if request.endpoint == 'shop' %}active{% endif %}">
-            <span class="nav-icon">🛒</span> Shop
-        </a>
-        <a href="{{ url_for('events') }}"
-           class="nav-item {% if request.endpoint == 'events' %}active{% endif %}">
-            <span class="nav-icon">🎯</span> Events
-        </a>
+<!-- ─── SYSTEMS ───────── -->
+<div class="nav-section">
+    <div class="nav-section-title">Systems</div>
+    
+    <a href="/dashboard/{{ guild_id }}/mvp" 
+       hx-get="/dashboard/{{ guild_id }}/mvp" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">🏆</span>
+        <span class="nav-text">MVP System</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/leveling" 
+       hx-get="/dashboard/{{ guild_id }}/leveling" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">⭐</span>
+        <span class="nav-text">Leveling</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/economy" 
+       hx-get="/dashboard/{{ guild_id }}/economy" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">💰</span>
+        <span class="nav-text">Economy</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/shop" 
+       hx-get="/dashboard/{{ guild_id }}/shop" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">🛒</span>
+        <span class="nav-text">Shop</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/events" 
+       hx-get="/dashboard/{{ guild_id }}/events" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">🎯</span>
+        <span class="nav-text">Events</span>
+    </a>
+</div>
 
         <!-- CONFIG -->
         <div style="font-size:10px;font-weight:600;color:var(--text3);
