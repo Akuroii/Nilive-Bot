@@ -163,8 +163,6 @@ def select_guild(guild_id: int):
         gdata  = next((g for g in guilds if int(g["id"]) == guild_id), None)
         session["guild_name"] = gdata["name"] if gdata else ""
     return redirect(url_for("index"))
-
-
 @app.route("/")
 @require_page("overview")
 def index():
