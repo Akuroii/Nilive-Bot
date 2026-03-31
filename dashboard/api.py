@@ -110,65 +110,7 @@ def get_channels():
     return get_guild_channels()
 
 
-@api_bp.route("/members/search")
-@require_guild
-def get_guild_channels():
-    """
-    Returns all channels in the guild via Discord Bot API.
-    Response: { results: [{id, text, type_icon, category, type}] }
-    """
-    guild_id  = get_session_guild_id()
-    bot_token = os.getenv("DISCORD_TOKEN", "")
-    if not bot_token:
-        return jsonify({"results": [], "error": "BOT_TOKEN not set"})
-
-    import requests as _req
-    resp = _req.get(
-        f"https://discord.com/api/v10/guilds/{guild_id}/channels",
-        headers={"Authorization": f"Bot {bot_token}"},
-        timeout=8,
-    )
-    if resp.status_code != 200:
-        return jsonify({"results": [], "error": f"Discord API {resp.status_code}"})
-
-    channels = resp.json()
-
-    TYPE_ICON = {
-        0:  "💬",   # text
-        2:  "🔊",   # voice
-        4:  "📁",   # category
-        5:  "📢",   # announcement
-        10: "🧵",   # announcement thread
-        11: "🧵",   # public thread
-        12: "🧵",   # private thread
-        13: "🎙️",  # stage
-        15: "📋",   # forum
-    }
-    TYPE_NAME = {0: "text", 2: "voice", 4: "category", 5: "announcement",
-                 13: "stage", 15: "forum"}
-
-    # Build category map
-    categories = {c["id"]: c["name"] for c in channels if c["type"] == 4}
-
-    results = []
-    for ch in channels:
-        if ch["type"] == 4:
-            continue  # skip category rows themselves
-        icon     = TYPE_ICON.get(ch["type"], "💬")
-        cat_name = categories.get(str(ch.get("parent_id", "")), "")
-        results.append({
-            "id":       ch["id"],
-            "text":     ch["name"],
-            "type_icon": icon,
-            "category": cat_name,
-            "type":     TYPE_NAME.get(ch["type"], "text"),
-        })
-
-    # Sort: text/announce first, then voice, then others; alpha within type
-    type_order = {"text": 0, "announcement": 1, "voice": 2, "stage": 3, "forum": 4}
-    results.sort(key=lambda c: (type_order.get(c["type"], 9), c["text"].lower()))
-
-    return jsonify({"results": results})
+# ❌ REMOVED DUPLICATE get_guild_channels HERE (was line 89-134)
 
 
 @api_bp.route("/members/search")
@@ -480,6 +422,8 @@ def tickets_partial():
             f"</tr>"
         )
     return html or "<tr><td colspan='5' class='empty'>No tickets found</td></tr>"
+
+
 @api_bp.route("/settings/general", methods=["POST"])
 @require_guild
 def save_settings_general():
