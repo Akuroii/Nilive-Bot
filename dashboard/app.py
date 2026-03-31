@@ -31,6 +31,8 @@ app.secret_key = os.getenv("SECRET_KEY", "nero-dashboard-secret-key-2024")
 app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7
 
 app.register_blueprint(api_bp)
+
+
 def render(template, **ctx):
     """
     If the request came from HTMX (sidebar nav), return only the
@@ -38,12 +40,13 @@ def render(template, **ctx):
     Full-page load returns the complete base template as normal.
     """
     if request.headers.get('HX-Request'):
-        # HTMX request: return just the page content (no base.html wrapper)
+        # HTMX request: return just the page content
         ctx['_htmx'] = True
         return render_template(template, **ctx)
     
-    # Normal request: wrap the page in base.html
+    # Normal request: wrap in base.html
     return render_template('base.html', page=template, **ctx)
+
 
 def calculate_level(xp: int) -> int:
     level = 0
@@ -160,7 +163,6 @@ def select_guild(guild_id: int):
     session["user_level"] = row[0]
     access_token = session.get("access_token", "")
     if access_token:
-        from dashboard.auth import fetch_discord_guilds
         guilds = fetch_discord_guilds(access_token)
         gdata  = next((g for g in guilds if int(g["id"]) == guild_id), None)
         session["guild_name"] = gdata["name"] if gdata else ""
@@ -199,7 +201,7 @@ def index():
 
     stats = run_async(get_stats())
     ctx   = get_current_user_context()
-    return render_template("general/overview.html", stats=stats, **ctx)
+    return render("general/overview.html", stats=stats, **ctx)
 
 
 @app.route("/members")
@@ -224,8 +226,7 @@ def members():
 
     member_list = run_async(get_members())
     ctx = get_current_user_context()
-    return render_template("general/members.html",
-                           members=member_list, **ctx)
+    return render("general/members.html", members=member_list, **ctx)
 
 
 @app.route("/members/<int:user_id>")
@@ -283,9 +284,8 @@ def member_profile(user_id: int):
 
     profile = run_async(get_profile())
     ctx     = get_current_user_context()
-    return render_template("general/member_profile.html",
-                           profile=profile,
-                           member_id=user_id, **ctx)
+    return render("general/member_profile.html",
+                  profile=profile, member_id=user_id, **ctx)
 
 
 @app.route("/audit-log")
@@ -306,7 +306,7 @@ def audit_log():
 
     logs = run_async(get_logs())
     ctx  = get_current_user_context()
-    return render_template("general/auditlog.html", logs=logs, **ctx)
+    return render("general/auditlog.html", logs=logs, **ctx)
 
 
 @app.route("/moderation")
@@ -337,8 +337,8 @@ def moderation():
 
     logs, warnings = run_async(get_data())
     ctx = get_current_user_context()
-    return render_template("manage/moderation.html",
-                           logs=logs, warnings=warnings, **ctx)
+    return render("manage/moderation.html",
+                  logs=logs, warnings=warnings, **ctx)
 
 
 @app.route("/tickets")
@@ -357,22 +357,22 @@ def tickets():
 
     ticket_list = run_async(get_tickets())
     ctx = get_current_user_context()
-    return render_template("manage/tickets.html",
-                           tickets=ticket_list, **ctx)
+    return render("manage/tickets.html", tickets=ticket_list, **ctx)
 
 
 @app.route("/embed-builder")
 @require_page("embedbuilder")
 def embed_builder():
     ctx = get_current_user_context()
-    return render_template("manage/embedbuilder.html", **ctx)
+    ctx['page_title'] = 'Embed Builder'  # Fixed title
+    return render("manage/embedbuilder.html", **ctx)
 
 
 @app.route("/reaction-roles")
 @require_page("reactionroles")
 def reaction_roles():
     ctx = get_current_user_context()
-    return render_template("manage/reactionroles.html", **ctx)
+    return render("manage/reactionroles.html", **ctx)
 
 
 @app.route("/triggers")
@@ -393,8 +393,7 @@ def triggers_page():
 
     trigger_list = run_async(get_triggers())
     ctx = get_current_user_context()
-    return render_template("manage/triggers.html",
-                           triggers=trigger_list, **ctx)
+    return render("manage/triggers.html", triggers=trigger_list, **ctx)
 
 
 @app.route("/custom-commands")
@@ -415,8 +414,7 @@ def custom_commands():
 
     cmds = run_async(get_cmds())
     ctx  = get_current_user_context()
-    return render_template("manage/customcommands.html",
-                           commands=cmds, **ctx)
+    return render("manage/customcommands.html", commands=cmds, **ctx)
 
 
 @app.route("/mvp")
@@ -447,8 +445,7 @@ def mvp():
 
     scores, history = run_async(get_data())
     ctx = get_current_user_context()
-    return render_template("systems/mvp.html",
-                           scores=scores, history=history, **ctx)
+    return render("systems/mvp.html", scores=scores, history=history, **ctx)
 
 
 @app.route("/leveling")
@@ -473,8 +470,7 @@ def leveling():
 
     levels, rewards = run_async(get_data())
     ctx = get_current_user_context()
-    return render_template("systems/leveling.html",
-                           levels=levels, rewards=rewards, **ctx)
+    return render("systems/leveling.html", levels=levels, rewards=rewards, **ctx)
 
 
 @app.route("/economy")
@@ -493,8 +489,7 @@ def economy():
 
     balances = run_async(get_data())
     ctx = get_current_user_context()
-    return render_template("systems/economy.html",
-                           balances=balances, **ctx)
+    return render("systems/economy.html", balances=balances, **ctx)
 
 
 @app.route("/shop")
@@ -515,7 +510,7 @@ def shop():
 
     items = run_async(get_items())
     ctx   = get_current_user_context()
-    return render_template("systems/shop.html", items=items, **ctx)
+    return render("systems/shop.html", items=items, **ctx)
 
 
 @app.route("/events")
@@ -535,8 +530,7 @@ def events():
 
     event_list = run_async(get_events())
     ctx = get_current_user_context()
-    return render_template("systems/events.html",
-                           events=event_list, **ctx)
+    return render("systems/events.html", events=event_list, **ctx)
 
 
 @app.route("/config/general", methods=["GET", "POST"])
@@ -593,9 +587,8 @@ def config_general():
 
     settings = run_async(get_settings())
     ctx = get_current_user_context()
-    return render_template("config/general.html",
-                           settings=settings,
-                           saved=request.args.get("saved"), **ctx)
+    return render("config/general.html",
+                  settings=settings, saved=request.args.get("saved"), **ctx)
 
 
 @app.route("/config/welcome", methods=["GET", "POST"])
@@ -657,9 +650,8 @@ def config_welcome():
 
     config = run_async(get_config())
     ctx = get_current_user_context()
-    return render_template("config/welcome.html",
-                           config=config,
-                           saved=request.args.get("saved"), **ctx)
+    return render("config/welcome.html",
+                  config=config, saved=request.args.get("saved"), **ctx)
 
 
 @app.route("/config/boost", methods=["GET", "POST"])
@@ -711,9 +703,8 @@ def config_boost():
 
     config = run_async(get_config())
     ctx = get_current_user_context()
-    return render_template("config/boost.html",
-                           config=config,
-                           saved=request.args.get("saved"), **ctx)
+    return render("config/boost.html",
+                  config=config, saved=request.args.get("saved"), **ctx)
 
 
 @app.route("/config/announcements")
@@ -735,8 +726,7 @@ def config_announcements():
 
     yt, tw = run_async(get_configs())
     ctx = get_current_user_context()
-    return render_template("config/announcements.html",
-                           youtube=yt, twitch=tw, **ctx)
+    return render("config/announcements.html", youtube=yt, twitch=tw, **ctx)
 
 
 @app.route("/config/commands", methods=["GET", "POST"])
@@ -799,9 +789,8 @@ def config_commands():
 
     toggles = run_async(get_toggles())
     ctx = get_current_user_context()
-    return render_template("config/commands.html",
-                           all_commands=all_commands,
-                           toggles=toggles, **ctx)
+    return render("config/commands.html",
+                  all_commands=all_commands, toggles=toggles, **ctx)
 
 
 @app.route("/config/access", methods=["GET", "POST"])
@@ -858,7 +847,7 @@ def config_access():
 
     users = run_async(get_users())
     ctx   = get_current_user_context()
-    return render_template("config/access.html", users=users, **ctx)
+    return render("config/access.html", users=users, **ctx)
 
 
 @app.route("/api/edit-member", methods=["POST"])
@@ -1112,7 +1101,7 @@ def api_rr_panels():
 def api_delete_warning(warning_id: int):
     guild_id   = get_session_guild_id()
     user_level = session.get("user_level", "")
-    from utils.permissions import LEVEL_RANK, LEVEL_OWNER
+    from dashboard.permissions import LEVEL_RANK, LEVEL_OWNER
     if LEVEL_RANK.get(user_level, 0) < LEVEL_RANK[LEVEL_OWNER]:
         return jsonify({"success": False, "error": "Owner only"}), 403
 
