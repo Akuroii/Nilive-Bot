@@ -1,12 +1,13 @@
 {% extends "base.html" %}
 {% block title %}General Settings{% endblock %}
 {% block content %}
+<span data-page-title="General Settings"></span>
 
 {% if saved %}
 <div class="save-banner">✅ Settings saved successfully!</div>
 {% endif %}
 
-<form method="POST">
+<form id="general-form">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
 
         <div class="card">
@@ -26,10 +27,11 @@
                 </select>
             </div>
             <div class="form-group">
-                <label class="form-label">Log channel ID</label>
-                <input class="form-input" name="log_channel_id"
-                       value="{{ settings.get('log_channel_id', '') }}"
-                       placeholder="General log channel">
+                <label class="form-label">Log channel</label>
+                <select class="nero-channel-picker form-input"
+                        name="log_channel_id"
+                        data-value="{{ settings.get('log_channel_id', '') }}"></select>
+                <div class="form-hint">Where to send general bot logs</div>
             </div>
         </div>
 
@@ -70,11 +72,11 @@
             <div id="status-messages-manager">
                 <label class="form-label">Status messages</label>
                 <div id="status-list" style="margin-bottom:10px;">
-                    <span class="text-muted text-sm">Loading...</span>
+                    <span class="text-muted text-sm">Loading…</span>
                 </div>
-                <div style="display:flex;gap:8px;">
-                    <input class="form-input" id="new-status-text" placeholder="Status message..." style="flex:1;">
-                    <select class="form-input" id="new-status-type" style="width:130px;">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <input class="form-input" id="new-status-text" placeholder="Status message…" style="flex:1;min-width:180px;">
+                    <select class="form-input" id="new-status-type" style="width:140px;">
                         <option value="playing">Playing</option>
                         <option value="watching">Watching</option>
                         <option value="listening">Listening to</option>
@@ -87,12 +89,26 @@
 
     </div>
     <div style="margin-top:4px;">
-        <button type="submit" class="btn btn-primary">Save Settings</button>
+        <button type="button" class="btn btn-primary" id="save-btn" onclick="saveGeneral(this)">
+            Save Settings
+        </button>
     </div>
 </form>
 
 {% block scripts %}
 <script>
+async function saveGeneral(btn) {
+    const form    = document.getElementById('general-form');
+    const data    = Object.fromEntries(new FormData(form));
+    // Checkboxes not in FormData when unchecked
+    data.status_rotation_enabled = form.querySelector('[name=status_rotation_enabled]').checked ? 1 : 0;
+    // Select2 value
+    const logSel = form.querySelector('[name=log_channel_id]');
+    data.log_channel_id = logSel ? ($(logSel).val() || '') : '';
+
+    await ajaxSave('/api/settings/general', data, btn, 'Settings saved!');
+}
+
 async function loadStatusMessages() {
     const res  = await fetch('/api/status-messages');
     const data = await res.json();
@@ -114,7 +130,7 @@ async function loadStatusMessages() {
 async function addStatusMessage() {
     const text = document.getElementById('new-status-text').value.trim();
     const type = document.getElementById('new-status-type').value;
-    if (!text) { showToast('Enter a status message', 'danger'); return; }
+    if (!text) { showToast('Enter a status message', 'error'); return; }
     const res  = await fetch('/api/status-messages', {
         method: 'POST', headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ text, type }),
@@ -124,12 +140,15 @@ async function addStatusMessage() {
         document.getElementById('new-status-text').value = '';
         loadStatusMessages();
         showToast('Status message added!');
+    } else {
+        showToast('Error adding message', 'error');
     }
 }
 
 async function deleteStatusMessage(id) {
     await fetch(`/api/status-messages/${id}`, { method: 'DELETE' });
     loadStatusMessages();
+    showToast('Deleted', 'info');
 }
 
 loadStatusMessages();
