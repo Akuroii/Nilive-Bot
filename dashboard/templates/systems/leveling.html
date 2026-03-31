@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Leveling{% endblock %}
 {% block content %}
+<span data-page-title="Leveling"></span>
 
 <!-- TABS -->
 <div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--border);padding-bottom:0;">
@@ -9,10 +10,8 @@
         style="padding:10px 18px;border:none;background:transparent;
                color:var(--text2);font-size:13px;font-weight:500;
                cursor:pointer;border-bottom:2px solid transparent;
-               transition:all .15s;margin-bottom:-1px;"
-        class="tab-btn">
-        {{ label }}
-    </button>
+               transition:all .15s;margin-bottom:-1px;min-height:44px;"
+        class="tab-btn">{{ label }}</button>
     {% endfor %}
 </div>
 
@@ -23,45 +22,31 @@
         <div class="table-wrap">
             <table class="table">
                 <thead>
-                    <tr>
-                        <th>Rank</th><th>User ID</th>
-                        <th>Level</th><th>XP</th><th>Progress</th>
-                    </tr>
+                    <tr><th>Rank</th><th>User ID</th><th>Level</th><th>XP</th><th>Progress</th></tr>
                 </thead>
                 <tbody hx-get="/api/leveling/leaderboard"
-                       hx-trigger="load" hx-swap="innerHTML">
+                       hx-trigger="load"
+                       hx-boost="false"
+                       hx-swap="innerHTML">
                     {% for l in levels %}
                     <tr>
                         <td>
-                            <div class="rank-badge
-                                {% if loop.index == 1 %}rank-1
-                                {% elif loop.index == 2 %}rank-2
-                                {% elif loop.index == 3 %}rank-3
-                                {% else %}rank-n{% endif %}">
+                            <div class="rank-badge {% if loop.index == 1 %}rank-1{% elif loop.index == 2 %}rank-2{% elif loop.index == 3 %}rank-3{% else %}rank-n{% endif %}">
                                 {{ loop.index }}
                             </div>
                         </td>
                         <td><code>{{ l[0] }}</code></td>
-                        <td>
-                            <span class="badge badge-accent">
-                                Lv {{ l[2] }}
-                            </span>
-                        </td>
+                        <td><span class="badge badge-accent">Lv {{ l[2] }}</span></td>
                         <td>{{ "{:,}".format(l[1]) }}</td>
                         <td>
-                            <div style="background:var(--bg4);
-                                        border-radius:999px;height:5px;
-                                        width:100px;">
-                                <div style="background:var(--accent);
-                                            border-radius:999px;height:5px;
+                            <div style="background:var(--bg4);border-radius:999px;height:5px;width:100px;">
+                                <div style="background:var(--accent);border-radius:999px;height:5px;
                                             width:{{ [((l[1] % 100) / 100 * 100)|int, 100]|min }}%;"></div>
                             </div>
                         </td>
                     </tr>
                     {% else %}
-                    <tr>
-                        <td colspan="5" class="empty">No XP data yet</td>
-                    </tr>
+                    <tr><td colspan="5" class="empty">No XP data yet</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
@@ -78,38 +63,27 @@
                 <div class="card-title">💬 Message XP</div>
                 <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
                     <label class="toggle">
-                        <input type="checkbox" name="enabled"
-                               id="cfg-enabled">
+                        <input type="checkbox" name="enabled" id="cfg-enabled">
                         <span class="toggle-slider"></span>
                     </label>
-                    <span style="font-size:13px;color:var(--text2);">
-                        Leveling enabled
-                    </span>
+                    <span style="font-size:13px;color:var(--text2);">Leveling enabled</span>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label class="form-label">XP per word</label>
-                        <input class="form-input" type="number"
-                               name="xp_per_word" id="cfg-xp-per-word"
-                               min="0" max="10">
+                        <input class="form-input" type="number" name="xp_per_word" id="cfg-xp-per-word" min="0" max="10">
                     </div>
                     <div class="form-group">
                         <label class="form-label">Min XP per message</label>
-                        <input class="form-input" type="number"
-                               name="xp_min_per_message"
-                               id="cfg-xp-min" min="0">
+                        <input class="form-input" type="number" name="xp_min_per_message" id="cfg-xp-min" min="0">
                     </div>
                     <div class="form-group">
                         <label class="form-label">Max XP per message</label>
-                        <input class="form-input" type="number"
-                               name="xp_max_per_message"
-                               id="cfg-xp-max" min="1">
+                        <input class="form-input" type="number" name="xp_max_per_message" id="cfg-xp-max" min="1">
                     </div>
                     <div class="form-group">
                         <label class="form-label">Cooldown (seconds)</label>
-                        <input class="form-input" type="number"
-                               name="xp_cooldown_seconds"
-                               id="cfg-cooldown" min="0">
+                        <input class="form-input" type="number" name="xp_cooldown_seconds" id="cfg-cooldown" min="0">
                     </div>
                 </div>
             </div>
@@ -118,50 +92,36 @@
                 <div class="card-title">🎙️ Voice XP</div>
                 <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
                     <label class="toggle">
-                        <input type="checkbox" name="voice_xp_enabled"
-                               id="cfg-voice-enabled">
+                        <input type="checkbox" name="voice_xp_enabled" id="cfg-voice-enabled">
                         <span class="toggle-slider"></span>
                     </label>
-                    <span style="font-size:13px;color:var(--text2);">
-                        Voice XP enabled
-                    </span>
+                    <span style="font-size:13px;color:var(--text2);">Voice XP enabled</span>
                 </div>
                 <div class="form-group">
                     <label class="form-label">XP per minute in voice</label>
-                    <input class="form-input" type="number"
-                           name="voice_xp_per_minute"
-                           id="cfg-voice-xp" min="0">
+                    <input class="form-input" type="number" name="voice_xp_per_minute" id="cfg-voice-xp" min="0">
                 </div>
                 <label class="form-check" style="margin-bottom:16px;">
-                    <input type="checkbox" name="voice_require_unmuted"
-                           id="cfg-voice-unmuted">
+                    <input type="checkbox" name="voice_require_unmuted" id="cfg-voice-unmuted">
                     Require unmuted to earn voice XP
                 </label>
-                <div class="form-hint">
-                    Voice XP is never given when alone, deafened,
-                    or in AFK channel.
-                </div>
+                <div class="form-hint">Voice XP is never given when alone, deafened, or in AFK channel.</div>
             </div>
 
             <div class="card">
                 <div class="card-title">🚫 Anti-Spam</div>
                 <label class="form-check" style="margin-bottom:16px;">
-                    <input type="checkbox" name="spam_detection_enabled"
-                           id="cfg-spam">
+                    <input type="checkbox" name="spam_detection_enabled" id="cfg-spam">
                     Enable spam detection
                 </label>
                 <div class="form-row">
                     <div class="form-group">
                         <label class="form-label">Spam threshold (messages)</label>
-                        <input class="form-input" type="number"
-                               name="spam_threshold"
-                               id="cfg-spam-thresh" min="2">
+                        <input class="form-input" type="number" name="spam_threshold" id="cfg-spam-thresh" min="2">
                     </div>
                     <div class="form-group">
                         <label class="form-label">XP penalty per spam</label>
-                        <input class="form-input" type="number"
-                               name="spam_xp_penalty"
-                               id="cfg-spam-penalty" min="0">
+                        <input class="form-input" type="number" name="spam_xp_penalty" id="cfg-spam-penalty" min="0">
                     </div>
                 </div>
             </div>
@@ -169,40 +129,30 @@
             <div class="card">
                 <div class="card-title">📢 Level Up Announcements</div>
                 <label class="form-check" style="margin-bottom:16px;">
-                    <input type="checkbox" name="levelup_announce"
-                           id="cfg-announce">
+                    <input type="checkbox" name="levelup_announce" id="cfg-announce">
                     Announce level ups
                 </label>
                 <div class="form-group">
-                    <label class="form-label">
-                        Level up channel ID (empty = same channel)
-                    </label>
-                    <input class="form-input" name="levelup_channel_id"
-                           id="cfg-levelup-channel"
-                           placeholder="Leave empty for same channel">
+                    <label class="form-label">Level up channel (empty = same channel)</label>
+                    <select class="nero-channel-picker form-input"
+                            name="levelup_channel_id"
+                            id="cfg-levelup-channel"></select>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">
-                        Custom level up message
-                    </label>
-                    <input class="form-input" name="levelup_message"
-                           id="cfg-levelup-msg"
+                    <label class="form-label">Custom level up message</label>
+                    <input class="form-input" name="levelup_message" id="cfg-levelup-msg"
                            placeholder="Use {user}, {level}, {name}">
                 </div>
                 <label class="form-check">
-                    <input type="checkbox" name="remove_old_reward_role"
-                           id="cfg-remove-old">
+                    <input type="checkbox" name="remove_old_reward_role" id="cfg-remove-old">
                     Remove old reward role when new one is given
                 </label>
             </div>
 
         </div>
         <div style="margin-top:4px;">
-            <button type="button" class="btn btn-primary"
-                    onclick="saveConfig()">Save Config</button>
-            <div id="config-status"
-                 style="display:inline;margin-left:12px;
-                        font-size:13px;"></div>
+            <button type="button" class="btn btn-primary" id="cfg-save-btn"
+                    onclick="saveConfig(this)">Save Config</button>
         </div>
     </form>
 </div>
@@ -215,55 +165,35 @@
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Level required</label>
                 <input class="form-input" id="reward-level"
-                       type="number" min="1" placeholder="e.g. 10"
-                       style="width:130px;">
+                       type="number" min="1" placeholder="e.g. 10" style="width:130px;">
             </div>
-            <div class="form-group" style="margin-bottom:0;">
-                <label class="form-label">Role ID</label>
-                <input class="form-input" id="reward-role"
-                       placeholder="Right click role → Copy ID"
-                       style="width:220px;">
+            <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px;">
+                <label class="form-label">Role</label>
+                <select class="nero-role-picker form-input" id="reward-role-picker"></select>
             </div>
-            <button class="btn btn-primary"
-                    onclick="addReward()">Add Reward</button>
+            <button class="btn btn-primary" onclick="addReward()">Add Reward</button>
         </div>
-        <div id="reward-status"
-             style="margin-top:10px;font-size:13px;"></div>
     </div>
 
     <div class="card">
         <div class="card-title">🎁 Level Rewards</div>
         <div class="table-wrap">
             <table class="table">
-                <thead>
-                    <tr>
-                        <th>Level</th><th>Role ID</th><th></th>
-                    </tr>
-                </thead>
+                <thead><tr><th>Level</th><th>Role ID</th><th></th></tr></thead>
                 <tbody id="rewards-tbody">
                     {% for r in rewards %}
                     <tr>
-                        <td>
-                            <span class="badge badge-accent">
-                                Level {{ r[1] }}
-                            </span>
-                        </td>
+                        <td><span class="badge badge-accent">Level {{ r[1] }}</span></td>
                         <td><code>{{ r[2] }}</code></td>
                         <td>
                             <button class="btn btn-sm btn-danger"
-                                onclick="showConfirm(
-                                    'Delete Level {{ r[1] }} reward?',
-                                    () => deleteReward({{ r[0] }}))">
+                                onclick="showConfirm('Delete Level {{ r[1] }} reward?', () => deleteReward({{ r[0] }}))">
                                 Delete
                             </button>
                         </td>
                     </tr>
                     {% else %}
-                    <tr>
-                        <td colspan="3" class="empty">
-                            No rewards configured yet
-                        </td>
-                    </tr>
+                    <tr><td colspan="3" class="empty">No rewards configured yet</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
@@ -276,15 +206,12 @@
     <div class="card">
         <div class="card-title">✨ XP Multiplier Roles</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Roles with an XP multiplier. Multipliers do NOT stack —
-            the highest one wins.
+            Roles with an XP multiplier. Multipliers do NOT stack — the highest one wins.
         </p>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px;">
-            <div class="form-group" style="margin-bottom:0;">
-                <label class="form-label">Role ID</label>
-                <input class="form-input" id="bonus-role"
-                       placeholder="Right click role → Copy ID"
-                       style="width:220px;">
+            <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px;">
+                <label class="form-label">Role</label>
+                <select class="nero-role-picker form-input" id="bonus-role-picker"></select>
             </div>
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Multiplier</label>
@@ -292,42 +219,30 @@
                        type="number" min="1.1" max="10" step="0.1"
                        value="1.5" style="width:120px;">
             </div>
-            <button class="btn btn-primary"
-                    onclick="addBonus()">Add Bonus Role</button>
+            <button class="btn btn-primary" onclick="addBonus()">Add Bonus Role</button>
         </div>
-        <div id="bonus-list">
-            <span class="text-muted text-sm">Loading...</span>
-        </div>
+        <div id="bonus-list"><span class="text-muted text-sm">Loading…</span></div>
     </div>
 
     <div class="card">
         <div class="card-title">🚫 XP Blacklist Roles</div>
-        <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Members with these roles earn 0 XP.
-        </p>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">Members with these roles earn 0 XP.</p>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px;">
-            <div class="form-group" style="margin-bottom:0;">
-                <label class="form-label">Role ID</label>
-                <input class="form-input" id="blacklist-role"
-                       placeholder="Right click role → Copy ID"
-                       style="width:220px;">
+            <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px;">
+                <label class="form-label">Role</label>
+                <select class="nero-role-picker form-input" id="blacklist-role-picker"></select>
             </div>
-            <button class="btn btn-danger"
-                    onclick="addBlacklist()">Add Blacklist Role</button>
+            <button class="btn btn-danger" onclick="addBlacklist()">Add Blacklist Role</button>
         </div>
-        <div id="blacklist-list">
-            <span class="text-muted text-sm">Loading...</span>
-        </div>
+        <div id="blacklist-list"><span class="text-muted text-sm">Loading…</span></div>
     </div>
 </div>
 
 {% block scripts %}
 <script>
-// ── TAB SWITCHING ──
+// ── TAB SWITCHING ──────────────────────────────────────────────
 function switchTab(name) {
-    document.querySelectorAll('.tab-content').forEach(el => {
-        el.style.display = 'none';
-    });
+    document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
     document.getElementById('tab-content-' + name).style.display = 'block';
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.style.borderBottomColor = 'transparent';
@@ -339,7 +254,7 @@ function switchTab(name) {
 }
 switchTab('leaderboard');
 
-// ── LOAD CONFIG ──
+// ── LOAD CONFIG ────────────────────────────────────────────────
 async function loadConfig() {
     const res  = await fetch('/api/leveling/config');
     if (!res.ok) return;
@@ -350,30 +265,35 @@ async function loadConfig() {
         const el = document.getElementById(id);
         if (!el) return;
         if (el.type === 'checkbox') el.checked = !!val;
-        else el.value = val ?? '';
+        else if (el.classList.contains('nero-channel-picker')) {
+            setTimeout(() => { $(el).val(String(val || '')).trigger('change.select2'); }, 600);
+        } else el.value = val ?? '';
     };
-    set('cfg-enabled',       c.enabled);
-    set('cfg-xp-per-word',   c.xp_per_word);
-    set('cfg-xp-min',        c.xp_min_per_message);
-    set('cfg-xp-max',        c.xp_max_per_message);
-    set('cfg-cooldown',      c.xp_cooldown_seconds);
-    set('cfg-voice-enabled', c.voice_xp_enabled);
-    set('cfg-voice-xp',      c.voice_xp_per_minute);
-    set('cfg-voice-unmuted', c.voice_require_unmuted);
-    set('cfg-spam',          c.spam_detection_enabled);
-    set('cfg-spam-thresh',   c.spam_threshold);
-    set('cfg-spam-penalty',  c.spam_xp_penalty);
-    set('cfg-announce',      c.levelup_announce);
+    set('cfg-enabled',         c.enabled);
+    set('cfg-xp-per-word',     c.xp_per_word);
+    set('cfg-xp-min',          c.xp_min_per_message);
+    set('cfg-xp-max',          c.xp_max_per_message);
+    set('cfg-cooldown',        c.xp_cooldown_seconds);
+    set('cfg-voice-enabled',   c.voice_xp_enabled);
+    set('cfg-voice-xp',        c.voice_xp_per_minute);
+    set('cfg-voice-unmuted',   c.voice_require_unmuted);
+    set('cfg-spam',            c.spam_detection_enabled);
+    set('cfg-spam-thresh',     c.spam_threshold);
+    set('cfg-spam-penalty',    c.spam_xp_penalty);
+    set('cfg-announce',        c.levelup_announce);
     set('cfg-levelup-channel', c.levelup_channel_id);
-    set('cfg-levelup-msg',   c.levelup_message);
-    set('cfg-remove-old',    c.remove_old_reward_role);
+    set('cfg-levelup-msg',     c.levelup_message);
+    set('cfg-remove-old',      c.remove_old_reward_role);
 }
 loadConfig();
 
-async function saveConfig() {
+async function saveConfig(btn) {
     const getVal = id => {
         const el = document.getElementById(id);
-        return el.type === 'checkbox' ? (el.checked ? 1 : 0) : el.value;
+        if (!el) return '';
+        if (el.type === 'checkbox') return el.checked ? 1 : 0;
+        if (el.classList.contains('nero-channel-picker')) return $(el).val() || '';
+        return el.value;
     };
     const payload = {
         enabled:               getVal('cfg-enabled'),
@@ -392,57 +312,38 @@ async function saveConfig() {
         levelup_message:       getVal('cfg-levelup-msg'),
         remove_old_reward_role:getVal('cfg-remove-old'),
     };
-    const res  = await fetch('/api/leveling/config', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(payload),
-    });
-    const data = await res.json();
-    const status = document.getElementById('config-status');
-    if (data.success) {
-        showToast('Config saved!');
-        status.textContent = '✅ Saved!';
-        status.style.color = 'var(--success)';
-    } else {
-        showToast('Error saving', 'danger');
-        status.textContent = '❌ Error';
-        status.style.color = 'var(--danger)';
-    }
-    setTimeout(() => status.textContent = '', 3000);
+    await ajaxSave('/api/leveling/config', payload, btn, 'Leveling config saved!');
 }
 
-// ── REWARDS ──
+// ── REWARDS ────────────────────────────────────────────────────
 async function addReward() {
     const level   = document.getElementById('reward-level').value;
-    const role_id = document.getElementById('reward-role').value;
-    if (!level || !role_id) {
-        showToast('Enter level and role ID', 'danger'); return;
-    }
+    const rp      = document.getElementById('reward-role-picker');
+    const role_id = rp ? ($(rp).val() || '') : '';
+    if (!level || !role_id) { showToast('Select a level and role', 'warning'); return; }
     const res  = await fetch('/api/leveling/reward', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ level: parseInt(level), role_id }),
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ level: parseInt(level), role_id }),
     });
     const data = await res.json();
     if (data.success) {
         showToast('Reward added!');
         document.getElementById('reward-level').value = '';
-        document.getElementById('reward-role').value  = '';
-        location.reload();
+        if (rp) $(rp).val('').trigger('change.select2');
+        setTimeout(() => location.reload(), 600);
     } else {
-        showToast('Error adding reward', 'danger');
+        showToast(data.error || 'Error adding reward', 'error');
     }
 }
 
 async function deleteReward(id) {
-    const res  = await fetch(`/api/leveling/reward/${id}`,
-                             { method: 'DELETE' });
+    const res  = await fetch(`/api/leveling/reward/${id}`, { method: 'DELETE' });
     const data = await res.json();
-    if (data.success) { showToast('Reward deleted'); location.reload(); }
-    else showToast('Error', 'danger');
+    if (data.success) { showToast('Reward deleted', 'info'); setTimeout(() => location.reload(), 600); }
+    else showToast('Error', 'error');
 }
 
-// ── BONUS ROLES ──
+// ── BONUS ROLES ────────────────────────────────────────────────
 async function loadBonusRoles() {
     const res  = await fetch('/api/leveling/bonus-roles');
     if (!res.ok) return;
@@ -457,39 +358,36 @@ async function loadBonusRoles() {
                     padding:9px 0;border-bottom:1px solid var(--border);">
             <div>
                 <code>${r.role_id}</code>
-                <span class="badge badge-accent" style="margin-left:8px;">
-                    ${r.multiplier}x
-                </span>
+                <span class="badge badge-accent" style="margin-left:8px;">${r.multiplier}x</span>
             </div>
-            <button class="btn btn-sm btn-danger"
-                onclick="deleteBonus(${r.id})">Remove</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteBonus(${r.id})">Remove</button>
         </div>`).join('');
 }
 
 async function addBonus() {
-    const role_id    = document.getElementById('bonus-role').value;
+    const rp         = document.getElementById('bonus-role-picker');
+    const role_id    = rp ? ($(rp).val() || '') : '';
     const multiplier = document.getElementById('bonus-mult').value;
-    if (!role_id) { showToast('Enter role ID', 'danger'); return; }
+    if (!role_id) { showToast('Select a role', 'warning'); return; }
     const res  = await fetch('/api/leveling/bonus-role', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ role_id, multiplier: parseFloat(multiplier) }),
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ role_id, multiplier: parseFloat(multiplier) }),
     });
     const data = await res.json();
     if (data.success) {
         showToast('Bonus role added!');
-        document.getElementById('bonus-role').value = '';
+        if (rp) $(rp).val('').trigger('change.select2');
         loadBonusRoles();
-    } else {
-        showToast('Error', 'danger');
-    }
+    } else { showToast('Error', 'error'); }
 }
 
 async function deleteBonus(id) {
     await fetch(`/api/leveling/bonus-role/${id}`, { method: 'DELETE' });
+    showToast('Removed', 'info');
     loadBonusRoles();
 }
 
+// ── BLACKLIST ─────────────────────────────────────────────────
 async function loadBlacklist() {
     const res  = await fetch('/api/leveling/blacklist');
     if (!res.ok) return;
@@ -503,31 +401,29 @@ async function loadBlacklist() {
         <div style="display:flex;align-items:center;justify-content:space-between;
                     padding:9px 0;border-bottom:1px solid var(--border);">
             <code>${r.role_id}</code>
-            <button class="btn btn-sm btn-danger"
-                onclick="deleteBlacklist(${r.id})">Remove</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteBlacklist(${r.id})">Remove</button>
         </div>`).join('');
 }
 
 async function addBlacklist() {
-    const role_id = document.getElementById('blacklist-role').value;
-    if (!role_id) { showToast('Enter role ID', 'danger'); return; }
+    const rp      = document.getElementById('blacklist-role-picker');
+    const role_id = rp ? ($(rp).val() || '') : '';
+    if (!role_id) { showToast('Select a role', 'warning'); return; }
     const res  = await fetch('/api/leveling/blacklist', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ role_id }),
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ role_id }),
     });
     const data = await res.json();
     if (data.success) {
         showToast('Role blacklisted!');
-        document.getElementById('blacklist-role').value = '';
+        if (rp) $(rp).val('').trigger('change.select2');
         loadBlacklist();
-    } else {
-        showToast('Error', 'danger');
-    }
+    } else { showToast('Error', 'error'); }
 }
 
 async function deleteBlacklist(id) {
     await fetch(`/api/leveling/blacklist/${id}`, { method: 'DELETE' });
+    showToast('Removed', 'info');
     loadBlacklist();
 }
 
