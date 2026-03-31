@@ -38,10 +38,12 @@ def render(template, **ctx):
     Full-page load returns the complete base template as normal.
     """
     if request.headers.get('HX-Request'):
-        # Derive the partial template name: 'leveling.html' → 'leveling_partial.html'
-        # We use a single convention: pass partial=True into the template context
+        # HTMX request: return just the page content (no base.html wrapper)
         ctx['_htmx'] = True
-    return render_template(template, **ctx)
+        return render_template(template, **ctx)
+    
+    # Normal request: wrap the page in base.html
+    return render_template('base.html', page=template, **ctx)
 
 def calculate_level(xp: int) -> int:
     level = 0
