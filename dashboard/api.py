@@ -140,55 +140,6 @@ def get_guild_channels():
     return jsonify({"results": results})
 
 
-# Keep old /roles and /channels as aliases for backwards compat
-@api_bp.route("/roles")
-@require_guild
-def get_roles():
-    return get_guild_roles()
-
-
-@api_bp.route("/channels")
-@require_guild
-def get_channels():
-    return get_guild_channels()
-
-
-@api_bp.route("/members/search")
-@require_guild
-    guild_id = get_session_guild_id()
-    async def fetch():
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "SELECT role_id, role_name FROM boost_color_roles WHERE guild_id = ?",
-                (guild_id,))
-            return await cursor.fetchall()
-    rows = run_async(fetch())
-    return jsonify({"results": [{"id": r[0], "text": r[1]} for r in rows]})
-
-
-@api_bp.route("/channels")
-@require_guild
-def get_channels():
-    guild_id = get_session_guild_id()
-    async def fetch():
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT DISTINCT announce_channel_id FROM mvp_config
-                WHERE guild_id = ? AND announce_channel_id IS NOT NULL
-                UNION
-                SELECT DISTINCT log_channel_id FROM ticket_config
-                WHERE guild_id = ? AND log_channel_id IS NOT NULL
-                UNION
-                SELECT DISTINCT discord_channel_id FROM youtube_config
-                WHERE guild_id = ?
-            """, (guild_id, guild_id, guild_id))
-            return await cursor.fetchall()
-    rows = run_async(fetch())
-    return jsonify({"results": [
-        {"id": r[0], "text": f"#{r[0]}"} for r in rows if r[0]
-    ]})
-
-
 @api_bp.route("/members/search")
 @require_guild
 def members_search():
@@ -613,8 +564,6 @@ def delete_warning_threshold(threshold_id: int):
     return jsonify({"success": True})
 
 
-# ── MVP Config API ────────────────��─────────────────────────
-
 @api_bp.route("/mvp/config", methods=["GET"])
 @require_guild
 def get_mvp_config_api():
@@ -665,8 +614,6 @@ def save_mvp_config_api():
     log_action(guild_id, "Updated MVP config", "mvp")
     return jsonify({"success": True})
 
-
-# ── Shop Purchase History & Temp Roles ──────────────────────
 
 @api_bp.route("/shop/purchase-history")
 @require_guild
@@ -728,8 +675,6 @@ def shop_temp_roles():
         "<tr><td colspan='4' class='empty'>"
         "No active temp roles</td></tr>")
 
-
-# ── Leveling Config & Rewards ───────────────────────────────
 
 @api_bp.route("/leveling/config", methods=["GET"])
 @require_guild
