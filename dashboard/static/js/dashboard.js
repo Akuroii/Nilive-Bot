@@ -1,44 +1,109 @@
-// ═══════════════════════════════════════════════
-// NERO DASHBOARD — dashboard.js
-// Global JS: theme toggle, modals, toasts, helpers
-// ═══════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// NERO DASHBOARD — dashboard.js  (Phase 2 upgrade)
+// ═══════════════════════════════════════════════════════════════
 
-// ── THEME TOGGLE ──
+// ── THEME TOGGLE ──────────────────────────────────────────────
 function toggleTheme() {
     const html = document.documentElement;
     const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
     html.setAttribute('data-theme', next);
     localStorage.setItem('nero-theme', next);
 }
-
 (function initTheme() {
     const saved = localStorage.getItem('nero-theme');
     if (saved) document.documentElement.setAttribute('data-theme', saved);
 })();
 
-// ── MOBILE SIDEBAR ──
+// ── MOBILE SIDEBAR ────────────────────────────────────────────
 function toggleSidebar() {
-    document.querySelector('.sidebar')?.classList.toggle('open');
+    const sidebar  = document.getElementById('sidebar');
+    const overlay  = document.querySelector('.sidebar-overlay');
+    const isOpen   = sidebar && sidebar.classList.contains('open');
+    if (sidebar) sidebar.classList.toggle('open');
+    if (overlay) overlay.classList.toggle('active');
+    document.body.classList.toggle('sidebar-open', !isOpen);
 }
 
-// ── TOAST ──
-function showToast(message, type = 'success', duration = 3000) {
-    let toast = document.getElementById('global-toast');
-    if (!toast) {
-        toast = document.createElement('div');
-        toast.id = 'global-toast';
-        toast.className = 'toast';
-        document.body.appendChild(toast);
+// ── TOAST SYSTEM (4 types) ────────────────────────────────────
+const TOAST_CONFIG = {
+    success: { icon: '✅', bg: 'var(--success)',  fg: '#000', dur: 3000 },
+    error:   { icon: '❌', bg: 'var(--danger)',   fg: '#fff', dur: 5000 },
+    warning: { icon: '⚠️', bg: 'var(--warning)',  fg: '#000', dur: 4000 },
+    info:    { icon: 'ℹ️', bg: 'var(--accent)',   fg: '#fff', dur: 3000 },
+    // Legacy aliases
+    danger:  { icon: '❌', bg: 'var(--danger)',   fg: '#fff', dur: 5000 },
+};
+
+function showToast(message, type = 'success', duration) {
+    const cfg = TOAST_CONFIG[type] || TOAST_CONFIG.success;
+    const dur = duration || cfg.dur;
+
+    let container = document.getElementById('toast-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'toast-container';
+        document.body.appendChild(container);
     }
-    toast.textContent = message;
-    toast.className = `toast show${type === 'danger' ? ' danger' : ''}`;
-    clearTimeout(toast._timer);
-    toast._timer = setTimeout(() => {
+
+    const toast = document.createElement('div');
+    toast.className = 'toast-item';
+    toast.innerHTML = `<span class="toast-icon">${cfg.icon}</span><span class="toast-msg">${message}</span><button class="toast-close" onclick="this.parentElement.remove()">✕</button>`;
+    toast.style.setProperty('--toast-bg', cfg.bg);
+    toast.style.setProperty('--toast-fg', cfg.fg);
+    container.appendChild(toast);
+
+    // Animate in
+    requestAnimationFrame(() => toast.classList.add('show'));
+
+    // Auto-dismiss
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => {
         toast.classList.remove('show');
-    }, duration);
+        setTimeout(() => toast.remove(), 300);
+    }, dur);
 }
 
-// ── CONFIRM MODAL ──
+// ── LOADING STATE HELPERS ─────────────────────────────────────
+function setLoading(btn, isLoading, loadText = 'Saving…') {
+    if (!btn) return;
+    if (isLoading) {
+        btn._origText  = btn.innerHTML;
+        btn._origDis   = btn.disabled;
+        btn.disabled   = true;
+        btn.innerHTML  = `<span class="btn-spinner"></span> ${loadText}`;
+        btn.classList.add('loading');
+    } else {
+        btn.disabled   = btn._origDis || false;
+        btn.innerHTML  = btn._origText || btn.innerHTML;
+        btn.classList.remove('loading');
+    }
+}
+
+// Helper: AJAX save with standard loading + toast feedback
+async function ajaxSave(url, payload, btn, successMsg = 'Saved!') {
+    if (btn) setLoading(btn, true);
+    try {
+        const res  = await fetch(url, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (data.success || data.ok) {
+            showToast(successMsg, 'success');
+        } else {
+            showToast(data.error || 'Save failed', 'error');
+        }
+        return data;
+    } catch (err) {
+        showToast('Connection error', 'error');
+        return null;
+    } finally {
+        if (btn) setLoading(btn, false);
+    }
+}
+
+// ── CONFIRM MODAL ─────────────────────────────────────────────
 function showConfirm(message, onConfirm) {
     let overlay = document.getElementById('confirm-overlay');
     if (!overlay) {
@@ -58,23 +123,21 @@ function showConfirm(message, onConfirm) {
     }
     document.getElementById('confirm-message').textContent = message;
     overlay.style.display = 'flex';
-    document.getElementById('confirm-cancel').onclick = () => {
-        overlay.style.display = 'none';
-    };
+    document.getElementById('confirm-cancel').onclick = () => { overlay.style.display = 'none'; };
     document.getElementById('confirm-ok').onclick = () => {
         overlay.style.display = 'none';
         onConfirm();
     };
 }
 
-// ── EDIT MEMBER MODAL ──
+// ── EDIT MEMBER MODAL ─────────────────────────────────────────
 let _editUid = null;
 
 function openEditModal(uid, xp, coins) {
     _editUid = uid;
     document.getElementById('edit-uid-label').textContent = uid;
-    document.getElementById('edit-xp').value   = xp;
-    document.getElementById('edit-coins').value = coins;
+    document.getElementById('edit-xp').value    = xp;
+    document.getElementById('edit-coins').value  = coins;
     document.getElementById('edit-modal').style.display = 'flex';
 }
 
@@ -86,66 +149,41 @@ function closeEditModal() {
 async function saveEditModal() {
     const xp    = parseInt(document.getElementById('edit-xp').value);
     const coins = parseInt(document.getElementById('edit-coins').value);
-    const res   = await fetch('/api/edit-member', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ user_id: _editUid, xp, coins }),
-    });
-    const data = await res.json();
-    if (data.success) {
-        showToast('Member updated!');
+    const btn   = document.querySelector('#edit-modal .btn-primary');
+    const data  = await ajaxSave('/api/edit-member', { user_id: _editUid, xp, coins }, btn, 'Member updated!');
+    if (data && data.success) {
         closeEditModal();
-        setTimeout(() => location.reload(), 800);
-    } else {
-        showToast('Error saving', 'danger');
+        setTimeout(() => location.reload(), 600);
     }
 }
 
-// ── HTMX EVENTS ──
-document.addEventListener('htmx:afterRequest', function(e) {
-    if (e.detail.xhr.status >= 400) {
-        showToast('Something went wrong', 'danger');
-    }
-});
-
-document.addEventListener('htmx:afterSwap', function(e) {
-    if (e.detail.target.id &&
-        e.detail.target.id.includes('tbody') &&
-        e.detail.xhr.status === 200) {
-        // Rows swapped successfully — no toast needed
-    }
-});
-
-// ── COPY TO CLIPBOARD ──
+// ── COPY TO CLIPBOARD ─────────────────────────────────────────
 function copyText(text) {
-    navigator.clipboard.writeText(text).then(() => {
-        showToast('Copied!');
-    });
+    navigator.clipboard.writeText(text).then(() => showToast('Copied!', 'info'));
 }
 
-// ── COLOR PICKER SYNC ──
+// ── COLOR PICKER SYNC ─────────────────────────────────────────
 function syncColorInput(pickerId, textId) {
     const picker = document.getElementById(pickerId);
     const text   = document.getElementById(textId);
     if (!picker || !text) return;
     picker.addEventListener('input', () => { text.value = picker.value; });
-    text.addEventListener('input', () => {
-        if (/^#[0-9A-Fa-f]{6}$/.test(text.value)) {
-            picker.value = text.value;
-        }
+    text.addEventListener('input',  () => {
+        if (/^#[0-9A-Fa-f]{6}$/.test(text.value)) picker.value = text.value;
     });
 }
 
-// ── SAVE BANNER AUTO-HIDE ──
-(function hideSaveBanner() {
-    const banner = document.querySelector('.save-banner');
-    if (banner) setTimeout(() => banner.remove(), 4000);
-})();
-
-// ── CLOSE MODAL ON OVERLAY CLICK ──
+// ── CLOSE MODAL ON OVERLAY CLICK ─────────────────────────────
 document.addEventListener('click', function(e) {
-    const overlay = document.getElementById('confirm-overlay');
-    if (e.target === overlay) overlay.style.display = 'none';
-    const editModal = document.getElementById('edit-modal');
-    if (e.target === editModal) closeEditModal();
+    const co = document.getElementById('confirm-overlay');
+    if (e.target === co) co.style.display = 'none';
+    const em = document.getElementById('edit-modal');
+    if (e.target === em) closeEditModal();
+});
+
+// ── HTMX ERROR HANDLING ───────────────────────────────────────
+document.addEventListener('htmx:afterRequest', function(e) {
+    if (e.detail.xhr && e.detail.xhr.status >= 500) {
+        showToast('Server error — please try again', 'error');
+    }
 });
