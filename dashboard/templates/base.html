@@ -83,53 +83,94 @@
 
     <nav style="flex:1;padding:12px 10px;overflow-y:auto;">
 
-        <!-- GENERAL -->
-        <div style="font-size:10px;font-weight:600;color:var(--text3);
-                    text-transform:uppercase;letter-spacing:.08em;
-                    padding:8px 8px 4px;">General</div>
-
-        <a href="{{ url_for('index') }}"
-           class="nav-item {% if request.endpoint == 'index' %}active{% endif %}">
-            <span class="nav-icon">🏠</span> Overview
-        </a>
-        <a href="{{ url_for('members') }}"
-           class="nav-item {% if request.endpoint == 'members' %}active{% endif %}">
-            <span class="nav-icon">👥</span> Members
-        </a>
-        <a href="{{ url_for('audit_log') }}"
-           class="nav-item {% if request.endpoint == 'audit_log' %}active{% endif %}">
-            <span class="nav-icon">📝</span> Audit Log
-        </a>
-
-        <!-- MANAGE -->
-        <div style="font-size:10px;font-weight:600;color:var(--text3);
-                    text-transform:uppercase;letter-spacing:.08em;
-                    padding:14px 8px 4px;">Manage</div>
-
-        <a href="{{ url_for('moderation') }}"
-           class="nav-item {% if request.endpoint == 'moderation' %}active{% endif %}">
-            <span class="nav-icon">🛡️</span> Moderation
-        </a>
-        <a href="{{ url_for('tickets') }}"
-           class="nav-item {% if request.endpoint == 'tickets' %}active{% endif %}">
-            <span class="nav-icon">🎫</span> Tickets
-        </a>
-        <a href="{{ url_for('embed_builder') }}"
-           class="nav-item {% if request.endpoint == 'embed_builder' %}active{% endif %}">
-            <span class="nav-icon">📦</span> Embed Builder
-        </a>
-        <a href="{{ url_for('reaction_roles') }}"
-           class="nav-item {% if request.endpoint == 'reaction_roles' %}active{% endif %}">
-            <span class="nav-icon">🎭</span> Reaction Roles
-        </a>
-        <a href="{{ url_for('triggers_page') }}"
-           class="nav-item {% if request.endpoint == 'triggers_page' %}active{% endif %}">
-            <span class="nav-icon">⚡</span> Triggers
-        </a>
-        <a href="{{ url_for('custom_commands') }}"
-           class="nav-item {% if request.endpoint == 'custom_commands' %}active{% endif %}">
-            <span class="nav-icon">🔨</span> Custom Commands
-        </a>
+<!-- ─── GENERAL ────────── -->
+<div class="nav-section">
+    <div class="nav-section-title">General</div>
+    
+    <a href="/dashboard/{{ guild_id }}/overview" 
+       hx-get="/dashboard/{{ guild_id }}/overview" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link active">
+        <span class="nav-icon">🏠</span>
+        <span class="nav-text">Overview</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/members" 
+       hx-get="/dashboard/{{ guild_id }}/members" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">👥</span>
+        <span class="nav-text">Members</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/auditlog" 
+       hx-get="/dashboard/{{ guild_id }}/auditlog" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">📝</span>
+        <span class="nav-text">Audit Log</span>
+    </a>
+</div>
+<!-- ─── MANAGE ───────── -->
+<div class="nav-section">
+    <div class="nav-section-title">Manage</div>
+    
+    <a href="/dashboard/{{ guild_id }}/moderation" 
+       hx-get="/dashboard/{{ guild_id }}/moderation" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">🛡️</span>
+        <span class="nav-text">Moderation</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/tickets" 
+       hx-get="/dashboard/{{ guild_id }}/tickets" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">🎫</span>
+        <span class="nav-text">Tickets</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/embedbuilder" 
+       hx-get="/dashboard/{{ guild_id }}/embedbuilder" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">📦</span>
+        <span class="nav-text">Embed Builder</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/reactionroles" 
+       hx-get="/dashboard/{{ guild_id }}/reactionroles" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">🎭</span>
+        <span class="nav-text">Reaction Roles</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/triggers" 
+       hx-get="/dashboard/{{ guild_id }}/triggers" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">⚡</span>
+        <span class="nav-text">Triggers</span>
+    </a>
+</div>
 
 <!-- ─── SYSTEMS ───────── -->
 <div class="nav-section">
@@ -186,40 +227,70 @@
     </a>
 </div>
 
-        <!-- CONFIG -->
-        <div style="font-size:10px;font-weight:600;color:var(--text3);
-                    text-transform:uppercase;letter-spacing:.08em;
-                    padding:14px 8px 4px;">Config</div>
-
-        <a href="{{ url_for('config_general') }}"
-           class="nav-item {% if request.endpoint == 'config_general' %}active{% endif %}">
-            <span class="nav-icon">⚙️</span> General Settings
-        </a>
-        <a href="{{ url_for('config_welcome') }}"
-           class="nav-item {% if request.endpoint == 'config_welcome' %}active{% endif %}">
-            <span class="nav-icon">👋</span> Welcome & Leave
-        </a>
-        <a href="{{ url_for('config_boost') }}"
-           class="nav-item {% if request.endpoint == 'config_boost' %}active{% endif %}">
-            <span class="nav-icon">🔰</span> Boost Roles
-        </a>
-        <a href="{{ url_for('config_announcements') }}"
-           class="nav-item {% if request.endpoint == 'config_announcements' %}active{% endif %}">
-            <span class="nav-icon">📢</span> Announcements
-        </a>
-        <a href="{{ url_for('config_commands') }}"
-           class="nav-item {% if request.endpoint == 'config_commands' %}active{% endif %}">
-            <span class="nav-icon">🎮</span> Commands
-        </a>
-        {% if is_owner %}
-        <a href="{{ url_for('config_access') }}"
-           class="nav-item {% if request.endpoint == 'config_access' %}active{% endif %}">
-            <span class="nav-icon">🔐</span> Dashboard Access
-        </a>
-        {% endif %}
-
-    </nav>
-
+<!-- ─── CONFIG ─────────── -->
+<div class="nav-section">
+    <div class="nav-section-title">Config</div>
+    
+    <a href="/dashboard/{{ guild_id }}/general" 
+       hx-get="/dashboard/{{ guild_id }}/general" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">⚙️</span>
+        <span class="nav-text">General Settings</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/welcome" 
+       hx-get="/dashboard/{{ guild_id }}/welcome" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">👋</span>
+        <span class="nav-text">Welcome & Leave</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/boost" 
+       hx-get="/dashboard/{{ guild_id }}/boost" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">🔰</span>
+        <span class="nav-text">Boost Roles</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/announcements" 
+       hx-get="/dashboard/{{ guild_id }}/announcements" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">📢</span>
+        <span class="nav-text">Announcements</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/commands" 
+       hx-get="/dashboard/{{ guild_id }}/commands" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">🎮</span>
+        <span class="nav-text">Commands</span>
+    </a>
+    
+    <a href="/dashboard/{{ guild_id }}/access" 
+       hx-get="/dashboard/{{ guild_id }}/access" 
+       hx-target="#content-area" 
+       hx-swap="innerHTML" 
+       hx-push-url="true" 
+       class="nav-link">
+        <span class="nav-icon">🔐</span>
+        <span class="nav-text">Dashboard Access</span>
+    </a>
+</div>
     <!-- USER FOOTER -->
     <div style="padding:12px;border-top:1px solid var(--border);
                 display:flex;align-items:center;gap:10px;">
