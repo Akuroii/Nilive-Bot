@@ -187,3 +187,21 @@ document.addEventListener('htmx:afterRequest', function(e) {
         showToast('Server error — please try again', 'error');
     }
 });
+
+// ── HTMX AFTER SWAP: Re-init Select2 and update page title ──────
+document.addEventListener('htmx:afterSwap', function(e) {
+    // Re-initialize Select2 pickers if NeroSelect is available
+    if (window.NeroSelect && window.NeroSelect.initAll) {
+        window.NeroSelect.initAll(document);
+    }
+    
+    // Update page title from data-page-title attribute
+    const pageTitle = document.querySelector('[data-page-title]');
+    if (pageTitle) {
+        const title = pageTitle.getAttribute('data-page-title');
+        if (title) {
+            const titleEl = document.getElementById('page-title');
+            if (titleEl) titleEl.textContent = title;
+        }
+    }
+});
