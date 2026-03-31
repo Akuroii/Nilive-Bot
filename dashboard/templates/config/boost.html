@@ -1,12 +1,13 @@
 {% extends "base.html" %}
 {% block title %}Boost Roles{% endblock %}
 {% block content %}
+<span data-page-title="Boost Roles"></span>
 
 {% if saved %}
 <div class="save-banner">✅ Settings saved!</div>
 {% endif %}
 
-<form method="POST">
+<form id="boost-form">
     <div class="card">
         <div class="card-header">
             <div class="card-title" style="margin:0;">🔰 Boost Role Configuration</div>
@@ -21,22 +22,25 @@
         </div>
         <div class="form-row">
             <div class="form-group">
-                <label class="form-label">1st boost role ID</label>
-                <input class="form-input" name="boost1_role_id"
-                       value="{{ config.get('boost1_role_id', '') }}"
-                       placeholder="Role given on first boost">
+                <label class="form-label">1st boost role</label>
+                <select class="nero-role-picker form-input"
+                        name="boost1_role_id"
+                        data-value="{{ config.get('boost1_role_id', '') }}"></select>
+                <div class="form-hint">Given on first server boost</div>
             </div>
             <div class="form-group">
-                <label class="form-label">2nd boost role ID</label>
-                <input class="form-input" name="boost2_role_id"
-                       value="{{ config.get('boost2_role_id', '') }}"
-                       placeholder="Role given on second boost">
+                <label class="form-label">2nd boost role</label>
+                <select class="nero-role-picker form-input"
+                        name="boost2_role_id"
+                        data-value="{{ config.get('boost2_role_id', '') }}"></select>
+                <div class="form-hint">Given on second server boost</div>
             </div>
             <div class="form-group">
-                <label class="form-label">Boost announce channel ID</label>
-                <input class="form-input" name="boost2_channel_id"
-                       value="{{ config.get('boost2_channel_id', '') }}"
-                       placeholder="Where to announce new boosts">
+                <label class="form-label">Boost announce channel</label>
+                <select class="nero-channel-picker form-input"
+                        name="boost2_channel_id"
+                        data-value="{{ config.get('boost2_channel_id', '') }}"></select>
+                <div class="form-hint">Where to announce new boosts</div>
             </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:14px;margin-top:8px;">
@@ -52,7 +56,9 @@
             </label>
         </div>
         <div style="margin-top:20px;">
-            <button type="submit" class="btn btn-primary">Save Settings</button>
+            <button type="button" class="btn btn-primary" id="save-btn" onclick="saveBoost(this)">
+                Save Settings
+            </button>
         </div>
     </div>
 </form>
@@ -67,4 +73,23 @@
         <div>• Color roles are managed via <strong>Reaction Roles</strong> with booster_only flag</div>
     </div>
 </div>
+
+{% block scripts %}
+<script>
+async function saveBoost(btn) {
+    const form = document.getElementById('boost-form');
+    const g    = n => $(form.querySelector('[name=' + n + ']')).val() || '';
+    const cb   = n => form.querySelector('[name=' + n + ']')?.checked ? 1 : 0;
+    const payload = {
+        enabled:               cb('enabled'),
+        boost1_role_id:        g('boost1_role_id'),
+        boost2_role_id:        g('boost2_role_id'),
+        boost2_channel_id:     g('boost2_channel_id'),
+        auto_remove_on_unboost:cb('auto_remove_on_unboost'),
+        color_roles_enabled:   cb('color_roles_enabled'),
+    };
+    await ajaxSave('/api/settings/boost', payload, btn, 'Boost settings saved!');
+}
+</script>
+{% endblock %}
 {% endblock %}
