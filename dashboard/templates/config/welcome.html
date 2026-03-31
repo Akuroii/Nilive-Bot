@@ -1,35 +1,36 @@
 {% extends "base.html" %}
 {% block title %}Welcome & Leave{% endblock %}
 {% block content %}
+<span data-page-title="Welcome & Leave"></span>
 
 {% if saved %}
 <div class="save-banner">✅ Settings saved!</div>
 {% endif %}
 
-<form method="POST">
+<form id="welcome-form">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
 
         <div class="card">
             <div class="card-title">👋 Join Settings</div>
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
                 <label class="toggle">
-                    <input type="checkbox" name="join_enabled"
+                    <input type="checkbox" name="join_enabled" id="join-enabled"
                         {% if config.get('join_enabled') %}checked{% endif %}>
                     <span class="toggle-slider"></span>
                 </label>
                 <span style="font-size:13px;color:var(--text2);">Enable welcome messages</span>
             </div>
             <div class="form-group">
-                <label class="form-label">Welcome channel ID</label>
-                <input class="form-input" name="join_channel_id"
-                       value="{{ config.get('join_channel_id', '') }}"
-                       placeholder="Right click channel → Copy ID">
+                <label class="form-label">Welcome channel</label>
+                <select class="nero-channel-picker form-input"
+                        name="join_channel_id"
+                        data-value="{{ config.get('join_channel_id', '') }}"></select>
             </div>
             <div class="form-group">
-                <label class="form-label">Auto-role ID (given on join)</label>
-                <input class="form-input" name="auto_role_id"
-                       value="{{ config.get('auto_role_id', '') }}"
-                       placeholder="Right click role → Copy ID">
+                <label class="form-label">Auto-role (given on join)</label>
+                <select class="nero-role-picker form-input"
+                        name="auto_role_id"
+                        data-value="{{ config.get('auto_role_id', '') }}"></select>
             </div>
             <div class="form-group">
                 <label class="form-label">Message mode</label>
@@ -44,17 +45,17 @@
             <div class="card-title">🚪 Leave Settings</div>
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
                 <label class="toggle">
-                    <input type="checkbox" name="leave_enabled"
+                    <input type="checkbox" name="leave_enabled" id="leave-enabled"
                         {% if config.get('leave_enabled') %}checked{% endif %}>
                     <span class="toggle-slider"></span>
                 </label>
                 <span style="font-size:13px;color:var(--text2);">Enable leave messages</span>
             </div>
             <div class="form-group">
-                <label class="form-label">Leave channel ID</label>
-                <input class="form-input" name="leave_channel_id"
-                       value="{{ config.get('leave_channel_id', '') }}"
-                       placeholder="Right click channel → Copy ID">
+                <label class="form-label">Leave channel</label>
+                <select class="nero-channel-picker form-input"
+                        name="leave_channel_id"
+                        data-value="{{ config.get('leave_channel_id', '') }}"></select>
             </div>
         </div>
 
@@ -73,16 +74,16 @@
             </div>
             <div class="form-row">
                 <div class="form-group">
-                    <label class="form-label">Rules channel ID</label>
-                    <input class="form-input" name="rules_channel_id"
-                           value="{{ config.get('rules_channel_id', '') }}"
-                           placeholder="Right click channel → Copy ID">
+                    <label class="form-label">Rules channel</label>
+                    <select class="nero-channel-picker form-input"
+                            name="rules_channel_id"
+                            data-value="{{ config.get('rules_channel_id', '') }}"></select>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Role to give on accept</label>
-                    <input class="form-input" name="rules_role_id"
-                           value="{{ config.get('rules_role_id', '') }}"
-                           placeholder="Right click role → Copy ID">
+                    <select class="nero-role-picker form-input"
+                            name="rules_role_id"
+                            data-value="{{ config.get('rules_role_id', '') }}"></select>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Accept button text</label>
@@ -94,6 +95,35 @@
         </div>
 
     </div>
-    <button type="submit" class="btn btn-primary">Save Settings</button>
+    <button type="button" class="btn btn-primary" id="save-btn" onclick="saveWelcome(this)">
+        Save Settings
+    </button>
 </form>
+
+{% block scripts %}
+<script>
+function getSelect2Val(name) {
+    const el = document.querySelector('[name="' + name + '"]');
+    return el ? ($(el).val() || '') : '';
+}
+
+async function saveWelcome(btn) {
+    const form = document.getElementById('welcome-form');
+    const cb   = n => form.querySelector('[name=' + n + ']')?.checked ? 1 : 0;
+    const payload = {
+        join_enabled:       cb('join_enabled'),
+        join_channel_id:    getSelect2Val('join_channel_id'),
+        auto_role_id:       getSelect2Val('auto_role_id'),
+        join_message_mode:  form.querySelector('[name=join_message_mode]')?.value,
+        leave_enabled:      cb('leave_enabled'),
+        leave_channel_id:   getSelect2Val('leave_channel_id'),
+        rules_enabled:      cb('rules_enabled'),
+        rules_channel_id:   getSelect2Val('rules_channel_id'),
+        rules_role_id:      getSelect2Val('rules_role_id'),
+        rules_button_text:  form.querySelector('[name=rules_button_text]')?.value,
+    };
+    await ajaxSave('/api/settings/welcome', payload, btn, 'Welcome settings saved!');
+}
+</script>
+{% endblock %}
 {% endblock %}
