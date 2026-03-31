@@ -147,6 +147,7 @@ def get_current_user_context() -> dict:
     user       = session.get("user", {})
     user_id    = int(user.get("id", 0))
     guild_id   = get_session_guild_id()
+    guild_name = session.get("guild_name", "")
     user_level = session.get("user_level")
     if not user_level and guild_id:
         user_level = run_async(_get_permission_level(guild_id, user_id))
@@ -154,6 +155,7 @@ def get_current_user_context() -> dict:
         "user":         user,
         "user_level":   user_level or "",
         "guild_id":     guild_id,
+        "guild_name":   guild_name,
         "is_owner":     user_level == LEVEL_OWNER,
         "is_admin":     LEVEL_RANK.get(user_level, 0) >= LEVEL_RANK[LEVEL_ADMIN],
         "is_moderator": LEVEL_RANK.get(user_level, 0) >= LEVEL_RANK[LEVEL_MODERATOR],
