@@ -34,9 +34,127 @@ def require_guild(f):
     return decorated
 
 
+@api_bp.route("/guild/roles")
+@require_guild
+def get_guild_roles():
+    """
+    Returns all roles in the guild via Discord Bot API.
+    Response: { results: [{id, text, color, position, managed}] }
+    Sorted: custom roles by position desc, then managed/bot roles, then @everyone last.
+    """
+    guild_id    = get_session_guild_id()
+    bot_token   = os.getenv("DISCORD_TOKEN", "")
+    if not bot_token:
+        return jsonify({"results": [], "error": "BOT_TOKEN not set"})
+
+    import requests as _req
+    resp = _req.get(
+        f"https://discord.com/api/v10/guilds/{guild_id}/roles",
+        headers={"Authorization": f"Bot {bot_token}"},
+        timeout=8,
+    )
+    if resp.status_code != 200:
+        return jsonify({"results": [], "error": f"Discord API {resp.status_code}"})
+
+    roles = resp.json()
+    # Sort: custom roles (highest position first), managed last, @everyone last
+    def sort_key(r):
+        if r["id"] == str(guild_id):   return (2, 0)   # @everyone
+        if r.get("managed"):           return (1, -r["position"])
+        return (0, -r["position"])
+
+    roles.sort(key=sort_key)
+
+    results = []
+    for r in roles:
+        color_hex = f"#{r['color']:06x}" if r["color"] else None
+        results.append({
+            "id":       r["id"],
+            "text":     r["name"],
+            "color":    color_hex,
+            "position": r["position"],
+            "managed":  r.get("managed", False),
+        })
+
+    return jsonify({"results": results})
+
+
+@api_bp.route("/guild/channels")
+@require_guild
+def get_guild_channels():
+    """
+    Returns all channels in the guild via Discord Bot API.
+    Response: { results: [{id, text, type_icon, category, type}] }
+    """
+    guild_id  = get_session_guild_id()
+    bot_token = os.getenv("DISCORD_TOKEN", "")
+    if not bot_token:
+        return jsonify({"results": [], "error": "BOT_TOKEN not set"})
+
+    import requests as _req
+    resp = _req.get(
+        f"https://discord.com/api/v10/guilds/{guild_id}/channels",
+        headers={"Authorization": f"Bot {bot_token}"},
+        timeout=8,
+    )
+    if resp.status_code != 200:
+        return jsonify({"results": [], "error": f"Discord API {resp.status_code}"})
+
+    channels = resp.json()
+
+    TYPE_ICON = {
+        0:  "💬",   # text
+        2:  "🔊",   # voice
+        4:  "📁",   # category
+        5:  "📢",   # announcement
+        10: "🧵",   # announcement thread
+        11: "🧵",   # public thread
+        12: "🧵",   # private thread
+        13: "🎙️",  # stage
+        15: "📋",   # forum
+    }
+    TYPE_NAME = {0: "text", 2: "voice", 4: "category", 5: "announcement",
+                 13: "stage", 15: "forum"}
+
+    # Build category map
+    categories = {c["id"]: c["name"] for c in channels if c["type"] == 4}
+
+    results = []
+    for ch in channels:
+        if ch["type"] == 4:
+            continue  # skip category rows themselves
+        icon     = TYPE_ICON.get(ch["type"], "💬")
+        cat_name = categories.get(str(ch.get("parent_id", "")), "")
+        results.append({
+            "id":       ch["id"],
+            "text":     ch["name"],
+            "type_icon": icon,
+            "category": cat_name,
+            "type":     TYPE_NAME.get(ch["type"], "text"),
+        })
+
+    # Sort: text/announce first, then voice, then others; alpha within type
+    type_order = {"text": 0, "announcement": 1, "voice": 2, "stage": 3, "forum": 4}
+    results.sort(key=lambda c: (type_order.get(c["type"], 9), c["text"].lower()))
+
+    return jsonify({"results": results})
+
+
+# Keep old /roles and /channels as aliases for backwards compat
 @api_bp.route("/roles")
 @require_guild
 def get_roles():
+    return get_guild_roles()
+
+
+@api_bp.route("/channels")
+@require_guild
+def get_channels():
+    return get_guild_channels()
+
+
+@api_bp.route("/members/search")
+@require_guild
     guild_id = get_session_guild_id()
     async def fetch():
         async with aiosqlite.connect(DB_PATH) as db:
