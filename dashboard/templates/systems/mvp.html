@@ -144,9 +144,12 @@ async function loadMVPConfig() {
     const data = await res.json();
     const c    = data.config;
     if (!c) return;
-    document.getElementById('mvp-cycle').value        = c.cycle_hours         || 6;
-    document.getElementById('mvp-chat-weight').value  = c.chat_word_weight    || 1.0;
-    document.getElementById('mvp-voice-weight').value = c.voice_minute_weight || 2.0;
+    const cycleEl = document.getElementById('mvp-cycle');
+    const chatEl = document.getElementById('mvp-chat-weight');
+    const voiceEl = document.getElementById('mvp-voice-weight');
+    if (cycleEl) cycleEl.value = c.cycle_hours || 6;
+    if (chatEl) chatEl.value = c.chat_word_weight || 1.0;
+    if (voiceEl) voiceEl.value = c.voice_minute_weight || 2.0;
     // Set Select2 values after pickers are initialized
     setTimeout(function() {
         const rp = document.getElementById('mvp-role-picker');
