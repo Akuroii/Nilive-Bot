@@ -156,6 +156,13 @@ def select_guild(guild_id: int):
         abort(403)
     set_session_guild(guild_id)
     session["user_level"] = row[0]
+    # Store guild name for sidebar display
+    access_token = session.get("access_token", "")
+    if access_token:
+        from dashboard.auth import fetch_discord_guilds
+        guilds = fetch_discord_guilds(access_token)
+        gdata  = next((g for g in guilds if int(g["id"]) == guild_id), None)
+        session["guild_name"] = gdata["name"] if gdata else ""
     return redirect(url_for("index"))
 
 
