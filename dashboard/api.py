@@ -37,16 +37,10 @@ def require_guild(f):
 @api_bp.route("/guild/roles")
 @require_guild
 def get_guild_roles():
-    """
-    Returns all roles in the guild via Discord Bot API.
-    Response: { results: [{id, text, color, position, managed}] }
-    Sorted: custom roles by position desc, then managed/bot roles, then @everyone last.
-    """
-    guild_id    = get_session_guild_id()
-    bot_token   = os.getenv("DISCORD_TOKEN", "")
+    guild_id  = get_session_guild_id()
+    bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:
         return jsonify({"results": [], "error": "BOT_TOKEN not set"})
-
     import requests as _req
     resp = _req.get(
         f"https://discord.com/api/v10/guilds/{guild_id}/roles",
@@ -54,32 +48,69 @@ def get_guild_roles():
         timeout=8,
     )
     if resp.status_code != 200:
-        return jsonify({"results": [], "error": f"Discord API {resp.status_code}"})
-
+        return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
     roles = resp.json()
-    # Sort: custom roles (highest position first), managed last, @everyone last
     def sort_key(r):
-        if r["id"] == str(guild_id):   return (2, 0)   # @everyone
-        if r.get("managed"):           return (1, -r["position"])
+        if r["id"] == str(guild_id): return (2, 0)
+        if r.get("managed"):         return (1, -r["position"])
         return (0, -r["position"])
-
     roles.sort(key=sort_key)
-
-    results = []
-    for r in roles:
-        color_hex = f"#{r['color']:06x}" if r["color"] else None
-        results.append({
-            "id":       r["id"],
-            "text":     r["name"],
-            "color":    color_hex,
-            "position": r["position"],
-            "managed":  r.get("managed", False),
-        })
-
-    return jsonify({"results": results})
+    return jsonify({"results": [{
+        "id":       r["id"],
+        "text":     r["name"],
+        "color":    f"#{r['color']:06x}" if r["color"] else None,
+        "position": r["position"],
+        "managed":  r.get("managed", False),
+    } for r in roles]})
 
 
 @api_bp.route("/guild/channels")
+@require_guild
+def get_guild_channels():
+    guild_id  = get_session_guild_id()
+    bot_token = os.getenv("DISCORD_TOKEN", "")
+    if not bot_token:
+        return jsonify({"results": [], "error": "BOT_TOKEN not set"})
+    import requests as _req
+    resp = _req.get(
+        f"https://discord.com/api/v10/guilds/{guild_id}/channels",
+        headers={"Authorization": f"Bot {bot_token}"},
+        timeout=8,
+    )
+    if resp.status_code != 200:
+        return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
+    channels = resp.json()
+    TYPE_ICON = {0:"💬",2:"🔊",4:"📁",5:"📢",10:"🧵",11:"🧵",12:"🧵",13:"🎙️",15:"📋"}
+    TYPE_NAME = {0:"text",2:"voice",4:"category",5:"announcement",13:"stage",15:"forum"}
+    categories = {c["id"]: c["name"] for c in channels if c["type"] == 4}
+    results = []
+    for ch in channels:
+        if ch["type"] == 4: continue
+        results.append({
+            "id":        ch["id"],
+            "text":      ch["name"],
+            "type_icon": TYPE_ICON.get(ch["type"], "💬"),
+            "category":  categories.get(str(ch.get("parent_id", "")), ""),
+            "type":      TYPE_NAME.get(ch["type"], "text"),
+        })
+    type_order = {"text":0,"announcement":1,"voice":2,"stage":3,"forum":4}
+    results.sort(key=lambda c: (type_order.get(c["type"], 9), c["text"].lower()))
+    return jsonify({"results": results})
+
+
+@api_bp.route("/roles")
+@require_guild
+def get_roles():
+    return get_guild_roles()
+
+
+@api_bp.route("/channels")
+@require_guild
+def get_channels():
+    return get_guild_channels()
+
+
+@api_bp.route("/members/search")
 @require_guild
 def get_guild_channels():
     """
@@ -449,7 +480,114 @@ def tickets_partial():
             f"</tr>"
         )
     return html or "<tr><td colspan='5' class='empty'>No tickets found</td></tr>"
+@api_bp.route("/settings/general", methods=["POST"])
+@require_guild
+def save_settings_general():
+    guild_id = get_session_guild_id()
+    data = request.get_json() or {}
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO guild_settings
+                    (guild_id, prefix, timezone, log_channel_id,
+                     currency_name, currency_emoji_id,
+                     status_rotation_enabled, status_rotation_interval)
+                VALUES (?,?,?,?,?,?,?,?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    prefix=excluded.prefix, timezone=excluded.timezone,
+                    log_channel_id=excluded.log_channel_id,
+                    currency_name=excluded.currency_name,
+                    currency_emoji_id=excluded.currency_emoji_id,
+                    status_rotation_enabled=excluded.status_rotation_enabled,
+                    status_rotation_interval=excluded.status_rotation_interval,
+                    updated_at=CURRENT_TIMESTAMP
+            """, (guild_id, data.get("prefix","/"), data.get("timezone","UTC"),
+                  data.get("log_channel_id") or None,
+                  data.get("currency_name","Coins"),
+                  data.get("currency_emoji_id") or None,
+                  int(bool(data.get("status_rotation_enabled"))),
+                  int(data.get("status_rotation_interval",5))))
+            await db.commit()
+    run_async(save())
+    from dashboard.permissions import log_action
+    log_action(guild_id, "Updated general settings", "config_general")
+    return jsonify({"success": True})
 
+
+@api_bp.route("/settings/welcome", methods=["POST"])
+@require_guild
+def save_settings_welcome():
+    guild_id = get_session_guild_id()
+    data = request.get_json() or {}
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO welcome_config
+                    (guild_id, join_enabled, join_channel_id, auto_role_id,
+                     join_message_mode, leave_enabled, leave_channel_id,
+                     rules_enabled, rules_channel_id, rules_role_id, rules_button_text)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    join_enabled=excluded.join_enabled,
+                    join_channel_id=excluded.join_channel_id,
+                    auto_role_id=excluded.auto_role_id,
+                    join_message_mode=excluded.join_message_mode,
+                    leave_enabled=excluded.leave_enabled,
+                    leave_channel_id=excluded.leave_channel_id,
+                    rules_enabled=excluded.rules_enabled,
+                    rules_channel_id=excluded.rules_channel_id,
+                    rules_role_id=excluded.rules_role_id,
+                    rules_button_text=excluded.rules_button_text,
+                    updated_at=CURRENT_TIMESTAMP
+            """, (guild_id,
+                  int(bool(data.get("join_enabled"))),
+                  data.get("join_channel_id") or None,
+                  data.get("auto_role_id") or None,
+                  data.get("join_message_mode","random"),
+                  int(bool(data.get("leave_enabled"))),
+                  data.get("leave_channel_id") or None,
+                  int(bool(data.get("rules_enabled"))),
+                  data.get("rules_channel_id") or None,
+                  data.get("rules_role_id") or None,
+                  data.get("rules_button_text","✅ I Accept")))
+            await db.commit()
+    run_async(save())
+    from dashboard.permissions import log_action
+    log_action(guild_id, "Updated welcome settings", "config_welcome")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/settings/boost", methods=["POST"])
+@require_guild
+def save_settings_boost():
+    guild_id = get_session_guild_id()
+    data = request.get_json() or {}
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO boost_config
+                    (guild_id, enabled, boost1_role_id, boost2_role_id,
+                     boost2_channel_id, auto_remove_on_unboost, color_roles_enabled)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    enabled=excluded.enabled,
+                    boost1_role_id=excluded.boost1_role_id,
+                    boost2_role_id=excluded.boost2_role_id,
+                    boost2_channel_id=excluded.boost2_channel_id,
+                    auto_remove_on_unboost=excluded.auto_remove_on_unboost,
+                    color_roles_enabled=excluded.color_roles_enabled
+            """, (guild_id,
+                  int(bool(data.get("enabled",1))),
+                  data.get("boost1_role_id") or None,
+                  data.get("boost2_role_id") or None,
+                  data.get("boost2_channel_id") or None,
+                  int(bool(data.get("auto_remove_on_unboost",1))),
+                  int(bool(data.get("color_roles_enabled")))))
+            await db.commit()
+    run_async(save())
+    from dashboard.permissions import log_action
+    log_action(guild_id, "Updated boost settings", "config_boost")
+    return jsonify({"success": True})
 
 @api_bp.route("/status-messages", methods=["GET"])
 @require_guild
