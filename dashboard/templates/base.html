@@ -39,7 +39,8 @@
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
-<body hx-boost="true" hx-target="#content-area" hx-push-url="true" hx-indicator="#global-spinner" hx-select="#content-area">
+<!-- NO hx-boost on body — sidebar links use explicit hx-get, boost causes double-fire -->
+<body>
 
 <!-- MOBILE HAMBURGER -->
 <button class="hamburger" onclick="toggleSidebar()"
@@ -86,141 +87,152 @@
 <!-- ─── GENERAL ────────── -->
 <div class="nav-section">
     <div class="nav-section-title">General</div>
-    
-    <a href="/dashboard/{{ guild_id }}/overview" 
-       hx-get="/dashboard/{{ guild_id }}/overview" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
-       class="nav-link active">
+
+    <a href="/"
+       hx-get="/"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
+       class="nav-link">
         <span class="nav-icon">🏠</span>
         <span class="nav-text">Overview</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/members" 
-       hx-get="/dashboard/{{ guild_id }}/members" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/members"
+       hx-get="/members"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">👥</span>
         <span class="nav-text">Members</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/auditlog" 
-       hx-get="/dashboard/{{ guild_id }}/auditlog" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/audit-log"
+       hx-get="/audit-log"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">📝</span>
         <span class="nav-text">Audit Log</span>
     </a>
 </div>
+
 <!-- ─── MANAGE ───────── -->
 <div class="nav-section">
     <div class="nav-section-title">Manage</div>
-    
-    <a href="/dashboard/{{ guild_id }}/moderation" 
-       hx-get="/dashboard/{{ guild_id }}/moderation" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/moderation"
+       hx-get="/moderation"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🛡️</span>
         <span class="nav-text">Moderation</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/tickets" 
-       hx-get="/dashboard/{{ guild_id }}/tickets" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/tickets"
+       hx-get="/tickets"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🎫</span>
         <span class="nav-text">Tickets</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/embedbuilder" 
-       hx-get="/dashboard/{{ guild_id }}/embedbuilder" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/embed-builder"
+       hx-get="/embed-builder"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">📦</span>
         <span class="nav-text">Embed Builder</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/reactionroles" 
-       hx-get="/dashboard/{{ guild_id }}/reactionroles" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/reaction-roles"
+       hx-get="/reaction-roles"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🎭</span>
         <span class="nav-text">Reaction Roles</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/triggers" 
-       hx-get="/dashboard/{{ guild_id }}/triggers" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/triggers"
+       hx-get="/triggers"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">⚡</span>
         <span class="nav-text">Triggers</span>
+    </a>
+
+    <a href="/custom-commands"
+       hx-get="/custom-commands"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">💬</span>
+        <span class="nav-text">Custom Commands</span>
     </a>
 </div>
 
 <!-- ─── SYSTEMS ───────── -->
 <div class="nav-section">
     <div class="nav-section-title">Systems</div>
-    
-    <a href="/dashboard/{{ guild_id }}/mvp" 
-       hx-get="/dashboard/{{ guild_id }}/mvp" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/mvp"
+       hx-get="/mvp"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🏆</span>
         <span class="nav-text">MVP System</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/leveling" 
-       hx-get="/dashboard/{{ guild_id }}/leveling" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/leveling"
+       hx-get="/leveling"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">⭐</span>
         <span class="nav-text">Leveling</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/economy" 
-       hx-get="/dashboard/{{ guild_id }}/economy" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/economy"
+       hx-get="/economy"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">💰</span>
         <span class="nav-text">Economy</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/shop" 
-       hx-get="/dashboard/{{ guild_id }}/shop" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/shop"
+       hx-get="/shop"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🛒</span>
         <span class="nav-text">Shop</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/events" 
-       hx-get="/dashboard/{{ guild_id }}/events" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/events"
+       hx-get="/events"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🎯</span>
         <span class="nav-text">Events</span>
@@ -230,67 +242,70 @@
 <!-- ─── CONFIG ─────────── -->
 <div class="nav-section">
     <div class="nav-section-title">Config</div>
-    
-    <a href="/dashboard/{{ guild_id }}/general" 
-       hx-get="/dashboard/{{ guild_id }}/general" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/config/general"
+       hx-get="/config/general"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">⚙️</span>
         <span class="nav-text">General Settings</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/welcome" 
-       hx-get="/dashboard/{{ guild_id }}/welcome" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/config/welcome"
+       hx-get="/config/welcome"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">👋</span>
         <span class="nav-text">Welcome & Leave</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/boost" 
-       hx-get="/dashboard/{{ guild_id }}/boost" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/config/boost"
+       hx-get="/config/boost"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🔰</span>
         <span class="nav-text">Boost Roles</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/announcements" 
-       hx-get="/dashboard/{{ guild_id }}/announcements" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/config/announcements"
+       hx-get="/config/announcements"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">📢</span>
         <span class="nav-text">Announcements</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/commands" 
-       hx-get="/dashboard/{{ guild_id }}/commands" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/commands"
+       hx-get="/commands"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🎮</span>
         <span class="nav-text">Commands</span>
     </a>
-    
-    <a href="/dashboard/{{ guild_id }}/access" 
-       hx-get="/dashboard/{{ guild_id }}/access" 
-       hx-target="#content-area" 
-       hx-swap="innerHTML" 
-       hx-push-url="true" 
+
+    <a href="/config/access"
+       hx-get="/config/access"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🔐</span>
         <span class="nav-text">Dashboard Access</span>
     </a>
 </div>
+
+    </nav>
+
     <!-- USER FOOTER -->
     <div style="padding:12px;border-top:1px solid var(--border);
                 display:flex;align-items:center;gap:10px;">
@@ -338,7 +353,7 @@
         </div>
     </div>
 
-    <!-- ★ HTMX swaps content into this div — never the whole page -->
+    <!-- HTMX swaps content into this div only -->
     <div class="page-content" id="content-area">
         {% block content %}{% endblock %}
     </div>
@@ -373,7 +388,7 @@
     htmx.config.globalViewTransitions = false;
     htmx.config.defaultSwapStyle = 'innerHTML';
 
-    // After every HTMX swap: re-init Select2 widgets inside new content
+    // After every HTMX swap: re-init Select2 + re-run injected scripts
     document.body.addEventListener('htmx:afterSwap', function(evt) {
         if (window.$ && $.fn.select2) {
             $(evt.detail.target).find('.select2-widget').select2({
@@ -388,20 +403,32 @@
             newScript.textContent = oldScript.textContent;
             oldScript.parentNode.replaceChild(newScript, oldScript);
         });
-        // Update active nav link
+        // Update active nav link to match current URL
         const path = window.location.pathname;
-        document.querySelectorAll('.nav-item').forEach(function(a) {
-            a.classList.toggle('active', a.getAttribute('href') === path);
+        document.querySelectorAll('.nav-link').forEach(function(a) {
+            const href = a.getAttribute('href');
+            // Exact match, or root path special case
+            a.classList.toggle('active', href === path || (href === '/' && path === '/'));
         });
     });
 
-    // Mark nav link active on click (hx-boost handles the actual swap)
-    document.querySelectorAll('.nav-item').forEach(function(a) {
+    // Mark nav link active immediately on click (before swap completes)
+    document.querySelectorAll('.nav-link').forEach(function(a) {
         a.addEventListener('click', function() {
-            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            document.querySelectorAll('.nav-link').forEach(n => n.classList.remove('active'));
             a.classList.add('active');
         });
     });
+
+    // Set active link on initial page load
+    (function() {
+        const path = window.location.pathname;
+        document.querySelectorAll('.nav-link').forEach(function(a) {
+            if (a.getAttribute('href') === path) {
+                a.classList.add('active');
+            }
+        });
+    })();
 </script>
 {% block scripts %}{% endblock %}
 
@@ -417,7 +444,7 @@
     z-index: 100;
     overflow: hidden;
 }
-.nav-item {
+.nav-link {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -430,8 +457,8 @@
     margin-bottom: 1px;
     transition: all .12s;
 }
-.nav-item:hover { background: var(--bg4); color: var(--text); }
-.nav-item.active { background: var(--accent); color: #fff; }
+.nav-link:hover { background: var(--bg4); color: var(--text); }
+.nav-link.active { background: var(--accent); color: #fff; }
 .nav-icon { font-size: 15px; width: 18px; text-align: center; flex-shrink: 0; }
 </style>
 </body>
