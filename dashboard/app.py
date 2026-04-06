@@ -35,20 +35,11 @@ app.register_blueprint(api_bp)
 
 def render(template, **ctx):
     """
-    HTMX request → return partial (content only, no base wrapper)
-    Normal request → return full base.html
+    Always render the full base.html.
+    HTMX nav links use hx-select="#content-area" to extract only
+    the content div from the response — no partial templates needed.
     """
-    if request.headers.get('HX-Request'):
-        ctx['_htmx'] = True
-        # Check for a partials/ version first (Phase 2 partial_base support)
-        import os
-        partial_path = os.path.join('partials', template)
-        tpl_folder = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), 'templates')
-        if os.path.exists(os.path.join(tpl_folder, partial_path)):
-            return render_template(partial_path, **ctx)
-        # Fall back: return the full template but HTMX will only swap #content-area
-        return render_template(template, **ctx)
+    return render_template('base.html', page=template, **ctx)
 
     # Normal browser request: full page
     return render_template('base.html', page=template, **ctx)
