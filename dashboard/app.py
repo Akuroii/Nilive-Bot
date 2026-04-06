@@ -35,14 +35,23 @@ app.register_blueprint(api_bp)
 
 def render(template, **ctx):
     """
-    If the request came from HTMX (sidebar nav), return only the
-    inner content block so the sidebar stays in place.
-    Full-page load returns the complete base template as normal.
+    HTMX request → return partial (content only, no base wrapper)
+    Normal request → return full base.html
     """
     if request.headers.get('HX-Request'):
-        # HTMX request: return just the page content
         ctx['_htmx'] = True
+        # Check for a partials/ version first (Phase 2 partial_base support)
+        import os
+        partial_path = os.path.join('partials', template)
+        tpl_folder = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'templates')
+        if os.path.exists(os.path.join(tpl_folder, partial_path)):
+            return render_template(partial_path, **ctx)
+        # Fall back: return the full template but HTMX will only swap #content-area
         return render_template(template, **ctx)
+
+    # Normal browser request: full page
+    return render_template('base.html', page=template, **ctx)
     
     # Normal request: wrap in base.html
     return render_template('base.html', page=template, **ctx)
