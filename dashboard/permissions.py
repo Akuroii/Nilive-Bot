@@ -1,25 +1,13 @@
-import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import aiosqlite
-import asyncio
 from functools import wraps
 from flask import session, redirect, url_for, abort
 from database import DB_PATH
+from dashboard.utils.async_utils import run_async
 from utils.permissions import (
     LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
-    LEVEL_RANK, user_can_access_page, get_required_level
+    LEVEL_RANK, user_can_access_page,
 )
-
-
-def run_async(coro):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
 
 
 async def _get_permission_level(guild_id: int, user_id: int) -> str | None:
@@ -34,8 +22,7 @@ async def _get_permission_level(guild_id: int, user_id: int) -> str | None:
 
 async def _log_audit(guild_id: int, user_id: int, display_name: str,
                      action: str, page: str, details: str = None,
-                     target_id: int = None, target_name: str = None,
-                     ip: str = None):
+                     target_id: int = None, target_name: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO audit_log
@@ -43,7 +30,7 @@ async def _log_audit(guild_id: int, user_id: int, display_name: str,
              action, details, page, ip_address)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (guild_id, user_id, display_name, target_id, target_name,
-              action, details, page, ip))
+              action, details, page, None))
         await db.commit()
 
 
@@ -54,7 +41,7 @@ def log_action(guild_id: int, action: str, page: str,
     user_id      = int(user.get("id", 0))
     display_name = user.get("username", "Unknown")
     run_async(_log_audit(guild_id, user_id, display_name,
-                         action, page, details, target_id, target_name, None))
+                         action, page, details, target_id, target_name))
 
 
 def get_session_guild_id() -> int | None:
@@ -87,60 +74,6 @@ def require_page(page_name: str):
             return f(*args, **kwargs)
         return decorated
     return decorator
-
-
-def require_owner(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        from dashboard.auth import is_session_valid
-        if not is_session_valid():
-            return redirect(url_for("login"))
-        user     = session.get("user", {})
-        user_id  = int(user.get("id", 0))
-        guild_id = get_session_guild_id()
-        if not guild_id:
-            return redirect(url_for("server_select"))
-        level = run_async(_get_permission_level(guild_id, user_id))
-        if level != LEVEL_OWNER:
-            abort(403)
-        return f(*args, **kwargs)
-    return decorated
-
-
-def require_admin(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        from dashboard.auth import is_session_valid
-        if not is_session_valid():
-            return redirect(url_for("login"))
-        user     = session.get("user", {})
-        user_id  = int(user.get("id", 0))
-        guild_id = get_session_guild_id()
-        if not guild_id:
-            return redirect(url_for("server_select"))
-        level = run_async(_get_permission_level(guild_id, user_id))
-        if LEVEL_RANK.get(level, 0) < LEVEL_RANK[LEVEL_ADMIN]:
-            abort(403)
-        return f(*args, **kwargs)
-    return decorated
-
-
-def require_moderator(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        from dashboard.auth import is_session_valid
-        if not is_session_valid():
-            return redirect(url_for("login"))
-        user     = session.get("user", {})
-        user_id  = int(user.get("id", 0))
-        guild_id = get_session_guild_id()
-        if not guild_id:
-            return redirect(url_for("server_select"))
-        level = run_async(_get_permission_level(guild_id, user_id))
-        if LEVEL_RANK.get(level, 0) < LEVEL_RANK[LEVEL_MODERATOR]:
-            abort(403)
-        return f(*args, **kwargs)
-    return decorated
 
 
 def get_current_user_context() -> dict:
