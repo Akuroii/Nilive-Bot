@@ -1,31 +1,18 @@
-import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import time
 import requests
-from functools import wraps
-from flask import session, redirect, url_for, request
+from flask import session, redirect, url_for
 import aiosqlite
-import asyncio
 from database import DB_PATH
+from dashboard.utils.async_utils import run_async
 
-DISCORD_API    = "https://discord.com/api/v10"
-CLIENT_ID      = os.getenv("DISCORD_CLIENT_ID")
-CLIENT_SECRET  = os.getenv("DISCORD_CLIENT_SECRET")
-REDIRECT_URI   = os.getenv("DISCORD_REDIRECT_URI")
+DISCORD_API   = "https://discord.com/api/v10"
+CLIENT_ID     = os.getenv("DISCORD_CLIENT_ID")
+CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
+REDIRECT_URI  = os.getenv("DISCORD_REDIRECT_URI")
 
 SESSION_DURATION_DEFAULT  = 60 * 60 * 24
 SESSION_DURATION_REMEMBER = 60 * 60 * 24 * 7
-
-
-def run_async(coro):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
 
 
 def get_discord_oauth_url() -> str:
@@ -39,22 +26,19 @@ def get_discord_oauth_url() -> str:
 
 
 def exchange_code(code: str) -> dict | None:
-    data = {
-        "client_id":     CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "grant_type":    "authorization_code",
-        "code":          code,
-        "redirect_uri":  REDIRECT_URI,
-    }
     r = requests.post(
         f"{DISCORD_API}/oauth2/token",
-        data=data,
+        data={
+            "client_id":     CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "grant_type":    "authorization_code",
+            "code":          code,
+            "redirect_uri":  REDIRECT_URI,
+        },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=10,
     )
-    if r.status_code != 200:
-        return None
-    return r.json()
+    return r.json() if r.status_code == 200 else None
 
 
 def fetch_discord_user(access_token: str) -> dict | None:
@@ -63,9 +47,7 @@ def fetch_discord_user(access_token: str) -> dict | None:
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=10,
     )
-    if r.status_code != 200:
-        return None
-    return r.json()
+    return r.json() if r.status_code == 200 else None
 
 
 def fetch_discord_guilds(access_token: str) -> list:
@@ -74,9 +56,7 @@ def fetch_discord_guilds(access_token: str) -> list:
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=10,
     )
-    if r.status_code != 200:
-        return []
-    return r.json()
+    return r.json() if r.status_code == 200 else []
 
 
 def create_session(user: dict, remember_me: bool = False):
@@ -94,8 +74,7 @@ def create_session(user: dict, remember_me: bool = False):
 def is_session_valid() -> bool:
     if "user" not in session:
         return False
-    expires_at = session.get("expires_at", 0)
-    if time.time() > expires_at:
+    if time.time() > session.get("expires_at", 0):
         session.clear()
         return False
     return True
@@ -104,8 +83,7 @@ def is_session_valid() -> bool:
 def refresh_session_if_needed():
     if not session.get("remember_me"):
         return
-    expires_at = session.get("expires_at", 0)
-    remaining  = expires_at - time.time()
+    remaining = session.get("expires_at", 0) - time.time()
     if remaining < 60 * 60 * 24 * 3:
         session["expires_at"] = time.time() + SESSION_DURATION_REMEMBER
 
@@ -139,8 +117,7 @@ def get_current_user_level(guild_id: int) -> str | None:
     user = session.get("user")
     if not user:
         return None
-    user_id = int(user["id"])
-    return run_async(_get_user_level_async(guild_id, user_id))
+    return run_async(_get_user_level_async(guild_id, int(user["id"])))
 
 
 def current_user_id() -> int | None:
