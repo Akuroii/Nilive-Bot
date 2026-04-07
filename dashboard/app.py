@@ -882,46 +882,23 @@ COMMAND_CATEGORIES = {
 }
 
 
-@app.route("/commands")
-@require_page("commands")
-def commands_dashboard():
+@app.route("/custom-commands")
+@require_page("customcommands")
+def custom_commands():
     guild_id = get_session_guild_id()
 
-    async def get_toggles():
+    async def get_commands():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT command_name, enabled, allowed_roles, allowed_channels,
-                       cooldown_seconds, aliases, enabled_roles, disabled_roles,
-                       enabled_channels, disabled_channels, delete_user_msg,
-                       delete_bot_reply, delete_bot_after, custom_cooldown,
-                       success_message, error_message, ephemeral, dm_response,
-                       bypass_cooldown_roles, require_permission, owner_only,
-                       cmd_emoji, category_color, hide_from_help
-                FROM command_toggles WHERE guild_id=?
+                SELECT id, trigger, actions, embed_title, embed_description
+                FROM custom_commands WHERE guild_id=?
+                ORDER BY id DESC
             """, (guild_id,))
-            rows   = await cursor.fetchall()
-            result = {}
-            for r in rows:
-                result[r[0]] = {
-                    "enabled": r[1], "allowed_roles": r[2],
-                    "allowed_channels": r[3], "cooldown": r[4],
-                    "aliases": r[5], "enabled_roles": r[6],
-                    "disabled_roles": r[7], "enabled_channels": r[8],
-                    "disabled_channels": r[9], "delete_user_msg": r[10],
-                    "delete_bot_reply": r[11], "delete_bot_after": r[12],
-                    "custom_cooldown": r[13], "success_message": r[14],
-                    "error_message": r[15], "ephemeral": r[16],
-                    "dm_response": r[17], "bypass_cooldown_roles": r[18],
-                    "require_permission": r[19], "owner_only": r[20],
-                    "cmd_emoji": r[21], "category_color": r[22],
-                    "hide_from_help": r[23],
-                }
-            return result
+            return await cursor.fetchall()
 
-    toggles = run_async(get_toggles())
-    ctx     = get_current_user_context()
-    return render("manage/commands.html",
-                  categories=COMMAND_CATEGORIES, toggles=toggles, **ctx)
+    cmds = run_async(get_commands())
+    ctx  = get_current_user_context()
+    return render("manage/customcommands.html", commands=cmds, **ctx)
 
 
 @app.route("/config/commands", methods=["GET", "POST"])
