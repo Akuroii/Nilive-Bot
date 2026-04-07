@@ -1,54 +1,16 @@
-import os
 import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import aiosqlite
 from functools import wraps
 from flask import session, redirect, url_for, abort
-
-# Add root to path before any local imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 from database import DB_PATH
 from dashboard.utils.async_utils import run_async
-
-# Permission levels (copied from utils/permissions.py to avoid path issues)
-LEVEL_OWNER     = "owner"
-LEVEL_ADMIN     = "admin"
-LEVEL_MODERATOR = "moderator"
-
-LEVEL_RANK = {
-    LEVEL_OWNER:     3,
-    LEVEL_ADMIN:     2,
-    LEVEL_MODERATOR: 1,
-}
-
-PAGE_PERMISSIONS = {
-    "overview":           LEVEL_MODERATOR,
-    "members_view":       LEVEL_MODERATOR,
-    "members_edit":       LEVEL_ADMIN,
-    "members_delete":     LEVEL_OWNER,
-    "audit_log":          LEVEL_ADMIN,
-    "moderation_view":    LEVEL_MODERATOR,
-    "moderation_action":  LEVEL_MODERATOR,
-    "moderation_edit":    LEVEL_ADMIN,
-    "moderation_delete":  LEVEL_OWNER,
-    "tickets":            LEVEL_MODERATOR,
-    "embedbuilder":       LEVEL_ADMIN,
-    "reactionroles":      LEVEL_ADMIN,
-    "triggers":           LEVEL_ADMIN,
-    "customcommands":     LEVEL_ADMIN,
-    "mvp":                LEVEL_ADMIN,
-    "leveling":           LEVEL_ADMIN,
-    "economy":            LEVEL_ADMIN,
-    "shop":               LEVEL_ADMIN,
-    "events":             LEVEL_ADMIN,
-    "leaderboards":       LEVEL_MODERATOR,
-    "general_settings":   LEVEL_OWNER,
-    "welcome":            LEVEL_ADMIN,
-    "boost":              LEVEL_ADMIN,
-    "announcements":      LEVEL_ADMIN,
-    "commands":           LEVEL_OWNER,
-    "dashboard_access":   LEVEL_OWNER,
-}
+from utils.permissions import (
+    LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
+    LEVEL_RANK, user_can_access_page,
+)
 
 
 def get_required_level(page: str) -> str:
