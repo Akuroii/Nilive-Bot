@@ -1386,10 +1386,11 @@ def api_save_rr_panel():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO rr_panels
-                    (title, description, color, channel_id, buttons,
+                    (guild_id, title, description, color, channel_id, buttons,
                      exclusive, max_roles, require_confirmation, required_role)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
             """, (
+                guild_id,
                 data.get("title"),
                 data.get("desc"),
                 data.get("color"),
@@ -1410,10 +1411,13 @@ def api_save_rr_panel():
 @app.route("/api/rr-panels")
 @require_page("reactionroles")
 def api_rr_panels():
+    guild_id = get_session_guild_id()
+
     async def get():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT id, title, buttons FROM rr_panels ORDER BY id DESC")
+                "SELECT id, title, buttons FROM rr_panels WHERE guild_id=? ORDER BY id DESC",
+                (guild_id,))
             rows = await cursor.fetchall()
             return [{"id": r[0], "title": r[1],
                      "buttons": len(json.loads(r[2])) if r[2] else 0}
