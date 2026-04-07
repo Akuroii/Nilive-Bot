@@ -1,4 +1,7 @@
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json
 import math
 import aiosqlite
@@ -6,8 +9,6 @@ from flask import (
     Flask, redirect, url_for, session,
     request, render_template, jsonify, abort,
 )
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database import DB_PATH
 from dashboard.utils.async_utils import run_async
 from dashboard.auth import (
@@ -35,7 +36,7 @@ def render(template, **ctx):
     return render_template("base.html", page=template, **ctx)
 
 
-# ── Error handlers ────────────────────────────────────────────────────────────
+# ── Error handlers ─────────────────────────────────────────────────────────────
 
 @app.errorhandler(403)
 def forbidden(e):
@@ -52,7 +53,7 @@ def server_error(e):
     return render_template("errors/500.html"), 500
 
 
-# ── Auth routes ───────────────────────────────────────────────────────────────
+# ── Auth routes ────────────────────────────────────────────────────────────────
 
 @app.route("/login")
 def login():
@@ -89,7 +90,7 @@ def logout():
     return redirect(url_for("login"))
 
 
-# ── Server select ─────────────────────────────────────────────────────────────
+# ── Server select ──────────────────────────────────────────────────────────────
 
 @app.route("/server-select")
 @login_required
@@ -155,7 +156,7 @@ def select_guild(guild_id: int):
     return redirect(url_for("index"))
 
 
-# ── Overview ──────────────────────────────────────────────────────────────────
+# ── Overview ───────────────────────────────────────────────────────────────────
 
 @app.route("/")
 @require_page("overview")
@@ -188,7 +189,7 @@ def index():
     return render("general/overview.html", stats=stats, **ctx)
 
 
-# ── Members ───────────────────────────────────────────────────────────────────
+# ── Members ────────────────────────────────────────────────────────────────────
 
 @app.route("/members")
 @require_page("members_view")
@@ -272,7 +273,7 @@ def member_profile(user_id: int):
                   profile=profile, member_id=user_id, **ctx)
 
 
-# ── Audit log ─────────────────────────────────────────────────────────────────
+# ── Audit log ──────────────────────────────────────────────────────────────────
 
 @app.route("/audit-log")
 @require_page("audit_log")
@@ -295,7 +296,7 @@ def audit_log():
     return render("general/auditlog.html", logs=logs, **ctx)
 
 
-# ── Moderation ────────────────────────────────────────────────────────────────
+# ── Moderation ─────────────────────────────────────────────────────────────────
 
 @app.route("/moderation")
 @require_page("moderation_view")
@@ -378,7 +379,7 @@ def moderation():
                 SELECT value FROM guild_settings_kv
                 WHERE guild_id=? AND key='auto_escalation_enabled'
             """, (guild_id,))
-            ae_row         = await ae_cur.fetchone()
+            ae_row          = await ae_cur.fetchone()
             auto_escalation = ae_row[0] if ae_row else "1"
 
             act_cur = await db.execute("""
@@ -403,7 +404,7 @@ def moderation():
     return render("manage/moderation.html", tab=tab, **data, **ctx)
 
 
-# ── Tickets ───────────────────────────────────────────────────────────────────
+# ── Tickets ────────────────────────────────────────────────────────────────────
 
 @app.route("/tickets")
 @require_page("tickets")
@@ -416,7 +417,7 @@ def tickets():
             try:
                 gs_cur = await db.execute(
                     "SELECT * FROM ticket_settings WHERE guild_id=?", (guild_id,))
-                gs_row = await gs_cur.fetchone()
+                gs_row  = await gs_cur.fetchone()
                 general = dict(zip(
                     [d[0] for d in gs_cur.description], gs_row)) if gs_row else {}
             except Exception:
@@ -453,7 +454,7 @@ def tickets():
                 ticket_list = []
 
             try:
-                rating_cur = await db.execute("""
+                rating_cur  = await db.execute("""
                     SELECT AVG(rating), COUNT(*) FROM ticket_ratings WHERE guild_id=?
                 """, (guild_id,))
                 rating_row  = await rating_cur.fetchone()
@@ -477,7 +478,7 @@ def tickets():
     return render("manage/tickets.html", tab=tab, **data, **ctx)
 
 
-# ── Embed builder ─────────────────────────────────────────────────────────────
+# ── Embed builder ──────────────────────────────────────────────────────────────
 
 @app.route("/embed-builder")
 @require_page("embedbuilder")
@@ -486,7 +487,7 @@ def embed_builder():
     return render("manage/embedbuilder.html", **ctx)
 
 
-# ── Reaction roles ────────────────────────────────────────────────────────────
+# ── Reaction roles ─────────────────────────────────────────────────────────────
 
 @app.route("/reaction-roles")
 @require_page("reactionroles")
@@ -495,7 +496,7 @@ def reaction_roles():
     return render("manage/reactionroles.html", **ctx)
 
 
-# ── Triggers ──────────────────────────────────────────────────────────────────
+# ── Triggers ───────────────────────────────────────────────────────────────────
 
 @app.route("/triggers")
 @require_page("triggers")
@@ -516,7 +517,7 @@ def triggers():
     return render("manage/triggers.html", triggers=trigger_list, **ctx)
 
 
-# ── Custom commands ───────────────────────────────────────────────────────────
+# ── Custom commands ────────────────────────────────────────────────────────────
 
 @app.route("/custom-commands")
 @require_page("customcommands")
@@ -537,7 +538,7 @@ def custom_commands():
     return render("manage/customcommands.html", commands=cmds, **ctx)
 
 
-# ── MVP ───────────────────────────────────────────────────────────────────────
+# ── MVP ────────────────────────────────────────────────────────────────────────
 
 @app.route("/mvp")
 @require_page("mvp")
@@ -568,7 +569,7 @@ def mvp():
     return render("systems/mvp.html", scores=scores, history=history, **ctx)
 
 
-# ── Leveling ──────────────────────────────────────────────────────────────────
+# ── Leveling ───────────────────────────────────────────────────────────────────
 
 @app.route("/leveling")
 @require_page("leveling")
@@ -594,7 +595,7 @@ def leveling():
     return render("systems/leveling.html", levels=levels, rewards=rewards, **ctx)
 
 
-# ── Economy ───────────────────────────────────────────────────────────────────
+# ── Economy ────────────────────────────────────────────────────────────────────
 
 @app.route("/economy")
 @require_page("economy")
@@ -614,7 +615,7 @@ def economy():
     return render("systems/economy.html", balances=balances, **ctx)
 
 
-# ── Shop ──────────────────────────────────────────────────────────────────────
+# ── Shop ───────────────────────────────────────────────────────────────────────
 
 @app.route("/shop")
 @require_page("shop")
@@ -636,7 +637,7 @@ def shop():
     return render("systems/shop.html", items=items, **ctx)
 
 
-# ── Events ────────────────────────────────────────────────────────────────────
+# ── Events ─────────────────────────────────────────────────────────────────────
 
 @app.route("/events")
 @require_page("events")
@@ -658,7 +659,7 @@ def events():
     return render("systems/events.html", events=event_list, **ctx)
 
 
-# ── Config: General ───────────────────────────────────────────────────────────
+# ── Config: General ────────────────────────────────────────────────────────────
 
 @app.route("/config/general", methods=["GET", "POST"])
 @require_page("general_settings")
@@ -716,7 +717,7 @@ def config_general():
                   settings=settings, saved=request.args.get("saved"), **ctx)
 
 
-# ── Config: Welcome ───────────────────────────────────────────────────────────
+# ── Config: Welcome ────────────────────────────────────────────────────────────
 
 @app.route("/config/welcome", methods=["GET", "POST"])
 @require_page("welcome")
@@ -779,7 +780,7 @@ def config_welcome():
                   config=config, saved=request.args.get("saved"), **ctx)
 
 
-# ── Config: Boost ─────────────────────────────────────────────────────────────
+# ── Config: Boost ──────────────────────────────────────────────────────────────
 
 @app.route("/config/boost", methods=["GET", "POST"])
 @require_page("boost")
@@ -832,7 +833,7 @@ def config_boost():
                   config=config, saved=request.args.get("saved"), **ctx)
 
 
-# ── Config: Announcements ─────────────────────────────────────────────────────
+# ── Config: Announcements ──────────────────────────────────────────────────────
 
 @app.route("/config/announcements")
 @require_page("announcements")
@@ -854,7 +855,7 @@ def config_announcements():
     return render("config/announcements.html", youtube=yt, twitch=tw, **ctx)
 
 
-# ── Commands dashboard ────────────────────────────────────────────────────────
+# ── Commands dashboard ─────────────────────────────────────────────────────────
 
 COMMAND_CATEGORIES = {
     "Moderation": [
@@ -946,7 +947,7 @@ def config_commands():
     return redirect(url_for("commands_dashboard"))
 
 
-# ── Commands API ──────────────────────────────────────────────────────────────
+# ── Commands API ───────────────────────────────────────────────────────────────
 
 @app.route("/api/commands/toggle", methods=["POST"])
 @require_page("commands")
@@ -1108,7 +1109,7 @@ def api_command_settings_save(command: str):
     return jsonify({"success": True})
 
 
-# ── Config: Access ────────────────────────────────────────────────────────────
+# ── Config: Access ─────────────────────────────────────────────────────────────
 
 @app.route("/config/access", methods=["GET", "POST"])
 @require_page("dashboard_access")
@@ -1167,7 +1168,7 @@ def config_access():
     return render("config/access.html", users=users, **ctx)
 
 
-# ── Member edit API ───────────────────────────────────────────────────────────
+# ── Member edit API ────────────────────────────────────────────────────────────
 
 @app.route("/api/edit-member", methods=["POST"])
 @require_page("members_edit")
@@ -1201,7 +1202,7 @@ def api_edit_member():
     return jsonify({"success": True})
 
 
-# ── Embed template API ────────────────────────────────────────────────────────
+# ── Embed template API ─────────────────────────────────────────────────────────
 
 @app.route("/api/save-embed-template", methods=["POST"])
 @require_page("embedbuilder")
@@ -1265,7 +1266,7 @@ def api_embed_template(n: str):
     return jsonify({"template": run_async(get())})
 
 
-# ── Trigger API ───────────────────────────────────────────────────────────────
+# ── Trigger API ────────────────────────────────────────────────────────────────
 
 @app.route("/api/save-trigger", methods=["POST"])
 @require_page("triggers")
@@ -1317,7 +1318,7 @@ def api_delete_trigger(trigger_id: int):
     return jsonify({"success": True})
 
 
-# ── Custom command API ────────────────────────────────────────────────────────
+# ── Custom command API ─────────────────────────────────────────────────────────
 
 @app.route("/api/save-custom-command", methods=["POST"])
 @require_page("customcommands")
@@ -1373,7 +1374,7 @@ def api_delete_custom_command(cmd_id: int):
     return jsonify({"success": True})
 
 
-# ── Reaction role API ─────────────────────────────────────────────────────────
+# ── Reaction role API ──────────────────────────────────────────────────────────
 
 @app.route("/api/save-rr-panel", methods=["POST"])
 @require_page("reactionroles")
