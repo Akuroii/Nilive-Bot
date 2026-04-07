@@ -6,6 +6,8 @@ from flask import (
     Flask, redirect, url_for, session,
     request, render_template, jsonify, abort,
 )
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database import DB_PATH
 from dashboard.utils.async_utils import run_async
 from dashboard.auth import (
