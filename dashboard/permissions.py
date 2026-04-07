@@ -9,17 +9,8 @@ from database import DB_PATH
 from dashboard.utils.async_utils import run_async
 from utils.permissions import (
     LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
-    LEVEL_RANK, user_can_access_page,
+    LEVEL_RANK, user_can_access_page, get_required_level,
 )
-
-
-def get_required_level(page: str) -> str:
-    return PAGE_PERMISSIONS.get(page, LEVEL_OWNER)
-
-
-def user_can_access_page(user_level: str, page: str) -> bool:
-    required = get_required_level(page)
-    return LEVEL_RANK.get(user_level, 0) >= LEVEL_RANK.get(required, 3)
 
 
 async def _get_permission_level(guild_id: int, user_id: int) -> str | None:
