@@ -4,6 +4,8 @@ from functools import wraps
 from flask import session, redirect, url_for, abort
 from database import DB_PATH
 from dashboard.utils.async_utils import run_async
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.permissions import (
     LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
     LEVEL_RANK, user_can_access_page,
