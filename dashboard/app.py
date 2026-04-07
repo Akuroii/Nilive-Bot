@@ -882,23 +882,33 @@ COMMAND_CATEGORIES = {
 }
 
 
-@app.route("/custom-commands")
-@require_page("customcommands")
-def custom_commands():
+@app.route("/commands")
+@require_page("commands")
+def commands_dashboard():
     guild_id = get_session_guild_id()
 
-    async def get_commands():
+    async def get_toggles():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT id, trigger, actions, embed_title, embed_description
-                FROM custom_commands WHERE guild_id=?
-                ORDER BY id DESC
+                SELECT command_name, enabled, allowed_roles,
+                       allowed_channels, cooldown_seconds
+                FROM command_toggles WHERE guild_id=?
             """, (guild_id,))
-            return await cursor.fetchall()
+            rows   = await cursor.fetchall()
+            result = {}
+            for r in rows:
+                result[r[0]] = {
+                    "enabled": r[1],
+                    "allowed_roles": r[2],
+                    "allowed_channels": r[3],
+                    "cooldown": r[4],
+                }
+            return result
 
-    cmds = run_async(get_commands())
-    ctx  = get_current_user_context()
-    return render("manage/customcommands.html", commands=cmds, **ctx)
+    toggles = run_async(get_toggles())
+    ctx     = get_current_user_context()
+    return render("manage/commands.html",
+                  categories=COMMAND_CATEGORIES, toggles=toggles, **ctx)
 
 
 @app.route("/config/commands", methods=["GET", "POST"])
