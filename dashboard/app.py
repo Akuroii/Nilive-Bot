@@ -33,7 +33,7 @@ app.register_blueprint(api_bp)
 
 
 def render(template, **ctx):
-    return render_template("base.html", page=template, **ctx)
+    return render_template(template, **ctx)
 
 
 # ── Error handlers ─────────────────────────────────────────────────────────────
