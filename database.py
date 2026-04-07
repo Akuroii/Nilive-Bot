@@ -774,6 +774,144 @@ async def init_db():
             )
         """)
 
+        # ══════════════════════════════════════════
+        # TICKET SYSTEM TABLES
+        # ══════════════════════════════════════════
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_settings (
+                guild_id              INTEGER PRIMARY KEY,
+                enabled               INTEGER DEFAULT 1,
+                max_per_user          INTEGER DEFAULT 1,
+                auto_close_hours      INTEGER DEFAULT 0,
+                save_transcripts      INTEGER DEFAULT 1,
+                transcript_channel_id INTEGER,
+                support_role_id       INTEGER,
+                name_format           TEXT DEFAULT 'ticket-{number}',
+                updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_categories (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id         INTEGER NOT NULL,
+                name             TEXT NOT NULL,
+                emoji            TEXT DEFAULT '🎫',
+                viewer_roles     TEXT DEFAULT '[]',
+                closer_roles     TEXT DEFAULT '[]',
+                auto_assign_roles TEXT DEFAULT '[]',
+                open_embed       TEXT DEFAULT '{}',
+                enabled          INTEGER DEFAULT 1,
+                sort_order       INTEGER DEFAULT 0,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tc_guild
+            ON ticket_categories(guild_id)
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_panels (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id   INTEGER NOT NULL,
+                name       TEXT,
+                channel_id INTEGER,
+                embed_data TEXT DEFAULT '{}',
+                buttons    TEXT DEFAULT '[]',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tp_guild
+            ON ticket_panels(guild_id)
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_ratings (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id   INTEGER NOT NULL,
+                ticket_id  INTEGER,
+                user_id    INTEGER NOT NULL,
+                rating     INTEGER NOT NULL,
+                comment    TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_trat_guild
+            ON ticket_ratings(guild_id)
+        """)
+
+        # ══════════════════════════════════════════
+        # GUILD SETTINGS KV STORE
+        # ══════════════════════════════════════════
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_settings_kv (
+                guild_id   INTEGER NOT NULL,
+                key        TEXT NOT NULL,
+                value      TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, key)
+            )
+        """)
+
+        # ══════════════════════════════════════════
+        # MODERATION LOGS — MISSING COLUMNS
+        # ══════════════════════════════════════════
+
+        for col in [
+            ("expires_at",  "TIMESTAMP"),
+            ("updated_at",  "TIMESTAMP"),
+        ]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE moderation_logs ADD COLUMN {col[0]} {col[1]}")
+            except Exception:
+                pass
+
+        # ══════════════════════════════════════════
+        # COMMAND TOGGLES — MISSING COLUMNS
+        # ══════════════════════════════════════════
+
+        for col in [
+            ("aliases",               "TEXT"),
+            ("enabled_roles",         "TEXT"),
+            ("disabled_roles",        "TEXT"),
+            ("enabled_channels",      "TEXT"),
+            ("disabled_channels",     "TEXT"),
+            ("delete_user_msg",       "INTEGER DEFAULT 0"),
+            ("delete_bot_reply",      "INTEGER DEFAULT 0"),
+            ("delete_bot_after",      "INTEGER DEFAULT 0"),
+            ("custom_cooldown",       "TEXT"),
+            ("success_message",       "TEXT"),
+            ("error_message",         "TEXT"),
+            ("ephemeral",             "INTEGER DEFAULT 0"),
+            ("dm_response",           "INTEGER DEFAULT 0"),
+            ("bypass_cooldown_roles", "TEXT"),
+            ("require_permission",    "TEXT"),
+            ("owner_only",            "INTEGER DEFAULT 0"),
+            ("cmd_emoji",             "TEXT"),
+            ("category_color",        "TEXT"),
+            ("hide_from_help",        "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE command_toggles ADD COLUMN {col[0]} {col[1]}")
+            except Exception:
+                pass
+
+        # ══════════════════════════════════════════
+        # RR_PANELS — ADD guild_id COLUMN
+        # ══════════════════════════════════════════
+
+        try:
+            await db.execute("ALTER TABLE rr_panels ADD COLUMN guild_id INTEGER")
+        except Exception:
+            pass
+
         await db.commit()
 
     await ensure_owner_access()
