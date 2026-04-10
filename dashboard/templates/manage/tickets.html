@@ -3,29 +3,139 @@
 {% block content %}
 <span data-page-title="Tickets"></span>
 
+{# Route passes: ticket_list, general, categories, panels, avg_rating, rating_count #}
+{# ticket_list row: (id[0], channel_id[1], user_id[2], status[3], category[4], claimed_by[5], tags[6], created_at[7]) #}
+
 <div class="stats-grid">
     <div class="stat-card stat-success">
         <div class="stat-label">Open</div>
-        <div class="stat-value">{{ tickets | selectattr(3, 'equalto', 'open') | list | length }}</div>
+        <div class="stat-value">
+            {% set open_count = namespace(n=0) %}
+            {% for t in ticket_list %}{% if t[3] == 'open' %}{% set open_count.n = open_count.n + 1 %}{% endif %}{% endfor %}
+            {{ open_count.n }}
+        </div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Closed</div>
-        <div class="stat-value">{{ tickets | selectattr(3, 'equalto', 'closed') | list | length }}</div>
+        <div class="stat-value">
+            {% set closed_count = namespace(n=0) %}
+            {% for t in ticket_list %}{% if t[3] == 'closed' %}{% set closed_count.n = closed_count.n + 1 %}{% endif %}{% endfor %}
+            {{ closed_count.n }}
+        </div>
     </div>
     <div class="stat-card stat-accent">
         <div class="stat-label">Total</div>
-        <div class="stat-value">{{ tickets | length }}</div>
+        <div class="stat-value">{{ ticket_list | length }}</div>
+    </div>
+    {% if avg_rating %}
+    <div class="stat-card">
+        <div class="stat-label">Avg Rating</div>
+        <div class="stat-value">&#11088; {{ avg_rating }} <span style="font-size:13px;color:var(--text3);">({{ rating_count }})</span></div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- TAB NAV -->
+<div style="display:flex;gap:6px;margin-bottom:16px;border-bottom:1px solid var(--border);padding-bottom:10px;">
+    <a href="/tickets?tab=general"
+       class="btn btn-sm {% if tab == 'general' %}btn-primary{% else %}btn-secondary{% endif %}"
+       hx-get="/tickets?tab=general" hx-target="#content-area" hx-push-url="true">
+       Settings
+    </a>
+    <a href="/tickets?tab=categories"
+       class="btn btn-sm {% if tab == 'categories' %}btn-primary{% else %}btn-secondary{% endif %}"
+       hx-get="/tickets?tab=categories" hx-target="#content-area" hx-push-url="true">
+       Categories
+    </a>
+    <a href="/tickets?tab=panels"
+       class="btn btn-sm {% if tab == 'panels' %}btn-primary{% else %}btn-secondary{% endif %}"
+       hx-get="/tickets?tab=panels" hx-target="#content-area" hx-push-url="true">
+       Panels
+    </a>
+    <a href="/tickets?tab=list"
+       class="btn btn-sm {% if tab == 'list' or tab == 'general' and false %}btn-primary{% else %}btn-secondary{% endif %}"
+       hx-get="/tickets?tab=list" hx-target="#content-area" hx-push-url="true">
+       All Tickets
+    </a>
+</div>
+
+<!-- GENERAL SETTINGS TAB -->
+{% if tab == 'general' %}
+<div class="card">
+    <div class="card-title">Ticket Settings</div>
+    {% if general %}
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;">
+        <div><div class="form-label">Enabled</div>
+            <span class="badge {% if general.enabled %}badge-success{% else %}badge-danger{% endif %}">{{ 'Yes' if general.enabled else 'No' }}</span>
+        </div>
+        <div><div class="form-label">Max Tickets Per User</div><div>{{ general.max_per_user or 1 }}</div></div>
+        <div><div class="form-label">Auto-Close After (hours)</div><div>{{ general.auto_close_hours or 'Off' }}</div></div>
+        <div><div class="form-label">Save Transcripts</div><div>{{ 'Yes' if general.save_transcripts else 'No' }}</div></div>
+        <div><div class="form-label">Transcript Channel ID</div><div>{{ general.transcript_channel_id or '—' }}</div></div>
+        <div><div class="form-label">Support Role ID</div><div>{{ general.support_role_id or '—' }}</div></div>
+        <div><div class="form-label">Name Format</div><div><code>{{ general.name_format or 'ticket-{number}' }}</code></div></div>
+    </div>
+    {% else %}
+    <p class="text-muted">No settings yet. Use /ticket_setup in Discord.</p>
+    {% endif %}
+</div>
+
+{% elif tab == 'categories' %}
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0;">Categories</div>
+        <span class="badge">{{ categories | length }} total</span>
+    </div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead><tr><th>Emoji</th><th>Name</th><th>Status</th></tr></thead>
+            <tbody>
+                {% for cat in categories %}
+                {# cat: id[0], name[1], emoji[2], viewer_roles[3], closer_roles[4], auto_assign_roles[5], open_embed[6], enabled[7], sort_order[8] #}
+                <tr>
+                    <td>{{ cat[2] or '🎫' }}</td>
+                    <td><strong>{{ cat[1] }}</strong></td>
+                    <td><span class="badge {% if cat[7] %}badge-success{% else %}badge-danger{% endif %}">{{ 'Active' if cat[7] else 'Disabled' }}</span></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="3" class="empty">No categories yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
     </div>
 </div>
 
+{% elif tab == 'panels' %}
 <div class="card">
     <div class="card-header">
-        <div class="card-title" style="margin:0">🎫 All Tickets</div>
-        <select class="form-input" style="width:140px;"
-                hx-get="/api/tickets/list"
-                hx-target="#tickets-tbody"
-                hx-trigger="change"
-                name="status">
+        <div class="card-title" style="margin:0;">Panels</div>
+        <span class="badge">{{ panels | length }} total</span>
+    </div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead><tr><th>ID</th><th>Name</th><th>Channel</th><th>Created</th></tr></thead>
+            <tbody>
+                {% for p in panels %}
+                {# p: id[0], name[1], channel_id[2], embed_data[3], buttons[4], created_at[5] #}
+                <tr>
+                    <td><strong>#{{ p[0] }}</strong></td>
+                    <td>{{ p[1] or '—' }}</td>
+                    <td><code>{{ p[2] or '—' }}</code></td>
+                    <td class="text-muted">{{ p[5][:10] if p[5] else '—' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="empty">No panels yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% else %}
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0;">All Tickets</div>
+        <select class="form-input" style="width:140px;" onchange="filterTickets(this.value)">
             <option value="">All</option>
             <option value="open">Open</option>
             <option value="closed">Closed</option>
@@ -34,20 +144,12 @@
     <div class="table-wrap">
         <table class="table">
             <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>User ID</th>
-                    <th>Category</th>
-                    <th>Status</th>
-                    <th>Created</th>
-                </tr>
+                <tr><th>ID</th><th>User ID</th><th>Category</th><th>Status</th><th>Created</th></tr>
             </thead>
-            <tbody id="tickets-tbody"
-                   hx-get="/api/tickets/list"
-                   hx-trigger="load"
-                   hx-swap="innerHTML">
-                {% for t in tickets %}
-                <tr>
+            <tbody id="tickets-tbody">
+                {% for t in ticket_list %}
+                {# t: id[0], channel_id[1], user_id[2], status[3], category[4], claimed_by[5], tags[6], created_at[7] #}
+                <tr class="ticket-row" data-status="{{ t[3] }}">
                     <td><strong>#{{ t[0] }}</strong></td>
                     <td><code>{{ t[2] }}</code></td>
                     <td>{{ t[4] or 'General' }}</td>
@@ -56,7 +158,7 @@
                             {{ t[3] }}
                         </span>
                     </td>
-                    <td class="text-muted">{{ t[5][:10] if t[5] else '—' }}</td>
+                    <td class="text-muted">{{ t[7][:10] if t[7] else '—' }}</td>
                 </tr>
                 {% else %}
                 <tr><td colspan="5" class="empty">No tickets yet</td></tr>
@@ -65,4 +167,13 @@
         </table>
     </div>
 </div>
+{% endif %}
+
+<script>
+function filterTickets(status) {
+    document.querySelectorAll('.ticket-row').forEach(function(row) {
+        row.style.display = (!status || row.dataset.status === status) ? '' : 'none';
+    });
+}
+</script>
 {% endblock %}
