@@ -1,0 +1,468 @@
+{% extends "base.html" %}
+{% block title %}Moderation{% endblock %}
+{% block content %}
+<span data-page-title="Moderation"></span>
+
+<!-- Stats row -->
+<div class="stats-grid">
+    <div class="stat-card stat-danger">
+        <div class="stat-label">Total Logs</div>
+        <div class="stat-value">{{ total }}</div>
+        <div class="stat-sub">moderation actions</div>
+    </div>
+    <div class="stat-card stat-warning">
+        <div class="stat-label">Active Punishments</div>
+        <div class="stat-value">{{ active_punishments | length }}</div>
+        <div class="stat-sub">timeouts &amp; temp bans</div>
+    </div>
+    <div class="stat-card stat-accent">
+        <div class="stat-label">Warned Users</div>
+        <div class="stat-value">{{ active_warnings | length }}</div>
+        <div class="stat-sub">with active warnings</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Auto-Escalation</div>
+        <div class="stat-value" style="font-size:18px;color:{% if auto_escalation == '1' %}var(--success){% else %}var(--danger){% endif %}">
+            {% if auto_escalation == '1' %}On{% else %}Off{% endif %}
+        </div>
+        <div class="stat-sub">warning thresholds</div>
+    </div>
+</div>
+
+<!-- Tabs -->
+<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+    <a href="/moderation?tab=logs"
+       class="btn {% if tab == 'logs' %}btn-primary{% else %}btn-secondary{% endif %}">
+        📋 Mod Logs
+    </a>
+    <a href="/moderation?tab=punishments"
+       class="btn {% if tab == 'punishments' %}btn-primary{% else %}btn-secondary{% endif %}">
+        ⚠️ Active Punishments
+    </a>
+    <a href="/moderation?tab=warnings"
+       class="btn {% if tab == 'warnings' %}btn-primary{% else %}btn-secondary{% endif %}">
+        🔔 Warnings
+    </a>
+    <a href="/moderation?tab=thresholds"
+       class="btn {% if tab == 'thresholds' %}btn-primary{% else %}btn-secondary{% endif %}">
+        📐 Thresholds
+    </a>
+</div>
+
+<!-- ── TAB: Mod Logs ───────────────────────────────────────────────────── -->
+{% if tab == 'logs' %}
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0">📋 Moderation Logs</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <form method="get" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <input type="hidden" name="tab" value="logs">
+                <select name="action" class="form-input" style="width:130px;"
+                        onchange="this.form.submit()">
+                    <option value="">All Actions</option>
+                    {% for a in distinct_actions %}
+                    <option value="{{ a }}" {% if request.args.get('action') == a %}selected{% endif %}>
+                        {{ a }}
+                    </option>
+                    {% endfor %}
+                </select>
+                <input type="text" name="search" class="form-input" placeholder="Search user…"
+                       value="{{ request.args.get('search', '') }}" style="width:150px;">
+                <input type="date" name="date_from" class="form-input"
+                       value="{{ request.args.get('date_from', '') }}" style="width:140px;">
+                <input type="date" name="date_to" class="form-input"
+                       value="{{ request.args.get('date_to', '') }}" style="width:140px;">
+                <button class="btn btn-secondary" type="submit">Filter</button>
+                <a href="/api/moderation/export?date_from={{ request.args.get('date_from','') }}&date_to={{ request.args.get('date_to','') }}"
+                   class="btn btn-secondary">⬇ Export CSV</a>
+            </form>
+        </div>
+    </div>
+
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>User</th>
+                    <th>Moderator</th>
+                    <th>Action</th>
+                    <th>Reason</th>
+                    <th>Source</th>
+                    <th>Date</th>
+                    {% if is_admin %}<th></th>{% endif %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in logs %}
+                {% set action_colors = {
+                    'ban': 'danger', 'kick': 'warning', 'timeout': 'warning',
+                    'warn': 'accent', 'unban': 'success', 'lock': 'danger',
+                    'temp_ban': 'danger'
+                } %}
+                <tr id="log-{{ log[0] }}">
+                    <td>
+                        <div class="user-cell">
+                            <img src="{{ log[3] or 'https://cdn.discordapp.com/embed/avatars/0.png' }}"
+                                 class="avatar-sm" onerror="this.src='https://cdn.discordapp.com/embed/avatars/0.png'">
+                            <div>
+                                <div style="font-weight:500;">{{ log[2] or '—' }}</div>
+                                <div style="font-size:11px;color:var(--text3);">{{ log[1] }}</div>
+                            </div>
+                        </div>
+                    </td>
+                    <td style="color:var(--text2);">{{ log[5] or '—' }}</td>
+                    <td>
+                        <span class="badge badge-{{ action_colors.get(log[6], 'accent') }}">
+                            {{ log[6] }}
+                        </span>
+                    </td>
+                    <td class="text-muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                        {{ log[7] or '—' }}
+                    </td>
+                    <td><span class="badge">{{ log[8] or '—' }}</span></td>
+                    <td class="text-muted">{{ log[10][:10] if log[10] else '—' }}</td>
+                    {% if is_admin %}
+                    <td>
+                        <button class="btn btn-sm btn-secondary"
+                                onclick="editReason({{ log[0] }}, `{{ (log[7] or '') | replace('`', '') }}`)"
+                                title="Edit reason">✏️</button>
+                        {% if is_owner %}
+                        <button class="btn btn-sm btn-danger"
+                                onclick="deleteLog({{ log[0] }})"
+                                title="Delete log">🗑️</button>
+                        {% endif %}
+                    </td>
+                    {% endif %}
+                </tr>
+                {% else %}
+                <tr><td colspan="7" class="empty">No moderation logs yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Pagination -->
+    {% if total_pages > 1 %}
+    <div style="display:flex;gap:8px;justify-content:center;padding:16px;flex-wrap:wrap;">
+        {% for p in range(1, total_pages + 1) %}
+        <a href="/moderation?tab=logs&page={{ p }}&action={{ request.args.get('action','') }}&search={{ request.args.get('search','') }}"
+           class="btn {% if p == page %}btn-primary{% else %}btn-secondary{% endif %}"
+           style="min-width:36px;">{{ p }}</a>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+<!-- Quick Action Panel -->
+{% if is_moderator %}
+<div class="card">
+    <div class="card-title">⚡ Quick Action</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;">
+        <div class="form-group">
+            <label class="form-label">User ID</label>
+            <input class="form-input" id="qa-user" type="text" placeholder="123456789…">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Action</label>
+            <select class="form-input" id="qa-action">
+                <option value="warn">Warn</option>
+                <option value="timeout">Timeout</option>
+                <option value="kick">Kick</option>
+                <option value="ban">Ban</option>
+                <option value="unban">Unban</option>
+                <option value="remove_timeout">Remove Timeout</option>
+            </select>
+        </div>
+        <div class="form-group" id="qa-duration-wrap">
+            <label class="form-label">Duration (seconds)</label>
+            <input class="form-input" id="qa-duration" type="number" placeholder="300">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Reason</label>
+            <input class="form-input" id="qa-reason" type="text" placeholder="Reason…">
+        </div>
+    </div>
+    <button class="btn btn-danger" onclick="submitQuickAction()">Execute Action</button>
+</div>
+{% endif %}
+
+<!-- Edit Reason Modal -->
+<div id="edit-reason-modal" class="modal-overlay" style="display:none;">
+    <div class="modal">
+        <div class="modal-title">Edit Reason</div>
+        <input type="hidden" id="edit-log-id">
+        <div class="form-group">
+            <label class="form-label">Reason</label>
+            <input class="form-input" id="edit-reason-text" type="text">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" onclick="document.getElementById('edit-reason-modal').style.display='none'">Cancel</button>
+            <button class="btn btn-primary" onclick="saveReason()">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- ── TAB: Active Punishments ─────────────────────────────────────────── -->
+{% elif tab == 'punishments' %}
+<div class="card">
+    <div class="card-title">⚠️ Active Punishments</div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>User</th><th>Action</th><th>Reason</th><th>Moderator</th><th>Expires</th></tr>
+            </thead>
+            <tbody>
+                {% for p in active_punishments %}
+                <tr>
+                    <td>
+                        <div style="font-weight:500;">{{ p[2] or '—' }}</div>
+                        <div style="font-size:11px;color:var(--text3);">{{ p[1] }}</div>
+                    </td>
+                    <td><span class="badge badge-warning">{{ p[3] }}</span></td>
+                    <td class="text-muted">{{ p[4] or '—' }}</td>
+                    <td class="text-muted">{{ p[6] or '—' }}</td>
+                    <td class="text-muted">{{ p[5][:16] if p[5] else 'Permanent' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="empty">No active punishments</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ── TAB: Warnings ───────────────────────────────────────────────────── -->
+{% elif tab == 'warnings' %}
+<div class="card">
+    <div class="card-title">🔔 Warned Users</div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>User</th><th>Warnings</th><th>Last Reason</th><th>Last Warn</th><th></th></tr>
+            </thead>
+            <tbody>
+                {% for w in active_warnings %}
+                <tr>
+                    <td>
+                        <div style="font-weight:500;">{{ w[1] or '—' }}</div>
+                        <div style="font-size:11px;color:var(--text3);">{{ w[0] }}</div>
+                    </td>
+                    <td>
+                        <span class="badge badge-{% if w[2] >= 3 %}danger{% elif w[2] >= 2 %}warning{% else %}accent{% endif %}">
+                            {{ w[2] }} warns
+                        </span>
+                    </td>
+                    <td class="text-muted">{{ w[3] or '—' }}</td>
+                    <td class="text-muted">{{ w[4][:10] if w[4] else '—' }}</td>
+                    <td>
+                        {% if is_moderator %}
+                        <button class="btn btn-sm btn-danger"
+                                onclick="clearWarnings('{{ w[0] }}')">Clear All</button>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="empty">No warnings on record</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ── TAB: Thresholds ─────────────────────────────────────────────────── -->
+{% elif tab == 'thresholds' %}
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0">📐 Warning Thresholds</div>
+        <div style="display:flex;align-items:center;gap:12px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);">
+                Auto-Escalation
+                <input type="checkbox" id="auto-escalation-toggle"
+                       {% if auto_escalation == '1' %}checked{% endif %}
+                       onchange="toggleAutoEscalation(this.checked)">
+            </label>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>Warnings</th><th>Action</th><th>Duration (min)</th><th>Enabled</th><th></th></tr>
+            </thead>
+            <tbody>
+                {% for t in thresholds %}
+                <tr>
+                    <td><strong>{{ t[1] }}</strong></td>
+                    <td><span class="badge badge-warning">{{ t[2] }}</span></td>
+                    <td class="text-muted">{{ t[3] or '—' }}</td>
+                    <td>
+                        <span class="badge {% if t[5] %}badge-success{% else %}badge-danger{% endif %}">
+                            {% if t[5] %}Active{% else %}Off{% endif %}
+                        </span>
+                    </td>
+                    <td>
+                        {% if is_admin %}
+                        <button class="btn btn-sm btn-danger"
+                                onclick="deleteThreshold({{ t[0] }})">Delete</button>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="empty">No thresholds configured</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {% if is_admin %}
+    <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);">
+        <div class="card-title">Add Threshold</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;">
+            <div class="form-group">
+                <label class="form-label">Warn Count</label>
+                <input class="form-input" id="th-count" type="number" min="1" value="3">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Action</label>
+                <select class="form-input" id="th-action">
+                    <option value="timeout">Timeout</option>
+                    <option value="kick">Kick</option>
+                    <option value="ban">Ban</option>
+                    <option value="temp_ban">Temp Ban</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Duration (minutes)</label>
+                <input class="form-input" id="th-duration" type="number" placeholder="optional">
+            </div>
+        </div>
+        <button class="btn btn-primary" onclick="addThreshold()">Add Threshold</button>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+<script>
+// ── Quick Action ──────────────────────────────────────────────────────────────
+document.getElementById('qa-action') && document.getElementById('qa-action').addEventListener('change', function() {
+    const wrap = document.getElementById('qa-duration-wrap');
+    if (wrap) wrap.style.display = ['timeout','temp_ban'].includes(this.value) ? '' : 'none';
+});
+
+async function submitQuickAction() {
+    const userId = document.getElementById('qa-user').value.trim();
+    const action = document.getElementById('qa-action').value;
+    const reason = document.getElementById('qa-reason').value.trim() || 'No reason provided';
+    const duration = document.getElementById('qa-duration').value;
+    if (!userId) { showToast('Enter a user ID', 'error'); return; }
+    const payload = { user_id: userId, action, reason };
+    if (duration) payload.duration_seconds = parseInt(duration);
+    const res = await fetch('/api/moderation/quick-action', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.success) { showToast(data.message || 'Done', 'success'); }
+    else { showToast(data.error || 'Failed', 'error'); }
+}
+
+// ── Edit Reason ───────────────────────────────────────────────────────────────
+function editReason(logId, currentReason) {
+    document.getElementById('edit-log-id').value = logId;
+    document.getElementById('edit-reason-text').value = currentReason;
+    document.getElementById('edit-reason-modal').style.display = 'flex';
+}
+
+async function saveReason() {
+    const logId = document.getElementById('edit-log-id').value;
+    const reason = document.getElementById('edit-reason-text').value.trim();
+    if (!reason) return;
+    const res = await fetch(`/api/moderation/edit-reason/${logId}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({reason})
+    });
+    const data = await res.json();
+    document.getElementById('edit-reason-modal').style.display = 'none';
+    if (data.success) showToast('Reason updated', 'success');
+    else showToast(data.error || 'Failed', 'error');
+}
+
+// ── Delete Log ────────────────────────────────────────────────────────────────
+async function deleteLog(logId) {
+    if (!confirm('Permanently delete this log entry?')) return;
+    const res = await fetch(`/api/moderation/delete-log/${logId}`, {method: 'DELETE'});
+    const data = await res.json();
+    if (data.success) {
+        const row = document.getElementById(`log-${logId}`);
+        if (row) row.remove();
+        showToast('Log deleted', 'success');
+    } else {
+        showToast(data.error || 'Failed', 'error');
+    }
+}
+
+// ── Clear Warnings ────────────────────────────────────────────────────────────
+async function clearWarnings(userId) {
+    if (!confirm(`Clear all warnings for ${userId}?`)) return;
+    const res = await fetch('/api/moderation/clear-warnings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({user_id: userId})
+    });
+    const data = await res.json();
+    if (data.success) { showToast('Warnings cleared', 'success'); setTimeout(() => location.reload(), 800); }
+    else showToast(data.error || 'Failed', 'error');
+}
+
+// ── Thresholds ────────────────────────────────────────────────────────────────
+async function addThreshold() {
+    const payload = {
+        warn_count: parseInt(document.getElementById('th-count').value),
+        action: document.getElementById('th-action').value,
+        duration_minutes: document.getElementById('th-duration').value || null
+    };
+    const res = await fetch('/api/moderation/warning-thresholds', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.success) { showToast('Threshold added', 'success'); setTimeout(() => location.reload(), 600); }
+    else showToast(data.error || 'Failed', 'error');
+}
+
+async function deleteThreshold(id) {
+    if (!confirm('Delete this threshold?')) return;
+    const res = await fetch(`/api/moderation/warning-thresholds/${id}`, {method: 'DELETE'});
+    const data = await res.json();
+    if (data.success) { showToast('Deleted', 'success'); setTimeout(() => location.reload(), 600); }
+    else showToast(data.error || 'Failed', 'error');
+}
+
+async function toggleAutoEscalation(enabled) {
+    const res = await fetch('/api/moderation/auto-escalation', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled})
+    });
+    const data = await res.json();
+    showToast(enabled ? 'Auto-escalation enabled' : 'Auto-escalation disabled',
+              data.success ? 'success' : 'error');
+}
+
+// Close edit reason modal on overlay click
+document.getElementById('edit-reason-modal') && document.getElementById('edit-reason-modal').addEventListener('click', function(e) {
+    if (e.target === this) this.style.display = 'none';
+});
+
+// Hide duration field initially if not needed
+(function() {
+    const actionEl = document.getElementById('qa-action');
+    const wrap = document.getElementById('qa-duration-wrap');
+    if (actionEl && wrap && !['timeout','temp_ban'].includes(actionEl.value)) {
+        wrap.style.display = 'none';
+    }
+})();
+</script>
+{% endblock %}
