@@ -82,7 +82,7 @@
     </div>
     {% endif %}
 
-    <nav style="flex:1;padding:12px 10px;overflow-y:auto;" hx-disable>
+    <nav style="flex:1;padding:12px 10px;overflow-y:auto;">
 
 <!-- ─── GENERAL ────────── -->
 <div class="nav-section">
@@ -91,7 +91,8 @@
     <a href="/"
        hx-get="/"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🏠</span>
@@ -101,7 +102,8 @@
     <a href="/members"
        hx-get="/members"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">👥</span>
@@ -111,7 +113,8 @@
     <a href="/audit-log"
        hx-get="/audit-log"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">📝</span>
@@ -126,7 +129,8 @@
     <a href="/moderation"
        hx-get="/moderation"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🛡️</span>
@@ -136,7 +140,8 @@
     <a href="/tickets"
        hx-get="/tickets"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🎫</span>
@@ -146,7 +151,8 @@
     <a href="/embed-builder"
        hx-get="/embed-builder"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">📦</span>
@@ -156,7 +162,8 @@
     <a href="/reaction-roles"
        hx-get="/reaction-roles"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🎭</span>
@@ -166,7 +173,8 @@
     <a href="/triggers"
        hx-get="/triggers"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">⚡</span>
@@ -176,7 +184,8 @@
     <a href="/custom-commands"
        hx-get="/custom-commands"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">💬</span>
@@ -191,7 +200,8 @@
     <a href="/mvp"
        hx-get="/mvp"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🏆</span>
@@ -201,7 +211,8 @@
     <a href="/leveling"
        hx-get="/leveling"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">⭐</span>
@@ -211,7 +222,8 @@
     <a href="/economy"
        hx-get="/economy"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">💰</span>
@@ -221,7 +233,8 @@
     <a href="/shop"
        hx-get="/shop"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🛒</span>
@@ -231,7 +244,8 @@
     <a href="/events"
        hx-get="/events"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🎯</span>
@@ -246,7 +260,8 @@
     <a href="/config/general"
        hx-get="/config/general"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">⚙️</span>
@@ -256,7 +271,8 @@
     <a href="/config/welcome"
        hx-get="/config/welcome"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">👋</span>
@@ -266,7 +282,8 @@
     <a href="/config/boost"
        hx-get="/config/boost"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🔰</span>
@@ -276,7 +293,8 @@
     <a href="/config/announcements"
        hx-get="/config/announcements"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">📢</span>
@@ -286,7 +304,8 @@
     <a href="/commands"
        hx-get="/commands"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🎮</span>
@@ -296,7 +315,8 @@
     <a href="/config/access"
        hx-get="/config/access"
        hx-target="#content-area"
-       hx-swap="innerHTML"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🔐</span>
