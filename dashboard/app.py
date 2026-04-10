@@ -346,16 +346,19 @@ def moderation():
             """, params + [per_page, (page - 1) * per_page])
             logs = await log_cur.fetchall()
 
-            active_cur = await db.execute("""
-                SELECT id, user_id, user_display_name, action, reason,
-                       expires_at, moderator_display_name
-                FROM moderation_logs
-                WHERE guild_id=? AND deleted=0
-                  AND action IN ('timeout','temp_ban')
-                  AND (expires_at IS NULL OR expires_at > datetime('now'))
-                ORDER BY created_at DESC
-            """, (guild_id,))
-            active_punishments = await active_cur.fetchall()
+            try:
+                active_cur = await db.execute("""
+                    SELECT id, user_id, user_display_name, action, reason,
+                           expires_at, moderator_display_name
+                    FROM moderation_logs
+                    WHERE guild_id=? AND deleted=0
+                      AND action IN ('timeout','temp_ban')
+                      AND (expires_at IS NULL OR expires_at > datetime('now'))
+                    ORDER BY created_at DESC
+                """, (guild_id,))
+                active_punishments = await active_cur.fetchall()
+            except Exception:
+                active_punishments = []
 
             warn_cur = await db.execute("""
                 SELECT user_id, user_display_name,
@@ -468,12 +471,17 @@ def tickets():
             "general":      general,
             "categories":   categories,
             "panels":       panels,
-            "ticket_list":  ticket_list,
+            "tickets":      ticket_list,
             "avg_rating":   avg_rating,
             "rating_count": rating_count,
         }
 
     data = run_async(get_data())
+    # Pre-compute counts so template doesn't need selectattr on tuples
+    tickets = data.get("tickets", [])
+    data["ticket_open"]   = sum(1 for t in tickets if t[3] == "open")
+    data["ticket_closed"] = sum(1 for t in tickets if t[3] == "closed")
+    data["ticket_total"]  = len(tickets)
     ctx  = get_current_user_context()
     return render("manage/tickets.html", tab=tab, **data, **ctx)
 
@@ -890,18 +898,31 @@ def commands_dashboard():
     async def get_toggles():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT command_name, enabled, allowed_roles,
-                       allowed_channels, cooldown_seconds
+                SELECT command_name, enabled, allowed_roles, allowed_channels,
+                       cooldown_seconds, aliases, enabled_roles, disabled_roles,
+                       enabled_channels, disabled_channels, delete_user_msg,
+                       delete_bot_reply, delete_bot_after, custom_cooldown,
+                       success_message, error_message, ephemeral, dm_response,
+                       bypass_cooldown_roles, require_permission, owner_only,
+                       cmd_emoji, category_color, hide_from_help
                 FROM command_toggles WHERE guild_id=?
             """, (guild_id,))
             rows   = await cursor.fetchall()
             result = {}
             for r in rows:
                 result[r[0]] = {
-                    "enabled": r[1],
-                    "allowed_roles": r[2],
-                    "allowed_channels": r[3],
-                    "cooldown": r[4],
+                    "enabled": r[1], "allowed_roles": r[2],
+                    "allowed_channels": r[3], "cooldown": r[4],
+                    "aliases": r[5], "enabled_roles": r[6],
+                    "disabled_roles": r[7], "enabled_channels": r[8],
+                    "disabled_channels": r[9], "delete_user_msg": r[10],
+                    "delete_bot_reply": r[11], "delete_bot_after": r[12],
+                    "custom_cooldown": r[13], "success_message": r[14],
+                    "error_message": r[15], "ephemeral": r[16],
+                    "dm_response": r[17], "bypass_cooldown_roles": r[18],
+                    "require_permission": r[19], "owner_only": r[20],
+                    "cmd_emoji": r[21], "category_color": r[22],
+                    "hide_from_help": r[23],
                 }
             return result
 
