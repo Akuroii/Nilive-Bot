@@ -88,6 +88,7 @@ async def init_db():
                 guild_id      INTEGER,
                 channel_id    INTEGER,
                 user_id       INTEGER,
+                staff_role_id INTEGER,
                 status        TEXT DEFAULT 'open',
                 category      TEXT,
                 claimed_by    INTEGER,
@@ -95,6 +96,17 @@ async def init_db():
                 created_at    TEXT
             )
         """)
+
+        # Migration: add staff_role_id if an older DB predates it
+        try:
+            cursor = await db.execute("PRAGMA table_info(tickets)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "staff_role_id" not in cols:
+                await db.execute(
+                    "ALTER TABLE tickets ADD COLUMN staff_role_id INTEGER")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] tickets.staff_role_id: {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ticket_config (
