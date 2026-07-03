@@ -1051,14 +1051,32 @@ def add_shop_item():
     guild_id = get_session_guild_id()
     data     = request.json or request.form.to_dict()
 
+    # P1 #11 FIX: this INSERT previously omitted max_stock and
+    # current_stock entirely, even though the dashboard form
+    # (systems/shop.html addItem()) collects both and sends them in
+    # the payload. Every "limited stock" item silently became
+    # unlimited stock the moment it was saved, because the columns
+    # were never written — they stayed NULL regardless of what the
+    # admin typed in. safe_decrement_stock() in economy_safe.py only
+    # enforces a limit when max_stock is non-NULL, so this wasn't
+    # just a display bug, it meant stock limits had zero effect at
+    # purchase time.
+    max_stock_val = data.get("max_stock")
+    try:
+        max_stock_val = int(max_stock_val) if max_stock_val not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        max_stock_val = None
+    current_stock_val = max_stock_val  # a brand-new item starts full
+
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO shop_items
                     (guild_id, name, description, price, type,
                      role_id, duration_hours, featured,
-                     required_level, required_role_id, enabled)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                     required_level, required_role_id,
+                     max_stock, current_stock, enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """, (
                 guild_id,
                 data.get("name"),
@@ -1070,6 +1088,8 @@ def add_shop_item():
                 int(data.get("featured", 0)),
                 int(data.get("required_level", 0)),
                 data.get("required_role_id") or None,
+                max_stock_val,
+                current_stock_val,
             ))
             await db.commit()
 
