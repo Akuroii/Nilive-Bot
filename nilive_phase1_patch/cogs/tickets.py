@@ -51,12 +51,20 @@ class TicketControlView(discord.ui.View):
 
     @discord.ui.button(label="Claim", emoji="✋", style=discord.ButtonStyle.success, custom_id="ticket_claim")
     async def claim_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # P1 #10 FIX: this used to SELECT staff_role_id FROM the legacy
+        # ticket_config table, which /ticket_setup no longer writes to
+        # (it writes ticket_settings now). That meant the row was always
+        # missing, the "staff only" check silently never fired, and any
+        # member who could see the ticket channel could claim it.
+        # Fixed to read the per-ticket snapshot stored on the tickets
+        # row itself, same source create_ticket() used when it opened
+        # the channel.
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT staff_role_id FROM ticket_config WHERE guild_id=?",
-                (interaction.guild.id,))
+                "SELECT staff_role_id FROM tickets WHERE channel_id=?",
+                (interaction.channel.id,))
             row = await cursor.fetchone()
-        if row:
+        if row and row[0]:
             staff_role = interaction.guild.get_role(row[0])
             if staff_role and staff_role not in interaction.user.roles:
                 await interaction.response.send_message("Only staff can claim tickets!", ephemeral=True)
@@ -121,12 +129,18 @@ class ClosedTicketView(discord.ui.View):
 
     @discord.ui.button(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="ticket_delete")
     async def delete_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # P1 #10 FIX: same dead-table bug as claim_ticket above — this
+        # queried the legacy ticket_config table (never populated since
+        # the migration to ticket_settings), so the staff check never
+        # fired and any member could permanently delete a ticket
+        # channel + its transcript. Fixed to use the per-ticket
+        # snapshot on the tickets row.
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT staff_role_id FROM ticket_config WHERE guild_id=?",
-                (interaction.guild.id,))
+                "SELECT staff_role_id FROM tickets WHERE channel_id=?",
+                (interaction.channel.id,))
             row = await cursor.fetchone()
-        if row:
+        if row and row[0]:
             staff_role = interaction.guild.get_role(row[0])
             if staff_role and staff_role not in interaction.user.roles:
                 await interaction.response.send_message("Only staff can delete tickets!", ephemeral=True)
@@ -248,29 +262,43 @@ async def create_ticket(interaction: discord.Interaction, category: str):
 async def close_ticket(interaction: discord.Interaction):
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT user_id, staff_role_id FROM tickets WHERE channel_id=? AND status='open'",
+            "SELECT user_id, staff_role_id, category FROM tickets WHERE channel_id=? AND status='open'",
             (interaction.channel.id,))
         row = await cursor.fetchone()
     if not row:
         await interaction.response.send_message("This is not an open ticket!", ephemeral=True)
         return
-    user_id, staff_role_id = row
+    user_id, staff_role_id, category = row
 
     async with aiosqlite.connect(DB_PATH) as db:
         settings_cur = await db.execute(
             "SELECT support_role_id FROM ticket_settings WHERE guild_id=?",
             (interaction.guild.id,))
         settings_row = await settings_cur.fetchone()
+
+        # P1 #10 ENHANCEMENT: previously only the single guild-wide
+        # support_role_id could close a ticket. Categories can define
+        # their own closer_roles (dashboard already exposes this per
+        # category) — those were being collected for channel view
+        # access but never actually checked for close permission.
+        closer_role_ids = []
+        if category:
+            cat_cur = await db.execute(
+                "SELECT closer_roles FROM ticket_categories WHERE guild_id=? AND name=?",
+                (interaction.guild.id, category))
+            cat_row = await cat_cur.fetchone()
+            if cat_row and cat_row[0]:
+                closer_role_ids = json.loads(cat_row[0])
+
     support_role_id = settings_row[0] if settings_row else staff_role_id
 
     is_owner = interaction.user.id == user_id
-    is_staff = False
-    if support_role_id:
-        staff_role = interaction.guild.get_role(int(support_role_id))
-        is_staff = bool(staff_role and staff_role in interaction.user.roles)
+    member_role_ids = {r.id for r in interaction.user.roles}
+    is_staff = bool(support_role_id and int(support_role_id) in member_role_ids)
+    is_category_closer = bool(member_role_ids & {int(r) for r in closer_role_ids})
     is_admin = interaction.user.guild_permissions.manage_channels
 
-    if not (is_owner or is_staff or is_admin):
+    if not (is_owner or is_staff or is_category_closer or is_admin):
         await interaction.response.send_message(
             "You don't have permission to close this ticket.", ephemeral=True)
         return
