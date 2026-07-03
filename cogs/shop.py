@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 from database import DB_PATH
 from utils.permissions import check_bot_role_position
 from utils.formatters import snapshot_user, now_iso
+from utils.economy_safe import safe_deduct, safe_decrement_stock, InsufficientBalance
 
 
 async def get_currency_name(guild_id: int) -> str:
@@ -57,29 +58,6 @@ async def process_purchase(interaction: discord.Interaction,
     (iid, name, price, itype, role_id, duration_hours,
      req_level, req_role_id, enabled, max_stock, curr_stock) = item
 
-    # Stock check
-    if max_stock and curr_stock is not None and curr_stock <= 0:
-        await interaction.response.send_message(
-            "This item is out of stock!", ephemeral=True)
-        return
-
-    # Balance check
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT balance FROM economy
-            WHERE guild_id = ? AND user_id = ?
-        """, (guild_id, user_id))
-        row = await cursor.fetchone()
-    balance = row[0] if row else 0
-
-    if balance < price:
-        currency = await get_currency_name(guild_id)
-        await interaction.response.send_message(
-            f"You need {price:,} {currency} but only have {balance:,}.",
-            ephemeral=True)
-        return
-
-    # Level check
     if req_level and req_level > 0:
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
@@ -94,7 +72,6 @@ async def process_purchase(interaction: discord.Interaction,
                 ephemeral=True)
             return
 
-    # Required role check
     if req_role_id:
         req_role = interaction.guild.get_role(int(req_role_id))
         if req_role and req_role not in interaction.user.roles:
@@ -103,29 +80,49 @@ async def process_purchase(interaction: discord.Interaction,
                 ephemeral=True)
             return
 
-    # Deduct coins
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            UPDATE economy SET balance = balance - ?
-            WHERE guild_id = ? AND user_id = ?
-        """, (price, guild_id, user_id))
+    # P1 #11 FIX: previously stock and balance were checked with
+    # plain SELECTs, then both decremented in separate UPDATEs
+    # outside any shared transaction — two people buying the last
+    # unit of a limited item at the same moment could both pass the
+    # check and both succeed, overselling stock and/or letting a
+    # buyer without enough balance still get charged into a negative
+    # number. Now stock is claimed atomically first; if the balance
+    # deduction that follows fails, the stock claim is released.
+    stock_ok = await safe_decrement_stock(iid)
+    if not stock_ok:
+        await interaction.response.send_message(
+            "This item is out of stock!", ephemeral=True)
+        return
 
-        # Reduce stock
+    try:
+        await safe_deduct(guild_id, user_id, price)
+    except InsufficientBalance:
         if max_stock:
-            await db.execute("""
-                UPDATE shop_items
-                SET current_stock = current_stock - 1
-                WHERE id = ?
-            """, (iid,))
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE shop_items SET current_stock = current_stock + 1 WHERE id=?",
+                    (iid,))
+                await db.commit()
+        currency = await get_currency_name(guild_id)
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id))
+            row = await cursor.fetchone()
+        bal = row[0] if row else 0
+        await interaction.response.send_message(
+            f"You need {price:,} {currency} but only have {bal:,}.",
+            ephemeral=True)
+        return
 
-        # Record purchase
-        snap       = snapshot_user(interaction.user)
-        expires_at = None
-        if duration_hours:
-            expires_at = (
-                datetime.now(timezone.utc) +
-                timedelta(hours=duration_hours)).isoformat()
+    snap       = snapshot_user(interaction.user)
+    expires_at = None
+    if duration_hours:
+        expires_at = (
+            datetime.now(timezone.utc) +
+            timedelta(hours=duration_hours)).isoformat()
 
+    async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO purchase_history
                 (guild_id, user_id, user_display_name,
@@ -133,10 +130,8 @@ async def process_purchase(interaction: discord.Interaction,
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (guild_id, user_id, snap["display_name"],
               iid, name, price, expires_at))
-
         await db.commit()
 
-    # Give role if applicable
     if itype in ("role", "temp_role") and role_id:
         role = interaction.guild.get_role(int(role_id))
         if role:
@@ -149,7 +144,6 @@ async def process_purchase(interaction: discord.Interaction,
                 except Exception as e:
                     print(f"[SHOP] Role give error: {e}")
 
-                # Track temp role
                 if duration_hours and expires_at:
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute("""
