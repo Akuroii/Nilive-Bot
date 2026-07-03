@@ -5,6 +5,7 @@ import aiosqlite
 import random
 from datetime import datetime, timedelta
 from database import DB_PATH
+from utils.economy_safe import safe_transfer, safe_credit, InsufficientBalance
 
 
 _daily_cooldowns:  dict[int, datetime] = {}
@@ -23,20 +24,13 @@ async def get_balance(guild_id: int, user_id: int) -> int:
 
 async def add_balance(guild_id: int, user_id: int,
                       amount: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO economy (guild_id, user_id, balance)
-            VALUES (?, ?, ?)
-            ON CONFLICT(guild_id, user_id)
-            DO UPDATE SET balance = balance + ?
-        """, (guild_id, user_id, amount, amount))
-        await db.commit()
-        cursor = await db.execute("""
-            SELECT balance FROM economy
-            WHERE guild_id = ? AND user_id = ?
-        """, (guild_id, user_id))
-        row = await cursor.fetchone()
-    return row[0] if row else 0
+    # P1 #11 FIX: routed through safe_credit (atomic upsert) instead
+    # of a raw INSERT..ON CONFLICT here. Functionally the same for a
+    # single credit, but keeps every write path going through one
+    # audited helper instead of two separate implementations that
+    # could drift apart.
+    await safe_credit(guild_id, user_id, amount)
+    return await get_balance(guild_id, user_id)
 
 
 async def get_currency_name(guild_id: int) -> str:
@@ -175,25 +169,23 @@ class Economy(commands.Cog):
             return
 
         guild_id = interaction.guild.id
-        user_id  = interaction.user.id
-        bal      = await get_balance(guild_id, user_id)
-        if bal < amount:
+
+        # P1 #11 FIX: previously this read the sender's balance,
+        # checked it, then ran two separate UPDATE statements
+        # outside any shared transaction. Two /give calls fired
+        # close together could both pass the balance check before
+        # either deduction landed, letting a user spend the same
+        # coins twice (overdraft into negative balance). safe_transfer
+        # wraps the check-and-deduct in a single BEGIN IMMEDIATE
+        # transaction so the second call sees the already-reduced
+        # balance and correctly fails instead of racing.
+        try:
+            await safe_transfer(guild_id, interaction.user.id, member.id, amount)
+        except InsufficientBalance:
+            bal = await get_balance(guild_id, interaction.user.id)
             await interaction.response.send_message(
                 f"You only have {bal:,} coins!", ephemeral=True)
             return
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                UPDATE economy SET balance = balance - ?
-                WHERE guild_id = ? AND user_id = ?
-            """, (amount, guild_id, user_id))
-            await db.execute("""
-                INSERT INTO economy (guild_id, user_id, balance)
-                VALUES (?, ?, ?)
-                ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET balance = balance + ?
-            """, (guild_id, member.id, amount, amount))
-            await db.commit()
 
         currency = await get_currency_name(guild_id)
         await interaction.response.send_message(
@@ -257,13 +249,13 @@ class Economy(commands.Cog):
                 SET balance = MAX(0, balance - ?)
                 WHERE guild_id = ? AND user_id = ?
             """, (amount, interaction.guild.id, member.id))
-            await db.commit()
             cursor = await db.execute("""
                 SELECT balance FROM economy
                 WHERE guild_id = ? AND user_id = ?
             """, (interaction.guild.id, member.id))
             row     = await cursor.fetchone()
             new_bal = row[0] if row else 0
+            await db.commit()
         currency = await get_currency_name(interaction.guild.id)
         await interaction.response.send_message(
             f"Removed **{amount:,}** {currency} from {member.mention}. "
