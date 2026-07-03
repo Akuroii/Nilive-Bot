@@ -3,6 +3,7 @@ from discord.ext import commands
 import aiosqlite
 import json
 from database import DB_PATH
+from utils.permissions import can_moderate, check_bot_role_position
 
 
 class CustomCommands(commands.Cog):
@@ -85,6 +86,20 @@ class CustomCommands(commands.Cog):
             action_list = json.loads(actions) if actions else []
             action_errors = []
 
+            # Hierarchy check — block privilege escalation via custom commands
+            destructive = {"ban", "kick", "remove_all_roles"}
+            is_destructive = (
+                bool(destructive & set(action_list))
+                or any(a.startswith("timeout:") for a in action_list)
+            )
+            if target_member and is_destructive:
+                allowed, hmsg = await can_moderate(
+                    message.author, target_member, message.guild.id)
+                if not allowed:
+                    await message.channel.send(
+                        f"{message.author.mention} {hmsg}", delete_after=6)
+                    return
+
             for action in action_list:
                 try:
                     if action == "ban" and target_member:
@@ -127,7 +142,12 @@ class CustomCommands(commands.Cog):
                         role_id = int(action.split(":")[1])
                         role    = message.guild.get_role(role_id)
                         if role:
-                            await target_member.add_roles(role)
+                            can_assign, warn = check_bot_role_position(
+                                message.guild, role)
+                            if can_assign:
+                                await target_member.add_roles(role)
+                            else:
+                                action_errors.append(warn)
                     elif action.startswith("remove_role:") and target_member:
                         role_id = int(action.split(":")[1])
                         role    = message.guild.get_role(role_id)
