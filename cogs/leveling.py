@@ -17,11 +17,25 @@ class Leveling(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._xp_cooldowns: dict[tuple, float] = {}
-        self._voice_join_times: dict[tuple, float] = {}
+        self._spam_tracker: dict[tuple, list[float]] = {}
         self.voice_xp_task.start()
 
     def cog_unload(self):
         self.voice_xp_task.cancel()
+
+    # ─── SPAM DETECTION (P1 #12) ─────────────────────────
+    # Frequency-based: N messages within X seconds = spam.
+    # Penalizes XP instead of blocking messages (moderation.py
+    # already handles actual mute/timeout enforcement).
+    def _is_spamming(self, guild_id: int, user_id: int,
+                      threshold: int, window_seconds: int) -> bool:
+        key = (guild_id, user_id)
+        now = time.time()
+        times = self._spam_tracker.get(key, [])
+        times = [t for t in times if now - t < window_seconds]
+        times.append(now)
+        self._spam_tracker[key] = times
+        return len(times) >= threshold
 
     # ─── MESSAGE XP ─────────────────────────────────────
     @commands.Cog.listener()
@@ -37,6 +51,40 @@ class Leveling(commands.Cog):
         user_id  = message.author.id
         key      = (guild_id, user_id)
         now      = time.time()
+
+        # P1 #12 FIX: spam detection must run on EVERY message,
+        # BEFORE the XP-cooldown gate below — not after it.
+        #
+        # The previous ordering updated self._xp_cooldowns and
+        # returned early whenever a message arrived inside the
+        # cooldown window, which meant that message never reached
+        # _is_spamming() at all. With the default settings
+        # (xp_cooldown_seconds=30, spam_window_seconds=10,
+        # spam_threshold=3), every message that could have counted
+        # toward the spam threshold was filtered out by the cooldown
+        # gate first — it was mathematically impossible to
+        # accumulate 3 tracked messages inside a 10s window when
+        # tracked messages were always >=30s apart. The anti-spam
+        # feature existed in code but could never actually fire.
+        #
+        # Spam tracking now runs independently of the XP cooldown,
+        # so rapid-fire messages get caught regardless of whether
+        # they'd have earned XP anyway.
+        if config.get("spam_detection_enabled", 1):
+            threshold = int(config.get("spam_threshold", 3))
+            window    = int(config.get("spam_window_seconds", 10))
+            if self._is_spamming(guild_id, user_id, threshold, window):
+                penalty = int(config.get("spam_xp_penalty", 10))
+                if penalty > 0:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("""
+                            INSERT INTO levels (guild_id, user_id, xp, level)
+                            VALUES (?, ?, 0, 0)
+                            ON CONFLICT(guild_id, user_id)
+                            DO UPDATE SET xp = MAX(0, xp - ?)
+                        """, (guild_id, user_id, penalty))
+                        await db.commit()
+                return
 
         cooldown = config.get("xp_cooldown_seconds", 30)
         last     = self._xp_cooldowns.get(key, 0)
@@ -105,67 +153,71 @@ class Leveling(commands.Cog):
     @tasks.loop(seconds=60)
     async def voice_xp_task(self):
         for guild in self.bot.guilds:
-            config = await get_leveling_config(guild.id)
-            if not config.get("voice_xp_enabled", 1):
-                continue
-            xp_per_min = config.get("voice_xp_per_minute", 3)
-            require_unmuted = config.get("voice_require_unmuted", 1)
-            afk_channel_id  = guild.afk_channel.id if guild.afk_channel else None
-
-            for channel in guild.voice_channels:
-                if channel.id == afk_channel_id:
+            try:
+                config = await get_leveling_config(guild.id)
+                if not config.get("voice_xp_enabled", 1):
                     continue
+                xp_per_min = config.get("voice_xp_per_minute", 3)
+                require_unmuted = config.get("voice_require_unmuted", 1)
+                afk_channel_id  = guild.afk_channel.id if guild.afk_channel else None
 
-                real_members = [
-                    m for m in channel.members if not m.bot]
-
-                if len(real_members) < 2:
-                    continue
-
-                for member in real_members:
-                    if member.voice.self_deaf or member.voice.deaf:
-                        continue
-                    if require_unmuted:
-                        if member.voice.self_mute or member.voice.mute:
-                            continue
-
-                    xp_gain = calculate_voice_xp(1, xp_per_min)
-                    if xp_gain <= 0:
+                for channel in guild.voice_channels:
+                    if channel.id == afk_channel_id:
                         continue
 
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        cursor = await db.execute("""
-                            SELECT xp, level FROM levels
-                            WHERE guild_id = ? AND user_id = ?
-                        """, (guild.id, member.id))
-                        row = await cursor.fetchone()
-                        old_xp    = row[0] if row else 0
-                        old_level = row[1] if row else 0
-                        new_xp    = old_xp + xp_gain
-                        new_level, _, _ = xp_progress(new_xp)
-                        await db.execute("""
-                            INSERT INTO levels (guild_id, user_id, xp, level)
-                            VALUES (?, ?, ?, ?)
-                            ON CONFLICT(guild_id, user_id)
-                            DO UPDATE SET xp = ?, level = ?
-                        """, (guild.id, member.id, new_xp, new_level,
-                              new_xp, new_level))
-                        await db.commit()
+                    real_members = [
+                        m for m in channel.members if not m.bot]
 
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute("""
-                            INSERT INTO voice_sessions
-                                (guild_id, user_id, join_time)
-                            VALUES (?, ?, ?)
-                            ON CONFLICT(guild_id, user_id)
-                            DO UPDATE SET join_time = join_time
-                        """, (guild.id, member.id, time.time()))
-                        await db.commit()
+                    if len(real_members) < 2:
+                        continue
 
-                    if new_level > old_level:
-                        await check_and_award_level_rewards(
-                            self.bot, member,
-                            guild.id, old_level, new_level)
+                    for member in real_members:
+                        # P1 #12 FIX: original loop had no
+                        # per-member error isolation. A single
+                        # malformed row or unexpected None from
+                        # member.voice could raise an unhandled
+                        # exception inside tasks.loop, which stops
+                        # the whole loop from rescheduling — silently
+                        # killing voice XP for every guild until the
+                        # bot restarts. Each member is now isolated.
+                        try:
+                            if member.voice.self_deaf or member.voice.deaf:
+                                continue
+                            if require_unmuted:
+                                if member.voice.self_mute or member.voice.mute:
+                                    continue
+
+                            xp_gain = calculate_voice_xp(1, xp_per_min)
+                            if xp_gain <= 0:
+                                continue
+
+                            async with aiosqlite.connect(DB_PATH) as db:
+                                cursor = await db.execute("""
+                                    SELECT xp, level FROM levels
+                                    WHERE guild_id = ? AND user_id = ?
+                                """, (guild.id, member.id))
+                                row = await cursor.fetchone()
+                                old_xp    = row[0] if row else 0
+                                old_level = row[1] if row else 0
+                                new_xp    = old_xp + xp_gain
+                                new_level, _, _ = xp_progress(new_xp)
+                                await db.execute("""
+                                    INSERT INTO levels (guild_id, user_id, xp, level)
+                                    VALUES (?, ?, ?, ?)
+                                    ON CONFLICT(guild_id, user_id)
+                                    DO UPDATE SET xp = ?, level = ?
+                                """, (guild.id, member.id, new_xp, new_level,
+                                      new_xp, new_level))
+                                await db.commit()
+
+                            if new_level > old_level:
+                                await check_and_award_level_rewards(
+                                    self.bot, member,
+                                    guild.id, old_level, new_level)
+                        except Exception as e:
+                            print(f"[VOICE XP] Error for member {member.id} in guild {guild.id}: {e}")
+            except Exception as e:
+                print(f"[VOICE XP] Error for guild {guild.id}: {e}")
 
     @voice_xp_task.before_loop
     async def before_voice_task(self):
