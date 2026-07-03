@@ -72,3 +72,40 @@ async def safe_credit(guild_id: int, user_id: int, amount: int):
             ON CONFLICT(guild_id, user_id) DO UPDATE SET balance = balance + ?
         """, (guild_id, user_id, amount, amount))
         await db.commit()
+
+
+async def safe_decrement_stock(item_id: int) -> bool:
+    """
+    Atomic stock claim. Returns False if the item is out of stock
+    (or doesn't exist). Unlimited-stock items (max_stock NULL/0)
+    always succeed and are left untouched.
+
+    Used by shop.process_purchase() to claim a unit of stock BEFORE
+    attempting the balance deduction, so two simultaneous purchases
+    of the last unit can't both succeed. If the balance deduction
+    that follows fails, the caller is responsible for calling back
+    to increment current_stock by 1 to release the claim.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "SELECT max_stock, current_stock FROM shop_items WHERE id=?",
+                (item_id,))
+            row = await cursor.fetchone()
+            if not row:
+                await db.execute("ROLLBACK")
+                return False
+            max_stock, curr_stock = row
+            if max_stock and curr_stock is not None and curr_stock <= 0:
+                await db.execute("ROLLBACK")
+                return False
+            if max_stock:
+                await db.execute(
+                    "UPDATE shop_items SET current_stock = current_stock - 1 WHERE id=?",
+                    (item_id,))
+            await db.commit()
+            return True
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
