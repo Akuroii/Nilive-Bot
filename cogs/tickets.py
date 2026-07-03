@@ -2,8 +2,10 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import aiosqlite
+import json
 from database import DB_PATH
 from datetime import datetime
+
 
 class TicketCategory(discord.ui.Select):
     def __init__(self, categories):
@@ -59,6 +61,11 @@ class TicketControlView(discord.ui.View):
             if staff_role and staff_role not in interaction.user.roles:
                 await interaction.response.send_message("Only staff can claim tickets!", ephemeral=True)
                 return
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE tickets SET claimed_by=? WHERE channel_id=?",
+                (interaction.user.id, interaction.channel.id))
+            await db.commit()
         await interaction.channel.edit(topic=f"Claimed by {interaction.user.display_name}")
         embed = discord.Embed(
             description=f"Ticket claimed by {interaction.user.mention}",
@@ -67,8 +74,18 @@ class TicketControlView(discord.ui.View):
 
     @discord.ui.button(label="Add Member", emoji="➕", style=discord.ButtonStyle.secondary, custom_id="ticket_add")
     async def add_member(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT support_role_id FROM ticket_settings WHERE guild_id=?",
+                (interaction.guild.id,))
+            row = await cursor.fetchone()
+        if row and row[0]:
+            staff_role = interaction.guild.get_role(row[0])
+            if staff_role and staff_role not in interaction.user.roles:
+                await interaction.response.send_message("Only staff can add members!", ephemeral=True)
+                return
         await interaction.response.send_message(
-            "Use `/ticket_add @member` to add someone to this ticket.", ephemeral=True)
+            "Reply with `/ticket_add @member` to add someone to this ticket.", ephemeral=True)
 
 class ClosedTicketView(discord.ui.View):
     def __init__(self):
@@ -96,8 +113,9 @@ class ClosedTicketView(discord.ui.View):
         if staff_role:
             overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
         await interaction.channel.edit(overwrites=overwrites)
-        await db.execute("UPDATE tickets SET status='open' WHERE channel_id=?", (interaction.channel.id,))
-        await db.commit()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE tickets SET status='open' WHERE channel_id=?", (interaction.channel.id,))
+            await db.commit()
         embed = discord.Embed(description=f"Ticket reopened by {interaction.user.mention}", color=discord.Color.green())
         await interaction.response.send_message(embed=embed, view=TicketControlView())
 
@@ -203,6 +221,26 @@ async def close_ticket(interaction: discord.Interaction):
         await interaction.response.send_message("This is not an open ticket!", ephemeral=True)
         return
     user_id, staff_role_id = row
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        settings_cur = await db.execute(
+            "SELECT support_role_id FROM ticket_settings WHERE guild_id=?",
+            (interaction.guild.id,))
+        settings_row = await settings_cur.fetchone()
+    support_role_id = settings_row[0] if settings_row else staff_role_id
+
+    is_owner = interaction.user.id == user_id
+    is_staff = False
+    if support_role_id:
+        staff_role = interaction.guild.get_role(int(support_role_id))
+        is_staff = bool(staff_role and staff_role in interaction.user.roles)
+    is_admin = interaction.user.guild_permissions.manage_channels
+
+    if not (is_owner or is_staff or is_admin):
+        await interaction.response.send_message(
+            "You don't have permission to close this ticket.", ephemeral=True)
+        return
+
     staff_role = interaction.guild.get_role(staff_role_id) if staff_role_id else None
     overwrites = {
         interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -284,13 +322,31 @@ class Tickets(commands.Cog):
                            categories: str = "General Support,Report,Ban Appeal,Other"):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                INSERT OR REPLACE INTO ticket_config
-                (guild_id, staff_role_id, ticket_category_id, log_channel_id, categories)
-                VALUES (?, ?, ?, ?, ?)
-            """, (interaction.guild.id, staff_role.id,
-                  ticket_category.id if ticket_category else None,
-                  log_channel.id, categories))
+                INSERT INTO ticket_settings
+                    (guild_id, enabled, max_per_user, auto_close_hours,
+                     save_transcripts, transcript_channel_id, support_role_id, name_format)
+                VALUES (?, 1, 1, 0, 1, ?, ?, 'ticket-{number}')
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    save_transcripts      = 1,
+                    transcript_channel_id = excluded.transcript_channel_id,
+                    support_role_id       = excluded.support_role_id,
+                    updated_at            = CURRENT_TIMESTAMP
+            """, (interaction.guild.id, log_channel.id, staff_role.id))
+
+            cat_names = [c.strip() for c in categories.split(",") if c.strip()]
+            for i, cat_name in enumerate(cat_names):
+                existing = await db.execute(
+                    "SELECT id FROM ticket_categories WHERE guild_id=? AND name=?",
+                    (interaction.guild.id, cat_name))
+                if not await existing.fetchone():
+                    await db.execute("""
+                        INSERT INTO ticket_categories
+                            (guild_id, name, emoji, viewer_roles, closer_roles, sort_order, enabled)
+                        VALUES (?, ?, '🎫', ?, ?, ?, 1)
+                    """, (interaction.guild.id, cat_name,
+                          json.dumps([staff_role.id]), json.dumps([staff_role.id]), i))
             await db.commit()
+
         embed = discord.Embed(
             title="Ticket System",
             description="Click the button below to open a support ticket!",
@@ -298,7 +354,8 @@ class Tickets(commands.Cog):
         embed.set_footer(text="One ticket per user at a time")
         await channel.send(embed=embed, view=TicketOpenButton())
         await interaction.response.send_message(
-            f"Ticket system set up in {channel.mention}!", ephemeral=True)
+            f"Ticket system set up in {channel.mention}! Categories: {', '.join(cat_names)}",
+            ephemeral=True)
 
     @app_commands.command(name="ticket_add", description="Add a member to the current ticket")
     @app_commands.checks.has_permissions(manage_channels=True)
@@ -315,6 +372,15 @@ class Tickets(commands.Cog):
 
     @app_commands.command(name="ticket_close", description="Close the current ticket")
     async def ticket_close(self, interaction: discord.Interaction):
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT id FROM tickets WHERE channel_id=? AND guild_id=?",
+                (interaction.channel.id, interaction.guild.id))
+            row = await cursor.fetchone()
+        if not row:
+            await interaction.response.send_message(
+                "This command only works inside a ticket channel.", ephemeral=True)
+            return
         await close_ticket(interaction)
 
 async def setup(bot):
