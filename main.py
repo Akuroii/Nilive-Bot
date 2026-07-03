@@ -2,6 +2,8 @@ import discord
 from discord.ext import commands, tasks
 import asyncio
 import os
+import json          # ← NEW
+import time          # ← NEW
 import traceback
 from dotenv import load_dotenv
 import aiosqlite
@@ -14,6 +16,87 @@ print(f"Token exists: {bool(os.getenv('DISCORD_TOKEN'))}")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ── COMMAND TOGGLE ENFORCEMENT ────────────────────────────────   ← NEW BLOCK
+_command_cooldowns: dict[tuple, float] = {}
+
+@bot.tree.check
+async def global_command_gate(interaction: discord.Interaction) -> bool:
+    if interaction.guild is None or interaction.command is None:
+        return True
+
+    cmd_name = interaction.command.qualified_name
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT enabled, allowed_roles, allowed_channels, owner_only,
+                   cooldown_seconds, bypass_cooldown_roles, error_message
+            FROM command_toggles
+            WHERE guild_id = ? AND command_name = ?
+        """, (interaction.guild.id, cmd_name))
+        row = await cursor.fetchone()
+
+    if not row:
+        return True
+
+    (enabled, allowed_roles, allowed_channels, owner_only,
+     cooldown_seconds, bypass_cooldown_roles, error_message) = row
+
+    if not enabled:
+        msg = error_message or f"`/{cmd_name}` is currently disabled on this server."
+        await interaction.response.send_message(msg, ephemeral=True)
+        return False
+
+    if owner_only and interaction.user.id != interaction.guild.owner_id:
+        await interaction.response.send_message(
+            "This command is restricted to the server owner.", ephemeral=True)
+        return False
+
+    if allowed_roles:
+        try:
+            role_ids = {int(r) for r in json.loads(allowed_roles)}
+        except Exception:
+            role_ids = set()
+        if role_ids:
+            member_role_ids = {r.id for r in interaction.user.roles}
+            if not member_role_ids & role_ids:
+                await interaction.response.send_message(
+                    "You don't have permission to use this command.", ephemeral=True)
+                return False
+
+    if allowed_channels:
+        try:
+            channel_ids = {int(c) for c in json.loads(allowed_channels)}
+        except Exception:
+            channel_ids = set()
+        if channel_ids and interaction.channel_id not in channel_ids:
+            await interaction.response.send_message(
+                "This command can't be used in this channel.", ephemeral=True)
+            return False
+
+    if cooldown_seconds and cooldown_seconds > 0:
+        bypass_roles = set()
+        if bypass_cooldown_roles:
+            try:
+                bypass_roles = {int(r) for r in json.loads(bypass_cooldown_roles)}
+            except Exception:
+                pass
+        member_role_ids = {r.id for r in interaction.user.roles}
+        if not (member_role_ids & bypass_roles):
+            key = (interaction.guild.id, interaction.user.id, cmd_name)
+            now = time.time()
+            last = _command_cooldowns.get(key, 0)
+            if now - last < cooldown_seconds:
+                remaining = round(cooldown_seconds - (now - last), 1)
+                await interaction.response.send_message(
+                    f"Slow down — try again in {remaining}s.", ephemeral=True)
+                return False
+            _command_cooldowns[key] = now
+
+    return True
+# ── END OF NEW BLOCK ──────────────────────────────────────────
+
+# ↓↓↓ YOUR ORIGINAL CODE CONTINUES BELOW (unchanged) ↓↓↓
 
 _status_index = 0
 
@@ -88,11 +171,6 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    """
-    When Nero joins a new server, immediately grant
-    the owner dashboard access for that guild.
-    No restart needed.
-    """
     print(f"Joined new guild: {guild.name} ({guild.id})")
     await add_guild_owner(guild.id)
 
