@@ -50,7 +50,18 @@ class AuditLog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member,
                                 after: discord.Member):
-        """Detects manual timeouts."""
+        """
+        Detects manual timeouts (applied directly in Discord's UI,
+        not through /timeout).
+
+        P1 #13 FIX: this previously logged the action with no
+        duration_minutes or expires_at at all, so manual timeouts
+        never showed a duration and never expired out of the
+        dashboard's "Active Punishments" tab. Now we read
+        after.timed_out_until directly off the member object and
+        derive both fields from it, the same way log_mod_action()
+        does for bot-issued timeouts.
+        """
         if before.timed_out_until == after.timed_out_until:
             return
         guild = after.guild
@@ -64,11 +75,22 @@ class AuditLog(commands.Cog):
                     # Skip if done by our own bot
                     if entry.user.id == self.bot.user.id:
                         return
+
+                    expires_at        = None
+                    duration_minutes  = None
+                    if after.timed_out_until:
+                        expires_at = after.timed_out_until.isoformat()
+                        delta = after.timed_out_until - discord.utils.utcnow()
+                        duration_minutes = max(
+                            0, int(delta.total_seconds() // 60))
+
                     await self._save_log(
                         guild.id, after, entry.user,
                         action,
                         str(entry.reason or "No reason"),
-                        "manual")
+                        "manual",
+                        duration_minutes=duration_minutes,
+                        expires_at=expires_at)
                     return
         except Exception:
             pass
@@ -100,7 +122,9 @@ class AuditLog(commands.Cog):
     async def _save_log(self, guild_id: int,
                          target, moderator,
                          action: str, reason: str,
-                         source: str):
+                         source: str,
+                         duration_minutes: int = None,
+                         expires_at: str = None):
         user_snap = snapshot_user(target)
         mod_snap  = snapshot_user(moderator)
         try:
@@ -110,8 +134,9 @@ class AuditLog(commands.Cog):
                         (guild_id, user_id, user_display_name,
                          user_avatar_url, moderator_id,
                          moderator_display_name, action,
-                         reason, source, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         reason, source, duration_minutes,
+                         expires_at, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     guild_id,
                     user_snap["id"],
@@ -119,7 +144,8 @@ class AuditLog(commands.Cog):
                     user_snap["avatar_url"],
                     mod_snap["id"],
                     mod_snap["display_name"],
-                    action, reason, source, now_iso(),
+                    action, reason, source,
+                    duration_minutes, expires_at, now_iso(),
                 ))
                 await db.commit()
         except Exception as e:
