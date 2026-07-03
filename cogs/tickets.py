@@ -6,7 +6,6 @@ import json
 from database import DB_PATH
 from datetime import datetime
 
-
 class TicketCategory(discord.ui.Select):
     def __init__(self, categories):
         options = [
@@ -31,11 +30,12 @@ class TicketOpenButton(discord.ui.View):
     async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT categories FROM ticket_config WHERE guild_id=?
+                SELECT name FROM ticket_categories
+                WHERE guild_id=? AND enabled=1 ORDER BY sort_order ASC
             """, (interaction.guild.id,))
-            row = await cursor.fetchone()
-        if row and row[0]:
-            cats = [(c.strip(), "🎫") for c in row[0].split(",")]
+            rows = await cursor.fetchall()
+        if rows:
+            cats = [(r[0], "🎫") for r in rows]
             view = TicketCreateView(cats)
             await interaction.response.send_message("Please select a category:", view=view, ephemeral=True)
         else:
@@ -51,12 +51,20 @@ class TicketControlView(discord.ui.View):
 
     @discord.ui.button(label="Claim", emoji="✋", style=discord.ButtonStyle.success, custom_id="ticket_claim")
     async def claim_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # P1 #10 FIX: this used to SELECT staff_role_id FROM the legacy
+        # ticket_config table, which /ticket_setup no longer writes to
+        # (it writes ticket_settings now). That meant the row was always
+        # missing, the "staff only" check silently never fired, and any
+        # member who could see the ticket channel could claim it.
+        # Fixed to read the per-ticket snapshot stored on the tickets
+        # row itself, same source create_ticket() used when it opened
+        # the channel.
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT staff_role_id FROM ticket_config WHERE guild_id=?",
-                (interaction.guild.id,))
+                "SELECT staff_role_id FROM tickets WHERE channel_id=?",
+                (interaction.channel.id,))
             row = await cursor.fetchone()
-        if row:
+        if row and row[0]:
             staff_role = interaction.guild.get_role(row[0])
             if staff_role and staff_role not in interaction.user.roles:
                 await interaction.response.send_message("Only staff can claim tickets!", ephemeral=True)
@@ -121,12 +129,18 @@ class ClosedTicketView(discord.ui.View):
 
     @discord.ui.button(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="ticket_delete")
     async def delete_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # P1 #10 FIX: same dead-table bug as claim_ticket above — this
+        # queried the legacy ticket_config table (never populated since
+        # the migration to ticket_settings), so the staff check never
+        # fired and any member could permanently delete a ticket
+        # channel + its transcript. Fixed to use the per-ticket
+        # snapshot on the tickets row.
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT staff_role_id FROM ticket_config WHERE guild_id=?",
-                (interaction.guild.id,))
+                "SELECT staff_role_id FROM tickets WHERE channel_id=?",
+                (interaction.channel.id,))
             row = await cursor.fetchone()
-        if row:
+        if row and row[0]:
             staff_role = interaction.guild.get_role(row[0])
             if staff_role and staff_role not in interaction.user.roles:
                 await interaction.response.send_message("Only staff can delete tickets!", ephemeral=True)
@@ -137,46 +151,68 @@ class ClosedTicketView(discord.ui.View):
 async def create_ticket(interaction: discord.Interaction, category: str):
     guild = interaction.guild
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT staff_role_id, ticket_category_id, log_channel_id FROM ticket_config WHERE guild_id=?",
+        settings_cur = await db.execute(
+            "SELECT support_role_id, max_per_user, name_format FROM ticket_settings WHERE guild_id=?",
             (guild.id,))
-        config = await cursor.fetchone()
-        existing = await db.execute(
-            "SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=? AND status='open'",
-            (guild.id, interaction.user.id))
-        existing_row = await existing.fetchone()
+        settings = await settings_cur.fetchone()
 
-    if existing_row:
+        cat_cur = await db.execute("""
+            SELECT id, name, viewer_roles, closer_roles, auto_assign_roles, open_embed
+            FROM ticket_categories
+            WHERE guild_id=? AND name=? AND enabled=1
+        """, (guild.id, category))
+        cat_row = await cat_cur.fetchone()
+
+        max_per_user = settings[1] if settings else 1
+        existing = await db.execute(
+            "SELECT COUNT(*) FROM tickets WHERE guild_id=? AND user_id=? AND status='open'",
+            (guild.id, interaction.user.id))
+        open_count = (await existing.fetchone())[0]
+
+    if open_count >= max_per_user:
         await interaction.response.send_message(
-            f"You already have an open ticket! <#{existing_row[0]}>", ephemeral=True)
+            f"You already have {open_count} open ticket(s) (max {max_per_user}).", ephemeral=True)
         return
 
-    staff_role_id = config[0] if config else None
-    category_id = config[1] if config else None
-    log_channel_id = config[2] if config else None
-    staff_role = guild.get_role(staff_role_id) if staff_role_id else None
-    ticket_category = guild.get_channel(category_id) if category_id else None
+    staff_role_id = settings[0] if settings else None
+    viewer_role_ids = json.loads(cat_row[2]) if cat_row and cat_row[2] else []
+    closer_role_ids = json.loads(cat_row[3]) if cat_row and cat_row[3] else []
+    auto_assign_ids = json.loads(cat_row[4]) if cat_row and cat_row[4] else []
+    open_embed_data = json.loads(cat_row[5]) if cat_row and cat_row[5] else {}
+    category_id = cat_row[0] if cat_row else None
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
         interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
     }
-    if staff_role:
-        overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+    all_viewer_ids = set(viewer_role_ids) | set(closer_role_ids) | ({staff_role_id} if staff_role_id else set())
+    for rid in all_viewer_ids:
+        role = guild.get_role(int(rid))
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT COUNT(*) FROM tickets WHERE guild_id=?", (guild.id,))
         count = (await cursor.fetchone())[0] + 1
 
-    channel_name = f"ticket-{count:04d}"
+    name_format = settings[2] if settings and settings[2] else "ticket-{number}"
+    channel_name = name_format.replace("{number}", f"{count:04d}").replace("{user}", interaction.user.name)[:100]
+
     channel = await guild.create_text_channel(
         name=channel_name,
         overwrites=overwrites,
-        category=ticket_category,
         topic=f"Ticket by {interaction.user.display_name} | Category: {category}"
     )
+
+    for rid in auto_assign_ids:
+        role = guild.get_role(int(rid))
+        if role:
+            try:
+                await interaction.user.add_roles(role, reason="Ticket opened")
+            except Exception:
+                pass
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -186,24 +222,36 @@ async def create_ticket(interaction: discord.Interaction, category: str):
               datetime.utcnow().isoformat()))
         await db.commit()
 
-    embed = discord.Embed(
-        title=f"Ticket #{count:04d} — {category}",
-        description=f"Hello {interaction.user.mention}! Support will be with you shortly.\n\nPlease describe your issue in detail.",
-        color=discord.Color.blurple()
-    )
-    embed.set_footer(text=f"Opened by {interaction.user.display_name}")
-    await channel.send(
-        content=f"{interaction.user.mention}{' | ' + staff_role.mention if staff_role else ''}",
-        embed=embed,
-        view=TicketControlView()
-    )
+    title = open_embed_data.get("title") or f"Ticket #{count:04d} — {category}"
+    description = open_embed_data.get("description") or (
+        f"Hello {interaction.user.mention}! Support will be with you shortly.\n\n"
+        f"Please describe your issue in detail.")
+    color_str = open_embed_data.get("color", "#5865F2")
+    try:
+        color_int = int(color_str.strip("#"), 16)
+    except Exception:
+        color_int = discord.Color.blurple().value
 
-    if log_channel_id:
-        log_channel = guild.get_channel(log_channel_id)
+    embed = discord.Embed(title=title, description=description, color=color_int)
+    embed.set_footer(text=f"Opened by {interaction.user.display_name}")
+
+    ping = interaction.user.mention
+    for rid in closer_role_ids or ([staff_role_id] if staff_role_id else []):
+        role = guild.get_role(int(rid))
+        if role:
+            ping += f" | {role.mention}"
+
+    await channel.send(content=ping, embed=embed, view=TicketControlView())
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        set_cur = await db.execute(
+            "SELECT transcript_channel_id, save_transcripts FROM ticket_settings WHERE guild_id=?",
+            (guild.id,))
+        set_row = await set_cur.fetchone()
+    if set_row and set_row[0]:
+        log_channel = guild.get_channel(int(set_row[0]))
         if log_channel:
-            log_embed = discord.Embed(
-                title="Ticket Opened",
-                color=discord.Color.green())
+            log_embed = discord.Embed(title="Ticket Opened", color=discord.Color.green())
             log_embed.add_field(name="User", value=interaction.user.mention)
             log_embed.add_field(name="Category", value=category)
             log_embed.add_field(name="Channel", value=channel.mention)
@@ -214,29 +262,43 @@ async def create_ticket(interaction: discord.Interaction, category: str):
 async def close_ticket(interaction: discord.Interaction):
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT user_id, staff_role_id FROM tickets WHERE channel_id=? AND status='open'",
+            "SELECT user_id, staff_role_id, category FROM tickets WHERE channel_id=? AND status='open'",
             (interaction.channel.id,))
         row = await cursor.fetchone()
     if not row:
         await interaction.response.send_message("This is not an open ticket!", ephemeral=True)
         return
-    user_id, staff_role_id = row
+    user_id, staff_role_id, category = row
 
     async with aiosqlite.connect(DB_PATH) as db:
         settings_cur = await db.execute(
             "SELECT support_role_id FROM ticket_settings WHERE guild_id=?",
             (interaction.guild.id,))
         settings_row = await settings_cur.fetchone()
+
+        # P1 #10 ENHANCEMENT: previously only the single guild-wide
+        # support_role_id could close a ticket. Categories can define
+        # their own closer_roles (dashboard already exposes this per
+        # category) — those were being collected for channel view
+        # access but never actually checked for close permission.
+        closer_role_ids = []
+        if category:
+            cat_cur = await db.execute(
+                "SELECT closer_roles FROM ticket_categories WHERE guild_id=? AND name=?",
+                (interaction.guild.id, category))
+            cat_row = await cat_cur.fetchone()
+            if cat_row and cat_row[0]:
+                closer_role_ids = json.loads(cat_row[0])
+
     support_role_id = settings_row[0] if settings_row else staff_role_id
 
     is_owner = interaction.user.id == user_id
-    is_staff = False
-    if support_role_id:
-        staff_role = interaction.guild.get_role(int(support_role_id))
-        is_staff = bool(staff_role and staff_role in interaction.user.roles)
+    member_role_ids = {r.id for r in interaction.user.roles}
+    is_staff = bool(support_role_id and int(support_role_id) in member_role_ids)
+    is_category_closer = bool(member_role_ids & {int(r) for r in closer_role_ids})
     is_admin = interaction.user.guild_permissions.manage_channels
 
-    if not (is_owner or is_staff or is_admin):
+    if not (is_owner or is_staff or is_category_closer or is_admin):
         await interaction.response.send_message(
             "You don't have permission to close this ticket.", ephemeral=True)
         return
@@ -265,10 +327,10 @@ async def save_transcript(channel: discord.TextChannel, guild: discord.Guild):
         messages.append(f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author.display_name}: {msg.content}")
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT log_channel_id FROM ticket_config WHERE guild_id=?", (guild.id,))
+            "SELECT transcript_channel_id, save_transcripts FROM ticket_settings WHERE guild_id=?", (guild.id,))
         row = await cursor.fetchone()
-    if row and row[0]:
-        log_channel = guild.get_channel(row[0])
+    if row and row[0] and row[1]:
+        log_channel = guild.get_channel(int(row[0]))
         if log_channel:
             transcript_text = "\n".join(messages)
             file = discord.File(
@@ -285,29 +347,6 @@ class Tickets(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS ticket_config (
-                    guild_id INTEGER PRIMARY KEY,
-                    staff_role_id INTEGER,
-                    ticket_category_id INTEGER,
-                    log_channel_id INTEGER,
-                    categories TEXT DEFAULT 'General Support,Report,Ban Appeal,Other'
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS tickets (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER,
-                    channel_id INTEGER,
-                    user_id INTEGER,
-                    staff_role_id INTEGER,
-                    status TEXT DEFAULT 'open',
-                    category TEXT,
-                    created_at TEXT
-                )
-            """)
-            await db.commit()
         self.bot.add_view(TicketOpenButton())
         self.bot.add_view(TicketControlView())
         self.bot.add_view(ClosedTicketView())
