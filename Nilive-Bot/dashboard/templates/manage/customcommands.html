@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+{% block title %}Custom Commands{% endblock %}
+{% block content %}
+
+<div class="card">
+    <div class="card-title">🔨 Create Custom Command</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div class="form-group">
+            <label class="form-label">Command trigger (without !)</label>
+            <input class="form-input" id="cmd-trigger" placeholder="e.g. ban, warn, mute">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Allowed role IDs (comma separated, empty = admins only)</label>
+            <input class="form-input" id="cmd-roles" placeholder="123456789, 987654321">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Embed title</label>
+            <input class="form-input" id="cmd-title" placeholder="Use {target}, {moderator}, {reason}">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Embed color</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <input type="color" id="cmd-color" value="#ED4245"
+                    style="width:42px;height:36px;border-radius:8px;
+                           border:1px solid var(--border);background:transparent;cursor:pointer;padding:2px;">
+                <input class="form-input" id="cmd-color-hex" value="#ED4245" style="flex:1;"
+                    oninput="if(/^#[0-9A-Fa-f]{6}$/.test(this.value)) document.getElementById('cmd-color').value=this.value;">
+            </div>
+        </div>
+        <div class="form-group" style="grid-column:1/-1;">
+            <label class="form-label">Embed description</label>
+            <textarea class="form-input" id="cmd-desc" rows="3"
+                placeholder="Use {target}, {target_name}, {moderator}, {reason}"></textarea>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Log channel ID</label>
+            <input class="form-input" id="cmd-log-channel" placeholder="Channel to send embed">
+        </div>
+        <div class="form-group">
+            <label class="form-label">DM message to member (optional)</label>
+            <input class="form-input" id="cmd-dm" placeholder="Use {server}, {reason}, {moderator}">
+        </div>
+    </div>
+    <div style="display:flex;gap:16px;margin-bottom:16px;">
+        <label class="form-check"><input type="checkbox" id="cmd-same-channel"> Send embed in same channel</label>
+        <label class="form-check"><input type="checkbox" id="cmd-dm-member"> DM the member</label>
+    </div>
+
+    <div class="form-group">
+        <label class="form-label">Actions</label>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-bottom:8px;">
+            <select class="form-input" id="action-select">
+                <option value="ban">Ban member</option>
+                <option value="kick">Kick member</option>
+                <option value="warn">Warn member</option>
+                <option value="remove_all_roles">Remove all roles</option>
+                <option value="delete_message">Delete command message</option>
+                <option value="timeout:10">Timeout 10 minutes</option>
+                <option value="timeout:30">Timeout 30 minutes</option>
+                <option value="timeout:60">Timeout 1 hour</option>
+                <option value="timeout:1440">Timeout 24 hours</option>
+                <option value="timeout:custom">Timeout custom minutes</option>
+                <option value="add_role:custom">Add specific role</option>
+                <option value="remove_role:custom">Remove specific role</option>
+            </select>
+            <button class="btn btn-primary" onclick="addAction()">Add</button>
+        </div>
+        <div id="custom-action-input" style="display:none;margin-bottom:8px;">
+            <input class="form-input" id="custom-action-value" placeholder="Enter minutes or role ID">
+        </div>
+        <div id="actions-list"><p class="text-muted text-sm">No actions added yet.</p></div>
+    </div>
+
+    <button class="btn btn-primary" onclick="saveCommand()">Save Command</button>
+    <div id="cmd-status" style="margin-top:10px;font-size:13px;"></div>
+</div>
+
+<div class="card">
+    <div class="card-title">📋 Active Custom Commands</div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>Command</th><th>Actions</th><th>Log Channel</th><th></th></tr>
+            </thead>
+            <tbody>
+                {% for c in commands %}
+                <tr>
+                    <td><code>!{{ c[1] }}</code></td>
+                    <td>{{ c[2] | length if c[2] else 0 }} actions</td>
+                    <td>{{ c[3] or '—' }}</td>
+                    <td>
+                        <button class="btn btn-sm btn-danger"
+                            onclick="showConfirm('Delete !{{ c[1] }}?', () => deleteCmd({{ c[0] }}))">
+                            Delete
+                        </button>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" class="empty">No custom commands yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+let actions = [];
+
+document.getElementById('action-select').addEventListener('change', function() {
+    document.getElementById('custom-action-input').style.display =
+        this.value.includes('custom') ? 'block' : 'none';
+});
+document.getElementById('cmd-color').addEventListener('input', function() {
+    document.getElementById('cmd-color-hex').value = this.value;
+});
+
+function addAction() {
+    let action = document.getElementById('action-select').value;
+    if (action.includes('custom')) {
+        const val = document.getElementById('custom-action-value').value;
+        if (!val) { showToast('Enter a value', 'danger'); return; }
+        action = action.replace('custom', val);
+        document.getElementById('custom-action-value').value = '';
+    }
+    if (actions.includes(action)) { showToast('Already added', 'danger'); return; }
+    actions.push(action);
+    renderActions();
+}
+
+function removeAction(i) { actions.splice(i, 1); renderActions(); }
+
+function getLabel(a) {
+    if (a === 'ban') return 'Ban member';
+    if (a === 'kick') return 'Kick member';
+    if (a === 'warn') return 'Warn member';
+    if (a === 'remove_all_roles') return 'Remove all roles';
+    if (a === 'delete_message') return 'Delete message';
+    if (a.startsWith('timeout:')) return `Timeout ${a.split(':')[1]} min`;
+    if (a.startsWith('add_role:')) return `Add role ${a.split(':')[1]}`;
+    if (a.startsWith('remove_role:')) return `Remove role ${a.split(':')[1]}`;
+    return a;
+}
+
+function renderActions() {
+    const list = document.getElementById('actions-list');
+    if (!actions.length) {
+        list.innerHTML = '<p class="text-muted text-sm">No actions added yet.</p>';
+        return;
+    }
+    list.innerHTML = actions.map((a, i) => `
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    padding:8px 12px;background:var(--bg3);border-radius:8px;margin-bottom:6px;">
+            <span style="font-size:13px;">${getLabel(a)}</span>
+            <button onclick="removeAction(${i})" class="btn btn-sm btn-danger">Remove</button>
+        </div>`).join('');
+}
+
+async function saveCommand() {
+    const trigger = document.getElementById('cmd-trigger').value.trim();
+    if (!trigger) { showToast('Enter a trigger', 'danger'); return; }
+    if (!actions.length) { showToast('Add at least one action', 'danger'); return; }
+    const roles = document.getElementById('cmd-roles').value
+        .split(',').map(r => r.trim()).filter(r => r);
+    const res  = await fetch('/api/save-custom-command', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+            trigger,
+            allowed_roles:    roles,
+            actions,
+            embed_title:      document.getElementById('cmd-title').value,
+            embed_description:document.getElementById('cmd-desc').value,
+            embed_color:      document.getElementById('cmd-color').value,
+            log_channel_id:   document.getElementById('cmd-log-channel').value || null,
+            same_channel:     document.getElementById('cmd-same-channel').checked,
+            dm_member:        document.getElementById('cmd-dm-member').checked,
+            dm_message:       document.getElementById('cmd-dm').value,
+            requires_mention: true,
+            requires_reason:  true,
+        }),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast(`!${trigger} saved!`);
+        actions = [];
+        renderActions();
+        document.getElementById('cmd-trigger').value = '';
+        document.getElementById('cmd-title').value   = '';
+        document.getElementById('cmd-desc').value    = '';
+        setTimeout(() => location.reload(), 800);
+    } else showToast('Error saving', 'danger');
+}
+
+async function deleteCmd(id) {
+    const res  = await fetch(`/api/delete-custom-command/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) { showToast('Deleted'); setTimeout(() => location.reload(), 800); }
+    else showToast('Error', 'danger');
+}
+</script>
+{% endblock %}
+{% endblock %}

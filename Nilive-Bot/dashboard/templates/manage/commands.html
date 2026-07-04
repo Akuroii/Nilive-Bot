@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Commands{% endblock %}
+{% block content %}
+<span data-page-title="Commands"></span>
+
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+    <div>
+        <h2 style="margin:0;font-size:18px;">🎮 Command Manager</h2>
+        <div class="text-muted text-sm">Toggle and configure bot commands per category.</div>
+    </div>
+    <div style="display:flex;gap:8px;">
+        <button class="btn btn-secondary"
+                onclick="bulkToggle(true)">Enable All</button>
+        <button class="btn btn-danger"
+                onclick="bulkToggle(false)">Disable All</button>
+    </div>
+</div>
+
+{% for category, cmds in categories.items() %}
+<div class="card" style="margin-bottom:16px;">
+    <div class="card-header">
+        <div class="card-title" style="margin:0;">{{ category }}</div>
+        <div style="display:flex;gap:6px;">
+            <button class="btn btn-sm btn-secondary"
+                    onclick="bulkCategory('{{ category }}', true)">Enable All</button>
+            <button class="btn btn-sm btn-danger"
+                    onclick="bulkCategory('{{ category }}', false)">Disable All</button>
+        </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;">
+        {% for cmd in cmds %}
+        {% set t = toggles.get(cmd, {}) %}
+        {% set enabled = t.get('enabled', 1) %}
+        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;
+                    padding:12px 14px;display:flex;align-items:center;
+                    justify-content:space-between;gap:8px;"
+             id="cmd-{{ cmd }}">
+            <div>
+                <div style="font-weight:600;font-size:13px;">/{{ cmd }}</div>
+                {% if t.get('cooldown') %}
+                <div style="font-size:11px;color:var(--text3);">⏱ {{ t.cooldown }}s cooldown</div>
+                {% endif %}
+                <div style="font-size:11px;margin-top:2px;">
+                    {% if enabled %}
+                    <span style="color:var(--success);">● Enabled</span>
+                    {% else %}
+                    <span style="color:var(--danger);">● Disabled</span>
+                    {% endif %}
+                </div>
+            </div>
+            <button class="btn btn-sm {% if enabled %}btn-danger{% else %}btn-success{% endif %}"
+                    onclick="toggleCmd('{{ cmd }}', {% if enabled %}false{% else %}true{% endif %}, this)">
+                {% if enabled %}Disable{% else %}Enable{% endif %}
+            </button>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endfor %}
+
+<script>
+async function toggleCmd(cmd, enable, btn) {
+    const res = await fetch('/api/commands/toggle', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({command: cmd, enabled: enable})
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast(`/${cmd} ${enable ? 'enabled' : 'disabled'}`, 'success');
+        // Update UI without reload
+        const card = document.getElementById(`cmd-${cmd}`);
+        if (card) {
+            const status = card.querySelector('[style*="color:var(--success)"], [style*="color:var(--danger)"]');
+            if (status) {
+                status.style.color = enable ? 'var(--success)' : 'var(--danger)';
+                status.textContent = enable ? '● Enabled' : '● Disabled';
+            }
+            btn.textContent = enable ? 'Disable' : 'Enable';
+            btn.className = `btn btn-sm ${enable ? 'btn-danger' : 'btn-success'}`;
+            btn.onclick = function() { toggleCmd(cmd, !enable, btn); };
+        }
+    } else {
+        showToast(data.error || 'Failed', 'error');
+    }
+}
+
+async function bulkToggle(enable) {
+    if (!confirm(`${enable ? 'Enable' : 'Disable'} ALL commands?`)) return;
+    const res = await fetch('/api/commands/bulk-toggle', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: enable})
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast(`${data.count} commands ${enable ? 'enabled' : 'disabled'}`, 'success');
+        setTimeout(() => location.reload(), 600);
+    } else {
+        showToast(data.error || 'Failed', 'error');
+    }
+}
+
+async function bulkCategory(category, enable) {
+    const res = await fetch('/api/commands/bulk-toggle', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({category, enabled: enable})
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast(`${category}: ${data.count} commands ${enable ? 'enabled' : 'disabled'}`, 'success');
+        setTimeout(() => location.reload(), 600);
+    } else {
+        showToast(data.error || 'Failed', 'error');
+    }
+}
+</script>
+{% endblock %}

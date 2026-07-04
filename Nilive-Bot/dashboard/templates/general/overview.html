@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Overview{% endblock %}
+{% block content %}
+
+<div class="stats-grid">
+    <div class="stat-card stat-accent">
+        <div class="stat-label">Members Tracked</div>
+        <div class="stat-value">{{ stats.member_count }}</div>
+        <div class="stat-sub">in leveling system</div>
+    </div>
+    <div class="stat-card stat-warning">
+        <div class="stat-label">Open Tickets</div>
+        <div class="stat-value">{{ stats.open_tickets }}</div>
+        <div class="stat-sub">awaiting response</div>
+    </div>
+    <div class="stat-card stat-danger">
+        <div class="stat-label">Total Warnings</div>
+        <div class="stat-value">{{ stats.warn_count }}</div>
+        <div class="stat-sub">all time</div>
+    </div>
+    <div class="stat-card stat-success">
+        <div class="stat-label">Bot Status</div>
+        <div class="stat-value" style="font-size:18px;color:var(--success)">Online</div>
+        <div class="stat-sub">Nero is running</div>
+    </div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+    <div class="card">
+        <div class="card-title">🚀 Quick Actions</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+            <a href="{{ url_for('mvp') }}" class="btn btn-secondary">🏆 View MVP Scores</a>
+            <a href="{{ url_for('moderation') }}" class="btn btn-secondary">🛡️ Moderation Logs</a>
+            <a href="{{ url_for('tickets') }}" class="btn btn-secondary">🎫 View Tickets</a>
+            <a href="{{ url_for('members') }}" class="btn btn-secondary">👥 Manage Members</a>
+            {% if is_owner %}
+            <a href="{{ url_for('config_access') }}" class="btn btn-secondary">🔐 Dashboard Access</a>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">📋 Active Features</div>
+        <table class="table">
+            <tbody>
+                <tr><td>MVP System</td><td><span class="badge badge-success">Active</span></td></tr>
+                <tr><td>Moderation</td><td><span class="badge badge-success">Active</span></td></tr>
+                <tr><td>Leveling</td><td><span class="badge badge-success">Active</span></td></tr>
+                <tr><td>Economy</td><td><span class="badge badge-success">Active</span></td></tr>
+                <tr><td>Boost Roles</td><td><span class="badge badge-success">Active</span></td></tr>
+                <tr><td>Reaction Roles</td><td><span class="badge badge-success">Active</span></td></tr>
+                <tr><td>Tickets</td><td><span class="badge badge-success">Active</span></td></tr>
+                <tr><td>Triggers</td><td><span class="badge badge-success">Active</span></td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

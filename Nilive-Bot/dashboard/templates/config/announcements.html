@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Announcements{% endblock %}
+{% block content %}
+
+<div class="card">
+    <div class="card-title">📺 YouTube Notifications</div>
+    {% if youtube %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>Channel URL</th><th>Discord Channel</th><th>Ping Role</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+                {% for y in youtube %}
+                <tr>
+                    <td class="text-muted">{{ y[2][:40] if y[2] else '—' }}</td>
+                    <td><code>{{ y[4] }}</code></td>
+                    <td><code>{{ y[8] or '—' }}</code></td>
+                    <td><span class="badge {% if y[10] %}badge-success{% else %}badge-danger{% endif %}">
+                        {% if y[10] %}Active{% else %}Disabled{% endif %}
+                    </span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">📺</div>
+        <div class="empty-text">No YouTube notifications configured.<br>Use <code>/youtube_setup</code> in Discord.</div>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <div class="card-title">🟣 Twitch Alerts</div>
+    {% if twitch %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>Streamer</th><th>Discord Channel</th><th>Ping Role</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+                {% for t in twitch %}
+                <tr>
+                    <td><strong>{{ t[2] }}</strong></td>
+                    <td><code>{{ t[3] }}</code></td>
+                    <td><code>{{ t[6] or '—' }}</code></td>
+                    <td><span class="badge {% if t[10] %}badge-success{% else %}badge-danger{% endif %}">
+                        {% if t[10] %}Active{% else %}Disabled{% endif %}
+                    </span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <div class="empty-icon">🟣</div>
+        <div class="empty-text">No Twitch alerts configured.<br>Coming in Phase 5.</div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nero Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css">
+<style>
+.select2-container--default .select2-selection--single,
+.select2-container--default .select2-selection--multiple {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+}
+.select2-container--default .select2-selection--single .select2-selection__rendered { color: var(--text); padding: 0 12px; }
+.select2-container--default .select2-results__option { background: var(--bg3); color: var(--text2); padding: 8px 12px; }
+.select2-container--default .select2-results__option--highlighted { background: var(--accent); color: #fff; }
+.select2-dropdown { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; }
+.select2-search--dropdown .select2-search__field { background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 10px; }
+
+/* HTMX loading indicator */
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator { display: inline-block; }
+.htmx-request.htmx-indicator { display: inline-block; }
+#global-spinner {
+    width: 16px; height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<!-- NO hx-boost on body — sidebar links use explicit hx-get, boost causes double-fire -->
+<body>
+
+<!-- MOBILE HAMBURGER -->
+<button class="hamburger" onclick="toggleSidebar()"
+    style="display:none;position:fixed;top:14px;left:14px;z-index:200;
+           background:var(--bg2);border:1px solid var(--border);
+           border-radius:8px;padding:8px;cursor:pointer;flex-direction:column;gap:4px;">
+    <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
+    <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
+    <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
+</button>
+
+<!-- SIDEBAR -->
+<div class="sidebar">
+    <div style="padding:20px 18px 16px;border-bottom:1px solid var(--border);
+                display:flex;align-items:center;gap:12px;">
+        <div style="width:38px;height:38px;border-radius:50%;background:var(--accent);
+                    display:flex;align-items:center;justify-content:center;
+                    font-weight:700;font-size:16px;color:#fff;flex-shrink:0;">N</div>
+        <div>
+            <div style="font-weight:700;font-size:16px;color:var(--text)">Nero</div>
+            <div style="font-size:11px;color:var(--text3)">Dashboard</div>
+        </div>
+    </div>
+
+    <!-- SERVER SELECTOR -->
+    {% if guild_id %}
+    <div style="padding:10px 12px;border-bottom:1px solid var(--border);">
+        <a href="{{ url_for('server_select') }}"
+           style="display:flex;align-items:center;gap:8px;padding:8px 10px;
+                  border-radius:8px;background:var(--bg3);border:1px solid var(--border);
+                  text-decoration:none;color:var(--text2);font-size:12px;
+                  transition:all .15s;">
+            <span style="font-size:14px;">🖥️</span>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                Server: {{ guild_name or guild_id }}
+            </span>
+            <span style="color:var(--text3);font-size:11px;">↗</span>
+        </a>
+    </div>
+    {% endif %}
+
+    <nav style="flex:1;padding:12px 10px;overflow-y:auto;" hx-disable>
+
+<!-- ─── GENERAL ────────── -->
+<div class="nav-section">
+    <div class="nav-section-title">General</div>
+
+    <a href="/"
+       hx-get="/"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🏠</span>
+        <span class="nav-text">Overview</span>
+    </a>
+
+    <a href="/members"
+       hx-get="/members"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">👥</span>
+        <span class="nav-text">Members</span>
+    </a>
+
+    <a href="/audit-log"
+       hx-get="/audit-log"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">📝</span>
+        <span class="nav-text">Audit Log</span>
+    </a>
+</div>
+
+<!-- ─── MANAGE ───────── -->
+<div class="nav-section">
+    <div class="nav-section-title">Manage</div>
+
+    <a href="/moderation"
+       hx-get="/moderation"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🛡️</span>
+        <span class="nav-text">Moderation</span>
+    </a>
+
+    <a href="/tickets"
+       hx-get="/tickets"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🎫</span>
+        <span class="nav-text">Tickets</span>
+    </a>
+
+    <a href="/embed-builder"
+       hx-get="/embed-builder"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">📦</span>
+        <span class="nav-text">Embed Builder</span>
+    </a>
+
+    <a href="/reaction-roles"
+       hx-get="/reaction-roles"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🎭</span>
+        <span class="nav-text">Reaction Roles</span>
+    </a>
+
+    <a href="/triggers"
+       hx-get="/triggers"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">⚡</span>
+        <span class="nav-text">Triggers</span>
+    </a>
+
+    <a href="/custom-commands"
+       hx-get="/custom-commands"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">💬</span>
+        <span class="nav-text">Custom Commands</span>
+    </a>
+</div>
+
+<!-- ─── SYSTEMS ───────── -->
+<div class="nav-section">
+    <div class="nav-section-title">Systems</div>
+
+    <a href="/mvp"
+       hx-get="/mvp"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🏆</span>
+        <span class="nav-text">MVP System</span>
+    </a>
+
+    <a href="/leveling"
+       hx-get="/leveling"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">⭐</span>
+        <span class="nav-text">Leveling</span>
+    </a>
+
+    <a href="/economy"
+       hx-get="/economy"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">💰</span>
+        <span class="nav-text">Economy</span>
+    </a>
+
+    <a href="/shop"
+       hx-get="/shop"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🛒</span>
+        <span class="nav-text">Shop</span>
+    </a>
+
+    <a href="/events"
+       hx-get="/events"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🎯</span>
+        <span class="nav-text">Events</span>
+    </a>
+</div>
+
+<!-- ─── CONFIG ─────────── -->
+<div class="nav-section">
+    <div class="nav-section-title">Config</div>
+
+    <a href="/config/general"
+       hx-get="/config/general"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">⚙️</span>
+        <span class="nav-text">General Settings</span>
+    </a>
+
+    <a href="/config/welcome"
+       hx-get="/config/welcome"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">👋</span>
+        <span class="nav-text">Welcome & Leave</span>
+    </a>
+
+    <a href="/config/boost"
+       hx-get="/config/boost"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🔰</span>
+        <span class="nav-text">Boost Roles</span>
+    </a>
+
+    <a href="/config/announcements"
+       hx-get="/config/announcements"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">📢</span>
+        <span class="nav-text">Announcements</span>
+    </a>
+
+    <a href="/commands"
+       hx-get="/commands"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🎮</span>
+        <span class="nav-text">Commands</span>
+    </a>
+
+    <a href="/config/access"
+       hx-get="/config/access"
+       hx-target="#content-area"
+       hx-swap="innerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🔐</span>
+        <span class="nav-text">Dashboard Access</span>
+    </a>
+</div>
+
+    </nav>
+
+    <!-- USER FOOTER -->
+    <div style="padding:12px;border-top:1px solid var(--border);
+                display:flex;align-items:center;gap:10px;">
+        {% if user and user.avatar %}
+        <img src="https://cdn.discordapp.com/avatars/{{ user.id }}/{{ user.avatar }}.png"
+             class="avatar-md">
+        {% else %}
+        <div style="width:36px;height:36px;border-radius:50%;background:var(--accent);
+                    display:flex;align-items:center;justify-content:center;
+                    font-weight:700;color:#fff;font-size:14px;flex-shrink:0;">
+            {{ user.username[0].upper() if user else '?' }}
+        </div>
+        {% endif %}
+        <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;font-weight:600;color:var(--text);
+                        overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                {{ user.username if user else 'Unknown' }}
+            </div>
+            <div style="font-size:11px;color:var(--text3);text-transform:capitalize;">
+                {{ user_level or 'guest' }}
+            </div>
+        </div>
+        <a href="{{ url_for('logout') }}"
+           style="padding:5px 10px;border-radius:6px;background:transparent;
+                  border:1px solid var(--border);color:var(--text3);font-size:11px;
+                  text-decoration:none;transition:all .15s;"
+           onmouseover="this.style.background='var(--danger)';this.style.color='#fff';this.style.borderColor='var(--danger)'"
+           onmouseout="this.style.background='transparent';this.style.color='var(--text3)';this.style.borderColor='var(--border)'">
+            Out
+        </a>
+    </div>
+</div>
+
+<!-- MAIN -->
+<div class="main-content">
+    <div class="topbar">
+        <div style="display:flex;align-items:center;gap:12px;">
+            <div class="topbar-title" id="page-title">{% block title %}Dashboard{% endblock %}</div>
+            <div class="htmx-indicator" id="global-spinner"></div>
+        </div>
+        <div class="topbar-actions">
+            <div class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                <div class="theme-toggle-thumb"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- HTMX swaps content into this div only -->
+    <div class="page-content" id="content-area">
+        {% block content %}{% endblock %}
+    </div>
+</div>
+
+<!-- GLOBAL EDIT MEMBER MODAL -->
+<div id="edit-modal" class="modal-overlay" style="display:none;">
+    <div class="modal">
+        <div class="modal-title">Edit Member — <span id="edit-uid-label" style="color:var(--accent)"></span></div>
+        <div class="form-group">
+            <label class="form-label">XP</label>
+            <input class="form-input" id="edit-xp" type="number" min="0">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Coins</label>
+            <input class="form-input" id="edit-coins" type="number" min="0">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" onclick="closeEditModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="saveEditModal()">Save</button>
+        </div>
+        <div id="edit-modal-status" style="margin-top:10px;font-size:12px;"></div>
+    </div>
+</div>
+
+<!-- SCRIPTS — load HTMX first, then jQuery, then our JS -->
+<script src="https://unpkg.com/htmx.org@1.9.10"></script>
+<script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+<script>
+    htmx.config.globalViewTransitions = false;
+    htmx.config.defaultSwapStyle = 'innerHTML';
+
+    // After every HTMX swap: re-init Select2 + re-run injected scripts
+    document.body.addEventListener('htmx:afterSwap', function(evt) {
+        if (window.$ && $.fn.select2) {
+            $(evt.detail.target).find('.select2-widget').select2({
+                theme: 'default',
+                width: '100%'
+            });
+        }
+        // Re-run any inline <script> tags injected by the partial
+        evt.detail.target.querySelectorAll('script').forEach(function(oldScript) {
+            const newScript = document.createElement('script');
+            [...oldScript.attributes].forEach(a => newScript.setAttribute(a.name, a.value));
+            newScript.textContent = oldScript.textContent;
+            oldScript.parentNode.replaceChild(newScript, oldScript);
+        });
+        // Update active nav link to match current URL
+        const path = window.location.pathname;
+        document.querySelectorAll('.nav-link').forEach(function(a) {
+            const href = a.getAttribute('href');
+            // Exact match, or root path special case
+            a.classList.toggle('active', href === path || (href === '/' && path === '/'));
+        });
+    });
+
+    // Mark nav link active immediately on click (before swap completes)
+    document.querySelectorAll('.nav-link').forEach(function(a) {
+        a.addEventListener('click', function() {
+            document.querySelectorAll('.nav-link').forEach(n => n.classList.remove('active'));
+            a.classList.add('active');
+        });
+    });
+
+    // Set active link on initial page load
+    (function() {
+        const path = window.location.pathname;
+        document.querySelectorAll('.nav-link').forEach(function(a) {
+            if (a.getAttribute('href') === path) {
+                a.classList.add('active');
+            }
+        });
+    })();
+</script>
+{% block scripts %}{% endblock %}
+
+<style>
+.sidebar {
+    width: var(--sidebar-w);
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    height: 100vh;
+    z-index: 100;
+    overflow: hidden;
+}
+.nav-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text2);
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 1px;
+    transition: all .12s;
+}
+.nav-link:hover { background: var(--bg4); color: var(--text); }
+.nav-link.active { background: var(--accent); color: #fff; }
+.nav-icon { font-size: 15px; width: 18px; text-align: center; flex-shrink: 0; }
+</style>
+</body>
+</html>

@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Select Server{% endblock %}
+{% block content %}
+<div style="max-width:600px;margin:0 auto;padding-top:20px;">
+    <div class="card">
+        <div class="card-title">🖥️ Select a Server</div>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:20px;">
+            Choose which server you want to manage.
+            Only servers where you have dashboard access are shown.
+        </p>
+        {% if guilds %}
+        <div style="display:flex;flex-direction:column;gap:10px;">
+            {% for g in guilds %}
+            <a href="{{ url_for('select_guild', guild_id=g.id) }}"
+               style="display:flex;align-items:center;gap:14px;padding:14px 16px;
+                      background:var(--bg3);border:1px solid var(--border);
+                      border-radius:10px;text-decoration:none;color:var(--text);
+                      transition:all .15s;"
+               onmouseover="this.style.borderColor='var(--accent)';this.style.background='var(--bg4)'"
+               onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--bg3)'">
+                {% if g.icon %}
+                <img src="https://cdn.discordapp.com/icons/{{ g.id }}/{{ g.icon }}.png"
+                     style="width:44px;height:44px;border-radius:50%;object-fit:cover;">
+                {% else %}
+                <div style="width:44px;height:44px;border-radius:50%;background:var(--accent);
+                            display:flex;align-items:center;justify-content:center;
+                            font-weight:700;font-size:18px;color:#fff;flex-shrink:0;">
+                    {{ g.name[0].upper() }}
+                </div>
+                {% endif %}
+                <div>
+                    <div style="font-weight:600;font-size:14px;">{{ g.name }}</div>
+                    <div style="font-size:11px;color:var(--text3);text-transform:capitalize;margin-top:2px;">
+                        {{ g.level }}
+                    </div>
+                </div>
+                <div style="margin-left:auto;color:var(--text3);font-size:18px;">›</div>
+            </a>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <div class="empty-icon">🔐</div>
+            <div class="empty-text">
+                You don't have access to any servers yet.<br>
+                Ask your server owner to add you in Dashboard Access.
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

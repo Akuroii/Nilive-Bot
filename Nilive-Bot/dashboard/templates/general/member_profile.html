@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Member Profile{% endblock %}
+{% block content %}
+
+<div style="display:flex;align-items:center;gap:16px;margin-bottom:24px;">
+    <a href="{{ url_for('members') }}" class="btn btn-secondary">← Back</a>
+    <div>
+        <div style="font-size:20px;font-weight:700;">Member Profile</div>
+        <div class="text-muted text-sm">User ID: <code>{{ member_id }}</code></div>
+    </div>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card stat-accent">
+        <div class="stat-label">Level</div>
+        <div class="stat-value">{{ profile.level }}</div>
+        <div class="stat-sub">{{ "{:,}".format(profile.xp) }} XP</div>
+    </div>
+    <div class="stat-card stat-success">
+        <div class="stat-label">Coins</div>
+        <div class="stat-value">{{ "{:,}".format(profile.coins) }}</div>
+    </div>
+    <div class="stat-card stat-danger">
+        <div class="stat-label">Warnings</div>
+        <div class="stat-value">{{ profile.warnings | length }}</div>
+    </div>
+    <div class="stat-card stat-warning">
+        <div class="stat-label">Mod Actions</div>
+        <div class="stat-value">{{ profile.mod_logs | length }}</div>
+    </div>
+</div>
+
+{% if is_admin %}
+<div class="card">
+    <div class="card-title">✏️ Edit Stats</div>
+    <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="form-group" style="margin-bottom:0;">
+            <label class="form-label">XP</label>
+            <input class="form-input" id="edit-xp"
+                   value="{{ profile.xp }}" type="number" min="0"
+                   style="width:160px;">
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+            <label class="form-label">Coins</label>
+            <input class="form-input" id="edit-coins"
+                   value="{{ profile.coins }}" type="number" min="0"
+                   style="width:160px;">
+        </div>
+        <button class="btn btn-primary"
+                onclick="saveProfile()">Save Changes</button>
+        <div id="profile-status" style="font-size:13px;align-self:center;"></div>
+    </div>
+</div>
+{% endif %}
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+
+    <div class="card">
+        <div class="card-title">⚠️ Warnings</div>
+        {% if profile.warnings %}
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr><th>Reason</th><th>By</th><th>Date</th></tr>
+                </thead>
+                <tbody>
+                    {% for w in profile.warnings %}
+                    <tr>
+                        <td>{{ w[0] or '—' }}</td>
+                        <td class="text-muted">{{ w[2] or 'Unknown' }}</td>
+                        <td class="text-muted">{{ w[1][:10] if w[1] else '—' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <div class="empty-icon">✅</div>
+            <div class="empty-text">No warnings</div>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <div class="card-title">🛡️ Moderation History</div>
+        {% if profile.mod_logs %}
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr><th>Action</th><th>Reason</th><th>By</th><th>Date</th></tr>
+                </thead>
+                <tbody>
+                    {% for log in profile.mod_logs %}
+                    <tr>
+                        <td>
+                            <span class="badge badge-warning">
+                                {{ log[0] }}
+                            </span>
+                        </td>
+                        <td class="text-muted">{{ log[1] or '—' }}</td>
+                        <td class="text-muted">{{ log[2] or 'Unknown' }}</td>
+                        <td class="text-muted">{{ log[3][:10] if log[3] else '—' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <div class="empty-icon">✅</div>
+            <div class="empty-text">No moderation history</div>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="card" style="grid-column:1/-1;">
+        <div class="card-title">🛒 Purchase History</div>
+        {% if profile.purchases %}
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr><th>Item</th><th>Price Paid</th><th>Date</th></tr>
+                </thead>
+                <tbody>
+                    {% for p in profile.purchases %}
+                    <tr>
+                        <td><strong>{{ p[0] }}</strong></td>
+                        <td>🪙 {{ "{:,}".format(p[1]) }}</td>
+                        <td class="text-muted">{{ p[2][:10] if p[2] else '—' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <div class="empty-icon">🛒</div>
+            <div class="empty-text">No purchases yet</div>
+        </div>
+        {% endif %}
+    </div>
+
+</div>
+
+{% block scripts %}
+<script>
+async function saveProfile() {
+    const xp    = parseInt(document.getElementById('edit-xp').value);
+    const coins = parseInt(document.getElementById('edit-coins').value);
+    const res   = await fetch('/api/edit-member', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+            user_id: '{{ member_id }}', xp, coins
+        }),
+    });
+    const data = await res.json();
+    const status = document.getElementById('profile-status');
+    if (data.success) {
+        status.textContent = '✅ Saved!';
+        status.style.color = 'var(--success)';
+        showToast('Profile updated!');
+    } else {
+        status.textContent = '❌ Error saving';
+        status.style.color = 'var(--danger)';
+    }
+    setTimeout(() => status.textContent = '', 3000);
+}
+</script>
+{% endblock %}
+{% endblock %}
