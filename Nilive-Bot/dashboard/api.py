@@ -10,29 +10,25 @@ from database import DB_PATH
 from dashboard.utils.async_utils import run_async
 from dashboard.auth import login_required, current_user_id, current_user
 from dashboard.permissions import (
-    get_session_guild_id, log_action,
-    LEVEL_RANK, LEVEL_OWNER,
+    get_session_guild_id, log_action, require_api_permission,
+    LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
 )
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
-
-def require_guild(f):
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not session.get("user"):
-            abort(401)
-        if not get_session_guild_id():
-            abort(400)
-        return f(*args, **kwargs)
-    return decorated
+# PHASE 2 CRITICAL SECURITY FIX: the old `require_guild` decorator that
+# used to live here only checked "is someone logged in" + "is a guild
+# selected" — it never looked at permission_level at all. Every route
+# below has been re-audited and re-gated with @require_api_permission
+# (see dashboard/permissions.py), which enforces the same tiered
+# moderator/admin/owner model the rest of the dashboard uses. See
+# individual route comments below for why each level was chosen.
 
 
 # ── Discord helpers ───────────────────────────────────────────────────────────
 
 @api_bp.route("/guild/roles")
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def get_guild_roles():
     guild_id  = get_session_guild_id()
     bot_token = os.getenv("DISCORD_TOKEN", "")
@@ -61,7 +57,7 @@ def get_guild_roles():
 
 
 @api_bp.route("/guild/channels")
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def get_guild_channels():
     guild_id  = get_session_guild_id()
     bot_token = os.getenv("DISCORD_TOKEN", "")
@@ -96,13 +92,13 @@ def get_guild_channels():
 
 # Compatibility shims
 @api_bp.route("/roles")
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def get_roles():
     return get_guild_roles()
 
 
 @api_bp.route("/channels")
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def get_channels():
     return get_guild_channels()
 
@@ -110,7 +106,7 @@ def get_channels():
 # ── Members ───────────────────────────────────────────────────────────────────
 
 @api_bp.route("/members/search")
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def members_search():
     guild_id = get_session_guild_id()
     query    = request.args.get("q", "").strip()
@@ -149,7 +145,7 @@ def members_search():
 # ── Moderation ────────────────────────────────────────────────────────────────
 
 @api_bp.route("/moderation/logs")
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def moderation_logs_partial():
     guild_id      = get_session_guild_id()
     action_filter = request.args.get("action", "")
@@ -204,7 +200,7 @@ def moderation_logs_partial():
 
 
 @api_bp.route("/moderation/edit-reason/<int:log_id>", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def api_mod_edit_reason(log_id: int):
     guild_id = get_session_guild_id()
     reason   = request.json.get("reason", "").strip()
@@ -226,12 +222,11 @@ def api_mod_edit_reason(log_id: int):
 
 
 @api_bp.route("/moderation/delete-log/<int:log_id>", methods=["DELETE"])
-@require_guild
+@require_api_permission(LEVEL_OWNER)
 def api_mod_delete_log(log_id: int):
-    guild_id   = get_session_guild_id()
-    user_level = session.get("user_level", "")
-    if LEVEL_RANK.get(user_level, 0) < LEVEL_RANK[LEVEL_OWNER]:
-        return jsonify({"success": False, "error": "Owner only"}), 403
+    # Owner-only enforcement now happens in @require_api_permission(LEVEL_OWNER)
+    # above, not here — see dashboard/permissions.py.
+    guild_id = get_session_guild_id()
 
     async def soft_delete():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -247,7 +242,7 @@ def api_mod_delete_log(log_id: int):
 
 
 @api_bp.route("/moderation/export")
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def api_mod_export():
     guild_id = get_session_guild_id()
     date_from = request.args.get("date_from", "")
@@ -282,7 +277,7 @@ def api_mod_export():
 
 
 @api_bp.route("/moderation/quick-action", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def api_mod_quick_action():
     guild_id    = get_session_guild_id()
     data        = request.json
@@ -398,7 +393,7 @@ def api_mod_quick_action():
 
 
 @api_bp.route("/moderation/warning-thresholds", methods=["GET"])
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def get_warning_thresholds():
     guild_id = get_session_guild_id()
 
@@ -419,7 +414,7 @@ def get_warning_thresholds():
 
 
 @api_bp.route("/moderation/warning-thresholds", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def save_warning_threshold():
     guild_id = get_session_guild_id()
     data     = request.json
@@ -454,7 +449,7 @@ def save_warning_threshold():
 
 
 @api_bp.route("/moderation/warning-thresholds/<int:tid>", methods=["DELETE"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def delete_warning_threshold(tid: int):
     guild_id = get_session_guild_id()
 
@@ -470,7 +465,7 @@ def delete_warning_threshold(tid: int):
 
 
 @api_bp.route("/moderation/auto-escalation", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def api_toggle_auto_escalation():
     guild_id = get_session_guild_id()
     enabled  = request.json.get("enabled", True)
@@ -489,7 +484,7 @@ def api_toggle_auto_escalation():
 
 
 @api_bp.route("/moderation/clear-warnings", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def api_clear_warnings():
     guild_id  = get_session_guild_id()
     target_id = request.json.get("user_id")
@@ -518,12 +513,11 @@ def api_clear_warnings():
 
 
 @api_bp.route("/moderation/delete-warning/<int:warning_id>", methods=["DELETE"])
-@require_guild
+@require_api_permission(LEVEL_OWNER)
 def api_delete_warning(warning_id: int):
-    guild_id   = get_session_guild_id()
-    user_level = session.get("user_level", "")
-    if LEVEL_RANK.get(user_level, 0) < LEVEL_RANK[LEVEL_OWNER]:
-        return jsonify({"success": False, "error": "Owner only"}), 403
+    # Owner-only enforcement now happens in @require_api_permission(LEVEL_OWNER)
+    # above, not here — see dashboard/permissions.py.
+    guild_id = get_session_guild_id()
 
     async def delete():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -540,7 +534,7 @@ def api_delete_warning(warning_id: int):
 # ── Tickets ───────────────────────────────────────────────────────────────────
 
 @api_bp.route("/tickets/list")
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def tickets_partial():
     guild_id      = get_session_guild_id()
     status_filter = request.args.get("status", "")
@@ -578,7 +572,7 @@ def tickets_partial():
 
 
 @api_bp.route("/tickets/settings", methods=["GET"])
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def api_tickets_settings_get():
     guild_id = get_session_guild_id()
 
@@ -595,7 +589,7 @@ def api_tickets_settings_get():
 
 
 @api_bp.route("/tickets/settings", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def api_tickets_settings_save():
     guild_id = get_session_guild_id()
     data     = request.json
@@ -635,7 +629,7 @@ def api_tickets_settings_save():
 
 
 @api_bp.route("/tickets/categories", methods=["GET"])
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def api_tickets_categories():
     guild_id = get_session_guild_id()
 
@@ -660,7 +654,7 @@ def api_tickets_categories():
 
 
 @api_bp.route("/tickets/categories", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def api_tickets_save_category():
     guild_id = get_session_guild_id()
     data     = request.json
@@ -699,7 +693,7 @@ def api_tickets_save_category():
 
 
 @api_bp.route("/tickets/categories/<int:cat_id>", methods=["DELETE"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def api_tickets_delete_category(cat_id: int):
     guild_id = get_session_guild_id()
 
@@ -715,7 +709,7 @@ def api_tickets_delete_category(cat_id: int):
 
 
 @api_bp.route("/tickets/categories/reorder", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def api_tickets_reorder_categories():
     guild_id = get_session_guild_id()
     order    = request.json.get("order", [])
@@ -733,7 +727,7 @@ def api_tickets_reorder_categories():
 
 
 @api_bp.route("/tickets/panels", methods=["GET"])
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def api_tickets_panels():
     guild_id = get_session_guild_id()
 
@@ -755,7 +749,7 @@ def api_tickets_panels():
 
 
 @api_bp.route("/tickets/panels", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def api_tickets_save_panel():
     guild_id = get_session_guild_id()
     data     = request.json
@@ -787,7 +781,7 @@ def api_tickets_save_panel():
 
 
 @api_bp.route("/tickets/panels/<int:panel_id>", methods=["DELETE"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def api_tickets_delete_panel(panel_id: int):
     guild_id = get_session_guild_id()
 
@@ -803,7 +797,7 @@ def api_tickets_delete_panel(panel_id: int):
 
 
 @api_bp.route("/tickets/claim/<int:ticket_id>", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def api_tickets_claim(ticket_id: int):
     guild_id = get_session_guild_id()
     user     = current_user()
@@ -823,7 +817,7 @@ def api_tickets_claim(ticket_id: int):
 
 
 @api_bp.route("/tickets/transfer/<int:ticket_id>", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def api_tickets_transfer(ticket_id: int):
     guild_id = get_session_guild_id()
     to_user  = request.json.get("to_user", "")
@@ -842,7 +836,7 @@ def api_tickets_transfer(ticket_id: int):
 
 
 @api_bp.route("/tickets/tag/<int:ticket_id>", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def api_tickets_tag(ticket_id: int):
     guild_id = get_session_guild_id()
     tags     = request.json.get("tags", [])
@@ -859,7 +853,7 @@ def api_tickets_tag(ticket_id: int):
 
 
 @api_bp.route("/tickets/ratings", methods=["GET"])
-@require_guild
+@require_api_permission(LEVEL_MODERATOR)
 def api_tickets_ratings():
     guild_id = get_session_guild_id()
 
@@ -882,7 +876,7 @@ def api_tickets_ratings():
 # ── MVP ───────────────────────────────────────────────────────────────────────
 
 @api_bp.route("/mvp/scores")
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def mvp_scores_partial():
     from datetime import date
     guild_id = get_session_guild_id()
@@ -913,7 +907,7 @@ def mvp_scores_partial():
 
 
 @api_bp.route("/mvp/config", methods=["GET"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def get_mvp_config_api():
     guild_id = get_session_guild_id()
 
@@ -930,7 +924,7 @@ def get_mvp_config_api():
 
 
 @api_bp.route("/mvp/config", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def save_mvp_config_api():
     guild_id = get_session_guild_id()
     data     = request.json
@@ -967,7 +961,7 @@ def save_mvp_config_api():
 # ── Economy / Shop ────────────────────────────────────────────────────────────
 
 @api_bp.route("/economy/leaderboard")
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def economy_leaderboard_partial():
     guild_id = get_session_guild_id()
 
@@ -991,7 +985,7 @@ def economy_leaderboard_partial():
 
 
 @api_bp.route("/shop/items")
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def shop_items_partial():
     guild_id = get_session_guild_id()
 
@@ -1030,7 +1024,7 @@ def shop_items_partial():
 
 
 @api_bp.route("/shop/item/<int:item_id>", methods=["DELETE"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def delete_shop_item(item_id: int):
     guild_id = get_session_guild_id()
 
@@ -1046,7 +1040,7 @@ def delete_shop_item(item_id: int):
 
 
 @api_bp.route("/shop/item", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def add_shop_item():
     guild_id = get_session_guild_id()
     data     = request.json or request.form.to_dict()
@@ -1099,7 +1093,7 @@ def add_shop_item():
 
 
 @api_bp.route("/shop/purchase-history")
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def shop_purchase_history():
     guild_id = get_session_guild_id()
 
@@ -1131,7 +1125,7 @@ def shop_purchase_history():
 
 
 @api_bp.route("/shop/temp-roles")
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def shop_temp_roles():
     guild_id = get_session_guild_id()
 
@@ -1161,7 +1155,7 @@ def shop_temp_roles():
 # ── Leveling ──────────────────────────────────────────────────────────────────
 
 @api_bp.route("/leveling/leaderboard")
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def leveling_leaderboard_partial():
     guild_id = get_session_guild_id()
 
@@ -1186,7 +1180,7 @@ def leveling_leaderboard_partial():
 
 
 @api_bp.route("/leveling/config", methods=["GET"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def get_leveling_config_api():
     guild_id = get_session_guild_id()
 
@@ -1203,7 +1197,7 @@ def get_leveling_config_api():
 
 
 @api_bp.route("/leveling/config", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def save_leveling_config_api():
     guild_id = get_session_guild_id()
     data     = request.json
@@ -1264,7 +1258,7 @@ def save_leveling_config_api():
 
 
 @api_bp.route("/leveling/reward", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def add_leveling_reward():
     guild_id = get_session_guild_id()
     data     = request.json
@@ -1282,7 +1276,7 @@ def add_leveling_reward():
 
 
 @api_bp.route("/leveling/reward/<int:reward_id>", methods=["DELETE"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def delete_leveling_reward(reward_id: int):
     guild_id = get_session_guild_id()
 
@@ -1298,7 +1292,7 @@ def delete_leveling_reward(reward_id: int):
 
 
 @api_bp.route("/leveling/bonus-roles", methods=["GET"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def get_bonus_roles():
     guild_id = get_session_guild_id()
 
@@ -1316,7 +1310,7 @@ def get_bonus_roles():
 
 
 @api_bp.route("/leveling/bonus-role", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def add_bonus_role():
     guild_id = get_session_guild_id()
     data     = request.json
@@ -1334,7 +1328,7 @@ def add_bonus_role():
 
 
 @api_bp.route("/leveling/bonus-role/<int:role_id>", methods=["DELETE"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def delete_bonus_role(role_id: int):
     guild_id = get_session_guild_id()
 
@@ -1350,7 +1344,7 @@ def delete_bonus_role(role_id: int):
 
 
 @api_bp.route("/leveling/blacklist", methods=["GET"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def get_blacklist():
     guild_id = get_session_guild_id()
 
@@ -1367,7 +1361,7 @@ def get_blacklist():
 
 
 @api_bp.route("/leveling/blacklist", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def add_blacklist():
     guild_id = get_session_guild_id()
     data     = request.json
@@ -1385,7 +1379,7 @@ def add_blacklist():
 
 
 @api_bp.route("/leveling/blacklist/<int:entry_id>", methods=["DELETE"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def delete_blacklist(entry_id: int):
     guild_id = get_session_guild_id()
 
@@ -1403,7 +1397,7 @@ def delete_blacklist(entry_id: int):
 # ── Audit log ─────────────────────────────────────────────────────────────────
 
 @api_bp.route("/audit-log/entries")
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def audit_log_partial():
     guild_id = get_session_guild_id()
     page     = int(request.args.get("page", 1))
@@ -1437,7 +1431,7 @@ def audit_log_partial():
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 @api_bp.route("/settings/general", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_OWNER)
 def save_settings_general():
     guild_id = get_session_guild_id()
     data     = request.get_json() or {}
@@ -1479,7 +1473,7 @@ def save_settings_general():
 
 
 @api_bp.route("/settings/welcome", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def save_settings_welcome():
     guild_id = get_session_guild_id()
     data     = request.get_json() or {}
@@ -1525,7 +1519,7 @@ def save_settings_welcome():
 
 
 @api_bp.route("/settings/boost", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_ADMIN)
 def save_settings_boost():
     guild_id = get_session_guild_id()
     data     = request.get_json() or {}
@@ -1563,7 +1557,7 @@ def save_settings_boost():
 # ── Status messages ───────────────────────────────────────────────────────────
 
 @api_bp.route("/status-messages", methods=["GET"])
-@require_guild
+@require_api_permission(LEVEL_OWNER)
 def get_status_messages():
     guild_id = get_session_guild_id()
 
@@ -1584,7 +1578,7 @@ def get_status_messages():
 
 
 @api_bp.route("/status-messages", methods=["POST"])
-@require_guild
+@require_api_permission(LEVEL_OWNER)
 def add_status_message():
     guild_id = get_session_guild_id()
     data     = request.json
@@ -1606,7 +1600,7 @@ def add_status_message():
 
 
 @api_bp.route("/status-messages/<int:msg_id>", methods=["DELETE"])
-@require_guild
+@require_api_permission(LEVEL_OWNER)
 def delete_status_message(msg_id: int):
     guild_id = get_session_guild_id()
 

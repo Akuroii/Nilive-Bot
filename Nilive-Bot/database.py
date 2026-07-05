@@ -209,12 +209,33 @@ async def init_db():
                 response_type     TEXT DEFAULT 'text',
                 match_type        TEXT DEFAULT 'contains',
                 fuzzy_match       INTEGER DEFAULT 0,
+                fuzzy_threshold   INTEGER DEFAULT 80,
                 case_sensitive    INTEGER DEFAULT 0,
                 response_chance   INTEGER DEFAULT 100,
+                cooldown_seconds  INTEGER DEFAULT 0,
                 allowed_channels  TEXT,
                 enabled           INTEGER DEFAULT 1
             )
         """)
+
+        # Migration: add fuzzy_threshold / cooldown_seconds if an older
+        # DB predates them (Phase 2 fix — see cogs/triggers.py). Before
+        # this, fuzzy matching was hardcoded to a >=80 ratio for every
+        # trigger with no way to tune it per-trigger, and there was no
+        # anti-repeat cooldown at all: a trigger could fire on every
+        # single matching message, spamming the channel.
+        try:
+            cursor = await db.execute("PRAGMA table_info(triggers)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "fuzzy_threshold" not in cols:
+                await db.execute(
+                    "ALTER TABLE triggers ADD COLUMN fuzzy_threshold INTEGER DEFAULT 80")
+            if "cooldown_seconds" not in cols:
+                await db.execute(
+                    "ALTER TABLE triggers ADD COLUMN cooldown_seconds INTEGER DEFAULT 0")
+            await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] triggers.fuzzy_threshold/cooldown_seconds: {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bot_settings (
@@ -596,6 +617,37 @@ async def init_db():
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_tr_expires
             ON temp_roles(expires_at)
+        """)
+
+        # ══════════════════════════════════════════
+        # TEMP BANS (Phase 2 fix)
+        # check_warning_thresholds() in cogs/moderation.py could
+        # already select action='temp_ban' from the dashboard's
+        # warning-threshold form, but the handler for it was a
+        # silent no-op — there was nowhere to record "unban this
+        # user at time X" and nothing that ever read such a record.
+        # This table + the scheduled_unban_check task in
+        # cogs/moderation.py is that missing piece.
+        # ══════════════════════════════════════════
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS temp_bans (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,
+                banned_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at  TIMESTAMP NOT NULL,
+                reason      TEXT,
+                source      TEXT DEFAULT 'auto-threshold'
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tb_expires
+            ON temp_bans(expires_at)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tb_guild_user
+            ON temp_bans(guild_id, user_id)
         """)
 
         # ══════════════════════════════════════════

@@ -275,12 +275,19 @@
     <div class="card-header">
         <div class="card-title" style="margin:0">📐 Warning Thresholds</div>
         <div style="display:flex;align-items:center;gap:12px;">
+            {% if is_admin %}
             <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);">
                 Auto-Escalation
                 <input type="checkbox" id="auto-escalation-toggle"
                        {% if auto_escalation == '1' %}checked{% endif %}
                        onchange="toggleAutoEscalation(this.checked)">
             </label>
+            {% else %}
+            <span style="font-size:13px;color:var(--text3);">
+                Auto-Escalation: {% if auto_escalation == '1' %}On{% else %}Off{% endif %}
+                (admin only)
+            </span>
+            {% endif %}
         </div>
     </div>
     <div class="table-wrap">

@@ -169,7 +169,21 @@ class Events(commands.Cog):
 
     @tasks.loop(minutes=15)
     async def scheduled_events_task(self):
-        """Fires scheduled events at the right time."""
+        """
+        Fires scheduled events at the right time.
+
+        PHASE 2 FIX: the per-event body (guild/channel lookup,
+        _launch_event, then the UPDATE that disables the event) had
+        no try/except of its own. _launch_event() already guards its
+        own internals, but a bad row, a transient DB error on the
+        "disable after firing" UPDATE, or literally any other
+        unexpected exception here would propagate up through
+        tasks.loop and stop the whole 15-minute loop from ever
+        rescheduling — silently killing scheduled events for every
+        guild until the bot restarts, same class of bug already fixed
+        in cogs/leveling.py's voice_xp_task. Each event is now
+        isolated so one bad row can't take the rest down with it.
+        """
         now = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
@@ -187,31 +201,35 @@ class Events(commands.Cog):
             due = await cursor.fetchall()
 
         for ev in due:
-            (eid, guild_id, title, desc, etype,
-             reward_type, reward_value, reward_dur,
-             max_winners, channel_id, embed_data_str,
-             stype, stime, rmin, rmax) = ev
+            try:
+                (eid, guild_id, title, desc, etype,
+                 reward_type, reward_value, reward_dur,
+                 max_winners, channel_id, embed_data_str,
+                 stype, stime, rmin, rmax) = ev
 
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                continue
-            channel = guild.get_channel(int(channel_id)) \
-                if channel_id else None
-            if not channel:
-                continue
+                guild = self.bot.get_guild(guild_id)
+                if not guild:
+                    continue
+                channel = guild.get_channel(int(channel_id)) \
+                    if channel_id else None
+                if not channel:
+                    continue
 
-            await self._launch_event(
-                channel, eid, title, desc,
-                reward_type, reward_value,
-                reward_dur, max_winners, embed_data_str)
+                await self._launch_event(
+                    channel, eid, title, desc,
+                    reward_type, reward_value,
+                    reward_dur, max_winners, embed_data_str)
 
-            # Disable after firing
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("""
-                    UPDATE events SET enabled = 0
-                    WHERE id = ?
-                """, (eid,))
-                await db.commit()
+                # Disable after firing
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("""
+                        UPDATE events SET enabled = 0
+                        WHERE id = ?
+                    """, (eid,))
+                    await db.commit()
+            except Exception as e:
+                print(f"[EVENTS] scheduled_events_task error for "
+                      f"event {ev[0] if ev else '?'}: {e}")
 
     async def _launch_event(self, channel, event_id, title,
                              desc, reward_type, reward_value,

@@ -1408,9 +1408,10 @@ def api_save_trigger():
                 INSERT INTO triggers
                     (guild_id, trigger_words, response_text,
                      response_embed, response_type, match_type,
-                     fuzzy_match, case_sensitive, response_chance,
+                     fuzzy_match, fuzzy_threshold, case_sensitive,
+                     response_chance, cooldown_seconds,
                      allowed_channels, enabled)
-                VALUES (?,?,?,?,?,?,?,?,?,?,1)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)
             """, (
                 guild_id,
                 data.get("trigger_words"),
@@ -1419,8 +1420,10 @@ def api_save_trigger():
                 data.get("response_type", "text"),
                 data.get("match_type", "contains"),
                 int(data.get("fuzzy_match", 0)),
+                int(data.get("fuzzy_threshold", 80)),
                 int(data.get("case_sensitive", 0)),
                 int(data.get("response_chance", 100)),
+                int(data.get("cooldown_seconds", 0)),
                 json.dumps(data.get("allowed_channels", [])),
             ))
             await db.commit()

@@ -33,6 +33,18 @@
             <input class="form-input" id="t-chance" type="number"
                    min="1" max="100" value="100">
         </div>
+        <div class="form-group">
+            <label class="form-label">Fuzzy match threshold (%)</label>
+            <input class="form-input" id="t-fuzzy-threshold" type="number"
+                   min="50" max="100" value="80">
+            <div class="form-hint">Only used when Fuzzy matching is on. Higher = stricter.</div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Cooldown between fires (seconds)</label>
+            <input class="form-input" id="t-cooldown" type="number"
+                   min="0" value="0">
+            <div class="form-hint">0 = fire every time it matches. Prevents spam from busy channels.</div>
+        </div>
         <div class="form-group" id="text-field">
             <label class="form-label">Response text / emoji</label>
             <textarea class="form-input" id="t-text" rows="3"
@@ -115,8 +127,10 @@ async function addTrigger() {
         response_type:    document.getElementById('t-type').value,
         match_type:       document.getElementById('t-match').value,
         fuzzy_match:      document.getElementById('t-fuzzy').checked ? 1 : 0,
+        fuzzy_threshold:  parseInt(document.getElementById('t-fuzzy-threshold').value) || 80,
         case_sensitive:   document.getElementById('t-case').checked ? 1 : 0,
         response_chance:  parseInt(document.getElementById('t-chance').value),
+        cooldown_seconds: parseInt(document.getElementById('t-cooldown').value) || 0,
         allowed_channels: channels,
     };
     if (!payload.trigger_words) {
