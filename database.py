@@ -209,12 +209,33 @@ async def init_db():
                 response_type     TEXT DEFAULT 'text',
                 match_type        TEXT DEFAULT 'contains',
                 fuzzy_match       INTEGER DEFAULT 0,
+                fuzzy_threshold   INTEGER DEFAULT 80,
                 case_sensitive    INTEGER DEFAULT 0,
                 response_chance   INTEGER DEFAULT 100,
+                cooldown_seconds  INTEGER DEFAULT 0,
                 allowed_channels  TEXT,
                 enabled           INTEGER DEFAULT 1
             )
         """)
+
+        # Migration: add fuzzy_threshold / cooldown_seconds if an older
+        # DB predates them (Phase 2 fix — see cogs/triggers.py). Before
+        # this, fuzzy matching was hardcoded to a >=80 ratio for every
+        # trigger with no way to tune it per-trigger, and there was no
+        # anti-repeat cooldown at all: a trigger could fire on every
+        # single matching message, spamming the channel.
+        try:
+            cursor = await db.execute("PRAGMA table_info(triggers)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "fuzzy_threshold" not in cols:
+                await db.execute(
+                    "ALTER TABLE triggers ADD COLUMN fuzzy_threshold INTEGER DEFAULT 80")
+            if "cooldown_seconds" not in cols:
+                await db.execute(
+                    "ALTER TABLE triggers ADD COLUMN cooldown_seconds INTEGER DEFAULT 0")
+            await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] triggers.fuzzy_threshold/cooldown_seconds: {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bot_settings (
@@ -416,6 +437,20 @@ async def init_db():
             )
         """)
 
+        # Migration: add spam_window_seconds if an older DB predates it.
+        # cogs/leveling.py reads this via config.get(..., 10), so its
+        # absence never crashed anything, it just meant the value could
+        # never be anything other than that hardcoded default.
+        try:
+            cursor = await db.execute("PRAGMA table_info(leveling_config)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "spam_window_seconds" not in cols:
+                await db.execute(
+                    "ALTER TABLE leveling_config ADD COLUMN spam_window_seconds INTEGER DEFAULT 10")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] leveling_config.spam_window_seconds: {e}")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_rewards (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -585,6 +620,37 @@ async def init_db():
         """)
 
         # ══════════════════════════════════════════
+        # TEMP BANS (Phase 2 fix)
+        # check_warning_thresholds() in cogs/moderation.py could
+        # already select action='temp_ban' from the dashboard's
+        # warning-threshold form, but the handler for it was a
+        # silent no-op — there was nowhere to record "unban this
+        # user at time X" and nothing that ever read such a record.
+        # This table + the scheduled_unban_check task in
+        # cogs/moderation.py is that missing piece.
+        # ══════════════════════════════════════════
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS temp_bans (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,
+                banned_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at  TIMESTAMP NOT NULL,
+                reason      TEXT,
+                source      TEXT DEFAULT 'auto-threshold'
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tb_expires
+            ON temp_bans(expires_at)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tb_guild_user
+            ON temp_bans(guild_id, user_id)
+        """)
+
+        # ══════════════════════════════════════════
         # EVENTS
         # ══════════════════════════════════════════
 
@@ -731,6 +797,72 @@ async def init_db():
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_trat_guild
             ON ticket_ratings(guild_id)
+        """)
+
+        # ══════════════════════════════════════════
+        # REPORT SYSTEM (P1 #16)
+        # ══════════════════════════════════════════
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS report_config (
+                guild_id          INTEGER PRIMARY KEY,
+                enabled           INTEGER DEFAULT 0,
+                report_channel_id INTEGER,
+                staff_role_id     INTEGER,
+                updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS reports (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id           INTEGER NOT NULL,
+                reporter_id        INTEGER NOT NULL,
+                reporter_name      TEXT NOT NULL,
+                reported_user_id   INTEGER NOT NULL,
+                reported_user_name TEXT NOT NULL,
+                message_id         INTEGER NOT NULL,
+                channel_id         INTEGER NOT NULL,
+                report_message_id  INTEGER,
+                report_channel_id  INTEGER,
+                message_content    TEXT,
+                message_jump_url   TEXT,
+                reason             TEXT,
+                status             TEXT DEFAULT 'open',
+                created_at         TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_reports_guild
+            ON reports(guild_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_reports_status
+            ON reports(guild_id, status)
+        """)
+
+        # ══════════════════════════════════════════
+        # BOT HEALTH (P1 #17)
+        # Singleton row (id=1), overwritten every heartbeat by the
+        # bot process. Dashboard reads it read-only — it never
+        # writes here, since Flask and the bot are separate
+        # processes with no shared memory, only this DB file.
+        # ══════════════════════════════════════════
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_status (
+                id                INTEGER PRIMARY KEY CHECK (id = 1),
+                started_at        TEXT,
+                last_heartbeat    TEXT,
+                guild_count       INTEGER DEFAULT 0,
+                latency_ms        INTEGER DEFAULT 0,
+                loaded_cogs       TEXT DEFAULT '[]',
+                failed_cogs       TEXT DEFAULT '[]',
+                last_error        TEXT,
+                last_error_at     TEXT,
+                discord_py_version TEXT,
+                python_version    TEXT
+            )
         """)
 
         # ══════════════════════════════════════════

@@ -180,7 +180,20 @@ class Shop(commands.Cog):
     # ─── TEMP ROLE CLEANUP ──────────────────────────────
     @tasks.loop(minutes=10)
     async def temp_role_cleanup(self):
-        """Removes expired temp roles every 10 minutes."""
+        """
+        Removes expired temp roles every 10 minutes.
+
+        PHASE 2 FIX: previously the DELETE FROM temp_roles fired
+        unconditionally right after the remove_roles try/except-pass,
+        regardless of whether the removal actually succeeded. A
+        transient failure (rate limit, missing permission, network
+        blip) meant the row was deleted anyway and the temp role just
+        stayed on the member forever with no record left to retry
+        against. The delete is now conditional on the removal
+        actually succeeding (or there being nothing to remove), and
+        each entry is isolated in its own try/except so one bad row
+        can't take out the rest of the batch or the whole loop.
+        """
         now = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
@@ -191,22 +204,35 @@ class Shop(commands.Cog):
             expired = await cursor.fetchall()
 
         for (entry_id, guild_id, user_id, role_id) in expired:
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                continue
-            member = guild.get_member(user_id)
-            role   = guild.get_role(role_id)
-            if member and role and role in member.roles:
-                try:
-                    await member.remove_roles(
-                        role, reason="Temp role expired")
-                except Exception:
-                    pass
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    "DELETE FROM temp_roles WHERE id = ?",
-                    (entry_id,))
-                await db.commit()
+            try:
+                guild = self.bot.get_guild(guild_id)
+                removal_ok = True
+                if guild:
+                    member = guild.get_member(user_id)
+                    role   = guild.get_role(role_id)
+                    if member and role and role in member.roles:
+                        try:
+                            await member.remove_roles(
+                                role, reason="Temp role expired")
+                        except Exception as e:
+                            print(f"[SHOP] Failed to remove expired "
+                                  f"role {role_id} from {user_id} in "
+                                  f"{guild_id}: {e}")
+                            removal_ok = False
+                else:
+                    # Bot isn't in this guild right now — keep the
+                    # row so it's retried once it rejoins.
+                    removal_ok = False
+
+                if removal_ok:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "DELETE FROM temp_roles WHERE id = ?",
+                            (entry_id,))
+                        await db.commit()
+            except Exception as e:
+                print(f"[SHOP] temp_role_cleanup error for entry "
+                      f"{entry_id}: {e}")
 
     @temp_role_cleanup.before_loop
     async def before_cleanup(self):

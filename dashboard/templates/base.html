@@ -120,6 +120,17 @@
         <span class="nav-icon">📝</span>
         <span class="nav-text">Audit Log</span>
     </a>
+
+    <a href="/reports"
+       hx-get="/reports"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🚩</span>
+        <span class="nav-text">Reports</span>
+    </a>
 </div>
 
 <!-- ─── MANAGE ───────── -->
@@ -321,6 +332,17 @@
        class="nav-link">
         <span class="nav-icon">🔐</span>
         <span class="nav-text">Dashboard Access</span>
+    </a>
+
+    <a href="/health"
+       hx-get="/health"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🩺</span>
+        <span class="nav-text">System Health</span>
     </a>
 </div>
 

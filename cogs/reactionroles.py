@@ -146,6 +146,20 @@ class ReactionRoles(commands.Cog):
 
     @tasks.loop(minutes=30)
     async def expiry_check(self):
+        """
+        PHASE 2 FIX: this used to try/except-and-pass the role
+        removal, then unconditionally DELETE the expiry row right
+        after regardless of whether the removal actually worked. If
+        remove_roles() failed (rate limit, missing permission,
+        network blip), the row was deleted anyway and the role
+        obligation silently vanished forever — the role just stayed
+        on the member with no record left to retry against. The
+        delete is now conditional on the removal actually succeeding
+        (or there being nothing to remove), and each entry is
+        isolated in its own try/except so one bad row can't stop the
+        rest of the batch — or the whole 30-minute loop — from
+        running. Same pattern as cogs/shop.py's temp_role_cleanup.
+        """
         now = datetime.utcnow().isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
@@ -153,23 +167,37 @@ class ReactionRoles(commands.Cog):
                 WHERE expires_at <= ?
             """, (now,))
             expired = await cursor.fetchall()
+
         for guild_id, user_id, role_id in expired:
-            guild = self.bot.get_guild(guild_id)
-            if not guild:
-                continue
-            member = guild.get_member(user_id)
-            role = guild.get_role(role_id)
-            if member and role and role in member.roles:
-                try:
-                    await member.remove_roles(role)
-                except:
-                    pass
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("""
-                    DELETE FROM reaction_role_expiry
-                    WHERE guild_id=? AND user_id=? AND role_id=?
-                """, (guild_id, user_id, role_id))
-                await db.commit()
+            try:
+                guild = self.bot.get_guild(guild_id)
+                removal_ok = True
+                if guild:
+                    member = guild.get_member(user_id)
+                    role = guild.get_role(role_id)
+                    if member and role and role in member.roles:
+                        try:
+                            await member.remove_roles(role)
+                        except Exception as e:
+                            print(f"[RR] Failed to remove expired role "
+                                  f"{role_id} from {user_id} in "
+                                  f"{guild_id}: {e}")
+                            removal_ok = False
+                else:
+                    # Bot isn't in this guild right now — keep the
+                    # row so it's retried once it rejoins.
+                    removal_ok = False
+
+                if removal_ok:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("""
+                            DELETE FROM reaction_role_expiry
+                            WHERE guild_id=? AND user_id=? AND role_id=?
+                        """, (guild_id, user_id, role_id))
+                        await db.commit()
+            except Exception as e:
+                print(f"[RR] expiry_check error for {user_id}/{role_id} "
+                      f"in {guild_id}: {e}")
 
     @app_commands.command(name="reactionrole_create", description="Create a reaction role message with buttons")
     @app_commands.checks.has_permissions(administrator=True)

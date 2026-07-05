@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Reports{% endblock %}
+{% block content %}
+<span data-page-title="Reports"></span>
+
+<div class="stats-grid">
+    <div class="stat-card stat-danger">
+        <div class="stat-label">Open</div>
+        <div class="stat-value">{{ counts.get('open', 0) }}</div>
+    </div>
+    <div class="stat-card stat-success">
+        <div class="stat-label">Resolved</div>
+        <div class="stat-value">{{ counts.get('resolved', 0) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Dismissed</div>
+        <div class="stat-value">{{ counts.get('dismissed', 0) }}</div>
+    </div>
+    <div class="stat-card {% if config.enabled %}stat-success{% else %}stat-danger{% endif %}">
+        <div class="stat-label">System Status</div>
+        <div class="stat-value" style="font-size:18px;color:{% if config.enabled %}var(--success){% else %}var(--danger){% endif %}">
+            {% if config.enabled %}Enabled{% else %}Not Set Up{% endif %}
+        </div>
+        <div class="stat-sub">
+            {% if config.enabled %}Right-click a message → Apps → Report Message{% else %}Run /report_setup in Discord{% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0">🚩 Reports</div>
+        <div style="display:flex;gap:8px;">
+            <a href="/reports?status=open"      class="btn {% if status == 'open' %}btn-primary{% else %}btn-secondary{% endif %}">Open</a>
+            <a href="/reports?status=resolved"  class="btn {% if status == 'resolved' %}btn-primary{% else %}btn-secondary{% endif %}">Resolved</a>
+            <a href="/reports?status=dismissed" class="btn {% if status == 'dismissed' %}btn-primary{% else %}btn-secondary{% endif %}">Dismissed</a>
+        </div>
+    </div>
+    <p class="text-muted text-sm" style="margin-bottom:16px;">
+        Resolve or dismiss reports using the buttons on the report embed in Discord — this page is view-only for now.
+    </p>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>Reported User</th><th>Reported By</th><th>Reason</th><th>Message</th><th>Date</th></tr>
+            </thead>
+            <tbody>
+                {% for r in reports %}
+                <tr>
+                    <td><strong>{{ r[2] }}</strong></td>
+                    <td class="text-muted">{{ r[1] }}</td>
+                    <td class="text-muted" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ r[3] or '—' }}</td>
+                    <td><a href="{{ r[4] }}" target="_blank" rel="noopener">Jump ↗</a></td>
+                    <td class="text-muted">{{ r[6][:16] if r[6] else '—' }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="empty">No {{ status }} reports</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

@@ -102,6 +102,15 @@ PAGE_PERMISSIONS = {
     "announcements":      LEVEL_ADMIN,
     "commands":           LEVEL_OWNER,
     "dashboard_access":   LEVEL_OWNER,
+
+    # P1 #16 / #17
+    "reports":            LEVEL_MODERATOR,
+    # Health is owner-only, not admin — the error panel can show
+    # tracebacks that reference internal file paths and code
+    # structure. That's a bigger information-disclosure surface than
+    # "can this person read mod logs", so it gets the stricter gate
+    # already used for commands/dashboard_access.
+    "health":             LEVEL_OWNER,
 }
 
 

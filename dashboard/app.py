@@ -296,6 +296,126 @@ def audit_log():
     return render("general/auditlog.html", logs=logs, **ctx)
 
 
+# ── Reports (P1 #16) ────────────────────────────────────────────────────────
+
+@app.route("/reports")
+@require_page("reports")
+def reports():
+    guild_id = get_session_guild_id()
+    status   = request.args.get("status", "open")
+
+    async def get_data():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, reporter_name, reported_user_name, reason,
+                       message_jump_url, status, created_at
+                FROM reports
+                WHERE guild_id = ? AND status = ?
+                ORDER BY created_at DESC LIMIT 100
+            """, (guild_id, status))
+            rows = await cursor.fetchall()
+
+            counts_cur = await db.execute("""
+                SELECT status, COUNT(*) FROM reports
+                WHERE guild_id = ? GROUP BY status
+            """, (guild_id,))
+            counts_rows = await counts_cur.fetchall()
+
+            config_cur = await db.execute(
+                "SELECT enabled, report_channel_id, staff_role_id "
+                "FROM report_config WHERE guild_id = ?", (guild_id,))
+            config_row = await config_cur.fetchone()
+
+        counts = {row[0]: row[1] for row in counts_rows}
+        return rows, counts, config_row
+
+    reports_list, counts, config_row = run_async(get_data())
+    config = {
+        "enabled": bool(config_row[0]) if config_row else False,
+        "report_channel_id": config_row[1] if config_row else None,
+        "staff_role_id": config_row[2] if config_row else None,
+    }
+    ctx = get_current_user_context()
+    return render(
+        "general/reports.html",
+        reports=reports_list, status=status, counts=counts,
+        config=config, **ctx)
+
+
+# ── Health (P1 #17) ─────────────────────────────────────────────────────────
+
+@app.route("/health")
+@require_page("health")
+def health():
+    async def get_status():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT * FROM bot_status WHERE id = 1")
+            row = await cursor.fetchone()
+            if row:
+                return dict(zip([d[0] for d in cursor.description], row))
+        return None
+
+    row = run_async(get_status())
+
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    def _parse(ts):
+        if not ts:
+            return None
+        try:
+            return _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    last_hb  = _parse(row.get("last_heartbeat")) if row else None
+    started  = _parse(row.get("started_at")) if row else None
+    seconds_since_hb = (now - last_hb).total_seconds() if last_hb else None
+
+    # A heartbeat older than 3x its own interval means the bot
+    # process is either down or hung — treat it as offline rather
+    # than trusting stale numbers.
+    is_online = seconds_since_hb is not None and seconds_since_hb < 90
+
+    uptime_str = "Unknown"
+    if started:
+        delta = now - started
+        days, rem = divmod(int(delta.total_seconds()), 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, _ = divmod(rem, 60)
+        parts = []
+        if days: parts.append(f"{days}d")
+        if hours: parts.append(f"{hours}h")
+        parts.append(f"{minutes}m")
+        uptime_str = " ".join(parts)
+
+    loaded_cogs = json.loads(row.get("loaded_cogs") or "[]") if row else []
+    failed_cogs = json.loads(row.get("failed_cogs") or "[]") if row else []
+
+    db_size_bytes = None
+    db_exists     = os.path.exists(DB_PATH)
+    if db_exists:
+        try:
+            db_size_bytes = os.path.getsize(DB_PATH)
+        except OSError:
+            db_size_bytes = None
+
+    ctx = get_current_user_context()
+    return render(
+        "general/health.html",
+        row=row,
+        is_online=is_online,
+        seconds_since_hb=seconds_since_hb,
+        uptime_str=uptime_str,
+        loaded_cogs=loaded_cogs,
+        failed_cogs=failed_cogs,
+        db_path=DB_PATH,
+        db_exists=db_exists,
+        db_size_bytes=db_size_bytes,
+        **ctx)
+
+
 # ── Moderation ─────────────────────────────────────────────────────────────────
 
 @app.route("/moderation")
@@ -1288,9 +1408,10 @@ def api_save_trigger():
                 INSERT INTO triggers
                     (guild_id, trigger_words, response_text,
                      response_embed, response_type, match_type,
-                     fuzzy_match, case_sensitive, response_chance,
+                     fuzzy_match, fuzzy_threshold, case_sensitive,
+                     response_chance, cooldown_seconds,
                      allowed_channels, enabled)
-                VALUES (?,?,?,?,?,?,?,?,?,?,1)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)
             """, (
                 guild_id,
                 data.get("trigger_words"),
@@ -1299,8 +1420,10 @@ def api_save_trigger():
                 data.get("response_type", "text"),
                 data.get("match_type", "contains"),
                 int(data.get("fuzzy_match", 0)),
+                int(data.get("fuzzy_threshold", 80)),
                 int(data.get("case_sensitive", 0)),
                 int(data.get("response_chance", 100)),
+                int(data.get("cooldown_seconds", 0)),
                 json.dumps(data.get("allowed_channels", [])),
             ))
             await db.commit()

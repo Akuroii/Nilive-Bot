@@ -146,14 +146,23 @@ async def load_cogs():
         "cogs.auditlog",
         "cogs.twitch",
         "cogs.events",
+        "cogs.report",
+        "cogs.health",
     ]
+    # P1 #17: track load results on the bot object itself so
+    # cogs/health.py's heartbeat loop can read them without main.py
+    # and the cog needing any other shared state.
+    bot.loaded_cogs = []
+    bot.failed_cogs = []
     for cog in cog_files:
         try:
             await bot.load_extension(cog)
             print(f"  Loaded {cog}")
+            bot.loaded_cogs.append(cog)
         except Exception as e:
             print(f"  Failed to load {cog}: {e}")
             traceback.print_exc()
+            bot.failed_cogs.append({"cog": cog, "error": str(e)})
 
 
 @bot.event
@@ -167,6 +176,63 @@ async def on_ready():
         print(f"Sync error: {e}")
         traceback.print_exc()
     rotate_status.start()
+
+
+@bot.event
+async def on_error(event_method, *args, **kwargs):
+    """
+    P1 #17: catches exceptions raised inside event listeners
+    (on_message, on_member_update, etc. across every cog) that
+    would otherwise only ever show up in server logs nobody's
+    watching. Still prints the full traceback to stdout as before —
+    this only ADDS a copy to bot_status.last_error for the health
+    dashboard, it doesn't change discord.py's default handling.
+    """
+    tb = traceback.format_exc()
+    print(f"[ON_ERROR] in {event_method}:\n{tb}")
+    try:
+        from cogs.health import record_error
+        await record_error(f"event:{event_method}", tb)
+    except Exception:
+        pass
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction,
+                                error: discord.app_commands.AppCommandError):
+    """
+    P1 #17: same idea for slash command failures. Permission checks
+    (MissingPermissions, CheckFailure) are expected user-facing
+    outcomes, not bugs — those get a plain ephemeral message and are
+    NOT written to bot_status, so the health page only ever shows
+    genuine unexpected failures, not "a member without permission
+    tried to use /ban".
+    """
+    if isinstance(error, (discord.app_commands.MissingPermissions,
+                           discord.app_commands.CheckFailure)):
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "You don't have permission to use this command.",
+                ephemeral=True)
+        return
+
+    tb = "".join(traceback.format_exception(
+        type(error), error, error.__traceback__))
+    print(f"[APP_COMMAND_ERROR] {interaction.command}:\n{tb}")
+    try:
+        from cogs.health import record_error
+        cmd_name = interaction.command.qualified_name if interaction.command else "unknown"
+        await record_error(f"command:/{cmd_name}", tb)
+    except Exception:
+        pass
+
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "Something went wrong running that command. "
+                "The error has been logged.", ephemeral=True)
+    except Exception:
+        pass
 
 
 @bot.event

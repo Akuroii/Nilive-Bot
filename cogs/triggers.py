@@ -4,6 +4,7 @@ from discord import app_commands
 import aiosqlite
 import json
 import random
+import time
 from database import DB_PATH
 
 try:
@@ -17,6 +18,13 @@ except ImportError:
 class Triggers(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # PHASE 2 FIX: anti-repeat cooldown tracker. Keyed by
+        # (guild_id, trigger_id) -> last-fired unix timestamp, so a
+        # trigger can be rate-limited independently of any other
+        # trigger even if several match the same message. In-memory
+        # only (like Leveling's _xp_cooldowns) — resets on restart,
+        # which is fine for a spam-prevention cooldown.
+        self._last_fired: dict[tuple, float] = {}
 
     async def ensure_table(self):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -30,8 +38,10 @@ class Triggers(commands.Cog):
                     response_type    TEXT DEFAULT 'text',
                     match_type       TEXT DEFAULT 'contains',
                     fuzzy_match      INTEGER DEFAULT 0,
+                    fuzzy_threshold  INTEGER DEFAULT 80,
                     case_sensitive   INTEGER DEFAULT 0,
                     response_chance  INTEGER DEFAULT 100,
+                    cooldown_seconds INTEGER DEFAULT 0,
                     allowed_channels TEXT,
                     enabled          INTEGER DEFAULT 1,
                     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -41,7 +51,7 @@ class Triggers(commands.Cog):
 
     def _matches(self, content: str, trigger_words: str,
                  match_type: str, fuzzy: bool,
-                 case_sensitive: bool) -> bool:
+                 case_sensitive: bool, fuzzy_threshold: int = 80) -> bool:
         """
         Checks if a message content matches the trigger.
 
@@ -51,8 +61,15 @@ class Triggers(commands.Cog):
             exact      — message is exactly the trigger word
             endswith   — message ends with trigger word
 
-        fuzzy: uses thefuzz ratio (>= 80 match threshold)
+        fuzzy: uses thefuzz ratio (>= fuzzy_threshold match, default 80)
         case_sensitive: default OFF (Arabic + English both work)
+
+        PHASE 2 FIX: fuzzy_threshold was previously hardcoded to 80
+        for every trigger. A loose trigger (short/common word) with
+        an 80% partial-ratio threshold can false-positive constantly;
+        a strict one might want 90+. It's now per-trigger, read from
+        the triggers table and defaulting to 80 for older rows that
+        predate the column.
 
         Arabic support: since we do not modify the Unicode content,
         Arabic text is matched correctly by all match types.
@@ -67,7 +84,7 @@ class Triggers(commands.Cog):
         for word in words:
             if fuzzy and FUZZY_AVAILABLE:
                 ratio = fuzz.partial_ratio(word, content_check)
-                if ratio >= 80:
+                if ratio >= fuzzy_threshold:
                     return True
                 continue
             if match_type == "contains":
@@ -95,17 +112,21 @@ class Triggers(commands.Cog):
             cursor = await db.execute("""
                 SELECT id, guild_id, trigger_words, response_text,
                        response_embed, response_type, match_type,
-                       fuzzy_match, case_sensitive, response_chance,
+                       fuzzy_match, fuzzy_threshold, case_sensitive,
+                       response_chance, cooldown_seconds,
                        allowed_channels, enabled
                 FROM triggers
                 WHERE (guild_id = ? OR guild_id = 0) AND enabled = 1
             """, (message.guild.id,))
             all_triggers = await cursor.fetchall()
 
+        now = time.time()
+
         for t in all_triggers:
             (tid, guild_id, trigger_words, response_text,
              response_embed, response_type, match_type,
-             fuzzy_match, case_sensitive, response_chance,
+             fuzzy_match, fuzzy_threshold, case_sensitive,
+             response_chance, cooldown_seconds,
              allowed_channels, enabled) = t
 
             # Channel filter
@@ -122,9 +143,23 @@ class Triggers(commands.Cog):
                 message.content, trigger_words,
                 match_type or "contains",
                 bool(fuzzy_match),
-                bool(case_sensitive)
+                bool(case_sensitive),
+                int(fuzzy_threshold) if fuzzy_threshold else 80,
             ):
                 continue
+
+            # PHASE 2 FIX: anti-repeat cooldown. Previously a trigger
+            # fired on every single matching message with no rate
+            # limit at all — a common word set to "contains" could
+            # spam a response into a busy channel dozens of times a
+            # minute. cooldown_seconds=0 (the default) preserves the
+            # old fire-every-time behavior for triggers that want it.
+            cooldown_key = (message.guild.id, tid)
+            cooldown     = int(cooldown_seconds) if cooldown_seconds else 0
+            if cooldown > 0:
+                last = self._last_fired.get(cooldown_key, 0)
+                if now - last < cooldown:
+                    continue
 
             # % chance check
             chance = int(response_chance) if response_chance else 100
@@ -162,6 +197,12 @@ class Triggers(commands.Cog):
 
                 elif response_text:
                     await message.channel.send(response_text)
+
+                # Only stamp the cooldown once the response actually
+                # sent successfully — a send failure shouldn't burn
+                # the cooldown window for a trigger that never fired.
+                if cooldown > 0:
+                    self._last_fired[cooldown_key] = now
 
             except Exception as e:
                 print(f"[triggers] Error responding to trigger {tid}: {e}")

@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import aiosqlite
 from datetime import datetime, timedelta
@@ -77,13 +77,13 @@ async def check_warning_thresholds(guild: discord.Guild,
     Reads from: warning_thresholds table
     Configured on: dashboard Moderation page
 
-    NOTE (found during P1 #13, not fixed here — separate item):
-    the dashboard lets admins choose action='temp_ban' for a
-    threshold, but this function only handles kick/ban/timeout/
-    add_role. A temp_ban threshold is silently a no-op right now.
-    Fixing that needs a scheduled-unban worker, which is a bigger
-    change than a field-alignment fix — flagging for its own P1
-    ticket rather than bundling it in here.
+    PHASE 2 FIX: action == "temp_ban" was previously a silent no-op —
+    the dashboard let admins configure it, but this function only
+    handled kick/ban/timeout/add_role, so a temp_ban threshold just
+    never did anything when reached. Now it bans the member and
+    writes an expires_at row to temp_bans; Moderation.scheduled_unban_check
+    (below) polls that table and lifts the ban when it's due, the
+    same pattern already used for temp_roles in cogs/shop.py.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         # Count current warnings
@@ -112,6 +112,21 @@ async def check_warning_thresholds(guild: discord.Guild,
                 await member.ban(reason=reason)
                 await log_mod_action(guild.id, member, moderator,
                                      "ban", reason, "auto-threshold")
+            elif action == "temp_ban" and duration_minutes:
+                await member.ban(reason=reason)
+                expires_at = (
+                    datetime.utcnow() + timedelta(minutes=duration_minutes)
+                ).isoformat()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("""
+                        INSERT INTO temp_bans
+                            (guild_id, user_id, expires_at, reason, source)
+                        VALUES (?, ?, ?, ?, 'auto-threshold')
+                    """, (guild.id, member.id, expires_at, reason))
+                    await db.commit()
+                await log_mod_action(guild.id, member, moderator,
+                                     "temp_ban", reason, "auto-threshold",
+                                     duration_minutes, expires_at)
             elif action == "timeout" and duration_minutes:
                 await member.timeout(
                     timedelta(minutes=duration_minutes), reason=reason)
@@ -133,6 +148,67 @@ async def check_warning_thresholds(guild: discord.Guild,
 class Moderation(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.scheduled_unban_check.start()
+
+    def cog_unload(self):
+        self.scheduled_unban_check.cancel()
+
+    # ─── TEMP BAN EXPIRY (Phase 2 fix) ──────────────────
+    @tasks.loop(minutes=10)
+    async def scheduled_unban_check(self):
+        """
+        Lifts bans placed by a temp_ban warning threshold once their
+        expires_at has passed. Mirrors cogs/shop.py's
+        temp_role_cleanup: only deletes the temp_bans row once the
+        unban actually succeeds (or the ban is already gone), and
+        isolates each row in its own try/except so one bad entry
+        can't kill the whole loop and silently stop every future
+        temp-ban expiry from ever being checked again.
+        """
+        now = datetime.utcnow().isoformat()
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, guild_id, user_id FROM temp_bans
+                WHERE expires_at <= ?
+            """, (now,))
+            expired = await cursor.fetchall()
+
+        for entry_id, guild_id, user_id in expired:
+            try:
+                guild = self.bot.get_guild(guild_id)
+                if not guild:
+                    # Bot isn't in this guild (right now, at least) —
+                    # leave the row so it's retried once it rejoins,
+                    # rather than losing track of the obligation.
+                    continue
+
+                unban_ok = True
+                try:
+                    await guild.unban(
+                        discord.Object(id=user_id),
+                        reason="Temp ban expired")
+                except discord.NotFound:
+                    # Already unbanned manually — nothing to do,
+                    # still safe to clear the row.
+                    pass
+                except Exception as e:
+                    print(f"[MOD] Failed to lift temp ban for "
+                          f"{user_id} in {guild_id}: {e}")
+                    unban_ok = False  # keep the row, retry next cycle
+
+                if unban_ok:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "DELETE FROM temp_bans WHERE id = ?",
+                            (entry_id,))
+                        await db.commit()
+            except Exception as e:
+                print(f"[MOD] scheduled_unban_check error for "
+                      f"entry {entry_id}: {e}")
+
+    @scheduled_unban_check.before_loop
+    async def before_unban_check(self):
+        await self.bot.wait_until_ready()
 
     # ─── KICK ───────────────────────────────────────────
     @app_commands.command(name="kick", description="Kick a member")
