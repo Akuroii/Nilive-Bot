@@ -5,7 +5,6 @@ import aiosqlite
 import json
 from datetime import datetime, timezone, timedelta
 from database import DB_PATH
-from utils.permissions import check_bot_role_position
 from utils.formatters import snapshot_user, now_iso
 from utils.economy_safe import safe_deduct, safe_decrement_stock, InsufficientBalance
 
@@ -133,29 +132,26 @@ async def process_purchase(interaction: discord.Interaction,
         await db.commit()
 
     if itype in ("role", "temp_role") and role_id:
-        role = interaction.guild.get_role(int(role_id))
-        if role:
-            can, warn = check_bot_role_position(
-                interaction.guild, role)
-            if can:
-                try:
-                    await interaction.user.add_roles(
-                        role, reason=f"Shop purchase: {name}")
-                except Exception as e:
-                    print(f"[SHOP] Role give error: {e}")
-
-                if duration_hours and expires_at:
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute("""
-                            INSERT INTO temp_roles
-                                (guild_id, user_id, role_id,
-                                 expires_at, source)
-                            VALUES (?, ?, ?, ?, 'shop')
-                        """, (guild_id, user_id,
-                              role_id, expires_at))
-                        await db.commit()
-            else:
-                print(f"[SHOP ROLE WARNING] {warn}")
+        # Phase 3 / E2: role/temp_role granting now goes through the
+        # shared Reward Engine instead of this cog's own copy of the
+        # bot-role-position check + add_roles + temp_roles insert
+        # (the same logic that used to be duplicated in cogs/events.py
+        # too). Also fixes a small pre-existing inconsistency: this
+        # used to write a temp_roles row whenever the item's
+        # duration_hours happened to be set, regardless of whether the
+        # item's declared type was "role" (permanent) or "temp_role" —
+        # now it's keyed off itype itself, matching what the admin
+        # actually configured in the shop.
+        from utils.reward_engine import give_reward
+        result = await give_reward(
+            interaction.client, guild_id, user_id, itype,
+            role_id=role_id,
+            duration_hours=duration_hours if itype == "temp_role" else None,
+            reason=f"Shop purchase: {name}",
+            source="shop",
+        )
+        if not result.get("success"):
+            print(f"[SHOP] Role give error: {result.get('error')}")
 
     currency = await get_currency_name(guild_id)
     embed    = discord.Embed(

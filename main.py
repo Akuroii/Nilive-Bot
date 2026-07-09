@@ -128,6 +128,14 @@ async def rotate_status():
 
 async def load_cogs():
     cog_files = [
+        # Phase 3 / E1: loaded first — leveling and mvp now consume
+        # this cog's activity_message / activity_voice_tick events
+        # instead of listening to raw Discord events themselves. Load
+        # order doesn't actually matter for discord.py's dispatch()
+        # (listeners are looked up at dispatch time, not at cog-load
+        # time), but it's loaded first here for readability: this is
+        # the foundation layer everything else in Phase 3 builds on.
+        "cogs.activity_engine",
         "cogs.mvp",
         "cogs.moderation",
         "cogs.leveling",

@@ -49,6 +49,51 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
+        # NOTE (Phase 3 / E1): voice_sessions was previously written and
+        # read only by cogs/mvp.py's own join/leave voice tracking. As
+        # of the Activity Engine refactor, MVP's voice scoring now
+        # consumes activity_voice_tick events from cogs/activity_engine.py
+        # instead (see below) — nothing writes to voice_sessions anymore.
+        # Left in place rather than dropped to avoid a destructive
+        # migration; flagged here for the Phase 7 dead-code cleanup pass
+        # alongside bot_settings / ticket_config / disabled_commands.
+
+        # ══════════════════════════════════════════
+        # ACTIVITY ENGINE (Phase 3, E1)
+        # Single shared source of raw activity signal — messages,
+        # voice presence, forum posts — for every feature that needs
+        # it (leveling, mvp, and future missions/tag-quest/anti-spam)
+        # instead of each feature re-listening to the same Discord
+        # events and re-computing the same word counts / voice minutes
+        # independently. See cogs/activity_engine.py.
+        #
+        # Day-bucketed like mvp_scores so "today's activity" queries
+        # are cheap; features that need their own weighting/cooldowns
+        # (leveling XP, MVP score) still keep their own tables — this
+        # is the raw signal, not a replacement for feature-specific
+        # scoring.
+        # ══════════════════════════════════════════
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS activity_stats (
+                guild_id          INTEGER,
+                user_id           INTEGER,
+                date              TEXT,
+                messages_count    INTEGER DEFAULT 0,
+                words_count       INTEGER DEFAULT 0,
+                voice_minutes     REAL DEFAULT 0,
+                forum_posts_count INTEGER DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id, date)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_activity_guild
+            ON activity_stats(guild_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_activity_guild_date
+            ON activity_stats(guild_id, date)
+        """)
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS levels (
@@ -65,9 +110,23 @@ async def init_db():
                 guild_id INTEGER,
                 user_id  INTEGER,
                 balance  INTEGER DEFAULT 0,
+                diamonds INTEGER DEFAULT 0,
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
+        # Migration: add diamonds if an older DB predates it (Phase 3 /
+        # E2 — Reward Engine adds diamonds as a second currency
+        # alongside coins, living on the same row rather than a
+        # separate table so a member's economy state is one lookup).
+        try:
+            cursor = await db.execute("PRAGMA table_info(economy)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "diamonds" not in cols:
+                await db.execute(
+                    "ALTER TABLE economy ADD COLUMN diamonds INTEGER DEFAULT 0")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] economy.diamonds: {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS warnings (

@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
 import aiosqlite
 import time
@@ -7,8 +7,7 @@ import io
 from database import DB_PATH
 from utils.xp_calculator import (
     calculate_message_xp, calculate_voice_xp,
-    xp_progress, check_and_award_level_rewards,
-    get_leveling_config,
+    xp_progress, get_leveling_config,
 )
 from utils.formatters import snapshot_user
 
@@ -18,10 +17,11 @@ class Leveling(commands.Cog):
         self.bot = bot
         self._xp_cooldowns: dict[tuple, float] = {}
         self._spam_tracker: dict[tuple, list[float]] = {}
-        self.voice_xp_task.start()
-
-    def cog_unload(self):
-        self.voice_xp_task.cancel()
+        # Phase 3 / E1: voice XP is now driven by
+        # cogs/activity_engine.py's activity_voice_tick event (see
+        # on_activity_voice_tick below) instead of this cog running
+        # its own poll loop, so there's no task to start/cancel here
+        # anymore.
 
     # ─── SPAM DETECTION (P1 #12) ─────────────────────────
     # Frequency-based: N messages within X seconds = spam.
@@ -37,9 +37,16 @@ class Leveling(commands.Cog):
         self._spam_tracker[key] = times
         return len(times) >= threshold
 
-    # ─── MESSAGE XP ─────────────────────────────────────
+    # ─── MESSAGE XP (Phase 3 / E1: now driven by the Activity
+    # Engine's activity_message event instead of its own on_message
+    # listener — word_count used to be computed here independently
+    # of cogs/activity_engine.py's identical computation; now it's
+    # computed once, centrally, and passed in. Everything else below
+    # — the cooldown gate, spam-penalty ordering, multiplier lookup,
+    # XP award, level-up announce — is unchanged from before.) ─────
     @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
+    async def on_activity_message(self, message: discord.Message,
+                                   word_count: int):
         if message.author.bot or not message.guild:
             return
 
@@ -92,39 +99,28 @@ class Leveling(commands.Cog):
             return
         self._xp_cooldowns[key] = now
 
-        word_count = len(message.content.split())
-        role_ids   = [r.id for r in message.author.roles]
-        xp_to_add  = await calculate_message_xp(
+        role_ids  = [r.id for r in message.author.roles]
+        xp_to_add = await calculate_message_xp(
             guild_id, role_ids, word_count)
 
         if xp_to_add <= 0:
             return
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT xp, level FROM levels
-                WHERE guild_id = ? AND user_id = ?
-            """, (guild_id, user_id))
-            row = await cursor.fetchone()
-            old_xp    = row[0] if row else 0
-            old_level = row[1] if row else 0
-            new_xp    = old_xp + xp_to_add
-            new_level, _, _ = xp_progress(new_xp)
-            await db.execute("""
-                INSERT INTO levels (guild_id, user_id, xp, level)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET xp = ?, level = ?
-            """, (guild_id, user_id, new_xp, new_level,
-                  new_xp, new_level))
-            await db.commit()
+        # Phase 3 / E2: XP granting + level-up detection + level
+        # reward roles now go through the shared Reward Engine
+        # instead of this cog doing its own raw INSERT/UPDATE and its
+        # own inline level comparison — the exact same logic used to
+        # be duplicated again below for voice XP. Announcing the
+        # level-up in-channel stays here since that's leveling's own
+        # UI concern, not something the engine should know about.
+        from utils.reward_engine import give_reward
+        result = await give_reward(
+            self.bot, guild_id, user_id, "xp", amount=xp_to_add,
+            reason="Message XP", source="leveling")
 
-        if new_level > old_level:
+        if result.get("leveled_up"):
             await self._announce_levelup(
-                message, new_level, config)
-            await check_and_award_level_rewards(
-                self.bot, message.author,
-                guild_id, old_level, new_level)
+                message, result["new_level"], config)
 
     async def _announce_levelup(self, message: discord.Message,
                                  new_level: int, config: dict):
@@ -149,79 +145,43 @@ class Leveling(commands.Cog):
                 color=0x7c5cbf)
             await channel.send(embed=embed)
 
-    # ─── VOICE XP TASK (Rule 4 — Voice Farming Guard) ───
-    @tasks.loop(seconds=60)
-    async def voice_xp_task(self):
-        for guild in self.bot.guilds:
-            try:
-                config = await get_leveling_config(guild.id)
-                if not config.get("voice_xp_enabled", 1):
-                    continue
-                xp_per_min = config.get("voice_xp_per_minute", 3)
-                require_unmuted = config.get("voice_require_unmuted", 1)
-                afk_channel_id  = guild.afk_channel.id if guild.afk_channel else None
+    # ─── VOICE XP (Phase 3 / E1: now driven by the Activity
+    # Engine's activity_voice_tick event instead of running its own
+    # 60s poll loop over every guild/channel/member. The engine
+    # already applies the raw disqualifiers (2+ real members present,
+    # not AFK channel, not deafened) that used to live in this loop;
+    # what's left here is leveling's own POLICY on top of a valid
+    # tick — voice_xp_enabled, the require_unmuted choice, and the
+    # actual XP math — exactly as before, just invoked once per tick
+    # instead of leveling running its own duplicate poll. ──────────
+    @commands.Cog.listener()
+    async def on_activity_voice_tick(self, guild: discord.Guild,
+                                      member: discord.Member,
+                                      flags: dict):
+        try:
+            config = await get_leveling_config(guild.id)
+            if not config.get("voice_xp_enabled", 1):
+                return
 
-                for channel in guild.voice_channels:
-                    if channel.id == afk_channel_id:
-                        continue
+            require_unmuted = config.get("voice_require_unmuted", 1)
+            if require_unmuted and (flags.get("self_mute") or flags.get("mute")):
+                return
 
-                    real_members = [
-                        m for m in channel.members if not m.bot]
+            xp_per_min = config.get("voice_xp_per_minute", 3)
+            xp_gain = calculate_voice_xp(1, xp_per_min)
+            if xp_gain <= 0:
+                return
 
-                    if len(real_members) < 2:
-                        continue
-
-                    for member in real_members:
-                        # P1 #12 FIX: original loop had no
-                        # per-member error isolation. A single
-                        # malformed row or unexpected None from
-                        # member.voice could raise an unhandled
-                        # exception inside tasks.loop, which stops
-                        # the whole loop from rescheduling — silently
-                        # killing voice XP for every guild until the
-                        # bot restarts. Each member is now isolated.
-                        try:
-                            if member.voice.self_deaf or member.voice.deaf:
-                                continue
-                            if require_unmuted:
-                                if member.voice.self_mute or member.voice.mute:
-                                    continue
-
-                            xp_gain = calculate_voice_xp(1, xp_per_min)
-                            if xp_gain <= 0:
-                                continue
-
-                            async with aiosqlite.connect(DB_PATH) as db:
-                                cursor = await db.execute("""
-                                    SELECT xp, level FROM levels
-                                    WHERE guild_id = ? AND user_id = ?
-                                """, (guild.id, member.id))
-                                row = await cursor.fetchone()
-                                old_xp    = row[0] if row else 0
-                                old_level = row[1] if row else 0
-                                new_xp    = old_xp + xp_gain
-                                new_level, _, _ = xp_progress(new_xp)
-                                await db.execute("""
-                                    INSERT INTO levels (guild_id, user_id, xp, level)
-                                    VALUES (?, ?, ?, ?)
-                                    ON CONFLICT(guild_id, user_id)
-                                    DO UPDATE SET xp = ?, level = ?
-                                """, (guild.id, member.id, new_xp, new_level,
-                                      new_xp, new_level))
-                                await db.commit()
-
-                            if new_level > old_level:
-                                await check_and_award_level_rewards(
-                                    self.bot, member,
-                                    guild.id, old_level, new_level)
-                        except Exception as e:
-                            print(f"[VOICE XP] Error for member {member.id} in guild {guild.id}: {e}")
-            except Exception as e:
-                print(f"[VOICE XP] Error for guild {guild.id}: {e}")
-
-    @voice_xp_task.before_loop
-    async def before_voice_task(self):
-        await self.bot.wait_until_ready()
+            # Phase 3 / E2: same reward-engine handoff as message XP
+            # above — no announcement on voice level-ups, matching the
+            # pre-existing behavior (only chat XP announces).
+            from utils.reward_engine import give_reward
+            await give_reward(
+                self.bot, guild.id, member.id, "xp", amount=xp_gain,
+                reason="Voice XP", source="leveling")
+        except Exception as e:
+            print(f"[VOICE XP] Error for member {member.id} in "
+                  f"guild {guild.id}: {e}")
 
     # ─── RANK COMMAND (Pillow Image Card) ───────────────
     @app_commands.command(name="rank",

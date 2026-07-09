@@ -1,20 +1,35 @@
 import aiosqlite
 from database import DB_PATH
 
+VALID_CURRENCIES = {"balance", "diamonds"}
+
 
 class InsufficientBalance(Exception):
     pass
 
 
-async def safe_transfer(guild_id: int, from_user: int, to_user: int, amount: int):
+def _check_currency(currency: str) -> str:
+    # Column names can't be parameterized as SQL placeholders, so this
+    # whitelist check is what keeps the f-strings below safe — currency
+    # is always an internal constant passed by calling code (never raw
+    # user input), but the check stays here as a hard guarantee rather
+    # than trusting every call site to only ever pass a literal.
+    if currency not in VALID_CURRENCIES:
+        raise ValueError(f"Unknown currency column: {currency!r}")
+    return currency
+
+
+async def safe_transfer(guild_id: int, from_user: int, to_user: int,
+                         amount: int, currency: str = "balance"):
     """Atomic balance transfer. Raises InsufficientBalance if sender can't cover it."""
+    currency = _check_currency(currency)
     if amount <= 0:
         raise ValueError("amount must be positive")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             cursor = await db.execute(
-                "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
                 (guild_id, from_user))
             row = await cursor.fetchone()
             balance = row[0] if row else 0
@@ -22,13 +37,13 @@ async def safe_transfer(guild_id: int, from_user: int, to_user: int, amount: int
                 await db.execute("ROLLBACK")
                 raise InsufficientBalance(f"Balance {balance} < {amount}")
 
-            await db.execute("""
-                INSERT INTO economy (guild_id, user_id, balance) VALUES (?, ?, -?)
-                ON CONFLICT(guild_id, user_id) DO UPDATE SET balance = balance - ?
+            await db.execute(f"""
+                INSERT INTO economy (guild_id, user_id, {currency}) VALUES (?, ?, -?)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET {currency} = {currency} - ?
             """, (guild_id, from_user, amount, amount))
-            await db.execute("""
-                INSERT INTO economy (guild_id, user_id, balance) VALUES (?, ?, ?)
-                ON CONFLICT(guild_id, user_id) DO UPDATE SET balance = balance + ?
+            await db.execute(f"""
+                INSERT INTO economy (guild_id, user_id, {currency}) VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET {currency} = {currency} + ?
             """, (guild_id, to_user, amount, amount))
             await db.commit()
         except InsufficientBalance:
@@ -38,23 +53,25 @@ async def safe_transfer(guild_id: int, from_user: int, to_user: int, amount: int
             raise
 
 
-async def safe_deduct(guild_id: int, user_id: int, amount: int):
+async def safe_deduct(guild_id: int, user_id: int, amount: int,
+                       currency: str = "balance"):
     """Atomic deduct-if-sufficient. Raises InsufficientBalance otherwise."""
+    currency = _check_currency(currency)
     if amount <= 0:
         raise ValueError("amount must be positive")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             cursor = await db.execute(
-                "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
                 (guild_id, user_id))
             row = await cursor.fetchone()
             balance = row[0] if row else 0
             if balance < amount:
                 await db.execute("ROLLBACK")
                 raise InsufficientBalance(f"Balance {balance} < {amount}")
-            await db.execute("""
-                UPDATE economy SET balance = balance - ? WHERE guild_id=? AND user_id=?
+            await db.execute(f"""
+                UPDATE economy SET {currency} = {currency} - ? WHERE guild_id=? AND user_id=?
             """, (amount, guild_id, user_id))
             await db.commit()
         except InsufficientBalance:
@@ -64,14 +81,27 @@ async def safe_deduct(guild_id: int, user_id: int, amount: int):
             raise
 
 
-async def safe_credit(guild_id: int, user_id: int, amount: int):
+async def safe_credit(guild_id: int, user_id: int, amount: int,
+                       currency: str = "balance"):
     """Atomic credit, always succeeds."""
+    currency = _check_currency(currency)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO economy (guild_id, user_id, balance) VALUES (?, ?, ?)
-            ON CONFLICT(guild_id, user_id) DO UPDATE SET balance = balance + ?
+        await db.execute(f"""
+            INSERT INTO economy (guild_id, user_id, {currency}) VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET {currency} = {currency} + ?
         """, (guild_id, user_id, amount, amount))
         await db.commit()
+
+
+async def get_balance(guild_id: int, user_id: int,
+                       currency: str = "balance") -> int:
+    currency = _check_currency(currency)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id))
+        row = await cursor.fetchone()
+    return row[0] if row else 0
 
 
 async def safe_decrement_stock(item_id: int) -> bool:

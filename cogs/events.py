@@ -8,7 +8,6 @@ import random
 from datetime import datetime, timezone, timedelta
 from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
-from utils.permissions import check_bot_role_position
 
 
 async def get_currency_name(guild_id: int) -> str:
@@ -21,67 +20,38 @@ async def get_currency_name(guild_id: int) -> str:
     return row[0] if row and row[0] else "Coins"
 
 
-async def give_reward(guild: discord.Guild,
+async def give_reward(bot: discord.Client,
+                       guild: discord.Guild,
                        member: discord.Member,
                        reward_type: str,
                        reward_value: str,
                        duration_hours: int = None):
     """
     Awards an event reward to a member.
-    reward_type: 'coins', 'xp', 'role', 'temp_role'
+    reward_type: 'coins', 'diamonds', 'xp', 'role', 'temp_role'
+
+    Phase 3 / E2: this used to duplicate the exact same coin/xp/role/
+    temp_role granting logic that also lived in cogs/shop.py and
+    cogs/leveling.py, each with its own small differences (this one,
+    for instance, never actually checked add_roles() for failure
+    beyond a bare except-pass, and its XP grant didn't do level-up
+    detection at all — a member could hit a new level from an event
+    reward and never get their level-up rewards or announcement).
+    Now a thin wrapper around utils.reward_engine.give_reward(), the
+    one place all of that logic lives.
     """
-    from database import DB_PATH
-    guild_id = guild.id
-    user_id  = member.id
-
-    if reward_type == "coins":
-        amount = int(reward_value)
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO economy (guild_id, user_id, balance)
-                VALUES (?, ?, ?)
-                ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET balance = balance + ?
-            """, (guild_id, user_id, amount, amount))
-            await db.commit()
-
-    elif reward_type == "xp":
-        amount = int(reward_value)
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO levels (guild_id, user_id, xp, level)
-                VALUES (?, ?, ?, 0)
-                ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET xp = xp + ?
-            """, (guild_id, user_id, amount, amount))
-            await db.commit()
-
-    elif reward_type in ("role", "temp_role"):
-        role_id = int(reward_value)
-        role    = guild.get_role(role_id)
-        if role:
-            can, warn = check_bot_role_position(guild, role)
-            if can:
-                try:
-                    await member.add_roles(
-                        role, reason="Event reward")
-                except Exception:
-                    pass
-                if reward_type == "temp_role" and duration_hours:
-                    expires_at = (
-                        datetime.now(timezone.utc) +
-                        timedelta(hours=duration_hours)).isoformat()
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute("""
-                            INSERT INTO temp_roles
-                                (guild_id, user_id, role_id,
-                                 expires_at, source)
-                            VALUES (?, ?, ?, ?, 'event')
-                        """, (guild_id, user_id,
-                              role_id, expires_at))
-                        await db.commit()
-            else:
-                print(f"[EVENTS] {warn}")
+    from utils.reward_engine import give_reward as _engine_give_reward
+    result = await _engine_give_reward(
+        bot, guild.id, member.id, reward_type,
+        amount=reward_value if reward_type in ("coins", "diamonds", "xp") else None,
+        role_id=reward_value if reward_type in ("role", "temp_role") else None,
+        duration_hours=duration_hours,
+        reason="Event reward",
+        source="event",
+    )
+    if not result.get("success"):
+        print(f"[EVENTS] Reward grant failed: {result.get('error')}")
+    return result
 
 
 class ButtonRaceView(discord.ui.View):
@@ -129,6 +99,7 @@ class ButtonRaceView(discord.ui.View):
             await db.commit()
 
         await give_reward(
+            interaction.client,
             interaction.guild,
             interaction.user,
             self.reward_type,
@@ -139,6 +110,8 @@ class ButtonRaceView(discord.ui.View):
         if self.reward_type == "coins":
             reward_str = (f"**{int(self.reward_value):,}** "
                           f"{currency}")
+        elif self.reward_type == "diamonds":
+            reward_str = f"**{int(self.reward_value):,}** 💎 Diamonds"
         elif self.reward_type == "xp":
             reward_str = f"**{int(self.reward_value):,}** XP"
         else:
@@ -255,6 +228,9 @@ class Events(commands.Cog):
             if reward_type == "coins":
                 embed.add_field(name="Reward",
                                 value=f"🪙 {int(reward_value):,} coins")
+            elif reward_type == "diamonds":
+                embed.add_field(name="Reward",
+                                value=f"💎 {int(reward_value):,} Diamonds")
             elif reward_type == "xp":
                 embed.add_field(name="Reward",
                                 value=f"⭐ {int(reward_value):,} XP")
@@ -292,7 +268,7 @@ class Events(commands.Cog):
             duration_hours: int = None):
         target = channel or interaction.channel
 
-        valid_types = ["coins", "xp", "role", "temp_role"]
+        valid_types = ["coins", "diamonds", "xp", "role", "temp_role"]
         if reward_type not in valid_types:
             await interaction.response.send_message(
                 f"reward_type must be one of: "

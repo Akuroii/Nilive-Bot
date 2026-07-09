@@ -2,7 +2,6 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import aiosqlite
-import asyncio
 from datetime import datetime, timezone
 from discord.ext import tasks
 from database import DB_PATH
@@ -32,19 +31,24 @@ class MVP(commands.Cog):
     def cog_unload(self):
         self.mvp_cycle_task.cancel()
 
-    # ─── SCORE MESSAGES ─────────────────────────────────
+    # ─── SCORE MESSAGES (Phase 3 / E1: now driven by the Activity
+    # Engine's activity_message event instead of its own on_message
+    # listener — word_count used to be computed here independently
+    # of cogs/leveling.py's identical computation on the same
+    # message; now it's computed once, centrally, in
+    # cogs/activity_engine.py and passed to both.) ─────────────────
     @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
+    async def on_activity_message(self, message: discord.Message,
+                                   word_count: int):
         if message.author.bot or not message.guild:
             return
         config = await get_mvp_config(message.guild.id)
         if not config.get("enabled", 1):
             return
 
-        word_count = len(message.content.split())
-        weight     = float(config.get("chat_word_weight", 1.0))
-        score      = word_count * weight
-        today      = datetime.now(timezone.utc).date().isoformat()
+        weight = float(config.get("chat_word_weight", 1.0))
+        score  = word_count * weight
+        today  = datetime.now(timezone.utc).date().isoformat()
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -58,72 +62,46 @@ class MVP(commands.Cog):
                   score, score, score, score))
             await db.commit()
 
-    # ─── SCORE VOICE ────────────────────────────────────
+    # ─── SCORE VOICE (Phase 3 / E1: now driven by the Activity
+    # Engine's activity_voice_tick event instead of MVP's own
+    # join/leave session timer.
+    #
+    # Worth flagging: this also fixes a real gap MVP had on its own —
+    # the old on_voice_state_update/_credit_voice_score session timer
+    # had NO anti-farming guards at all (unlike leveling's poll loop),
+    # so a member could sit alone, deafened, or in the AFK channel
+    # and still rack up MVP voice score. The engine's tick already
+    # excludes all of that before MVP ever sees the tick, so this is
+    # a side-effect security/fairness improvement, not just a
+    # refactor. The old voice_sessions-based join/leave bookkeeping
+    # is gone entirely — a tick-based model doesn't need it. ────────
     @commands.Cog.listener()
-    async def on_voice_state_update(self, member: discord.Member,
-                                     before: discord.VoiceState,
-                                     after: discord.VoiceState):
-        if member.bot:
-            return
-        config = await get_mvp_config(member.guild.id)
-        if not config.get("enabled", 1):
-            return
+    async def on_activity_voice_tick(self, guild: discord.Guild,
+                                      member: discord.Member,
+                                      flags: dict):
+        try:
+            config = await get_mvp_config(guild.id)
+            if not config.get("enabled", 1):
+                return
 
-        # Joined voice
-        if not before.channel and after.channel:
+            weight = float(config.get("voice_minute_weight", 2.0))
+            score  = 1 * weight  # one tick == one minute
+            today  = datetime.now(timezone.utc).date().isoformat()
+
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("""
-                    INSERT INTO voice_sessions (guild_id, user_id, join_time)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(guild_id, user_id)
-                    DO UPDATE SET join_time = ?
-                """, (member.guild.id, member.id,
-                      datetime.now(timezone.utc).timestamp(),
-                      datetime.now(timezone.utc).timestamp()))
+                    INSERT INTO mvp_scores
+                        (guild_id, user_id, date,
+                         voice_minutes, total_score)
+                    VALUES (?, ?, ?, 1, ?)
+                    ON CONFLICT(guild_id, user_id, date) DO UPDATE SET
+                        voice_minutes = voice_minutes + 1,
+                        total_score   = total_score   + ?
+                """, (guild.id, member.id, today, score, score))
                 await db.commit()
-
-        # Left voice
-        elif before.channel and not after.channel:
-            await self._credit_voice_score(member, config)
-
-    async def _credit_voice_score(self, member: discord.Member,
-                                   config: dict):
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT join_time FROM voice_sessions
-                WHERE guild_id = ? AND user_id = ?
-            """, (member.guild.id, member.id))
-            row = await cursor.fetchone()
-            if not row:
-                return
-            join_time = row[0]
-            await db.execute("""
-                DELETE FROM voice_sessions
-                WHERE guild_id = ? AND user_id = ?
-            """, (member.guild.id, member.id))
-            await db.commit()
-
-        now     = datetime.now(timezone.utc).timestamp()
-        minutes = (now - join_time) / 60
-        if minutes < 0.5:
-            return
-
-        weight = float(config.get("voice_minute_weight", 2.0))
-        score  = minutes * weight
-        today  = datetime.now(timezone.utc).date().isoformat()
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO mvp_scores
-                    (guild_id, user_id, date,
-                     voice_minutes, total_score)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(guild_id, user_id, date) DO UPDATE SET
-                    voice_minutes = voice_minutes + ?,
-                    total_score   = total_score   + ?
-            """, (member.guild.id, member.id, today,
-                  minutes, score, minutes, score))
-            await db.commit()
+        except Exception as e:
+            print(f"[MVP] voice tick error for member {member.id} "
+                  f"in guild {guild.id}: {e}")
 
     # ─── MVP CYCLE TASK ──────────────────────────────────
     @tasks.loop(minutes=30)
