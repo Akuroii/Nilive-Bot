@@ -94,7 +94,8 @@ async def process_purchase(interaction: discord.Interaction,
         return
 
     try:
-        await safe_deduct(guild_id, user_id, price)
+        await safe_deduct(guild_id, user_id, price,
+                           reason=f"Shop purchase: {name}", source="shop")
     except InsufficientBalance:
         if max_stock:
             async with aiosqlite.connect(DB_PATH) as db:
@@ -152,6 +153,24 @@ async def process_purchase(interaction: discord.Interaction,
         )
         if not result.get("success"):
             print(f"[SHOP] Role give error: {result.get('error')}")
+    elif itype not in ("role", "temp_role"):
+        # Phase 3 / E4: anything that isn't a role/temp_role (i.e. the
+        # shop's "Custom" item type) is delivered into the buyer's
+        # Inventory instead of silently doing nothing beyond the
+        # purchase_history row above — previously a "custom" item's
+        # only trace after purchase was the receipt, with nothing a
+        # member could actually check or a future feature (missions,
+        # trade) could query against. Routed through the Reward
+        # Engine's 'item' type so it's logged/sourced consistently
+        # with every other grant.
+        from utils.reward_engine import give_reward
+        result = await give_reward(
+            interaction.client, guild_id, user_id, "item",
+            amount=1, item_name=name, item_type="shop_custom",
+            reason=f"Shop purchase: {name}", source="shop",
+        )
+        if not result.get("success"):
+            print(f"[SHOP] Item give error: {result.get('error')}")
 
     currency = await get_currency_name(guild_id)
     embed    = discord.Embed(
@@ -295,6 +314,7 @@ class Shop(commands.Cog):
                 interaction.data["custom_id"].replace("shop_buy_", ""))
             await process_purchase(interaction, item_id)
 
+    # ─── INVENTORY ──────────────────────────────────────
     @app_commands.command(name="inventory",
                           description="View your purchased items")
     async def inventory(self, interaction: discord.Interaction):
@@ -307,7 +327,18 @@ class Shop(commands.Cog):
             """, (interaction.guild.id, interaction.user.id))
             rows = await cursor.fetchall()
 
-        if not rows:
+        # Phase 3 / E4: purchase_history is a receipt log (what was
+        # bought, when, for how much) — it was never a live "what do
+        # they currently hold" view, and had no concept of quantity
+        # or of items granted outside a purchase (events, missions).
+        # This pulls that live view from the Inventory module and
+        # shows it alongside the existing purchase history, rather
+        # than replacing it.
+        from utils.inventory import get_inventory
+        held_items = await get_inventory(
+            interaction.guild.id, interaction.user.id)
+
+        if not rows and not held_items:
             await interaction.response.send_message(
                 "Your inventory is empty.", ephemeral=True)
             return
@@ -315,7 +346,14 @@ class Shop(commands.Cog):
         embed = discord.Embed(
             title=f"🎒 {interaction.user.display_name}'s Inventory",
             color=0x7c5cbf)
-        for name, price, bought_at, expires_at in rows:
+
+        if held_items:
+            items_text = "\n".join(
+                f"**{it['item_name']}** ×{it['quantity']}"
+                for it in held_items[:15])
+            embed.add_field(name="Held Items", value=items_text, inline=False)
+
+        for name, price, bought_at, expires_at in rows[:10]:
             exp_str = ""
             if expires_at:
                 exp_str = f"\nExpires: {expires_at[:10]}"

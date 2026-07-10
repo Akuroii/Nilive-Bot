@@ -23,17 +23,19 @@ from utils.xp_calculator import xp_progress, check_and_award_level_rewards
 #     balance UPDATEs
 #
 # give_reward() below is the one place that knows how to grant any of
-# coins, diamonds, xp, role, or temp_role — atomic economy ops, the
-# bot-role-position permission guard, and level-up detection all live
-# here exactly once. Every consumer (events, shop, leveling, future
-# missions, admin grants) calls this instead of reimplementing it.
+# coins, diamonds, xp, role, temp_role, or item — atomic economy ops,
+# the bot-role-position permission guard, level-up detection, and
+# (Phase 3, E4) inventory item delivery all live here exactly once.
+# Every consumer (events, shop, leveling, future missions, admin
+# grants) calls this instead of reimplementing it.
 #
-# Ledger hook (Phase 3, E3): give_reward() is the natural place for
-# the upcoming Transaction Ledger to record "who/what/when/before/
-# after" once E3 exists — every reward already flows through this one
-# function, so E3 only needs to add a log line here, not touch every
-# consumer again. Not implemented yet; noted so E3 doesn't have to
-# rediscover this.
+# Ledger hook (Phase 3, E3): coins/diamonds grants are logged
+# automatically because safe_credit/safe_deduct now write to
+# utils/ledger.py themselves. XP grants don't go through
+# economy_safe (xp lives on the levels table, not economy), so this
+# module logs xp transactions to the ledger directly, right after the
+# level write commits, mirroring the same "log what already happened"
+# pattern.
 # ══════════════════════════════════════════════════════════════
 
 
@@ -41,6 +43,19 @@ class RewardError(Exception):
     """Raised when a reward can't be granted (bad input, insufficient
     balance for a negative coin/diamond grant, role misconfigured)."""
     pass
+
+
+async def _log_xp_ledger(guild_id: int, user_id: int, amount: int,
+                          new_xp: int, reason: str, source: str):
+    try:
+        from utils.ledger import log_transaction
+        await log_transaction(
+            guild_id, user_id, "xp", amount, new_xp,
+            type="credit" if amount >= 0 else "deduct",
+            reason=reason, source=source)
+    except Exception as e:
+        print(f"[LEDGER] Failed to log xp transaction "
+              f"(guild={guild_id} user={user_id}): {e}")
 
 
 async def give_reward(bot: discord.Client,
@@ -51,21 +66,28 @@ async def give_reward(bot: discord.Client,
                        role_id: int | str = None,
                        duration_hours: int = None,
                        reason: str = "Reward",
-                       source: str = "system") -> dict:
+                       source: str = "system",
+                       item_name: str = None,
+                       item_type: str = "custom",
+                       item_metadata: dict = None) -> dict:
     """
     Single central reward-granting path.
 
-    reward_type: 'coins' | 'diamonds' | 'xp' | 'role' | 'temp_role'
+    reward_type: 'coins' | 'diamonds' | 'xp' | 'role' | 'temp_role' | 'item'
     amount: required for coins/diamonds/xp (int or numeric string).
         Negative amounts are allowed for coins/diamonds (e.g. an admin
         deduction) and go through safe_deduct so they can't overdraw.
+        For 'item', amount is used as the quantity (default 1).
     role_id: required for role/temp_role (int or numeric string).
     duration_hours: required for temp_role, ignored otherwise.
+    item_name: required for 'item' — the inventory item to grant.
+    item_type / item_metadata: optional extra detail stored alongside
+        the item (Phase 3, E4 — see utils/inventory.py).
     reason: audit-trail text, passed through to Discord's own
-        add_roles(reason=...) and to whatever calls this.
+        add_roles(reason=...) and to the ledger/inventory source log.
     source: free-text tag for where the grant came from ('event',
-        'shop', 'leveling', 'admin', ...) — kept for the future ledger
-        (E3) and any caller that wants to log it themselves meanwhile.
+        'shop', 'leveling', 'admin', ...) — recorded in the ledger
+        (E3) and inventory (E4) rows.
 
     Returns a result dict, always including "success" and "reward_type":
         coins/diamonds -> {"success", "reward_type", "amount", "new_balance"}
@@ -73,15 +95,17 @@ async def give_reward(bot: discord.Client,
                             "old_level", "new_level", "leveled_up"}
         role/temp_role -> {"success", "reward_type", "role_id",
                             "expires_at" (temp_role only)}
+        item           -> {"success", "reward_type", "item_name",
+                            "quantity", "new_quantity"}
 
     Raises RewardError for programmer-error-shaped problems (unknown
     reward_type, missing required args) so callers fail loudly during
     development rather than silently no-op'ing like the old per-feature
-    copies sometimes did. Discord-side failures (role not found, bot
-    can't assign it, insufficient balance for a deduction) are
-    returned as {"success": False, "error": "..."} instead of raised,
-    since those are expected, recoverable conditions callers already
-    handle with a user-facing message.
+    copies sometimes did. Discord-side/inventory failures (role not
+    found, bot can't assign it, insufficient balance for a deduction)
+    are returned as {"success": False, "error": "..."} instead of
+    raised, since those are expected, recoverable conditions callers
+    already handle with a user-facing message.
     """
     if reward_type in ("coins", "diamonds"):
         if amount is None:
@@ -90,9 +114,11 @@ async def give_reward(bot: discord.Client,
         currency = "balance" if reward_type == "coins" else "diamonds"
         try:
             if amount >= 0:
-                await safe_credit(guild_id, user_id, amount, currency=currency)
+                await safe_credit(guild_id, user_id, amount,
+                                   currency=currency, reason=reason, source=source)
             else:
-                await safe_deduct(guild_id, user_id, -amount, currency=currency)
+                await safe_deduct(guild_id, user_id, -amount,
+                                   currency=currency, reason=reason, source=source)
         except InsufficientBalance:
             return {"success": False, "reward_type": reward_type,
                     "error": "Insufficient balance for this deduction"}
@@ -128,6 +154,11 @@ async def give_reward(bot: discord.Client,
             """, (guild_id, user_id, new_xp, new_level,
                   new_xp, new_level))
             await db.commit()
+
+        # Phase 3 / E3: xp doesn't run through economy_safe (it's not
+        # an economy currency), so it's logged to the ledger here,
+        # right after the write commits.
+        await _log_xp_ledger(guild_id, user_id, amount, new_xp, reason, source)
 
         leveled_up = new_level > old_level
         if leveled_up:
@@ -195,6 +226,31 @@ async def give_reward(bot: discord.Client,
                 result["expires_at"] = expires_at
 
         return result
+
+    elif reward_type == "item":
+        # Phase 3 / E4: generic stackable-item delivery, backed by
+        # utils/inventory.py. Distinct from role/temp_role — this is
+        # for genuinely inventory-style items (shop 'custom' type,
+        # future mission/event drops, Trade System stock).
+        if not item_name:
+            raise RewardError("item reward requires 'item_name'")
+        quantity = int(amount) if amount else 1
+        if quantity <= 0:
+            raise RewardError("item reward quantity must be positive")
+
+        from utils.inventory import give_item
+        try:
+            new_qty = await give_item(
+                guild_id, user_id, item_name,
+                quantity=quantity, item_type=item_type,
+                metadata=item_metadata, source=source)
+        except Exception as e:
+            return {"success": False, "reward_type": "item",
+                    "error": f"Inventory error: {e}"}
+
+        return {"success": True, "reward_type": "item",
+                "item_name": item_name, "quantity": quantity,
+                "new_quantity": new_qty}
 
     else:
         raise RewardError(f"Unknown reward_type: {reward_type!r}")

@@ -5,7 +5,9 @@ import aiosqlite
 import random
 from datetime import datetime, timedelta
 from database import DB_PATH
-from utils.economy_safe import safe_transfer, safe_credit, InsufficientBalance
+from utils.economy_safe import (
+    safe_transfer, safe_credit, safe_admin_deduct, InsufficientBalance,
+)
 
 
 _daily_cooldowns:  dict[int, datetime] = {}
@@ -23,13 +25,17 @@ async def get_balance(guild_id: int, user_id: int) -> int:
 
 
 async def add_balance(guild_id: int, user_id: int,
-                      amount: int) -> int:
+                      amount: int, reason: str = "Balance credit",
+                      source: str = "system") -> int:
     # P1 #11 FIX: routed through safe_credit (atomic upsert) instead
     # of a raw INSERT..ON CONFLICT here. Functionally the same for a
     # single credit, but keeps every write path going through one
     # audited helper instead of two separate implementations that
     # could drift apart.
-    await safe_credit(guild_id, user_id, amount)
+    # Phase 3 / E3: safe_credit now writes a ledger entry itself, so
+    # every path that calls add_balance() (daily, work, addcoins) is
+    # automatically ledgered with no extra code here.
+    await safe_credit(guild_id, user_id, amount, reason=reason, source=source)
     return await get_balance(guild_id, user_id)
 
 
@@ -96,7 +102,9 @@ class Economy(commands.Cog):
             daily_max = int(row[0]) if row else 300
 
         amount   = random.randint(daily_min, daily_max)
-        new_bal  = await add_balance(interaction.guild.id, user_id, amount)
+        new_bal  = await add_balance(
+            interaction.guild.id, user_id, amount,
+            reason="Daily reward", source="daily")
         currency = await get_currency_name(interaction.guild.id)
         _daily_cooldowns[user_id] = now + timedelta(hours=24)
 
@@ -141,7 +149,8 @@ class Economy(commands.Cog):
         ]
         amount   = random.randint(work_min, work_max)
         new_bal  = await add_balance(
-            interaction.guild.id, user_id, amount)
+            interaction.guild.id, user_id, amount,
+            reason="Work reward", source="work")
         currency = await get_currency_name(interaction.guild.id)
         _work_cooldowns[user_id] = now + timedelta(hours=1)
 
@@ -179,8 +188,13 @@ class Economy(commands.Cog):
         # wraps the check-and-deduct in a single BEGIN IMMEDIATE
         # transaction so the second call sees the already-reduced
         # balance and correctly fails instead of racing.
+        # Phase 3 / E3: safe_transfer now logs both legs of the
+        # transfer to the ledger automatically, cross-referenced via
+        # related_user_id.
         try:
-            await safe_transfer(guild_id, interaction.user.id, member.id, amount)
+            await safe_transfer(
+                guild_id, interaction.user.id, member.id, amount,
+                reason="Player-to-player transfer", source="give")
         except InsufficientBalance:
             bal = await get_balance(guild_id, interaction.user.id)
             await interaction.response.send_message(
@@ -230,7 +244,9 @@ class Economy(commands.Cog):
     async def addcoins(self, interaction: discord.Interaction,
                        member: discord.Member, amount: int):
         new_bal  = await add_balance(
-            interaction.guild.id, member.id, amount)
+            interaction.guild.id, member.id, amount,
+            reason=f"Admin grant by {interaction.user.display_name}",
+            source="admin")
         currency = await get_currency_name(interaction.guild.id)
         await interaction.response.send_message(
             f"Added **{amount:,}** {currency} to {member.mention}. "
@@ -243,19 +259,19 @@ class Economy(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def removecoins(self, interaction: discord.Interaction,
                           member: discord.Member, amount: int):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                UPDATE economy
-                SET balance = MAX(0, balance - ?)
-                WHERE guild_id = ? AND user_id = ?
-            """, (amount, interaction.guild.id, member.id))
-            cursor = await db.execute("""
-                SELECT balance FROM economy
-                WHERE guild_id = ? AND user_id = ?
-            """, (interaction.guild.id, member.id))
-            row     = await cursor.fetchone()
-            new_bal = row[0] if row else 0
-            await db.commit()
+        # Phase 3 / E3 FIX: this previously ran a raw
+        # `UPDATE economy SET balance = MAX(0, balance - ?)` with no
+        # transaction guard and no ledger record at all — an admin
+        # deduction was completely invisible to the Transaction
+        # Ledger, and two concurrent removecoins calls could race the
+        # same way /give used to before P1 #11. Now routed through
+        # safe_admin_deduct(), which is atomic (BEGIN IMMEDIATE),
+        # clamps to zero like the old behavior, and logs the actual
+        # amount removed to the ledger.
+        new_bal = await safe_admin_deduct(
+            interaction.guild.id, member.id, amount,
+            reason=f"Admin removal by {interaction.user.display_name}",
+            source="admin")
         currency = await get_currency_name(interaction.guild.id)
         await interaction.response.send_message(
             f"Removed **{amount:,}** {currency} from {member.mention}. "

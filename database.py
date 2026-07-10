@@ -49,30 +49,6 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
-        # NOTE (Phase 3 / E1): voice_sessions was previously written and
-        # read only by cogs/mvp.py's own join/leave voice tracking. As
-        # of the Activity Engine refactor, MVP's voice scoring now
-        # consumes activity_voice_tick events from cogs/activity_engine.py
-        # instead (see below) — nothing writes to voice_sessions anymore.
-        # Left in place rather than dropped to avoid a destructive
-        # migration; flagged here for the Phase 7 dead-code cleanup pass
-        # alongside bot_settings / ticket_config / disabled_commands.
-
-        # ══════════════════════════════════════════
-        # ACTIVITY ENGINE (Phase 3, E1)
-        # Single shared source of raw activity signal — messages,
-        # voice presence, forum posts — for every feature that needs
-        # it (leveling, mvp, and future missions/tag-quest/anti-spam)
-        # instead of each feature re-listening to the same Discord
-        # events and re-computing the same word counts / voice minutes
-        # independently. See cogs/activity_engine.py.
-        #
-        # Day-bucketed like mvp_scores so "today's activity" queries
-        # are cheap; features that need their own weighting/cooldowns
-        # (leveling XP, MVP score) still keep their own tables — this
-        # is the raw signal, not a replacement for feature-specific
-        # scoring.
-        # ══════════════════════════════════════════
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS activity_stats (
@@ -114,10 +90,6 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
-        # Migration: add diamonds if an older DB predates it (Phase 3 /
-        # E2 — Reward Engine adds diamonds as a second currency
-        # alongside coins, living on the same row rather than a
-        # separate table so a member's economy state is one lookup).
         try:
             cursor = await db.execute("PRAGMA table_info(economy)")
             cols = [c[1] for c in await cursor.fetchall()]
@@ -156,7 +128,6 @@ async def init_db():
             )
         """)
 
-        # Migration: add staff_role_id if an older DB predates it
         try:
             cursor = await db.execute("PRAGMA table_info(tickets)")
             cols = [c[1] for c in await cursor.fetchall()]
@@ -277,12 +248,6 @@ async def init_db():
             )
         """)
 
-        # Migration: add fuzzy_threshold / cooldown_seconds if an older
-        # DB predates them (Phase 2 fix — see cogs/triggers.py). Before
-        # this, fuzzy matching was hardcoded to a >=80 ratio for every
-        # trigger with no way to tune it per-trigger, and there was no
-        # anti-repeat cooldown at all: a trigger could fire on every
-        # single matching message, spamming the channel.
         try:
             cursor = await db.execute("PRAGMA table_info(triggers)")
             cols = [c[1] for c in await cursor.fetchall()]
@@ -496,10 +461,6 @@ async def init_db():
             )
         """)
 
-        # Migration: add spam_window_seconds if an older DB predates it.
-        # cogs/leveling.py reads this via config.get(..., 10), so its
-        # absence never crashed anything, it just meant the value could
-        # never be anything other than that hardcoded default.
         try:
             cursor = await db.execute("PRAGMA table_info(leveling_config)")
             cols = [c[1] for c in await cursor.fetchall()]
@@ -679,14 +640,89 @@ async def init_db():
         """)
 
         # ══════════════════════════════════════════
+        # TRANSACTION LEDGER (Phase 3, E3)
+        # Single append-only audit trail for every currency movement
+        # (coins, diamonds, xp) across the bot — economy commands,
+        # shop purchases, event/level rewards, admin grants, and
+        # (future) trades. Nothing here mutates economy/levels
+        # balances itself; utils/ledger.py only ever records what
+        # utils/economy_safe.py and utils/reward_engine.py already
+        # did, after the fact, in the same call. balance_after is a
+        # point-in-time snapshot for that currency so the dashboard
+        # can render a running history without recomputing sums.
+        # A future Trade System (Phase 6) will insert matched
+        # transfer_out/transfer_in pairs here via the same
+        # log_transaction() call, keyed by related_user_id.
+        # ══════════════════════════════════════════
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS transaction_ledger (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id         INTEGER NOT NULL,
+                user_id          INTEGER NOT NULL,
+                currency         TEXT NOT NULL,
+                amount           INTEGER NOT NULL,
+                balance_after    INTEGER,
+                type             TEXT NOT NULL,
+                reason           TEXT,
+                source           TEXT DEFAULT 'system',
+                related_user_id  INTEGER,
+                reversed         INTEGER DEFAULT 0,
+                reversed_at      TIMESTAMP,
+                reversed_by      INTEGER,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tl_guild
+            ON transaction_ledger(guild_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tl_guild_user
+            ON transaction_ledger(guild_id, user_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tl_date
+            ON transaction_ledger(created_at)
+        """)
+
+        # ══════════════════════════════════════════
+        # INVENTORY SYSTEM (Phase 3, E4)
+        # Generic per-guild, per-user item ownership with quantity.
+        # Distinct from shop_items (the catalog) and purchase_history
+        # (the receipt log) — this is the live "what does this member
+        # currently hold" table. item_type distinguishes stackable
+        # custom items from things that are really just role/temp_role
+        # grants (those continue to go through temp_roles / Discord
+        # roles directly, NOT through inventory — inventory only
+        # tracks genuinely inventory-style items: shop 'custom' type
+        # items, future mission/event drops, and Trade System (Phase 6)
+        # stock). metadata is a free-form JSON blob for item-specific
+        # data (e.g. a custom item's flavor text or effect config).
+        # ══════════════════════════════════════════
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS inventory_items (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id   INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                item_name  TEXT NOT NULL,
+                item_type  TEXT DEFAULT 'custom',
+                quantity   INTEGER NOT NULL DEFAULT 0,
+                metadata   TEXT,
+                source     TEXT DEFAULT 'system',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, user_id, item_name)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_inv_guild_user
+            ON inventory_items(guild_id, user_id)
+        """)
+
+        # ══════════════════════════════════════════
         # TEMP BANS (Phase 2 fix)
-        # check_warning_thresholds() in cogs/moderation.py could
-        # already select action='temp_ban' from the dashboard's
-        # warning-threshold form, but the handler for it was a
-        # silent no-op — there was nowhere to record "unban this
-        # user at time X" and nothing that ever read such a record.
-        # This table + the scheduled_unban_check task in
-        # cogs/moderation.py is that missing piece.
         # ══════════════════════════════════════════
 
         await db.execute("""
@@ -902,10 +938,6 @@ async def init_db():
 
         # ══════════════════════════════════════════
         # BOT HEALTH (P1 #17)
-        # Singleton row (id=1), overwritten every heartbeat by the
-        # bot process. Dashboard reads it read-only — it never
-        # writes here, since Flask and the bot are separate
-        # processes with no shared memory, only this DB file.
         # ══════════════════════════════════════════
 
         await db.execute("""
@@ -1059,7 +1091,6 @@ async def ensure_owner_access():
     async with aiosqlite.connect(DB_PATH) as db:
         guild_ids = set()
 
-        # Collect from DB
         for table in ["levels", "economy", "warnings", "tickets",
                       "mvp_scores", "mod_logs", "boost_config",
                       "mvp_config", "guild_settings"]:
@@ -1075,7 +1106,6 @@ async def ensure_owner_access():
             except Exception:
                 pass
 
-        # Always include your known servers
         for gid in FALLBACK_GUILD_IDS:
             guild_ids.add(gid)
 
