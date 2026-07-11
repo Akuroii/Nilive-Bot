@@ -28,7 +28,7 @@ async def give_reward(bot: discord.Client,
                        duration_hours: int = None):
     """
     Awards an event reward to a member.
-    reward_type: 'coins', 'diamonds', 'xp', 'role', 'temp_role'
+    reward_type: 'coins', 'diamonds', 'xp', 'role', 'temp_role', 'item'
 
     Phase 3 / E2: this used to duplicate the exact same coin/xp/role/
     temp_role granting logic that also lived in cogs/shop.py and
@@ -39,16 +39,31 @@ async def give_reward(bot: discord.Client,
     reward and never get their level-up rewards or announcement).
     Now a thin wrapper around utils.reward_engine.give_reward(), the
     one place all of that logic lives.
+
+    Phase 3 / E4 CLOSEOUT: 'item' rewards now route through the same
+    engine call into utils/inventory.py — reward_value is used as the
+    item_name and duration_hours is ignored for items (they don't
+    expire). This mirrors how cogs/shop.py's "Custom" item type
+    already delivers into Inventory instead of a no-op.
     """
     from utils.reward_engine import give_reward as _engine_give_reward
-    result = await _engine_give_reward(
-        bot, guild.id, member.id, reward_type,
-        amount=reward_value if reward_type in ("coins", "diamonds", "xp") else None,
-        role_id=reward_value if reward_type in ("role", "temp_role") else None,
-        duration_hours=duration_hours,
-        reason="Event reward",
-        source="event",
-    )
+
+    if reward_type == "item":
+        result = await _engine_give_reward(
+            bot, guild.id, member.id, "item",
+            amount=1, item_name=reward_value, item_type="event_drop",
+            reason=f"Event reward: {reward_value}",
+            source="event",
+        )
+    else:
+        result = await _engine_give_reward(
+            bot, guild.id, member.id, reward_type,
+            amount=reward_value if reward_type in ("coins", "diamonds", "xp") else None,
+            role_id=reward_value if reward_type in ("role", "temp_role") else None,
+            duration_hours=duration_hours,
+            reason="Event reward",
+            source="event",
+        )
     if not result.get("success"):
         print(f"[EVENTS] Reward grant failed: {result.get('error')}")
     return result
@@ -114,6 +129,8 @@ class ButtonRaceView(discord.ui.View):
             reward_str = f"**{int(self.reward_value):,}** 💎 Diamonds"
         elif self.reward_type == "xp":
             reward_str = f"**{int(self.reward_value):,}** XP"
+        elif self.reward_type == "item":
+            reward_str = f"**{self.reward_value}**"
         else:
             reward_str = "your reward"
 
@@ -234,6 +251,9 @@ class Events(commands.Cog):
             elif reward_type == "xp":
                 embed.add_field(name="Reward",
                                 value=f"⭐ {int(reward_value):,} XP")
+            elif reward_type == "item":
+                embed.add_field(name="Reward",
+                                value=f"🎁 {reward_value} (item)")
             else:
                 embed.add_field(name="Reward",
                                 value=f"🎁 {reward_value}")
@@ -268,7 +288,12 @@ class Events(commands.Cog):
             duration_hours: int = None):
         target = channel or interaction.channel
 
-        valid_types = ["coins", "diamonds", "xp", "role", "temp_role"]
+        # Phase 3 / E4 CLOSEOUT: 'item' added as a valid reward_type —
+        # it delivers into the winner's Inventory (utils/inventory.py)
+        # via the Reward Engine instead of only ever supporting
+        # coins/diamonds/xp/role/temp_role. For 'item', reward_value
+        # is the item name (e.g. "Golden Ticket"), not a numeric ID.
+        valid_types = ["coins", "diamonds", "xp", "role", "temp_role", "item"]
         if reward_type not in valid_types:
             await interaction.response.send_message(
                 f"reward_type must be one of: "

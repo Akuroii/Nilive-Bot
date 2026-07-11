@@ -373,9 +373,6 @@ def health():
     started  = _parse(row.get("started_at")) if row else None
     seconds_since_hb = (now - last_hb).total_seconds() if last_hb else None
 
-    # A heartbeat older than 3x its own interval means the bot
-    # process is either down or hung — treat it as offline rather
-    # than trusting stale numbers.
     is_online = seconds_since_hb is not None and seconds_since_hb < 90
 
     uptime_str = "Unknown"
@@ -597,7 +594,6 @@ def tickets():
         }
 
     data = run_async(get_data())
-    # Pre-compute counts so template doesn't need selectattr on tuples
     tickets = data.get("tickets", [])
     data["ticket_open"]   = sum(1 for t in tickets if t[3] == "open")
     data["ticket_closed"] = sum(1 for t in tickets if t[3] == "closed")
@@ -785,6 +781,68 @@ def events():
     event_list = run_async(get_events())
     ctx        = get_current_user_context()
     return render("systems/events.html", events=event_list, **ctx)
+
+
+# ── Ledger (Phase 3 E3 CLOSEOUT — read-only) ────────────────────────────────
+#
+# ADMIN+ page gate (see utils/permissions.py PAGE_PERMISSIONS["ledger"]).
+# Data itself is loaded client-side via GET /api/ledger, which enforces
+# its own MOD+ floor independently — see dashboard/api.py. This route
+# only renders the shell + the initial guild-wide page; per-guild
+# isolation is enforced identically to every other page here, via
+# get_session_guild_id() rather than any client-supplied guild id.
+
+@app.route("/ledger")
+@require_page("ledger")
+def ledger_page():
+    guild_id = get_session_guild_id()
+
+    async def get_recent():
+        from utils.ledger import get_guild_ledger
+        return await get_guild_ledger(guild_id, limit=100)
+
+    entries = run_async(get_recent())
+    ctx     = get_current_user_context()
+    return render("systems/ledger.html", entries=entries, **ctx)
+
+
+# ── Inventory (Phase 3 E4 CLOSEOUT — read-only) ─────────────────────────────
+#
+# Same shape as the ledger page above: ADMIN+ to view the page,
+# MOD+ enforced independently by the underlying /api/inventory routes.
+# /inventory shows the guild-wide "who holds what" summary;
+# /inventory/<user_id> drills into one member, reusing the same
+# per-guild-isolated query utils/inventory.get_inventory() already
+# exposes to the /inventory slash command.
+
+@app.route("/inventory")
+@require_page("inventory_view")
+def inventory_page():
+    guild_id = get_session_guild_id()
+
+    async def get_summary():
+        from utils.inventory import get_guild_inventory_summary
+        return await get_guild_inventory_summary(guild_id, limit=200)
+
+    items = run_async(get_summary())
+    ctx   = get_current_user_context()
+    return render("systems/inventory.html",
+                  items=items, target_user_id=None, **ctx)
+
+
+@app.route("/inventory/<int:user_id>")
+@require_page("inventory_view")
+def inventory_user_page(user_id: int):
+    guild_id = get_session_guild_id()
+
+    async def get_user_items():
+        from utils.inventory import get_inventory
+        return await get_inventory(guild_id, user_id, include_empty=False)
+
+    items = run_async(get_user_items())
+    ctx   = get_current_user_context()
+    return render("systems/inventory.html",
+                  items=items, target_user_id=user_id, **ctx)
 
 
 # ── Config: General ────────────────────────────────────────────────────────────

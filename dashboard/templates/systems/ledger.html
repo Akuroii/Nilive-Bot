@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Transaction Ledger{% endblock %}
+{% block content %}
+<span data-page-title="Transaction Ledger"></span>
+
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0">📒 Transaction Ledger</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input class="form-input" id="ledger-user" placeholder="Filter by User ID..." style="max-width:200px;">
+            <select class="form-input" id="ledger-currency" style="width:130px;">
+                <option value="">All Currencies</option>
+                <option value="balance">Coins</option>
+                <option value="diamonds">Diamonds</option>
+                <option value="xp">XP</option>
+            </select>
+            <button class="btn btn-secondary" onclick="loadLedger()">🔄 Refresh</button>
+        </div>
+    </div>
+    <p class="text-muted text-sm" style="margin-bottom:16px;">
+        Read-only audit trail of every coin, diamond, and XP movement in this server. Reversing an
+        entry (owner only) credits/deducts the opposite amount and marks the row as reversed.
+    </p>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>User ID</th><th>Currency</th><th>Amount</th>
+                    <th>Balance After</th><th>Type</th><th>Source</th>
+                    <th>Reason</th><th>Date</th>{% if is_owner %}<th></th>{% endif %}
+                </tr>
+            </thead>
+            <tbody id="ledger-tbody">
+                {% for e in entries %}
+                <tr id="ledger-row-{{ e.id }}">
+                    <td><code>{{ e.user_id }}</code></td>
+                    <td><span class="badge badge-accent">{{ e.currency }}</span></td>
+                    <td style="color:{% if e.amount >= 0 %}var(--success){% else %}var(--danger){% endif %};font-weight:600;">
+                        {{ "+" if e.amount >= 0 else "" }}{{ "{:,}".format(e.amount) }}
+                    </td>
+                    <td>{{ "{:,}".format(e.balance_after) if e.balance_after is not none else "—" }}</td>
+                    <td><span class="badge">{{ e.type }}</span></td>
+                    <td><span class="badge badge-source">{{ e.source }}</span></td>
+                    <td class="text-muted">{{ e.reason or "—" }}</td>
+                    <td class="text-muted">{{ e.created_at[:16] if e.created_at else "—" }}</td>
+                    {% if is_owner %}
+                    <td>
+                        {% if e.reversed %}
+                        <span class="badge badge-danger">Reversed</span>
+                        {% elif e.currency in ('balance', 'diamonds') %}
+                        <button class="btn btn-sm btn-danger"
+                            onclick="showConfirm('Reverse this transaction?', () => reverseLedger({{ e.id }}))">
+                            Reverse
+                        </button>
+                        {% else %}
+                        <span class="text-muted text-sm">—</span>
+                        {% endif %}
+                    </td>
+                    {% endif %}
+                </tr>
+                {% else %}
+                <tr><td colspan="9" class="empty">No transactions recorded yet</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+async function loadLedger() {
+    const userId   = document.getElementById('ledger-user').value.trim();
+    const currency = document.getElementById('ledger-currency').value;
+    const params   = new URLSearchParams();
+    if (userId) params.set('user_id', userId);
+    if (currency) params.set('currency', currency);
+    params.set('limit', 100);
+
+    const res  = await fetch('/api/ledger?' + params.toString());
+    const data = await res.json();
+    const tbody = document.getElementById('ledger-tbody');
+    if (!data.entries || !data.entries.length) {
+        tbody.innerHTML = "<tr><td colspan='9' class='empty'>No transactions found</td></tr>";
+        return;
+    }
+    tbody.innerHTML = data.entries.map(e => `
+        <tr id="ledger-row-${e.id}">
+            <td><code>${e.user_id}</code></td>
+            <td><span class="badge badge-accent">${e.currency}</span></td>
+            <td style="color:${e.amount >= 0 ? 'var(--success)' : 'var(--danger)'};font-weight:600;">
+                ${e.amount >= 0 ? '+' : ''}${e.amount.toLocaleString()}
+            </td>
+            <td>${e.balance_after !== null && e.balance_after !== undefined ? e.balance_after.toLocaleString() : '—'}</td>
+            <td><span class="badge">${e.type}</span></td>
+            <td><span class="badge badge-source">${e.source}</span></td>
+            <td class="text-muted">${e.reason || '—'}</td>
+            <td class="text-muted">${e.created_at ? e.created_at.slice(0,16) : '—'}</td>
+            {% if is_owner %}
+            <td>${e.reversed
+                ? '<span class="badge badge-danger">Reversed</span>'
+                : (['balance','diamonds'].includes(e.currency)
+                    ? `<button class="btn btn-sm btn-danger" onclick="showConfirm('Reverse this transaction?', () => reverseLedger(${e.id}))">Reverse</button>`
+                    : '<span class="text-muted text-sm">—</span>')}
+            </td>
+            {% endif %}
+        </tr>`).join('');
+}
+
+async function reverseLedger(id) {
+    const res  = await fetch(`/api/ledger/reverse/${id}`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ reason: 'Reversed via dashboard' }),
+    });
+    const data = await res.json();
+    if (data.success) { showToast('Transaction reversed'); loadLedger(); }
+    else showToast(data.error || 'Reversal failed', 'error');
+}
+
+document.getElementById('ledger-user').addEventListener('keydown', e => {
+    if (e.key === 'Enter') loadLedger();
+});
+</script>
+{% endblock %}
+{% endblock %}

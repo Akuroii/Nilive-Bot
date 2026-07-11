@@ -2,22 +2,6 @@ import aiosqlite
 import json
 from database import DB_PATH
 
-# ══════════════════════════════════════════════════════════════
-# TRANSACTION LEDGER (Phase 3, E3)
-#
-# Single append-only audit trail for every currency movement in the
-# bot — coins, diamonds, and xp. This module never touches
-# economy/levels balances itself; it is called AFTER a balance change
-# already happened (by utils/economy_safe.py or utils/reward_engine.py)
-# to record what happened, so nothing here can desync from the real
-# balance.
-#
-# currency: 'balance' | 'diamonds' | 'xp'
-# type: 'credit' | 'deduct' | 'transfer_in' | 'transfer_out' | 'reversal'
-# source: free-text tag ('shop', 'leveling', 'event', 'admin', 'dashboard', ...)
-# related_user_id: for transfers, the other party in the transfer
-# ══════════════════════════════════════════════════════════════
-
 VALID_CURRENCIES = {"balance", "diamonds", "xp"}
 VALID_TYPES = {"credit", "deduct", "transfer_in", "transfer_out", "reversal"}
 
@@ -31,13 +15,6 @@ async def log_transaction(guild_id: int, user_id: int, currency: str,
                            type: str, reason: str = None,
                            source: str = "system",
                            related_user_id: int = None) -> int:
-    """
-    Records one ledger entry. Returns the new row's id.
-
-    amount is signed from the perspective of user_id (positive =
-    they gained, negative = they lost) regardless of `type` — type
-    just labels the shape of the movement for filtering/display.
-    """
     if currency not in VALID_CURRENCIES:
         raise LedgerError(f"Unknown currency: {currency!r}")
     if type not in VALID_TYPES:
@@ -57,7 +34,6 @@ async def log_transaction(guild_id: int, user_id: int, currency: str,
 
 async def get_user_ledger(guild_id: int, user_id: int,
                            limit: int = 50, currency: str = None) -> list[dict]:
-    """Returns most-recent-first ledger entries for one member."""
     query = """
         SELECT id, currency, amount, balance_after, type, reason,
                source, related_user_id, reversed, reversed_at, created_at
@@ -86,8 +62,6 @@ async def get_user_ledger(guild_id: int, user_id: int,
 async def get_guild_ledger(guild_id: int, limit: int = 100,
                             currency: str = None,
                             source: str = None) -> list[dict]:
-    """Returns most-recent-first ledger entries for the whole guild
-    (dashboard-facing — used for a server-wide audit view)."""
     query = """
         SELECT id, user_id, currency, amount, balance_after, type,
                reason, source, related_user_id, reversed,
@@ -120,15 +94,6 @@ async def get_guild_ledger(guild_id: int, limit: int = 100,
 async def reverse_transaction(ledger_id: int, guild_id: int,
                                reversed_by: int = None,
                                reason: str = "Reversed via dashboard") -> dict:
-    """
-    Reverses a single ledger entry: credits/debits the opposite amount
-    back to the user's balance and marks the original row reversed so
-    it can't be reversed twice. Only supports 'balance' and 'diamonds'
-    currencies (xp reversal would need level recalculation and isn't
-    supported here — reverse xp grants via /setxp instead).
-
-    Returns {"success": bool, "error"?: str, "new_balance"?: int}.
-    """
     from utils.economy_safe import safe_credit, safe_deduct, InsufficientBalance
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -150,9 +115,6 @@ async def reverse_transaction(ledger_id: int, guild_id: int,
                 "error": f"Reversal not supported for currency '{currency}'"}
 
     try:
-        # Reversing means undoing `amount`: if the original amount was
-        # positive (a credit), reverse by deducting it back; if it was
-        # negative (a deduction), reverse by crediting it back.
         if amount >= 0:
             await safe_deduct(guild_id, user_id, amount, currency=currency)
         else:

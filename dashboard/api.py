@@ -1613,3 +1613,82 @@ def delete_status_message(msg_id: int):
 
     run_async(delete())
     return jsonify({"success": True})
+
+
+# ── Phase 3 E3/E4 CLOSEOUT — Ledger & Inventory (read-only) ────────────────────
+#
+# Both endpoints are MOD+ (viewing money movement / who-holds-what is
+# a read, gated at the same floor as moderation_logs viewing). The
+# dashboard page routes that link to these (see dashboard/app.py)
+# additionally require ADMIN+ for the page itself — api.py enforces
+# its own floor independently rather than trusting the page gate, per
+# the existing pattern documented at the top of this file.
+#
+# Neither route accepts a guild_id from the client — like every other
+# route in this file, the guild is always taken from the authenticated
+# session (get_session_guild_id()), never from user input, so there is
+# no way to page through another guild's ledger/inventory by editing
+# a URL.
+
+@api_bp.route("/ledger")
+@require_api_permission(LEVEL_MODERATOR)
+def api_ledger():
+    guild_id = get_session_guild_id()
+    user_id  = request.args.get("user_id")
+    currency = request.args.get("currency") or None
+    source   = request.args.get("source") or None
+    limit    = min(int(request.args.get("limit", 100)), 500)
+
+    from utils.ledger import get_user_ledger, get_guild_ledger
+
+    async def fetch():
+        if user_id:
+            return await get_user_ledger(
+                guild_id, int(user_id), limit=limit, currency=currency)
+        return await get_guild_ledger(
+            guild_id, limit=limit, currency=currency, source=source)
+
+    entries = run_async(fetch())
+    return jsonify({"entries": entries, "guild_id": guild_id})
+
+
+@api_bp.route("/ledger/reverse/<int:ledger_id>", methods=["POST"])
+@require_api_permission(LEVEL_OWNER)
+def api_ledger_reverse(ledger_id: int):
+    # Reversing a transaction actually moves coins/diamonds back —
+    # unlike the read above, this is a write and gets the same
+    # owner-only floor already used for deleting mod logs/warnings.
+    guild_id = get_session_guild_id()
+    reason   = (request.json or {}).get("reason", "Reversed via dashboard")
+
+    from utils.ledger import reverse_transaction
+    result = run_async(reverse_transaction(
+        ledger_id, guild_id,
+        reversed_by=current_user_id(), reason=reason))
+
+    if result.get("success"):
+        log_action(guild_id, f"Reversed ledger entry #{ledger_id}", "ledger")
+    return jsonify(result)
+
+
+@api_bp.route("/inventory")
+@require_api_permission(LEVEL_MODERATOR)
+def api_inventory_guild():
+    guild_id = get_session_guild_id()
+    limit    = min(int(request.args.get("limit", 200)), 500)
+
+    from utils.inventory import get_guild_inventory_summary
+    rows = run_async(get_guild_inventory_summary(guild_id, limit=limit))
+    return jsonify({"items": rows, "guild_id": guild_id})
+
+
+@api_bp.route("/inventory/<int:user_id>")
+@require_api_permission(LEVEL_MODERATOR)
+def api_inventory_user(user_id: int):
+    guild_id      = get_session_guild_id()
+    include_empty = request.args.get("include_empty") == "1"
+
+    from utils.inventory import get_inventory
+    rows = run_async(get_inventory(
+        guild_id, user_id, include_empty=include_empty))
+    return jsonify({"items": rows, "guild_id": guild_id, "user_id": user_id})

@@ -91,9 +91,20 @@ PAGE_PERMISSIONS = {
     "mvp":                LEVEL_ADMIN,
     "leveling":           LEVEL_ADMIN,
     "economy":            LEVEL_ADMIN,
-    "shop":               LEVEL_ADMIN,
+    "shop":                LEVEL_ADMIN,
     "events":             LEVEL_ADMIN,
     "leaderboards":       LEVEL_MODERATOR,
+
+    # Phase 3 E3/E4 CLOSEOUT — read-only ledger/inventory dashboard
+    # pages. ADMIN+ for the full-page view (money movement history and
+    # who-holds-what across the whole guild is sensitive), MOD+ for
+    # the underlying API reads (mirrors the pattern already used for
+    # moderation_view vs moderation_edit — viewing is looser than the
+    # page gate that surfaces it by default, and api.py enforces its
+    # own floor independently via require_api_permission regardless of
+    # what page linked to it).
+    "ledger":             LEVEL_ADMIN,
+    "inventory_view":     LEVEL_ADMIN,
 
     # Config
     "general_settings":   LEVEL_OWNER,

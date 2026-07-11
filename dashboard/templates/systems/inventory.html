@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Inventory{% endblock %}
+{% block content %}
+<span data-page-title="Inventory"></span>
+
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0">
+            🎒 {% if target_user_id %}Inventory — <code>{{ target_user_id }}</code>{% else %}Guild Inventory{% endif %}
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input class="form-input" id="inv-user" placeholder="View a User ID..." style="max-width:200px;"
+                   value="{{ target_user_id or '' }}">
+            <button class="btn btn-secondary" onclick="lookupUser()">🔍 View</button>
+            {% if target_user_id %}
+            <a href="/inventory" class="btn btn-secondary">← All Items</a>
+            {% endif %}
+        </div>
+    </div>
+    <p class="text-muted text-sm" style="margin-bottom:16px;">
+        Read-only view of stackable items held per member — shop "Custom" purchases, event drops,
+        and future mission rewards. Role/temp-role grants aren't shown here; they live on Discord
+        roles directly (see Shop → Temp Roles).
+    </p>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                {% if target_user_id %}
+                <tr><th>Item</th><th>Type</th><th>Quantity</th><th>Source</th><th>Last Updated</th></tr>
+                {% else %}
+                <tr><th>User ID</th><th>Item</th><th>Type</th><th>Quantity</th><th>Last Updated</th></tr>
+                {% endif %}
+            </thead>
+            <tbody>
+                {% for it in items %}
+                <tr>
+                    {% if target_user_id %}
+                    <td><strong>{{ it.item_name }}</strong></td>
+                    <td><span class="badge badge-accent">{{ it.item_type }}</span></td>
+                    <td>×{{ it.quantity }}</td>
+                    <td><span class="badge badge-source">{{ it.source }}</span></td>
+                    <td class="text-muted">{{ it.updated_at[:16] if it.updated_at else "—" }}</td>
+                    {% else %}
+                    <td><code>{{ it.user_id }}</code></td>
+                    <td><strong>{{ it.item_name }}</strong></td>
+                    <td><span class="badge badge-accent">{{ it.item_type }}</span></td>
+                    <td>×{{ it.quantity }}</td>
+                    <td class="text-muted">{{ it.updated_at[:16] if it.updated_at else "—" }}</td>
+                    {% endif %}
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="empty">
+                    {% if target_user_id %}This member holds no items{% else %}No items held anywhere in this server yet{% endif %}
+                </td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+function lookupUser() {
+    const uid = document.getElementById('inv-user').value.trim();
+    if (!uid) { showToast('Enter a User ID', 'warning'); return; }
+    window.location.href = `/inventory/${uid}`;
+}
+document.getElementById('inv-user').addEventListener('keydown', e => {
+    if (e.key === 'Enter') lookupUser();
+});
+</script>
+{% endblock %}
+{% endblock %}
