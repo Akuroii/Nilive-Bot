@@ -4,6 +4,7 @@ import asyncio
 import os
 import json
 import time
+import sys
 import traceback
 from dotenv import load_dotenv
 import aiosqlite
@@ -12,9 +13,66 @@ from database import DB_PATH, add_guild_owner
 load_dotenv()
 
 print("Starting Nero bot...")
-print(f"Token exists: {bool(os.getenv('DISCORD_TOKEN'))}")
+
+
+def validate_discord_token() -> str:
+    """
+    CRITICAL DEBUG FIX: previously the bot called bot.start(os.getenv(...))
+    directly with no validation. If DISCORD_TOKEN was missing or blank on
+    Railway (unset env var, typo in var name, empty string), discord.py's
+    error came back as a generic/opaque failure deep in the connection
+    stack with no indication the token itself was the problem — the
+    Railway logs just showed a crash with no actionable next step.
+
+    This performs a cheap, local sanity check (present, non-empty, roughly
+    the right shape) BEFORE attempting any network connection, and exits
+    with a clear, actionable log line if it fails. This does NOT call
+    Discord's API to verify the token is valid/unrevoked — that still
+    surfaces as a normal discord.py LoginFailure on bot.start(), which is
+    already a clear error. This only catches the "token isn't even set"
+    class of failure, which was previously the most opaque one.
+    """
+    token = os.getenv("DISCORD_TOKEN")
+
+    if not token or not token.strip():
+        print("=" * 60)
+        print("FATAL: DISCORD_TOKEN is missing or empty.")
+        print("  -> Check Railway > your service > Variables tab.")
+        print("  -> Variable name must be exactly: DISCORD_TOKEN")
+        print("  -> See DEBUG_GUIDE.md for full steps.")
+        print("=" * 60)
+        sys.exit(1)
+
+    token = token.strip()
+    # Discord bot tokens are three dot-separated base64-ish segments and
+    # are normally 59+ chars. This is a shape check only, not a validity
+    # check — it catches "pasted the wrong thing" (e.g. client secret,
+    # truncated token, stray quotes) without calling Discord's API.
+    if token.count(".") != 2 or len(token) < 50:
+        print("=" * 60)
+        print("WARNING: DISCORD_TOKEN is set but doesn't look like a "
+              "valid Discord bot token (unexpected length/format).")
+        print("  -> Double check you copied the BOT token, not the "
+              "client secret, and that no quotes/whitespace got")
+        print("     included when pasting into Railway.")
+        print("  -> Continuing anyway — Discord will reject it on "
+              "connect if it's actually invalid.")
+        print("=" * 60)
+    else:
+        print(f"Token check: OK (length={len(token)}, format looks valid)")
+
+    return token
+
+
+DISCORD_TOKEN = validate_discord_token()
 
 intents = discord.Intents.all()
+print(
+    "Intents status: message_content="
+    f"{intents.message_content}, members={intents.members}, "
+    f"presences={intents.presences} (all others enabled via Intents.all())"
+)
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 _command_cooldowns: dict[tuple, float] = {}
@@ -244,8 +302,18 @@ async def main():
         await init_db()
         print("Loading cogs...")
         await load_cogs()
-        print("Starting bot...")
-        await bot.start(os.getenv("DISCORD_TOKEN"))
+        print("Attempting Discord connection...")
+        await bot.start(DISCORD_TOKEN)
+    except discord.LoginFailure:
+        print("=" * 60)
+        print("FATAL: Discord rejected DISCORD_TOKEN (LoginFailure).")
+        print("  -> The token is set but Discord says it's invalid.")
+        print("  -> It may have been regenerated/revoked in the")
+        print("     Developer Portal — copy a fresh token and update")
+        print("     the Railway env var, then redeploy.")
+        print("  -> See DEBUG_GUIDE.md for full steps.")
+        print("=" * 60)
+        sys.exit(1)
     except Exception as e:
         print(f"FATAL ERROR: {e}")
         traceback.print_exc()

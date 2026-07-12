@@ -1,0 +1,4 @@
+3-LINE SUMMARY
+1. dashboard/app.py already binds to Railway's $PORT correctly — no change made, confirmed by inspection.
+2. main.py now validates DISCORD_TOKEN before connecting (hard-fails with a clear log if missing, warns on malformed shape) and logs intents status + a specific LoginFailure message instead of a generic crash.
+3. Added DEBUG_GUIDE.md with exact steps to enable privileged intents, verify the Railway token variable, and read the new log lines to diagnose an offline bot.
