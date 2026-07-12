@@ -1759,3 +1759,66 @@ def api_inventory_user(user_id: int):
     rows = run_async(get_inventory(
         guild_id, user_id, include_empty=include_empty))
     return jsonify({"items": rows, "guild_id": guild_id, "user_id": user_id})
+
+
+# ── Rewards (Phase 3 E2 read endpoint) ─────────────────────────────────────
+#
+# E2 (utils/reward_engine.py) is complete and NOT rebuilt here. Every
+# coin/diamond/xp grant it issues already lands in transaction_ledger
+# via economy_safe.py / _log_xp_ledger — there was no missing write
+# path, only a missing read: a way to pull just the *reward-sourced*
+# slice of one member's ledger (leveling/shop/event/admin grants)
+# instead of their full transaction history.
+#
+# ADMIN+ gate, same tier as /api/activity/<user_id> — a per-user
+# reward history is comparable sensitivity to a per-user activity
+# history. guild_id is always taken from the session, never the
+# client, matching every other route in this file. role/temp_role and
+# item rewards aren't ledgered (they're Discord role state / the
+# inventory_items table respectively — see Ledger page docstring and
+# systems/inventory.html), so this reflects coins/diamonds/xp reward
+# grants specifically, which is what "reward history" means for the
+# ledger's schema.
+
+REWARD_SOURCES = ("leveling", "shop", "event", "admin")
+
+
+@api_bp.route("/rewards/<int:user_id>")
+@require_api_permission(LEVEL_ADMIN)
+def api_rewards_user(user_id: int):
+    guild_id  = get_session_guild_id()
+    limit     = min(int(request.args.get("limit", 50)), 200)
+    date_from = request.args.get("date_from", "")
+    date_to   = request.args.get("date_to", "")
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            placeholders = ",".join("?" for _ in REWARD_SOURCES)
+            where  = [
+                "guild_id = ?", "user_id = ?",
+                f"source IN ({placeholders})",
+            ]
+            params = [guild_id, user_id, *REWARD_SOURCES]
+            if date_from:
+                where.append("created_at >= ?"); params.append(date_from)
+            if date_to:
+                where.append("created_at <= ?"); params.append(date_to + " 23:59:59")
+            params.append(limit)
+            cursor = await db.execute(f"""
+                SELECT id, currency, amount, balance_after, type, reason,
+                       source, related_user_id, reversed, reversed_at, created_at
+                FROM transaction_ledger
+                WHERE {' AND '.join(where)}
+                ORDER BY created_at DESC LIMIT ?
+            """, params)
+            return await cursor.fetchall()
+
+    rows = run_async(fetch())
+    rewards = [{
+        "id": r[0], "currency": r[1], "amount": r[2],
+        "balance_after": r[3], "type": r[4], "reason": r[5],
+        "source": r[6], "related_user_id": r[7],
+        "reversed": bool(r[8]), "reversed_at": r[9], "created_at": r[10],
+    } for r in rows]
+
+    return jsonify({"guild_id": guild_id, "user_id": user_id, "rewards": rewards})
