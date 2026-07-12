@@ -2,32 +2,19 @@ import aiosqlite
 import asyncio
 import os
 
-# ══════════════════════════════════════════════════════
-# IMPORTANT: DB_PATH points to a Railway persistent volume
-# Go to Railway → your service → Volumes → Add Volume
-# Mount path: /app/data
-# Without this, nero.db is wiped on every redeploy!
-# ══════════════════════════════════════════════════════
 DB_PATH = "/app/data/nero.db"
 
 OWNER_DISCORD_ID = int(os.getenv("OWNER_ID", "704453350384730237"))
 
-# Your server IDs — owner access is guaranteed for these
-# even on a completely fresh database
 FALLBACK_GUILD_IDS = [
     1360461358486913145,
 ]
 
 
 async def init_db():
-    # Make sure the directory exists
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
     async with aiosqlite.connect(DB_PATH) as db:
-
-        # ══════════════════════════════════════════
-        # CORE TABLES
-        # ══════════════════════════════════════════
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS mvp_scores (
@@ -276,10 +263,6 @@ async def init_db():
             )
         """)
 
-        # ══════════════════════════════════════════
-        # MODERATION TABLES
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS mod_logs (
                 id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -354,10 +337,6 @@ async def init_db():
             ON warning_thresholds(guild_id)
         """)
 
-        # ══════════════════════════════════════════
-        # GUILD SETTINGS
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id                 INTEGER PRIMARY KEY,
@@ -398,10 +377,6 @@ async def init_db():
             )
         """)
 
-        # ══════════════════════════════════════════
-        # WELCOME SYSTEM
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS welcome_config (
                 guild_id          INTEGER PRIMARY KEY,
@@ -433,10 +408,6 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_wm_guild
             ON welcome_messages(guild_id)
         """)
-
-        # ══════════════════════════════════════════
-        # LEVELING SYSTEM
-        # ══════════════════════════════════════════
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_config (
@@ -508,10 +479,6 @@ async def init_db():
             )
         """)
 
-        # ══════════════════════════════════════════
-        # MVP SYSTEM
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS mvp_config (
                 guild_id            INTEGER PRIMARY KEY,
@@ -543,10 +510,6 @@ async def init_db():
             ON mvp_history(guild_id)
         """)
 
-        # ══════════════════════════════════════════
-        # BOOST SYSTEM
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS boost_config (
                 guild_id               INTEGER PRIMARY KEY,
@@ -569,10 +532,6 @@ async def init_db():
                 created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-
-        # ══════════════════════════════════════════
-        # ECONOMY & SHOP
-        # ══════════════════════════════════════════
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS shop_items (
@@ -639,22 +598,6 @@ async def init_db():
             ON temp_roles(expires_at)
         """)
 
-        # ══════════════════════════════════════════
-        # TRANSACTION LEDGER (Phase 3, E3)
-        # Single append-only audit trail for every currency movement
-        # (coins, diamonds, xp) across the bot — economy commands,
-        # shop purchases, event/level rewards, admin grants, and
-        # (future) trades. Nothing here mutates economy/levels
-        # balances itself; utils/ledger.py only ever records what
-        # utils/economy_safe.py and utils/reward_engine.py already
-        # did, after the fact, in the same call. balance_after is a
-        # point-in-time snapshot for that currency so the dashboard
-        # can render a running history without recomputing sums.
-        # A future Trade System (Phase 6) will insert matched
-        # transfer_out/transfer_in pairs here via the same
-        # log_transaction() call, keyed by related_user_id.
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS transaction_ledger (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -686,21 +629,6 @@ async def init_db():
             ON transaction_ledger(created_at)
         """)
 
-        # ══════════════════════════════════════════
-        # INVENTORY SYSTEM (Phase 3, E4)
-        # Generic per-guild, per-user item ownership with quantity.
-        # Distinct from shop_items (the catalog) and purchase_history
-        # (the receipt log) — this is the live "what does this member
-        # currently hold" table. item_type distinguishes stackable
-        # custom items from things that are really just role/temp_role
-        # grants (those continue to go through temp_roles / Discord
-        # roles directly, NOT through inventory — inventory only
-        # tracks genuinely inventory-style items: shop 'custom' type
-        # items, future mission/event drops, and Trade System (Phase 6)
-        # stock). metadata is a free-form JSON blob for item-specific
-        # data (e.g. a custom item's flavor text or effect config).
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS inventory_items (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -721,10 +649,6 @@ async def init_db():
             ON inventory_items(guild_id, user_id)
         """)
 
-        # ══════════════════════════════════════════
-        # TEMP BANS (Phase 2 fix)
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS temp_bans (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -744,10 +668,6 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_tb_guild_user
             ON temp_bans(guild_id, user_id)
         """)
-
-        # ══════════════════════════════════════════
-        # EVENTS
-        # ══════════════════════════════════════════
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS events (
@@ -786,10 +706,6 @@ async def init_db():
             )
         """)
 
-        # ══════════════════════════════════════════
-        # ANNOUNCEMENTS
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS youtube_config (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -823,10 +739,6 @@ async def init_db():
                 created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-
-        # ══════════════════════════════════════════
-        # TICKET SYSTEM
-        # ══════════════════════════════════════════
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ticket_settings (
@@ -894,10 +806,6 @@ async def init_db():
             ON ticket_ratings(guild_id)
         """)
 
-        # ══════════════════════════════════════════
-        # REPORT SYSTEM (P1 #16)
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS report_config (
                 guild_id          INTEGER PRIMARY KEY,
@@ -936,10 +844,6 @@ async def init_db():
             ON reports(guild_id, status)
         """)
 
-        # ══════════════════════════════════════════
-        # BOT HEALTH (P1 #17)
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bot_status (
                 id                INTEGER PRIMARY KEY CHECK (id = 1),
@@ -955,10 +859,6 @@ async def init_db():
                 python_version    TEXT
             )
         """)
-
-        # ══════════════════════════════════════════
-        # DASHBOARD ACCESS
-        # ══════════════════════════════════════════
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS dashboard_users (
@@ -1005,10 +905,6 @@ async def init_db():
             ON audit_log(created_at)
         """)
 
-        # ══════════════════════════════════════════
-        # COMMAND TOGGLES
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS command_toggles (
                 id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1045,10 +941,6 @@ async def init_db():
             ON command_toggles(guild_id)
         """)
 
-        # ══════════════════════════════════════════
-        # UTILITY TABLES
-        # ══════════════════════════════════════════
-
         await db.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1083,11 +975,6 @@ async def init_db():
 
 
 async def ensure_owner_access():
-    """
-    Guarantees OWNER_DISCORD_ID has dashboard owner access
-    for every known guild, including FALLBACK_GUILD_IDS.
-    Safe to run on every startup.
-    """
     async with aiosqlite.connect(DB_PATH) as db:
         guild_ids = set()
 
@@ -1122,7 +1009,6 @@ async def ensure_owner_access():
 
 
 async def add_guild_owner(guild_id: int):
-    """Called from main.py on_guild_join for instant access on new servers."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT OR IGNORE INTO dashboard_users

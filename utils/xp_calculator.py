@@ -2,30 +2,7 @@ import math
 import aiosqlite
 from database import DB_PATH
 
-# ══════════════════════════════════════════════════════
-# RULE 3 — ANTI-INFLATION MATH
-# XP multipliers do NOT stack.
-# User has @Booster (1.5x) AND @VIP (1.2x)
-# → They get max(1.5, 1.2) = 1.5x ONLY
-# NOT 1.5 + 1.2 = 2.7x
-# NOT 1.5 × 1.2 = 1.8x
-# The highest single multiplier wins.
-# Multiplier roles are stored in: leveling_bonus_roles table
-# ══════════════════════════════════════════════════════
-
 async def get_xp_multiplier(guild_id: int, member_role_ids: list[int]) -> float:
-    """
-    Returns the highest XP multiplier for a member.
-    Reads from leveling_bonus_roles table.
-    Never stacks — always returns max single multiplier.
-
-    Args:
-        guild_id: The Discord guild ID
-        member_role_ids: List of role IDs the member currently has
-
-    Returns:
-        float: The multiplier to apply (1.0 = no bonus)
-    """
     if not member_role_ids:
         return 1.0
     async with aiosqlite.connect(DB_PATH) as db:
@@ -64,12 +41,6 @@ async def get_xp_multiplier(guild_id: int, member_role_ids: list[int]) -> float:
 
 
 async def get_leveling_config(guild_id: int) -> dict:
-    """
-    Returns the leveling config for a guild.
-    Falls back to defaults if no config row exists.
-    Config is stored in: leveling_config table
-    Configurable from: dashboard Systems > Leveling page
-    """
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT * FROM leveling_config WHERE guild_id = ?
@@ -104,13 +75,6 @@ async def calculate_message_xp(
     member_role_ids: list[int],
     word_count: int
 ) -> int:
-    """
-    Calculates XP to award for a message.
-    Applies anti-inflation multiplier (Rule 3).
-    Clamps to min/max from leveling_config.
-
-    Returns 0 if leveling is disabled or member is blacklisted.
-    """
     config = await get_leveling_config(guild_id)
     if not config.get("enabled", 1):
         return 0
@@ -125,29 +89,14 @@ async def calculate_message_xp(
 
 
 def calculate_voice_xp(minutes: float, voice_xp_per_minute: int) -> int:
-    """
-    Calculates XP to award for voice time.
-    Called every 60 seconds by the voice XP task.
-    Multiplier is NOT applied to voice XP (Blueprint decision).
-
-    Rule 4 guards (alone, deafened, AFK, muted) are checked
-    BEFORE calling this function in cogs/leveling.py
-    """
     return int(minutes * voice_xp_per_minute)
 
 
-# ══════════════════════════════════════════════════════
-# LEVEL CALCULATION
-# Same formula used everywhere — centralized here
-# ══════════════════════════════════════════════════════
-
 def xp_for_level(level: int) -> int:
-    """Total XP needed to reach a given level from 0."""
     return math.floor(100 * (level ** 1.5))
 
 
 def calculate_level_from_xp(total_xp: int) -> int:
-    """Returns the level for a given total XP amount."""
     level = 0
     while total_xp >= xp_for_level(level + 1):
         total_xp -= xp_for_level(level + 1)
@@ -156,10 +105,6 @@ def calculate_level_from_xp(total_xp: int) -> int:
 
 
 def xp_progress(total_xp: int) -> tuple[int, int, int]:
-    """
-    Returns (current_level, xp_into_level, xp_needed_for_next_level).
-    Used for rank cards and leaderboard displays.
-    """
     level = 0
     remaining = total_xp
     while remaining >= xp_for_level(level + 1):
@@ -171,13 +116,6 @@ def xp_progress(total_xp: int) -> tuple[int, int, int]:
 
 async def check_and_award_level_rewards(bot, member, guild_id: int,
                                          old_level: int, new_level: int):
-    """
-    Checks leveling_rewards table and assigns/removes roles
-    when a member levels up.
-    Rule 5 check is done before assigning each role.
-
-    Called from: cogs/leveling.py on_message after XP update
-    """
     from utils.permissions import check_bot_role_position
 
     if new_level <= old_level:

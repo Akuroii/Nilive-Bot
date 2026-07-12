@@ -69,14 +69,12 @@ def check_bot_role_position(guild, role) -> tuple[bool, str]:
 
 
 PAGE_PERMISSIONS = {
-    # General
     "overview":           LEVEL_MODERATOR,
     "members_view":       LEVEL_MODERATOR,
     "members_edit":       LEVEL_ADMIN,
     "members_delete":     LEVEL_OWNER,
     "audit_log":          LEVEL_ADMIN,
 
-    # Manage
     "moderation_view":    LEVEL_MODERATOR,
     "moderation_action":  LEVEL_MODERATOR,
     "moderation_edit":    LEVEL_ADMIN,
@@ -87,7 +85,6 @@ PAGE_PERMISSIONS = {
     "triggers":           LEVEL_ADMIN,
     "customcommands":     LEVEL_ADMIN,
 
-    # Systems
     "mvp":                LEVEL_ADMIN,
     "leveling":           LEVEL_ADMIN,
     "economy":            LEVEL_ADMIN,
@@ -95,18 +92,9 @@ PAGE_PERMISSIONS = {
     "events":             LEVEL_ADMIN,
     "leaderboards":       LEVEL_MODERATOR,
 
-    # Phase 3 E3/E4 CLOSEOUT — read-only ledger/inventory dashboard
-    # pages. ADMIN+ for the full-page view (money movement history and
-    # who-holds-what across the whole guild is sensitive), MOD+ for
-    # the underlying API reads (mirrors the pattern already used for
-    # moderation_view vs moderation_edit — viewing is looser than the
-    # page gate that surfaces it by default, and api.py enforces its
-    # own floor independently via require_api_permission regardless of
-    # what page linked to it).
     "ledger":             LEVEL_ADMIN,
     "inventory_view":     LEVEL_ADMIN,
 
-    # Config
     "general_settings":   LEVEL_OWNER,
     "welcome":            LEVEL_ADMIN,
     "boost":              LEVEL_ADMIN,
@@ -114,13 +102,7 @@ PAGE_PERMISSIONS = {
     "commands":           LEVEL_OWNER,
     "dashboard_access":   LEVEL_OWNER,
 
-    # P1 #16 / #17
     "reports":            LEVEL_MODERATOR,
-    # Health is owner-only, not admin — the error panel can show
-    # tracebacks that reference internal file paths and code
-    # structure. That's a bigger information-disclosure surface than
-    # "can this person read mod logs", so it gets the stricter gate
-    # already used for commands/dashboard_access.
     "health":             LEVEL_OWNER,
 }
 

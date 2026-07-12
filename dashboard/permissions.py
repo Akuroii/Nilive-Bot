@@ -80,31 +80,6 @@ def require_page(page_name: str):
 
 
 def require_api_permission(min_level: str):
-    """
-    PHASE 2 CRITICAL FIX: dashboard/api.py's ~57 endpoints previously
-    used a local `require_guild` decorator that only checked "is
-    someone logged in" + "is a guild selected" — it never checked
-    permission_level at all. Any enabled dashboard user of ANY tier
-    (including the lowest, moderator) could call ANY api.py endpoint
-    directly with fetch()/curl, bypassing every is_admin/is_owner
-    button-hiding check in the templates, since those only ever
-    controlled whether a button was *rendered* — the server accepted
-    the request regardless.
-
-    This decorator is the api.py equivalent of require_page() in this
-    same module: it actually enforces permission_level server-side.
-    It's kept separate from require_page (rather than reusing it
-    directly) because API endpoints should return JSON 401/403, not
-    redirect to /login or render an HTML error page — a fetch() call
-    redirected to a login page just looks like a confusing JSON parse
-    error to the browser.
-
-    Usage: pass one of LEVEL_MODERATOR / LEVEL_ADMIN / LEVEL_OWNER —
-    the minimum tier allowed to call this endpoint. This mirrors
-    get_required_level()/user_can_access_page() but takes a level
-    directly since most api.py endpoints don't map 1:1 onto a single
-    dashboard "page" the way full routes in app.py do.
-    """
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):

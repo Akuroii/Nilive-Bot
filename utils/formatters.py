@@ -1,22 +1,6 @@
 from datetime import datetime, timezone
 
-# ══════════════════════════════════════════════════════
-# RULE 1 — SNAPSHOT HELPERS
-# Every log table must save display_name + avatar_url
-# at the TIME of the action, not looked up later.
-# If a user leaves the server, we still show their name.
-# ══════════════════════════════════════════════════════
-
 def snapshot_user(member) -> dict:
-    """
-    Takes a discord.Member or discord.User and returns
-    a snapshot dict with id, display_name, avatar_url.
-
-    Usage in cogs:
-        snap = snapshot_user(member)
-        # Then use snap["display_name"] and snap["avatar_url"]
-        # when inserting into any log table.
-    """
     if member is None:
         return {
             "id":           0,
@@ -36,24 +20,14 @@ def snapshot_user(member) -> dict:
 
 
 def snapshot_member(member) -> dict:
-    """Alias for snapshot_user — same thing, clearer name in mod contexts."""
     return snapshot_user(member)
 
 
-# ══════════════════════════════════════════════════════
-# DATE + TIME FORMATTERS
-# ══════════════════════════════════════════════════════
-
 def now_iso() -> str:
-    """Returns current UTC time as ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def format_timestamp(ts: str | None, fmt: str = "%Y-%m-%d %H:%M UTC") -> str:
-    """
-    Formats an ISO timestamp string for display.
-    Returns 'Unknown' if ts is None or unparseable.
-    """
     if not ts:
         return "Unknown"
     try:
@@ -64,7 +38,6 @@ def format_timestamp(ts: str | None, fmt: str = "%Y-%m-%d %H:%M UTC") -> str:
 
 
 def format_date_only(ts: str | None) -> str:
-    """Returns just the date part: YYYY-MM-DD"""
     if not ts:
         return "Unknown"
     try:
@@ -75,10 +48,6 @@ def format_date_only(ts: str | None) -> str:
 
 
 def format_relative(ts: str | None) -> str:
-    """
-    Returns a human-readable relative time string.
-    e.g. '2 hours ago', 'just now', '3 days ago'
-    """
     if not ts:
         return "Unknown"
     try:
@@ -103,25 +72,15 @@ def format_relative(ts: str | None) -> str:
         return "Unknown"
 
 
-# ══════════════════════════════════════════════════════
-# NUMBER FORMATTERS
-# ══════════════════════════════════════════════════════
-
 def format_number(n: int | float) -> str:
-    """Formats a number with commas: 1234567 → '1,234,567'"""
     return f"{int(n):,}"
 
 
 def format_coins(n: int, currency_name: str = "Coins") -> str:
-    """
-    Formats a coin amount with currency name.
-    currency_name comes from guild_settings.currency_name
-    """
     return f"{format_number(n)} {currency_name}"
 
 
 def format_duration(minutes: int | None) -> str:
-    """Formats a duration in minutes to readable string."""
     if not minutes:
         return "Permanent"
     if minutes < 60:
@@ -136,16 +95,8 @@ def format_duration(minutes: int | None) -> str:
         return f"{d}d {h}h" if h else f"{d}d"
 
 
-# ══════════════════════════════════════════════════════
-# AVATAR URL HELPERS
-# ══════════════════════════════════════════════════════
-
 def avatar_url_or_default(avatar_url: str | None,
                            user_id: int | None = None) -> str:
-    """
-    Returns the avatar URL or a Discord default avatar URL.
-    Used in dashboard templates to always show an image.
-    """
     if avatar_url:
         return avatar_url
     if user_id:

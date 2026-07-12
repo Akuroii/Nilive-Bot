@@ -2,8 +2,8 @@ import discord
 from discord.ext import commands, tasks
 import asyncio
 import os
-import json          # ← NEW
-import time          # ← NEW
+import json
+import time
 import traceback
 from dotenv import load_dotenv
 import aiosqlite
@@ -17,7 +17,6 @@ print(f"Token exists: {bool(os.getenv('DISCORD_TOKEN'))}")
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ── COMMAND TOGGLE ENFORCEMENT ────────────────────────────────   ← NEW BLOCK
 _command_cooldowns: dict[tuple, float] = {}
 
 @bot.tree.check
@@ -94,9 +93,6 @@ async def global_command_gate(interaction: discord.Interaction) -> bool:
             _command_cooldowns[key] = now
 
     return True
-# ── END OF NEW BLOCK ──────────────────────────────────────────
-
-# ↓↓↓ YOUR ORIGINAL CODE CONTINUES BELOW (unchanged) ↓↓↓
 
 _status_index = 0
 
@@ -128,13 +124,6 @@ async def rotate_status():
 
 async def load_cogs():
     cog_files = [
-        # Phase 3 / E1: loaded first — leveling and mvp now consume
-        # this cog's activity_message / activity_voice_tick events
-        # instead of listening to raw Discord events themselves. Load
-        # order doesn't actually matter for discord.py's dispatch()
-        # (listeners are looked up at dispatch time, not at cog-load
-        # time), but it's loaded first here for readability: this is
-        # the foundation layer everything else in Phase 3 builds on.
         "cogs.activity_engine",
         "cogs.mvp",
         "cogs.moderation",
@@ -157,9 +146,6 @@ async def load_cogs():
         "cogs.report",
         "cogs.health",
     ]
-    # P1 #17: track load results on the bot object itself so
-    # cogs/health.py's heartbeat loop can read them without main.py
-    # and the cog needing any other shared state.
     bot.loaded_cogs = []
     bot.failed_cogs = []
     for cog in cog_files:
@@ -188,14 +174,6 @@ async def on_ready():
 
 @bot.event
 async def on_error(event_method, *args, **kwargs):
-    """
-    P1 #17: catches exceptions raised inside event listeners
-    (on_message, on_member_update, etc. across every cog) that
-    would otherwise only ever show up in server logs nobody's
-    watching. Still prints the full traceback to stdout as before —
-    this only ADDS a copy to bot_status.last_error for the health
-    dashboard, it doesn't change discord.py's default handling.
-    """
     tb = traceback.format_exc()
     print(f"[ON_ERROR] in {event_method}:\n{tb}")
     try:
@@ -208,14 +186,6 @@ async def on_error(event_method, *args, **kwargs):
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction,
                                 error: discord.app_commands.AppCommandError):
-    """
-    P1 #17: same idea for slash command failures. Permission checks
-    (MissingPermissions, CheckFailure) are expected user-facing
-    outcomes, not bugs — those get a plain ephemeral message and are
-    NOT written to bot_status, so the health page only ever shows
-    genuine unexpected failures, not "a member without permission
-    tried to use /ban".
-    """
     if isinstance(error, (discord.app_commands.MissingPermissions,
                            discord.app_commands.CheckFailure)):
         if not interaction.response.is_done():
