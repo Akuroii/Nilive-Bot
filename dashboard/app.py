@@ -9,7 +9,7 @@ from flask import (
     Flask, redirect, url_for, session,
     request, render_template, jsonify, abort,
 )
-from database import DB_PATH
+from database import DB_PATH, init_db
 from dashboard.utils.async_utils import run_async
 from dashboard.auth import (
     login_required, create_session, clear_session,
@@ -30,6 +30,13 @@ app = Flask(__name__,
 app.secret_key = os.getenv("SECRET_KEY", "nero-dashboard-secret-key-2024")
 app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7
 app.register_blueprint(api_bp)
+
+# Ensure the schema exists before any request can hit the DB. This does NOT
+# depend on the bot process having run first — CREATE TABLE IF NOT EXISTS
+# makes this safe to call from both processes, in either order, every boot.
+print("Initializing database (dashboard process)...")
+run_async(init_db())
+print("Database ready (dashboard process).")
 
 
 def render(template, **ctx):

@@ -2,7 +2,7 @@ import aiosqlite
 import asyncio
 import os
 
-DB_PATH = "/app/data/nero.db"
+DB_PATH = os.getenv("DATABASE_PATH", "/app/data/nero.db")
 
 OWNER_DISCORD_ID = int(os.getenv("OWNER_ID", "704453350384730237"))
 
