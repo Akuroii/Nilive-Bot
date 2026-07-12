@@ -142,6 +142,73 @@ def members_search():
     return html or "<tr><td colspan='5' class='empty'>No members found</td></tr>"
 
 
+# ── Activity (Phase 3 E1 CLOSEOUT) ─────────────────────────────────────────
+#
+# cogs/activity_engine.py (E1) already writes daily rollups to
+# activity_stats (guild_id, user_id, date, messages_count, words_count,
+# voice_minutes, forum_posts_count) via on_message / voice_tick_task /
+# on_thread_create. This route was the one missing piece — a way for
+# the dashboard to actually read that data back out per member.
+#
+# ADMIN+ gate: same tier as members_edit / leveling / economy — this is
+# a per-user activity readout, not a bulk moderation action, but it's
+# still more sensitive than a MOD-level leaderboard view since it
+# exposes a full daily activity history for one specific person.
+#
+# guild_id is always taken from the session (get_session_guild_id()),
+# never from the client, so there's no cross-guild lookup path here —
+# consistent with every other route in this file.
+
+@api_bp.route("/activity/<int:user_id>")
+@require_api_permission(LEVEL_ADMIN)
+def api_activity_user(user_id: int):
+    guild_id = get_session_guild_id()
+    days     = min(int(request.args.get("days", 30)), 365)
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Totals across all recorded history for this member
+            totals_cur = await db.execute("""
+                SELECT COALESCE(SUM(messages_count), 0),
+                       COALESCE(SUM(words_count), 0),
+                       COALESCE(SUM(voice_minutes), 0),
+                       COALESCE(SUM(forum_posts_count), 0)
+                FROM activity_stats
+                WHERE guild_id = ? AND user_id = ?
+            """, (guild_id, user_id))
+            totals = await totals_cur.fetchone()
+
+            # Daily breakdown for the requested window, most recent first
+            daily_cur = await db.execute("""
+                SELECT date, messages_count, words_count,
+                       voice_minutes, forum_posts_count
+                FROM activity_stats
+                WHERE guild_id = ? AND user_id = ?
+                ORDER BY date DESC LIMIT ?
+            """, (guild_id, user_id, days))
+            daily = await daily_cur.fetchall()
+
+        return totals, daily
+
+    totals, daily = run_async(fetch())
+
+    return jsonify({
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "messages_count": totals[0],
+        "words_count": totals[1],
+        "voice_minutes": totals[2],
+        "forum_posts_count": totals[3],
+        "daily": [{
+            "date": r[0],
+            "messages_count": r[1],
+            "words_count": r[2],
+            "voice_minutes": r[3],
+            "forum_posts_count": r[4],
+        } for r in daily],
+    })
+
+
 # ── Moderation ────────────────────────────────────────────────────────────────
 
 @api_bp.route("/moderation/logs")
