@@ -43,7 +43,7 @@ async def process_purchase(interaction: discord.Interaction,
             SELECT id, name, price, type, role_id,
                    duration_hours, required_level,
                    required_role_id, enabled,
-                   max_stock, current_stock
+                   max_stock, current_stock, price_diamonds
             FROM shop_items
             WHERE id = ? AND guild_id = ? AND enabled = 1
         """, (item_id, guild_id))
@@ -55,7 +55,14 @@ async def process_purchase(interaction: discord.Interaction,
         return
 
     (iid, name, price, itype, role_id, duration_hours,
-     req_level, req_role_id, enabled, max_stock, curr_stock) = item
+     req_level, req_role_id, enabled, max_stock, curr_stock,
+     price_diamonds) = item
+
+    # Phase 5 / Economy v2: an item is diamond-priced when
+    # price_diamonds is set (nullable column — see database.py
+    # migration). Coins-priced items are untouched, same as before.
+    pay_currency = "diamonds" if price_diamonds else "balance"
+    pay_amount   = price_diamonds if price_diamonds else price
 
     if req_level and req_level > 0:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -94,7 +101,8 @@ async def process_purchase(interaction: discord.Interaction,
         return
 
     try:
-        await safe_deduct(guild_id, user_id, price,
+        await safe_deduct(guild_id, user_id, pay_amount,
+                           currency=pay_currency,
                            reason=f"Shop purchase: {name}", source="shop")
     except InsufficientBalance:
         if max_stock:
@@ -103,16 +111,21 @@ async def process_purchase(interaction: discord.Interaction,
                     "UPDATE shop_items SET current_stock = current_stock + 1 WHERE id=?",
                     (iid,))
                 await db.commit()
-        currency = await get_currency_name(guild_id)
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                f"SELECT {pay_currency} FROM economy WHERE guild_id=? AND user_id=?",
                 (guild_id, user_id))
             row = await cursor.fetchone()
         bal = row[0] if row else 0
-        await interaction.response.send_message(
-            f"You need {price:,} {currency} but only have {bal:,}.",
-            ephemeral=True)
+        if pay_currency == "diamonds":
+            await interaction.response.send_message(
+                f"You need {pay_amount:,} 💎 but only have {bal:,}.",
+                ephemeral=True)
+        else:
+            currency = await get_currency_name(guild_id)
+            await interaction.response.send_message(
+                f"You need {pay_amount:,} {currency} but only have {bal:,}.",
+                ephemeral=True)
         return
 
     snap       = snapshot_user(interaction.user)
@@ -126,10 +139,11 @@ async def process_purchase(interaction: discord.Interaction,
         await db.execute("""
             INSERT INTO purchase_history
                 (guild_id, user_id, user_display_name,
-                 item_id, item_name, price_paid, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 item_id, item_name, price_paid, expires_at,
+                 currency_paid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (guild_id, user_id, snap["display_name"],
-              iid, name, price, expires_at))
+              iid, name, pay_amount, expires_at, pay_currency))
         await db.commit()
 
     if itype in ("role", "temp_role") and role_id:
@@ -172,11 +186,11 @@ async def process_purchase(interaction: discord.Interaction,
         if not result.get("success"):
             print(f"[SHOP] Item give error: {result.get('error')}")
 
-    currency = await get_currency_name(guild_id)
-    embed    = discord.Embed(
+    embed = discord.Embed(
         title="✅ Purchase Successful!",
-        description=(f"You bought **{name}** for "
-                     f"**{price:,}** {currency}!"),
+        description=(
+            f"You bought **{name}** for **{pay_amount:,}** "
+            f"{'💎' if pay_currency == 'diamonds' else await get_currency_name(guild_id)}!"),
         color=0x57F287)
     if duration_hours:
         embed.set_footer(
@@ -261,7 +275,8 @@ class Shop(commands.Cog):
             cursor = await db.execute("""
                 SELECT id, name, description, price,
                        type, duration_hours, featured,
-                       required_level, max_stock, current_stock
+                       required_level, max_stock, current_stock,
+                       price_diamonds
                 FROM shop_items
                 WHERE guild_id = ? AND enabled = 1
                 ORDER BY featured DESC, price ASC
@@ -279,21 +294,25 @@ class Shop(commands.Cog):
             color=0x7c5cbf)
 
         for (iid, name, desc, price, itype,
-             dur, featured, req_lvl, max_s, curr_s) in items:
+             dur, featured, req_lvl, max_s, curr_s,
+             price_diamonds) in items:
             stock_info = ""
             if max_s:
                 stock_info = (f" • {curr_s or 0}/{max_s} left"
                               if curr_s else " • **Out of stock**")
-            dur_info = f" • {dur}h temp" if dur else ""
-            lvl_info = f" • Req. Level {req_lvl}" if req_lvl else ""
+            dur_info  = f" • {dur}h temp" if dur else ""
+            lvl_info  = f" • Req. Level {req_lvl}" if req_lvl else ""
+            price_str = (f"{price_diamonds:,} 💎" if price_diamonds
+                         else f"{price:,} {currency}")
             embed.add_field(
-                name=f"{'⭐ ' if featured else ''}{name} — {price:,} {currency}",
+                name=f"{'⭐ ' if featured else ''}{name} — {price_str}",
                 value=(f"{desc or ''}{dur_info}{lvl_info}{stock_info}"),
                 inline=False)
 
         view = discord.ui.View()
         for (iid, name, desc, price, itype,
-             dur, featured, req_lvl, max_s, curr_s) in items[:5]:
+             dur, featured, req_lvl, max_s, curr_s,
+             price_diamonds) in items[:5]:
             if max_s and not curr_s:
                 continue
             btn = discord.ui.Button(

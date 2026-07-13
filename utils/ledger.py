@@ -3,7 +3,12 @@ import json
 from database import DB_PATH
 
 VALID_CURRENCIES = {"balance", "diamonds", "xp"}
-VALID_TYPES = {"credit", "deduct", "transfer_in", "transfer_out", "reversal"}
+# Phase 5 / Economy v2: added convert_in/convert_out for the coins→diamonds
+# exchange (see utils/economy_safe.safe_convert). Same idea as
+# transfer_in/transfer_out but between two different currency columns on
+# the same user, not between two users.
+VALID_TYPES = {"credit", "deduct", "transfer_in", "transfer_out",
+               "convert_in", "convert_out", "reversal"}
 
 
 class LedgerError(Exception):

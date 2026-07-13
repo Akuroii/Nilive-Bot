@@ -3,29 +3,129 @@
 {% block content %}
 <span data-page-title="Economy"></span>
 
-<div class="card">
-    <div class="card-title">🪙 Richest Members</div>
-    <div class="table-wrap">
-        <table class="table">
-            <thead>
-                <tr><th>Rank</th><th>User ID</th><th>Balance</th></tr>
-            </thead>
-            <tbody hx-get="/api/economy/leaderboard" hx-trigger="load" hx-swap="innerHTML">
-                {% for b in balances %}
-                <tr>
-                    <td>
-                        <div class="rank-badge {% if loop.index == 1 %}rank-1{% elif loop.index == 2 %}rank-2{% elif loop.index == 3 %}rank-3{% else %}rank-n{% endif %}">
-                            {{ loop.index }}
-                        </div>
-                    </td>
-                    <td><code>{{ b[0] }}</code></td>
-                    <td><strong style="color:var(--gold);">🪙 {{ "{:,}".format(b[1]) }}</strong></td>
-                </tr>
-                {% else %}
-                <tr><td colspan="3" class="empty">No economy data yet</td></tr>
-                {% endfor %}
-            </tbody>
-        </table>
+<div style="display:flex;gap:4px;margin-bottom:20px;
+            border-bottom:1px solid var(--border);padding-bottom:0;">
+    {% for tab, label in [('coins','🪙 Coins'),('diamonds','💎 Diamonds'),('exchange','💱 Exchange Rate')] %}
+    <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
+        style="padding:10px 18px;border:none;background:transparent;
+               color:var(--text2);font-size:13px;font-weight:500;
+               cursor:pointer;border-bottom:2px solid transparent;
+               transition:all .15s;margin-bottom:-1px;"
+        class="tab-btn">{{ label }}</button>
+    {% endfor %}
+</div>
+
+<!-- COINS TAB -->
+<div id="tab-content-coins" class="tab-content">
+    <div class="card">
+        <div class="card-title">🪙 Richest Members</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr><th>Rank</th><th>User ID</th><th>Balance</th></tr>
+                </thead>
+                <tbody hx-get="/api/economy/leaderboard" hx-trigger="load" hx-swap="innerHTML">
+                    {% for b in balances %}
+                    <tr>
+                        <td>
+                            <div class="rank-badge {% if loop.index == 1 %}rank-1{% elif loop.index == 2 %}rank-2{% elif loop.index == 3 %}rank-3{% else %}rank-n{% endif %}">
+                                {{ loop.index }}
+                            </div>
+                        </td>
+                        <td><code>{{ b[0] }}</code></td>
+                        <td><strong style="color:var(--gold);">🪙 {{ "{:,}".format(b[1]) }}</strong></td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="3" class="empty">No economy data yet</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
+
+<!-- DIAMONDS TAB -->
+<div id="tab-content-diamonds" class="tab-content" style="display:none;">
+    <div class="card">
+        <div class="card-title">💎 Diamond Holders</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Diamonds are a convertible currency — members earn them from special
+            events (bonus, no conversion needed) or by converting coins with
+            <code>/convert</code> at this server's exchange rate.
+        </p>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr><th>Rank</th><th>User ID</th><th>Diamonds</th></tr>
+                </thead>
+                <tbody hx-get="/api/economy/leaderboard-diamonds" hx-trigger="load" hx-swap="innerHTML">
+                    {% for d in diamonds %}
+                    <tr>
+                        <td>
+                            <div class="rank-badge {% if loop.index == 1 %}rank-1{% elif loop.index == 2 %}rank-2{% elif loop.index == 3 %}rank-3{% else %}rank-n{% endif %}">
+                                {{ loop.index }}
+                            </div>
+                        </td>
+                        <td><code>{{ d[0] }}</code></td>
+                        <td><strong style="color:var(--accent);">💎 {{ "{:,}".format(d[1]) }}</strong></td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="3" class="empty">No diamonds held yet</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- EXCHANGE RATE TAB -->
+<div id="tab-content-exchange" class="tab-content" style="display:none;">
+    <div class="card">
+        <div class="card-title">💱 Coins ↔ Diamonds Exchange Rate</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Members convert coins into diamonds in Discord with <code>/convert</code>,
+            using this rate. Diamonds earned from events are separate and never
+            need conversion. Changing this rate only affects future conversions.
+        </p>
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Coins per 1 💎 Diamond</label>
+                <input class="form-input" id="exchange-rate-input"
+                       type="number" min="1" value="{{ exchange_rate }}"
+                       style="width:180px;">
+            </div>
+            <button class="btn btn-primary" onclick="saveExchangeRate()">Save Rate</button>
+        </div>
+        <div id="exchange-status" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+function switchTab(name) {
+    document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+    document.getElementById('tab-content-' + name).style.display = 'block';
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.style.borderBottomColor = 'transparent';
+        btn.style.color = 'var(--text2)';
+    });
+    const active = document.getElementById('tab-' + name);
+    active.style.borderBottomColor = 'var(--accent)';
+    active.style.color = 'var(--text)';
+}
+switchTab('coins');
+
+async function saveExchangeRate() {
+    const rate = parseInt(document.getElementById('exchange-rate-input').value);
+    if (!rate || rate <= 0) { showToast('Enter a valid rate', 'warning'); return; }
+    const res  = await fetch('/api/economy/exchange-rate', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ rate }),
+    });
+    const data = await res.json();
+    if (data.success) showToast(`Rate set to ${rate.toLocaleString()}:1`);
+    else showToast(data.error || 'Error saving rate', 'error');
+}
+</script>
+{% endblock %}
 {% endblock %}

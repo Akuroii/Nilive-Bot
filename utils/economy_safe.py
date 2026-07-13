@@ -204,3 +204,93 @@ async def safe_decrement_stock(item_id: int) -> bool:
         except Exception:
             await db.execute("ROLLBACK")
             raise
+
+
+# ── Phase 5 / Economy v2 ────────────────────────────────────────────────
+# Converts coins into diamonds at a configurable coins-per-diamond rate.
+# Atomic (BEGIN IMMEDIATE): the coin deduction and diamond credit either
+# both land or neither does — same transactional guard pattern as
+# safe_transfer above, just moving value between two currency columns on
+# the same user instead of between two users on the same currency.
+#
+# Only the coins that convert cleanly are spent (coin_amount is floored
+# to the nearest multiple of `rate`), so a user converting 1,250 coins at
+# a 500:1 rate gets 2 diamonds and keeps the leftover 250 coins rather
+# than losing them to rounding.
+async def safe_convert(guild_id: int, user_id: int, coin_amount: int,
+                        rate: int, reason: str = "Currency conversion",
+                        source: str = "convert") -> dict:
+    if coin_amount <= 0:
+        raise ValueError("coin_amount must be positive")
+    if rate <= 0:
+        raise ValueError("rate must be positive")
+
+    diamonds_gained = coin_amount // rate
+    if diamonds_gained <= 0:
+        raise ValueError(
+            f"Need at least {rate} coins to convert 1 diamond "
+            f"(current rate: {rate}:1)")
+
+    coins_spent = diamonds_gained * rate
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id))
+            row = await cursor.fetchone()
+            balance = row[0] if row else 0
+            if balance < coins_spent:
+                await db.execute("ROLLBACK")
+                raise InsufficientBalance(f"Balance {balance} < {coins_spent}")
+
+            await db.execute("""
+                UPDATE economy SET balance = balance - ?
+                WHERE guild_id=? AND user_id=?
+            """, (coins_spent, guild_id, user_id))
+            await db.execute("""
+                INSERT INTO economy (guild_id, user_id, diamonds)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, user_id)
+                DO UPDATE SET diamonds = diamonds + ?
+            """, (guild_id, user_id, diamonds_gained, diamonds_gained))
+
+            new_balance_row = await (await db.execute(
+                "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id))).fetchone()
+            new_diamonds_row = await (await db.execute(
+                "SELECT diamonds FROM economy WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id))).fetchone()
+            await db.commit()
+        except InsufficientBalance:
+            raise
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+
+    new_balance  = new_balance_row[0] if new_balance_row else 0
+    new_diamonds = new_diamonds_row[0] if new_diamonds_row else 0
+
+    await _log_ledger(guild_id, user_id, "balance", -coins_spent,
+                       new_balance, "convert_out",
+                       f"{reason} ({rate}:1 rate)", source)
+    await _log_ledger(guild_id, user_id, "diamonds", diamonds_gained,
+                       new_diamonds, "convert_in",
+                       f"{reason} ({rate}:1 rate)", source)
+
+    return {
+        "coins_spent": coins_spent,
+        "diamonds_gained": diamonds_gained,
+        "new_balance": new_balance,
+        "new_diamonds": new_diamonds,
+    }
+
+
+async def get_guild_exchange_rate(guild_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT diamond_exchange_rate FROM guild_settings WHERE guild_id=?",
+            (guild_id,))
+        row = await cursor.fetchone()
+    return row[0] if row and row[0] else 500

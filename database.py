@@ -356,6 +356,24 @@ async def init_db():
             ON guild_settings(guild_id)
         """)
 
+        # Phase 5 / Economy v2: per-guild convertible exchange rate.
+        # Coins-per-1-diamond. Server owners set this via the Economy
+        # dashboard page; cogs/economy.py's /convert command and
+        # utils/economy_safe.safe_convert() both read it (falling back
+        # to 500 if a guild has no row yet, matching the value Dark
+        # specified). Additive migration only — no existing column
+        # touched, no rebuild of guild_settings itself.
+        try:
+            cursor = await db.execute("PRAGMA table_info(guild_settings)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "diamond_exchange_rate" not in cols:
+                await db.execute(
+                    "ALTER TABLE guild_settings ADD COLUMN "
+                    "diamond_exchange_rate INTEGER DEFAULT 500")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] guild_settings.diamond_exchange_rate: {e}")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_settings_kv (
                 guild_id   INTEGER NOT NULL,
@@ -560,6 +578,22 @@ async def init_db():
             ON shop_items(guild_id)
         """)
 
+        # Phase 5 / Economy v2: diamond-priced shop items. Nullable —
+        # a shop item is coins-priced (existing `price` column) unless
+        # this is set, in which case cogs/shop.py's process_purchase()
+        # charges diamonds instead. Additive migration, existing rows
+        # unaffected (NULL = still coins-priced, same as before).
+        try:
+            cursor = await db.execute("PRAGMA table_info(shop_items)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "price_diamonds" not in cols:
+                await db.execute(
+                    "ALTER TABLE shop_items ADD COLUMN "
+                    "price_diamonds INTEGER DEFAULT NULL")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] shop_items.price_diamonds: {e}")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS purchase_history (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -581,6 +615,21 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_ph_user
             ON purchase_history(user_id)
         """)
+
+        # Phase 5 / Economy v2: records which currency a purchase was
+        # paid in, since price_paid alone is ambiguous once diamond
+        # pricing exists. Defaults to 'balance' for historical rows
+        # (accurate — diamond pricing didn't exist before this).
+        try:
+            cursor = await db.execute("PRAGMA table_info(purchase_history)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "currency_paid" not in cols:
+                await db.execute(
+                    "ALTER TABLE purchase_history ADD COLUMN "
+                    "currency_paid TEXT DEFAULT 'balance'")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] purchase_history.currency_paid: {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS temp_roles (

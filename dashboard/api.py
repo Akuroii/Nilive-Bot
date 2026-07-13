@@ -291,8 +291,6 @@ def api_mod_edit_reason(log_id: int):
 @api_bp.route("/moderation/delete-log/<int:log_id>", methods=["DELETE"])
 @require_api_permission(LEVEL_OWNER)
 def api_mod_delete_log(log_id: int):
-    # Owner-only enforcement now happens in @require_api_permission(LEVEL_OWNER)
-    # above, not here — see dashboard/permissions.py.
     guild_id = get_session_guild_id()
 
     async def soft_delete():
@@ -582,8 +580,6 @@ def api_clear_warnings():
 @api_bp.route("/moderation/delete-warning/<int:warning_id>", methods=["DELETE"])
 @require_api_permission(LEVEL_OWNER)
 def api_delete_warning(warning_id: int):
-    # Owner-only enforcement now happens in @require_api_permission(LEVEL_OWNER)
-    # above, not here — see dashboard/permissions.py.
     guild_id = get_session_guild_id()
 
     async def delete():
@@ -1051,6 +1047,85 @@ def economy_leaderboard_partial():
     return html or "<tr><td colspan='3' class='empty'>No data yet</td></tr>"
 
 
+# Phase 5 / Economy v2: diamonds leaderboard, mirrors the coins one
+# above exactly (same gate, same per-guild isolation) but reads the
+# `diamonds` column instead of `balance`.
+@api_bp.route("/economy/leaderboard-diamonds")
+@require_api_permission(LEVEL_ADMIN)
+def economy_leaderboard_diamonds_partial():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT user_id, diamonds FROM economy
+                WHERE guild_id = ? AND diamonds > 0
+                ORDER BY diamonds DESC LIMIT 50
+            """, (guild_id,))
+            return await cursor.fetchall()
+
+    rows = run_async(fetch())
+    html = ""
+    for i, r in enumerate(rows, 1):
+        html += (
+            f"<tr><td>#{i}</td>"
+            f"<td><code>{r[0]}</code></td>"
+            f"<td><strong>💎 {r[1]:,}</strong></td></tr>"
+        )
+    return html or "<tr><td colspan='3' class='empty'>No diamonds held yet</td></tr>"
+
+
+# Phase 5 / Economy v2: per-guild convertible exchange rate config.
+# GET returns the current rate (falls back to the 500:1 default Dark
+# specified if the guild hasn't set one). POST lets an ADMIN+ user
+# change it — server owners configuring their own rate, per spec.
+# Rate is read at conversion time by cogs/economy.py's /convert
+# command and utils/economy_safe.safe_convert(), never cached, so a
+# rate change takes effect on the very next /convert call.
+@api_bp.route("/economy/exchange-rate", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_exchange_rate_api():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT diamond_exchange_rate FROM guild_settings WHERE guild_id=?",
+                (guild_id,))
+            row = await cursor.fetchone()
+        return row[0] if row and row[0] else 500
+
+    return jsonify({"rate": run_async(fetch())})
+
+
+@api_bp.route("/economy/exchange-rate", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def save_exchange_rate_api():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+    try:
+        rate = int(data.get("rate", 500))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Rate must be a whole number"})
+    if rate <= 0:
+        return jsonify({"success": False, "error": "Rate must be positive"})
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO guild_settings (guild_id, diamond_exchange_rate)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    diamond_exchange_rate = excluded.diamond_exchange_rate,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (guild_id, rate))
+            await db.commit()
+
+    run_async(save())
+    log_action(guild_id, f"Set diamond exchange rate to {rate}:1", "economy")
+    return jsonify({"success": True, "rate": rate})
+
+
 @api_bp.route("/shop/items")
 @require_api_permission(LEVEL_ADMIN)
 def shop_items_partial():
@@ -1060,7 +1135,8 @@ def shop_items_partial():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT id, name, description, price, type,
-                       role_id, duration_hours, featured, enabled
+                       role_id, duration_hours, featured, enabled,
+                       price_diamonds
                 FROM shop_items WHERE guild_id = ?
                 ORDER BY featured DESC, created_at DESC
             """, (guild_id,))
@@ -1072,11 +1148,13 @@ def shop_items_partial():
         status = "badge-success" if r[8] else "badge-danger"
         label  = "Active" if r[8] else "Disabled"
         dur    = f"{r[6]}h" if r[6] else "Permanent"
+        price_diamonds = r[9]
+        price_str = f"💎 {price_diamonds:,}" if price_diamonds else f"🪙 {r[3]:,}"
         html  += (
             f"<tr>"
             f"<td><strong>{r[1]}</strong>{'⭐' if r[7] else ''}</td>"
             f"<td class='text-muted'>{r[2] or '—'}</td>"
-            f"<td>🪙 {r[3]:,}</td>"
+            f"<td>{price_str}</td>"
             f"<td>{r[4]}</td>"
             f"<td>{dur}</td>"
             f"<td><span class='badge {status}'>{label}</span></td>"
@@ -1129,6 +1207,18 @@ def add_shop_item():
         max_stock_val = None
     current_stock_val = max_stock_val  # a brand-new item starts full
 
+    # Phase 5 / Economy v2: optional diamond price. When set, the
+    # item is charged in diamonds instead of coins at purchase time
+    # (see cogs/shop.py process_purchase). Left NULL (unset) keeps
+    # existing coins-priced behavior exactly as before.
+    price_diamonds_val = data.get("price_diamonds")
+    try:
+        price_diamonds_val = (
+            int(price_diamonds_val)
+            if price_diamonds_val not in (None, "", 0, "0") else None)
+    except (TypeError, ValueError):
+        price_diamonds_val = None
+
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -1136,8 +1226,8 @@ def add_shop_item():
                     (guild_id, name, description, price, type,
                      role_id, duration_hours, featured,
                      required_level, required_role_id,
-                     max_stock, current_stock, enabled)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                     max_stock, current_stock, enabled, price_diamonds)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             """, (
                 guild_id,
                 data.get("name"),
@@ -1151,6 +1241,7 @@ def add_shop_item():
                 data.get("required_role_id") or None,
                 max_stock_val,
                 current_stock_val,
+                price_diamonds_val,
             ))
             await db.commit()
 
@@ -1168,7 +1259,8 @@ def shop_purchase_history():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT user_display_name, item_name,
-                       price_paid, purchased_at, expires_at
+                       price_paid, purchased_at, expires_at,
+                       currency_paid
                 FROM purchase_history
                 WHERE guild_id = ?
                 ORDER BY purchased_at DESC LIMIT 50
@@ -1179,11 +1271,12 @@ def shop_purchase_history():
     html = ""
     for r in rows:
         exp   = r[4][:10] if r[4] else "Permanent"
+        currency_icon = "💎" if (len(r) > 5 and r[5] == "diamonds") else "🪙"
         html += (
             f"<tr>"
             f"<td>{r[0]}</td>"
             f"<td><strong>{r[1]}</strong></td>"
-            f"<td>🪙 {r[2]:,}</td>"
+            f"<td>{currency_icon} {r[2]:,}</td>"
             f"<td class='text-muted'>{str(r[3])[:10] if r[3] else '—'}</td>"
             f"<td class='text-muted'>{exp}</td>"
             f"</tr>"
@@ -1683,19 +1776,6 @@ def delete_status_message(msg_id: int):
 
 
 # ── Phase 3 E3/E4 CLOSEOUT — Ledger & Inventory (read-only) ────────────────────
-#
-# Both endpoints are MOD+ (viewing money movement / who-holds-what is
-# a read, gated at the same floor as moderation_logs viewing). The
-# dashboard page routes that link to these (see dashboard/app.py)
-# additionally require ADMIN+ for the page itself — api.py enforces
-# its own floor independently rather than trusting the page gate, per
-# the existing pattern documented at the top of this file.
-#
-# Neither route accepts a guild_id from the client — like every other
-# route in this file, the guild is always taken from the authenticated
-# session (get_session_guild_id()), never from user input, so there is
-# no way to page through another guild's ledger/inventory by editing
-# a URL.
 
 @api_bp.route("/ledger")
 @require_api_permission(LEVEL_MODERATOR)
@@ -1722,9 +1802,6 @@ def api_ledger():
 @api_bp.route("/ledger/reverse/<int:ledger_id>", methods=["POST"])
 @require_api_permission(LEVEL_OWNER)
 def api_ledger_reverse(ledger_id: int):
-    # Reversing a transaction actually moves coins/diamonds back —
-    # unlike the read above, this is a write and gets the same
-    # owner-only floor already used for deleting mod logs/warnings.
     guild_id = get_session_guild_id()
     reason   = (request.json or {}).get("reason", "Reversed via dashboard")
 
@@ -1762,23 +1839,6 @@ def api_inventory_user(user_id: int):
 
 
 # ── Rewards (Phase 3 E2 read endpoint) ─────────────────────────────────────
-#
-# E2 (utils/reward_engine.py) is complete and NOT rebuilt here. Every
-# coin/diamond/xp grant it issues already lands in transaction_ledger
-# via economy_safe.py / _log_xp_ledger — there was no missing write
-# path, only a missing read: a way to pull just the *reward-sourced*
-# slice of one member's ledger (leveling/shop/event/admin grants)
-# instead of their full transaction history.
-#
-# ADMIN+ gate, same tier as /api/activity/<user_id> — a per-user
-# reward history is comparable sensitivity to a per-user activity
-# history. guild_id is always taken from the session, never the
-# client, matching every other route in this file. role/temp_role and
-# item rewards aren't ledgered (they're Discord role state / the
-# inventory_items table respectively — see Ledger page docstring and
-# systems/inventory.html), so this reflects coins/diamonds/xp reward
-# grants specifically, which is what "reward history" means for the
-# ledger's schema.
 
 REWARD_SOURCES = ("leveling", "shop", "event", "admin")
 

@@ -6,7 +6,8 @@ import random
 from datetime import datetime, timedelta
 from database import DB_PATH
 from utils.economy_safe import (
-    safe_transfer, safe_credit, safe_admin_deduct, InsufficientBalance,
+    safe_transfer, safe_credit, safe_admin_deduct, safe_convert,
+    get_guild_exchange_rate, InsufficientBalance,
 )
 
 
@@ -18,6 +19,16 @@ async def get_balance(guild_id: int, user_id: int) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT balance FROM economy
+            WHERE guild_id = ? AND user_id = ?
+        """, (guild_id, user_id))
+        row = await cursor.fetchone()
+    return row[0] if row else 0
+
+
+async def get_diamonds(guild_id: int, user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT diamonds FROM economy
             WHERE guild_id = ? AND user_id = ?
         """, (guild_id, user_id))
         row = await cursor.fetchone()
@@ -59,17 +70,20 @@ class Economy(commands.Cog):
 
     # ─── BALANCE ────────────────────────────────────────
     @app_commands.command(name="balance",
-                          description="Check your coin balance")
+                          description="Check your coin and diamond balance")
     async def balance(self, interaction: discord.Interaction,
                       member: discord.Member = None):
         member   = member or interaction.user
         bal      = await get_balance(
             interaction.guild.id, member.id)
+        gems     = await get_diamonds(
+            interaction.guild.id, member.id)
         currency = await get_currency_name(interaction.guild.id)
         embed    = discord.Embed(
             title=f"💰 {member.display_name}'s Balance",
-            description=f"**{bal:,}** {currency}",
             color=0xFFD700)
+        embed.add_field(name=currency, value=f"**{bal:,}**")
+        embed.add_field(name="💎 Diamonds", value=f"**{gems:,}**")
         await interaction.response.send_message(embed=embed)
 
     # ─── DAILY ──────────────────────────────────────────
@@ -205,6 +219,48 @@ class Economy(commands.Cog):
         await interaction.response.send_message(
             f"Gave **{amount:,}** {currency} to {member.mention}!")
 
+    # ─── CONVERT (Phase 5 / Economy v2) ─────────────────
+    # Converts coins into diamonds at this guild's configured rate
+    # (default 500:1, set via the Economy dashboard page or left at
+    # default). Rounds down to the nearest full diamond — leftover
+    # coins that don't divide evenly stay in the user's balance
+    # rather than being lost.
+    @app_commands.command(name="convert",
+                          description="Convert coins into diamonds")
+    async def convert(self, interaction: discord.Interaction, coins: int):
+        if coins <= 0:
+            await interaction.response.send_message(
+                "Amount must be positive.", ephemeral=True)
+            return
+
+        guild_id = interaction.guild.id
+        rate     = await get_guild_exchange_rate(guild_id)
+        currency = await get_currency_name(guild_id)
+
+        try:
+            result = await safe_convert(
+                guild_id, interaction.user.id, coins, rate,
+                reason="User conversion", source="convert")
+        except InsufficientBalance:
+            bal = await get_balance(guild_id, interaction.user.id)
+            await interaction.response.send_message(
+                f"You only have {bal:,} {currency}!", ephemeral=True)
+            return
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="💱 Converted!",
+            description=(
+                f"Spent **{result['coins_spent']:,}** {currency} → "
+                f"got **{result['diamonds_gained']:,}** 💎 Diamonds\n"
+                f"New balance: **{result['new_balance']:,}** {currency} · "
+                f"**{result['new_diamonds']:,}** 💎"),
+            color=0x57F287)
+        embed.set_footer(text=f"Rate: {rate:,} {currency} = 1 💎")
+        await interaction.response.send_message(embed=embed)
+
     # ─── RICHEST ────────────────────────────────────────
     @app_commands.command(name="richest",
                           description="View the richest members")
@@ -276,6 +332,49 @@ class Economy(commands.Cog):
         await interaction.response.send_message(
             f"Removed **{amount:,}** {currency} from {member.mention}. "
             f"New balance: **{new_bal:,}**.",
+            ephemeral=True)
+
+    # ─── ADD DIAMONDS (admin, Phase 5 / Economy v2) ─────
+    # Mirrors addcoins but on the diamonds currency column — used for
+    # "special events, bonus, no conversion needed" diamond grants per
+    # Dark's spec. Routed through safe_credit(currency="diamonds") so
+    # it's ledgered identically to every other reward path.
+    @app_commands.command(name="adddiamonds",
+                          description="Add diamonds to a member (admin)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def adddiamonds(self, interaction: discord.Interaction,
+                          member: discord.Member, amount: int):
+        if amount <= 0:
+            await interaction.response.send_message(
+                "Amount must be positive.", ephemeral=True)
+            return
+        await safe_credit(
+            interaction.guild.id, member.id, amount, currency="diamonds",
+            reason=f"Admin grant by {interaction.user.display_name}",
+            source="admin")
+        new_gems = await get_diamonds(interaction.guild.id, member.id)
+        await interaction.response.send_message(
+            f"Added **{amount:,}** 💎 to {member.mention}. "
+            f"New diamond balance: **{new_gems:,}**.",
+            ephemeral=True)
+
+    # ─── REMOVE DIAMONDS (admin, Phase 5 / Economy v2) ──
+    @app_commands.command(name="removediamonds",
+                          description="Remove diamonds from a member (admin)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def removediamonds(self, interaction: discord.Interaction,
+                             member: discord.Member, amount: int):
+        if amount <= 0:
+            await interaction.response.send_message(
+                "Amount must be positive.", ephemeral=True)
+            return
+        new_gems = await safe_admin_deduct(
+            interaction.guild.id, member.id, amount, currency="diamonds",
+            reason=f"Admin removal by {interaction.user.display_name}",
+            source="admin")
+        await interaction.response.send_message(
+            f"Removed **{amount:,}** 💎 from {member.mention}. "
+            f"New diamond balance: **{new_gems:,}**.",
             ephemeral=True)
 
 

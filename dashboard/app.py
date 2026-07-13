@@ -727,6 +727,14 @@ def leveling():
 
 
 # ── Economy ────────────────────────────────────────────────────────────────────
+#
+# Phase 5 / Economy v2 (dual currency, convertible, 500:1 default):
+# this route now also loads the diamonds leaderboard and the guild's
+# configured exchange rate so systems/economy.html can render both
+# currencies and let an ADMIN+ user change the rate. The rate itself
+# is saved via POST /api/economy/exchange-rate (dashboard/api.py),
+# not here — this route stays read-only like the rest of the page
+# routes in this file.
 
 @app.route("/economy")
 @require_page("economy")
@@ -739,11 +747,26 @@ def economy():
                 SELECT user_id, balance FROM economy
                 WHERE guild_id=? ORDER BY balance DESC LIMIT 50
             """, (guild_id,))
-            return await cursor.fetchall()
+            balances = await cursor.fetchall()
 
-    balances = run_async(get_data())
-    ctx      = get_current_user_context()
-    return render("systems/economy.html", balances=balances, **ctx)
+            dcursor = await db.execute("""
+                SELECT user_id, diamonds FROM economy
+                WHERE guild_id=? AND diamonds > 0
+                ORDER BY diamonds DESC LIMIT 50
+            """, (guild_id,))
+            diamonds = await dcursor.fetchall()
+
+            rcursor = await db.execute(
+                "SELECT diamond_exchange_rate FROM guild_settings WHERE guild_id=?",
+                (guild_id,))
+            rrow = await rcursor.fetchone()
+        return balances, diamonds, (rrow[0] if rrow and rrow[0] else 500)
+
+    balances, diamonds, exchange_rate = run_async(get_data())
+    ctx = get_current_user_context()
+    return render("systems/economy.html",
+                  balances=balances, diamonds=diamonds,
+                  exchange_rate=exchange_rate, **ctx)
 
 
 # ── Shop ───────────────────────────────────────────────────────────────────────
@@ -757,7 +780,8 @@ def shop():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT id, name, description, price, type,
-                       role_id, duration_hours, featured, enabled
+                       role_id, duration_hours, featured, enabled,
+                       price_diamonds
                 FROM shop_items WHERE guild_id=?
                 ORDER BY featured DESC, created_at DESC
             """, (guild_id,))
@@ -1057,8 +1081,9 @@ COMMAND_CATEGORIES = {
         "lock","unlock","slowmode","modlogs",
     ],
     "Economy": [
-        "balance","daily","work","give","richest",
-        "addcoins","removecoins","shop","buy",
+        "balance","daily","work","give","richest","convert",
+        "addcoins","removecoins","adddiamonds","removediamonds",
+        "shop","buy",
     ],
     "Leveling": ["rank","leaderboard","setxp","resetxp"],
     "Fun": ["hug","pat","slap","kiss","dance","coinflip","8ball"],
