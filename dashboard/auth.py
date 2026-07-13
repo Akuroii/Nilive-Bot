@@ -14,6 +14,13 @@ REDIRECT_URI  = os.getenv("DISCORD_REDIRECT_URI")
 SESSION_DURATION_DEFAULT  = 60 * 60 * 24
 SESSION_DURATION_REMEMBER = 60 * 60 * 24 * 7
 
+# Phase 0 Extension — Server Permission Gating (Sapphire-style)
+DISCORD_PERMISSION_ADMINISTRATOR = 0x8
+# Bot invite permission bitfield — defaults to Administrator (8) like the
+# existing invite flow implied by DEBUG_GUIDE.md's bot+applications.commands
+# scopes. Overridable via env if a narrower permission set is ever wanted.
+BOT_INVITE_PERMISSIONS = os.getenv("BOT_INVITE_PERMISSIONS", "8")
+
 
 def get_discord_oauth_url() -> str:
     return (
@@ -59,97 +66,73 @@ def fetch_discord_guilds(access_token: str) -> list:
     return r.json() if r.status_code == 200 else []
 
 
-# ── PHASE 0: SERVER PERMISSION GATING ───────────────────────────────
-#
-# Two additions in support of the server-gating feature on
-# /server-select: knowing which of the user's guilds the bot is
-# ALREADY in (fetch_discord_bot_guilds, uses the bot token — the
-# user's own OAuth2 token has no visibility into that), and building
-# a guild-targeted invite link (get_bot_invite_url). Also a small
-# permission-bit helper so app.py doesn't need to know Discord's
-# permission bitfield layout.
-#
-# This is deliberately separate from dashboard_users (Nilive's own
-# per-guild access-approval table, see database.py). dashboard_users
-# still gates who can actually USE the dashboard for a guild.
-# fetch_discord_bot_guilds / get_bot_invite_url only answer "is the
-# bot in this Discord server yet" and "here's how to add it" — a
-# setup aid, not an access grant.
-
-ADMINISTRATOR_PERMISSION_BIT = 0x8
-
-# Default invite scope: bot + slash commands, Administrator permission.
-# Administrator (not a hand-picked subset of permission bits) is used
-# deliberately here: Nilive runs on a small number of trusted,
-# approval-based friend servers (see project memory), and the bot's
-# cogs already span moderation, channel/role management, and ticket
-# channel creation — a narrower bitmask would need constant upkeep as
-# cogs grow, for no real security benefit in this deployment model.
-# Override via DISCORD_BOT_PERMISSIONS if a narrower grant is wanted.
-DEFAULT_BOT_INVITE_PERMISSIONS = os.getenv(
-    "DISCORD_BOT_PERMISSIONS", str(ADMINISTRATOR_PERMISSION_BIT))
-
-
-def fetch_discord_bot_guilds() -> list[str]:
+def guild_permissions_include_admin(permissions) -> bool:
     """
-    Returns the guild IDs (as strings, matching Discord API shape) that
-    the bot itself is currently a member of, via the bot token. Used to
-    compute is_bot_member for each of the user's guilds in
-    /api/user/servers. Returns [] (not an exception) on any failure —
-    callers treat that the same as "bot membership unknown / assume
-    not a member", which is the safe default for a gating feature
-    (worst case: a server that already has the bot shows an
-    unnecessary Invite button, not a hidden active server).
+    Phase 0 Extension. `permissions` is the decimal-string bitfield
+    Discord returns per-guild in /users/@me/guilds. Guild owners
+    already have this bit set by Discord itself, so no separate
+    owner check is needed.
+    """
+    try:
+        perm_int = int(permissions)
+    except (TypeError, ValueError):
+        return False
+    return bool(perm_int & DISCORD_PERMISSION_ADMINISTRATOR)
+
+
+def fetch_discord_bot_guilds() -> set[int]:
+    """
+    Phase 0 Extension. Returns the set of guild IDs the bot is
+    currently a member of, read via the BOT token (not the user's
+    OAuth token), so this works regardless of what scopes the user
+    granted. Used to flag which of a user's admin guilds already
+    have the bot installed vs. still need an invite.
+
+    Returns an empty set (never raises) if DISCORD_TOKEN isn't set
+    or the API call fails — callers treat that as "assume not a
+    member yet", which just shows the Invite button, the safe
+    default.
     """
     bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:
-        return []
+        return set()
+    guild_ids: set[int] = set()
+    headers = {"Authorization": f"Bot {bot_token}"}
+    params  = {"limit": 200}
     try:
-        r = requests.get(
-            f"{DISCORD_API}/users/@me/guilds",
-            headers={"Authorization": f"Bot {bot_token}"},
-            timeout=10,
-        )
-    except requests.RequestException:
-        return []
-    if r.status_code != 200:
-        return []
-    return [g["id"] for g in r.json()]
-
-
-def guild_permissions_include_admin(permissions_str: str | None,
-                                     is_owner: bool) -> bool:
-    """
-    Discord's /users/@me/guilds response includes `owner` (bool) and
-    `permissions` (a base-10 string of the computed permission
-    bitfield) per guild. A user counts as "admin" for gating purposes
-    if they own the guild OR have the ADMINISTRATOR bit set.
-    """
-    if is_owner:
-        return True
-    if not permissions_str:
-        return False
-    try:
-        perms = int(permissions_str)
-    except (TypeError, ValueError):
-        return False
-    return bool(perms & ADMINISTRATOR_PERMISSION_BIT)
+        while True:
+            r = requests.get(
+                f"{DISCORD_API}/users/@me/guilds",
+                headers=headers, params=params, timeout=10)
+            if r.status_code != 200:
+                break
+            page = r.json()
+            if not page:
+                break
+            guild_ids.update(int(g["id"]) for g in page)
+            if len(page) < params["limit"]:
+                break
+            params["after"] = page[-1]["id"]
+    except Exception as e:
+        print(f"[AUTH] fetch_discord_bot_guilds error: {e}")
+    return guild_ids
 
 
 def get_bot_invite_url(guild_id: int) -> str:
     """
-    Builds a Discord OAuth2 bot-invite URL pre-targeted at a specific
-    guild. disable_guild_select=true locks Discord's own guild picker
-    so the inviting admin can't accidentally add the bot to the wrong
-    server.
+    Phase 0 Extension. Builds a bot-invite OAuth2 URL locked to one
+    guild (disable_guild_select=true) so clicking "Invite Bot" from
+    the dashboard can't accidentally add the bot to the wrong
+    server. Uses the bot+applications.commands scopes DEBUG_GUIDE.md
+    already documents as required.
     """
     return (
-        f"https://discord.com/oauth2/authorize"
+        f"https://discord.com/api/oauth2/authorize"
         f"?client_id={CLIENT_ID}"
-        f"&scope=bot+applications.commands"
-        f"&permissions={DEFAULT_BOT_INVITE_PERMISSIONS}"
         f"&guild_id={guild_id}"
         f"&disable_guild_select=true"
+        f"&permissions={BOT_INVITE_PERMISSIONS}"
+        f"&scope=bot+applications.commands"
     )
 
 

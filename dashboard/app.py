@@ -15,8 +15,6 @@ from dashboard.auth import (
     login_required, create_session, clear_session,
     get_discord_oauth_url, exchange_code, fetch_discord_user,
     fetch_discord_guilds, current_user, current_user_id,
-    fetch_discord_bot_guilds, get_bot_invite_url,
-    guild_permissions_include_admin,
 )
 from dashboard.permissions import (
     require_page, get_current_user_context, log_action,
@@ -165,62 +163,57 @@ def select_guild(guild_id: int):
     return redirect(url_for("index"))
 
 
-# ── Phase 0: Server permission gating ───────────────────────────────────────
+# ── Phase 0 Extension — Server Permission Gating (Sapphire-style) ──────────
 #
-# Two new endpoints supporting the /server-select "invite/manage servers"
-# panel. Both are gated with @login_required only (not @require_page /
-# @require_api_permission), because they intentionally run BEFORE a guild
-# is selected in the session — there's no get_session_guild_id() yet at
-# this point in the flow, which every other /api route in dashboard/api.py
-# depends on. This is why these live in app.py rather than api.py's
-# api_bp blueprint.
+# The section above (/server-select, /select-guild) gates on the internal
+# dashboard_users table, which only lists guilds someone has already been
+# explicitly granted access to — that's still the real authorization check
+# and is untouched here.
 #
-# Design note (see dashboard/auth.py docstrings for the full rationale):
-# this is deliberately separate from dashboard_users. dashboard_users
-# still gates who can actually USE the dashboard for a guild once Nero is
-# in it; these two routes only answer "which of your Discord servers could
-# Nero be added to, and is she there yet" as a setup aid.
+# What was missing: a way for a user to SEE their Discord-admin servers
+# that aren't onboarded yet, and invite the bot to one directly from the
+# dashboard instead of needing a raw invite link from elsewhere. These two
+# routes are read-only discovery + a redirect-URL generator — neither one
+# grants dashboard access by itself. A server only becomes selectable via
+# /select-guild once dashboard_users has a row for it, same as before (bot
+# join already auto-grants OWNER_DISCORD_ID via database.add_guild_owner()).
 
 @app.route("/api/user/servers")
 @login_required
 def api_user_servers():
+    from dashboard.auth import (
+        guild_permissions_include_admin, fetch_discord_bot_guilds,
+    )
+
     access_token = session.get("access_token", "")
     if not access_token:
-        return jsonify({"servers": [], "error": "No Discord session"}), 401
+        return jsonify({"servers": []})
 
-    user_guilds  = fetch_discord_guilds(access_token)
-    bot_guild_ids = set(fetch_discord_bot_guilds())
+    guilds        = fetch_discord_guilds(access_token)
+    bot_guild_ids = fetch_discord_bot_guilds()
 
     servers = []
-    for g in user_guilds:
-        is_admin = guild_permissions_include_admin(
-            g.get("permissions"), bool(g.get("owner")))
-        # Hidden state: a guild the user doesn't administer has nothing
-        # actionable here (they can't invite or manage the bot), so it's
-        # omitted entirely rather than returned with is_admin=false.
-        if not is_admin:
+    for g in guilds:
+        if not guild_permissions_include_admin(g.get("permissions")):
             continue
+        gid = int(g["id"])
         servers.append({
-            "id":            g["id"],
-            "name":          g["name"],
+            "id":            gid,
+            "name":          g.get("name", "Unknown Server"),
             "icon":          g.get("icon"),
-            "is_bot_member": g["id"] in bot_guild_ids,
-            "is_admin":      True,
+            "is_bot_member": gid in bot_guild_ids,
         })
 
-    # Servers missing the bot float to the top — that's the actionable
-    # group a returning admin most likely wants to see first.
-    servers.sort(key=lambda s: (s["is_bot_member"], s["name"].lower()))
+    # Bot-installed servers first, then alphabetical within each group.
+    servers.sort(key=lambda s: (not s["is_bot_member"], s["name"].lower()))
     return jsonify({"servers": servers})
 
 
-@app.route("/api/invite-bot")
+@app.route("/api/invite-bot/<int:guild_id>")
 @login_required
-def api_invite_bot():
-    guild_id = request.args.get("guild_id", "")
-    if not guild_id.isdigit():
-        return jsonify({"error": "Valid guild_id required"}), 400
-    return jsonify({"invite_url": get_bot_invite_url(int(guild_id))})
+def api_invite_bot(guild_id: int):
+    from dashboard.auth import get_bot_invite_url
+    return jsonify({"url": get_bot_invite_url(guild_id)})
 
 
 # ── Overview ───────────────────────────────────────────────────────────────────
@@ -787,6 +780,14 @@ def leveling():
 
 
 # ── Economy ────────────────────────────────────────────────────────────────────
+#
+# Phase 5 / Economy v2 (dual currency, convertible, 500:1 default):
+# this route now also loads the diamonds leaderboard and the guild's
+# configured exchange rate so systems/economy.html can render both
+# currencies and let an ADMIN+ user change the rate. The rate itself
+# is saved via POST /api/economy/exchange-rate (dashboard/api.py),
+# not here — this route stays read-only like the rest of the page
+# routes in this file.
 
 @app.route("/economy")
 @require_page("economy")
@@ -799,11 +800,26 @@ def economy():
                 SELECT user_id, balance FROM economy
                 WHERE guild_id=? ORDER BY balance DESC LIMIT 50
             """, (guild_id,))
-            return await cursor.fetchall()
+            balances = await cursor.fetchall()
 
-    balances = run_async(get_data())
-    ctx      = get_current_user_context()
-    return render("systems/economy.html", balances=balances, **ctx)
+            dcursor = await db.execute("""
+                SELECT user_id, diamonds FROM economy
+                WHERE guild_id=? AND diamonds > 0
+                ORDER BY diamonds DESC LIMIT 50
+            """, (guild_id,))
+            diamonds = await dcursor.fetchall()
+
+            rcursor = await db.execute(
+                "SELECT diamond_exchange_rate FROM guild_settings WHERE guild_id=?",
+                (guild_id,))
+            rrow = await rcursor.fetchone()
+        return balances, diamonds, (rrow[0] if rrow and rrow[0] else 500)
+
+    balances, diamonds, exchange_rate = run_async(get_data())
+    ctx = get_current_user_context()
+    return render("systems/economy.html",
+                  balances=balances, diamonds=diamonds,
+                  exchange_rate=exchange_rate, **ctx)
 
 
 # ── Shop ───────────────────────────────────────────────────────────────────────
@@ -817,7 +833,8 @@ def shop():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT id, name, description, price, type,
-                       role_id, duration_hours, featured, enabled
+                       role_id, duration_hours, featured, enabled,
+                       price_diamonds
                 FROM shop_items WHERE guild_id=?
                 ORDER BY featured DESC, created_at DESC
             """, (guild_id,))
@@ -851,6 +868,13 @@ def events():
 
 
 # ── Ledger (Phase 3 E3 CLOSEOUT — read-only) ────────────────────────────────
+#
+# ADMIN+ page gate (see utils/permissions.py PAGE_PERMISSIONS["ledger"]).
+# Data itself is loaded client-side via GET /api/ledger, which enforces
+# its own MOD+ floor independently — see dashboard/api.py. This route
+# only renders the shell + the initial guild-wide page; per-guild
+# isolation is enforced identically to every other page here, via
+# get_session_guild_id() rather than any client-supplied guild id.
 
 @app.route("/ledger")
 @require_page("ledger")
@@ -867,6 +891,13 @@ def ledger_page():
 
 
 # ── Inventory (Phase 3 E4 CLOSEOUT — read-only) ─────────────────────────────
+#
+# Same shape as the ledger page above: ADMIN+ to view the page,
+# MOD+ enforced independently by the underlying /api/inventory routes.
+# /inventory shows the guild-wide "who holds what" summary;
+# /inventory/<user_id> drills into one member, reusing the same
+# per-guild-isolated query utils/inventory.get_inventory() already
+# exposes to the /inventory slash command.
 
 @app.route("/inventory")
 @require_page("inventory_view")
@@ -1103,8 +1134,9 @@ COMMAND_CATEGORIES = {
         "lock","unlock","slowmode","modlogs",
     ],
     "Economy": [
-        "balance","daily","work","give","richest",
-        "addcoins","removecoins","shop","buy",
+        "balance","daily","work","give","richest","convert",
+        "addcoins","removecoins","adddiamonds","removediamonds",
+        "shop","buy",
     ],
     "Leveling": ["rank","leaderboard","setxp","resetxp"],
     "Fun": ["hug","pat","slap","kiss","dance","coinflip","8ball"],
