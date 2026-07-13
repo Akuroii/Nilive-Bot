@@ -1,92 +1,115 @@
 # NILIVE BOT — SHIFT CHECKPOINT
-Stopped at: Economy v2 (dual convertible currency) — core feature complete.
+Stopped at: Phase 0 server permission gating shift complete.
 
-## This shift — Phase 5, Economy v2 (Option B: Convertible, 500:1 default, per-guild configurable)
+## Phase 0: Server Permission Gating (this shift)
 
-Dual currency already existed at the data layer (economy.balance + economy.diamonds,
-economy_safe.py already took a `currency` param). This shift wires the actual
-feature Dark specced on top of that: conversion, diamond-priced shop items, admin
-diamond grants, and dashboard visibility — not a rebuild of E2/E3.
+### Internal design answers (kept out of chat, recorded here)
+1. Dashboard already does OAuth2 (`dashboard/auth.py: fetch_discord_guilds`),
+   used by `/server-select`. That call returns the user's own guild list
+   only — no bot-membership info, no admin-bit info exposed to the
+   frontend. Both were missing and are added this shift.
+2. Server list template: `dashboard/templates/server_select.html`. Left
+   its existing "Select a Server" card (backed by `dashboard_users`,
+   Nilive's own per-guild access-approval table) untouched, and added a
+   second, independent card below it for this feature.
+3. No existing Invite Bot flow anywhere in the repo. Built from scratch.
+4. Invite URL is generated in `dashboard/auth.py::get_bot_invite_url()`,
+   same file/pattern as the existing `get_discord_oauth_url()` (user
+   login OAuth) — kept URL-building logic in one place rather than
+   inlining it in app.py.
+5. `/api/user/servers` and `/api/invite-bot` are gated with
+   `@login_required` (from `dashboard/auth.py`), NOT
+   `@require_api_permission` (from `dashboard/permissions.py`). The
+   latter calls `get_session_guild_id()` internally and 400s if no guild
+   is selected — these two routes run BEFORE guild selection by design,
+   so they live as plain `app.route`s in `dashboard/app.py`, not in the
+   `api_bp` blueprint (`dashboard/api.py`).
 
-### Database (database.py) — additive migrations only, no existing column touched
-- `guild_settings.diamond_exchange_rate` (INTEGER DEFAULT 500) — per-guild rate
-- `shop_items.price_diamonds` (INTEGER DEFAULT NULL) — nullable; item is
-  diamond-priced when set, otherwise unchanged coins pricing
-- `purchase_history.currency_paid` (TEXT DEFAULT 'balance') — records which
-  currency a purchase was actually paid in, since price_paid alone became
-  ambiguous once diamond pricing exists
+### Design decision: filtering / state model
+The spec's three rendering states ("active", "gray + invite", "hidden")
+and its filtering note ("only include servers where user_admin ...")
+overlap in a way that only resolves cleanly one way: `is_admin=false`
+guilds are filtered out server-side (Hidden) since a non-admin user has
+no action available for that guild either way. Of the remaining
+admin-only guilds: bot present → Active (full opacity, no button); bot
+absent → Gray (0.5 opacity, Invite Bot button). This is implemented and
+documented inline in `dashboard/app.py::api_user_servers`.
 
-### utils/economy_safe.py
-- Added `safe_convert(guild_id, user_id, coin_amount, rate, ...)` — atomic
-  (BEGIN IMMEDIATE) coins→diamonds conversion. Floors to the nearest multiple
-  of `rate` so leftover coins that don't divide evenly aren't lost.
-- Added `get_guild_exchange_rate(guild_id)` helper (falls back to 500)
+This is intentionally decoupled from `dashboard_users` — that table
+still gates who can actually operate the dashboard for a guild once Nero
+is in it. This feature only answers "which of your Discord servers could
+Nero be added to, and is she there yet."
 
-### utils/ledger.py
-- Added `convert_in` / `convert_out` to VALID_TYPES so conversions show up
-  distinctly in the Ledger page instead of looking like a generic credit/deduct
+### Endpoints added
+- `GET /api/user/servers` (`dashboard/app.py`, `@login_required`)
+  Returns `{"servers": [{id, name, icon, is_bot_member, is_admin}, ...]}`
+  for every guild the logged-in user owns or has ADMINISTRATOR in.
+  Non-admin guilds are omitted. Sorted bot-missing-first.
+- `GET /api/invite-bot?guild_id=<id>` (`dashboard/app.py`, `@login_required`)
+  Returns `{"invite_url": "..."}`, a guild-locked
+  (`disable_guild_select=true`) Discord bot-invite OAuth2 URL.
 
-### cogs/economy.py
-- `/convert <coins>` — user-facing conversion command, reads the guild's
-  configured rate
-- `/adddiamonds` / `/removediamonds` (admin) — mirrors addcoins/removecoins,
-  routed through safe_credit/safe_admin_deduct so they're ledgered identically
-- `/balance` now shows both coins and diamonds
+### Supporting helpers added (`dashboard/auth.py`)
+- `fetch_discord_bot_guilds()` — bot-token call to
+  `GET /users/@me/guilds`, returns guild IDs the bot is currently in.
+  Fails soft (`[]`) on any error — a network hiccup here just means an
+  already-invited server shows an unnecessary Invite button, never a
+  hidden active server.
+- `guild_permissions_include_admin(permissions_str, is_owner)` — decodes
+  Discord's per-guild `owner` bool + `permissions` bitfield string into
+  a single is-admin check (owner OR `ADMINISTRATOR` bit `0x8`).
+- `get_bot_invite_url(guild_id)` — builds the invite URL. Requested
+  permission integer defaults to Administrator (`8`), overridable via
+  `DISCORD_BOT_PERMISSIONS` env var — see inline comment in auth.py for
+  why Administrator was chosen for this deployment model (small,
+  trusted, approval-based friend servers; cogs span moderation/roles/
+  channels already).
 
-### cogs/shop.py
-- `process_purchase()` now checks `price_diamonds` on the item; if set, charges
-  diamonds instead of coins (currency-aware safe_deduct call, currency-aware
-  insufficient-balance message)
-- `/shop` listing shows 💎 price for diamond-priced items
-- purchase_history rows now record `currency_paid`
+### Frontend (`dashboard/templates/server_select.html`)
+Added a new "➕ Manage Servers" card below the existing server-select
+list. JS fetches `/api/user/servers` on load, renders each guild:
+- Bot present → full-opacity row, no button, "Nero is active here".
+- Bot absent → 0.5-opacity row + "Invite Bot" button, "Nero isn't in
+  this server yet".
+`inviteBotTo(guildId)` hits `/api/invite-bot`, opens the returned URL
+in a new tab, and shows a toast prompting the user to refresh once
+they're done — refreshing re-runs `loadUserServers()` on page load,
+which re-fetches bot membership and moves the guild into the active
+group.
 
-### Dashboard
-- `/economy` page: added Diamonds leaderboard tab + Exchange Rate config tab
-  (coins-per-1-diamond, editable, ADMIN+)
-- `/shop` page: add-item form has an optional "Price (diamonds)" field;
-  item list shows 💎 or 🪙 price appropriately
-- `dashboard/api.py`: added `GET/POST /api/economy/exchange-rate` (ADMIN+),
-  `GET /api/economy/leaderboard-diamonds` (ADMIN+); `/api/shop/item` POST and
-  `/api/shop/items` GET updated for `price_diamonds`; `/api/shop/purchase-history`
-  now returns `currency_paid` and shows the right icon
+### Not done / explicitly out of scope this shift
+- No automated tests added (no test harness exists yet in the repo to
+  hook into — flagging for a future shift rather than inventing one
+  ad hoc).
+- No change to `dashboard_users` or the existing dashboard-access
+  request flow — an admin who invites the bot still needs to be added
+  under Dashboard Access separately, same as before.
+- Did not touch Economy v2 or any Phase 5 work.
 
-### Compiled clean in this ZIP
-`python3 -m py_compile` exit 0 on: database.py, utils/ledger.py,
-utils/economy_safe.py, cogs/economy.py, cogs/shop.py, dashboard/app.py,
-dashboard/api.py.
+### Files changed this shift
+- `dashboard/auth.py` — added `fetch_discord_bot_guilds`,
+  `guild_permissions_include_admin`, `get_bot_invite_url`,
+  `ADMINISTRATOR_PERMISSION_BIT`, `DEFAULT_BOT_INVITE_PERMISSIONS`.
+- `dashboard/app.py` — added `/api/user/servers`, `/api/invite-bot`,
+  updated the `dashboard.auth` import line. No other route changed.
+- `dashboard/templates/server_select.html` — added the "Manage
+  Servers" card + `{% block scripts %}` (new to this template).
+- `STATUS.md` — this section.
+- Compiled clean: `python3 -m py_compile dashboard/app.py
+  dashboard/auth.py` → exit 0.
 
-## NOT included in this zip (unchanged — pull from your last full ZIP)
-Everything not listed above. Per-file shift pattern as usual:
-- main.py, dashboard/auth.py, dashboard/permissions.py,
-  dashboard/utils/async_utils.py
-- utils/reward_engine.py, utils/inventory.py, utils/permissions.py,
-  utils/xp_calculator.py, utils/formatters.py
-- All other cogs/* (leveling, moderation, tickets, reactionroles, etc. —
-  untouched)
-- dashboard/templates/* other than systems/shop.html and systems/economy.html
-  (base.html sidebar already has Ledger/Inventory links from last shift, no
-  change needed here)
+## NOT included in this ZIP (unchanged — pull from your last full ZIP)
+Everything except `dashboard/auth.py`, `dashboard/app.py`,
+`dashboard/templates/server_select.html`, `STATUS.md`:
+- database.py, main.py, dashboard/permissions.py, dashboard/api.py,
+  dashboard/utils/*
+- utils/* (reward_engine.py, ledger.py, inventory.py, economy_safe.py,
+  permissions.py, xp_calculator.py, formatters.py)
+- cogs/* (all cogs — untouched)
+- dashboard/templates/* (all other templates — untouched)
 - dashboard/static/*
 - requirements.txt, Dockerfile, start.sh, .gitignore
 
-## Still needed / explicitly out of scope this shift
-- Missions/quests that reward diamonds directly (Phase 6, New Major Engines —
-  not started, per locked phase order)
-- No new slash-command help text / `/economy_help` — not asked for
-- No rate-change audit trail beyond the existing audit_log entry written on
-  every `/api/economy/exchange-rate` save (that part IS done — flagging what's
-  NOT extra)
-- Trade System (Phase 6) remains BLOCKED — unaffected by this shift, dual
-  currency doesn't change its prerequisites
-
-## Phase 5 status
-Economy v2 (dual convertible currency): ✅ core feature shipped this shift.
-Other Phase 5 candidates (Leveling expansion, Shop expansion beyond diamond
-pricing, Events expansion, Tickets overhaul) — not started, awaiting Dark's
-next pick.
-
-## Next up
-Confirm with Dark: is Economy v2 considered feature-complete as shipped, or
-are there specific follow-ups (e.g. a `/richest diamonds` command, missions
-hook, or admin bulk-convert)? Otherwise, pick the next Phase 5 system per the
-original menu (Leveling / Shop / Events / Tickets).
+## Phase 3 status (unchanged this shift)
+E1 ✅ E2 ✅ E3 ✅ E4 ✅ — untouched. Trade System still BLOCKED pending
+live production verification, per standing rule.

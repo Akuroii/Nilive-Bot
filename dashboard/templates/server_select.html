@@ -48,5 +48,98 @@
         </div>
         {% endif %}
     </div>
+
+    <!-- PHASE 0: SERVER PERMISSION GATING
+         Separate from the "Select a Server" card above, which only lists
+         servers already granted via dashboard_users. This card shows every
+         Discord server the logged-in user administers, flags whether Nero
+         is a member yet, and offers a scoped invite link for the ones that
+         aren't. It does not grant dashboard access by itself — an owner
+         still has to add the user under Dashboard Access after inviting. -->
+    <div class="card" style="margin-top:20px;">
+        <div class="card-title">➕ Manage Servers</div>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:16px;">
+            Discord servers you administer. Grayed-out servers don't have Nero yet —
+            invite the bot, then refresh this page to update its status.
+        </p>
+        <div id="user-servers-list">
+            <span class="text-muted text-sm">Loading…</span>
+        </div>
+    </div>
 </div>
+
+{% block scripts %}
+<script>
+async function loadUserServers() {
+    const container = document.getElementById('user-servers-list');
+    try {
+        const res  = await fetch('/api/user/servers');
+        const data = await res.json();
+        if (!data.servers || !data.servers.length) {
+            container.innerHTML = '<span class="text-muted text-sm">No Discord servers found where you\'re an admin.</span>';
+            return;
+        }
+        container.innerHTML = data.servers.map(function(s) {
+            const iconUrl = s.icon
+                ? 'https://cdn.discordapp.com/icons/' + s.id + '/' + s.icon + '.png'
+                : null;
+            const avatarHtml = iconUrl
+                ? '<img src="' + iconUrl + '" style="width:40px;height:40px;border-radius:50%;object-fit:cover;flex-shrink:0;">'
+                : '<div style="width:40px;height:40px;border-radius:50%;background:var(--accent);'
+                  + 'display:flex;align-items:center;justify-content:center;font-weight:700;'
+                  + 'color:#fff;flex-shrink:0;">' + s.name.charAt(0).toUpperCase() + '</div>';
+
+            if (s.is_bot_member) {
+                return '<div style="display:flex;align-items:center;gap:14px;padding:12px 14px;'
+                    + 'background:var(--bg3);border:1px solid var(--border);border-radius:10px;'
+                    + 'margin-bottom:8px;">'
+                    + avatarHtml
+                    + '<div style="flex:1;min-width:0;">'
+                    + '<div style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + s.name + '</div>'
+                    + '<div style="font-size:11px;color:var(--success);">Nero is active here</div>'
+                    + '</div></div>';
+            }
+
+            return '<div style="display:flex;align-items:center;gap:14px;padding:12px 14px;'
+                + 'background:var(--bg3);border:1px solid var(--border);border-radius:10px;'
+                + 'margin-bottom:8px;opacity:0.5;transition:opacity .15s;" '
+                + 'onmouseover="this.style.opacity=0.75" onmouseout="this.style.opacity=0.5">'
+                + avatarHtml
+                + '<div style="flex:1;min-width:0;">'
+                + '<div style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + s.name + '</div>'
+                + '<div style="font-size:11px;color:var(--text3);">Nero isn\'t in this server yet</div>'
+                + '</div>'
+                + '<button class="btn btn-sm btn-primary" style="opacity:1;flex-shrink:0;" '
+                + 'onclick="inviteBotTo(\'' + s.id + '\')">Invite Bot</button>'
+                + '</div>';
+        }).join('');
+    } catch (e) {
+        container.innerHTML = '<span class="text-muted text-sm">Could not load your Discord servers.</span>';
+    }
+}
+
+async function inviteBotTo(guildId) {
+    try {
+        const res  = await fetch('/api/invite-bot?guild_id=' + guildId);
+        const data = await res.json();
+        if (data.invite_url) {
+            window.open(data.invite_url, '_blank');
+            if (typeof showToast === 'function') {
+                showToast('After inviting, refresh this page to update status.', 'info');
+            }
+        } else {
+            if (typeof showToast === 'function') {
+                showToast(data.error || 'Could not generate invite link.', 'error');
+            }
+        }
+    } catch (e) {
+        if (typeof showToast === 'function') {
+            showToast('Could not generate invite link.', 'error');
+        }
+    }
+}
+
+loadUserServers();
+</script>
+{% endblock %}
 {% endblock %}
