@@ -73,84 +73,102 @@ print(
     f"presences={intents.presences} (all others enabled via Intents.all())"
 )
 
-bot = commands.Bot(command_prefix="!", intents=intents)
-
 _command_cooldowns: dict[tuple, float] = {}
 
-@bot.tree.check
-async def global_command_gate(interaction: discord.Interaction) -> bool:
-    if interaction.guild is None or interaction.command is None:
-        return True
 
-    cmd_name = interaction.command.qualified_name
+class NeroCommandTree(discord.app_commands.CommandTree):
+    """
+    CRASH FIX: the bot was wired up via `@bot.tree.check`, but
+    discord.py's `CommandTree` has no `.check()` decorator (that only
+    exists on `commands.Bot` for prefix commands) — this raised
+    `AttributeError: 'CommandTree' object has no attribute 'check'`
+    at import time, before the bot ever attempted to log in. The
+    dashboard process is separate (start.sh runs it after the bot,
+    regardless of whether the bot crashed), which is why the
+    dashboard looked fully healthy while the bot itself never came
+    online. The correct hook for a tree-wide app-command check is
+    overriding `interaction_check` on a `CommandTree` subclass and
+    passing it to `commands.Bot(tree_cls=...)`. All gating logic
+    below (per-guild enable/disable, owner-only, role/channel
+    restrictions, cooldowns) is unchanged from the old function.
+    """
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT enabled, allowed_roles, allowed_channels, owner_only,
-                   cooldown_seconds, bypass_cooldown_roles, error_message
-            FROM command_toggles
-            WHERE guild_id = ? AND command_name = ?
-        """, (interaction.guild.id, cmd_name))
-        row = await cursor.fetchone()
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None or interaction.command is None:
+            return True
 
-    if not row:
-        return True
+        cmd_name = interaction.command.qualified_name
 
-    (enabled, allowed_roles, allowed_channels, owner_only,
-     cooldown_seconds, bypass_cooldown_roles, error_message) = row
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT enabled, allowed_roles, allowed_channels, owner_only,
+                       cooldown_seconds, bypass_cooldown_roles, error_message
+                FROM command_toggles
+                WHERE guild_id = ? AND command_name = ?
+            """, (interaction.guild.id, cmd_name))
+            row = await cursor.fetchone()
 
-    if not enabled:
-        msg = error_message or f"`/{cmd_name}` is currently disabled on this server."
-        await interaction.response.send_message(msg, ephemeral=True)
-        return False
+        if not row:
+            return True
 
-    if owner_only and interaction.user.id != interaction.guild.owner_id:
-        await interaction.response.send_message(
-            "This command is restricted to the server owner.", ephemeral=True)
-        return False
+        (enabled, allowed_roles, allowed_channels, owner_only,
+         cooldown_seconds, bypass_cooldown_roles, error_message) = row
 
-    if allowed_roles:
-        try:
-            role_ids = {int(r) for r in json.loads(allowed_roles)}
-        except Exception:
-            role_ids = set()
-        if role_ids:
-            member_role_ids = {r.id for r in interaction.user.roles}
-            if not member_role_ids & role_ids:
-                await interaction.response.send_message(
-                    "You don't have permission to use this command.", ephemeral=True)
-                return False
-
-    if allowed_channels:
-        try:
-            channel_ids = {int(c) for c in json.loads(allowed_channels)}
-        except Exception:
-            channel_ids = set()
-        if channel_ids and interaction.channel_id not in channel_ids:
-            await interaction.response.send_message(
-                "This command can't be used in this channel.", ephemeral=True)
+        if not enabled:
+            msg = error_message or f"`/{cmd_name}` is currently disabled on this server."
+            await interaction.response.send_message(msg, ephemeral=True)
             return False
 
-    if cooldown_seconds and cooldown_seconds > 0:
-        bypass_roles = set()
-        if bypass_cooldown_roles:
-            try:
-                bypass_roles = {int(r) for r in json.loads(bypass_cooldown_roles)}
-            except Exception:
-                pass
-        member_role_ids = {r.id for r in interaction.user.roles}
-        if not (member_role_ids & bypass_roles):
-            key = (interaction.guild.id, interaction.user.id, cmd_name)
-            now = time.time()
-            last = _command_cooldowns.get(key, 0)
-            if now - last < cooldown_seconds:
-                remaining = round(cooldown_seconds - (now - last), 1)
-                await interaction.response.send_message(
-                    f"Slow down — try again in {remaining}s.", ephemeral=True)
-                return False
-            _command_cooldowns[key] = now
+        if owner_only and interaction.user.id != interaction.guild.owner_id:
+            await interaction.response.send_message(
+                "This command is restricted to the server owner.", ephemeral=True)
+            return False
 
-    return True
+        if allowed_roles:
+            try:
+                role_ids = {int(r) for r in json.loads(allowed_roles)}
+            except Exception:
+                role_ids = set()
+            if role_ids:
+                member_role_ids = {r.id for r in interaction.user.roles}
+                if not member_role_ids & role_ids:
+                    await interaction.response.send_message(
+                        "You don't have permission to use this command.", ephemeral=True)
+                    return False
+
+        if allowed_channels:
+            try:
+                channel_ids = {int(c) for c in json.loads(allowed_channels)}
+            except Exception:
+                channel_ids = set()
+            if channel_ids and interaction.channel_id not in channel_ids:
+                await interaction.response.send_message(
+                    "This command can't be used in this channel.", ephemeral=True)
+                return False
+
+        if cooldown_seconds and cooldown_seconds > 0:
+            bypass_roles = set()
+            if bypass_cooldown_roles:
+                try:
+                    bypass_roles = {int(r) for r in json.loads(bypass_cooldown_roles)}
+                except Exception:
+                    pass
+            member_role_ids = {r.id for r in interaction.user.roles}
+            if not (member_role_ids & bypass_roles):
+                key = (interaction.guild.id, interaction.user.id, cmd_name)
+                now = time.time()
+                last = _command_cooldowns.get(key, 0)
+                if now - last < cooldown_seconds:
+                    remaining = round(cooldown_seconds - (now - last), 1)
+                    await interaction.response.send_message(
+                        f"Slow down — try again in {remaining}s.", ephemeral=True)
+                    return False
+                _command_cooldowns[key] = now
+
+        return True
+
+
+bot = commands.Bot(command_prefix="!", intents=intents, tree_cls=NeroCommandTree)
 
 _status_index = 0
 
