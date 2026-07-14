@@ -1528,6 +1528,81 @@ def delete_leveling_currency_reward(reward_id: int):
     return jsonify({"success": True})
 
 
+@api_bp.route("/leveling/reset-config", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_reset_config():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT enabled, period, last_reset
+                FROM leveling_reset_config WHERE guild_id = ?
+            """, (guild_id,))
+            row = await cursor.fetchone()
+        if not row:
+            return {"enabled": 0, "period": "weekly", "last_reset": None}
+        return {"enabled": row[0], "period": row[1], "last_reset": row[2]}
+
+    return jsonify({"config": run_async(fetch())})
+
+
+@api_bp.route("/leveling/reset-config", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def save_leveling_reset_config():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+    period   = data.get("period", "weekly")
+    if period not in ("weekly", "monthly"):
+        return jsonify({"success": False, "error": "Period must be 'weekly' or 'monthly'"})
+    enabled = int(bool(data.get("enabled")))
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Seed last_reset to now on first enable so the task loop
+            # doesn't fire an immediate reset the moment it's turned
+            # on — the first reset happens one full period from now,
+            # same as flipping on a fresh cycle.
+            cursor = await db.execute(
+                "SELECT last_reset FROM leveling_reset_config WHERE guild_id = ?",
+                (guild_id,))
+            existing = await cursor.fetchone()
+            last_reset = existing[0] if existing and existing[0] else \
+                datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+            await db.execute("""
+                INSERT INTO leveling_reset_config (guild_id, enabled, period, last_reset)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    period  = excluded.period
+            """, (guild_id, enabled, period, last_reset))
+            await db.commit()
+
+    run_async(save())
+    log_action(guild_id,
+               f"{'Enabled' if enabled else 'Disabled'} {period} leaderboard reset",
+               "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/force-reset", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def force_leveling_reset():
+    guild_id = get_session_guild_id()
+
+    async def run():
+        from cogs.leveling import perform_leaderboard_reset, get_reset_config
+        cfg = await get_reset_config(guild_id)
+        period = cfg.get("period") or "weekly"
+        count = await perform_leaderboard_reset(guild_id, period)
+        return count
+
+    count = run_async(run())
+    log_action(guild_id, f"Forced leaderboard reset ({count} members)", "leveling")
+    return jsonify({"success": True, "count": count})
+
+
 @api_bp.route("/leveling/bonus-roles", methods=["GET"])
 @require_api_permission(LEVEL_ADMIN)
 def get_bonus_roles():

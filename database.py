@@ -499,6 +499,42 @@ async def init_db():
             ON leveling_currency_rewards(guild_id)
         """)
 
+        # Phase 5 / Leveling expansion: weekly/monthly leaderboard resets.
+        # One row per guild. last_reset drives the scheduled task in
+        # cogs/leveling.py — it only fires once the configured period
+        # has actually elapsed since last_reset, same "check every N
+        # minutes, compare against a stored timestamp" pattern already
+        # used by cogs/mvp.py's mvp_cycle_task.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS leveling_reset_config (
+                guild_id   INTEGER PRIMARY KEY,
+                enabled    INTEGER DEFAULT 0,
+                period     TEXT DEFAULT 'weekly',
+                last_reset TIMESTAMP
+            )
+        """)
+
+        # Snapshot of the full leaderboard taken immediately before each
+        # scheduled reset, so a reset never destroys history — it's
+        # visible afterward as a completed cycle instead.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS leveling_leaderboard_history (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id     INTEGER NOT NULL,
+                user_id      INTEGER NOT NULL,
+                xp           INTEGER NOT NULL,
+                level        INTEGER NOT NULL,
+                rank         INTEGER NOT NULL,
+                period       TEXT NOT NULL,
+                period_end   TIMESTAMP NOT NULL,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llh_guild
+            ON leveling_leaderboard_history(guild_id, period_end)
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_bonus_roles (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,

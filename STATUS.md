@@ -1,73 +1,69 @@
 # NILIVE BOT — SHIFT CHECKPOINT
-Stopped at: Phase 5 — Leveling expansion (currency level rewards) complete.
+Stopped at: Phase 5 — Leveling expansion, round 2. Stopping now (context
+budget) per instruction — next session picks up from "Still needed" below.
 
-## Scope this shift
-User-specified scope only: level-up rewards via the existing Reward
-Engine (no rebuild) — coins and/or diamonds per level, guild-isolated,
-ledger-logged. Role rewards at configured levels already existed
-(leveling_rewards + check_and_award_level_rewards) and were verified
-working, not rebuilt.
-
-## What was built
-- **database.py** — new table `leveling_currency_rewards`
-  (guild_id, level, currency, amount). Kept separate from
-  `leveling_rewards` since a level can carry a role reward AND a
-  currency reward, and `leveling_rewards.role_id` is NOT NULL so it
-  can't represent a currency-only row.
-- **utils/xp_calculator.py** — new
-  `check_and_award_level_currency_rewards(bot, member, guild_id,
-  old_level, new_level)`. Reads all currency rewards for levels in
-  `(old_level, new_level]`, grants each via
-  `utils.economy_safe.safe_credit()` — same atomic/ledgered path as
-  every other coin/diamond grant in the project (shop, /give, events).
-  No new logging code needed; safe_credit already writes the
-  transaction_ledger row with source='leveling'.
-- **utils/reward_engine.py** — `give_reward()`'s `xp` branch now calls
-  the new function right alongside the existing
-  `check_and_award_level_rewards()` role-grant call, same trigger
-  point (real level-up), same resolved guild/member.
-- **dashboard/api.py** — 3 new ADMIN+ routes, guild-scoped via
-  `get_session_guild_id()` like every other route in the file:
-  - `GET /api/leveling/currency-rewards`
-  - `POST /api/leveling/currency-reward`
-  - `DELETE /api/leveling/currency-reward/<id>`
-- **dashboard/templates/systems/leveling.html** — Rewards tab now has
-  a second add-form + table for currency rewards, alongside the
-  existing role-reward form/table. New JS: `loadCurrencyRewards()`,
-  `addCurrencyReward()`, `deleteCurrencyReward()`.
-
-## Verified, not touched
-- `leveling_rewards` (role rewards) — confirmed working, left as-is.
-- `cogs/leveling.py` — no changes needed; the xp reward path already
-  routes through `reward_engine.give_reward()` for both message and
-  voice XP, so currency rewards fire automatically with zero cog
-  changes.
-- E1–E4 (activity engine, reward engine, ledger, inventory) — all
-  confirmed present and wired from the uploaded ZIP; not rebuilt.
-- Economy v2 (dual currency, exchange rate) — confirmed present; not
-  rebuilt.
+## This round added (on top of the currency-rewards ZIP already delivered)
+- **database.py** — 2 new tables:
+  - `leveling_reset_config` (guild_id PK, enabled, period, last_reset)
+  - `leveling_leaderboard_history` (snapshot of the full leaderboard
+    taken immediately before every reset — resets archive, they don't
+    destroy)
+- **cogs/leveling.py** (full file, rebuilt from the canonical ZIP + additions):
+  - `/resetxp` — fixes the flagged gap: `dashboard/app.py`
+    `COMMAND_CATEGORIES` has listed this command with nothing behind
+    it. Now implemented: admin-only, resets one member's xp/level to 0,
+    guild-isolated.
+  - `/resetleaderboard` — admin, forces an immediate reset (mirrors
+    `/mvp_force`'s pattern).
+  - `leaderboard_reset_task` — 30-min poll loop, same shape as
+    `cogs/mvp.py`'s `mvp_cycle_task`: compares elapsed time since
+    `last_reset` against the configured weekly/monthly period, only
+    fires once it's actually due. Each guild isolated in its own
+    try/except (matches temp_role_cleanup / expiry_check pattern).
+  - `perform_leaderboard_reset(guild_id, period)` — shared by the task,
+    `/resetleaderboard`, and the dashboard's force-reset button. Reads
+    current `levels` for that guild only, writes a ranked snapshot to
+    `leveling_leaderboard_history`, zeroes `levels.xp/level`, updates
+    `last_reset`.
+- **dashboard/api.py** — 3 new ADMIN+ routes (guild-scoped, same
+  pattern as every other route in the file):
+  - `GET /api/leveling/reset-config`
+  - `POST /api/leveling/reset-config`
+  - `POST /api/leveling/force-reset`
+- **dashboard/templates/systems/leveling.html** — Config tab gets a
+  "Leaderboard Resets" card: enable toggle, weekly/monthly period,
+  last-reset timestamp, Save + Force Reset Now (wired to the real API
+  route, not a stub).
 
 Compile-checked: `python3 -m py_compile database.py utils/xp_calculator.py
-utils/reward_engine.py dashboard/api.py` — exit 0.
+utils/reward_engine.py dashboard/api.py cogs/leveling.py` — exit 0.
 
-## Flagged, not fixed (out of scope this shift)
-- `/resetxp` is listed in `dashboard/app.py`'s `COMMAND_CATEGORIES`
-  (Leveling section) but no such command exists in `cogs/leveling.py`.
-  Dead entry in the Commands dashboard page until either the command
-  is built or the entry is removed.
+## Verified, not touched
+- Everything from the previous checkpoint (currency level rewards,
+  role rewards, E1–E4, Economy v2) — unchanged.
+- `cogs/mvp.py` — pattern-matched for the reset task shape, not modified.
 
-## Still needed for Phase 5 (not started, awaiting direction)
-- Weekly/monthly leaderboard resets
-- XP boost items (shop-integrated)
-- Prestige system
-- `/resetxp` command (see flag above)
+## Flagged, not fixed
+- `dashboard/app.py`'s `COMMAND_CATEGORIES["Leveling"]` list doesn't
+  include `resetleaderboard` yet (it already had `resetxp`, which is
+  now real). Purely cosmetic on the Commands dashboard page — the
+  slash command itself works regardless. Not touched this round to
+  avoid rewriting the full `app.py` file under context pressure;
+  one-line list edit next session.
 
-## Files in this ZIP
+## Still needed for Phase 5 (not started)
+- XP boost items (shop-integrated) — e.g. a shop item type that grants
+  a temporary XP multiplier, likely via a new `leveling_active_boosts`
+  table + a check inside `calculate_message_xp`/voice XP path.
+- Prestige system.
+
+## Files in this ZIP (cumulative — supersedes the first Phase 5 ZIP)
 - `database.py`
 - `utils/xp_calculator.py`
 - `utils/reward_engine.py`
 - `dashboard/api.py`
 - `dashboard/templates/systems/leveling.html`
+- `cogs/leveling.py`
 - `STATUS.md`
 
 ## NOT included (unchanged — pull from your last full ZIP)

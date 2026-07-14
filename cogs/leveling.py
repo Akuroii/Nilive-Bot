@@ -1,15 +1,73 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import aiosqlite
 import time
 import io
+from datetime import datetime, timezone, timedelta
 from database import DB_PATH
 from utils.xp_calculator import (
     calculate_message_xp, calculate_voice_xp,
     xp_progress, get_leveling_config,
 )
 from utils.formatters import snapshot_user
+
+
+# ─── Phase 5 / Leveling expansion — reset config helpers ────────────────
+async def get_reset_config(guild_id: int) -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT enabled, period, last_reset FROM leveling_reset_config "
+            "WHERE guild_id = ?", (guild_id,))
+        row = await cursor.fetchone()
+    if not row:
+        return {"enabled": 0, "period": "weekly", "last_reset": None}
+    return {"enabled": row[0], "period": row[1], "last_reset": row[2]}
+
+
+def _period_hours(period: str) -> int:
+    return 24 * 30 if period == "monthly" else 24 * 7
+
+
+async def perform_leaderboard_reset(guild_id: int, period: str):
+    """
+    Snapshots the full current leaderboard into
+    leveling_leaderboard_history (so a reset preserves the completed
+    cycle instead of destroying it), then zeroes xp/level for every
+    member of THIS guild only. Per-guild isolated throughout — every
+    query is scoped to guild_id, matching every other reset/cleanup
+    task in the project (cogs/mvp.py's cycle task, cogs/shop.py's
+    temp_role_cleanup).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT user_id, xp, level FROM levels
+            WHERE guild_id = ? ORDER BY xp DESC
+        """, (guild_id,))
+        rows = await cursor.fetchall()
+
+        for rank, (user_id, xp, level) in enumerate(rows, 1):
+            await db.execute("""
+                INSERT INTO leveling_leaderboard_history
+                    (guild_id, user_id, xp, level, rank, period, period_end)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (guild_id, user_id, xp, level, rank, period, now))
+
+        await db.execute(
+            "UPDATE levels SET xp = 0, level = 0 WHERE guild_id = ?",
+            (guild_id,))
+
+        await db.execute("""
+            INSERT INTO leveling_reset_config (guild_id, enabled, period, last_reset)
+            VALUES (?, 1, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                period = excluded.period,
+                last_reset = excluded.last_reset
+        """, (guild_id, period, now))
+
+        await db.commit()
+    return len(rows)
 
 
 class Leveling(commands.Cog):
@@ -22,6 +80,10 @@ class Leveling(commands.Cog):
         # on_activity_voice_tick below) instead of this cog running
         # its own poll loop, so there's no task to start/cancel here
         # anymore.
+        self.leaderboard_reset_task.start()
+
+    def cog_unload(self):
+        self.leaderboard_reset_task.cancel()
 
     # ─── SPAM DETECTION (P1 #12) ─────────────────────────
     # Frequency-based: N messages within X seconds = spam.
@@ -182,6 +244,61 @@ class Leveling(commands.Cog):
         except Exception as e:
             print(f"[VOICE XP] Error for member {member.id} in "
                   f"guild {guild.id}: {e}")
+
+    # ─── LEADERBOARD RESET TASK (Phase 5 / Leveling expansion) ─────
+    # Mirrors cogs/mvp.py's mvp_cycle_task pattern: poll every 30
+    # minutes, compare elapsed time against a stored last_reset per
+    # guild, only act once the configured period has actually passed.
+    # Each guild is isolated in its own try/except so one bad row
+    # can't stop the loop from checking the rest — same defensive
+    # pattern used throughout (shop temp_role_cleanup,
+    # reactionroles expiry_check, moderation scheduled_unban_check).
+    @tasks.loop(minutes=30)
+    async def leaderboard_reset_task(self):
+        now = datetime.now(timezone.utc)
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT guild_id, period, last_reset
+                FROM leveling_reset_config WHERE enabled = 1
+            """)
+            configs = await cursor.fetchall()
+
+        for guild_id, period, last_reset in configs:
+            try:
+                if last_reset:
+                    last_dt = datetime.fromisoformat(last_reset)
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    elapsed_hours = (now - last_dt).total_seconds() / 3600
+                    if elapsed_hours < _period_hours(period):
+                        continue
+
+                count = await perform_leaderboard_reset(guild_id, period)
+                print(f"[LEVELING RESET] guild={guild_id} period={period} "
+                      f"reset {count} members")
+
+                guild = self.bot.get_guild(guild_id)
+                config = await get_leveling_config(guild_id)
+                channel_id = config.get("levelup_channel_id")
+                if guild and channel_id:
+                    channel = guild.get_channel(int(channel_id))
+                    if channel:
+                        embed = discord.Embed(
+                            title="🔄 Leaderboard Reset",
+                            description=(f"The {period} leaderboard has reset! "
+                                         f"Last cycle's standings are archived — "
+                                         f"everyone starts fresh."),
+                            color=0x7c5cbf)
+                        try:
+                            await channel.send(embed=embed)
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[LEVELING RESET] Error for guild {guild_id}: {e}")
+
+    @leaderboard_reset_task.before_loop
+    async def before_reset_task(self):
+        await self.bot.wait_until_ready()
 
     # ─── RANK COMMAND (Pillow Image Card) ───────────────
     @app_commands.command(name="rank",
@@ -390,6 +507,50 @@ class Leveling(commands.Cog):
         await interaction.response.send_message(
             f"Set {member.mention}'s XP to {xp:,} (Level {new_level}).",
             ephemeral=True)
+
+    # ─── RESET XP (admin, Phase 5 / Leveling expansion) ─
+    # Fixes the flagged gap: dashboard/app.py's COMMAND_CATEGORIES has
+    # listed a Leveling "resetxp" entry (Commands dashboard page) with
+    # no matching command anywhere in the codebase. This is that
+    # command — resets one member's xp/level back to 0 in this guild
+    # only. Deliberately does NOT touch leveling_leaderboard_history
+    # (that's only ever written by the scheduled/forced full-guild
+    # reset below) and does NOT archive the member's XP anywhere —
+    # a single-member reset is a moderation correction, not a
+    # leaderboard cycle event.
+    @app_commands.command(name="resetxp",
+                          description="Reset a member's XP and level back to 0 (admin)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def resetxp(self, interaction: discord.Interaction,
+                      member: discord.Member):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO levels (guild_id, user_id, xp, level)
+                VALUES (?, ?, 0, 0)
+                ON CONFLICT(guild_id, user_id)
+                DO UPDATE SET xp = 0, level = 0
+            """, (interaction.guild.id, member.id))
+            await db.commit()
+        await interaction.response.send_message(
+            f"Reset {member.mention}'s XP and level to 0.",
+            ephemeral=True)
+
+    # ─── RESET LEADERBOARD (admin, Phase 5 / Leveling expansion) ─
+    # Manual/forced equivalent of leaderboard_reset_task — same
+    # perform_leaderboard_reset() call, same archive-then-zero
+    # behavior, just triggered on demand instead of waiting for the
+    # configured weekly/monthly period to elapse. Mirrors
+    # cogs/mvp.py's /mvp_force pattern.
+    @app_commands.command(name="resetleaderboard",
+                          description="Force an immediate leaderboard reset for this server (admin)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def resetleaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        reset_config = await get_reset_config(interaction.guild.id)
+        period = reset_config.get("period") or "weekly"
+        count = await perform_leaderboard_reset(interaction.guild.id, period)
+        await interaction.followup.send(
+            f"✅ Leaderboard reset — {count} member(s) archived and zeroed.")
 
 
 async def setup(bot):

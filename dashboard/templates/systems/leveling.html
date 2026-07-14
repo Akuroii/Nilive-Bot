@@ -149,6 +149,38 @@
                 </label>
             </div>
 
+            <div class="card">
+                <div class="card-title">🔄 Leaderboard Resets</div>
+                <p class="text-muted text-sm" style="margin-bottom:16px;">
+                    On a schedule, archives the full current leaderboard (visible after
+                    reset as a completed cycle) then zeroes everyone's XP/level for
+                    this server. Level rewards already earned (roles, coins, diamonds)
+                    are NOT taken back.
+                </p>
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                    <label class="toggle">
+                        <input type="checkbox" id="reset-enabled">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span style="font-size:13px;color:var(--text2);">Enable scheduled resets</span>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Reset period</label>
+                    <select class="form-input" id="reset-period">
+                        <option value="weekly">Weekly</option>
+                        <option value="monthly">Monthly</option>
+                    </select>
+                </div>
+                <div class="form-hint" id="reset-last-info" style="margin-bottom:16px;"></div>
+                <div style="display:flex;gap:10px;">
+                    <button type="button" class="btn btn-primary" onclick="saveResetConfig()">Save</button>
+                    <button type="button" class="btn btn-danger"
+                            onclick="showConfirm('Force an immediate leaderboard reset? This archives and zeroes everyone\'s XP right now.', forceResetNow)">
+                        Force Reset Now
+                    </button>
+                </div>
+            </div>
+
         </div>
         <div style="margin-top:4px;">
             <button type="button" class="btn btn-primary" id="cfg-save-btn"
@@ -355,6 +387,46 @@ async function saveConfig(btn) {
         remove_old_reward_role:getVal('cfg-remove-old'),
     };
     await ajaxSave('/api/leveling/config', payload, btn, 'Leveling config saved!');
+}
+
+// ── LEADERBOARD RESETS (Phase 5 / Leveling expansion) ───────────
+async function loadResetConfig() {
+    const res  = await fetch('/api/leveling/reset-config');
+    if (!res.ok) return;
+    const data = await res.json();
+    const c    = data.config || {};
+    document.getElementById('reset-enabled').checked = !!c.enabled;
+    document.getElementById('reset-period').value = c.period || 'weekly';
+    const info = document.getElementById('reset-last-info');
+    info.textContent = c.last_reset
+        ? `Last reset: ${c.last_reset.slice(0, 16).replace('T', ' ')} UTC`
+        : 'No reset has run yet.';
+}
+loadResetConfig();
+
+async function saveResetConfig() {
+    const payload = {
+        enabled: document.getElementById('reset-enabled').checked,
+        period:  document.getElementById('reset-period').value,
+    };
+    const res  = await fetch('/api/leveling/reset-config', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.success) { showToast('Reset schedule saved!'); loadResetConfig(); }
+    else showToast(data.error || 'Error saving', 'error');
+}
+
+async function forceResetNow() {
+    const res  = await fetch('/api/leveling/force-reset', { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+        showToast(`Leaderboard reset — ${data.count} member(s) archived and zeroed.`);
+        loadResetConfig();
+    } else {
+        showToast(data.error || 'Reset failed', 'error');
+    }
 }
 
 // ── ROLE REWARDS ───────────────────────────────────────────────
