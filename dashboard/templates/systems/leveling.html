@@ -160,7 +160,7 @@
 <!-- REWARDS TAB -->
 <div id="tab-content-rewards" class="tab-content" style="display:none;">
     <div class="card">
-        <div class="card-title">➕ Add Level Reward</div>
+        <div class="card-title">➕ Add Level Reward — Role</div>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Level required</label>
@@ -176,7 +176,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🎁 Level Rewards</div>
+        <div class="card-title">🎁 Level Rewards — Roles</div>
         <div class="table-wrap">
             <table class="table">
                 <thead><tr><th>Level</th><th>Role ID</th><th></th></tr></thead>
@@ -193,8 +193,50 @@
                         </td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="3" class="empty">No rewards configured yet</td></tr>
+                    <tr><td colspan="3" class="empty">No role rewards configured yet</td></tr>
                     {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Phase 5 / Leveling expansion — currency rewards -->
+    <div class="card">
+        <div class="card-title">🪙 Add Level Reward — Coins / Diamonds</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Granted automatically on level-up via the Reward Engine, atomically and
+            logged to the Transaction Ledger (source: leveling). A level can have a
+            role reward, a currency reward, or both.
+        </p>
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Level required</label>
+                <input class="form-input" id="currency-reward-level"
+                       type="number" min="1" placeholder="e.g. 10" style="width:130px;">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Currency</label>
+                <select class="form-input" id="currency-reward-currency" style="width:140px;">
+                    <option value="balance">🪙 Coins</option>
+                    <option value="diamonds">💎 Diamonds</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Amount</label>
+                <input class="form-input" id="currency-reward-amount"
+                       type="number" min="1" placeholder="e.g. 500" style="width:140px;">
+            </div>
+            <button class="btn btn-primary" onclick="addCurrencyReward()">Add Reward</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">🎁 Level Rewards — Currency</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead><tr><th>Level</th><th>Currency</th><th>Amount</th><th></th></tr></thead>
+                <tbody id="currency-rewards-tbody">
+                    <tr><td colspan="4" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -315,7 +357,7 @@ async function saveConfig(btn) {
     await ajaxSave('/api/leveling/config', payload, btn, 'Leveling config saved!');
 }
 
-// ── REWARDS ────────────────────────────────────────────────────
+// ── ROLE REWARDS ───────────────────────────────────────────────
 async function addReward() {
     const level   = document.getElementById('reward-level').value;
     const rp      = document.getElementById('reward-role-picker');
@@ -340,6 +382,57 @@ async function deleteReward(id) {
     const res  = await fetch(`/api/leveling/reward/${id}`, { method: 'DELETE' });
     const data = await res.json();
     if (data.success) { showToast('Reward deleted', 'info'); setTimeout(() => location.reload(), 600); }
+    else showToast('Error', 'error');
+}
+
+// ── CURRENCY REWARDS (Phase 5 / Leveling expansion) ─────────────
+async function loadCurrencyRewards() {
+    const res  = await fetch('/api/leveling/currency-rewards');
+    if (!res.ok) return;
+    const data = await res.json();
+    const tbody = document.getElementById('currency-rewards-tbody');
+    if (!data.rewards || !data.rewards.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">No currency rewards configured yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = data.rewards.map(r => `
+        <tr>
+            <td><span class="badge badge-accent">Level ${r.level}</span></td>
+            <td>${r.currency === 'diamonds' ? '💎 Diamonds' : '🪙 Coins'}</td>
+            <td>${r.amount.toLocaleString()}</td>
+            <td>
+                <button class="btn btn-sm btn-danger"
+                    onclick="showConfirm('Delete Level ${r.level} currency reward?', () => deleteCurrencyReward(${r.id}))">
+                    Delete
+                </button>
+            </td>
+        </tr>`).join('');
+}
+
+async function addCurrencyReward() {
+    const level    = document.getElementById('currency-reward-level').value;
+    const currency = document.getElementById('currency-reward-currency').value;
+    const amount   = document.getElementById('currency-reward-amount').value;
+    if (!level || !amount) { showToast('Enter a level and amount', 'warning'); return; }
+    const res  = await fetch('/api/leveling/currency-reward', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ level: parseInt(level), currency, amount: parseInt(amount) }),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast('Currency reward added!');
+        document.getElementById('currency-reward-level').value = '';
+        document.getElementById('currency-reward-amount').value = '';
+        loadCurrencyRewards();
+    } else {
+        showToast(data.error || 'Error adding reward', 'error');
+    }
+}
+
+async function deleteCurrencyReward(id) {
+    const res  = await fetch(`/api/leveling/currency-reward/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) { showToast('Reward deleted', 'info'); loadCurrencyRewards(); }
     else showToast('Error', 'error');
 }
 
@@ -427,6 +520,7 @@ async function deleteBlacklist(id) {
     loadBlacklist();
 }
 
+loadCurrencyRewards();
 loadBonusRoles();
 loadBlacklist();
 </script>

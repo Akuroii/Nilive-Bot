@@ -474,6 +474,31 @@ async def init_db():
             ON leveling_rewards(guild_id)
         """)
 
+        # Phase 5 / Leveling expansion: currency (coins/diamonds) grants
+        # at configured levels, alongside the existing role rewards
+        # above. Kept as its own table rather than overloading
+        # leveling_rewards — a single level can have a role reward AND
+        # a currency reward, and role_id is NOT NULL on the existing
+        # table so it can't represent a currency-only row anyway.
+        # currency is constrained to the same values
+        # utils/ledger.VALID_CURRENCIES uses for real money ('balance'
+        # for coins, 'diamonds' for diamonds) so grants ledger cleanly
+        # with no translation layer.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS leveling_currency_rewards (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id   INTEGER NOT NULL,
+                level      INTEGER NOT NULL,
+                currency   TEXT NOT NULL DEFAULT 'balance',
+                amount     INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_lcr_guild
+            ON leveling_currency_rewards(guild_id)
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_bonus_roles (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -578,11 +603,6 @@ async def init_db():
             ON shop_items(guild_id)
         """)
 
-        # Phase 5 / Economy v2: diamond-priced shop items. Nullable —
-        # a shop item is coins-priced (existing `price` column) unless
-        # this is set, in which case cogs/shop.py's process_purchase()
-        # charges diamonds instead. Additive migration, existing rows
-        # unaffected (NULL = still coins-priced, same as before).
         try:
             cursor = await db.execute("PRAGMA table_info(shop_items)")
             cols = [c[1] for c in await cursor.fetchall()]
@@ -616,10 +636,6 @@ async def init_db():
             ON purchase_history(user_id)
         """)
 
-        # Phase 5 / Economy v2: records which currency a purchase was
-        # paid in, since price_paid alone is ambiguous once diamond
-        # pricing exists. Defaults to 'balance' for historical rows
-        # (accurate — diamond pricing didn't exist before this).
         try:
             cursor = await db.execute("PRAGMA table_info(purchase_history)")
             cols = [c[1] for c in await cursor.fetchall()]

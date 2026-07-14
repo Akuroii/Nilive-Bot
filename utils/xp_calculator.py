@@ -162,3 +162,52 @@ async def check_and_award_level_rewards(bot, member, guild_id: int,
                         reason="Replaced by higher level reward")
                 except Exception:
                     pass
+
+
+# ─── Phase 5 / Leveling expansion — currency level rewards ─────────────
+#
+# Companion to check_and_award_level_rewards() above (which only ever
+# handled role grants). Coin/diamond grants at configured levels live in
+# their own table (leveling_currency_rewards) rather than being bolted
+# onto leveling_rewards, since a single level can have both a role AND
+# a currency reward, and leveling_rewards.role_id is NOT NULL so it
+# can't represent a currency-only row.
+#
+# Routed through utils.economy_safe.safe_credit() — the same atomic,
+# ledgered path every other coin/diamond grant in the project uses
+# (shop purchases, /give, event rewards). That means every currency
+# level-up grant automatically gets a transaction_ledger row with
+# source='leveling', with no extra logging code needed here.
+#
+# Called from utils/reward_engine.py's give_reward() "xp" branch,
+# right alongside check_and_award_level_rewards() — same trigger point,
+# same guild_id/member already resolved by the caller.
+async def check_and_award_level_currency_rewards(bot, member, guild_id: int,
+                                                   old_level: int, new_level: int):
+    if new_level <= old_level:
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT level, currency, amount FROM leveling_currency_rewards
+            WHERE guild_id = ? AND level > ? AND level <= ?
+            ORDER BY level ASC
+        """, (guild_id, old_level, new_level))
+        rewards = await cursor.fetchall()
+
+    if not rewards:
+        return
+
+    from utils.economy_safe import safe_credit
+
+    for reward_level, currency, amount in rewards:
+        if not amount or amount <= 0:
+            continue
+        currency = currency if currency in ("balance", "diamonds") else "balance"
+        try:
+            await safe_credit(
+                guild_id, member.id, int(amount), currency=currency,
+                reason=f"Level {reward_level} reward", source="leveling")
+        except Exception as e:
+            print(f"[LEVEL CURRENCY REWARD ERROR] level={reward_level} "
+                  f"guild={guild_id} user={member.id}: {e}")

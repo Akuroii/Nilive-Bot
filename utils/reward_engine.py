@@ -4,7 +4,10 @@ from datetime import datetime, timedelta, timezone
 from database import DB_PATH
 from utils.economy_safe import safe_credit, safe_deduct, InsufficientBalance
 from utils.permissions import check_bot_role_position
-from utils.xp_calculator import xp_progress, check_and_award_level_rewards
+from utils.xp_calculator import (
+    xp_progress, check_and_award_level_rewards,
+    check_and_award_level_currency_rewards,
+)
 
 
 class RewardError(Exception):
@@ -92,6 +95,14 @@ async def give_reward(bot: discord.Client,
             member = guild.get_member(user_id) if guild else None
             if guild and member:
                 await check_and_award_level_rewards(
+                    bot, member, guild_id, old_level, new_level)
+                # Phase 5 / Leveling expansion: coin/diamond grants at
+                # configured levels, alongside the role grants above.
+                # Same trigger point (a real level-up), same resolved
+                # guild/member — see utils/xp_calculator.py for why
+                # this is a separate table/function from the role
+                # rewards call just above.
+                await check_and_award_level_currency_rewards(
                     bot, member, guild_id, old_level, new_level)
 
         return {"success": True, "reward_type": "xp", "amount": amount,
