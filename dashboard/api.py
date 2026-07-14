@@ -1451,6 +1451,83 @@ def delete_leveling_reward(reward_id: int):
     return jsonify({"success": True})
 
 
+# Phase 5 / Leveling expansion — currency rewards (coins/diamonds) at
+# configured levels. Mirrors the role-reward routes directly above:
+# same LEVEL_ADMIN gate, same guild-scoped CRUD shape, same log_action
+# pattern where applicable. Grant-time behavior lives in
+# utils/xp_calculator.check_and_award_level_currency_rewards(), wired
+# into utils/reward_engine.give_reward()'s "xp" branch — these three
+# routes are only the dashboard CRUD surface for that table.
+
+@api_bp.route("/leveling/currency-rewards", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_currency_rewards():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, level, currency, amount
+                FROM leveling_currency_rewards
+                WHERE guild_id = ? ORDER BY level ASC
+            """, (guild_id,))
+            return await cursor.fetchall()
+
+    rows = run_async(fetch())
+    return jsonify({"rewards": [{
+        "id": r[0], "level": r[1], "currency": r[2], "amount": r[3],
+    } for r in rows]})
+
+
+@api_bp.route("/leveling/currency-reward", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_leveling_currency_reward():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+
+    try:
+        level = int(data.get("level"))
+        amount = int(data.get("amount"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Level and amount must be numbers"})
+    if level <= 0 or amount <= 0:
+        return jsonify({"success": False, "error": "Level and amount must be positive"})
+
+    currency = data.get("currency", "balance")
+    if currency not in ("balance", "diamonds"):
+        return jsonify({"success": False, "error": "Currency must be 'balance' or 'diamonds'"})
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO leveling_currency_rewards (guild_id, level, currency, amount)
+                VALUES (?, ?, ?, ?)
+            """, (guild_id, level, currency, amount))
+            await db.commit()
+
+    run_async(save())
+    log_action(guild_id,
+               f"Added level {level} currency reward: {amount} {currency}",
+               "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/currency-reward/<int:reward_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_leveling_currency_reward(reward_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_currency_rewards WHERE id=? AND guild_id=?",
+                (reward_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+
 @api_bp.route("/leveling/bonus-roles", methods=["GET"])
 @require_api_permission(LEVEL_ADMIN)
 def get_bonus_roles():
