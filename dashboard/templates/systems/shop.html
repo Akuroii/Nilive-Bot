@@ -45,23 +45,31 @@
             </div>
             <div class="form-group">
                 <label class="form-label">Type</label>
-                <select class="form-input" id="item-type">
+                <select class="form-input" id="item-type" onchange="toggleItemTypeFields()">
                     <option value="role">Permanent Role</option>
                     <option value="temp_role">Temporary Role</option>
+                    <option value="xp_boost">⚡ XP Boost</option>
                     <option value="custom">Custom</option>
                 </select>
             </div>
-            <div class="form-group">
+            <div class="form-group" id="item-role-field">
                 <label class="form-label">Role ID</label>
                 <input class="form-input" id="item-role"
                        placeholder="Right click role → Copy ID">
             </div>
+            <div class="form-group" id="item-boost-mult-field" style="display:none;">
+                <label class="form-label">XP Multiplier</label>
+                <input class="form-input" id="item-boost-mult"
+                       type="number" min="1.1" step="0.1" placeholder="e.g. 2">
+                <div class="form-hint">e.g. 2 = double XP while active</div>
+            </div>
             <div class="form-group">
-                <label class="form-label">
+                <label class="form-label" id="item-duration-label">
                     Duration hours (0 = permanent)
                 </label>
                 <input class="form-input" id="item-duration"
                        type="number" min="0" value="0">
+                <div class="form-hint" id="item-duration-hint"></div>
             </div>
             <div class="form-group">
                 <label class="form-label">
@@ -122,7 +130,9 @@
                             🪙 {{ "{:,}".format(item[3]) }}
                             {% endif %}
                         </td>
-                        <td>{{ item[4] }}</td>
+                        <td>
+                            {{ item[4] }}{% if item[4] == 'xp_boost' and item[10] %} ({{ item[10] }}x){% endif %}
+                        </td>
                         <td>
                             {{ item[6]|string + 'h'
                                if item[6] else 'Permanent' }}
@@ -232,19 +242,50 @@ function switchTab(name) {
 }
 switchTab('items');
 
+// Phase 5 / Leveling expansion: xp_boost items need a multiplier
+// field instead of a role ID, and their "duration" means "how long
+// the boost lasts" rather than "how long until the role is removed" —
+// same underlying duration_hours column, different label/meaning.
+function toggleItemTypeFields() {
+    const type = document.getElementById('item-type').value;
+    const roleField  = document.getElementById('item-role-field');
+    const boostField = document.getElementById('item-boost-mult-field');
+    const durLabel   = document.getElementById('item-duration-label');
+    const durHint    = document.getElementById('item-duration-hint');
+
+    if (type === 'xp_boost') {
+        roleField.style.display = 'none';
+        boostField.style.display = 'block';
+        durLabel.textContent = 'Duration hours (required)';
+        durHint.textContent = 'How long the boost lasts once purchased';
+    } else {
+        roleField.style.display = 'block';
+        boostField.style.display = 'none';
+        durLabel.textContent = 'Duration hours (0 = permanent)';
+        durHint.textContent = '';
+    }
+}
+toggleItemTypeFields();
+
 async function addItem() {
+    const type = document.getElementById('item-type').value;
     const stock = parseInt(
         document.getElementById('item-stock').value) || 0;
     const priceDiamonds = parseInt(
         document.getElementById('item-price-diamonds').value) || 0;
+    const boostMult = parseFloat(
+        document.getElementById('item-boost-mult').value) || 0;
     const payload = {
         name:          document.getElementById('item-name').value,
         price:         parseInt(
             document.getElementById('item-price').value) || 0,
         price_diamonds: priceDiamonds > 0 ? priceDiamonds : null,
-        type:          document.getElementById('item-type').value,
-        role_id:       document.getElementById('item-role').value
-                       || null,
+        type:          type,
+        role_id:       type !== 'xp_boost'
+                       ? (document.getElementById('item-role').value || null)
+                       : null,
+        xp_boost_multiplier: type === 'xp_boost' && boostMult > 1
+                       ? boostMult : null,
         duration_hours:parseInt(
             document.getElementById('item-duration').value) || null,
         required_level:parseInt(
@@ -257,6 +298,10 @@ async function addItem() {
     };
     if (!payload.name || (!payload.price && !payload.price_diamonds)) {
         showToast('Enter name and a coin or diamond price', 'danger');
+        return;
+    }
+    if (type === 'xp_boost' && (!payload.xp_boost_multiplier || !payload.duration_hours)) {
+        showToast('XP Boost items need a multiplier > 1 and a duration', 'danger');
         return;
     }
     const res  = await fetch('/api/shop/item', {

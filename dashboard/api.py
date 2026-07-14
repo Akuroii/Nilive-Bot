@@ -1136,7 +1136,7 @@ def shop_items_partial():
             cursor = await db.execute("""
                 SELECT id, name, description, price, type,
                        role_id, duration_hours, featured, enabled,
-                       price_diamonds
+                       price_diamonds, xp_boost_multiplier
                 FROM shop_items WHERE guild_id = ?
                 ORDER BY featured DESC, created_at DESC
             """, (guild_id,))
@@ -1149,13 +1149,15 @@ def shop_items_partial():
         label  = "Active" if r[8] else "Disabled"
         dur    = f"{r[6]}h" if r[6] else "Permanent"
         price_diamonds = r[9]
+        boost_mult = r[10]
         price_str = f"💎 {price_diamonds:,}" if price_diamonds else f"🪙 {r[3]:,}"
+        type_str = f"{r[4]} ({boost_mult}x)" if r[4] == "xp_boost" and boost_mult else r[4]
         html  += (
             f"<tr>"
             f"<td><strong>{r[1]}</strong>{'⭐' if r[7] else ''}</td>"
             f"<td class='text-muted'>{r[2] or '—'}</td>"
             f"<td>{price_str}</td>"
-            f"<td>{r[4]}</td>"
+            f"<td>{type_str}</td>"
             f"<td>{dur}</td>"
             f"<td><span class='badge {status}'>{label}</span></td>"
             f"<td><button class='btn btn-sm btn-danger' "
@@ -1219,6 +1221,15 @@ def add_shop_item():
     except (TypeError, ValueError):
         price_diamonds_val = None
 
+    # Phase 5 / Leveling expansion: only meaningful when type='xp_boost'.
+    xp_boost_multiplier_val = data.get("xp_boost_multiplier")
+    try:
+        xp_boost_multiplier_val = (
+            float(xp_boost_multiplier_val)
+            if xp_boost_multiplier_val not in (None, "", 0, "0") else None)
+    except (TypeError, ValueError):
+        xp_boost_multiplier_val = None
+
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -1226,8 +1237,9 @@ def add_shop_item():
                     (guild_id, name, description, price, type,
                      role_id, duration_hours, featured,
                      required_level, required_role_id,
-                     max_stock, current_stock, enabled, price_diamonds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                     max_stock, current_stock, enabled, price_diamonds,
+                     xp_boost_multiplier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """, (
                 guild_id,
                 data.get("name"),
@@ -1242,6 +1254,7 @@ def add_shop_item():
                 max_stock_val,
                 current_stock_val,
                 price_diamonds_val,
+                xp_boost_multiplier_val,
             ))
             await db.commit()
 

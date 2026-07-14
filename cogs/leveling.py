@@ -163,7 +163,7 @@ class Leveling(commands.Cog):
 
         role_ids  = [r.id for r in message.author.roles]
         xp_to_add = await calculate_message_xp(
-            guild_id, role_ids, word_count)
+            guild_id, role_ids, word_count, user_id=user_id)
 
         if xp_to_add <= 0:
             return

@@ -535,6 +535,32 @@ async def init_db():
             ON leveling_leaderboard_history(guild_id, period_end)
         """)
 
+        # Phase 5 / Leveling expansion: XP boost items (shop-integrated).
+        # One row per active boost grant — a user can hold more than one
+        # simultaneously (e.g. stacked purchases); get_active_boost_multiplier()
+        # in utils/xp_calculator.py takes MAX(multiplier) across all
+        # non-expired rows rather than stacking them additively, matching
+        # the existing "highest wins" rule already used for bonus roles.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS leveling_active_boosts (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id   INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                multiplier REAL NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                source     TEXT DEFAULT 'shop',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_lab_guild_user
+            ON leveling_active_boosts(guild_id, user_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_lab_expires
+            ON leveling_active_boosts(expires_at)
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_bonus_roles (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -649,6 +675,22 @@ async def init_db():
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] shop_items.price_diamonds: {e}")
+
+        # Phase 5 / Leveling expansion: only relevant when
+        # shop_items.type = 'xp_boost' — the multiplier granted for
+        # duration_hours (that column already exists and is reused
+        # as-is, same as it's reused for temp_role). NULL for every
+        # other item type, exactly like price_diamonds above.
+        try:
+            cursor = await db.execute("PRAGMA table_info(shop_items)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "xp_boost_multiplier" not in cols:
+                await db.execute(
+                    "ALTER TABLE shop_items ADD COLUMN "
+                    "xp_boost_multiplier REAL DEFAULT NULL")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] shop_items.xp_boost_multiplier: {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS purchase_history (

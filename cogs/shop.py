@@ -43,7 +43,8 @@ async def process_purchase(interaction: discord.Interaction,
             SELECT id, name, price, type, role_id,
                    duration_hours, required_level,
                    required_role_id, enabled,
-                   max_stock, current_stock, price_diamonds
+                   max_stock, current_stock, price_diamonds,
+                   xp_boost_multiplier
             FROM shop_items
             WHERE id = ? AND guild_id = ? AND enabled = 1
         """, (item_id, guild_id))
@@ -56,7 +57,7 @@ async def process_purchase(interaction: discord.Interaction,
 
     (iid, name, price, itype, role_id, duration_hours,
      req_level, req_role_id, enabled, max_stock, curr_stock,
-     price_diamonds) = item
+     price_diamonds, xp_boost_multiplier) = item
 
     # Phase 5 / Economy v2: an item is diamond-priced when
     # price_diamonds is set (nullable column — see database.py
@@ -83,6 +84,24 @@ async def process_purchase(interaction: discord.Interaction,
         if req_role and req_role not in interaction.user.roles:
             await interaction.response.send_message(
                 f"You need {req_role.mention} to buy this.",
+                ephemeral=True)
+            return
+
+    # Phase 5 / Leveling expansion: an xp_boost item must have both a
+    # multiplier and a duration configured — without both there's
+    # nothing meaningful to grant. Checked before any balance/stock
+    # is touched, same as the level/role gates above.
+    if itype == "xp_boost":
+        if not xp_boost_multiplier or xp_boost_multiplier <= 1.0:
+            await interaction.response.send_message(
+                "This XP boost item isn't configured correctly "
+                "(missing or invalid multiplier). Ask an admin to fix it.",
+                ephemeral=True)
+            return
+        if not duration_hours or duration_hours <= 0:
+            await interaction.response.send_message(
+                "This XP boost item isn't configured correctly "
+                "(missing duration). Ask an admin to fix it.",
                 ephemeral=True)
             return
 
@@ -146,6 +165,7 @@ async def process_purchase(interaction: discord.Interaction,
               iid, name, pay_amount, expires_at, pay_currency))
         await db.commit()
 
+    boost_expires_at = None
     if itype in ("role", "temp_role") and role_id:
         # Phase 3 / E2: role/temp_role granting now goes through the
         # shared Reward Engine instead of this cog's own copy of the
@@ -167,16 +187,28 @@ async def process_purchase(interaction: discord.Interaction,
         )
         if not result.get("success"):
             print(f"[SHOP] Role give error: {result.get('error')}")
+    elif itype == "xp_boost":
+        # Phase 5 / Leveling expansion: grants a temporary XP
+        # multiplier instead of a role or inventory item. Read by
+        # utils.xp_calculator.calculate_message_xp() on every message,
+        # stacking multiplicatively on top of any role-based bonus.
+        from utils.xp_calculator import grant_xp_boost
+        try:
+            boost_expires_at = await grant_xp_boost(
+                guild_id, user_id, xp_boost_multiplier,
+                duration_hours, source="shop")
+        except Exception as e:
+            print(f"[SHOP] XP boost grant error: {e}")
     elif itype not in ("role", "temp_role"):
-        # Phase 3 / E4: anything that isn't a role/temp_role (i.e. the
-        # shop's "Custom" item type) is delivered into the buyer's
-        # Inventory instead of silently doing nothing beyond the
-        # purchase_history row above — previously a "custom" item's
-        # only trace after purchase was the receipt, with nothing a
-        # member could actually check or a future feature (missions,
-        # trade) could query against. Routed through the Reward
-        # Engine's 'item' type so it's logged/sourced consistently
-        # with every other grant.
+        # Phase 3 / E4: anything that isn't a role/temp_role/xp_boost
+        # (i.e. the shop's "Custom" item type) is delivered into the
+        # buyer's Inventory instead of silently doing nothing beyond
+        # the purchase_history row above — previously a "custom"
+        # item's only trace after purchase was the receipt, with
+        # nothing a member could actually check or a future feature
+        # (missions, trade) could query against. Routed through the
+        # Reward Engine's 'item' type so it's logged/sourced
+        # consistently with every other grant.
         from utils.reward_engine import give_reward
         result = await give_reward(
             interaction.client, guild_id, user_id, "item",
@@ -192,7 +224,11 @@ async def process_purchase(interaction: discord.Interaction,
             f"You bought **{name}** for **{pay_amount:,}** "
             f"{'💎' if pay_currency == 'diamonds' else await get_currency_name(guild_id)}!"),
         color=0x57F287)
-    if duration_hours:
+    if itype == "xp_boost" and boost_expires_at:
+        embed.add_field(
+            name="⚡ XP Boost Active",
+            value=f"{xp_boost_multiplier}x XP for the next {duration_hours} hours")
+    elif duration_hours:
         embed.set_footer(
             text=f"This role expires in {duration_hours} hours")
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -222,6 +258,13 @@ class Shop(commands.Cog):
         actually succeeding (or there being nothing to remove), and
         each entry is isolated in its own try/except so one bad row
         can't take out the rest of the batch or the whole loop.
+
+        Phase 5 / Leveling expansion: also sweeps expired
+        leveling_active_boosts rows in the same tick — same
+        "expires_at has passed" shape as temp_roles, and boosts have
+        no permission/Discord-API side effect to retry on failure
+        (it's a pure DB row), so this half is a plain unconditional
+        cleanup rather than needing its own try/except-per-row.
         """
         now = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
@@ -263,6 +306,15 @@ class Shop(commands.Cog):
                 print(f"[SHOP] temp_role_cleanup error for entry "
                       f"{entry_id}: {e}")
 
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "DELETE FROM leveling_active_boosts WHERE expires_at <= ?",
+                    (now,))
+                await db.commit()
+        except Exception as e:
+            print(f"[SHOP] xp_boost cleanup error: {e}")
+
     @temp_role_cleanup.before_loop
     async def before_cleanup(self):
         await self.bot.wait_until_ready()
@@ -276,7 +328,7 @@ class Shop(commands.Cog):
                 SELECT id, name, description, price,
                        type, duration_hours, featured,
                        required_level, max_stock, current_stock,
-                       price_diamonds
+                       price_diamonds, xp_boost_multiplier
                 FROM shop_items
                 WHERE guild_id = ? AND enabled = 1
                 ORDER BY featured DESC, price ASC
@@ -295,12 +347,15 @@ class Shop(commands.Cog):
 
         for (iid, name, desc, price, itype,
              dur, featured, req_lvl, max_s, curr_s,
-             price_diamonds) in items:
+             price_diamonds, boost_mult) in items:
             stock_info = ""
             if max_s:
                 stock_info = (f" • {curr_s or 0}/{max_s} left"
                               if curr_s else " • **Out of stock**")
-            dur_info  = f" • {dur}h temp" if dur else ""
+            if itype == "xp_boost" and boost_mult:
+                dur_info = f" • {boost_mult}x XP for {dur}h" if dur else f" • {boost_mult}x XP"
+            else:
+                dur_info = f" • {dur}h temp" if dur else ""
             lvl_info  = f" • Req. Level {req_lvl}" if req_lvl else ""
             price_str = (f"{price_diamonds:,} 💎" if price_diamonds
                          else f"{price:,} {currency}")
@@ -312,7 +367,7 @@ class Shop(commands.Cog):
         view = discord.ui.View()
         for (iid, name, desc, price, itype,
              dur, featured, req_lvl, max_s, curr_s,
-             price_diamonds) in items[:5]:
+             price_diamonds, boost_mult) in items[:5]:
             if max_s and not curr_s:
                 continue
             btn = discord.ui.Button(
@@ -357,7 +412,14 @@ class Shop(commands.Cog):
         held_items = await get_inventory(
             interaction.guild.id, interaction.user.id)
 
-        if not rows and not held_items:
+        # Phase 5 / Leveling expansion: show any currently active XP
+        # boosts alongside held items — same "what do I actually have
+        # right now" purpose, just a different table.
+        from utils.xp_calculator import get_active_boost_multiplier
+        active_boost = await get_active_boost_multiplier(
+            interaction.guild.id, interaction.user.id)
+
+        if not rows and not held_items and active_boost == 1.0:
             await interaction.response.send_message(
                 "Your inventory is empty.", ephemeral=True)
             return
@@ -365,6 +427,11 @@ class Shop(commands.Cog):
         embed = discord.Embed(
             title=f"🎒 {interaction.user.display_name}'s Inventory",
             color=0x7c5cbf)
+
+        if active_boost > 1.0:
+            embed.add_field(
+                name="⚡ Active XP Boost",
+                value=f"{active_boost}x XP", inline=False)
 
         if held_items:
             items_text = "\n".join(

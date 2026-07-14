@@ -1,5 +1,6 @@
 import math
 import aiosqlite
+from datetime import datetime, timezone, timedelta
 from database import DB_PATH
 
 async def get_xp_multiplier(guild_id: int, member_role_ids: list[int]) -> float:
@@ -73,19 +74,66 @@ async def get_leveling_config(guild_id: int) -> dict:
 async def calculate_message_xp(
     guild_id: int,
     member_role_ids: list[int],
-    word_count: int
+    word_count: int,
+    user_id: int = None,
 ) -> int:
     config = await get_leveling_config(guild_id)
     if not config.get("enabled", 1):
         return 0
-    multiplier = await get_xp_multiplier(guild_id, member_role_ids)
-    if multiplier == 0.0:
+    role_multiplier = await get_xp_multiplier(guild_id, member_role_ids)
+    if role_multiplier == 0.0:
         return 0
+    # Phase 5 / Leveling expansion: XP boost items. Stacks
+    # multiplicatively on top of the role multiplier above (a boost
+    # item is a separate, purchasable effect from role-based bonuses,
+    # not an alternative to them). Only applied when a user_id is
+    # given — voice XP intentionally does not call this with a
+    # user_id, keeping the existing voice XP economy untouched.
+    boost_multiplier = 1.0
+    if user_id is not None:
+        boost_multiplier = await get_active_boost_multiplier(guild_id, user_id)
     base_xp = word_count * config["xp_per_word"]
     base_xp = max(config["xp_min_per_message"],
                   min(config["xp_max_per_message"], base_xp))
-    final_xp = int(base_xp * multiplier)
+    final_xp = int(base_xp * role_multiplier * boost_multiplier)
     return final_xp
+
+
+# ─── Phase 5 / Leveling expansion — XP boost items ──────────────────────
+#
+# Purchasable, temporary XP multipliers granted via cogs/shop.py's
+# process_purchase() for shop items with type='xp_boost'. A user can
+# hold more than one active boost at once (e.g. two stacked
+# purchases) — get_active_boost_multiplier() takes the MAX across all
+# non-expired rows for that guild+user rather than stacking them
+# additively, the same "highest wins" rule leveling_bonus_roles
+# already uses for role multipliers.
+async def get_active_boost_multiplier(guild_id: int, user_id: int) -> float:
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT MAX(multiplier) FROM leveling_active_boosts
+            WHERE guild_id = ? AND user_id = ? AND expires_at > ?
+        """, (guild_id, user_id, now))
+        row = await cursor.fetchone()
+    return row[0] if row and row[0] else 1.0
+
+
+async def grant_xp_boost(guild_id: int, user_id: int, multiplier: float,
+                          duration_hours: int, source: str = "shop") -> str:
+    if duration_hours <= 0:
+        raise ValueError("duration_hours must be positive")
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(hours=duration_hours)
+    ).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO leveling_active_boosts
+                (guild_id, user_id, multiplier, expires_at, source)
+            VALUES (?, ?, ?, ?, ?)
+        """, (guild_id, user_id, multiplier, expires_at, source))
+        await db.commit()
+    return expires_at
 
 
 def calculate_voice_xp(minutes: float, voice_xp_per_minute: int) -> int:
