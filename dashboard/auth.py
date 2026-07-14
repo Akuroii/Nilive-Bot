@@ -118,6 +118,35 @@ def fetch_discord_bot_guilds() -> set[int]:
     return guild_ids
 
 
+def bot_is_in_guild(guild_id: int) -> bool:
+    """
+    Phase 0 — Server Select fix. Single-guild membership check via the
+    BOT token (GET /guilds/{id} — 200 if the bot is a member, 403/404
+    otherwise). Used by /select-guild to verify the bot is actually
+    installed before auto-granting OWNER_DISCORD_ID dashboard access,
+    without paying for a full fetch_discord_bot_guilds() page-through
+    just to check one guild.
+
+    Returns False (never raises) on any failure or missing token — the
+    safe default is "assume not a member", which just means the
+    auto-grant path is skipped and the normal dashboard_users check
+    (403 if no row) applies as before.
+    """
+    bot_token = os.getenv("DISCORD_TOKEN", "")
+    if not bot_token:
+        return False
+    try:
+        r = requests.get(
+            f"{DISCORD_API}/guilds/{guild_id}",
+            headers={"Authorization": f"Bot {bot_token}"},
+            timeout=8,
+        )
+        return r.status_code == 200
+    except Exception as e:
+        print(f"[AUTH] bot_is_in_guild error: {e}")
+        return False
+
+
 def get_bot_invite_url(guild_id: int) -> str:
     """
     Phase 0 Extension. Builds a bot-invite OAuth2 URL locked to one

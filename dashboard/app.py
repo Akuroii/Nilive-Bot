@@ -9,7 +9,7 @@ from flask import (
     Flask, redirect, url_for, session,
     request, render_template, jsonify, abort,
 )
-from database import DB_PATH, init_db
+from database import DB_PATH, init_db, OWNER_DISCORD_ID, add_guild_owner
 from dashboard.utils.async_utils import run_async
 from dashboard.auth import (
     login_required, create_session, clear_session,
@@ -148,6 +148,29 @@ def select_guild(guild_id: int):
             return await cursor.fetchone()
 
     row = run_async(check())
+
+    # Phase 0 fix — Server Select: previously a server the bot was
+    # already installed in had NO way to be entered by anyone unless a
+    # dashboard_users row already existed (e.g. seeded at boot by
+    # ensure_owner_access(), which only scans guilds that already have
+    # activity data — a freshly-invited guild with zero activity yet
+    # has no row and no way in until someone manually adds one via
+    # Dashboard Access, a page that itself requires being in the
+    # server first). That's a dead end for the super-admin.
+    #
+    # Fix: if the requester IS OWNER_DISCORD_ID (the one global
+    # super-admin — see database.py) and the bot is actually a member
+    # of this guild, grant owner access on the fly via the same
+    # add_guild_owner() helper on_guild_join already uses, then
+    # re-check. This does NOT extend to any other admin or user —
+    # everyone else still needs a pre-existing dashboard_users row,
+    # exactly as before. No auto-seeding for random guild admins.
+    if not row and user_id == OWNER_DISCORD_ID:
+        from dashboard.auth import bot_is_in_guild
+        if bot_is_in_guild(guild_id):
+            run_async(add_guild_owner(guild_id))
+            row = run_async(check())
+
     if not row:
         abort(403)
 

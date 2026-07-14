@@ -18,16 +18,24 @@
                       transition:all .15s;"
                onmouseover="this.style.borderColor='var(--accent)';this.style.background='var(--bg4)'"
                onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--bg3)'">
-                {% if g.icon %}
-                <img src="https://cdn.discordapp.com/icons/{{ g.id }}/{{ g.icon }}.png"
-                     style="width:44px;height:44px;border-radius:50%;object-fit:cover;">
-                {% else %}
-                <div style="width:44px;height:44px;border-radius:50%;background:var(--accent);
-                            display:flex;align-items:center;justify-content:center;
-                            font-weight:700;font-size:18px;color:#fff;flex-shrink:0;">
-                    {{ g.name[0].upper() }}
+                <!-- Phase 0 fix: onerror fallback in case the icon hash is
+                     stale/broken (e.g. icon changed/removed on Discord's
+                     side after this row was cached), plus correct .gif
+                     extension for animated (a_-prefixed) icon hashes —
+                     previously always requested .png, which 404s for
+                     animated icons. -->
+                <div style="width:44px;height:44px;flex-shrink:0;position:relative;">
+                    {% if g.icon %}
+                    <img src="https://cdn.discordapp.com/icons/{{ g.id }}/{{ g.icon }}.{{ 'gif' if g.icon.startswith('a_') else 'png' }}"
+                         style="width:44px;height:44px;border-radius:50%;object-fit:cover;display:block;"
+                         onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+                    {% endif %}
+                    <div style="width:44px;height:44px;border-radius:50%;background:var(--accent);
+                                display:{{ 'none' if g.icon else 'flex' }};align-items:center;justify-content:center;
+                                font-weight:700;font-size:18px;color:#fff;">
+                        {{ g.name[0].upper() }}
+                    </div>
                 </div>
-                {% endif %}
                 <div>
                     <div style="font-weight:600;font-size:14px;">{{ g.name }}</div>
                     <div style="font-size:11px;color:var(--text3);text-transform:capitalize;margin-top:2px;">
@@ -68,6 +76,36 @@
 
 {% block scripts %}
 <script>
+// Phase 0 fix: correct file extension for animated icon hashes
+// (a_-prefixed hashes are GIFs on Discord's CDN, everything else is
+// PNG — requesting .png for an animated hash 404s and breaks the img).
+function iconUrl(guildId, icon) {
+    if (!icon) return null;
+    const ext = icon.startsWith('a_') ? 'gif' : 'png';
+    return `https://cdn.discordapp.com/icons/${guildId}/${icon}.${ext}`;
+}
+
+function serverIconHtml(s) {
+    const url = iconUrl(s.id, s.icon);
+    const fallback = `<div style="width:40px;height:40px;border-radius:50%;background:var(--accent);
+                          display:flex;align-items:center;justify-content:center;
+                          font-weight:700;font-size:16px;color:#fff;flex-shrink:0;">
+                      ${s.name.charAt(0).toUpperCase()}
+                   </div>`;
+    if (!url) return fallback;
+    // onerror swaps a broken/stale icon URL for the letter-avatar
+    // fallback instead of showing a broken image icon.
+    return `<div style="width:40px;height:40px;flex-shrink:0;position:relative;">
+                <img src="${url}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;display:block;"
+                     onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+                <div style="width:40px;height:40px;border-radius:50%;background:var(--accent);
+                            display:none;align-items:center;justify-content:center;
+                            font-weight:700;font-size:16px;color:#fff;">
+                    ${s.name.charAt(0).toUpperCase()}
+                </div>
+            </div>`;
+}
+
 async function loadManageServers() {
     const list = document.getElementById('manage-servers-list');
     try {
@@ -87,27 +125,41 @@ async function loadManageServers() {
         }
 
         list.innerHTML = servers.map(s => {
-            const icon = s.icon
-                ? `<img src="https://cdn.discordapp.com/icons/${s.id}/${s.icon}.png"
-                        style="width:40px;height:40px;border-radius:50%;object-fit:cover;">`
-                : `<div style="width:40px;height:40px;border-radius:50%;background:var(--accent);
-                              display:flex;align-items:center;justify-content:center;
-                              font-weight:700;font-size:16px;color:#fff;flex-shrink:0;">
-                        ${s.name.charAt(0).toUpperCase()}
-                   </div>`;
+            const icon = serverIconHtml(s);
 
             if (s.is_bot_member) {
+                // Phase 0 fix (highest priority): this card used to be a
+                // dead end — bot installed, "Active" badge shown, but no
+                // link and no click handler at all, so there was no way
+                // to actually enter a server here even though it was
+                // live. It's now a real link into /select-guild/<id>,
+                // same destination as the "Select a Server" list above.
+                //
+                // Server access is still gated server-side by
+                // dashboard_users — clicking this does NOT bypass that.
+                // For most admins without an existing access row it'll
+                // land on the 403 page (same message as elsewhere:
+                // "ask your server owner to get access"). The one
+                // exception is the global super-admin (OWNER_DISCORD_ID),
+                // for whom /select-guild now auto-grants owner access
+                // when the bot is confirmed present — see
+                // dashboard/app.py select_guild().
                 return `
-                <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;
-                            background:var(--bg3);border:1px solid var(--border);
-                            border-radius:10px;">
+                <a href="/select-guild/${s.id}"
+                   style="display:flex;align-items:center;gap:12px;padding:12px 14px;
+                          background:var(--bg3);border:1px solid var(--border);
+                          border-radius:10px;text-decoration:none;color:var(--text);
+                          transition:all .15s;"
+                   onmouseover="this.style.borderColor='var(--accent)';this.style.background='var(--bg4)'"
+                   onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--bg3)'">
                     ${icon}
                     <div style="flex:1;min-width:0;">
                         <div style="font-weight:600;font-size:13px;overflow:hidden;
                                     text-overflow:ellipsis;white-space:nowrap;">${s.name}</div>
                         <div><span class="badge badge-success" style="margin-top:2px;">Bot installed</span></div>
                     </div>
-                </div>`;
+                    <div style="color:var(--text3);font-size:16px;">›</div>
+                </a>`;
             }
 
             return `
