@@ -123,8 +123,20 @@
                     <td class="text-muted">{{ log[10][:10] if log[10] else '—' }}</td>
                     {% if is_admin %}
                     <td>
+                        <!-- SECURITY FIX (Critical XSS): this used to inline the raw
+                             moderation reason into an onclick="...`{{ reason }}`..."
+                             JS template literal, only stripping backticks. A reason
+                             containing "${...}" would be evaluated as a live JS
+                             template-literal expression (arbitrary JS execution),
+                             and backslashes/other characters could still break out
+                             of the literal. Reason now travels via a data-* attribute,
+                             which Jinja's autoescaping HTML-encodes, and is read off
+                             the DOM node (never string-interpolated into JS) at click
+                             time. -->
                         <button class="btn btn-sm btn-secondary"
-                                onclick="editReason({{ log[0] }}, `{{ (log[7] or '') | replace('`', '') }}`)"
+                                data-log-id="{{ log[0] }}"
+                                data-log-reason="{{ log[7] or '' }}"
+                                onclick="editReason(this.dataset.logId, this.dataset.logReason)"
                                 title="Edit reason">✏️</button>
                         {% if is_owner %}
                         <button class="btn btn-sm btn-danger"
@@ -257,7 +269,8 @@
                     <td>
                         {% if is_moderator %}
                         <button class="btn btn-sm btn-danger"
-                                onclick="clearWarnings('{{ w[0] }}')">Clear All</button>
+                                data-warn-user="{{ w[0] }}"
+                                onclick="clearWarnings(this.dataset.warnUser)">Clear All</button>
                         {% endif %}
                     </td>
                 </tr>
@@ -374,6 +387,11 @@ async function submitQuickAction() {
 }
 
 // ── Edit Reason ───────────────────────────────────────────────────────────────
+// SECURITY: logId/currentReason arrive here as plain strings read from
+// data-* attributes (see template above) — never string-interpolated
+// into an onclick handler. Assignment below uses .value (a DOM
+// property), not innerHTML, so this stays safe even if the reason
+// contains HTML/JS-looking text.
 function editReason(logId, currentReason) {
     document.getElementById('edit-log-id').value = logId;
     document.getElementById('edit-reason-text').value = currentReason;

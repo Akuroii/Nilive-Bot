@@ -89,8 +89,16 @@
                     <td>{{ c[2] | length if c[2] else 0 }} actions</td>
                     <td>{{ c[3] or '—' }}</td>
                     <td>
+                        <!-- SECURITY FIX: same class of bug as moderation.html's edit-reason
+                             button — the trigger name used to be interpolated raw into a
+                             single-quoted JS string inside onclick=. A trigger containing a
+                             single quote or backslash could break out of the string and
+                             inject arbitrary JS. Now passed via a data-* attribute (Jinja
+                             autoescapes attribute values) and read off the DOM at click time. -->
                         <button class="btn btn-sm btn-danger"
-                            onclick="showConfirm('Delete !{{ c[1] }}?', () => deleteCmd({{ c[0] }}))">
+                            data-cmd-id="{{ c[0] }}"
+                            data-cmd-trigger="{{ c[1] }}"
+                            onclick="confirmDeleteCmd(this.dataset.cmdId, this.dataset.cmdTrigger)">
                             Delete
                         </button>
                     </td>
@@ -189,6 +197,10 @@ async function saveCommand() {
         document.getElementById('cmd-desc').value    = '';
         setTimeout(() => location.reload(), 800);
     } else showToast('Error saving', 'danger');
+}
+
+function confirmDeleteCmd(id, trigger) {
+    showConfirm(`Delete !${trigger}?`, () => deleteCmd(id));
 }
 
 async function deleteCmd(id) {

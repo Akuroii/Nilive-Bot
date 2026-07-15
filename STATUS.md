@@ -1,53 +1,98 @@
 # NILIVE BOT — SHIFT CHECKPOINT
-Stopped at: Phase 5 — flagged cosmetic gap closed, compiled clean.
+Stopped at: Security remediation pass (Critical + Critical-adjacent items
+from the prior static-analysis sweep). Feature work (Phase 5 leftovers)
+deliberately NOT touched this shift — see "Still needed" below.
 
-## Verified against uploaded ZIP (canonical truth)
-- XP Boost Shop Items: CONFIRMED COMPLETE — cogs/shop.py purchase branch,
-  utils/xp_calculator.py (grant_xp_boost / get_active_boost_multiplier),
-  cogs/leveling.py passes user_id, dashboard/templates/systems/shop.html
-  UI, dashboard/api.py add_shop_item + shop_items_partial. No work needed
-  here despite an earlier memory note calling this "DB layer only" —
-  that note was stale relative to the actual ZIP contents.
+## ⚠️ Conflict flagged, not resolved — needs your call
+`HANDOFF_NOTES.md` claims `dashboard/templates/config/commands.html` was
+deleted last shift ("Grepped every route in app.py — nothing renders
+it"). It is still present in the ZIP this session started from, and
+`config_commands()` in app.py still redirects through `/config/commands`.
+Did not touch it — could be a stale ZIP merge, or the delete didn't
+survive a merge. Confirm before it's deleted again.
 
-## This round
-- **dashboard/app.py** — added `"resetleaderboard"` to
-  `COMMAND_CATEGORIES["Leveling"]`. This was the one remaining flagged
-  item carried across multiple prior sessions (cosmetic only — the
-  `/resetleaderboard` command itself, in cogs/leveling.py, always worked;
-  it just never appeared on the Commands dashboard page or in bulk
-  enable/disable). One-line fix, no other logic touched.
+## This round — Critical / Critical-adjacent security fixes
+1. **Stored XSS, moderation dashboard (Critical)** —
+   `dashboard/templates/manage/moderation.html`'s "edit reason" button
+   used to inline the raw moderation reason into
+   `onclick="editReason(...,` `{{ reason }}` `)"`. Only backticks were
+   stripped — a reason containing `${...}` would execute as a live JS
+   template-literal expression. Fixed: reason now travels via a
+   `data-log-reason` attribute (Jinja autoescapes attribute values) and
+   is read off the DOM at click time, never string-interpolated into JS.
+   Same bug, same fix pattern applied to
+   `dashboard/templates/manage/customcommands.html`'s delete-command
+   button (trigger name was raw-interpolated into a JS string literal).
 
-Compile-checked: `python3 -m py_compile dashboard/app.py` — exit 0.
+2. **No CSRF protection (Critical)** — zero CSRF protection existed
+   anywhere; every state-changing route relied purely on the session
+   cookie. Fixed with a session-bound token:
+   - `dashboard/auth.py` — `create_session()` now mints
+     `session["csrf_token"]` (random, per session).
+   - `dashboard/templates/base.html` — exposes it as
+     `window.__CSRF_TOKEN__` before any other script loads.
+   - `dashboard/static/js/dashboard.js` — patches `window.fetch` and
+     listens for `htmx:configRequest` to attach `X-CSRF-Token`
+     automatically on every non-GET request. No individual template's
+     fetch/htmx calls had to be touched.
+   - `dashboard/api.py` — new `api_bp.before_request` hook rejects any
+     non-GET `/api/*` request whose header doesn't match the session
+     token.
+   - **Scope limit, flagged not fixed:** this only covers `api_bp`
+     (the vast majority of state changes). A few routes in
+     `dashboard/app.py` still use classic `<form method="POST">`
+     (`config/access.html`, `config/commands.html`) and are NOT yet
+     CSRF-protected — adding hidden token inputs to those forms is
+     next, kept separate to avoid breaking untested form flows in the
+     same pass as the fetch/htmx-wide change above.
 
-## Flagged items — now CLEAR
-- ~~resetleaderboard missing from COMMAND_CATEGORIES~~ FIXED this round.
-- ~~XP boost shop items partial~~ was already complete in the ZIP; false
-  flag from a stale memory note, corrected above.
+3. **Privilege mismatch, Ledger/Inventory API (Critical-adjacent)** —
+   `/api/ledger`, `/api/inventory`, `/api/inventory/<user_id>` were
+   gated at `LEVEL_MODERATOR` while the page routes that link to them
+   (`/ledger`, `/inventory`) are `LEVEL_ADMIN` per
+   `PAGE_PERMISSIONS`. A moderator who couldn't load the page could
+   still hit the JSON endpoint directly with their session cookie.
+   Raised both routes to `LEVEL_ADMIN` in `dashboard/api.py` to match.
 
-## Still blocked — needs your input before building
-**Prestige system** (Phase 5, last remaining item). Can't start without
-answers to:
-1. Minimum level required to prestige?
-2. On prestige: does XP reset to 0, or carry over above the reset point?
-3. Do level-role rewards get stripped on prestige, or kept?
-4. Prestige badges/roles — one role per prestige tier, or a single role
-   with a number shown elsewhere (rank card, leaderboard)?
-5. Leaderboard sort — prestige tier first then XP, or XP-only (ignoring
-   prestige)?
+All modified Python files compile clean: `python3 -m py_compile
+dashboard/api.py dashboard/auth.py` — exit 0.
 
-## On the horizon after prestige is unblocked
-- Phase 6: Event Stack Builder (hard caps: max 5 reward slots, max
-  currency per tier — caps already specified in project rules, not yet
-  built) and Trade System (still correctly BLOCKED — requires E3 ledger +
-  E4 inventory, both of which are confirmed live, so Trade System is
-  technically unblockable now too — flagging for next session since
-  Master Plan says finish Phase 5 before Phase 6).
+## Still needed (security, carried forward)
+- CSRF token on the classic-form routes in `dashboard/app.py`
+  (`config/access.html`, `config/commands.html`) — see scope note above.
+- Role hierarchy check gap in `warn` action for custom commands.
+- Role-grant escalation risk in `add_role`/`remove_role` custom-command
+  actions.
+- Reaction role expiry sentinel-row collision (Medium).
+- Unbounded in-memory cooldown dictionaries — slow memory leak (Low).
+- Orphaned-template question above needs your answer before anyone
+  touches `config/commands.html` again.
 
-## Files in this ZIP (delta — supersedes only dashboard/app.py from prior ZIPs)
-- `dashboard/app.py`
+## Still needed (features, Phase 5 — untouched this shift)
+- `resetleaderboard` missing from `COMMAND_CATEGORIES["Leveling"]` in
+  `dashboard/app.py` (cosmetic — command itself works). NOTE: you said
+  you updated `dashboard/app.py` yourself this session — check whether
+  this is already fixed there before re-doing it.
+- XP boost shop items — STATUS.md (prior round) says this was verified
+  already complete against the ZIP; re-confirm against your current
+  `dashboard/app.py` once merged.
+- Prestige system — still blocked on your answers to the 5 open
+  questions from the prior round (min level, XP reset behavior, reward
+  stripping, badge shape, leaderboard sort order).
+
+## Files in this ZIP (delta — only what changed this shift)
+- `dashboard/api.py`
+- `dashboard/auth.py`
+- `dashboard/static/js/dashboard.js`
+- `dashboard/templates/base.html`
+- `dashboard/templates/manage/moderation.html`
+- `dashboard/templates/manage/customcommands.html`
 - `STATUS.md`
 
-## NOT included (unchanged — pull from your last full ZIP)
-Everything else: all `cogs/*`, all other `dashboard/*`, all `utils/*`,
-`main.py`, `database.py`, `requirements.txt`, `Dockerfile`, `start.sh`,
-`.gitignore`, `DEBUG_GUIDE.md`, `HANDOFF_NOTES.md`.
+## NOT included (unchanged, or you already updated it — pull from your
+own latest ZIP)
+`dashboard/app.py` (you updated this yourself this session — did not
+touch or overwrite it). Everything else: all `cogs/*`, all other
+`dashboard/*`, all `utils/*`, `main.py`, `database.py`,
+`requirements.txt`, `Dockerfile`, `start.sh`, `.gitignore`,
+`DEBUG_GUIDE.md`, `HANDOFF_NOTES.md`.

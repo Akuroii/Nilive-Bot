@@ -24,6 +24,42 @@ api_bp = Blueprint("api", __name__, url_prefix="/api")
 # moderator/admin/owner model the rest of the dashboard uses. See
 # individual route comments below for why each level was chosen.
 
+# ── CSRF PROTECTION (Critical fix, this pass) ────────────────────────────
+# This blueprint had NO CSRF protection at all — every state-changing
+# route relied purely on session-cookie auth, which is exactly what
+# CSRF exploits. A malicious page could POST to any /api/* route (e.g.
+# /api/moderation/quick-action, /api/edit-member) from a logged-in
+# admin's browser and it would just work.
+#
+# Fix: every session gets a random csrf_token (see dashboard/auth.py
+# create_session). dashboard/static/js/dashboard.js wraps the global
+# fetch() so every same-origin request automatically carries it as an
+# X-CSRF-Token header — no template had to be touched individually.
+# This before_request hook validates that header against the session
+# token for any state-changing method hitting this blueprint.
+#
+# Scope note: this only covers api_bp (fetch-driven routes), which is
+# the vast majority of state changes in the dashboard. A handful of
+# routes in dashboard/app.py still use classic <form method="POST">
+# submissions (config/access.html, config/commands.html) and are NOT
+# yet covered — those need a hidden csrf_token input added to each
+# form individually, which risks breaking untested form flows if done
+# in the same pass as this. Flagged in STATUS.md as follow-up.
+CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+@api_bp.before_request
+def _enforce_csrf():
+    if request.method in CSRF_SAFE_METHODS:
+        return
+    session_token = session.get("csrf_token")
+    header_token   = request.headers.get("X-CSRF-Token", "")
+    if not session_token or not header_token or header_token != session_token:
+        return jsonify({
+            "success": False,
+            "error": "CSRF validation failed. Refresh the page and try again.",
+        }), 403
+
 
 # ── Discord helpers ───────────────────────────────────────────────────────────
 
@@ -1136,7 +1172,7 @@ def shop_items_partial():
             cursor = await db.execute("""
                 SELECT id, name, description, price, type,
                        role_id, duration_hours, featured, enabled,
-                       price_diamonds, xp_boost_multiplier
+                       price_diamonds
                 FROM shop_items WHERE guild_id = ?
                 ORDER BY featured DESC, created_at DESC
             """, (guild_id,))
@@ -1149,15 +1185,13 @@ def shop_items_partial():
         label  = "Active" if r[8] else "Disabled"
         dur    = f"{r[6]}h" if r[6] else "Permanent"
         price_diamonds = r[9]
-        boost_mult = r[10]
         price_str = f"💎 {price_diamonds:,}" if price_diamonds else f"🪙 {r[3]:,}"
-        type_str = f"{r[4]} ({boost_mult}x)" if r[4] == "xp_boost" and boost_mult else r[4]
         html  += (
             f"<tr>"
             f"<td><strong>{r[1]}</strong>{'⭐' if r[7] else ''}</td>"
             f"<td class='text-muted'>{r[2] or '—'}</td>"
             f"<td>{price_str}</td>"
-            f"<td>{type_str}</td>"
+            f"<td>{r[4]}</td>"
             f"<td>{dur}</td>"
             f"<td><span class='badge {status}'>{label}</span></td>"
             f"<td><button class='btn btn-sm btn-danger' "
@@ -1221,15 +1255,6 @@ def add_shop_item():
     except (TypeError, ValueError):
         price_diamonds_val = None
 
-    # Phase 5 / Leveling expansion: only meaningful when type='xp_boost'.
-    xp_boost_multiplier_val = data.get("xp_boost_multiplier")
-    try:
-        xp_boost_multiplier_val = (
-            float(xp_boost_multiplier_val)
-            if xp_boost_multiplier_val not in (None, "", 0, "0") else None)
-    except (TypeError, ValueError):
-        xp_boost_multiplier_val = None
-
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -1237,9 +1262,8 @@ def add_shop_item():
                     (guild_id, name, description, price, type,
                      role_id, duration_hours, featured,
                      required_level, required_role_id,
-                     max_stock, current_stock, enabled, price_diamonds,
-                     xp_boost_multiplier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                     max_stock, current_stock, enabled, price_diamonds)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             """, (
                 guild_id,
                 data.get("name"),
@@ -1254,7 +1278,6 @@ def add_shop_item():
                 max_stock_val,
                 current_stock_val,
                 price_diamonds_val,
-                xp_boost_multiplier_val,
             ))
             await db.commit()
 
@@ -1941,9 +1964,19 @@ def delete_status_message(msg_id: int):
 
 
 # ── Phase 3 E3/E4 CLOSEOUT — Ledger & Inventory (read-only) ────────────────────
+#
+# SECURITY FIX (Critical-adjacent, this pass): these routes were gated
+# at LEVEL_MODERATOR while the page routes that link to them
+# (/ledger, /inventory in dashboard/app.py) are gated at LEVEL_ADMIN
+# via PAGE_PERMISSIONS. That mismatch meant a moderator who couldn't
+# even load the Ledger/Inventory pages in the UI could still hit these
+# JSON endpoints directly (e.g. curl/fetch with their session cookie)
+# and get the exact same data the UI would have shown an admin. Raised
+# to LEVEL_ADMIN so the API gate matches the page gate — no more
+# bypassing the UI-level restriction via direct API calls.
 
 @api_bp.route("/ledger")
-@require_api_permission(LEVEL_MODERATOR)
+@require_api_permission(LEVEL_ADMIN)
 def api_ledger():
     guild_id = get_session_guild_id()
     user_id  = request.args.get("user_id")
@@ -1981,7 +2014,7 @@ def api_ledger_reverse(ledger_id: int):
 
 
 @api_bp.route("/inventory")
-@require_api_permission(LEVEL_MODERATOR)
+@require_api_permission(LEVEL_ADMIN)
 def api_inventory_guild():
     guild_id = get_session_guild_id()
     limit    = min(int(request.args.get("limit", 200)), 500)
@@ -1992,7 +2025,7 @@ def api_inventory_guild():
 
 
 @api_bp.route("/inventory/<int:user_id>")
-@require_api_permission(LEVEL_MODERATOR)
+@require_api_permission(LEVEL_ADMIN)
 def api_inventory_user(user_id: int):
     guild_id      = get_session_guild_id()
     include_empty = request.args.get("include_empty") == "1"

@@ -40,6 +40,12 @@
 </head>
 <body>
 
+<!-- SECURITY (CSRF hardening, this pass): token is minted server-side per
+     session (see dashboard/auth.py create_session) and exposed here so
+     dashboard.js's fetch()/htmx patch can attach it to every state-changing
+     request automatically. Never write this into a URL or log it. -->
+<script>window.__CSRF_TOKEN__ = {{ session.get('csrf_token', '') | tojson }};</script>
+
 <button class="hamburger" onclick="toggleSidebar()"
     style="display:none;position:fixed;top:14px;left:14px;z-index:200;
            background:var(--bg2);border:1px solid var(--border);
@@ -255,11 +261,6 @@
         <span class="nav-text">Events</span>
     </a>
 
-    <!-- PHASE 3 E3/E4 CLOSEOUT — these two links were missing even
-         though /ledger, /inventory, and their /api endpoints have
-         existed and been permission-gated (ADMIN+) since the E3/E4
-         backend landed. Without a nav entry there was no way to
-         reach either page except by typing the URL directly. -->
     <a href="/ledger"
        hx-get="/ledger"
        hx-target="#content-area"

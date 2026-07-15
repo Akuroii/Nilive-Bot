@@ -1,6 +1,37 @@
 // ═══════════════════════════════════════════════════════════════
-// NERO DASHBOARD — dashboard.js  (Phase 2 upgrade)
+// NERO DASHBOARD — dashboard.js  (Phase 2 upgrade + CSRF hardening)
 // ═══════════════════════════════════════════════════════════════
+
+// ── CSRF TOKEN INJECTION (Critical security fix, this pass) ────
+// api_bp now rejects any non-GET /api/* request that doesn't carry
+// a matching X-CSRF-Token header (see dashboard/api.py before_request
+// hook). Rather than touch every individual fetch() call across every
+// template (dozens of them, high risk of missing one), the two
+// request paths the dashboard actually uses — raw fetch() and HTMX —
+// are patched centrally, once, here.
+//
+// window.__CSRF_TOKEN__ is set by base.html from the session-stored
+// token (see dashboard/auth.py create_session).
+(function patchFetchForCsrf() {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = function(input, init) {
+        init = init || {};
+        const method = (init.method || 'GET').toUpperCase();
+        if (method !== 'GET' && method !== 'HEAD') {
+            const token = window.__CSRF_TOKEN__ || '';
+            if (init.headers instanceof Headers) {
+                init.headers.set('X-CSRF-Token', token);
+            } else {
+                init.headers = Object.assign({}, init.headers, { 'X-CSRF-Token': token });
+            }
+        }
+        return originalFetch(input, init);
+    };
+})();
+
+document.addEventListener('htmx:configRequest', function(evt) {
+    evt.detail.headers['X-CSRF-Token'] = window.__CSRF_TOKEN__ || '';
+});
 
 // ── THEME TOGGLE ──────────────────────────────────────────────
 function toggleTheme() {
@@ -185,6 +216,9 @@ document.addEventListener('click', function(e) {
 document.addEventListener('htmx:afterRequest', function(e) {
     if (e.detail.xhr && e.detail.xhr.status >= 500) {
         showToast('Server error — please try again', 'error');
+    }
+    if (e.detail.xhr && e.detail.xhr.status === 403) {
+        showToast('Action blocked (permission or session expired) — refresh and try again', 'error');
     }
 });
 

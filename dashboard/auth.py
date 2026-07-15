@@ -1,5 +1,6 @@
 import os
 import time
+import secrets
 import requests
 from flask import session, redirect, url_for
 import aiosqlite
@@ -175,6 +176,13 @@ def create_session(user: dict, remember_me: bool = False):
     }
     session["expires_at"]  = time.time() + duration
     session["remember_me"] = remember_me
+    # SECURITY FIX (Critical, this pass): dashboard had zero CSRF
+    # protection — every state-changing route relied solely on the
+    # session cookie. Minting a random per-session token here, checked
+    # against the X-CSRF-Token header on every non-GET /api/* request
+    # (see dashboard/api.py before_request hook), closes that gap for
+    # every fetch()/htmx-driven action without touching each route.
+    session["csrf_token"] = secrets.token_hex(16)
 
 
 def is_session_valid() -> bool:
