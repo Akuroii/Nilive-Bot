@@ -149,22 +149,6 @@ def select_guild(guild_id: int):
 
     row = run_async(check())
 
-    # Phase 0 fix — Server Select: previously a server the bot was
-    # already installed in had NO way to be entered by anyone unless a
-    # dashboard_users row already existed (e.g. seeded at boot by
-    # ensure_owner_access(), which only scans guilds that already have
-    # activity data — a freshly-invited guild with zero activity yet
-    # has no row and no way in until someone manually adds one via
-    # Dashboard Access, a page that itself requires being in the
-    # server first). That's a dead end for the super-admin.
-    #
-    # Fix: if the requester IS OWNER_DISCORD_ID (the one global
-    # super-admin — see database.py) and the bot is actually a member
-    # of this guild, grant owner access on the fly via the same
-    # add_guild_owner() helper on_guild_join already uses, then
-    # re-check. This does NOT extend to any other admin or user —
-    # everyone else still needs a pre-existing dashboard_users row,
-    # exactly as before. No auto-seeding for random guild admins.
     if not row and user_id == OWNER_DISCORD_ID:
         from dashboard.auth import bot_is_in_guild
         if bot_is_in_guild(guild_id):
@@ -187,19 +171,6 @@ def select_guild(guild_id: int):
 
 
 # ── Phase 0 Extension — Server Permission Gating (Sapphire-style) ──────────
-#
-# The section above (/server-select, /select-guild) gates on the internal
-# dashboard_users table, which only lists guilds someone has already been
-# explicitly granted access to — that's still the real authorization check
-# and is untouched here.
-#
-# What was missing: a way for a user to SEE their Discord-admin servers
-# that aren't onboarded yet, and invite the bot to one directly from the
-# dashboard instead of needing a raw invite link from elsewhere. These two
-# routes are read-only discovery + a redirect-URL generator — neither one
-# grants dashboard access by itself. A server only becomes selectable via
-# /select-guild once dashboard_users has a row for it, same as before (bot
-# join already auto-grants OWNER_DISCORD_ID via database.add_guild_owner()).
 
 @app.route("/api/user/servers")
 @login_required
@@ -227,7 +198,6 @@ def api_user_servers():
             "is_bot_member": gid in bot_guild_ids,
         })
 
-    # Bot-installed servers first, then alphabetical within each group.
     servers.sort(key=lambda s: (not s["is_bot_member"], s["name"].lower()))
     return jsonify({"servers": servers})
 
@@ -803,14 +773,6 @@ def leveling():
 
 
 # ── Economy ────────────────────────────────────────────────────────────────────
-#
-# Phase 5 / Economy v2 (dual currency, convertible, 500:1 default):
-# this route now also loads the diamonds leaderboard and the guild's
-# configured exchange rate so systems/economy.html can render both
-# currencies and let an ADMIN+ user change the rate. The rate itself
-# is saved via POST /api/economy/exchange-rate (dashboard/api.py),
-# not here — this route stays read-only like the rest of the page
-# routes in this file.
 
 @app.route("/economy")
 @require_page("economy")
@@ -891,13 +853,6 @@ def events():
 
 
 # ── Ledger (Phase 3 E3 CLOSEOUT — read-only) ────────────────────────────────
-#
-# ADMIN+ page gate (see utils/permissions.py PAGE_PERMISSIONS["ledger"]).
-# Data itself is loaded client-side via GET /api/ledger, which enforces
-# its own MOD+ floor independently — see dashboard/api.py. This route
-# only renders the shell + the initial guild-wide page; per-guild
-# isolation is enforced identically to every other page here, via
-# get_session_guild_id() rather than any client-supplied guild id.
 
 @app.route("/ledger")
 @require_page("ledger")
@@ -914,13 +869,6 @@ def ledger_page():
 
 
 # ── Inventory (Phase 3 E4 CLOSEOUT — read-only) ─────────────────────────────
-#
-# Same shape as the ledger page above: ADMIN+ to view the page,
-# MOD+ enforced independently by the underlying /api/inventory routes.
-# /inventory shows the guild-wide "who holds what" summary;
-# /inventory/<user_id> drills into one member, reusing the same
-# per-guild-isolated query utils/inventory.get_inventory() already
-# exposes to the /inventory slash command.
 
 @app.route("/inventory")
 @require_page("inventory_view")
@@ -1149,6 +1097,13 @@ def config_announcements():
 
 
 # ── Commands dashboard ─────────────────────────────────────────────────────────
+#
+# FLAGGED-ITEM FIX (carried over from prior sessions' STATUS.md notes):
+# "resetleaderboard" existed as a real slash command (cogs/leveling.py) but
+# was never listed in COMMAND_CATEGORIES below, so it never showed up on the
+# Commands dashboard page / bulk-toggle groupings. Cosmetic only — the
+# command itself always worked — but it's a one-line fix, so it's done now
+# instead of being deferred again.
 
 COMMAND_CATEGORIES = {
     "Moderation": [
@@ -1161,7 +1116,7 @@ COMMAND_CATEGORIES = {
         "addcoins","removecoins","adddiamonds","removediamonds",
         "shop","buy",
     ],
-    "Leveling": ["rank","leaderboard","setxp","resetxp"],
+    "Leveling": ["rank","leaderboard","setxp","resetxp","resetleaderboard"],
     "Fun": ["hug","pat","slap","kiss","dance","coinflip","8ball"],
     "Utility": [
         "embed_create","embed_edit","sticky_set","sticky_remove",

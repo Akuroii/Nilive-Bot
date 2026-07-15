@@ -1,69 +1,53 @@
 # NILIVE BOT — SHIFT CHECKPOINT
-Stopped at: Phase 5 — XP boost shop items complete, compiled clean.
+Stopped at: Phase 5 — flagged cosmetic gap closed, compiled clean.
 
-## This round added
-- **database.py** — `leveling_active_boosts` table (guild_id, user_id,
-  multiplier, expires_at, source) + `shop_items.xp_boost_multiplier`
-  column migration (nullable, only used when type='xp_boost').
-- **utils/xp_calculator.py**:
-  - `get_active_boost_multiplier(guild_id, user_id)` — MAX across
-    non-expired rows, "highest wins" (same rule as bonus roles).
-  - `grant_xp_boost(guild_id, user_id, multiplier, duration_hours, source)`.
-  - `calculate_message_xp()` now takes optional `user_id`; when given,
-    multiplies role_multiplier × boost_multiplier. Voice XP path
-    intentionally NOT touched — boosts only apply to message XP, kept
-    scope-limited to avoid changing voice XP balance.
-- **cogs/leveling.py** — `on_activity_message` now passes `user_id` so
-  boosts actually apply.
-- **cogs/shop.py** (full file) — new `xp_boost` purchase branch:
-  validates multiplier+duration before charging, grants via
-  `grant_xp_boost()`, shows boost info in the purchase-success embed,
-  `/shop` and `/inventory` both display active/available boosts.
-  `temp_role_cleanup` loop now also sweeps expired
-  `leveling_active_boosts` rows each tick (10 min).
-- **dashboard/api.py** — `add_shop_item` accepts `xp_boost_multiplier`;
-  `shop_items_partial` displays it in the items table.
-- **dashboard/templates/systems/shop.html** — item type dropdown gets
-  "⚡ XP Boost"; form swaps role-ID field for a multiplier field and
-  relabels duration when that type is selected; client-side validation
-  before POST.
+## Verified against uploaded ZIP (canonical truth)
+- XP Boost Shop Items: CONFIRMED COMPLETE — cogs/shop.py purchase branch,
+  utils/xp_calculator.py (grant_xp_boost / get_active_boost_multiplier),
+  cogs/leveling.py passes user_id, dashboard/templates/systems/shop.html
+  UI, dashboard/api.py add_shop_item + shop_items_partial. No work needed
+  here despite an earlier memory note calling this "DB layer only" —
+  that note was stale relative to the actual ZIP contents.
 
-Compile-checked: `python3 -m py_compile database.py utils/xp_calculator.py
-utils/reward_engine.py dashboard/api.py cogs/leveling.py cogs/shop.py`
-— exit 0.
+## This round
+- **dashboard/app.py** — added `"resetleaderboard"` to
+  `COMMAND_CATEGORIES["Leveling"]`. This was the one remaining flagged
+  item carried across multiple prior sessions (cosmetic only — the
+  `/resetleaderboard` command itself, in cogs/leveling.py, always worked;
+  it just never appeared on the Commands dashboard page or in bulk
+  enable/disable). One-line fix, no other logic touched.
 
-## Design decisions worth flagging
-- Multiple simultaneous boosts don't stack additively — MAX multiplier
-  wins, matching the existing bonus-role rule. Buying a second boost
-  while one is active doesn't waste the purchase (still grants its own
-  row/expiry), it just won't out-multiply a stronger one already active.
-- Boosts apply to message XP only, not voice XP (voice XP currently
-  has no role-multiplier support either — out of scope to add both).
+Compile-checked: `python3 -m py_compile dashboard/app.py` — exit 0.
 
-## Flagged, not fixed (carried over)
-- `dashboard/app.py`'s `COMMAND_CATEGORIES["Leveling"]` still doesn't
-  list `resetleaderboard`. Cosmetic only (Commands dashboard page);
-  command itself works. Deferred again — full `app.py` rewrite not
-  justified for a one-line list edit under context pressure.
+## Flagged items — now CLEAR
+- ~~resetleaderboard missing from COMMAND_CATEGORIES~~ FIXED this round.
+- ~~XP boost shop items partial~~ was already complete in the ZIP; false
+  flag from a stale memory note, corrected above.
 
-## Still needed for Phase 5
-- Prestige system — blocked on design questions (min level to
-  prestige, does XP/rewards reset or carry over, prestige
-  roles/badges, leaderboard sort order). Ask before building.
+## Still blocked — needs your input before building
+**Prestige system** (Phase 5, last remaining item). Can't start without
+answers to:
+1. Minimum level required to prestige?
+2. On prestige: does XP reset to 0, or carry over above the reset point?
+3. Do level-role rewards get stripped on prestige, or kept?
+4. Prestige badges/roles — one role per prestige tier, or a single role
+   with a number shown elsewhere (rank card, leaderboard)?
+5. Leaderboard sort — prestige tier first then XP, or XP-only (ignoring
+   prestige)?
 
-## Files in this ZIP (cumulative — supersedes both prior Phase 5 ZIPs)
-- `database.py`
-- `utils/xp_calculator.py`
-- `utils/reward_engine.py`
-- `dashboard/api.py`
-- `dashboard/templates/systems/leveling.html`
-- `dashboard/templates/systems/shop.html`
-- `cogs/leveling.py`
-- `cogs/shop.py`
+## On the horizon after prestige is unblocked
+- Phase 6: Event Stack Builder (hard caps: max 5 reward slots, max
+  currency per tier — caps already specified in project rules, not yet
+  built) and Trade System (still correctly BLOCKED — requires E3 ledger +
+  E4 inventory, both of which are confirmed live, so Trade System is
+  technically unblockable now too — flagging for next session since
+  Master Plan says finish Phase 5 before Phase 6).
+
+## Files in this ZIP (delta — supersedes only dashboard/app.py from prior ZIPs)
+- `dashboard/app.py`
 - `STATUS.md`
 
 ## NOT included (unchanged — pull from your last full ZIP)
-Everything else: all other `cogs/*`, `dashboard/*` (except api.py,
-leveling.html, shop.html), `utils/*` (except xp_calculator.py,
-reward_engine.py), `main.py`, `requirements.txt`, `Dockerfile`,
-`start.sh`, `.gitignore`, `DEBUG_GUIDE.md`, `HANDOFF_NOTES.md`.
+Everything else: all `cogs/*`, all other `dashboard/*`, all `utils/*`,
+`main.py`, `database.py`, `requirements.txt`, `Dockerfile`, `start.sh`,
+`.gitignore`, `DEBUG_GUIDE.md`, `HANDOFF_NOTES.md`.
