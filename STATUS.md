@@ -1,98 +1,92 @@
 # NILIVE BOT — SHIFT CHECKPOINT
-Stopped at: Security remediation pass (Critical + Critical-adjacent items
-from the prior static-analysis sweep). Feature work (Phase 5 leftovers)
-deliberately NOT touched this shift — see "Still needed" below.
+Stopped at: Phase 5 — prestige system DESIGN LOCKED + DB layer built. Bot
+command, reward-engine wiring, and dashboard UI NOT built yet.
 
-## ⚠️ Conflict flagged, not resolved — needs your call
-`HANDOFF_NOTES.md` claims `dashboard/templates/config/commands.html` was
-deleted last shift ("Grepped every route in app.py — nothing renders
-it"). It is still present in the ZIP this session started from, and
-`config_commands()` in app.py still redirects through `/config/commands`.
-Did not touch it — could be a stale ZIP merge, or the delete didn't
-survive a merge. Confirm before it's deleted again.
+## Design decisions (confirmed by Akuroi this shift — do not re-ask)
+1. Prestige XP handling: **carry over excess.** On prestige, subtract the
+   cumulative XP required to reach `min_level` from the member's current
+   total XP; the remainder becomes their new XP (level recalculated from
+   that remainder via `calculate_level_from_xp`), not a hard reset to 0.
+2. Level-role rewards (`leveling_rewards`) on prestige: **keep all.** Do
+   NOT strip roles already earned via `check_and_award_level_rewards`.
+3. Prestige badge: **one role per tier**, swapped — remove the previous
+   tier's role (if any) and add the new tier's role, same "one role
+   represents current standing" pattern as MVP's role.
+4. Min level to prestige: not explicitly answered — defaulted to a
+   per-guild configurable value, default **50**, stored in
+   `prestige_config.min_level`. Confirm/change with Akuroi if wrong.
+5. Leaderboard sort: not explicitly answered — implement as
+   **prestige DESC, then xp DESC** (natural pairing with "carry over
+   excess" + "role per tier", since prestige is now a visible tier not
+   a full reset). Confirm/change with Akuroi if wrong.
 
-## This round — Critical / Critical-adjacent security fixes
-1. **Stored XSS, moderation dashboard (Critical)** —
-   `dashboard/templates/manage/moderation.html`'s "edit reason" button
-   used to inline the raw moderation reason into
-   `onclick="editReason(...,` `{{ reason }}` `)"`. Only backticks were
-   stripped — a reason containing `${...}` would execute as a live JS
-   template-literal expression. Fixed: reason now travels via a
-   `data-log-reason` attribute (Jinja autoescapes attribute values) and
-   is read off the DOM at click time, never string-interpolated into JS.
-   Same bug, same fix pattern applied to
-   `dashboard/templates/manage/customcommands.html`'s delete-command
-   button (trigger name was raw-interpolated into a JS string literal).
+## Built this round
+- **database.py** — two new tables, both additive/safe migrations:
+  - `levels.prestige` column (ALTER, default 0) — prestige tier lives on
+    the same per-member row as xp/level, no join needed anywhere that
+    already reads `levels`.
+  - `prestige_config` (guild_id PK, enabled, min_level) — per-guild gate
+    + threshold, same shape as `leveling_reset_config`.
+  - `prestige_roles` (id, guild_id, tier, role_id, UNIQUE(guild_id,tier))
+    — tier → role mapping, same shape as `leveling_rewards`.
 
-2. **No CSRF protection (Critical)** — zero CSRF protection existed
-   anywhere; every state-changing route relied purely on the session
-   cookie. Fixed with a session-bound token:
-   - `dashboard/auth.py` — `create_session()` now mints
-     `session["csrf_token"]` (random, per session).
-   - `dashboard/templates/base.html` — exposes it as
-     `window.__CSRF_TOKEN__` before any other script loads.
-   - `dashboard/static/js/dashboard.js` — patches `window.fetch` and
-     listens for `htmx:configRequest` to attach `X-CSRF-Token`
-     automatically on every non-GET request. No individual template's
-     fetch/htmx calls had to be touched.
-   - `dashboard/api.py` — new `api_bp.before_request` hook rejects any
-     non-GET `/api/*` request whose header doesn't match the session
-     token.
-   - **Scope limit, flagged not fixed:** this only covers `api_bp`
-     (the vast majority of state changes). A few routes in
-     `dashboard/app.py` still use classic `<form method="POST">`
-     (`config/access.html`, `config/commands.html`) and are NOT yet
-     CSRF-protected — adding hidden token inputs to those forms is
-     next, kept separate to avoid breaking untested form flows in the
-     same pass as the fetch/htmx-wide change above.
+Compile-checked: `python3 -m py_compile database.py` — exit 0.
 
-3. **Privilege mismatch, Ledger/Inventory API (Critical-adjacent)** —
-   `/api/ledger`, `/api/inventory`, `/api/inventory/<user_id>` were
-   gated at `LEVEL_MODERATOR` while the page routes that link to them
-   (`/ledger`, `/inventory`) are `LEVEL_ADMIN` per
-   `PAGE_PERMISSIONS`. A moderator who couldn't load the page could
-   still hit the JSON endpoint directly with their session cookie.
-   Raised both routes to `LEVEL_ADMIN` in `dashboard/api.py` to match.
+## NOT built yet — next session should do these in order
+1. **utils/xp_calculator.py**:
+   - `total_xp_for_level(level)` — cumulative sum of `xp_for_level(1..level)`,
+     needed to compute the "excess above min_level" carry-over amount.
+     (`xp_for_level` currently only returns the *marginal* cost of one
+     level, not cumulative — don't reuse it directly for this.)
+   - `get_prestige_config(guild_id)` — same pattern as
+     `get_leveling_config`, falling back to `{"enabled":1,"min_level":50}`
+     when no row exists.
+   - `perform_prestige(guild_id, user_id)` — validates current level >=
+     min_level, computes excess XP via `total_xp_for_level(min_level)`,
+     writes new xp/level/prestige+1 to `levels`, returns old/new tier +
+     new xp/level for the caller to use in role swap + announce.
+2. **cogs/leveling.py** — new `/prestige` slash command:
+   - Calls `perform_prestige`.
+   - Role swap: look up `prestige_roles` for old tier (remove if member
+     has it) and new tier (add it) — reuse
+     `utils.permissions.check_bot_role_position` before assigning, same
+     guard every other role-grant path in this codebase already uses.
+   - Does NOT touch `leveling_rewards` roles (keep-all, per decision #2).
+   - Leaderboard query (`leaderboard` command + dashboard `/leveling`
+     page + `/api/leveling/leaderboard`) needs `ORDER BY prestige DESC,
+     xp DESC` and to display the prestige tier (e.g. a small "P{n}"
+     badge next to the level badge).
+3. **dashboard/api.py** — CRUD routes for `prestige_config` (GET/POST,
+   ADMIN+) and `prestige_roles` (GET/POST/DELETE, ADMIN+), mirroring the
+   existing `leveling/reset-config` and `leveling/reward` routes exactly.
+4. **dashboard/templates/systems/leveling.html** — new "Prestige" tab or
+   a section in the existing Config tab: min-level input, enable toggle,
+   tier→role add/list/delete table (reuse the `nero-role-picker` pattern
+   already used for bonus roles / rewards on this same page).
+5. Update `COMMAND_CATEGORIES["Leveling"]` in `dashboard/app.py` to
+   include `"prestige"` once the command exists (same one-line pattern
+   as the `resetleaderboard` fix from the prior round).
+6. Compile-check everything touched, re-zip cumulative.
 
-All modified Python files compile clean: `python3 -m py_compile
-dashboard/api.py dashboard/auth.py` — exit 0.
+## Already confirmed complete (do not rebuild)
+- XP Boost Shop Items — full stack (cogs/shop.py, xp_calculator.py,
+  leveling.py, dashboard UI + api.py) confirmed complete in the ZIP.
+- `resetleaderboard` in `COMMAND_CATEGORIES` — fixed previous round.
+- E1–E4 shared engines — all live, do not rebuild.
 
-## Still needed (security, carried forward)
-- CSRF token on the classic-form routes in `dashboard/app.py`
-  (`config/access.html`, `config/commands.html`) — see scope note above.
-- Role hierarchy check gap in `warn` action for custom commands.
-- Role-grant escalation risk in `add_role`/`remove_role` custom-command
-  actions.
-- Reaction role expiry sentinel-row collision (Medium).
-- Unbounded in-memory cooldown dictionaries — slow memory leak (Low).
-- Orphaned-template question above needs your answer before anyone
-  touches `config/commands.html` again.
+## Still correctly blocked
+- **Trade System** — technically unblockable now (E3 ledger + E4
+  inventory both confirmed live), but Master Plan v2.0 says finish
+  Phase 5 (prestige) before starting Phase 6 work. Don't jump ahead.
+- **Event Stack Builder** (Phase 6) — same reason, wait for Phase 5 close.
 
-## Still needed (features, Phase 5 — untouched this shift)
-- `resetleaderboard` missing from `COMMAND_CATEGORIES["Leveling"]` in
-  `dashboard/app.py` (cosmetic — command itself works). NOTE: you said
-  you updated `dashboard/app.py` yourself this session — check whether
-  this is already fixed there before re-doing it.
-- XP boost shop items — STATUS.md (prior round) says this was verified
-  already complete against the ZIP; re-confirm against your current
-  `dashboard/app.py` once merged.
-- Prestige system — still blocked on your answers to the 5 open
-  questions from the prior round (min level, XP reset behavior, reward
-  stripping, badge shape, leaderboard sort order).
-
-## Files in this ZIP (delta — only what changed this shift)
-- `dashboard/api.py`
-- `dashboard/auth.py`
-- `dashboard/static/js/dashboard.js`
-- `dashboard/templates/base.html`
-- `dashboard/templates/manage/moderation.html`
-- `dashboard/templates/manage/customcommands.html`
+## Files in this ZIP (delta — supersedes only database.py from prior ZIPs)
+- `database.py`
 - `STATUS.md`
 
-## NOT included (unchanged, or you already updated it — pull from your
-own latest ZIP)
-`dashboard/app.py` (you updated this yourself this session — did not
-touch or overwrite it). Everything else: all `cogs/*`, all other
-`dashboard/*`, all `utils/*`, `main.py`, `database.py`,
-`requirements.txt`, `Dockerfile`, `start.sh`, `.gitignore`,
-`DEBUG_GUIDE.md`, `HANDOFF_NOTES.md`.
+## NOT included (unchanged — pull from your last full ZIP)
+Everything else: all `cogs/*`, all `dashboard/*` (app.py already has the
+resetleaderboard fix from the prior delta ZIP — merge that in if working
+from an older base), all `utils/*`, `main.py`, `requirements.txt`,
+`Dockerfile`, `start.sh`, `.gitignore`, `DEBUG_GUIDE.md`,
+`HANDOFF_NOTES.md`.

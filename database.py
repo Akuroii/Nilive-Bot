@@ -68,6 +68,22 @@ async def init_db():
             )
         """)
 
+        # Phase 5 / Prestige system: prestige tier lives on the same
+        # per-member row as xp/level rather than a separate table —
+        # it's a third dimension of the same "how far has this member
+        # progressed" state, and every existing query that already
+        # SELECTs from levels by (guild_id, user_id) only needs one
+        # more column, not a join, to also know prestige tier.
+        try:
+            cursor = await db.execute("PRAGMA table_info(levels)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "prestige" not in cols:
+                await db.execute(
+                    "ALTER TABLE levels ADD COLUMN prestige INTEGER DEFAULT 0")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] levels.prestige: {e}")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS economy (
                 guild_id INTEGER,
@@ -356,13 +372,6 @@ async def init_db():
             ON guild_settings(guild_id)
         """)
 
-        # Phase 5 / Economy v2: per-guild convertible exchange rate.
-        # Coins-per-1-diamond. Server owners set this via the Economy
-        # dashboard page; cogs/economy.py's /convert command and
-        # utils/economy_safe.safe_convert() both read it (falling back
-        # to 500 if a guild has no row yet, matching the value Dark
-        # specified). Additive migration only — no existing column
-        # touched, no rebuild of guild_settings itself.
         try:
             cursor = await db.execute("PRAGMA table_info(guild_settings)")
             cols = [c[1] for c in await cursor.fetchall()]
@@ -474,16 +483,6 @@ async def init_db():
             ON leveling_rewards(guild_id)
         """)
 
-        # Phase 5 / Leveling expansion: currency (coins/diamonds) grants
-        # at configured levels, alongside the existing role rewards
-        # above. Kept as its own table rather than overloading
-        # leveling_rewards — a single level can have a role reward AND
-        # a currency reward, and role_id is NOT NULL on the existing
-        # table so it can't represent a currency-only row anyway.
-        # currency is constrained to the same values
-        # utils/ledger.VALID_CURRENCIES uses for real money ('balance'
-        # for coins, 'diamonds' for diamonds) so grants ledger cleanly
-        # with no translation layer.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_currency_rewards (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -499,12 +498,6 @@ async def init_db():
             ON leveling_currency_rewards(guild_id)
         """)
 
-        # Phase 5 / Leveling expansion: weekly/monthly leaderboard resets.
-        # One row per guild. last_reset drives the scheduled task in
-        # cogs/leveling.py — it only fires once the configured period
-        # has actually elapsed since last_reset, same "check every N
-        # minutes, compare against a stored timestamp" pattern already
-        # used by cogs/mvp.py's mvp_cycle_task.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_reset_config (
                 guild_id   INTEGER PRIMARY KEY,
@@ -514,9 +507,6 @@ async def init_db():
             )
         """)
 
-        # Snapshot of the full leaderboard taken immediately before each
-        # scheduled reset, so a reset never destroys history — it's
-        # visible afterward as a completed cycle instead.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_leaderboard_history (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -535,12 +525,6 @@ async def init_db():
             ON leveling_leaderboard_history(guild_id, period_end)
         """)
 
-        # Phase 5 / Leveling expansion: XP boost items (shop-integrated).
-        # One row per active boost grant — a user can hold more than one
-        # simultaneously (e.g. stacked purchases); get_active_boost_multiplier()
-        # in utils/xp_calculator.py takes MAX(multiplier) across all
-        # non-expired rows rather than stacking them additively, matching
-        # the existing "highest wins" rule already used for bonus roles.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_active_boosts (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -582,6 +566,36 @@ async def init_db():
                 role_id    INTEGER NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        """)
+
+        # Phase 5 / Prestige system. One config row per guild
+        # (min_level gate + on/off), plus one row per (guild, tier)
+        # mapping a prestige tier number to the Discord role granted
+        # for reaching it. Mirrors leveling_rewards' shape (a small
+        # per-guild CRUD table of level/tier -> role_id) rather than
+        # inventing a new pattern.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS prestige_config (
+                guild_id   INTEGER PRIMARY KEY,
+                enabled    INTEGER DEFAULT 1,
+                min_level  INTEGER DEFAULT 50,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS prestige_roles (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id   INTEGER NOT NULL,
+                tier       INTEGER NOT NULL,
+                role_id    INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, tier)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_pr_guild
+            ON prestige_roles(guild_id)
         """)
 
         await db.execute("""
@@ -676,11 +690,6 @@ async def init_db():
         except Exception as e:
             print(f"[MIGRATION] shop_items.price_diamonds: {e}")
 
-        # Phase 5 / Leveling expansion: only relevant when
-        # shop_items.type = 'xp_boost' — the multiplier granted for
-        # duration_hours (that column already exists and is reused
-        # as-is, same as it's reused for temp_role). NULL for every
-        # other item type, exactly like price_diamonds above.
         try:
             cursor = await db.execute("PRAGMA table_info(shop_items)")
             cols = [c[1] for c in await cursor.fetchall()]
