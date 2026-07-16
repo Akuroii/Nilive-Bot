@@ -39,6 +39,42 @@ run_async(init_db())
 print("Database ready (dashboard process).")
 
 
+# ── SECURITY FIX (Critical, this pass) ──────────────────────────────────
+# dashboard/api.py's CSRF check (api_bp.before_request) ONLY fires for
+# routes registered on that blueprint. Several state-changing /api/*
+# routes are registered directly on `app` below instead of on api_bp
+# (api_edit_member, api_command_toggle, api_commands_bulk_toggle,
+# api_command_settings_save, api_save_embed_template + DELETE,
+# api_save_trigger + api_delete_trigger, api_save_custom_command +
+# api_delete_custom_command, api_save_rr_panel) — none of them were ever
+# covered by that hook. They relied purely on the session cookie, which
+# is exactly what CSRF exploits: a page an already-logged-in admin merely
+# visits could POST to any of these with no token check failing server
+# side, e.g. silently disabling every bot command or editing a member's
+# XP/coins.
+#
+# This mirrors api_bp's check (same session/header token, same safe
+# methods) but scoped to any /api/* path on this app object, so it covers
+# both the routes below AND (redundantly, harmlessly) api_bp's own routes
+# without having to move anything or duplicate route definitions.
+_CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+@app.before_request
+def _enforce_csrf_app_level():
+    if not request.path.startswith("/api/"):
+        return
+    if request.method in _CSRF_SAFE_METHODS:
+        return
+    session_token = session.get("csrf_token")
+    header_token = request.headers.get("X-CSRF-Token", "")
+    if not session_token or not header_token or header_token != session_token:
+        return jsonify({
+            "success": False,
+            "error": "CSRF validation failed. Refresh the page and try again.",
+        }), 403
+
+
 def render(template, **ctx):
     return render_template(template, **ctx)
 
@@ -1197,6 +1233,9 @@ def config_commands():
 
 
 # ── Commands API ───────────────────────────────────────────────────────────────
+#
+# NOTE: these are registered on `app` directly, not on api_bp — they are
+# now covered by the _enforce_csrf_app_level() hook above.
 
 @app.route("/api/commands/toggle", methods=["POST"])
 @require_page("commands")
@@ -1359,6 +1398,13 @@ def api_command_settings_save(command: str):
 
 
 # ── Config: Access ─────────────────────────────────────────────────────────────
+#
+# NOTE: these are classic <form method="POST"> submissions (not fetch/htmx),
+# so they are NOT covered by the CSRF hook above (that hook only fires for
+# /api/* paths, and these are /config/access). Still flagged as an open
+# follow-up in dashboard/api.py's comments — needs a hidden csrf_token input
+# added to the templates, not done in this pass to avoid touching untested
+# form flows alongside the /api/* fix.
 
 @app.route("/config/access", methods=["GET", "POST"])
 @require_page("dashboard_access")

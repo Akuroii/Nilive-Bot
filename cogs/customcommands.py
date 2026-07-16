@@ -87,7 +87,14 @@ class CustomCommands(commands.Cog):
             action_errors = []
 
             # Hierarchy check — block privilege escalation via custom commands
-            destructive = {"ban", "kick", "remove_all_roles"}
+            #
+            # SECURITY FIX: "warn" is now included here too. It's less
+            # destructive than ban/kick, but it still writes a moderation
+            # record against the target and previously let a member with a
+            # custom-command trigger warn someone ABOVE them in the role
+            # hierarchy, bypassing can_moderate() entirely — the same class
+            # of gap that was already fixed for ban/kick/timeout/remove_all_roles.
+            destructive = {"ban", "kick", "remove_all_roles", "warn"}
             is_destructive = (
                 bool(destructive & set(action_list))
                 or any(a.startswith("timeout:") for a in action_list)
@@ -142,9 +149,30 @@ class CustomCommands(commands.Cog):
                         role_id = int(action.split(":")[1])
                         role    = message.guild.get_role(role_id)
                         if role:
+                            # SECURITY FIX: this only ever checked whether the
+                            # BOT could assign the role (check_bot_role_position)
+                            # — it never checked whether the ACTOR (the member
+                            # who typed the !command) was allowed to grant it.
+                            # A moderator with access to a custom command whose
+                            # actions included add_role:<high-privilege-role-id>
+                            # could hand out roles above their own rank —
+                            # straightforward privilege escalation. Now also
+                            # requires the actor be guild owner, or have a top
+                            # role strictly above the role being granted — the
+                            # same rule utils.permissions.check_hierarchy()
+                            # already uses for /ban, /kick, /timeout, /warn.
                             can_assign, warn = check_bot_role_position(
                                 message.guild, role)
-                            if can_assign:
+                            actor_ok = (
+                                message.author.id == message.guild.owner_id
+                                or message.author.top_role.position > role.position
+                            )
+                            if not actor_ok:
+                                action_errors.append(
+                                    f"You don't have permission to grant "
+                                    f"@{role.name} (it's at or above your "
+                                    f"highest role).")
+                            elif can_assign:
                                 await target_member.add_roles(role)
                             else:
                                 action_errors.append(warn)
@@ -152,7 +180,21 @@ class CustomCommands(commands.Cog):
                         role_id = int(action.split(":")[1])
                         role    = message.guild.get_role(role_id)
                         if role:
-                            await target_member.remove_roles(role)
+                            # SECURITY FIX: same gap as add_role above, mirrored
+                            # for removal — previously any actor with access to
+                            # the trigger could strip a role off anyone,
+                            # including roles above the actor's own rank.
+                            actor_ok = (
+                                message.author.id == message.guild.owner_id
+                                or message.author.top_role.position > role.position
+                            )
+                            if not actor_ok:
+                                action_errors.append(
+                                    f"You don't have permission to remove "
+                                    f"@{role.name} (it's at or above your "
+                                    f"highest role).")
+                            else:
+                                await target_member.remove_roles(role)
                     elif action == "delete_message":
                         try:
                             await message.delete()
