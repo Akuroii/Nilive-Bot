@@ -5,7 +5,7 @@
 
 <!-- TABS -->
 <div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--border);padding-bottom:0;">
-    {% for tab, label in [('leaderboard','⭐ Leaderboard'),('config','⚙️ Config'),('rewards','🎁 Rewards'),('bonuses','✨ Bonus Roles')] %}
+    {% for tab, label in [('leaderboard','⭐ Leaderboard'),('config','⚙️ Config'),('rewards','🎁 Rewards'),('bonuses','✨ Bonus Roles'),('prestige','🏵️ Prestige')] %}
     <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
         style="padding:10px 18px;border:none;background:transparent;
                color:var(--text2);font-size:13px;font-weight:500;
@@ -35,7 +35,7 @@
                                 {{ loop.index }}
                             </div>
                         </td>
-                        <td><code>{{ l[0] }}</code></td>
+                        <td><code>{% if l[3] %}★{{ l[3] }} {% endif %}{{ l[0] }}</code></td>
                         <td><span class="badge badge-accent">Lv {{ l[2] }}</span></td>
                         <td>{{ "{:,}".format(l[1]) }}</td>
                         <td>
@@ -309,6 +309,65 @@
             <button class="btn btn-danger" onclick="addBlacklist()">Add Blacklist Role</button>
         </div>
         <div id="blacklist-list"><span class="text-muted text-sm">Loading…</span></div>
+    </div>
+</div>
+
+<!-- PRESTIGE TAB (Phase 5 / Prestige system) -->
+<div id="tab-content-prestige" class="tab-content" style="display:none;">
+    <div class="card">
+        <div class="card-title">🏵️ Prestige Settings</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Members who reach the minimum level can run <code>/prestige</code> to
+            reset past that threshold in exchange for a permanent ★ tier. XP above
+            the threshold carries over (not a hard reset to 0). Existing level-role
+            rewards are kept, not removed.
+        </p>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+            <label class="toggle">
+                <input type="checkbox" id="prestige-enabled">
+                <span class="toggle-slider"></span>
+            </label>
+            <span style="font-size:13px;color:var(--text2);">Enable prestige</span>
+        </div>
+        <div class="form-group" style="max-width:220px;">
+            <label class="form-label">Minimum level required</label>
+            <input class="form-input" id="prestige-min-level" type="number" min="1" value="50">
+        </div>
+        <button class="btn btn-primary" onclick="savePrestigeConfig()">Save Settings</button>
+        <div id="prestige-config-status" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">➕ Add Prestige Tier Role</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            One role per tier. On prestige, the member's previous tier role is removed
+            and the new tier's role is added — tiers without a configured role just
+            skip the cosmetic swap.
+        </p>
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Tier (★ number)</label>
+                <input class="form-input" id="prestige-tier"
+                       type="number" min="1" placeholder="e.g. 1" style="width:130px;">
+            </div>
+            <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px;">
+                <label class="form-label">Role</label>
+                <select class="nero-role-picker form-input" id="prestige-role-picker"></select>
+            </div>
+            <button class="btn btn-primary" onclick="addPrestigeRole()">Add Tier Role</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">🎖️ Prestige Tier Roles</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead><tr><th>Tier</th><th>Role ID</th><th></th></tr></thead>
+                <tbody id="prestige-roles-tbody">
+                    <tr><td colspan="3" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
 
@@ -592,9 +651,91 @@ async function deleteBlacklist(id) {
     loadBlacklist();
 }
 
+// ── PRESTIGE (Phase 5 / Prestige system) ─────────────────────────
+async function loadPrestigeConfig() {
+    const res  = await fetch('/api/leveling/prestige-config');
+    if (!res.ok) return;
+    const data = await res.json();
+    const c    = data.config || {};
+    document.getElementById('prestige-enabled').checked = c.enabled === undefined ? true : !!c.enabled;
+    document.getElementById('prestige-min-level').value = c.min_level || 50;
+}
+loadPrestigeConfig();
+
+async function savePrestigeConfig() {
+    const payload = {
+        enabled:   document.getElementById('prestige-enabled').checked,
+        min_level: parseInt(document.getElementById('prestige-min-level').value) || 50,
+    };
+    const res  = await fetch('/api/leveling/prestige-config', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    const status = document.getElementById('prestige-config-status');
+    if (data.success) {
+        status.textContent = '✅ Saved!'; status.style.color = 'var(--success)';
+        showToast('Prestige settings saved!');
+    } else {
+        status.textContent = '❌ ' + (data.error || 'Error');
+        status.style.color = 'var(--danger)';
+    }
+    setTimeout(() => status.textContent = '', 3000);
+}
+
+async function loadPrestigeRoles() {
+    const res  = await fetch('/api/leveling/prestige-roles');
+    if (!res.ok) return;
+    const data = await res.json();
+    const tbody = document.getElementById('prestige-roles-tbody');
+    if (!data.roles || !data.roles.length) {
+        tbody.innerHTML = '<tr><td colspan="3" class="empty">No tier roles configured yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = data.roles.map(r => `
+        <tr>
+            <td><span class="badge badge-accent">★${r.tier}</span></td>
+            <td><code>${r.role_id}</code></td>
+            <td>
+                <button class="btn btn-sm btn-danger"
+                    onclick="showConfirm('Remove tier ★${r.tier} role?', () => deletePrestigeRole(${r.id}))">
+                    Delete
+                </button>
+            </td>
+        </tr>`).join('');
+}
+
+async function addPrestigeRole() {
+    const tier = document.getElementById('prestige-tier').value;
+    const rp   = document.getElementById('prestige-role-picker');
+    const role_id = rp ? ($(rp).val() || '') : '';
+    if (!tier || !role_id) { showToast('Enter a tier and select a role', 'warning'); return; }
+    const res  = await fetch('/api/leveling/prestige-role', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ tier: parseInt(tier), role_id }),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast('Tier role saved!');
+        document.getElementById('prestige-tier').value = '';
+        if (rp) $(rp).val('').trigger('change.select2');
+        loadPrestigeRoles();
+    } else {
+        showToast(data.error || 'Error saving', 'error');
+    }
+}
+
+async function deletePrestigeRole(id) {
+    const res  = await fetch(`/api/leveling/prestige-role/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) { showToast('Removed', 'info'); loadPrestigeRoles(); }
+    else showToast('Error', 'error');
+}
+
 loadCurrencyRewards();
 loadBonusRoles();
 loadBlacklist();
+loadPrestigeRoles();
 </script>
 {% endblock %}
 {% endblock %}

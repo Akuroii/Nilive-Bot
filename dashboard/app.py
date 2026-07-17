@@ -39,24 +39,6 @@ run_async(init_db())
 print("Database ready (dashboard process).")
 
 
-# ── SECURITY FIX (Critical, this pass) ──────────────────────────────────
-# dashboard/api.py's CSRF check (api_bp.before_request) ONLY fires for
-# routes registered on that blueprint. Several state-changing /api/*
-# routes are registered directly on `app` below instead of on api_bp
-# (api_edit_member, api_command_toggle, api_commands_bulk_toggle,
-# api_command_settings_save, api_save_embed_template + DELETE,
-# api_save_trigger + api_delete_trigger, api_save_custom_command +
-# api_delete_custom_command, api_save_rr_panel) — none of them were ever
-# covered by that hook. They relied purely on the session cookie, which
-# is exactly what CSRF exploits: a page an already-logged-in admin merely
-# visits could POST to any of these with no token check failing server
-# side, e.g. silently disabling every bot command or editing a member's
-# XP/coins.
-#
-# This mirrors api_bp's check (same session/header token, same safe
-# methods) but scoped to any /api/* path on this app object, so it covers
-# both the routes below AND (redundantly, harmlessly) api_bp's own routes
-# without having to move anything or duplicate route definitions.
 _CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
@@ -792,8 +774,8 @@ def leveling():
     async def get_data():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT user_id, xp, level FROM levels
-                WHERE guild_id=? ORDER BY xp DESC LIMIT 50
+                SELECT user_id, xp, level, prestige FROM levels
+                WHERE guild_id=? ORDER BY prestige DESC, xp DESC LIMIT 50
             """, (guild_id,))
             levels = await cursor.fetchall()
             rewards_cursor = await db.execute("""
@@ -1133,13 +1115,6 @@ def config_announcements():
 
 
 # ── Commands dashboard ─────────────────────────────────────────────────────────
-#
-# FLAGGED-ITEM FIX (carried over from prior sessions' STATUS.md notes):
-# "resetleaderboard" existed as a real slash command (cogs/leveling.py) but
-# was never listed in COMMAND_CATEGORIES below, so it never showed up on the
-# Commands dashboard page / bulk-toggle groupings. Cosmetic only — the
-# command itself always worked — but it's a one-line fix, so it's done now
-# instead of being deferred again.
 
 COMMAND_CATEGORIES = {
     "Moderation": [
@@ -1152,7 +1127,7 @@ COMMAND_CATEGORIES = {
         "addcoins","removecoins","adddiamonds","removediamonds",
         "shop","buy",
     ],
-    "Leveling": ["rank","leaderboard","setxp","resetxp","resetleaderboard"],
+    "Leveling": ["rank","leaderboard","setxp","resetxp","resetleaderboard","prestige"],
     "Fun": ["hug","pat","slap","kiss","dance","coinflip","8ball"],
     "Utility": [
         "embed_create","embed_edit","sticky_set","sticky_remove",
@@ -1233,9 +1208,6 @@ def config_commands():
 
 
 # ── Commands API ───────────────────────────────────────────────────────────────
-#
-# NOTE: these are registered on `app` directly, not on api_bp — they are
-# now covered by the _enforce_csrf_app_level() hook above.
 
 @app.route("/api/commands/toggle", methods=["POST"])
 @require_page("commands")
@@ -1398,13 +1370,6 @@ def api_command_settings_save(command: str):
 
 
 # ── Config: Access ─────────────────────────────────────────────────────────────
-#
-# NOTE: these are classic <form method="POST"> submissions (not fetch/htmx),
-# so they are NOT covered by the CSRF hook above (that hook only fires for
-# /api/* paths, and these are /config/access). Still flagged as an open
-# follow-up in dashboard/api.py's comments — needs a hidden csrf_token input
-# added to the templates, not done in this pass to avoid touching untested
-# form flows alongside the /api/* fix.
 
 @app.route("/config/access", methods=["GET", "POST"])
 @require_page("dashboard_access")

@@ -16,35 +16,6 @@ from dashboard.permissions import (
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
-# PHASE 2 CRITICAL SECURITY FIX: the old `require_guild` decorator that
-# used to live here only checked "is someone logged in" + "is a guild
-# selected" — it never looked at permission_level at all. Every route
-# below has been re-audited and re-gated with @require_api_permission
-# (see dashboard/permissions.py), which enforces the same tiered
-# moderator/admin/owner model the rest of the dashboard uses. See
-# individual route comments below for why each level was chosen.
-
-# ── CSRF PROTECTION (Critical fix, this pass) ────────────────────────────
-# This blueprint had NO CSRF protection at all — every state-changing
-# route relied purely on session-cookie auth, which is exactly what
-# CSRF exploits. A malicious page could POST to any /api/* route (e.g.
-# /api/moderation/quick-action, /api/edit-member) from a logged-in
-# admin's browser and it would just work.
-#
-# Fix: every session gets a random csrf_token (see dashboard/auth.py
-# create_session). dashboard/static/js/dashboard.js wraps the global
-# fetch() so every same-origin request automatically carries it as an
-# X-CSRF-Token header — no template had to be touched individually.
-# This before_request hook validates that header against the session
-# token for any state-changing method hitting this blueprint.
-#
-# Scope note: this only covers api_bp (fetch-driven routes), which is
-# the vast majority of state changes in the dashboard. A handful of
-# routes in dashboard/app.py still use classic <form method="POST">
-# submissions (config/access.html, config/commands.html) and are NOT
-# yet covered — those need a hidden csrf_token input added to each
-# form individually, which risks breaking untested form flows if done
-# in the same pass as this. Flagged in STATUS.md as follow-up.
 CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
@@ -179,21 +150,6 @@ def members_search():
 
 
 # ── Activity (Phase 3 E1 CLOSEOUT) ─────────────────────────────────────────
-#
-# cogs/activity_engine.py (E1) already writes daily rollups to
-# activity_stats (guild_id, user_id, date, messages_count, words_count,
-# voice_minutes, forum_posts_count) via on_message / voice_tick_task /
-# on_thread_create. This route was the one missing piece — a way for
-# the dashboard to actually read that data back out per member.
-#
-# ADMIN+ gate: same tier as members_edit / leveling / economy — this is
-# a per-user activity readout, not a bulk moderation action, but it's
-# still more sensitive than a MOD-level leaderboard view since it
-# exposes a full daily activity history for one specific person.
-#
-# guild_id is always taken from the session (get_session_guild_id()),
-# never from the client, so there's no cross-guild lookup path here —
-# consistent with every other route in this file.
 
 @api_bp.route("/activity/<int:user_id>")
 @require_api_permission(LEVEL_ADMIN)
@@ -203,7 +159,6 @@ def api_activity_user(user_id: int):
 
     async def fetch():
         async with aiosqlite.connect(DB_PATH) as db:
-            # Totals across all recorded history for this member
             totals_cur = await db.execute("""
                 SELECT COALESCE(SUM(messages_count), 0),
                        COALESCE(SUM(words_count), 0),
@@ -214,7 +169,6 @@ def api_activity_user(user_id: int):
             """, (guild_id, user_id))
             totals = await totals_cur.fetchone()
 
-            # Daily breakdown for the requested window, most recent first
             daily_cur = await db.execute("""
                 SELECT date, messages_count, words_count,
                        voice_minutes, forum_posts_count
@@ -1083,9 +1037,6 @@ def economy_leaderboard_partial():
     return html or "<tr><td colspan='3' class='empty'>No data yet</td></tr>"
 
 
-# Phase 5 / Economy v2: diamonds leaderboard, mirrors the coins one
-# above exactly (same gate, same per-guild isolation) but reads the
-# `diamonds` column instead of `balance`.
 @api_bp.route("/economy/leaderboard-diamonds")
 @require_api_permission(LEVEL_ADMIN)
 def economy_leaderboard_diamonds_partial():
@@ -1111,13 +1062,6 @@ def economy_leaderboard_diamonds_partial():
     return html or "<tr><td colspan='3' class='empty'>No diamonds held yet</td></tr>"
 
 
-# Phase 5 / Economy v2: per-guild convertible exchange rate config.
-# GET returns the current rate (falls back to the 500:1 default Dark
-# specified if the guild hasn't set one). POST lets an ADMIN+ user
-# change it — server owners configuring their own rate, per spec.
-# Rate is read at conversion time by cogs/economy.py's /convert
-# command and utils/economy_safe.safe_convert(), never cached, so a
-# rate change takes effect on the very next /convert call.
 @api_bp.route("/economy/exchange-rate", methods=["GET"])
 @require_api_permission(LEVEL_ADMIN)
 def get_exchange_rate_api():
@@ -1226,16 +1170,6 @@ def add_shop_item():
     guild_id = get_session_guild_id()
     data     = request.json or request.form.to_dict()
 
-    # P1 #11 FIX: this INSERT previously omitted max_stock and
-    # current_stock entirely, even though the dashboard form
-    # (systems/shop.html addItem()) collects both and sends them in
-    # the payload. Every "limited stock" item silently became
-    # unlimited stock the moment it was saved, because the columns
-    # were never written — they stayed NULL regardless of what the
-    # admin typed in. safe_decrement_stock() in economy_safe.py only
-    # enforces a limit when max_stock is non-NULL, so this wasn't
-    # just a display bug, it meant stock limits had zero effect at
-    # purchase time.
     max_stock_val = data.get("max_stock")
     try:
         max_stock_val = int(max_stock_val) if max_stock_val not in (None, "", 0, "0") else None
@@ -1243,10 +1177,6 @@ def add_shop_item():
         max_stock_val = None
     current_stock_val = max_stock_val  # a brand-new item starts full
 
-    # Phase 5 / Economy v2: optional diamond price. When set, the
-    # item is charged in diamonds instead of coins at purchase time
-    # (see cogs/shop.py process_purchase). Left NULL (unset) keeps
-    # existing coins-priced behavior exactly as before.
     price_diamonds_val = data.get("price_diamonds")
     try:
         price_diamonds_val = (
@@ -1358,17 +1288,19 @@ def leveling_leaderboard_partial():
     async def fetch():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT user_id, xp, level FROM levels
-                WHERE guild_id = ? ORDER BY xp DESC LIMIT 50
+                SELECT user_id, xp, level, prestige FROM levels
+                WHERE guild_id = ? ORDER BY prestige DESC, xp DESC LIMIT 50
             """, (guild_id,))
             return await cursor.fetchall()
 
     rows = run_async(fetch())
     html = ""
     for i, r in enumerate(rows, 1):
+        prestige = r[3] or 0
+        badge = f"★{prestige} " if prestige else ""
         html += (
             f"<tr><td>#{i}</td>"
-            f"<td><code>{r[0]}</code></td>"
+            f"<td><code>{badge}{r[0]}</code></td>"
             f"<td><span class='badge badge-accent'>Lv {r[2]}</span></td>"
             f"<td>{r[1]:,} XP</td></tr>"
         )
@@ -1487,14 +1419,6 @@ def delete_leveling_reward(reward_id: int):
     return jsonify({"success": True})
 
 
-# Phase 5 / Leveling expansion — currency rewards (coins/diamonds) at
-# configured levels. Mirrors the role-reward routes directly above:
-# same LEVEL_ADMIN gate, same guild-scoped CRUD shape, same log_action
-# pattern where applicable. Grant-time behavior lives in
-# utils/xp_calculator.check_and_award_level_currency_rewards(), wired
-# into utils/reward_engine.give_reward()'s "xp" branch — these three
-# routes are only the dashboard CRUD surface for that table.
-
 @api_bp.route("/leveling/currency-rewards", methods=["GET"])
 @require_api_permission(LEVEL_ADMIN)
 def get_leveling_currency_rewards():
@@ -1595,10 +1519,6 @@ def save_leveling_reset_config():
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
-            # Seed last_reset to now on first enable so the task loop
-            # doesn't fire an immediate reset the moment it's turned
-            # on — the first reset happens one full period from now,
-            # same as flipping on a fresh cycle.
             cursor = await db.execute(
                 "SELECT last_reset FROM leveling_reset_config WHERE guild_id = ?",
                 (guild_id,))
@@ -1735,6 +1655,107 @@ def delete_blacklist(entry_id: int):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "DELETE FROM leveling_blacklist_roles WHERE id=? AND guild_id=?",
+                (entry_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+# ── Prestige (Phase 5 / Prestige system) ────────────────────────────────────
+#
+# Same LEVEL_ADMIN gate + guild-scoped CRUD shape as the leveling
+# reward/bonus-role/blacklist routes directly above. Grant-time
+# validation and the XP/level recompute live in
+# utils.xp_calculator.perform_prestige() / get_prestige_config() —
+# these routes are only the dashboard CRUD surface for prestige_config
+# (on/off + min_level) and prestige_roles (tier -> role_id mapping).
+
+@api_bp.route("/leveling/prestige-config", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_prestige_config_api():
+    from utils.xp_calculator import get_prestige_config as _get_prestige_config
+    guild_id = get_session_guild_id()
+    return jsonify({"config": run_async(_get_prestige_config(guild_id))})
+
+
+@api_bp.route("/leveling/prestige-config", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def save_prestige_config_api():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+    try:
+        min_level = int(data.get("min_level", 50))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "min_level must be a number"})
+    if min_level <= 0:
+        return jsonify({"success": False, "error": "min_level must be positive"})
+    enabled = int(bool(data.get("enabled", True)))
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO prestige_config (guild_id, enabled, min_level)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    enabled    = excluded.enabled,
+                    min_level  = excluded.min_level,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (guild_id, enabled, min_level))
+            await db.commit()
+
+    run_async(save())
+    log_action(guild_id,
+               f"Updated prestige config: enabled={bool(enabled)} min_level={min_level}",
+               "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/prestige-roles", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_prestige_roles_api():
+    from utils.xp_calculator import get_prestige_roles as _get_prestige_roles
+    guild_id = get_session_guild_id()
+    return jsonify({"roles": run_async(_get_prestige_roles(guild_id))})
+
+
+@api_bp.route("/leveling/prestige-role", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_prestige_role_api():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+    try:
+        tier = int(data.get("tier"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "tier must be a number"})
+    role_id = data.get("role_id")
+    if tier <= 0 or not role_id:
+        return jsonify({"success": False, "error": "tier and role_id are required"})
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO prestige_roles (guild_id, tier, role_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, tier) DO UPDATE SET
+                    role_id = excluded.role_id
+            """, (guild_id, tier, role_id))
+            await db.commit()
+
+    run_async(save())
+    log_action(guild_id, f"Set prestige tier {tier} role", "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/prestige-role/<int:entry_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_prestige_role_api(entry_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM prestige_roles WHERE id=? AND guild_id=?",
                 (entry_id, guild_id))
             await db.commit()
 
@@ -1964,16 +1985,6 @@ def delete_status_message(msg_id: int):
 
 
 # ── Phase 3 E3/E4 CLOSEOUT — Ledger & Inventory (read-only) ────────────────────
-#
-# SECURITY FIX (Critical-adjacent, this pass): these routes were gated
-# at LEVEL_MODERATOR while the page routes that link to them
-# (/ledger, /inventory in dashboard/app.py) are gated at LEVEL_ADMIN
-# via PAGE_PERMISSIONS. That mismatch meant a moderator who couldn't
-# even load the Ledger/Inventory pages in the UI could still hit these
-# JSON endpoints directly (e.g. curl/fetch with their session cookie)
-# and get the exact same data the UI would have shown an admin. Raised
-# to LEVEL_ADMIN so the API gate matches the page gate — no more
-# bypassing the UI-level restriction via direct API calls.
 
 @api_bp.route("/ledger")
 @require_api_permission(LEVEL_ADMIN)
