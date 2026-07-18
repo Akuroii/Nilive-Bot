@@ -1,8 +1,38 @@
-# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #4)
+# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #5)
 
-Stopped at: `dashboard/api.py` blueprint split complete and verified.
-This was the last item on the audit list — see "Next objectives"
-below, which is now just a scan for anything new, not a backlog.
+Stopped at: repo-root cleanup complete. A report calling itself
+"shift work zero" claimed 4 issues; 2 were already fixed in pass #4
+(the report was checking a stale copy — see correction below), 2 were
+real and are fixed now.
+
+## Correction: "shift work zero" report was checking stale files
+
+Verified directly against this exact working copy before touching
+anything:
+- Root `dashboard.js`/`base.html` mislabeled duplicates: **already
+  deleted in pass #2**. `ls base.html dashboard.js` at repo root
+  returns "No such file or directory." The report describing these as
+  "confirmed with actual file contents... four passes have gone by and
+  nobody's touched this" was checking a stale copy, not this repo —
+  possibly the original upload, before any fixes were applied.
+- Old `dashboard/api.py` 2159-line monolith: **already deleted in
+  pass #4** when the package split happened (`rm dashboard/api.py`
+  before `mv dashboard/api_pkg dashboard/api`). Also confirmed absent.
+Both re-confirmed with `ls` immediately before writing this section,
+not assumed from memory of having done them earlier.
+
+## Real issues from that report, fixed this pass
+
+- **`P0-fixes.zip`, `dashboard-fixes-v2.zip`**: stray old delivery
+  zips sitting in the repo root (dated April, prior shift artifacts).
+  Confirmed zero references anywhere before deleting. Deleted.
+- **`markupsafe` missing from `requirements.txt`**: was working fine
+  as a transitive Flask/Jinja2 dependency, but pass #1's XSS fix made
+  it a direct, security-relevant import (`from markupsafe import
+  escape`). Pinned explicitly at `3.0.3` (the version Flask 3.0.0
+  already resolves to) so a future Flask upgrade can't silently change
+  what escaping behavior is running without it showing up in the
+  dependency list.
 
 ## ⚠️ Read this first — how this zip was assembled
 
