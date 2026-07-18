@@ -1,9 +1,10 @@
-# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #2)
+# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #3)
 
-Stopped at: `scheduled_messages` feature complete and tested. This is
-the last item of the "3 half-built dead tables" cleanup group. Nothing
-further from the original audit list has been started yet (see
-"Next objectives" below).
+Stopped at: `run_async` event-loop fix complete and tested. This
+turned out to be much smaller in scope than pass #2's STATUS.md
+predicted — see the correction note under item 11 below before
+reading the "Next objectives" section, since it's now shorter than
+last time.
 
 ## ⚠️ Read this first — how this zip was assembled
 
@@ -127,6 +128,32 @@ has more than one branch.
       writes to it — no command yet builds a scheduled embed. Text
       messages are fully functional today.
 
+11. **`run_async` per-request event loop — fixed** (`dashboard/utils/async_utils.py`).
+    **Scope correction from pass #2's STATUS.md**: that writeup
+    assumed the event-loop churn was scattered inline across
+    `dashboard/app.py`/`api.py` and would need touching 120+ call
+    sites individually. On actually investigating (grepping for
+    `asyncio.new_event_loop` directly in those files found nothing —
+    which should have been the tell), it turned out every one of
+    those 120+ call sites goes through one shared `run_async(coro)`
+    helper. That meant the real fix was a single ~40-line file, not a
+    multi-thousand-line rewrite. Replaced the old
+    create-loop/run/close-loop-every-call pattern with one persistent
+    event loop in a dedicated background thread (started lazily on
+    first use), with Flask's request threads dispatching onto it via
+    `asyncio.run_coroutine_threadsafe(...).result()`. Zero call sites
+    changed — every existing `run_async(some_coro())` call works
+    unmodified. Tested: sequential correctness, exception propagation,
+    50 concurrent threads with zero result cross-talk, confirmed the
+    loop is actually persisted (not recreated) across calls, and the
+    real `init_db()` startup pattern + a live DB query both verified
+    end-to-end against an actual SQLite file.
+    **Lesson for next time**: the original audit's time estimate for
+    this item was based on an assumption about the code's shape that
+    turned out to be wrong. Worth a quick grep to confirm an
+    audit-flagged item's actual blast radius before scoping it as
+    "big" — this one wasn't.
+
 ## Bugs caught by testing (not by reading the code)
 
 Both of these compiled fine and looked correct on read-through — they
@@ -159,31 +186,17 @@ place to explain the real mechanism rather than the wrong one.
 
 ## Next objectives (not started)
 
-Roughly in priority order:
-
-1. **`run_async` per-request event loop** (dashboard side). Flask
-   routes that hit the DB currently spin up a fresh asyncio event loop
-   per request to call the async `aiosqlite` code. Under real
-   concurrent dashboard traffic this is wasteful and has known
-   footguns (event loop churn, potential leaks). Needs a decision on
-   approach before touching code — options roughly are: (A) a
-   persistent background event loop the Flask app dispatches onto,
-   (B) a thread pool + `asyncio.run` per call (current approach,
-   basically), (C) drop `aiosqlite` on the dashboard side entirely and
-   use synchronous `sqlite3` there instead, since Flask routes don't
-   need to be async. (C) is probably the least risky and most
-   mechanical, but it touches every DB call site in `dashboard/`
-   (`app.py` at 1763 lines, `api.py` at 2159 lines) — this is real
-   scope, not a quick fix. Get a decision on approach before starting.
-
-2. **Split `dashboard/api.py` (2159 lines) into blueprints.**
+1. **Split `dashboard/api.py` (2159 lines) into blueprints.**
    Structural refactor, not a bug fix — pure maintainability. Higher
    risk of introducing a regression than anything done so far this
    shift just by virtue of size. Should be its own dedicated pass with
    care taken to test each moved route, not something to rush through
-   inside a larger batch of unrelated fixes.
+   inside a larger batch of unrelated fixes. Worth doing the same
+   "grep before scoping" check the `run_async` item got — confirm the
+   actual coupling between routes before assuming this is as large as
+   it looks from line count alone.
 
-3. Everything else from the original audit not explicitly listed here
+2. Everything else from the original audit not explicitly listed here
    is either done (see above) or was never part of the list.
 
 ## Design decisions locked from earlier shifts (still apply)
