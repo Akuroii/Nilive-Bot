@@ -6,6 +6,7 @@ import datetime
 import requests as _req
 import aiosqlite
 from flask import Blueprint, jsonify, request, session, abort, Response
+from markupsafe import escape as _esc
 from database import DB_PATH
 from dashboard.utils.async_utils import run_async
 from dashboard.auth import login_required, current_user_id, current_user
@@ -136,6 +137,8 @@ def members_search():
         rows = [r for r in rows if query in str(r[0])]
     html = ""
     for r in rows:
+        # r[0] (user_id) is always numeric — safe to interpolate raw
+        # into both the HTML and the inline onclick's JS-string args.
         html += (
             f"<tr>"
             f"<td><code>{r[0]}</code></td>"
@@ -239,17 +242,30 @@ def moderation_logs_partial():
     }
     html = ""
     for r in rows:
-        avatar = r[2] or "https://cdn.discordapp.com/embed/avatars/0.png"
+        # SECURITY FIX (dark-fixes pass, CRITICAL — stored XSS): every
+        # value below except the numeric id and the hardcoded badge
+        # color can be attacker-influenced (a member's Discord display
+        # name is fully attacker-controlled, and moderation reasons are
+        # free text typed by staff who could themselves be compromised
+        # or malicious). This response bypasses Jinja's autoescaping
+        # entirely (it's a hand-built string returned straight to an
+        # htmx innerHTML swap), so anything containing raw HTML/JS here
+        # used to execute directly in an admin's browser the next time
+        # they opened the Moderation Logs tab. Every interpolated field
+        # that isn't a guaranteed-numeric id or a hardcoded literal is
+        # now passed through markupsafe.escape() before being placed
+        # in the HTML string.
+        avatar = _esc(r[2] or "https://cdn.discordapp.com/embed/avatars/0.png")
         color  = colors.get(str(r[4]).lower(), "accent")
         html  += (
             f"<tr>"
             f"<td><div class='user-cell'>"
             f"<img src='{avatar}' class='avatar-sm'>"
-            f"<span>{r[1]}</span></div></td>"
-            f"<td>{r[3]}</td>"
-            f"<td><span class='badge badge-{color}'>{r[4]}</span></td>"
-            f"<td>{r[5] or '—'}</td>"
-            f"<td><span class='badge badge-source'>{r[6]}</span></td>"
+            f"<span>{_esc(r[1])}</span></div></td>"
+            f"<td>{_esc(r[3])}</td>"
+            f"<td><span class='badge badge-{color}'>{_esc(r[4])}</span></td>"
+            f"<td>{_esc(r[5]) if r[5] else '—'}</td>"
+            f"<td><span class='badge badge-source'>{_esc(r[6])}</span></td>"
             f"<td class='text-muted'>{str(r[7])[:10] if r[7] else '—'}</td>"
             f"</tr>"
         )
@@ -350,6 +366,28 @@ def api_mod_quick_action():
     if not bot_token:
         return jsonify({"success": False, "error": "Bot token not configured"})
 
+    # HARDENING (dark-fixes pass): target_id must be a real Discord
+    # snowflake before it's formatted into a Discord API URL or a
+    # DB write — previously an arbitrary string could be submitted
+    # here and would be silently coerced/used as-is downstream.
+    try:
+        target_id = int(target_id)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "user_id must be a valid Discord ID"})
+
+    if duration is not None:
+        try:
+            duration = int(duration)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "duration_seconds must be a number"})
+        if duration <= 0 or duration > 60 * 60 * 24 * 28:
+            return jsonify({"success": False, "error": "duration_seconds out of range (max 28 days)"})
+
+    try:
+        delete_days = max(0, min(int(delete_days or 0), 7))
+    except (TypeError, ValueError):
+        delete_days = 0
+
     headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
     base    = "https://discord.com/api/v10"
     result  = {"success": True, "message": ""}
@@ -397,8 +435,22 @@ def api_mod_quick_action():
             result["message"] = f"Warned <@{target_id}>"
         elif action == "massban":
             user_ids = data.get("user_ids", [])
+            # HARDENING (dark-fixes pass): cap batch size and validate
+            # each id — an unbounded list here could hammer Discord's
+            # ban endpoint hundreds of times in a single request,
+            # risking a rate-limit ban on the bot's own IP.
+            if not isinstance(user_ids, list) or len(user_ids) == 0:
+                return jsonify({"success": False, "error": "user_ids must be a non-empty list"})
+            if len(user_ids) > 25:
+                return jsonify({"success": False,
+                                "error": "massban is capped at 25 users per request"})
             failed   = []
             for uid in user_ids:
+                try:
+                    uid = int(uid)
+                except (TypeError, ValueError):
+                    failed.append(uid)
+                    continue
                 r = _req.put(
                     f"{base}/guilds/{guild_id}/bans/{uid}",
                     headers=headers, json={"reason": reason},
@@ -612,12 +664,14 @@ def tickets_partial():
     html = ""
     for r in rows:
         color = "badge-success" if r[3] == "open" else "badge-danger"
+        # r[4] (category) is admin-configured but still free text —
+        # escaped defensively rather than assumed trusted.
         html += (
             f"<tr>"
             f"<td><strong>#{r[0]}</strong></td>"
             f"<td><code>{r[2]}</code></td>"
-            f"<td>{r[4] or 'General'}</td>"
-            f"<td><span class='badge {color}'>{r[3]}</span></td>"
+            f"<td>{_esc(r[4]) if r[4] else 'General'}</td>"
+            f"<td><span class='badge {color}'>{_esc(r[3])}</span></td>"
             f"<td class='text-muted'>{str(r[5])[:10] if r[5] else '—'}</td>"
             f"</tr>"
         )
@@ -1130,12 +1184,15 @@ def shop_items_partial():
         dur    = f"{r[6]}h" if r[6] else "Permanent"
         price_diamonds = r[9]
         price_str = f"💎 {price_diamonds:,}" if price_diamonds else f"🪙 {r[3]:,}"
+        # r[1] (name) and r[2] (description) are admin-entered but
+        # still free text — escaped so a mischievous/compromised admin
+        # account can't plant stored XSS for the next admin to view.
         html  += (
             f"<tr>"
-            f"<td><strong>{r[1]}</strong>{'⭐' if r[7] else ''}</td>"
-            f"<td class='text-muted'>{r[2] or '—'}</td>"
+            f"<td><strong>{_esc(r[1])}</strong>{'⭐' if r[7] else ''}</td>"
+            f"<td class='text-muted'>{_esc(r[2]) if r[2] else '—'}</td>"
             f"<td>{price_str}</td>"
-            f"<td>{r[4]}</td>"
+            f"<td>{_esc(r[4])}</td>"
             f"<td>{dur}</td>"
             f"<td><span class='badge {status}'>{label}</span></td>"
             f"<td><button class='btn btn-sm btn-danger' "
@@ -1238,10 +1295,13 @@ def shop_purchase_history():
     for r in rows:
         exp   = r[4][:10] if r[4] else "Permanent"
         currency_icon = "💎" if (len(r) > 5 and r[5] == "diamonds") else "🪙"
+        # r[0] (user_display_name — a Discord nickname) and r[1]
+        # (item_name — admin-entered but still free text) are both
+        # escaped below; same stored-XSS class as moderation_logs_partial.
         html += (
             f"<tr>"
-            f"<td>{r[0]}</td>"
-            f"<td><strong>{r[1]}</strong></td>"
+            f"<td>{_esc(r[0])}</td>"
+            f"<td><strong>{_esc(r[1])}</strong></td>"
             f"<td>{currency_icon} {r[2]:,}</td>"
             f"<td class='text-muted'>{str(r[3])[:10] if r[3] else '—'}</td>"
             f"<td class='text-muted'>{exp}</td>"
@@ -1272,7 +1332,7 @@ def shop_temp_roles():
             f"<td><code>{r[0]}</code></td>"
             f"<td><code>{r[1]}</code></td>"
             f"<td class='text-muted'>{str(r[2])[:16] if r[2] else '—'}</td>"
-            f"<td><span class='badge badge-accent'>{r[3]}</span></td>"
+            f"<td><span class='badge badge-accent'>{_esc(r[3])}</span></td>"
             f"</tr>"
         )
     return html or "<tr><td colspan='4' class='empty'>No active temp roles</td></tr>"
@@ -1786,11 +1846,17 @@ def audit_log_partial():
     rows = run_async(fetch())
     html = ""
     for r in rows:
+        # SECURITY FIX (dark-fixes pass, CRITICAL — stored XSS): same
+        # class of bug as moderation_logs_partial above. r[0] is the
+        # dashboard user's Discord username (attacker-controlled via
+        # their own Discord profile), and r[2] ("details") is free
+        # text built from other admin actions (e.g. trigger words,
+        # item names) that themselves may contain unescaped input.
         html += (
             f"<tr>"
-            f"<td>{r[0]}</td><td>{r[1]}</td>"
-            f"<td class='text-muted'>{r[2] or '—'}</td>"
-            f"<td><span class='badge badge-accent'>{r[3] or '—'}</span></td>"
+            f"<td>{_esc(r[0])}</td><td>{_esc(r[1])}</td>"
+            f"<td class='text-muted'>{_esc(r[2]) if r[2] else '—'}</td>"
+            f"<td><span class='badge badge-accent'>{_esc(r[3]) if r[3] else '—'}</span></td>"
             f"<td class='text-muted'>{str(r[4])[:16] if r[4] else '—'}</td>"
             f"</tr>"
         )

@@ -215,6 +215,18 @@ async def perform_prestige(guild_id: int, user_id: int) -> dict:
     Raises PrestigeError with a user-facing message on any validation
     failure so the caller can just show it, rather than duplicating
     the checks.
+
+    SECURITY / CONCURRENCY FIX (dark-fixes pass): the SELECT and the
+    subsequent UPDATE used to happen in two separate, unguarded
+    connections. Two /prestige invocations (or a /prestige racing a
+    dashboard XP edit) firing close together could both read the same
+    pre-prestige xp/level, both pass validation, and both write —
+    silently granting a member two prestige tiers for one qualifying
+    level, or clobbering a concurrent XP grant. This now runs as a
+    single BEGIN IMMEDIATE transaction spanning the read and the
+    write, same pattern already used by utils/economy_safe.py, so a
+    second concurrent call sees the already-updated row and is
+    validated (or rejected) against the correct, current state.
     """
     config = await get_prestige_config(guild_id)
     if not config.get("enabled", 1):
@@ -223,34 +235,42 @@ async def perform_prestige(guild_id: int, user_id: int) -> dict:
     min_level = int(config.get("min_level", 50))
 
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT xp, level, prestige FROM levels
-            WHERE guild_id = ? AND user_id = ?
-        """, (guild_id, user_id))
-        row = await cursor.fetchone()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute("""
+                SELECT xp, level, prestige FROM levels
+                WHERE guild_id = ? AND user_id = ?
+            """, (guild_id, user_id))
+            row = await cursor.fetchone()
 
-    if not row:
-        raise PrestigeError("You have no XP yet.")
+            if not row:
+                await db.execute("ROLLBACK")
+                raise PrestigeError("You have no XP yet.")
 
-    old_xp, old_level, old_prestige = row
-    old_prestige = old_prestige or 0
+            old_xp, old_level, old_prestige = row
+            old_prestige = old_prestige or 0
 
-    if old_level < min_level:
-        raise PrestigeError(
-            f"You need to be Level {min_level} to prestige "
-            f"(you're Level {old_level}).")
+            if old_level < min_level:
+                await db.execute("ROLLBACK")
+                raise PrestigeError(
+                    f"You need to be Level {min_level} to prestige "
+                    f"(you're Level {old_level}).")
 
-    threshold = total_xp_for_level(min_level)
-    new_xp    = max(0, old_xp - threshold)
-    new_level = calculate_level_from_xp(new_xp)
-    new_prestige = old_prestige + 1
+            threshold = total_xp_for_level(min_level)
+            new_xp    = max(0, old_xp - threshold)
+            new_level = calculate_level_from_xp(new_xp)
+            new_prestige = old_prestige + 1
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            UPDATE levels SET xp = ?, level = ?, prestige = ?
-            WHERE guild_id = ? AND user_id = ?
-        """, (new_xp, new_level, new_prestige, guild_id, user_id))
-        await db.commit()
+            await db.execute("""
+                UPDATE levels SET xp = ?, level = ?, prestige = ?
+                WHERE guild_id = ? AND user_id = ?
+            """, (new_xp, new_level, new_prestige, guild_id, user_id))
+            await db.commit()
+        except PrestigeError:
+            raise
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
 
     return {
         "old_level": old_level, "new_level": new_level,

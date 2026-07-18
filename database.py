@@ -16,6 +16,26 @@ async def init_db():
 
     async with aiosqlite.connect(DB_PATH) as db:
 
+        # PERFORMANCE FIX (dark-fixes pass): every cog/route in this
+        # project opens a brand-new aiosqlite connection per query
+        # (dozens of call sites, by design — see STATUS.md audit).
+        # SQLite's default rollback-journal mode serializes ALL
+        # readers behind a writer, so under any real concurrent load
+        # (message XP + voice XP ticks + dashboard requests landing
+        # at once) that connection-churn pattern starts throwing
+        # "database is locked" errors. WAL mode lets readers proceed
+        # while a writer holds the lock, which is the single biggest,
+        # lowest-risk lever available without touching the
+        # one-connection-per-call pattern itself. Set once here,
+        # since WAL is a persistent, file-level setting (not per
+        # connection) — every subsequent connection to this file,
+        # from either the bot or dashboard process, inherits it.
+        try:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA busy_timeout=5000")
+        except Exception as e:
+            print(f"[DB] Failed to set WAL mode / busy_timeout: {e}")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS mvp_scores (
                 guild_id      INTEGER,

@@ -41,35 +41,58 @@ async def perform_leaderboard_reset(guild_id: int, period: str):
     query is scoped to guild_id, matching every other reset/cleanup
     task in the project (cogs/mvp.py's cycle task, cogs/shop.py's
     temp_role_cleanup).
+
+    CRITICAL FIX (dark-fixes pass): this used to run as four
+    separate, unguarded statements — a SELECT, up to N history
+    INSERTs, an UPDATE zeroing every member, and an upsert into
+    leveling_reset_config — with no transaction wrapping the group.
+    This function permanently destroys XP data (that's the entire
+    point of a reset), so a crash or connection drop partway through
+    the loop used to be able to leave the guild in a half-archived,
+    half-zeroed state with no way to detect or recover from it: some
+    members' history rows written, others not, and the zeroing UPDATE
+    possibly applied to some but not all rows depending on exactly
+    where the failure landed.
+
+    The whole operation — snapshot, zero, and the reset_config
+    bookkeeping row — now runs inside a single BEGIN IMMEDIATE
+    transaction and either commits completely or rolls back
+    completely, the same all-or-nothing guarantee
+    utils/economy_safe.py already gives every coin/diamond mutation.
     """
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT user_id, xp, level FROM levels
-            WHERE guild_id = ? ORDER BY xp DESC
-        """, (guild_id,))
-        rows = await cursor.fetchall()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute("""
+                SELECT user_id, xp, level FROM levels
+                WHERE guild_id = ? ORDER BY xp DESC
+            """, (guild_id,))
+            rows = await cursor.fetchall()
 
-        for rank, (user_id, xp, level) in enumerate(rows, 1):
+            for rank, (user_id, xp, level) in enumerate(rows, 1):
+                await db.execute("""
+                    INSERT INTO leveling_leaderboard_history
+                        (guild_id, user_id, xp, level, rank, period, period_end)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (guild_id, user_id, xp, level, rank, period, now))
+
+            await db.execute(
+                "UPDATE levels SET xp = 0, level = 0 WHERE guild_id = ?",
+                (guild_id,))
+
             await db.execute("""
-                INSERT INTO leveling_leaderboard_history
-                    (guild_id, user_id, xp, level, rank, period, period_end)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (guild_id, user_id, xp, level, rank, period, now))
+                INSERT INTO leveling_reset_config (guild_id, enabled, period, last_reset)
+                VALUES (?, 1, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    period = excluded.period,
+                    last_reset = excluded.last_reset
+            """, (guild_id, period, now))
 
-        await db.execute(
-            "UPDATE levels SET xp = 0, level = 0 WHERE guild_id = ?",
-            (guild_id,))
-
-        await db.execute("""
-            INSERT INTO leveling_reset_config (guild_id, enabled, period, last_reset)
-            VALUES (?, 1, ?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET
-                period = excluded.period,
-                last_reset = excluded.last_reset
-        """, (guild_id, period, now))
-
-        await db.commit()
+            await db.commit()
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
     return len(rows)
 
 
@@ -513,6 +536,11 @@ class Leveling(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def setxp(self, interaction: discord.Interaction,
                     member: discord.Member, xp: int):
+        # HARDENING (dark-fixes pass): clamp admin-supplied XP to
+        # non-negative — nothing previously stopped a negative value
+        # from being passed through to xp_progress()/the rank card,
+        # which assume xp >= 0.
+        xp = max(0, xp)
         new_level, _, _ = xp_progress(xp)
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""

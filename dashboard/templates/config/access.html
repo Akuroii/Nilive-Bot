@@ -10,6 +10,18 @@
     </p>
     <form method="POST" style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
         <input type="hidden" name="action" value="add">
+        <!-- SECURITY FIX (dark-fixes pass, form CSRF gap #3): this form
+             previously had no CSRF protection at all — the app-level
+             and api-level CSRF hooks only ever covered /api/* JSON
+             requests, not classic <form> POSTs. A forged cross-site
+             form submission could have added an attacker-controlled
+             user_id as 'owner' on this server. The token is minted
+             per-session in dashboard/auth.py::create_session() and
+             is already exposed to every page via window.__CSRF_TOKEN__
+             (see base.html) — this just also mirrors it into a hidden
+             form field so the server-side check in app.py's
+             config_access() route has something to compare against. -->
+        <input type="hidden" name="csrf_token" value="{{ session.get('csrf_token', '') }}">
         <div class="form-group" style="flex:1;min-width:200px;margin-bottom:0;">
             <label class="form-label">Discord User ID</label>
             <input class="form-input" name="user_id" placeholder="Right click user → Copy ID" required>
@@ -56,6 +68,8 @@
                         <form method="POST" style="display:inline;">
                             <input type="hidden" name="action" value="remove">
                             <input type="hidden" name="entry_id" value="{{ u[0] }}">
+                            <!-- Same CSRF fix as the add-user form above. -->
+                            <input type="hidden" name="csrf_token" value="{{ session.get('csrf_token', '') }}">
                             <button type="submit" class="btn btn-sm btn-danger"
                                 onclick="return confirm('Remove this user?')">
                                 Remove

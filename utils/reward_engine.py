@@ -68,24 +68,44 @@ async def give_reward(bot: discord.Client,
             raise RewardError("xp reward requires 'amount'")
         amount = int(amount)
 
+        # CONCURRENCY FIX (dark-fixes pass): this used to be a plain
+        # read (SELECT xp, level) followed by a separate write
+        # (INSERT ... ON CONFLICT DO UPDATE) with no transaction
+        # guard around the pair. Two XP grants landing close together
+        # for the same member — e.g. a message-XP award racing a
+        # voice-XP tick, or a shop XP-boost purchase racing either —
+        # could both read the same old_xp, both compute new_xp
+        # independently, and the second write would silently clobber
+        # the first (a classic lost-update race), undercounting XP
+        # and potentially skipping a level-up's role/currency reward
+        # entirely. This now runs as one BEGIN IMMEDIATE transaction
+        # spanning the read and the write, mirroring the pattern
+        # utils/economy_safe.py already uses for coins/diamonds, so a
+        # second concurrent grant is forced to wait and read the
+        # already-updated row instead of overwriting it.
         async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT xp, level FROM levels
-                WHERE guild_id = ? AND user_id = ?
-            """, (guild_id, user_id))
-            row = await cursor.fetchone()
-            old_xp    = row[0] if row else 0
-            old_level = row[1] if row else 0
-            new_xp    = max(0, old_xp + amount)
-            new_level, _, _ = xp_progress(new_xp)
-            await db.execute("""
-                INSERT INTO levels (guild_id, user_id, xp, level)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET xp = ?, level = ?
-            """, (guild_id, user_id, new_xp, new_level,
-                  new_xp, new_level))
-            await db.commit()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute("""
+                    SELECT xp, level FROM levels
+                    WHERE guild_id = ? AND user_id = ?
+                """, (guild_id, user_id))
+                row = await cursor.fetchone()
+                old_xp    = row[0] if row else 0
+                old_level = row[1] if row else 0
+                new_xp    = max(0, old_xp + amount)
+                new_level, _, _ = xp_progress(new_xp)
+                await db.execute("""
+                    INSERT INTO levels (guild_id, user_id, xp, level)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(guild_id, user_id)
+                    DO UPDATE SET xp = ?, level = ?
+                """, (guild_id, user_id, new_xp, new_level,
+                      new_xp, new_level))
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
 
         await _log_xp_ledger(guild_id, user_id, amount, new_xp, reason, source)
 

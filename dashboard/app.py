@@ -27,7 +27,47 @@ from utils.xp_calculator import calculate_level_from_xp
 app = Flask(__name__,
             template_folder="templates",
             static_folder="static")
-app.secret_key = os.getenv("SECRET_KEY", "nero-dashboard-secret-key-2024")
+
+# SECURITY FIX (dark-fixes pass, CRITICAL): this used to fall back to a
+# hardcoded, source-controlled string ("nero-dashboard-secret-key-2024")
+# whenever the SECRET_KEY env var wasn't set. Flask signs session cookies
+# (including the "user" identity and the csrf_token itself) with this
+# key using an unencrypted-but-signed scheme — anyone who knows the
+# fallback string (which is public, since it's sitting in this file in
+# source control) can FORGE a valid session cookie for any user_id,
+# including the owner, without ever touching the database or Discord
+# OAuth. This is strictly more dangerous than the CSRF gap that was
+# already being tracked, because it bypasses login entirely.
+#
+# We now require SECRET_KEY to be set in the environment and refuse to
+# start otherwise, mirroring the exact fail-fast pattern main.py already
+# uses for a missing/invalid DISCORD_TOKEN — loud, actionable, no silent
+# insecure fallback.
+_secret_key = os.getenv("SECRET_KEY", "").strip()
+if not _secret_key:
+    print("=" * 60)
+    print("FATAL: SECRET_KEY is missing or empty.")
+    print("  -> Dashboard sessions (including the CSRF token and the")
+    print("     logged-in user's identity) are signed with this key.")
+    print("     Running with no key, or a hardcoded fallback checked")
+    print("     into source control, lets an attacker who knows that")
+    print("     value forge a valid session for ANY user, including")
+    print("     the owner, with no login required.")
+    print("  -> Set SECRET_KEY in Railway > your service > Variables")
+    print("     to a long random value, e.g.:")
+    print("       python -c \"import secrets; print(secrets.token_hex(32))\"")
+    print("=" * 60)
+    sys.exit(1)
+if len(_secret_key) < 32:
+    print("=" * 60)
+    print("WARNING: SECRET_KEY is set but shorter than 32 characters.")
+    print("  -> A short/guessable key is still forgeable. Generate a")
+    print("     longer one with:")
+    print("       python -c \"import secrets; print(secrets.token_hex(32))\"")
+    print("  -> Continuing anyway, but treat this as urgent to rotate.")
+    print("=" * 60)
+
+app.secret_key = _secret_key
 app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7
 app.register_blueprint(api_bp)
 
@@ -1189,6 +1229,21 @@ def commands_dashboard():
 def config_commands():
     if request.method == "POST":
         guild_id = get_session_guild_id()
+
+        # SECURITY FIX (dark-fixes pass, form CSRF gap #3): this route
+        # (and /config/access below) are the two classic <form method=
+        # "POST"> submissions that the app-level and api-level CSRF
+        # hooks never covered, since those hooks only fire for
+        # /api/* paths. A hidden csrf_token input is now required and
+        # checked against the same session-stored token used
+        # everywhere else, closing the gap flagged across three
+        # STATUS.md revisions in a row. See templates/manage/commands
+        # dashboard form / config/access.html for the matching
+        # hidden input.
+        submitted_token = request.form.get("csrf_token", "")
+        if not submitted_token or submitted_token != session.get("csrf_token"):
+            abort(403)
+
         command  = request.form.get("command")
         action   = request.form.get("action")
         if command and action:
@@ -1410,6 +1465,15 @@ def config_access():
             await db.commit()
 
     if request.method == "POST":
+        # SECURITY FIX (dark-fixes pass, form CSRF gap #3): same
+        # missing-token issue as /config/commands above — this route
+        # grants/revokes dashboard access itself, so it's arguably the
+        # highest-value CSRF target in the whole app (a forged request
+        # here could add an attacker-controlled user_id as 'owner').
+        submitted_token = request.form.get("csrf_token", "")
+        if not submitted_token or submitted_token != session.get("csrf_token"):
+            abort(403)
+
         action = request.form.get("action")
         if action == "add":
             uid   = int(request.form.get("user_id", 0))
@@ -1436,8 +1500,12 @@ def api_edit_member():
     guild_id  = get_session_guild_id()
     data      = request.json
     user_id   = data.get("user_id")
-    xp        = int(data.get("xp", 0))
-    coins     = int(data.get("coins", 0))
+    # HARDENING (dark-fixes pass): clamp to non-negative. xp_progress()
+    # and the rank-card progress bar both assume xp/coins are >= 0;
+    # nothing previously stopped a raw negative value from being typed
+    # into this admin field and corrupting those downstream displays.
+    xp        = max(0, int(data.get("xp", 0)))
+    coins     = max(0, int(data.get("coins", 0)))
     new_level = calculate_level_from_xp(xp)
 
     async def update():
