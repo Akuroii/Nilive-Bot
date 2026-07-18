@@ -10,6 +10,15 @@ class CustomCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    async def cog_load(self):
+        # PERFORMANCE FIX (dark-fixes pass #2): same class of fix as
+        # cogs/triggers.py — database.py's central init_db() already
+        # creates "custom_commands" before the bot comes online, so
+        # running ensure_table() again inside on_message (previously,
+        # for every message starting with "!") was redundant work on
+        # the hottest path in the bot.
+        await self.ensure_table()
+
     async def ensure_table(self):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -46,7 +55,6 @@ class CustomCommands(commands.Cog):
         if not message.content.startswith("!"):
             return
 
-        await self.ensure_table()
         cmds = await self.get_commands(message.guild.id)
 
         for cmd in cmds:

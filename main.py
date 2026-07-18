@@ -221,6 +221,8 @@ async def load_cogs():
         "cogs.events",
         "cogs.report",
         "cogs.health",
+        "cogs.backup",
+        "cogs.scheduler",
     ]
     bot.loaded_cogs = []
     bot.failed_cogs = []

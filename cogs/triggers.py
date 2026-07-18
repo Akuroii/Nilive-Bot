@@ -26,6 +26,19 @@ class Triggers(commands.Cog):
         # which is fine for a spam-prevention cooldown.
         self._last_fired: dict[tuple, float] = {}
 
+    async def cog_load(self):
+        # PERFORMANCE FIX (dark-fixes pass #2): ensure_table() used to
+        # run inside on_message, meaning every single guild message
+        # opened a fresh connection and issued a full CREATE TABLE IF
+        # NOT EXISTS + commit before the trigger lookup could even
+        # start — on any active server that's thousands of redundant
+        # schema statements a day for a table that database.py's
+        # central init_db() (see database.py, "triggers" table) already
+        # guarantees exists before the bot ever comes online. Schema
+        # setup now happens once here, at cog load, matching the
+        # lifecycle discord.py already provides for this exact purpose.
+        await self.ensure_table()
+
     async def ensure_table(self):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -105,8 +118,6 @@ class Triggers(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
-
-        await self.ensure_table()
 
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""

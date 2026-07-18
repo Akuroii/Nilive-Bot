@@ -18,6 +18,31 @@ async def get_boost_config(guild_id: int) -> dict:
     return {}
 
 
+def _booster_level(member: discord.Member) -> int:
+    """
+    FEATURE (dark-fixes pass #2, boost_color_roles): reuses the same
+    "how many boosts is this member contributing" signal the existing
+    boost1/boost2 logic above already relies on
+    (premium_subscription_count), so a color role's requires_boost_level
+    lines up with the same tiers admins already think in terms of via
+    /boost_setup's boost1/boost2 roles. 0 if not currently boosting.
+    """
+    if not member.premium_since:
+        return 0
+    return getattr(member, "premium_subscription_count", 1) or 1
+
+
+async def get_boost_color_roles(guild_id: int) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT id, role_id, role_name, requires_boost_level
+            FROM boost_color_roles WHERE guild_id = ? ORDER BY requires_boost_level ASC
+        """, (guild_id,))
+        rows = await cursor.fetchall()
+    return [{"id": r[0], "role_id": r[1], "role_name": r[2],
+              "requires_boost_level": r[3]} for r in rows]
+
+
 class Boost(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -96,6 +121,19 @@ class Boost(commands.Cog):
                 except Exception:
                     pass
 
+        # FEATURE (dark-fixes pass #2, boost_color_roles): a self-picked
+        # color role is a boost perk too, so it comes off on unboost
+        # under the same auto_remove_on_unboost setting checked above
+        # (this function already returned early if that's disabled).
+        color_roles = await get_boost_color_roles(guild.id)
+        for cr in color_roles:
+            role = guild.get_role(cr["role_id"])
+            if role and role in member.roles:
+                try:
+                    await member.remove_roles(role, reason="Boost ended")
+                except Exception:
+                    pass
+
     async def _give_role(self, guild, member, role_id):
         if not role_id:
             return
@@ -161,6 +199,141 @@ class Boost(commands.Cog):
         embed.description = "\n".join(
             f"• {m.mention} — since {m.premium_since.strftime('%Y-%m-%d')}" for m in boosters)
         await interaction.response.send_message(embed=embed)
+
+    # ── boost_color_roles feature ────────────────────────────────────
+    # FEATURE (dark-fixes pass #2): boost_color_roles had a schema
+    # (database.py) with no implementation anywhere — this closes that
+    # gap. Lets boosters self-pick a cosmetic color role from an
+    # admin-configured list, gated per-role by boost level.
+
+    @app_commands.command(name="boostcolor_add",
+                          description="Add a self-pickable color role for boosters (admin)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def boostcolor_add(self, interaction: discord.Interaction,
+                             role: discord.Role, requires_boost_level: int = 1):
+        can_assign, warning = check_bot_role_position(interaction.guild, role)
+        if not can_assign:
+            await interaction.response.send_message(f"⚠️ {warning}", ephemeral=True)
+            return
+        if requires_boost_level < 1:
+            await interaction.response.send_message(
+                "requires_boost_level must be at least 1.", ephemeral=True)
+            return
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO boost_color_roles (guild_id, role_id, role_name, requires_boost_level)
+                VALUES (?, ?, ?, ?)
+            """, (interaction.guild.id, role.id, role.name, requires_boost_level))
+            await db.commit()
+        await interaction.response.send_message(
+            f"✅ Added {role.mention} as a boost color option "
+            f"(requires {requires_boost_level} boost{'s' if requires_boost_level != 1 else ''}).",
+            ephemeral=True)
+
+    @app_commands.command(name="boostcolor_remove",
+                          description="Remove a color role from the boost picker (admin)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def boostcolor_remove(self, interaction: discord.Interaction, role: discord.Role):
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "DELETE FROM boost_color_roles WHERE guild_id = ? AND role_id = ?",
+                (interaction.guild.id, role.id))
+            await db.commit()
+            removed = cursor.rowcount > 0
+        if removed:
+            await interaction.response.send_message(
+                f"Removed {role.mention} from the boost color picker.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "That role wasn't in the boost color picker.", ephemeral=True)
+
+    @app_commands.command(name="boostcolor_list",
+                          description="List configured boost color role options")
+    async def boostcolor_list(self, interaction: discord.Interaction):
+        options = await get_boost_color_roles(interaction.guild.id)
+        if not options:
+            await interaction.response.send_message(
+                "No boost color roles configured yet. Admins can add some with /boostcolor_add.",
+                ephemeral=True)
+            return
+        embed = discord.Embed(title="🎨 Boost Color Roles", color=0xf47fff)
+        for opt in options:
+            role = interaction.guild.get_role(opt["role_id"])
+            label = role.mention if role else f"(deleted role: {opt['role_name']})"
+            embed.add_field(
+                name=f"Requires {opt['requires_boost_level']} boost"
+                     f"{'s' if opt['requires_boost_level'] != 1 else ''}",
+                value=label, inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _boostcolor_autocomplete(self, interaction: discord.Interaction, current: str):
+        level = _booster_level(interaction.user)
+        options = await get_boost_color_roles(interaction.guild.id)
+        eligible = [o for o in options if o["requires_boost_level"] <= level]
+        return [
+            app_commands.Choice(name=o["role_name"], value=str(o["role_id"]))
+            for o in eligible
+            if current.lower() in o["role_name"].lower()
+        ][:25]
+
+    @app_commands.command(name="boostcolor",
+                          description="Pick your boost color role")
+    @app_commands.describe(color="Choose from the roles you're eligible for")
+    @app_commands.autocomplete(color=_boostcolor_autocomplete)
+    async def boostcolor(self, interaction: discord.Interaction, color: str):
+        level = _booster_level(interaction.user)
+        if level < 1:
+            await interaction.response.send_message(
+                "This is a booster perk — boost the server to unlock a color role.",
+                ephemeral=True)
+            return
+
+        options = await get_boost_color_roles(interaction.guild.id)
+        try:
+            target_role_id = int(color)
+        except ValueError:
+            await interaction.response.send_message(
+                "Pick an option from the autocomplete list.", ephemeral=True)
+            return
+
+        chosen = next((o for o in options if o["role_id"] == target_role_id), None)
+        if not chosen:
+            await interaction.response.send_message(
+                "That's not a configured color role. Pick one from the list.", ephemeral=True)
+            return
+        if chosen["requires_boost_level"] > level:
+            await interaction.response.send_message(
+                f"You need {chosen['requires_boost_level']} boosts for that color "
+                f"(you currently have {level}).", ephemeral=True)
+            return
+
+        role = interaction.guild.get_role(target_role_id)
+        if not role:
+            await interaction.response.send_message(
+                "That role no longer exists on this server — ask an admin to reconfigure it.",
+                ephemeral=True)
+            return
+        can_assign, warning = check_bot_role_position(interaction.guild, role)
+        if not can_assign:
+            await interaction.response.send_message(f"⚠️ {warning}", ephemeral=True)
+            return
+
+        # Single-select: swap out any other configured color role the
+        # member currently holds before assigning the new one, so
+        # members don't stack multiple color roles at once.
+        other_role_ids = {o["role_id"] for o in options if o["role_id"] != target_role_id}
+        to_remove = [r for r in interaction.user.roles if r.id in other_role_ids]
+        try:
+            if to_remove:
+                await interaction.user.remove_roles(*to_remove, reason="Switching boost color")
+            if role not in interaction.user.roles:
+                await interaction.user.add_roles(role, reason="Boost color pick")
+        except Exception as e:
+            await interaction.response.send_message(f"Couldn't update your role: {e}", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            f"🎨 You're now wearing {role.mention}!", ephemeral=True)
 
 
 async def setup(bot):

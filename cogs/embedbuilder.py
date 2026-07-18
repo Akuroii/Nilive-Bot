@@ -9,6 +9,19 @@ class EmbedBuilder(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    async def cog_load(self):
+        # CLEANUP (dark-fixes pass #2): "embed_templates" is already
+        # created by database.py's central init_db() before the bot
+        # comes online, so having every slash command in this cog
+        # re-run ensure_table() first was a harmless but pointless
+        # duplicate schema source (same table defined in two places).
+        # Not a hot-path perf issue like triggers.py/customcommands.py
+        # (these are low-frequency slash commands, not on_message), so
+        # this is cleanup only, not a fix. The per-command calls below
+        # are left in place deliberately as defense-in-depth cheap
+        # insurance, since IF NOT EXISTS makes them free no-ops now.
+        await self.ensure_table()
+
     async def ensure_table(self):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""

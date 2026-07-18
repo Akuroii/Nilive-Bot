@@ -16,20 +16,29 @@ async def init_db():
 
     async with aiosqlite.connect(DB_PATH) as db:
 
-        # PERFORMANCE FIX (dark-fixes pass): every cog/route in this
+        # PERFORMANCE FIX (dark-fixes pass #1): every cog/route in this
         # project opens a brand-new aiosqlite connection per query
-        # (dozens of call sites, by design — see STATUS.md audit).
-        # SQLite's default rollback-journal mode serializes ALL
-        # readers behind a writer, so under any real concurrent load
-        # (message XP + voice XP ticks + dashboard requests landing
-        # at once) that connection-churn pattern starts throwing
-        # "database is locked" errors. WAL mode lets readers proceed
-        # while a writer holds the lock, which is the single biggest,
-        # lowest-risk lever available without touching the
-        # one-connection-per-call pattern itself. Set once here,
-        # since WAL is a persistent, file-level setting (not per
-        # connection) — every subsequent connection to this file,
-        # from either the bot or dashboard process, inherits it.
+        # (dozens of call sites, by design). SQLite's default
+        # rollback-journal mode serializes ALL readers behind a
+        # writer, so under real concurrent load (message XP + voice XP
+        # ticks + dashboard requests landing at once) that
+        # connection-churn pattern starts throwing "database is
+        # locked" errors. WAL mode lets readers proceed while a writer
+        # holds the lock — set once here, since WAL IS a persistent,
+        # file-level setting: every subsequent connection to this
+        # file, bot or dashboard, inherits it.
+        #
+        # CORRECTION (pass #2 review): busy_timeout, unlike
+        # journal_mode, is NOT a persistent file-level setting — it's
+        # per-connection. Setting it here only affects this one
+        # connection, not the dozens of others opened elsewhere via
+        # plain aiosqlite.connect(DB_PATH). This isn't a live bug only
+        # because Python's sqlite3 (which aiosqlite wraps) already
+        # defaults new connections to a 5-second busy timeout on its
+        # own — so those other connections get equivalent behavior by
+        # accident, not because of this pragma. Left in place since
+        # it's harmless and self-documenting; just don't rely on this
+        # line alone if that default ever changes.
         try:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.execute("PRAGMA busy_timeout=5000")
@@ -48,14 +57,15 @@ async def init_db():
             )
         """)
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS voice_sessions (
-                guild_id  INTEGER,
-                user_id   INTEGER,
-                join_time REAL,
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
+        # CLEANUP (dark-fixes pass #2): voice_sessions dropped from
+        # schema — confirmed zero read/write references anywhere in
+        # cogs/ or dashboard/ (only comments referencing the old name
+        # remain, e.g. cogs/mvp.py). Superseded entirely by the
+        # tick-based activity engine (on_activity_voice_tick), which
+        # doesn't need join/leave bookkeeping. Not DROPping the table
+        # from any already-deployed DB file here (that's a manual,
+        # explicit operator action) — this just stops a fresh DB from
+        # ever creating it again.
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS activity_stats (
@@ -161,15 +171,13 @@ async def init_db():
         except Exception as e:
             print(f"[MIGRATION] tickets.staff_role_id: {e}")
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS ticket_config (
-                guild_id           INTEGER PRIMARY KEY,
-                staff_role_id      INTEGER,
-                ticket_category_id INTEGER,
-                log_channel_id     INTEGER,
-                categories         TEXT DEFAULT 'General Support,Report,Ban Appeal,Other'
-            )
-        """)
+        # CLEANUP (dark-fixes pass #2): ticket_config dropped from
+        # schema — confirmed zero read/write references anywhere (only
+        # comments remain, e.g. cogs/tickets.py's P1 #10 fix note).
+        # /ticket_setup writes to ticket_settings now; this legacy
+        # table was never populated by any current code path. See
+        # voice_sessions cleanup note above for the same reasoning re:
+        # not touching already-deployed DB files here.
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS embed_templates (
@@ -291,13 +299,10 @@ async def init_db():
             )
         """)
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS disabled_commands (
-                guild_id INTEGER,
-                command  TEXT,
-                PRIMARY KEY (guild_id, command)
-            )
-        """)
+        # CLEANUP (dark-fixes pass #2): disabled_commands dropped from
+        # schema — confirmed zero references anywhere. Superseded by
+        # command_toggles (see main.py, dashboard/app.py's
+        # config_commands route), which is the table actually in use.
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS mod_logs (
