@@ -1,10 +1,8 @@
-# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #3)
+# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #4)
 
-Stopped at: `run_async` event-loop fix complete and tested. This
-turned out to be much smaller in scope than pass #2's STATUS.md
-predicted — see the correction note under item 11 below before
-reading the "Next objectives" section, since it's now shorter than
-last time.
+Stopped at: `dashboard/api.py` blueprint split complete and verified.
+This was the last item on the audit list — see "Next objectives"
+below, which is now just a scan for anything new, not a backlog.
 
 ## ⚠️ Read this first — how this zip was assembled
 
@@ -154,6 +152,37 @@ has more than one branch.
     audit-flagged item's actual blast radius before scoping it as
     "big" — this one wasn't.
 
+12. **`dashboard/api.py` split into a package — done**
+    (`dashboard/api/` — `core.py`, `moderation.py`, `tickets.py`,
+    `mvp.py`, `economy_shop.py`, `leveling.py`, `misc.py`,
+    `__init__.py`). Split along the section boundaries the original
+    2159-line file already had as comment headers (moderation,
+    tickets, mvp, economy/shop, leveling, misc) — those divisions
+    already existed, this just made them real file boundaries. Largest
+    resulting file is 503 lines (`leveling.py`), most are 100–450.
+    Kept as **one shared `Blueprint` object** (`api_bp`, defined in
+    `__init__.py`) that every submodule imports and registers routes
+    onto, rather than N blueprints each with their own prefix — that's
+    what made this a genuinely zero-risk split: `dashboard/app.py`'s
+    `from dashboard.api import api_bp` / `register_blueprint(api_bp)`
+    didn't change at all, and every route kept its exact existing URL,
+    HTTP methods, and endpoint name.
+    **Not just eyeballed — actually verified**: captured all 93
+    `/api/*` routes (path, methods, endpoint name) from the real Flask
+    app by importing `dashboard.app` and reading `app.url_map` *before*
+    touching anything, did the same after, and diffed — exact match,
+    zero routes added/removed/renamed. Then ran the CSRF
+    `before_request` hook (defined once in `__init__.py`) against
+    routes physically living in different submodules via Flask's test
+    client to confirm it still fires everywhere it used to (moderation
+    and leveling submodules both correctly returned 403 without a CSRF
+    token), plus confirmed `login_required` guards and normal 404
+    behavior still work. Each submodule currently carries the full
+    original import block rather than a pruned per-file one —
+    deliberate: zero risk of a missing import silently breaking a
+    route that used to work. Pruning unused imports per-file is a
+    safe, separate future cleanup if wanted.
+
 ## Bugs caught by testing (not by reading the code)
 
 Both of these compiled fine and looked correct on read-through — they
@@ -184,20 +213,17 @@ live bug only because `aiosqlite`/`sqlite3` already default new
 connections to a 5-second timeout on their own. Comment corrected in
 place to explain the real mechanism rather than the wrong one.
 
-## Next objectives (not started)
+## Next objectives
 
-1. **Split `dashboard/api.py` (2159 lines) into blueprints.**
-   Structural refactor, not a bug fix — pure maintainability. Higher
-   risk of introducing a regression than anything done so far this
-   shift just by virtue of size. Should be its own dedicated pass with
-   care taken to test each moved route, not something to rush through
-   inside a larger batch of unrelated fixes. Worth doing the same
-   "grep before scoping" check the `run_async` item got — confirm the
-   actual coupling between routes before assuming this is as large as
-   it looks from line count alone.
+The original audit list (both the pass-1 delta and pass-2's
+follow-ups) is now fully worked through — every item is either done
+(see above) or was deliberately left alone with a documented reason
+(`sticky.py`, see item 5). Nothing queued.
 
-2. Everything else from the original audit not explicitly listed here
-   is either done (see above) or was never part of the list.
+If picking this up next: a light pass pruning the duplicated import
+blocks in `dashboard/api/*.py` down to what each file actually uses
+would be reasonable low-risk cleanup, but isn't fixing anything
+broken — optional, not a backlog item.
 
 ## Design decisions locked from earlier shifts (still apply)
 
