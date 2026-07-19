@@ -69,6 +69,18 @@ class TicketControlView(discord.ui.View):
             if staff_role and staff_role not in interaction.user.roles:
                 await interaction.response.send_message("Only staff can claim tickets!", ephemeral=True)
                 return
+        elif not interaction.user.guild_permissions.manage_channels:
+            # SECURITY FIX (dark-fixes pass #8): `row and row[0]` above
+            # skipped the staff check ENTIRELY whenever no staff_role_id
+            # was configured for this ticket — meaning any member who
+            # could see the ticket channel could claim it, not just
+            # staff. close_ticket() already falls back to requiring
+            # manage_channels (its is_admin check) when no staff role
+            # is set; this brings claim in line with that same
+            # established fallback instead of defaulting to open access.
+            await interaction.response.send_message(
+                "Only staff can claim tickets!", ephemeral=True)
+            return
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "UPDATE tickets SET claimed_by=? WHERE channel_id=?",
@@ -103,13 +115,50 @@ class ClosedTicketView(discord.ui.View):
     async def reopen_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT user_id, staff_role_id FROM tickets WHERE channel_id=?",
+                "SELECT user_id, staff_role_id, category FROM tickets WHERE channel_id=?",
                 (interaction.channel.id,))
             row = await cursor.fetchone()
         if not row:
             await interaction.response.send_message("Ticket data not found!", ephemeral=True)
             return
-        user_id, staff_role_id = row
+        user_id, staff_role_id, category = row
+
+        # SECURITY FIX (dark-fixes pass #9): reopen_ticket() previously
+        # had NO permission check at all — any member who could see the
+        # closed ticket channel could click Reopen. Mirrors
+        # close_ticket()'s existing fallback chain exactly (ticket
+        # owner, guild-wide support role, the category's own closer
+        # roles, or manage_channels) rather than inventing a new
+        # permission model — same class of fix as claim_ticket() and
+        # delete_ticket() in pass #8.
+        async with aiosqlite.connect(DB_PATH) as db:
+            settings_cur = await db.execute(
+                "SELECT support_role_id FROM ticket_settings WHERE guild_id=?",
+                (interaction.guild.id,))
+            settings_row = await settings_cur.fetchone()
+
+            closer_role_ids = []
+            if category:
+                cat_cur = await db.execute(
+                    "SELECT closer_roles FROM ticket_categories WHERE guild_id=? AND name=?",
+                    (interaction.guild.id, category))
+                cat_row = await cat_cur.fetchone()
+                if cat_row and cat_row[0]:
+                    closer_role_ids = json.loads(cat_row[0])
+
+        support_role_id = settings_row[0] if settings_row else staff_role_id
+
+        is_owner = interaction.user.id == user_id
+        member_role_ids = {r.id for r in interaction.user.roles}
+        is_staff = bool(support_role_id and int(support_role_id) in member_role_ids)
+        is_category_closer = bool(member_role_ids & {int(r) for r in closer_role_ids})
+        is_admin = interaction.user.guild_permissions.manage_channels
+
+        if not (is_owner or is_staff or is_category_closer or is_admin):
+            await interaction.response.send_message(
+                "You don't have permission to reopen this ticket.", ephemeral=True)
+            return
+
         member = interaction.guild.get_member(user_id)
         staff_role = interaction.guild.get_role(staff_role_id) if staff_role_id else None
         overwrites = {
@@ -145,6 +194,16 @@ class ClosedTicketView(discord.ui.View):
             if staff_role and staff_role not in interaction.user.roles:
                 await interaction.response.send_message("Only staff can delete tickets!", ephemeral=True)
                 return
+        elif not interaction.user.guild_permissions.manage_channels:
+            # SECURITY FIX (dark-fixes pass #8): same open-access gap as
+            # claim_ticket above, but worse here — this is a permanent,
+            # irreversible channel deletion. No staff_role_id configured
+            # previously meant zero permission check at all. Now falls
+            # back to manage_channels, matching close_ticket's existing
+            # is_admin fallback.
+            await interaction.response.send_message(
+                "Only staff can delete tickets!", ephemeral=True)
+            return
         await save_transcript(interaction.channel, interaction.guild)
         await interaction.channel.delete()
 
