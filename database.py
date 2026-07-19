@@ -1114,6 +1114,85 @@ async def init_db():
             ON dashboard_users(user_id)
         """)
 
+        # SECURITY / DATA-INTEGRITY FIX (dark-fixes pass #7):
+        # dashboard_users had NO unique constraint on (guild_id,
+        # user_id) — only the surrogate `id` AUTOINCREMENT column was
+        # unique. Two places relied on "INSERT OR IGNORE" actually
+        # ignoring a duplicate (guild_id, user_id) pair:
+        #   - ensure_owner_access(), called from init_db() on EVERY
+        #     process start (bot AND dashboard both call init_db())
+        #   - add_guild_owner(), called from on_guild_join and the
+        #     select_guild() auto-grant path
+        # Without a real UNIQUE index, "INSERT OR IGNORE" never had
+        # anything to conflict against, so a new surrogate-keyed row
+        # was silently inserted every single time — meaning the owner
+        # accumulated a fresh duplicate `dashboard_users` row on every
+        # bot/dashboard restart.
+        #
+        # This directly broke "Remove User" in the dashboard
+        # (config_access()'s remove_user()): that route deletes by a
+        # single surrogate `id`, so removing one duplicate row left
+        # every other duplicate (still enabled=1, same guild_id +
+        # user_id) granting that user access — access revocation
+        # silently failed to actually revoke anything as soon as more
+        # than one duplicate existed, which was virtually guaranteed
+        # for the owner given the every-restart insert above.
+        #
+        # Migration: dedupe first (a real UNIQUE index creation fails
+        # outright if duplicate rows already exist on disk), keeping
+        # one row per (guild_id, user_id) — preferring 'owner' over
+        # 'admin' over 'moderator' if levels ever differed across
+        # duplicates, then the highest id (most recent) as a
+        # tiebreaker — then create the UNIQUE index. From this point
+        # forward every existing "INSERT OR IGNORE ... dashboard_users"
+        # call site (ensure_owner_access, add_guild_owner) actually
+        # ignores true duplicates instead of accumulating new rows,
+        # and a single "Remove User" delete is guaranteed to be the
+        # only row for that (guild_id, user_id) pair.
+        try:
+            cursor = await db.execute("""
+                SELECT COUNT(*) FROM (
+                    SELECT guild_id, user_id FROM dashboard_users
+                    GROUP BY guild_id, user_id HAVING COUNT(*) > 1
+                )
+            """)
+            dup_groups = (await cursor.fetchone())[0]
+
+            if dup_groups:
+                await db.execute("""
+                    DELETE FROM dashboard_users
+                    WHERE id NOT IN (
+                        SELECT id FROM (
+                            SELECT id,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY guild_id, user_id
+                                       ORDER BY
+                                           CASE permission_level
+                                               WHEN 'owner' THEN 0
+                                               WHEN 'admin' THEN 1
+                                               WHEN 'moderator' THEN 2
+                                               ELSE 3
+                                           END ASC,
+                                           id DESC
+                                   ) AS rn
+                            FROM dashboard_users
+                        )
+                        WHERE rn = 1
+                    )
+                """)
+                await db.commit()
+                print(f"[MIGRATION] dashboard_users: deduped "
+                      f"{dup_groups} (guild_id, user_id) group(s) "
+                      f"with duplicate rows")
+
+            await db.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_du_unique
+                ON dashboard_users(guild_id, user_id)
+            """)
+            await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] dashboard_users unique index: {e}")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1230,6 +1309,9 @@ async def ensure_owner_access():
             guild_ids.add(gid)
 
         for gid in guild_ids:
+            # Now that idx_du_unique on (guild_id, user_id) exists,
+            # this actually ignores an existing row instead of
+            # inserting a fresh duplicate on every restart.
             await db.execute("""
                 INSERT OR IGNORE INTO dashboard_users
                     (guild_id, user_id, permission_level,
@@ -1243,6 +1325,8 @@ async def ensure_owner_access():
 
 async def add_guild_owner(guild_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
+        # Same fix as ensure_owner_access() above — relies on
+        # idx_du_unique(guild_id, user_id) to actually dedupe.
         await db.execute("""
             INSERT OR IGNORE INTO dashboard_users
                 (guild_id, user_id, permission_level,

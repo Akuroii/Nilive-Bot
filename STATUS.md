@@ -1,141 +1,96 @@
-# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #6)
+# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #7)
 
-Stopped at: reaction_role_expiry sentinel-collision bug fixed and
-verified. Two stale carry-forward items from prior STATUS.md revisions
-were confirmed done (not touched this pass — see "Re-verified" below).
-Nothing else in scope this pass.
+Stopped at: 3 verified bug fixes shipped this pass (1 big DB migration,
+2 small). Stopped deliberately at ~70% context, per Dark's rule —
+nothing left half-edited. Delta ZIP = 4 files.
 
-## Re-verified against actual ZIP code before doing anything (not assumed)
+## Re-verified against actual ZIP before doing anything (not assumed)
 
-Both of these were still listed as "open" in Dark's running project
-notes from a prior session. Checked the real files directly — both are
-already fully built:
+Confirmed already fully done, NOT rebuilt:
+- Prestige system (cogs/leveling.py `/prestige`, dashboard CRUD, UI tab)
+- CSRF hardening (`dashboard/api/__init__.py` before_request hook +
+  `config_access()`/`config_commands()` hidden-token checks)
+- `COMMAND_CATEGORIES["Leveling"]` in dashboard/app.py already lists
+  `resetxp`, `resetleaderboard`, `prestige` — no change needed
 
-- **Prestige system**: `cogs/leveling.py` has a complete `/prestige`
-  command (calls `utils.xp_calculator.perform_prestige`, does the
-  tier-role swap, announces). `dashboard/api/leveling.py` has all 6
-  prestige CRUD routes. `dashboard/templates/systems/leveling.html`
-  has a full Prestige tab wired to them. **Do not rebuild.**
-- **CSRF hardening**: `dashboard/api/__init__.py`'s `before_request`
-  hook covers every `/api/*` POST/PUT/DELETE. `dashboard/app.py`'s
-  `config_access()` and `config_commands()` both check a hidden
-  `csrf_token` form field against `session['csrf_token']` and
-  `abort(403)` on mismatch; `config/access.html` has the hidden field.
-  **Do not rebuild.**
+## Fixed this pass (3 bugs, verified against real code, not notes)
 
-Recommendation for whoever picks this up next: treat "known gaps"
-lists in STATUS.md/project notes as a starting hypothesis, not fact —
-grep/read the actual file before scheduling work against it. Two full
-sessions' worth of already-complete work was nearly rebuilt because a
-stale note said otherwise.
+### 1. `dashboard_users` missing UNIQUE(guild_id, user_id) — database.py
+**Root cause**: table had no unique constraint beyond the surrogate
+`id` column. `ensure_owner_access()` (called from `init_db()` on
+EVERY bot/dashboard process start) and `add_guild_owner()` both used
+`INSERT OR IGNORE`, which had nothing to conflict against — so the
+owner got a brand-new duplicate row on every single restart.
 
-## Fixed this pass — reaction_role_expiry sentinel collision (2 bugs, 1 root cause)
+**Downstream break**: `config_access()`'s remove_user() deletes by a
+single surrogate `id`. With duplicates present, removing one row left
+other enabled duplicates (same guild_id+user_id) still granting
+access — "Remove User" silently failed to actually revoke access.
 
-Files changed: `database.py`, `cogs/reactionroles.py`.
+**Fix**: migration dedupes existing rows (keeps 'owner' > 'admin' >
+'moderator', highest id as tiebreaker), then creates
+`CREATE UNIQUE INDEX idx_du_unique ON dashboard_users(guild_id, user_id)`.
+From here on `INSERT OR IGNORE` actually ignores true duplicates.
 
-**Root cause**: `reaction_role_expiry` was keyed by
-`(guild_id, user_id, role_id)` only — no `message_id`. That table
-serves two purposes with the same rows:
-- `user_id=0` = a **sentinel/template row** written by
-  `/reactionrole_add role expiry_days:N` — "this role, on this panel,
-  expires N days after being claimed."
-- `user_id=<real member id>` = the **actual per-member expiry**,
-  written when that member clicks the button, copied from the
-  sentinel at claim time.
+**Tested**: seeded a throwaway DB with 3 duplicate owner rows +
+1 legit moderator row, ran `init_db()`, confirmed:
+- dedupe log fired, exactly 1 row per (guild_id, user_id) remained
+- unique index exists
+- a subsequent `INSERT OR IGNORE` for the same pair correctly no-ops
+(full python3 test script + output captured in this session).
 
-**Bug 1 (the one already flagged in prior STATUS.md revisions)**: add
-the same `role_id` to a second reaction-role panel with a different
-`expiry_days`, and the second `/reactionrole_add`'s `INSERT OR REPLACE`
-silently overwrote the first panel's sentinel row — no error, no
-warning. A member claiming the role from *either* panel afterward got
-whichever panel's expiry was configured last.
+### 2. Cross-guild cooldown leak — cogs/economy.py
+`_daily_cooldowns` / `_work_cooldowns` were keyed by `user_id` alone.
+A member in 2+ of Dark's controlled servers claiming `/daily` in
+Guild A put them on cooldown in Guild B too (and vice versa) — no DB
+involved, pure in-memory leak across the isolation boundary every
+other piece of state in this project respects.
+**Fix**: both dicts now keyed by `(guild_id, user_id)`.
 
-**Bug 2 (found while fixing #1, not previously flagged anywhere)**:
-`expiry_check()` (the 30-min cleanup loop) selected every row with
-`expires_at <= now` and processed it as a real member obligation,
-including sentinel rows. `guild.get_member(0)` is always `None`, so
-the role-removal branch was always skipped for a sentinel — but
-`removal_ok` stayed `True` regardless (the code path never explicitly
-sets it `False` in that branch), so the sentinel got `DELETE`d anyway
-once its own `expires_at` timestamp passed. Net effect: a role's
-configured expiry **silently stopped applying to any new claimant**
-once the first `expiry_days` window elapsed, because the template row
-`RoleButton.callback` reads from was gone. No error anywhere — the
-role just quietly became "no expiry" for everyone who claimed it after
-that point. This would only surface as a support question weeks after
-setup ("why didn't my temp role expire"), which is presumably why it
-was never caught before.
+### 3. XP blacklist roles not applying to voice XP — cogs/leveling.py + utils/xp_calculator.py
+`on_activity_voice_tick()` granted voice XP directly and never
+consulted `leveling_blacklist_roles` — only `calculate_message_xp()`
+(via `get_xp_multiplier()`) ever checked it. A member with a
+blacklist role (meant to fully opt them out of leveling) still
+silently earned voice XP.
+**Fix**: added `is_role_blacklisted(guild_id, member_role_ids)` to
+`utils/xp_calculator.py` (deliberately NOT reusing
+`get_xp_multiplier()` wholesale — that also applies bonus-role
+multipliers, which voice XP has never used; fixing blacklist
+shouldn't silently change voice XP payout math too). Wired into
+`on_activity_voice_tick()` before the XP grant.
 
-**Fix**:
-1. `message_id` added to `reaction_role_expiry`'s primary key:
-   `(guild_id, user_id, role_id, message_id)`. Every read/write site in
-   `cogs/reactionroles.py` (`reactionrole_add`, `reactionrole_remove`,
-   `RoleButton.callback`, `expiry_check`) now scopes by `message_id` so
-   two panels sharing a role no longer collide.
-2. `expiry_check()`'s SELECT now excludes `user_id = 0` — sentinel
-   rows are template metadata for a button click to read, not an
-   obligation for the cleanup loop to sweep.
-3. `reactionrole_remove` now also deletes that panel's own sentinel
-   row (previously nothing ever cleaned up an orphaned `user_id=0`
-   row once its button was removed — small leak, fixed as part of
-   touching this code, not a separate pass).
+**Verified**: `python3 -m py_compile` clean on all 4 changed files
+(database.py, cogs/economy.py, cogs/leveling.py, utils/xp_calculator.py).
 
-**Migration** (`database.py`): SQLite can't `ALTER TABLE` a primary
-key in place, so the migration checks for the `message_id` column via
-`PRAGMA table_info`; if missing, it renames the old table, creates the
-new 4-column-PK version, copies every row across with `message_id=0`
-(the true originating panel isn't recoverable from the old schema —
-this only affects rows written before this fix ships), then drops the
-old table. Wrapped in the project's existing `try/except` + log
-pattern used by every other migration in this file.
+## Not done / still open (unchanged from pass #6, re-confirmed real)
 
-**Verified**: `python3 -m py_compile database.py cogs/reactionroles.py`
-— clean. Not yet tested against a live throwaway DB with the
-old-schema-row migration path (recommend whoever deploys this do a
-quick manual check: seed a `reaction_role_expiry` row on the old
-2-column-PK schema, run `init_db()`, confirm the row survives with
-`message_id=0` and the table now has 4 PK columns).
+- **Ticket permission bypass when `staff_role_id` is null**
+  (cogs/tickets.py claim/close/delete) — flagged in project notes,
+  NOT yet investigated this pass. Next shift should check whether
+  "no staff role configured = anyone can claim/close/delete" is
+  actually a bug or an intentional fallback before changing anything.
+- **Orphaned `dashboard/templates/config/commands.html`** —
+  HANDOFF_NOTES.md from a prior shift claims this was deleted, but
+  the most recent uploaded ZIP still contains it, and nothing in
+  `dashboard/app.py` renders it (`manage/commands.html` is the live
+  template at `/commands`). Contradiction between handoff notes and
+  actual ZIP — **verify against the next real ZIP upload before
+  trusting either claim**, then delete if still orphaned.
+- Unbounded in-memory cooldown dicts (main.py, triggers.py) — still
+  low priority, not touched.
+- Event Stack Builder / dynamic weekly-quota events — still needs
+  `cogs/minigames.py` from Dark to verify before building anything.
+- Roleplay GIFs — low priority, unrelated.
+- Zero automated test coverage — still open.
 
-## Not done / explicitly out of scope this pass
+## Design decisions locked (unchanged)
 
-- **Unbounded in-memory cooldown dicts** (`main.py::_command_cooldowns`,
-  `cogs/leveling.py::_xp_cooldowns`/`_spam_tracker`,
-  `cogs/economy.py::_daily_cooldowns`/`_work_cooldowns`,
-  `cogs/triggers.py::_last_fired`) — still open, still low priority
-  (slow memory leak, not a correctness bug). Not touched.
-- **Event Stack Builder / dynamic weekly-quota events** — Dark
-  described a design (daily randomized spawn % that rises/falls based
-  on events-so-far vs days-remaining vs configured min/max weekly
-  targets, force-fire near week end). **Flagged, not built**: this
-  sounds like it may already be `cogs/minigames.py` from an earlier
-  session (per project notes: "quota-driven weekly system, 5-10
-  events/week default, daily randomized spawn probabilities, Friday
-  force-spawn to meet weekly minimum, Saturday reset"). That file was
-  not present in the most recent uploaded ZIP/context, so it could not
-  be verified. **Next shift: get `cogs/minigames.py` from Dark before
-  writing any new event-scheduling code.** If it turns out to already
-  do this, the work is extending/tuning it, not building fresh — if it
-  doesn't exist or does something else, then it's a genuine new build
-  against Dark's design (engineering freedom granted to propose a
-  better algorithm than the illustrative percentages in his spec, per
-  his 2026-07 note — but stay within this feature, no unrelated
-  refactors while the roadmap's still open).
-- **Roleplay commands as GIFs** — Dark wants `/hug`, `/cry`, etc.
-  (`cogs/roleplay.py`) to eventually send an actual GIF (Tenor/Giphy
-  API or curated list) instead of the current text-only embed. Not
-  started, low priority, unrelated to this pass.
-
-## Design decisions locked from earlier shifts (still apply)
-
-- Prestige: carry-over XP (not hard reset), keep-all level-role
-  rewards, one role per prestige tier (swapped on prestige),
-  `min_level` defaults to 50 (configurable per guild), leaderboard
-  sorted `prestige DESC, xp DESC`.
-- Event Stack Builder (original master-plan definition, P3 #30):
-  admin-authored events with stacked rewards — max 5 reward slots,
-  per-tier currency caps, max 3 active events at once, admin preview
-  before publish, weekly reward budget tracking. This is distinct from
-  the automated random-spawn scheduler Dark is now describing; don't
-  conflate the two when picking this up.
-- ZIP = source of truth, always verify against actual code before
-  scheduling work, never trust a "known gaps" list at face value.
+- Prestige: carry-over XP, keep-all level-role rewards, one role per
+  tier (swapped), `min_level` default 50, leaderboard sorted
+  `prestige DESC, xp DESC`.
+- Trade System: blocked until E3 (ledger) + E4 (inventory) verified
+  live in production — both already built per earlier passes.
+- ZIP = source of truth. Always verify against actual code before
+  scheduling work; STATUS.md and HANDOFF_NOTES.md can be stale (see
+  the commands.html contradiction above — proof of exactly this).

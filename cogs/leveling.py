@@ -11,6 +11,7 @@ from utils.xp_calculator import (
     xp_progress, get_leveling_config,
     get_prestige_config, get_prestige_roles,
     perform_prestige, PrestigeError,
+    is_role_blacklisted,
 )
 from utils.formatters import snapshot_user
 from utils.permissions import check_bot_role_position
@@ -239,9 +240,10 @@ class Leveling(commands.Cog):
     # already applies the raw disqualifiers (2+ real members present,
     # not AFK channel, not deafened) that used to live in this loop;
     # what's left here is leveling's own POLICY on top of a valid
-    # tick — voice_xp_enabled, the require_unmuted choice, and the
-    # actual XP math — exactly as before, just invoked once per tick
-    # instead of leveling running its own duplicate poll. ──────────
+    # tick — voice_xp_enabled, the require_unmuted choice, the XP
+    # blacklist, and the actual XP math — exactly as before, just
+    # invoked once per tick instead of leveling running its own
+    # duplicate poll. ──────────────────────────────────────────────
     @commands.Cog.listener()
     async def on_activity_voice_tick(self, guild: discord.Guild,
                                       member: discord.Member,
@@ -253,6 +255,19 @@ class Leveling(commands.Cog):
 
             require_unmuted = config.get("voice_require_unmuted", 1)
             if require_unmuted and (flags.get("self_mute") or flags.get("mute")):
+                return
+
+            # BUGFIX (dark-fixes pass #7): XP blacklist roles were
+            # never checked here — only calculate_message_xp() (via
+            # get_xp_multiplier) consulted leveling_blacklist_roles.
+            # A member given a blacklist role to opt them out of the
+            # leveling system entirely still silently earned XP from
+            # every voice tick. Message XP and voice XP now share the
+            # same blacklist gate; voice XP still does NOT apply
+            # bonus-role multipliers, matching its existing (separate)
+            # design.
+            role_ids = [r.id for r in member.roles]
+            if await is_role_blacklisted(guild.id, role_ids):
                 return
 
             xp_per_min = config.get("voice_xp_per_minute", 3)

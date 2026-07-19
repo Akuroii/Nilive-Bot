@@ -11,8 +11,19 @@ from utils.economy_safe import (
 )
 
 
-_daily_cooldowns:  dict[int, datetime] = {}
-_work_cooldowns:   dict[int, datetime] = {}
+# SECURITY / ISOLATION FIX (dark-fixes pass #7): these cooldown dicts
+# used to be keyed by user_id ALONE. This project's isolation rule
+# (STATUS.md, project rules) is that every table AND every runtime
+# state keyed by a member must be scoped per-guild — but a member
+# present in two of Dark's controlled servers shared a single
+# /daily and /work cooldown across both. Claiming /daily in Guild A
+# silently put that same user on cooldown in Guild B (and vice
+# versa), which is a real cross-guild leak even though it never
+# touched the database. Keys are now (guild_id, user_id) tuples,
+# matching the (guild_id, user_id) composite key every persisted
+# table in this project already uses (economy, levels, etc).
+_daily_cooldowns:  dict[tuple[int, int], datetime] = {}
+_work_cooldowns:   dict[tuple[int, int], datetime] = {}
 
 
 async def get_balance(guild_id: int, user_id: int) -> int:
@@ -91,8 +102,13 @@ class Economy(commands.Cog):
                           description="Claim your daily coins")
     async def daily(self, interaction: discord.Interaction):
         now      = datetime.utcnow()
-        user_id  = interaction.user.id
-        cooldown = _daily_cooldowns.get(user_id)
+        # ISOLATION FIX: cooldown key now includes guild_id — see the
+        # comment on _daily_cooldowns above. Previously this was
+        # user_id alone, so claiming /daily in one server put the
+        # member on cooldown in every other server they shared with
+        # this bot.
+        key      = (interaction.guild.id, interaction.user.id)
+        cooldown = _daily_cooldowns.get(key)
         if cooldown and now < cooldown:
             remaining = cooldown - now
             hours     = int(remaining.total_seconds() // 3600)
@@ -117,10 +133,10 @@ class Economy(commands.Cog):
 
         amount   = random.randint(daily_min, daily_max)
         new_bal  = await add_balance(
-            interaction.guild.id, user_id, amount,
+            interaction.guild.id, interaction.user.id, amount,
             reason="Daily reward", source="daily")
         currency = await get_currency_name(interaction.guild.id)
-        _daily_cooldowns[user_id] = now + timedelta(hours=24)
+        _daily_cooldowns[key] = now + timedelta(hours=24)
 
         embed = discord.Embed(
             title="🎁 Daily Reward!",
@@ -134,8 +150,9 @@ class Economy(commands.Cog):
                           description="Work to earn coins")
     async def work(self, interaction: discord.Interaction):
         now      = datetime.utcnow()
-        user_id  = interaction.user.id
-        cooldown = _work_cooldowns.get(user_id)
+        # ISOLATION FIX: same guild-scoped key as /daily above.
+        key      = (interaction.guild.id, interaction.user.id)
+        cooldown = _work_cooldowns.get(key)
         if cooldown and now < cooldown:
             remaining = cooldown - now
             minutes   = int(remaining.total_seconds() // 60)
@@ -163,10 +180,10 @@ class Economy(commands.Cog):
         ]
         amount   = random.randint(work_min, work_max)
         new_bal  = await add_balance(
-            interaction.guild.id, user_id, amount,
+            interaction.guild.id, interaction.user.id, amount,
             reason="Work reward", source="work")
         currency = await get_currency_name(interaction.guild.id)
-        _work_cooldowns[user_id] = now + timedelta(hours=1)
+        _work_cooldowns[key] = now + timedelta(hours=1)
 
         embed = discord.Embed(
             title="💼 Work Complete!",

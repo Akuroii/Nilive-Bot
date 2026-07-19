@@ -41,6 +41,34 @@ async def get_xp_multiplier(guild_id: int, member_role_ids: list[int]) -> float:
     return max(applicable)
 
 
+# BUGFIX (dark-fixes pass #7): XP blacklist roles not applying to
+# voice XP. cogs/leveling.py's on_activity_voice_tick() grants voice
+# XP directly (calculate_voice_xp + give_reward) and never once
+# consulted leveling_blacklist_roles — only calculate_message_xp()
+# (via get_xp_multiplier above) ever checked it. A member given a
+# blacklist role to explicitly opt them out of the leveling system
+# (e.g. a "no XP" role for staff/bots-adjacent accounts) still
+# silently earned XP for every voice tick.
+#
+# This is a standalone, cheap query rather than reusing
+# get_xp_multiplier() wholesale — get_xp_multiplier also folds in
+# leveling_bonus_roles (multiplier > 1x), and voice XP has never
+# applied bonus-role multipliers. Fixing the blacklist gap shouldn't
+# silently change voice XP's payout math for bonus-role holders too;
+# that's a separate design decision, out of scope for this fix.
+async def is_role_blacklisted(guild_id: int, member_role_ids: list[int]) -> bool:
+    if not member_role_ids:
+        return False
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT role_id FROM leveling_blacklist_roles
+            WHERE guild_id = ?
+        """, (guild_id,))
+        blacklist_rows = await cursor.fetchall()
+    blacklisted_role_ids = {row[0] for row in blacklist_rows}
+    return any(rid in blacklisted_role_ids for rid in member_role_ids)
+
+
 async def get_leveling_config(guild_id: int) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
