@@ -39,13 +39,22 @@ class ReactionRoles(commands.Cog):
                     require_confirmation INTEGER DEFAULT 0
                 )
             """)
+            # PHASE 5 TAIL FIX: message_id added to the key here too,
+            # matching database.py's central schema/migration — see
+            # that file for the full explanation. This CREATE is a
+            # no-op in practice (database.py's init_db() already runs
+            # and migrates the table before any cog's on_ready fires),
+            # kept only so this cog's own schema doesn't drift from
+            # the canonical one if ensure_table() is ever called from
+            # a context where init_db() hasn't run yet.
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS reaction_role_expiry (
                     guild_id INTEGER,
                     user_id INTEGER,
                     role_id INTEGER,
+                    message_id INTEGER NOT NULL DEFAULT 0,
                     expires_at TEXT,
-                    PRIMARY KEY (guild_id, user_id, role_id)
+                    PRIMARY KEY (guild_id, user_id, role_id, message_id)
                 )
             """)
             await db.commit()
@@ -87,6 +96,10 @@ class ReactionRoles(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
+        # Member is gone from the guild entirely — clear every expiry
+        # obligation for them regardless of which panel/message it
+        # came from, so message_id is intentionally NOT part of this
+        # WHERE clause.
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 DELETE FROM reaction_role_expiry
@@ -159,16 +172,42 @@ class ReactionRoles(commands.Cog):
         isolated in its own try/except so one bad row can't stop the
         rest of the batch — or the whole 30-minute loop — from
         running. Same pattern as cogs/shop.py's temp_role_cleanup.
+
+        PHASE 5 TAIL FIX (two changes):
+
+        1. reaction_role_expiry rows are now keyed by (guild_id,
+           user_id, role_id, message_id) instead of just (guild_id,
+           user_id, role_id) — the old key let the same role added to
+           two different panels with two different expiry periods
+           collide, so a member claiming the role from either panel
+           could silently pick up the wrong panel's expiry. message_id
+           disambiguates which panel a given row belongs to, and the
+           SELECT/DELETE below now carry it through.
+
+        2. This loop used to sweep up user_id=0 sentinel rows (the
+           per-panel "template" expiry written by /reactionrole_add)
+           as if they were real member obligations. guild.get_member(0)
+           is always None, so the role-removal branch was always
+           skipped for a sentinel row — but removal_ok stayed True
+           regardless, so the sentinel got DELETEd anyway once its own
+           expires_at passed. That silently broke the feature: a
+           role's configured expiry stopped applying to any NEW
+           claimant after the first expiry_days window elapsed, since
+           the template row RoleButton.callback reads from was gone.
+           Sentinel rows are now explicitly excluded here — they're
+           metadata for a button click to read, not an obligation for
+           this loop to clean up.
         """
         now = datetime.utcnow().isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT guild_id, user_id, role_id FROM reaction_role_expiry
-                WHERE expires_at <= ?
+                SELECT guild_id, user_id, role_id, message_id
+                FROM reaction_role_expiry
+                WHERE expires_at <= ? AND user_id != 0
             """, (now,))
             expired = await cursor.fetchall()
 
-        for guild_id, user_id, role_id in expired:
+        for guild_id, user_id, role_id, message_id in expired:
             try:
                 guild = self.bot.get_guild(guild_id)
                 removal_ok = True
@@ -192,8 +231,8 @@ class ReactionRoles(commands.Cog):
                     async with aiosqlite.connect(DB_PATH) as db:
                         await db.execute("""
                             DELETE FROM reaction_role_expiry
-                            WHERE guild_id=? AND user_id=? AND role_id=?
-                        """, (guild_id, user_id, role_id))
+                            WHERE guild_id=? AND user_id=? AND role_id=? AND message_id=?
+                        """, (guild_id, user_id, role_id, message_id))
                         await db.commit()
             except Exception as e:
                 print(f"[RR] expiry_check error for {user_id}/{role_id} "
@@ -271,12 +310,19 @@ class ReactionRoles(commands.Cog):
                   color, role.id, int(booster_only),
                   required_role.id if required_role else None))
             if expiry_days > 0:
+                # PHASE 5 TAIL FIX: message_id is now part of both the
+                # key and the row itself. This sentinel row (user_id=0)
+                # is THIS panel's template expiry for this role —
+                # previously keyed only on (guild_id, role_id), adding
+                # the same role to a second panel with a different
+                # expiry_days would silently overwrite this row instead
+                # of coexisting alongside it.
                 expires = (datetime.utcnow() + timedelta(days=expiry_days)).isoformat()
                 await db.execute("""
                     INSERT OR REPLACE INTO reaction_role_expiry
-                    (guild_id, user_id, role_id, expires_at)
-                    VALUES (?, 0, ?, ?)
-                """, (interaction.guild.id, role.id, expires))
+                    (guild_id, user_id, role_id, message_id, expires_at)
+                    VALUES (?, 0, ?, ?, ?)
+                """, (interaction.guild.id, role.id, msg_id, expires))
             await db.commit()
         for ch in interaction.guild.text_channels:
             try:
@@ -310,6 +356,15 @@ class ReactionRoles(commands.Cog):
             await db.execute(
                 "DELETE FROM reaction_roles WHERE message_id=? AND role_id=?",
                 (msg_id, role.id))
+            # PHASE 5 TAIL FIX: also clean up this panel's own sentinel
+            # expiry row (and any per-member rows tied to this specific
+            # panel) now that message_id disambiguates them — otherwise
+            # a removed button's expiry metadata would linger forever
+            # since nothing else ever cleans up user_id=0 rows.
+            await db.execute(
+                "DELETE FROM reaction_role_expiry "
+                "WHERE guild_id=? AND role_id=? AND message_id=?",
+                (interaction.guild.id, role.id, msg_id))
             await db.commit()
         for ch in interaction.guild.text_channels:
             try:
@@ -434,18 +489,24 @@ class RoleButton(discord.ui.Button):
 
         await member.add_roles(role)
 
+        # PHASE 5 TAIL FIX: both the sentinel lookup and the per-member
+        # expiry row this writes now include message_id — previously
+        # this read whichever panel's sentinel happened to have been
+        # written LAST for this role_id (guild-wide), regardless of
+        # which panel's button was actually clicked. Now it reads only
+        # THIS panel's (self.message_id) configured expiry.
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT expires_at FROM reaction_role_expiry
-                WHERE guild_id=? AND user_id=0 AND role_id=?
-            """, (guild.id, self.role_id))
+                WHERE guild_id=? AND user_id=0 AND role_id=? AND message_id=?
+            """, (guild.id, self.role_id, self.message_id))
             expiry = await cursor.fetchone()
             if expiry:
                 await db.execute("""
                     INSERT OR REPLACE INTO reaction_role_expiry
-                    (guild_id, user_id, role_id, expires_at)
-                    VALUES (?, ?, ?, ?)
-                """, (guild.id, member.id, self.role_id, expiry[0]))
+                    (guild_id, user_id, role_id, message_id, expires_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (guild.id, member.id, self.role_id, self.message_id, expiry[0]))
                 await db.commit()
 
         msg = f"Gave you **{role.name}**!"

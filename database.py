@@ -213,15 +213,71 @@ async def init_db():
             )
         """)
 
+        # PHASE 5 TAIL FIX (reaction_role_expiry sentinel collision):
+        # this table used to be keyed by (guild_id, user_id, role_id)
+        # only. That let the SAME role, added to two different
+        # reaction-role panels with two different expiry_days values,
+        # collide: the second /reactionrole_add's sentinel row
+        # (user_id=0, "this role's template expiry") silently
+        # overwrote the first panel's, and a member claiming the role
+        # from EITHER panel picked up whichever panel's expiry was
+        # configured last. message_id is now part of the key so each
+        # panel's copy of a role's expiry is tracked independently.
+        #
+        # message_id is NOT NULL DEFAULT 0 rather than nullable —
+        # SQLite treats NULL as distinct-from-itself in a PRIMARY KEY,
+        # which would silently defeat the "INSERT OR REPLACE dedupes
+        # on conflict" behavior every read/write in cogs/reactionroles.py
+        # relies on. 0 is never a real Discord message ID, so it's a
+        # safe non-nullable default for legacy rows that predate this
+        # column (see the migration block below).
         await db.execute("""
             CREATE TABLE IF NOT EXISTS reaction_role_expiry (
                 guild_id   INTEGER,
                 user_id    INTEGER,
                 role_id    INTEGER,
+                message_id INTEGER NOT NULL DEFAULT 0,
                 expires_at TEXT,
-                PRIMARY KEY (guild_id, user_id, role_id)
+                PRIMARY KEY (guild_id, user_id, role_id, message_id)
             )
         """)
+        try:
+            cursor = await db.execute("PRAGMA table_info(reaction_role_expiry)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "message_id" not in cols:
+                # Table predates message_id being part of the primary
+                # key — SQLite can't ALTER a PK in place, so rebuild.
+                # Legacy rows get message_id=0 (best we can do — the
+                # panel they belonged to isn't recoverable from the
+                # old schema); this only affects expiry rows written
+                # before this fix shipped, and worst case is one
+                # already-in-flight expiry falling back to "no known
+                # panel" instead of being lost.
+                await db.execute(
+                    "ALTER TABLE reaction_role_expiry "
+                    "RENAME TO reaction_role_expiry_old")
+                await db.execute("""
+                    CREATE TABLE reaction_role_expiry (
+                        guild_id   INTEGER,
+                        user_id    INTEGER,
+                        role_id    INTEGER,
+                        message_id INTEGER NOT NULL DEFAULT 0,
+                        expires_at TEXT,
+                        PRIMARY KEY (guild_id, user_id, role_id, message_id)
+                    )
+                """)
+                await db.execute("""
+                    INSERT INTO reaction_role_expiry
+                        (guild_id, user_id, role_id, message_id, expires_at)
+                    SELECT guild_id, user_id, role_id, 0, expires_at
+                    FROM reaction_role_expiry_old
+                """)
+                await db.execute("DROP TABLE reaction_role_expiry_old")
+                await db.commit()
+                print("[MIGRATION] reaction_role_expiry rebuilt with "
+                      "message_id in primary key")
+        except Exception as e:
+            print(f"[MIGRATION] reaction_role_expiry.message_id: {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS rr_panels (

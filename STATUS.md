@@ -1,265 +1,141 @@
-# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #5)
+# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #6)
 
-Stopped at: repo-root cleanup complete. A report calling itself
-"shift work zero" claimed 4 issues; 2 were already fixed in pass #4
-(the report was checking a stale copy — see correction below), 2 were
-real and are fixed now.
+Stopped at: reaction_role_expiry sentinel-collision bug fixed and
+verified. Two stale carry-forward items from prior STATUS.md revisions
+were confirmed done (not touched this pass — see "Re-verified" below).
+Nothing else in scope this pass.
 
-## Correction: "shift work zero" report was checking stale files
+## Re-verified against actual ZIP code before doing anything (not assumed)
 
-Verified directly against this exact working copy before touching
-anything:
-- Root `dashboard.js`/`base.html` mislabeled duplicates: **already
-  deleted in pass #2**. `ls base.html dashboard.js` at repo root
-  returns "No such file or directory." The report describing these as
-  "confirmed with actual file contents... four passes have gone by and
-  nobody's touched this" was checking a stale copy, not this repo —
-  possibly the original upload, before any fixes were applied.
-- Old `dashboard/api.py` 2159-line monolith: **already deleted in
-  pass #4** when the package split happened (`rm dashboard/api.py`
-  before `mv dashboard/api_pkg dashboard/api`). Also confirmed absent.
-Both re-confirmed with `ls` immediately before writing this section,
-not assumed from memory of having done them earlier.
+Both of these were still listed as "open" in Dark's running project
+notes from a prior session. Checked the real files directly — both are
+already fully built:
 
-## Real issues from that report, fixed this pass
+- **Prestige system**: `cogs/leveling.py` has a complete `/prestige`
+  command (calls `utils.xp_calculator.perform_prestige`, does the
+  tier-role swap, announces). `dashboard/api/leveling.py` has all 6
+  prestige CRUD routes. `dashboard/templates/systems/leveling.html`
+  has a full Prestige tab wired to them. **Do not rebuild.**
+- **CSRF hardening**: `dashboard/api/__init__.py`'s `before_request`
+  hook covers every `/api/*` POST/PUT/DELETE. `dashboard/app.py`'s
+  `config_access()` and `config_commands()` both check a hidden
+  `csrf_token` form field against `session['csrf_token']` and
+  `abort(403)` on mismatch; `config/access.html` has the hidden field.
+  **Do not rebuild.**
 
-- **`P0-fixes.zip`, `dashboard-fixes-v2.zip`**: stray old delivery
-  zips sitting in the repo root (dated April, prior shift artifacts).
-  Confirmed zero references anywhere before deleting. Deleted.
-- **`markupsafe` missing from `requirements.txt`**: was working fine
-  as a transitive Flask/Jinja2 dependency, but pass #1's XSS fix made
-  it a direct, security-relevant import (`from markupsafe import
-  escape`). Pinned explicitly at `3.0.3` (the version Flask 3.0.0
-  already resolves to) so a future Flask upgrade can't silently change
-  what escaping behavior is running without it showing up in the
-  dependency list.
+Recommendation for whoever picks this up next: treat "known gaps"
+lists in STATUS.md/project notes as a starting hypothesis, not fact —
+grep/read the actual file before scheduling work against it. Two full
+sessions' worth of already-complete work was nearly rebuilt because a
+stale note said otherwise.
 
-## ⚠️ Read this first — how this zip was assembled
+## Fixed this pass — reaction_role_expiry sentinel collision (2 bugs, 1 root cause)
 
-This zip is **pass #1 + pass #2 merged**, not just pass #2 in
-isolation. Context: pass #1's fixes (SECRET_KEY fail-fast, stored XSS
-escaping, CSRF hardening, XP/prestige race conditions, WAL mode) were
-delivered as a standalone delta zip and were verified correct against
-the actual code at the time — but they had **not yet been merged into
-the full project repo** when pass #2 started. Before doing any pass #2
-work, that merge was done first (diffed pass #1's files against the
-full repo to confirm no unrelated drift, then merged). If you're
-diffing this zip against an older copy of the full repo, expect to see
-both passes' changes together.
+Files changed: `database.py`, `cogs/reactionroles.py`.
 
-## Verification methodology (both passes)
+**Root cause**: `reaction_role_expiry` was keyed by
+`(guild_id, user_id, role_id)` only — no `message_id`. That table
+serves two purposes with the same rows:
+- `user_id=0` = a **sentinel/template row** written by
+  `/reactionrole_add role expiry_days:N` — "this role, on this panel,
+  expires N days after being claimed."
+- `user_id=<real member id>` = the **actual per-member expiry**,
+  written when that member clicks the button, copied from the
+  sentinel at claim time.
 
-Every fix in this checkpoint was checked against the **actual code**,
-not assumed from a prior shift's notes — a couple of the original
-audit's claims turned out to be wrong on inspection (see below), and
-one already-shipped comment was found to be technically inaccurate.
-Where a claim couldn't be verified by reading, it was tested by
-running the actual code against a throwaway SQLite DB with fake
-Discord objects (bot/channel stubs) — not just `py_compile`.
-**This caught two real bugs that code review alone did not catch**
-(see "Bugs caught by testing" below). Recommendation for future shifts
-handling this codebase: run it, don't just read it, whenever the logic
-has more than one branch.
+**Bug 1 (the one already flagged in prior STATUS.md revisions)**: add
+the same `role_id` to a second reaction-role panel with a different
+`expiry_days`, and the second `/reactionrole_add`'s `INSERT OR REPLACE`
+silently overwrote the first panel's sentinel row — no error, no
+warning. A member claiming the role from *either* panel afterward got
+whichever panel's expiry was configured last.
 
-## Built/fixed this shift (pass #2)
+**Bug 2 (found while fixing #1, not previously flagged anywhere)**:
+`expiry_check()` (the 30-min cleanup loop) selected every row with
+`expires_at <= now` and processed it as a real member obligation,
+including sentinel rows. `guild.get_member(0)` is always `None`, so
+the role-removal branch was always skipped for a sentinel — but
+`removal_ok` stayed `True` regardless (the code path never explicitly
+sets it `False` in that branch), so the sentinel got `DELETE`d anyway
+once its own `expires_at` timestamp passed. Net effect: a role's
+configured expiry **silently stopped applying to any new claimant**
+once the first `expiry_days` window elapsed, because the template row
+`RoleButton.callback` reads from was gone. No error anywhere — the
+role just quietly became "no expiry" for everyone who claimed it after
+that point. This would only surface as a support question weeks after
+setup ("why didn't my temp role expire"), which is presumably why it
+was never caught before.
 
-1. **CDN Subresource Integrity** (`dashboard/templates/base.html`)
-   Added `integrity`/`crossorigin` attributes to the select2 CSS,
-   htmx, jquery, and select2 JS `<script>`/`<link>` tags. Hashes were
-   **computed from the actual published npm packages** (`npm pack` +
-   `openssl dgst -sha384`), not guessed or copied from a search
-   result — guessing here would silently break the dashboard's JS/CSS
-   if wrong. Google Fonts link left alone (standard practice; Google's
-   font URLs aren't stable SRI targets).
+**Fix**:
+1. `message_id` added to `reaction_role_expiry`'s primary key:
+   `(guild_id, user_id, role_id, message_id)`. Every read/write site in
+   `cogs/reactionroles.py` (`reactionrole_add`, `reactionrole_remove`,
+   `RoleButton.callback`, `expiry_check`) now scopes by `message_id` so
+   two panels sharing a role no longer collide.
+2. `expiry_check()`'s SELECT now excludes `user_id = 0` — sentinel
+   rows are template metadata for a button click to read, not an
+   obligation for the cleanup loop to sweep.
+3. `reactionrole_remove` now also deletes that panel's own sentinel
+   row (previously nothing ever cleaned up an orphaned `user_id=0`
+   row once its button was removed — small leak, fixed as part of
+   touching this code, not a separate pass).
 
-2. **`Triggers.ensure_table()` hot path** (`cogs/triggers.py`)
-   Was running on every single guild message. Moved to `cog_load`
-   (runs once). Verified `triggers` table is already created by
-   `database.py::init_db()` before the bot comes online, so the
-   per-message call was pure overhead.
+**Migration** (`database.py`): SQLite can't `ALTER TABLE` a primary
+key in place, so the migration checks for the `message_id` column via
+`PRAGMA table_info`; if missing, it renames the old table, creates the
+new 4-column-PK version, copies every row across with `message_id=0`
+(the true originating panel isn't recoverable from the old schema —
+this only affects rows written before this fix ships), then drops the
+old table. Wrapped in the project's existing `try/except` + log
+pattern used by every other migration in this file.
 
-3. **`CustomCommands.ensure_table()` hot path** (`cogs/customcommands.py`)
-   Same fix, same reasoning — was running on every `!`-prefixed
-   message.
+**Verified**: `python3 -m py_compile database.py cogs/reactionroles.py`
+— clean. Not yet tested against a live throwaway DB with the
+old-schema-row migration path (recommend whoever deploys this do a
+quick manual check: seed a `reaction_role_expiry` row on the old
+2-column-PK schema, run `init_db()`, confirm the row survives with
+`message_id=0` and the table now has 4 PK columns).
 
-4. **`EmbedBuilder.ensure_table()` duplication** (`cogs/embedbuilder.py`)
-   Not a hot-path issue (only in slash commands, not `on_message`), so
-   this was cleanup, not a perf fix. Consolidated to `cog_load`; left
-   the per-command calls in place as free defense-in-depth since
-   `IF NOT EXISTS` makes them no-ops now.
+## Not done / explicitly out of scope this pass
 
-5. **`Sticky.ensure_table()` — intentionally NOT touched.**
-   The original audit claimed all these tables were already created
-   centrally by `database.py::init_db()`, making the per-cog calls
-   pure duplication. **That claim was false for `sticky_messages`** —
-   it does not exist anywhere in `database.py`. `sticky.py`'s
-   `ensure_table()` (in `on_ready`) is the *only* place that table
-   gets created. Following the audit's original recommendation here
-   would have broken the sticky-message feature on next fresh deploy.
-   Left completely alone. If someone wants this cleaned up too, the
-   correct fix is to add `sticky_messages` to `database.py`'s central
-   schema first, then remove the cog-level call — not the other way
-   around.
-
-6. **Orphaned template deleted**: `dashboard/templates/config/commands.html`
-   Confirmed zero references in any `.py` route or `.html` include
-   before deleting (real `manage/commands.html` is what's actually
-   rendered).
-
-7. **Dead schema removed from `database.py`**: `voice_sessions`,
-   `ticket_config`, `disabled_commands`. All three confirmed
-   genuinely dead (only comments referencing the old names remained,
-   no actual queries) before removal. Not touching any already-
-   deployed DB file's existing tables — this only stops a fresh DB
-   from creating them going forward.
-
-8. **`boost_color_roles` feature — built** (extended `cogs/boost.py`,
-   did not create a new file since this belongs with the existing
-   boost-tier logic).
-   - `/boostcolor_add`, `/boostcolor_remove`, `/boostcolor_list`
-     (admin) — configure which roles are pickable and at what boost
-     level.
-   - `/boostcolor` (booster-facing, autocomplete filtered to roles
-     the invoking member is currently eligible for by boost count).
-   - Single-select: picking a new color swaps out any other
-     configured color role the member currently holds.
-   - Auto-strips the color role on unboost, matching how the existing
-     boost1/boost2 tier roles already behave (same
-     `auto_remove_on_unboost` guild setting).
-
-9. **`backup_log` feature — built** (new `cogs/backup.py`).
-   - Daily automated backup via `aiosqlite.Connection.backup()` (the
-     real SQLite online-backup API) — deliberately not a raw file
-     copy, since copying a live WAL-mode DB file directly can capture
-     the main file and WAL out of sync and produce a corrupt backup.
-   - Prunes to the most recent 7 backups (files + `backup_log` rows).
-   - `/backup_now` (manual trigger), `/backup_list` (recent backups)
-     — both owner-only via the codebase's existing `bot.is_owner()`
-     check (same mechanism `/sync` and `/reload` already use in
-     `main.py`), not a new ad-hoc permission check.
-   - Backups land in `<DB_PATH's dir>/backups/`, i.e. on Railway's
-     persistent volume alongside the live DB — survives process
-     restarts/redeploys, does NOT survive the volume itself being
-     deleted (would need off-volume storage for that; out of scope).
-
-10. **`scheduled_messages` feature — built** (new `cogs/scheduler.py`).
-    - Background loop checks every 60s for due messages.
-    - `/schedule_message` — relative (`30m`/`2h`/`3d`) or absolute
-      (`YYYY-MM-DD HH:MM`) UTC time; optional repeat (hourly/daily/
-      weekly + interval).
-    - `/schedule_list`, `/schedule_cancel`.
-    - If the bot was offline past a repeating message's slot, it
-      rolls forward to the next future occurrence instead of
-      burst-firing every missed one on reconnect.
-    - `embed_data` column is wired up (stored as JSON, rendered via
-      `discord.Embed.from_dict` at send time) but nothing currently
-      writes to it — no command yet builds a scheduled embed. Text
-      messages are fully functional today.
-
-11. **`run_async` per-request event loop — fixed** (`dashboard/utils/async_utils.py`).
-    **Scope correction from pass #2's STATUS.md**: that writeup
-    assumed the event-loop churn was scattered inline across
-    `dashboard/app.py`/`api.py` and would need touching 120+ call
-    sites individually. On actually investigating (grepping for
-    `asyncio.new_event_loop` directly in those files found nothing —
-    which should have been the tell), it turned out every one of
-    those 120+ call sites goes through one shared `run_async(coro)`
-    helper. That meant the real fix was a single ~40-line file, not a
-    multi-thousand-line rewrite. Replaced the old
-    create-loop/run/close-loop-every-call pattern with one persistent
-    event loop in a dedicated background thread (started lazily on
-    first use), with Flask's request threads dispatching onto it via
-    `asyncio.run_coroutine_threadsafe(...).result()`. Zero call sites
-    changed — every existing `run_async(some_coro())` call works
-    unmodified. Tested: sequential correctness, exception propagation,
-    50 concurrent threads with zero result cross-talk, confirmed the
-    loop is actually persisted (not recreated) across calls, and the
-    real `init_db()` startup pattern + a live DB query both verified
-    end-to-end against an actual SQLite file.
-    **Lesson for next time**: the original audit's time estimate for
-    this item was based on an assumption about the code's shape that
-    turned out to be wrong. Worth a quick grep to confirm an
-    audit-flagged item's actual blast radius before scoping it as
-    "big" — this one wasn't.
-
-12. **`dashboard/api.py` split into a package — done**
-    (`dashboard/api/` — `core.py`, `moderation.py`, `tickets.py`,
-    `mvp.py`, `economy_shop.py`, `leveling.py`, `misc.py`,
-    `__init__.py`). Split along the section boundaries the original
-    2159-line file already had as comment headers (moderation,
-    tickets, mvp, economy/shop, leveling, misc) — those divisions
-    already existed, this just made them real file boundaries. Largest
-    resulting file is 503 lines (`leveling.py`), most are 100–450.
-    Kept as **one shared `Blueprint` object** (`api_bp`, defined in
-    `__init__.py`) that every submodule imports and registers routes
-    onto, rather than N blueprints each with their own prefix — that's
-    what made this a genuinely zero-risk split: `dashboard/app.py`'s
-    `from dashboard.api import api_bp` / `register_blueprint(api_bp)`
-    didn't change at all, and every route kept its exact existing URL,
-    HTTP methods, and endpoint name.
-    **Not just eyeballed — actually verified**: captured all 93
-    `/api/*` routes (path, methods, endpoint name) from the real Flask
-    app by importing `dashboard.app` and reading `app.url_map` *before*
-    touching anything, did the same after, and diffed — exact match,
-    zero routes added/removed/renamed. Then ran the CSRF
-    `before_request` hook (defined once in `__init__.py`) against
-    routes physically living in different submodules via Flask's test
-    client to confirm it still fires everywhere it used to (moderation
-    and leveling submodules both correctly returned 403 without a CSRF
-    token), plus confirmed `login_required` guards and normal 404
-    behavior still work. Each submodule currently carries the full
-    original import block rather than a pruned per-file one —
-    deliberate: zero risk of a missing import silently breaking a
-    route that used to work. Pruning unused imports per-file is a
-    safe, separate future cleanup if wanted.
-
-## Bugs caught by testing (not by reading the code)
-
-Both of these compiled fine and looked correct on read-through — they
-only surfaced by actually running the logic:
-
-- **`backup.py`**: filenames used 1-second-resolution timestamps.
-  Two backups in the same second (e.g. `/backup_now` fired twice
-  quickly) collided on disk, and — worse — the prune logic then
-  deleted a surviving row's file because an older row shared its
-  filename, wiping every backup instead of just the old ones. Fixed
-  with a uuid suffix; re-tested and confirmed 7-in/7-out with every
-  logged row matching a real file on disk.
-- **`scheduler.py`**: a failed send (deleted channel, missing perms,
-  etc.) still advanced the row's state — a one-off got marked
-  "sent"/disabled and a repeating message rolled its `send_at`
-  forward, even though nothing was actually delivered. The message
-  was silently lost with only a console log line as a trace. Fixed so
-  state only advances on a confirmed successful send; a failed send
-  now retries next tick instead of disappearing.
-
-## Known inaccuracy corrected (pass #1 → pass #2)
-
-`database.py`'s WAL-mode comment claimed `busy_timeout` persists
-file-wide like `journal_mode` does. It doesn't — `busy_timeout` is
-per-connection in SQLite, so the other dozens of `aiosqlite.connect()`
-call sites elsewhere in the codebase don't actually inherit it. Not a
-live bug only because `aiosqlite`/`sqlite3` already default new
-connections to a 5-second timeout on their own. Comment corrected in
-place to explain the real mechanism rather than the wrong one.
-
-## Next objectives
-
-The original audit list (both the pass-1 delta and pass-2's
-follow-ups) is now fully worked through — every item is either done
-(see above) or was deliberately left alone with a documented reason
-(`sticky.py`, see item 5). Nothing queued.
-
-If picking this up next: a light pass pruning the duplicated import
-blocks in `dashboard/api/*.py` down to what each file actually uses
-would be reasonable low-risk cleanup, but isn't fixing anything
-broken — optional, not a backlog item.
+- **Unbounded in-memory cooldown dicts** (`main.py::_command_cooldowns`,
+  `cogs/leveling.py::_xp_cooldowns`/`_spam_tracker`,
+  `cogs/economy.py::_daily_cooldowns`/`_work_cooldowns`,
+  `cogs/triggers.py::_last_fired`) — still open, still low priority
+  (slow memory leak, not a correctness bug). Not touched.
+- **Event Stack Builder / dynamic weekly-quota events** — Dark
+  described a design (daily randomized spawn % that rises/falls based
+  on events-so-far vs days-remaining vs configured min/max weekly
+  targets, force-fire near week end). **Flagged, not built**: this
+  sounds like it may already be `cogs/minigames.py` from an earlier
+  session (per project notes: "quota-driven weekly system, 5-10
+  events/week default, daily randomized spawn probabilities, Friday
+  force-spawn to meet weekly minimum, Saturday reset"). That file was
+  not present in the most recent uploaded ZIP/context, so it could not
+  be verified. **Next shift: get `cogs/minigames.py` from Dark before
+  writing any new event-scheduling code.** If it turns out to already
+  do this, the work is extending/tuning it, not building fresh — if it
+  doesn't exist or does something else, then it's a genuine new build
+  against Dark's design (engineering freedom granted to propose a
+  better algorithm than the illustrative percentages in his spec, per
+  his 2026-07 note — but stay within this feature, no unrelated
+  refactors while the roadmap's still open).
+- **Roleplay commands as GIFs** — Dark wants `/hug`, `/cry`, etc.
+  (`cogs/roleplay.py`) to eventually send an actual GIF (Tenor/Giphy
+  API or curated list) instead of the current text-only embed. Not
+  started, low priority, unrelated to this pass.
 
 ## Design decisions locked from earlier shifts (still apply)
 
 - Prestige: carry-over XP (not hard reset), keep-all level-role
   rewards, one role per prestige tier (swapped on prestige),
   `min_level` defaults to 50 (configurable per guild), leaderboard
-  sorted `prestige DESC, xp DESC`. See prior STATUS.md history if this
-  file gets truncated again — these were deliberate product decisions,
-  not defaults to second-guess.
+  sorted `prestige DESC, xp DESC`.
+- Event Stack Builder (original master-plan definition, P3 #30):
+  admin-authored events with stacked rewards — max 5 reward slots,
+  per-tier currency caps, max 3 active events at once, admin preview
+  before publish, weekly reward budget tracking. This is distinct from
+  the automated random-spawn scheduler Dark is now describing; don't
+  conflate the two when picking this up.
+- ZIP = source of truth, always verify against actual code before
+  scheduling work, never trust a "known gaps" list at face value.
