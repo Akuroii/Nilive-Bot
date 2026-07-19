@@ -26,6 +26,35 @@ class Triggers(commands.Cog):
         # which is fine for a spam-prevention cooldown.
         self._last_fired: dict[tuple, float] = {}
 
+        # MEMORY LEAK FIX (dark-fixes pass #11): this dict only ever
+        # grew — a key is written every time a cooldown-gated trigger
+        # fires and nothing ever removed old entries, so it slowly
+        # accumulated one permanent (guild_id, trigger_id) entry per
+        # trigger that ever fired, for the lifetime of the process.
+        # Flagged as low-priority across several passes and left
+        # alone each time; cleared now since nothing higher-priority
+        # is currently blocking on Dark's input.
+        #
+        # Unlike economy.py's cooldown dicts, the stored value here
+        # is a last-FIRED timestamp, not an expiry — per-trigger
+        # cooldown_seconds lives in the DB, not in this dict, so
+        # there's no single expiry to compare against cheaply. Using
+        # a generous fixed age cutoff instead: any trigger that
+        # hasn't fired in the last 24h is safe to drop regardless of
+        # its configured cooldown (cooldowns are configured in
+        # seconds/minutes in the dashboard UI, never days), and only
+        # runs the sweep once the dict has actually grown large.
+        self._COOLDOWN_PRUNE_THRESHOLD = 2000
+        self._COOLDOWN_MAX_AGE_SECONDS = 24 * 60 * 60
+
+    def _prune_last_fired(self, now: float) -> None:
+        if len(self._last_fired) < self._COOLDOWN_PRUNE_THRESHOLD:
+            return
+        cutoff = now - self._COOLDOWN_MAX_AGE_SECONDS
+        stale = [k for k, ts in self._last_fired.items() if ts < cutoff]
+        for k in stale:
+            del self._last_fired[k]
+
     async def cog_load(self):
         # PERFORMANCE FIX (dark-fixes pass #2): ensure_table() used to
         # run inside on_message, meaning every single guild message
@@ -214,6 +243,7 @@ class Triggers(commands.Cog):
                 # the cooldown window for a trigger that never fired.
                 if cooldown > 0:
                     self._last_fired[cooldown_key] = now
+                    self._prune_last_fired(now)
 
             except Exception as e:
                 print(f"[triggers] Error responding to trigger {tid}: {e}")

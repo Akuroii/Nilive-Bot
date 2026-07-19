@@ -25,6 +25,32 @@ from utils.economy_safe import (
 _daily_cooldowns:  dict[tuple[int, int], datetime] = {}
 _work_cooldowns:   dict[tuple[int, int], datetime] = {}
 
+# MEMORY LEAK FIX (dark-fixes pass #11): these dicts previously grew
+# forever — a key was written on every /daily and /work claim and
+# NOTHING ever removed old entries, so a bot running across many
+# guilds/users for months would slowly accumulate one permanent
+# (guild_id, user_id) entry per member who ever used either command,
+# even long after their cooldown expired. Flagged as "low priority,
+# slow leak" across several prior passes and deliberately left alone
+# each time since nothing higher-priority was blocking on it.
+#
+# Fix: the stored value IS already the cooldown's expiry timestamp
+# (see `_daily_cooldowns[key] = now + timedelta(hours=24)` below), so
+# pruning is just "drop anything whose expiry has already passed."
+# Runs opportunistically — only when a dict has grown past
+# _COOLDOWN_PRUNE_THRESHOLD — so normal-traffic bots pay zero extra
+# cost per command; only a dict that's actually accumulated a lot of
+# stale entries pays a one-time O(n) sweep to shrink back down.
+_COOLDOWN_PRUNE_THRESHOLD = 2000
+
+
+def _prune_expired(cooldowns: dict, now: datetime) -> None:
+    if len(cooldowns) < _COOLDOWN_PRUNE_THRESHOLD:
+        return
+    expired_keys = [k for k, expires_at in cooldowns.items() if expires_at <= now]
+    for k in expired_keys:
+        del cooldowns[k]
+
 
 async def get_balance(guild_id: int, user_id: int) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -137,6 +163,7 @@ class Economy(commands.Cog):
             reason="Daily reward", source="daily")
         currency = await get_currency_name(interaction.guild.id)
         _daily_cooldowns[key] = now + timedelta(hours=24)
+        _prune_expired(_daily_cooldowns, now)
 
         embed = discord.Embed(
             title="🎁 Daily Reward!",
@@ -184,6 +211,7 @@ class Economy(commands.Cog):
             reason="Work reward", source="work")
         currency = await get_currency_name(interaction.guild.id)
         _work_cooldowns[key] = now + timedelta(hours=1)
+        _prune_expired(_work_cooldowns, now)
 
         embed = discord.Embed(
             title="💼 Work Complete!",
