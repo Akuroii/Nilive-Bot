@@ -232,6 +232,7 @@ async def load_cogs():
         "cogs.moderation",
         "cogs.leveling",
         "cogs.economy",
+        "cogs.trade",
         "cogs.boost",
         "cogs.reactionroles",
         "cogs.tickets",
