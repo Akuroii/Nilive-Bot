@@ -1,0 +1,277 @@
+{% extends "base.html" %}
+{% block title %}Event Stack Builder{% endblock %}
+{% block content %}
+<span data-page-title="Event Stack Builder"></span>
+
+<div style="display:flex;gap:4px;margin-bottom:20px;
+            border-bottom:1px solid var(--border);padding-bottom:0;">
+    {% for tab, label in [('config','⚙️ Config'),('tiers','🎁 Reward Tiers'),('log','📜 Recent Winners')] %}
+    <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
+        style="padding:10px 18px;border:none;background:transparent;
+               color:var(--text2);font-size:13px;font-weight:500;
+               cursor:pointer;border-bottom:2px solid transparent;
+               transition:all .15s;margin-bottom:-1px;min-height:44px;"
+        class="tab-btn">{{ label }}</button>
+    {% endfor %}
+</div>
+
+<!-- CONFIG TAB -->
+<div id="tab-content-config" class="tab-content">
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title" style="margin:0;">🎲 Weekly Spawn Settings</div>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <label class="toggle">
+                    <input type="checkbox" id="mg-enabled">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span style="font-size:13px;color:var(--text2);">Enabled</span>
+            </div>
+        </div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Events spawn automatically with a probability that adapts daily to stay
+            within your min/max weekly range — behind pace pushes the odds up, ahead
+            of pace pushes them down. On the last day of the week, if the minimum
+            still hasn't been hit, an event force-fires regardless of the roll.
+        </p>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">Spawn channel</label>
+                <select class="nero-channel-picker form-input"
+                        id="mg-channel-picker"></select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Min events per week</label>
+                <input class="form-input" id="mg-min-events" type="number" min="1" value="5">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Max events per week</label>
+                <input class="form-input" id="mg-max-events" type="number" min="1" value="10">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Claim window (seconds)</label>
+                <input class="form-input" id="mg-claim-seconds" type="number" min="30" value="300">
+                <div class="form-hint">First member to click Claim! wins — minimum 30s</div>
+            </div>
+        </div>
+        <button class="btn btn-primary" onclick="saveMinigamesConfig(this)">Save Settings</button>
+        <div id="mg-config-status" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+</div>
+
+<!-- TIERS TAB -->
+<div id="tab-content-tiers" class="tab-content" style="display:none;">
+    <div class="card">
+        <div class="card-title">➕ Add Reward Tier</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            A spawn randomly picks one enabled tier, weighted by the value below
+            (higher weight = more common). At least one tier is required for events
+            to spawn at all.
+        </p>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">Tier</label>
+                <select class="form-input" id="mg-tier-select">
+                    <option value="bronze">🥉 Bronze</option>
+                    <option value="silver">🥈 Silver</option>
+                    <option value="gold">🥇 Gold</option>
+                    <option value="platinum">💎 Platinum</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Weight</label>
+                <input class="form-input" id="mg-tier-weight" type="number" min="1" value="1">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Reward type</label>
+                <select class="form-input" id="mg-tier-reward-type" onchange="toggleMgDurationField()">
+                    <option value="coins">🪙 Coins</option>
+                    <option value="diamonds">💎 Diamonds</option>
+                    <option value="xp">⭐ XP</option>
+                    <option value="role">Permanent Role</option>
+                    <option value="temp_role">Temporary Role</option>
+                    <option value="item">Item</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label" id="mg-tier-value-label">Amount</label>
+                <input class="form-input" id="mg-tier-value" placeholder="e.g. 500, a Role ID, or an item name">
+            </div>
+            <div class="form-group" id="mg-tier-duration-field" style="display:none;">
+                <label class="form-label">Duration hours (temp_role only)</label>
+                <input class="form-input" id="mg-tier-duration" type="number" min="1">
+            </div>
+        </div>
+        <button class="btn btn-primary" onclick="addMinigamesTier()">Add Tier</button>
+        <div id="mg-tier-status" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">🎁 Configured Tiers</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr><th>Tier</th><th>Weight</th><th>Reward</th><th>Duration</th><th></th></tr>
+                </thead>
+                <tbody id="mg-tiers-tbody">
+                    <tr><td colspan="5" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- LOG TAB -->
+<div id="tab-content-log" class="tab-content" style="display:none;">
+    <div class="card">
+        <div class="card-title">📜 Recent Winners</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr><th>Date</th><th>Tier</th><th>Winner</th><th>Forced?</th><th>Fired At</th></tr>
+                </thead>
+                <tbody id="mg-log-tbody">
+                    <tr><td colspan="5" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+const MG_TIER_EMOJI = {bronze:'🥉', silver:'🥈', gold:'🥇', platinum:'💎'};
+
+function switchTab(name) {
+    document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+    document.getElementById('tab-content-' + name).style.display = 'block';
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.style.borderBottomColor = 'transparent';
+        btn.style.color = 'var(--text2)';
+    });
+    const active = document.getElementById('tab-' + name);
+    active.style.borderBottomColor = 'var(--accent)';
+    active.style.color = 'var(--text)';
+}
+switchTab('config');
+
+function toggleMgDurationField() {
+    const type = document.getElementById('mg-tier-reward-type').value;
+    const durField = document.getElementById('mg-tier-duration-field');
+    const valLabel = document.getElementById('mg-tier-value-label');
+    durField.style.display = type === 'temp_role' ? 'block' : 'none';
+    if (type === 'role' || type === 'temp_role') valLabel.textContent = 'Role ID';
+    else if (type === 'item') valLabel.textContent = 'Item name';
+    else valLabel.textContent = 'Amount';
+}
+toggleMgDurationField();
+
+async function loadMinigamesConfig() {
+    const res = await fetch('/api/minigames/config');
+    if (!res.ok) return;
+    const data = await res.json();
+    const c = data.config || {};
+    document.getElementById('mg-enabled').checked = c.enabled === undefined ? true : !!c.enabled;
+    document.getElementById('mg-min-events').value = c.min_events_per_week || 5;
+    document.getElementById('mg-max-events').value = c.max_events_per_week || 10;
+    document.getElementById('mg-claim-seconds').value = c.claim_seconds || 300;
+    setTimeout(function() {
+        const cp = document.getElementById('mg-channel-picker');
+        if (cp && c.channel_id) { $(cp).val(String(c.channel_id)).trigger('change.select2'); }
+    }, 800);
+}
+loadMinigamesConfig();
+
+async function saveMinigamesConfig(btn) {
+    const cp = document.getElementById('mg-channel-picker');
+    const payload = {
+        enabled:              document.getElementById('mg-enabled').checked,
+        channel_id:           cp ? ($(cp).val() || '') : '',
+        min_events_per_week:  parseInt(document.getElementById('mg-min-events').value) || 5,
+        max_events_per_week:  parseInt(document.getElementById('mg-max-events').value) || 10,
+        claim_seconds:        parseInt(document.getElementById('mg-claim-seconds').value) || 300,
+    };
+    await ajaxSave('/api/minigames/config', payload, btn, 'Event Stack Builder settings saved!');
+}
+
+async function loadMinigamesTiers() {
+    const res = await fetch('/api/minigames/tiers');
+    if (!res.ok) return;
+    const data = await res.json();
+    const tbody = document.getElementById('mg-tiers-tbody');
+    if (!data.tiers || !data.tiers.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">No reward tiers configured yet — events cannot spawn without at least one.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = data.tiers.map(t => `
+        <tr>
+            <td>${MG_TIER_EMOJI[t.tier] || '🎁'} ${t.tier.charAt(0).toUpperCase() + t.tier.slice(1)}</td>
+            <td>${t.weight}</td>
+            <td>${t.reward_type}: <code>${t.reward_value}</code></td>
+            <td>${t.reward_duration_hours ? t.reward_duration_hours + 'h' : '—'}</td>
+            <td>
+                <button class="btn btn-sm btn-danger"
+                    onclick="showConfirm('Remove this ${t.tier} tier?', () => deleteMinigamesTier(${t.id}))">
+                    Delete
+                </button>
+            </td>
+        </tr>`).join('');
+}
+loadMinigamesTiers();
+
+async function addMinigamesTier() {
+    const type = document.getElementById('mg-tier-reward-type').value;
+    const value = document.getElementById('mg-tier-value').value.trim();
+    if (!value) { showToast('Enter a reward value', 'warning'); return; }
+    const payload = {
+        tier:                  document.getElementById('mg-tier-select').value,
+        weight:                parseInt(document.getElementById('mg-tier-weight').value) || 1,
+        reward_type:           type,
+        reward_value:          value,
+        reward_duration_hours: type === 'temp_role'
+            ? (parseInt(document.getElementById('mg-tier-duration').value) || null)
+            : null,
+    };
+    const res  = await fetch('/api/minigames/tier', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast('Tier added!');
+        document.getElementById('mg-tier-value').value = '';
+        loadMinigamesTiers();
+    } else {
+        showToast(data.error || 'Error adding tier', 'error');
+    }
+}
+
+async function deleteMinigamesTier(id) {
+    const res  = await fetch(`/api/minigames/tier/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) { showToast('Tier removed', 'info'); loadMinigamesTiers(); }
+    else showToast('Error', 'error');
+}
+
+async function loadMinigamesLog() {
+    const res = await fetch('/api/minigames/log');
+    if (!res.ok) return;
+    const data = await res.json();
+    const tbody = document.getElementById('mg-log-tbody');
+    if (!data.log || !data.log.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">No events have fired yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = data.log.map(e => `
+        <tr>
+            <td class="text-muted">${e.event_date || '—'}</td>
+            <td>${MG_TIER_EMOJI[e.tier] || '🎁'} ${e.tier}</td>
+            <td>${e.winner_display_name ? e.winner_display_name : '<span class="text-muted">Unclaimed</span>'}</td>
+            <td>${e.forced ? '<span class="badge badge-warning">Forced</span>' : '—'}</td>
+            <td class="text-muted">${e.fired_at ? e.fired_at.slice(0,16) : '—'}</td>
+        </tr>`).join('');
+}
+loadMinigamesLog();
+</script>
+{% endblock %}
+{% endblock %}

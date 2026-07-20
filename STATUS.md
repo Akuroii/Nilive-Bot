@@ -1,105 +1,85 @@
-# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #11)
+# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #13)
 
-## Fixed this pass: unbounded in-memory cooldown dicts (slow leak)
+## Done this pass: Minigames (Event Stack Builder) dashboard UI
 
-Flagged as "low priority, not touched" across passes #9/#10 — cleared now
-since the higher-priority items were all already fixed (see verification
-below) and Event Stack Builder / Trade System are blocked on Dark's input.
+`cogs/minigames.py` was previously Discord-command-only. This pass adds
+the dashboard CRUD surface for it, reusing the cog's own
+`ensure_tables()` / `get_config()` / `get_tiers()` rather than
+duplicating schema or query logic.
 
-Three dicts grew forever with no eviction, each accumulating one permanent
-entry per (guild, user[, command/trigger]) combination for the lifetime of
-the process:
+New/changed files in this delta:
 
-- `cogs/economy.py` — `_daily_cooldowns`, `_work_cooldowns`. The stored
-  value is already the cooldown's *expiry* timestamp, so pruning is exact:
-  drop anything whose expiry has already passed.
-- `cogs/triggers.py` — `Triggers._last_fired` (per-cog instance dict, not
-  module-level). Stores *last-fired* time, not expiry, and per-trigger
-  cooldown length lives in the DB — so pruning uses a generous fixed
-  24h age cutoff instead (trigger cooldowns are dashboard-configured in
-  seconds/minutes, never days).
-- `main.py` — `_command_cooldowns` (used by `NeroCommandTree.interaction_check`).
-  Same last-used-time shape as triggers.py; same 24h age-cutoff approach.
+- `utils/permissions.py` — added `"minigames": LEVEL_ADMIN` to
+  `PAGE_PERMISSIONS`.
+- `dashboard/api/minigames.py` — NEW. Routes:
+  `GET/POST /api/minigames/config`, `GET /api/minigames/tiers`,
+  `POST /api/minigames/tier`, `DELETE /api/minigames/tier/<id>`,
+  `GET /api/minigames/log`. All gated `LEVEL_ADMIN`, all guild-isolated.
+- `dashboard/api/__init__.py` — registered the new `minigames`
+  submodule alongside the existing seven.
+- `dashboard/app.py` — two changes:
+  1. `COMMAND_CATEGORIES["Minigames"]` added
+     (`minigames_setup`, `minigames_tier_add`, `minigames_tier_list`,
+     `minigames_tier_remove`, `minigames_force`, `minigames_stats`) —
+     these now show up in the Commands page's per-command toggle list,
+     which they never did before.
+  2. New `/minigames` route (`systems/minigames.html`) — pulls config,
+     tiers, and recent winner log for the page.
+- `dashboard/templates/systems/minigames.html` — NEW. Three tabs:
+  Config (channel/min-max events/claim window), Reward Tiers (add/list/
+  delete, weighted by tier), Recent Winners (read-only log).
+- `NAV_LINK_SNIPPET.html` — NOT YET APPLIED. `dashboard/templates/base.html`
+  was not re-pasted into this session's context this pass, so I did not
+  regenerate the whole file from memory to avoid risking a silent
+  diff against your actual live version. This snippet is the exact
+  block to paste into base.html's "Systems" nav section (right after
+  the `/events` link) — one-line-pattern match to every other nav
+  link already there. **Until this is pasted in, `/minigames` is only
+  reachable by typing the URL directly** — the page and API both work,
+  it's just not in the sidebar yet.
 
-All three prune opportunistically — only once a dict has grown past a
-threshold (2000 for the per-cog dicts, 5000 for the global command-cooldown
-dict) — so normal-traffic bots pay zero extra cost per command/trigger;
-only a dict that has actually accumulated a lot of stale entries pays a
-one-time O(n) sweep to shrink back down. No change to any cooldown's
-externally-visible behavior (a fresh cooldown is still honored exactly as
-before) — this only affects when old, already-expired entries get freed.
+All five new/edited `.py` files `py_compile` clean.
 
-Verified: all three files `py_compile` clean, and the prune logic itself
-was unit-tested in isolation (below-threshold = no-op, above-threshold =
-correctly evicts only stale entries) before being wired into the actual
-cogs.
+## Verified NOT touched this pass (scope discipline)
 
-`leveling.py`'s `_xp_cooldowns` / `_spam_tracker` were NOT touched this
-pass (scope discipline — three files is enough for one change-set; same
-fix pattern applies there if wanted next).
+- `dashboard/api.py` deletion — still pending, unchanged from pass #12.
+  Same zero-risk action as before: delete that one file, nothing else
+  changes. Not repeated here since nothing new to say about it.
+- No changes to `cogs/minigames.py` itself — it was uploaded again this
+  session (`nero_minigames_delta.zip`) and `py_compile` clean; treated
+  as unchanged/current, not re-verified line-by-line against the
+  version already on record from pass #11/#12 since no diff tool
+  against a live repo was available this session (chat-pasted files
+  only, no ZIP of the full project).
 
-## Prior finding, still applies: 1 verified finding, no functional/behavioral changes
+## Stopped at: Minigames dashboard UI (config/tiers/log + Commands-category entry)
+## Still needed, in order:
 
-Continued the pass #10 pattern of auditing "carry-forward open items" against
-actual ZIP contents before touching anything. Re-verified every item memory
-listed as still-open:
+1. **Apply `NAV_LINK_SNIPPET.html` into `dashboard/templates/base.html`**
+   — 30-second manual paste, or hand me the current base.html next
+   session and I'll do it directly.
+2. **You verify E3 (ledger) + E4 (inventory) live on Railway** — still
+   the actual blocker on Trade System, not code.
+3. **Live verification of Minigames** — both the original spawn/claim
+   mechanics (pass #11/#12) AND this pass's new dashboard page (config
+   save round-trips correctly, tier add/delete reflects in Discord's
+   next spawn, log populates after a real claim).
+4. **Delete `dashboard/api.py`** — queued since pass #12, zero risk,
+   just needs someone with repo access to actually remove the file.
+5. **Zero automated test coverage** — still open, no small next step
+   without direction on what to prioritize first.
 
-- SECRET_KEY hardcoded fallback in dashboard/app.py: **already fixed**
-  (fail-fast check present, no insecure fallback string in source)
-- Stored XSS in dashboard/api/*.py partials (moderation_logs_partial,
-  shop_items_partial, economy_leaderboard_partial, audit_log_partial):
-  **already fixed** — all use `markupsafe.escape()` on every
-  attacker-influenced field
-- CSRF gap on /config/access + /config/commands form POSTs: **already
-  fixed** — both routes check a hidden `csrf_token` form field against
-  the session token, and both templates already carry the hidden input
-- reaction_role_expiry sentinel collision: **already fixed** — message_id
-  is part of the primary key, with a migration that rebuilds the table
-  and backfills message_id=0 for legacy rows
-- XP grant race condition in reward_engine.give_reward(): **already
-  fixed** — runs inside a single BEGIN IMMEDIATE transaction
+## Reminder for next session
 
-None of these needed work. Memory/handoff notes were stale relative to the
-actual code — consistent with the project's own "ZIP = source of truth"
-rule and pass #10's identical finding for a different set of items.
-
-## New finding this pass — orphaned pre-split monolith, confirmed dead code
-
-`dashboard/api.py` (the original 2159-line, 90+ route file) and
-`dashboard/api/__init__.py` (the post-refactor package split into core.py /
-economy_shop.py / leveling.py / misc.py / moderation.py / mvp.py /
-tickets.py) **both currently exist** in the repo at the same path.
-
-This is the same "leftover after refactor" class of bug as the orphaned
-`commands.html` template deleted in pass #10 — the split's own header
-comment in `dashboard/api/__init__.py` says the monolith was "split into
-this package," implying the original file should have been removed at the
-same time, but it wasn't.
-
-Confirmed via a live Python import experiment (not just code reading) that
-when a flat module and a same-named package coexist in one directory,
-`import dashboard.api` **always** resolves to the package, never the flat
-file. So `dashboard/api.py` has been fully unreachable dead code since the
-split — `dashboard/app.py`'s `from dashboard.api import api_bp` has always
-gotten the package's Blueprint, and every route defined inside the stale
-`dashboard/api.py` has never once executed.
-
-**Action: delete `dashboard/api.py`.** Zero behavior change (the code is
-provably unreachable) — see `DELETE_INSTRUCTIONS.txt` in this delivery.
-No code needed in the delta ZIP for a deletion, per the same convention
-pass #10 used for `commands.html`.
-
-## Still blocked — carried forward unchanged, need input before proceeding
-
-1. **Event Stack Builder (Phase 6)** — still needs `cogs/minigames.py`
-   from Dark to verify against before building anything (not present in
-   any upload so far). Either provide it, or confirm greenfield build.
-2. **Trade System** — blocked until E3 (ledger) + E4 (inventory) are
-   verified LIVE in production. Code-side both are fully built and wired
-   — this needs a runtime check on Dark's actual deployment, not
-   something verifiable from a ZIP.
-3. **Zero automated test coverage** — still open, unaddressed. No small
-   next step without direction on what to prioritize first.
+This chat has no live copy of the full repo — only whatever gets
+pasted into context each session, plus small delta ZIPs like
+`nero_minigames_delta.zip` this time (which only contained `main.py`
++ `cogs/minigames.py`, not the dashboard files touched above). If you
+want the next session to directly edit `dashboard/templates/base.html`,
+`dashboard/api.py` (for deletion), or verify this pass's app.py
+against what's actually deployed, paste/upload those specific files —
+per project rule, uploaded content is canonical truth over any
+handoff note, including this one.
 
 ## Design decisions locked (unchanged)
 
@@ -107,6 +87,7 @@ pass #10 used for `commands.html`.
   tier (swapped), `min_level` default 50, leaderboard sorted
   `prestige DESC, xp DESC`.
 - Trade System: blocked until E3 + E4 verified live in production.
+- Event Stack Builder: max 5 reward slots per event, hard currency
+  caps per tier (bronze/silver/gold/diamond), max 3 active events.
 - ZIP = source of truth. Always verify against actual code before
-  scheduling work — this pass is a second confirmation of that rule
-  paying off.
+  scheduling work.

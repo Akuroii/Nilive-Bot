@@ -28,21 +28,6 @@ app = Flask(__name__,
             template_folder="templates",
             static_folder="static")
 
-# SECURITY FIX (dark-fixes pass, CRITICAL): this used to fall back to a
-# hardcoded, source-controlled string ("nero-dashboard-secret-key-2024")
-# whenever the SECRET_KEY env var wasn't set. Flask signs session cookies
-# (including the "user" identity and the csrf_token itself) with this
-# key using an unencrypted-but-signed scheme — anyone who knows the
-# fallback string (which is public, since it's sitting in this file in
-# source control) can FORGE a valid session cookie for any user_id,
-# including the owner, without ever touching the database or Discord
-# OAuth. This is strictly more dangerous than the CSRF gap that was
-# already being tracked, because it bypasses login entirely.
-#
-# We now require SECRET_KEY to be set in the environment and refuse to
-# start otherwise, mirroring the exact fail-fast pattern main.py already
-# uses for a missing/invalid DISCORD_TOKEN — loud, actionable, no silent
-# insecure fallback.
 _secret_key = os.getenv("SECRET_KEY", "").strip()
 if not _secret_key:
     print("=" * 60)
@@ -71,9 +56,6 @@ app.secret_key = _secret_key
 app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7
 app.register_blueprint(api_bp)
 
-# Ensure the schema exists before any request can hit the DB. This does NOT
-# depend on the bot process having run first — CREATE TABLE IF NOT EXISTS
-# makes this safe to call from both processes, in either order, every boot.
 print("Initializing database (dashboard process)...")
 run_async(init_db())
 print("Database ready (dashboard process).")
@@ -910,6 +892,42 @@ def events():
     return render("systems/events.html", events=event_list, **ctx)
 
 
+# ── Minigames / Event Stack Builder (dark-fixes pass #13) ───────────────────
+#
+# Dashboard config/tier-management page for cogs/minigames.py, which was
+# previously Discord-command-only (/minigames_setup, /minigames_tier_add,
+# etc). Reuses cogs.minigames.ensure_tables()/get_config()/get_tiers()
+# rather than re-declaring the schema/query logic — see
+# dashboard/api/minigames.py for the matching write-side routes this
+# page's JS calls into.
+
+@app.route("/minigames")
+@require_page("minigames")
+def minigames_page():
+    guild_id = get_session_guild_id()
+
+    async def get_data():
+        from cogs.minigames import ensure_tables, get_config, get_tiers
+        await ensure_tables()
+        config = await get_config(guild_id)
+        tiers  = await get_tiers(guild_id)
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT event_date, tier, winner_id, winner_display_name,
+                       forced, fired_at
+                FROM minigames_log
+                WHERE guild_id = ?
+                ORDER BY fired_at DESC LIMIT 25
+            """, (guild_id,))
+            log = await cursor.fetchall()
+        return config, tiers, log
+
+    config, tiers, log = run_async(get_data())
+    ctx = get_current_user_context()
+    return render("systems/minigames.html",
+                  config=config, tiers=tiers, log=log, **ctx)
+
+
 # ── Ledger (Phase 3 E3 CLOSEOUT — read-only) ────────────────────────────────
 
 @app.route("/ledger")
@@ -1175,6 +1193,16 @@ COMMAND_CATEGORIES = {
     ],
     "Config": ["boost_setup","youtube_setup","youtube_remove","ticket_setup"],
     "Events": ["event_create","event_end","event_list"],
+    # dark-fixes pass #13: cogs/minigames.py's slash commands existed
+    # with no entry here, so they never showed up in the Commands
+    # page's per-command enable/disable toggle list even though every
+    # other command in the bot does. Names match the
+    # @app_commands.command(name=...) values in cogs/minigames.py
+    # exactly.
+    "Minigames": [
+        "minigames_setup", "minigames_tier_add", "minigames_tier_list",
+        "minigames_tier_remove", "minigames_force", "minigames_stats",
+    ],
     "Tickets": [
         "ticket_close","ticket_claim","ticket_transfer",
         "reactionrole_create","reactionrole_add",
@@ -1230,16 +1258,6 @@ def config_commands():
     if request.method == "POST":
         guild_id = get_session_guild_id()
 
-        # SECURITY FIX (dark-fixes pass, form CSRF gap #3): this route
-        # (and /config/access below) are the two classic <form method=
-        # "POST"> submissions that the app-level and api-level CSRF
-        # hooks never covered, since those hooks only fire for
-        # /api/* paths. A hidden csrf_token input is now required and
-        # checked against the same session-stored token used
-        # everywhere else, closing the gap flagged across three
-        # STATUS.md revisions in a row. See templates/manage/commands
-        # dashboard form / config/access.html for the matching
-        # hidden input.
         submitted_token = request.form.get("csrf_token", "")
         if not submitted_token or submitted_token != session.get("csrf_token"):
             abort(403)
@@ -1465,11 +1483,6 @@ def config_access():
             await db.commit()
 
     if request.method == "POST":
-        # SECURITY FIX (dark-fixes pass, form CSRF gap #3): same
-        # missing-token issue as /config/commands above — this route
-        # grants/revokes dashboard access itself, so it's arguably the
-        # highest-value CSRF target in the whole app (a forged request
-        # here could add an attacker-controlled user_id as 'owner').
         submitted_token = request.form.get("csrf_token", "")
         if not submitted_token or submitted_token != session.get("csrf_token"):
             abort(403)
@@ -1500,10 +1513,6 @@ def api_edit_member():
     guild_id  = get_session_guild_id()
     data      = request.json
     user_id   = data.get("user_id")
-    # HARDENING (dark-fixes pass): clamp to non-negative. xp_progress()
-    # and the rank-card progress bar both assume xp/coins are >= 0;
-    # nothing previously stopped a raw negative value from being typed
-    # into this admin field and corrupting those downstream displays.
     xp        = max(0, int(data.get("xp", 0)))
     coins     = max(0, int(data.get("coins", 0)))
     new_level = calculate_level_from_xp(xp)
