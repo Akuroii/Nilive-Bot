@@ -95,6 +95,11 @@ PAGE_PERMISSIONS = {
     "ledger":             LEVEL_ADMIN,
     "inventory_view":     LEVEL_ADMIN,
 
+    # Event Stack Builder dashboard page (dark-fixes pass #13). Same
+    # tier as shop/events — tier/config CRUD is an admin action,
+    # nothing here needs owner-only.
+    "minigames":          LEVEL_ADMIN,
+
     "general_settings":   LEVEL_OWNER,
     "welcome":            LEVEL_ADMIN,
     "boost":              LEVEL_ADMIN,

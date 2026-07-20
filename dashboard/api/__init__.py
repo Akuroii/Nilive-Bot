@@ -21,6 +21,13 @@ from flask import Blueprint, jsonify, request, session
 # needed, but zero risk of a missing import silently breaking a route
 # that used to work. Pruning unused imports per-file is a safe,
 # separate future cleanup if wanted.
+#
+# dark-fixes pass #13: added dashboard.api.minigames — the dashboard
+# CRUD surface for the Event Stack Builder (cogs/minigames.py), which
+# was previously Discord-command-only. Same registration pattern as
+# every other submodule below: import it, its @api_bp.route(...)
+# decorators register onto the shared blueprint, no other file needs
+# to change.
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -47,6 +54,7 @@ def _enforce_csrf():
 from dashboard.api import core          # noqa: E402,F401
 from dashboard.api import economy_shop  # noqa: E402,F401
 from dashboard.api import leveling      # noqa: E402,F401
+from dashboard.api import minigames     # noqa: E402,F401
 from dashboard.api import misc          # noqa: E402,F401
 from dashboard.api import moderation    # noqa: E402,F401
 from dashboard.api import mvp           # noqa: E402,F401
