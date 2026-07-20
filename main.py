@@ -246,6 +246,7 @@ async def load_cogs():
         "cogs.auditlog",
         "cogs.twitch",
         "cogs.events",
+        "cogs.minigames",
         "cogs.report",
         "cogs.health",
         "cogs.backup",
