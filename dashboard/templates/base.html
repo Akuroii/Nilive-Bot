@@ -32,7 +32,6 @@
 .select2-container--default .select2-results__option--highlighted { background: var(--accent); color: #fff; }
 .select2-dropdown { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; }
 .select2-search--dropdown .select2-search__field { background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 10px; }
-
 .htmx-indicator { display: none; }
 .htmx-request .htmx-indicator { display: inline-block; }
 .htmx-request.htmx-indicator { display: inline-block; }
@@ -47,13 +46,11 @@
 </style>
 </head>
 <body>
-
 <!-- SECURITY (CSRF hardening, this pass): token is minted server-side per
      session (see dashboard/auth.py create_session) and exposed here so
      dashboard.js's fetch()/htmx patch can attach it to every state-changing
      request automatically. Never write this into a URL or log it. -->
 <script>window.__CSRF_TOKEN__ = {{ session.get('csrf_token', '') | tojson }};</script>
-
 <button class="hamburger" onclick="toggleSidebar()"
     style="display:none;position:fixed;top:14px;left:14px;z-index:200;
            background:var(--bg2);border:1px solid var(--border);
@@ -62,7 +59,6 @@
     <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
     <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
 </button>
-
 <div class="sidebar">
     <div style="padding:20px 18px 16px;border-bottom:1px solid var(--border);
                 display:flex;align-items:center;gap:12px;">
@@ -74,7 +70,6 @@
             <div style="font-size:11px;color:var(--text3)">Dashboard</div>
         </div>
     </div>
-
     {% if guild_id %}
     <div style="padding:10px 12px;border-bottom:1px solid var(--border);">
         <a href="{{ url_for('server_select') }}"
@@ -90,12 +85,9 @@
         </a>
     </div>
     {% endif %}
-
     <nav style="flex:1;padding:12px 10px;overflow-y:auto;">
-
 <div class="nav-section">
     <div class="nav-section-title">General</div>
-
     <a href="/"
        hx-get="/"
        hx-target="#content-area"
@@ -106,7 +98,6 @@
         <span class="nav-icon">🏠</span>
         <span class="nav-text">Overview</span>
     </a>
-
     <a href="/members"
        hx-get="/members"
        hx-target="#content-area"
@@ -117,7 +108,6 @@
         <span class="nav-icon">👥</span>
         <span class="nav-text">Members</span>
     </a>
-
     <a href="/audit-log"
        hx-get="/audit-log"
        hx-target="#content-area"
@@ -128,7 +118,6 @@
         <span class="nav-icon">📝</span>
         <span class="nav-text">Audit Log</span>
     </a>
-
     <a href="/reports"
        hx-get="/reports"
        hx-target="#content-area"
@@ -140,10 +129,8 @@
         <span class="nav-text">Reports</span>
     </a>
 </div>
-
 <div class="nav-section">
     <div class="nav-section-title">Manage</div>
-
     <a href="/moderation"
        hx-get="/moderation"
        hx-target="#content-area"
@@ -154,7 +141,6 @@
         <span class="nav-icon">🛡️</span>
         <span class="nav-text">Moderation</span>
     </a>
-
     <a href="/tickets"
        hx-get="/tickets"
        hx-target="#content-area"
@@ -165,7 +151,6 @@
         <span class="nav-icon">🎫</span>
         <span class="nav-text">Tickets</span>
     </a>
-
     <a href="/embed-builder"
        hx-get="/embed-builder"
        hx-target="#content-area"
@@ -176,7 +161,6 @@
         <span class="nav-icon">📦</span>
         <span class="nav-text">Embed Builder</span>
     </a>
-
     <a href="/reaction-roles"
        hx-get="/reaction-roles"
        hx-target="#content-area"
@@ -187,7 +171,6 @@
         <span class="nav-icon">🎭</span>
         <span class="nav-text">Reaction Roles</span>
     </a>
-
     <a href="/triggers"
        hx-get="/triggers"
        hx-target="#content-area"
@@ -198,7 +181,6 @@
         <span class="nav-icon">⚡</span>
         <span class="nav-text">Triggers</span>
     </a>
-
     <a href="/custom-commands"
        hx-get="/custom-commands"
        hx-target="#content-area"
@@ -210,10 +192,8 @@
         <span class="nav-text">Custom Commands</span>
     </a>
 </div>
-
 <div class="nav-section">
     <div class="nav-section-title">Systems</div>
-
     <a href="/mvp"
        hx-get="/mvp"
        hx-target="#content-area"
@@ -224,7 +204,6 @@
         <span class="nav-icon">🏆</span>
         <span class="nav-text">MVP System</span>
     </a>
-
     <a href="/leveling"
        hx-get="/leveling"
        hx-target="#content-area"
@@ -235,7 +214,6 @@
         <span class="nav-icon">⭐</span>
         <span class="nav-text">Leveling</span>
     </a>
-
     <a href="/economy"
        hx-get="/economy"
        hx-target="#content-area"
@@ -246,7 +224,6 @@
         <span class="nav-icon">💰</span>
         <span class="nav-text">Economy</span>
     </a>
-
     <a href="/shop"
        hx-get="/shop"
        hx-target="#content-area"
@@ -257,7 +234,6 @@
         <span class="nav-icon">🛒</span>
         <span class="nav-text">Shop</span>
     </a>
-
     <a href="/events"
        hx-get="/events"
        hx-target="#content-area"
@@ -268,7 +244,6 @@
         <span class="nav-icon">🎯</span>
         <span class="nav-text">Events</span>
     </a>
-
     <a href="/minigames"
        hx-get="/minigames"
        hx-target="#content-area"
@@ -279,7 +254,16 @@
         <span class="nav-icon">🎲</span>
         <span class="nav-text">Event Stack Builder</span>
     </a>
-
+    <a href="/missions"
+       hx-get="/missions"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🗺️</span>
+        <span class="nav-text">Missions</span>
+    </a>
     <a href="/ledger"
        hx-get="/ledger"
        hx-target="#content-area"
@@ -290,7 +274,6 @@
         <span class="nav-icon">📒</span>
         <span class="nav-text">Ledger</span>
     </a>
-
     <a href="/inventory"
        hx-get="/inventory"
        hx-target="#content-area"
@@ -302,10 +285,8 @@
         <span class="nav-text">Inventory</span>
     </a>
 </div>
-
 <div class="nav-section">
     <div class="nav-section-title">Config</div>
-
     <a href="/config/general"
        hx-get="/config/general"
        hx-target="#content-area"
@@ -316,7 +297,6 @@
         <span class="nav-icon">⚙️</span>
         <span class="nav-text">General Settings</span>
     </a>
-
     <a href="/config/welcome"
        hx-get="/config/welcome"
        hx-target="#content-area"
@@ -327,7 +307,6 @@
         <span class="nav-icon">👋</span>
         <span class="nav-text">Welcome & Leave</span>
     </a>
-
     <a href="/config/boost"
        hx-get="/config/boost"
        hx-target="#content-area"
@@ -338,7 +317,6 @@
         <span class="nav-icon">🔰</span>
         <span class="nav-text">Boost Roles</span>
     </a>
-
     <a href="/config/announcements"
        hx-get="/config/announcements"
        hx-target="#content-area"
@@ -349,7 +327,6 @@
         <span class="nav-icon">📢</span>
         <span class="nav-text">Announcements</span>
     </a>
-
     <a href="/commands"
        hx-get="/commands"
        hx-target="#content-area"
@@ -360,7 +337,6 @@
         <span class="nav-icon">🎮</span>
         <span class="nav-text">Commands</span>
     </a>
-
     <a href="/config/access"
        hx-get="/config/access"
        hx-target="#content-area"
@@ -371,7 +347,6 @@
         <span class="nav-icon">🔐</span>
         <span class="nav-text">Dashboard Access</span>
     </a>
-
     <a href="/health"
        hx-get="/health"
        hx-target="#content-area"
@@ -383,9 +358,7 @@
         <span class="nav-text">System Health</span>
     </a>
 </div>
-
     </nav>
-
     <div style="padding:12px;border-top:1px solid var(--border);
                 display:flex;align-items:center;gap:10px;">
         {% if user and user.avatar %}
@@ -417,7 +390,6 @@
         </a>
     </div>
 </div>
-
 <div class="main-content">
     <div class="topbar">
         <div style="display:flex;align-items:center;gap:12px;">
@@ -430,12 +402,10 @@
             </div>
         </div>
     </div>
-
     <div class="page-content" id="content-area">
         {% block content %}{% endblock %}
     </div>
 </div>
-
 <div id="edit-modal" class="modal-overlay" style="display:none;">
     <div class="modal">
         <div class="modal-title">Edit Member — <span id="edit-uid-label" style="color:var(--accent)"></span></div>
@@ -454,7 +424,6 @@
         <div id="edit-modal-status" style="margin-top:10px;font-size:12px;"></div>
     </div>
 </div>
-
 <!-- SECURITY FIX (dark-fixes pass #2, CDN SRI): same reasoning as the
      select2 CSS link above — all three hashes computed from the exact
      published npm package bytes for their pinned versions. -->
@@ -471,7 +440,6 @@
 <script>
     htmx.config.globalViewTransitions = false;
     htmx.config.defaultSwapStyle = 'innerHTML';
-
     document.body.addEventListener('htmx:afterSwap', function(evt) {
         if (window.$ && $.fn.select2) {
             $(evt.detail.target).find('.select2-widget').select2({
@@ -491,14 +459,12 @@
             a.classList.toggle('active', href === path || (href === '/' && path === '/'));
         });
     });
-
     document.querySelectorAll('.nav-link').forEach(function(a) {
         a.addEventListener('click', function() {
             document.querySelectorAll('.nav-link').forEach(n => n.classList.remove('active'));
             a.classList.add('active');
         });
     });
-
     (function() {
         const path = window.location.pathname;
         document.querySelectorAll('.nav-link').forEach(function(a) {
@@ -509,7 +475,6 @@
     })();
 </script>
 {% block scripts %}{% endblock %}
-
 <style>
 .sidebar {
     width: var(--sidebar-w);
