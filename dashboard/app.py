@@ -990,6 +990,16 @@ def inventory_user_page(user_id: int):
                   items=items, target_user_id=user_id, **ctx)
 
 
+# ── Trade (read-only history) ───────────────────────────────────────────────
+
+@app.route("/trade")
+@require_page("trade")
+def trade_page():
+    guild_id = get_session_guild_id()
+    ctx = get_current_user_context()
+    return render("systems/trade.html", **ctx)
+
+
 # ── Config: General ────────────────────────────────────────────────────────────
 
 @app.route("/config/general", methods=["GET", "POST"])
