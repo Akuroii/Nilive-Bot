@@ -928,6 +928,20 @@ def minigames_page():
                   config=config, tiers=tiers, log=log, **ctx)
 
 
+# ── Missions ─────────────────────────────────────────────────────────────────
+#
+# Page data loads client-side via /api/missions/list and
+# /api/missions/completions (same pattern the minigames page already
+# uses), so no server-side query is needed in the route itself.
+
+@app.route("/missions")
+@require_page("missions")
+def missions_page():
+    guild_id = get_session_guild_id()
+    ctx = get_current_user_context()
+    return render("systems/missions.html", **ctx)
+
+
 # ── Ledger (Phase 3 E3 CLOSEOUT — read-only) ────────────────────────────────
 
 @app.route("/ledger")
@@ -1202,6 +1216,9 @@ COMMAND_CATEGORIES = {
     "Minigames": [
         "minigames_setup", "minigames_tier_add", "minigames_tier_list",
         "minigames_tier_remove", "minigames_force", "minigames_stats",
+    ],
+    "Missions": [
+        "missions", "mission_create", "mission_list", "mission_remove",
     ],
     "Tickets": [
         "ticket_close","ticket_claim","ticket_transfer",
