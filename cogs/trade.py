@@ -6,7 +6,7 @@ from utils.trade_engine import (
     ensure_trade_table, execute_trade, _empty_offer, TradeError,
     MAX_ITEM_LINES_PER_SIDE,
 )
-from utils.inventory import has_item
+from utils.inventory import has_item, get_inventory
 from utils.economy_safe import get_balance
 
 TRADE_TIMEOUT_SECONDS = 600  # 10 minutes
@@ -129,7 +129,98 @@ class AddDiamondsModal(discord.ui.Modal, title="Offer Diamonds"):
         await self.view_ref.refresh(interaction)
 
 
+# ─── Item picker (replaces free-text item-name entry) ───────────────────
+#
+# Previously "Offer Item" opened a modal with a raw text field for the
+# item name — a member had to know/type the exact name (case, spacing,
+# etc. all had to match inventory_items.item_name exactly, since
+# has_item() does a literal lookup). This is the carry-forward gap
+# flagged since pass #15 ("Item autocomplete/picker for Trade UI — not
+# yet built"). Discord slash-command autocomplete only works on command
+# options, not modal text inputs, so a modal can't offer live
+# suggestions — the fix is a Select menu instead: fetch the member's
+# actual inventory first, list what they hold as pickable options, and
+# only ask for a quantity (via a small modal) once they've picked a
+# real item they own. This makes offering a nonexistent/misspelled item
+# structurally impossible instead of just validated-and-rejected.
+#
+# Discord caps a Select at 25 options — if a member holds more than 25
+# distinct items, this shows their 25 highest-quantity ones. That's a
+# real (if unlikely) limitation for very item-heavy inventories; not
+# solved here since it would need pagination UI, which is out of scope
+# for this pass.
+
+class ItemQuantityModal(discord.ui.Modal):
+    quantity = discord.ui.TextInput(label="Quantity", default="1", required=True)
+
+    def __init__(self, view: "TradeView", item_name: str, available_qty: int):
+        super().__init__(title=f"Offer: {item_name}"[:45])
+        self.view_ref = view
+        self.item_name = item_name
+        self.quantity.placeholder = f"You have {available_qty}"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            qty = int(self.quantity.value)
+        except ValueError:
+            await interaction.response.send_message("Quantity must be a whole number.", ephemeral=True)
+            return
+        if qty <= 0:
+            await interaction.response.send_message("Quantity must be positive.", ephemeral=True)
+            return
+        # Re-checked live (not just against the snapshot the Select was
+        # built from) — the same "trust nothing older than this click"
+        # rule execute_trade() itself follows at execution time.
+        owns = await has_item(self.view_ref.session.guild_id, interaction.user.id, self.item_name, qty)
+        if not owns:
+            await interaction.response.send_message(
+                f"You don't have {qty}x **{self.item_name}** to offer.", ephemeral=True)
+            return
+        offer = self.view_ref.session.offers[interaction.user.id]
+        if self.item_name not in offer["items"] and len(offer["items"]) >= MAX_ITEM_LINES_PER_SIDE:
+            await interaction.response.send_message(
+                f"Max {MAX_ITEM_LINES_PER_SIDE} distinct items per side.", ephemeral=True)
+            return
+        offer["items"][self.item_name] = qty
+        self.view_ref.session.reset_ready()
+        await self.view_ref.refresh(interaction)
+
+
+class ItemPickerSelect(discord.ui.Select):
+    def __init__(self, view: "TradeView", items: list[dict]):
+        options = [
+            discord.SelectOption(
+                label=f"{it['item_name']} (×{it['quantity']})"[:100],
+                value=it["item_name"][:100],
+                description=it.get("item_type") or None,
+            )
+            for it in items
+        ]
+        super().__init__(placeholder="Choose an item to offer...", options=options)
+        self.view_ref = view
+        self._qty_by_name = {it["item_name"]: it["quantity"] for it in items}
+
+    async def callback(self, interaction: discord.Interaction):
+        item_name = self.values[0]
+        available = self._qty_by_name.get(item_name, 0)
+        await interaction.response.send_modal(
+            ItemQuantityModal(self.view_ref, item_name, available))
+
+
+class ItemPickerView(discord.ui.View):
+    def __init__(self, trade_view: "TradeView", items: list[dict]):
+        super().__init__(timeout=60)
+        self.add_item(ItemPickerSelect(trade_view, items))
+
+
 class AddItemModal(discord.ui.Modal, title="Offer an Item"):
+    """
+    Manual-entry fallback — kept for the >25-distinct-items case (where
+    a Select can't list everything) and for anyone who'd rather just
+    type the exact name. The picker above is the default path from the
+    "Offer Item" button; this is reached only when there are too many
+    items to list.
+    """
     item_name = discord.ui.TextInput(label="Item name (exact)", required=True)
     quantity = discord.ui.TextInput(label="Quantity", default="1", required=True)
 
@@ -208,7 +299,19 @@ class TradeView(discord.ui.View):
 
     @discord.ui.button(label="Offer Item", emoji="🎁", style=discord.ButtonStyle.secondary)
     async def offer_item(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AddItemModal(self))
+        items = await get_inventory(self.session.guild_id, interaction.user.id, include_empty=False)
+        if not items:
+            await interaction.response.send_message(
+                "You don't have any items to offer.", ephemeral=True)
+            return
+        if len(items) > 25:
+            # Select is capped at 25 options — fall back to manual
+            # entry rather than silently hiding items past the 25th.
+            await interaction.response.send_modal(AddItemModal(self))
+            return
+        view = ItemPickerView(self, items)
+        await interaction.response.send_message(
+            "Pick an item to offer:", view=view, ephemeral=True)
 
     @discord.ui.button(label="Clear My Offer", emoji="🔄", style=discord.ButtonStyle.secondary)
     async def clear_offer(self, interaction: discord.Interaction, button: discord.ui.Button):
