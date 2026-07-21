@@ -32,6 +32,11 @@ from flask import Blueprint, jsonify, request, session
 # Phase 6 (Missions, built ahead of the Trade-verification gate — see
 # utils/mission_engine.py header): added dashboard.api.missions, same
 # registration pattern.
+#
+# dark-fixes pass #17: added dashboard.api.trade — the optional,
+# read-only Trade history page flagged since pass #15 (Trade dashboard
+# page, "not yet built"). Same registration pattern as minigames and
+# missions above.
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -64,3 +69,4 @@ from dashboard.api import misc          # noqa: E402,F401
 from dashboard.api import moderation    # noqa: E402,F401
 from dashboard.api import mvp           # noqa: E402,F401
 from dashboard.api import tickets       # noqa: E402,F401
+from dashboard.api import trade         # noqa: E402,F401

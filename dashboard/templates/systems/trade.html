@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Trade History{% endblock %}
+{% block content %}
+<span data-page-title="Trade History"></span>
+
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0">🤝 Trade History</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input class="form-input" id="trade-user" placeholder="Filter by User ID..." style="max-width:200px;">
+            <button class="btn btn-secondary" onclick="loadTrades()">🔄 Refresh</button>
+        </div>
+    </div>
+    <p class="text-muted text-sm" style="margin-bottom:16px;">
+        Read-only log of completed trades between members. Every trade is a fully atomic
+        two-way swap of coins, diamonds, and items — balances and inventory were re-verified
+        live at the moment of execution, not just when the offer was built. Trades can only
+        be created through the <code>/trade</code> Discord command; there is nothing to
+        edit or reverse here.
+    </p>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>ID</th><th>Member A gave</th><th>Member B gave</th><th>Date</th></tr>
+            </thead>
+            <tbody id="trade-tbody">
+                <tr><td colspan="4" class="empty">Loading…</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+function summarizeOffer(offer) {
+    const parts = [];
+    if (offer.coins) parts.push(`🪙 ${offer.coins.toLocaleString()}`);
+    if (offer.diamonds) parts.push(`💎 ${offer.diamonds.toLocaleString()}`);
+    if (offer.items) {
+        for (const [name, qty] of Object.entries(offer.items)) {
+            parts.push(`🎁 ${name} ×${qty}`);
+        }
+    }
+    return parts.length ? parts.join(', ') : '<span class="text-muted">nothing</span>';
+}
+
+async function loadTrades() {
+    const userId = document.getElementById('trade-user').value.trim();
+    const params = new URLSearchParams();
+    if (userId) params.set('user_id', userId);
+    params.set('limit', 100);
+
+    const res  = await fetch('/api/trade/history?' + params.toString());
+    const data = await res.json();
+    const tbody = document.getElementById('trade-tbody');
+    if (!data.trades || !data.trades.length) {
+        tbody.innerHTML = "<tr><td colspan='4' class='empty'>No trades recorded yet</td></tr>";
+        return;
+    }
+    tbody.innerHTML = data.trades.map(t => `
+        <tr>
+            <td><strong>#${t.id}</strong></td>
+            <td><code>${t.user_a}</code> gave ${summarizeOffer(t.offer_a)}</td>
+            <td><code>${t.user_b}</code> gave ${summarizeOffer(t.offer_b)}</td>
+            <td class="text-muted">${t.created_at ? t.created_at.slice(0,16) : '—'}</td>
+        </tr>`).join('');
+}
+
+document.getElementById('trade-user').addEventListener('keydown', e => {
+    if (e.key === 'Enter') loadTrades();
+});
+
+loadTrades();
+</script>
+{% endblock %}
+{% endblock %}

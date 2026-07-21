@@ -105,6 +105,11 @@ PAGE_PERMISSIONS = {
     # mission definition CRUD is an admin action.
     "missions":           LEVEL_ADMIN,
 
+    # Trade history page (dark-fixes pass #17). Read-only, same tier
+    # as ledger/inventory — viewing member trade history is an admin-
+    # level concern, not owner-only.
+    "trade":              LEVEL_ADMIN,
+
     "general_settings":   LEVEL_OWNER,
     "welcome":            LEVEL_ADMIN,
     "boost":              LEVEL_ADMIN,
