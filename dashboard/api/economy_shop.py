@@ -18,6 +18,16 @@ from dashboard.api import api_bp
 
 # ── Economy / Shop ────────────────────────────────────────────────────────────
 
+# dark-fixes pass #18 (username resolver rollout, task #3 of 6): the two
+# htmx-loaded leaderboard partials below previously rendered raw
+# `<code>{{user_id}}</code>` — no snapshot table backs Economy (unlike
+# moderation_logs/purchase_history/etc), so a live resolve is correct
+# here. Both partials batch-resolve every ID on the page in ONE
+# resolve_users() call, not per-row, then render through the same
+# dashboard/utils/user_identity.py helper used everywhere else the
+# "Username (big) / User ID (small)" pattern appears.
+
+
 @api_bp.route("/economy/leaderboard")
 @require_api_permission(LEVEL_ADMIN)
 def economy_leaderboard_partial():
@@ -32,11 +42,22 @@ def economy_leaderboard_partial():
             return await cursor.fetchall()
 
     rows = run_async(fetch())
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        return await resolve_users(guild_id, [r[0] for r in rows])
+
+    user_map = run_async(resolve()) if rows else {}
+
+    from dashboard.utils.user_identity import render_user_identity_html
     html = ""
     for i, r in enumerate(rows, 1):
+        u = user_map.get(r[0], {})
+        identity_html = render_user_identity_html(
+            r[0], u.get("display_name"), u.get("username"), u.get("avatar_url"))
         html += (
             f"<tr><td>#{i}</td>"
-            f"<td><code>{r[0]}</code></td>"
+            f"<td>{identity_html}</td>"
             f"<td><strong>🪙 {r[1]:,}</strong></td></tr>"
         )
     return html or "<tr><td colspan='3' class='empty'>No data yet</td></tr>"
@@ -57,11 +78,22 @@ def economy_leaderboard_diamonds_partial():
             return await cursor.fetchall()
 
     rows = run_async(fetch())
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        return await resolve_users(guild_id, [r[0] for r in rows])
+
+    user_map = run_async(resolve()) if rows else {}
+
+    from dashboard.utils.user_identity import render_user_identity_html
     html = ""
     for i, r in enumerate(rows, 1):
+        u = user_map.get(r[0], {})
+        identity_html = render_user_identity_html(
+            r[0], u.get("display_name"), u.get("username"), u.get("avatar_url"))
         html += (
             f"<tr><td>#{i}</td>"
-            f"<td><code>{r[0]}</code></td>"
+            f"<td>{identity_html}</td>"
             f"<td><strong>💎 {r[1]:,}</strong></td></tr>"
         )
     return html or "<tr><td colspan='3' class='empty'>No diamonds held yet</td></tr>"
@@ -287,5 +319,3 @@ def shop_temp_roles():
             f"</tr>"
         )
     return html or "<tr><td colspan='4' class='empty'>No active temp roles</td></tr>"
-
-

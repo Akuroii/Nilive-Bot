@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "macros/user_identity.html" import user_identity %}
 {% block title %}Economy{% endblock %}
 {% block content %}
 <span data-page-title="Economy"></span>
@@ -22,17 +23,18 @@
         <div class="table-wrap">
             <table class="table">
                 <thead>
-                    <tr><th>Rank</th><th>User ID</th><th>Balance</th></tr>
+                    <tr><th>Rank</th><th>Member</th><th>Balance</th></tr>
                 </thead>
                 <tbody hx-get="/api/economy/leaderboard" hx-trigger="load" hx-swap="innerHTML">
                     {% for b in balances %}
+                    {% set u = user_map.get(b[0], {}) %}
                     <tr>
                         <td>
                             <div class="rank-badge {% if loop.index == 1 %}rank-1{% elif loop.index == 2 %}rank-2{% elif loop.index == 3 %}rank-3{% else %}rank-n{% endif %}">
                                 {{ loop.index }}
                             </div>
                         </td>
-                        <td><code>{{ b[0] }}</code></td>
+                        <td>{{ user_identity(b[0], u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
                         <td><strong style="color:var(--gold);">🪙 {{ "{:,}".format(b[1]) }}</strong></td>
                     </tr>
                     {% else %}
@@ -56,17 +58,18 @@
         <div class="table-wrap">
             <table class="table">
                 <thead>
-                    <tr><th>Rank</th><th>User ID</th><th>Diamonds</th></tr>
+                    <tr><th>Rank</th><th>Member</th><th>Diamonds</th></tr>
                 </thead>
                 <tbody hx-get="/api/economy/leaderboard-diamonds" hx-trigger="load" hx-swap="innerHTML">
                     {% for d in diamonds %}
+                    {% set u = user_map.get(d[0], {}) %}
                     <tr>
                         <td>
                             <div class="rank-badge {% if loop.index == 1 %}rank-1{% elif loop.index == 2 %}rank-2{% elif loop.index == 3 %}rank-3{% else %}rank-n{% endif %}">
                                 {{ loop.index }}
                             </div>
                         </td>
-                        <td><code>{{ d[0] }}</code></td>
+                        <td>{{ user_identity(d[0], u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
                         <td><strong style="color:var(--accent);">💎 {{ "{:,}".format(d[1]) }}</strong></td>
                     </tr>
                     {% else %}

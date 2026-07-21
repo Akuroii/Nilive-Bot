@@ -841,10 +841,27 @@ def economy():
         return balances, diamonds, (rrow[0] if rrow and rrow[0] else 500)
 
     balances, diamonds, exchange_rate = run_async(get_data())
+
+    # dark-fixes pass #18 (username resolver rollout, task #3 of 6):
+    # Economy previously showed raw user_id in both the Coins and
+    # Diamonds tabs — no snapshot table backs this page (unlike
+    # moderation_logs/purchase_history/etc), so a live resolve is the
+    # only correct source here. One batched resolve_users() call per
+    # page load covering every ID from both lists (not per-row), same
+    # "resolve once, render many" shape the Trade History page already
+    # established client-side via /api/trade/history.
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        ids = {r[0] for r in balances} | {r[0] for r in diamonds}
+        if not ids:
+            return {}
+        return await resolve_users(guild_id, list(ids))
+
+    user_map = run_async(resolve())
     ctx = get_current_user_context()
     return render("systems/economy.html",
                   balances=balances, diamonds=diamonds,
-                  exchange_rate=exchange_rate, **ctx)
+                  exchange_rate=exchange_rate, user_map=user_map, **ctx)
 
 
 # ── Shop ───────────────────────────────────────────────────────────────────────
