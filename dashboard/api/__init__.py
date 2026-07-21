@@ -28,6 +28,10 @@ from flask import Blueprint, jsonify, request, session
 # every other submodule below: import it, its @api_bp.route(...)
 # decorators register onto the shared blueprint, no other file needs
 # to change.
+#
+# Phase 6 (Missions, built ahead of the Trade-verification gate — see
+# utils/mission_engine.py header): added dashboard.api.missions, same
+# registration pattern.
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -55,6 +59,7 @@ from dashboard.api import core          # noqa: E402,F401
 from dashboard.api import economy_shop  # noqa: E402,F401
 from dashboard.api import leveling      # noqa: E402,F401
 from dashboard.api import minigames     # noqa: E402,F401
+from dashboard.api import missions      # noqa: E402,F401
 from dashboard.api import misc          # noqa: E402,F401
 from dashboard.api import moderation    # noqa: E402,F401
 from dashboard.api import mvp           # noqa: E402,F401

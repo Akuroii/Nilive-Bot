@@ -1,0 +1,241 @@
+{% extends "base.html" %}
+{% block title %}Missions{% endblock %}
+{% block content %}
+<span data-page-title="Missions"></span>
+
+<div style="display:flex;gap:4px;margin-bottom:20px;
+            border-bottom:1px solid var(--border);padding-bottom:0;">
+    {% for tab, label in [('missions','🗺️ Missions'),('log','📜 Recent Completions')] %}
+    <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
+        style="padding:10px 18px;border:none;background:transparent;
+               color:var(--text2);font-size:13px;font-weight:500;
+               cursor:pointer;border-bottom:2px solid transparent;
+               transition:all .15s;margin-bottom:-1px;min-height:44px;"
+        class="tab-btn">{{ label }}</button>
+    {% endfor %}
+</div>
+
+<!-- MISSIONS TAB -->
+<div id="tab-content-missions" class="tab-content">
+    <div class="card">
+        <div class="card-title">➕ Add Mission</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Reward is granted automatically the instant a member crosses the target —
+            no separate claim step. Daily/weekly missions reset on their own each period.
+        </p>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">Name</label>
+                <input class="form-input" id="ms-name" placeholder="e.g. Chatterbox">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Type</label>
+                <select class="form-input" id="ms-type">
+                    <option value="messages">Messages sent</option>
+                    <option value="words">Words typed</option>
+                    <option value="voice_minutes">Minutes in voice</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Target</label>
+                <input class="form-input" id="ms-target" type="number" min="1" placeholder="e.g. 20">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Period</label>
+                <select class="form-input" id="ms-period">
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="once">One-time</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Reward type</label>
+                <select class="form-input" id="ms-reward-type" onchange="toggleMsDurationField()">
+                    <option value="coins">🪙 Coins</option>
+                    <option value="diamonds">💎 Diamonds</option>
+                    <option value="xp">⭐ XP</option>
+                    <option value="role">Permanent Role</option>
+                    <option value="temp_role">Temporary Role</option>
+                    <option value="item">Item</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label" id="ms-reward-value-label">Amount</label>
+                <input class="form-input" id="ms-reward-value" placeholder="e.g. 500, a Role ID, or an item name">
+            </div>
+            <div class="form-group" id="ms-duration-field" style="display:none;">
+                <label class="form-label">Duration hours (temp_role only)</label>
+                <input class="form-input" id="ms-duration" type="number" min="1">
+            </div>
+            <div class="form-group" style="grid-column:1/-1;">
+                <label class="form-label">Description (optional)</label>
+                <input class="form-input" id="ms-desc" placeholder="Shown to members in /missions">
+            </div>
+        </div>
+        <button class="btn btn-primary" onclick="addMission()">Add Mission</button>
+        <div id="ms-status" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">🗺️ Configured Missions</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr><th>Name</th><th>Type</th><th>Target</th><th>Period</th><th>Reward</th><th>Status</th><th></th></tr>
+                </thead>
+                <tbody id="ms-tbody">
+                    <tr><td colspan="7" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- LOG TAB -->
+<div id="tab-content-log" class="tab-content" style="display:none;">
+    <div class="card">
+        <div class="card-title">📜 Recent Completions</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr><th>User ID</th><th>Mission</th><th>Reward</th><th>Period</th><th>Completed</th></tr>
+                </thead>
+                <tbody id="ms-log-tbody">
+                    <tr><td colspan="5" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+const MS_TYPE_LABEL = {messages:'Messages', words:'Words', voice_minutes:'Voice min'};
+const MS_PERIOD_LABEL = {daily:'Daily', weekly:'Weekly', once:'One-time'};
+
+function switchTab(name) {
+    document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+    document.getElementById('tab-content-' + name).style.display = 'block';
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.style.borderBottomColor = 'transparent';
+        btn.style.color = 'var(--text2)';
+    });
+    const active = document.getElementById('tab-' + name);
+    active.style.borderBottomColor = 'var(--accent)';
+    active.style.color = 'var(--text)';
+}
+switchTab('missions');
+
+function toggleMsDurationField() {
+    const type = document.getElementById('ms-reward-type').value;
+    const durField = document.getElementById('ms-duration-field');
+    const valLabel = document.getElementById('ms-reward-value-label');
+    durField.style.display = type === 'temp_role' ? 'block' : 'none';
+    if (type === 'role' || type === 'temp_role') valLabel.textContent = 'Role ID';
+    else if (type === 'item') valLabel.textContent = 'Item name';
+    else valLabel.textContent = 'Amount';
+}
+toggleMsDurationField();
+
+async function loadMissions() {
+    const res = await fetch('/api/missions/list');
+    if (!res.ok) return;
+    const data = await res.json();
+    const tbody = document.getElementById('ms-tbody');
+    if (!data.missions || !data.missions.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No missions configured yet.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = data.missions.map(m => `
+        <tr>
+            <td><strong>${m.name}</strong>${m.description ? `<div class="text-muted text-sm">${m.description}</div>` : ''}</td>
+            <td>${MS_TYPE_LABEL[m.type] || m.type}</td>
+            <td>${m.target}</td>
+            <td>${MS_PERIOD_LABEL[m.period] || m.period}</td>
+            <td>${m.reward_type}: <code>${m.reward_value}</code>${m.reward_duration_hours ? ` (${m.reward_duration_hours}h)` : ''}</td>
+            <td><span class="badge ${m.enabled ? 'badge-success' : 'badge-danger'}">${m.enabled ? 'Active' : 'Disabled'}</span></td>
+            <td style="display:flex;gap:6px;">
+                <button class="btn btn-sm btn-secondary" onclick="toggleMission(${m.id}, ${m.enabled ? 0 : 1})">
+                    ${m.enabled ? 'Disable' : 'Enable'}
+                </button>
+                <button class="btn btn-sm btn-danger"
+                    onclick="showConfirm('Delete mission &quot;${m.name}&quot;?', () => deleteMission(${m.id}))">
+                    Delete
+                </button>
+            </td>
+        </tr>`).join('');
+}
+loadMissions();
+
+async function addMission() {
+    const type = document.getElementById('ms-reward-type').value;
+    const value = document.getElementById('ms-reward-value').value.trim();
+    const name = document.getElementById('ms-name').value.trim();
+    if (!name) { showToast('Enter a mission name', 'warning'); return; }
+    if (!value) { showToast('Enter a reward value', 'warning'); return; }
+    const payload = {
+        name,
+        description: document.getElementById('ms-desc').value.trim() || null,
+        type: document.getElementById('ms-type').value,
+        target: parseInt(document.getElementById('ms-target').value),
+        period: document.getElementById('ms-period').value,
+        reward_type: type,
+        reward_value: value,
+        reward_duration_hours: type === 'temp_role'
+            ? (parseInt(document.getElementById('ms-duration').value) || null)
+            : null,
+    };
+    const res  = await fetch('/api/missions/definition', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast('Mission added!');
+        document.getElementById('ms-name').value = '';
+        document.getElementById('ms-target').value = '';
+        document.getElementById('ms-reward-value').value = '';
+        document.getElementById('ms-desc').value = '';
+        loadMissions();
+    } else {
+        showToast(data.error || 'Error adding mission', 'error');
+    }
+}
+
+async function toggleMission(id, enabled) {
+    await fetch(`/api/missions/definition/${id}/toggle`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ enabled: !!enabled }),
+    });
+    loadMissions();
+}
+
+async function deleteMission(id) {
+    const res  = await fetch(`/api/missions/definition/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) { showToast('Mission removed', 'info'); loadMissions(); }
+    else showToast('Error', 'error');
+}
+
+async function loadMissionLog() {
+    const res = await fetch('/api/missions/completions');
+    if (!res.ok) return;
+    const data = await res.json();
+    const tbody = document.getElementById('ms-log-tbody');
+    if (!data.completions || !data.completions.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">No completions yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = data.completions.map(c => `
+        <tr>
+            <td><code>${c.user_id}</code></td>
+            <td>${c.mission_name}</td>
+            <td>${c.reward_type}: <code>${c.reward_value}</code></td>
+            <td class="text-muted">${c.period_key}</td>
+            <td class="text-muted">${c.completed_at ? c.completed_at.slice(0,16) : '—'}</td>
+        </tr>`).join('');
+}
+loadMissionLog();
+</script>
+{% endblock %}
+{% endblock %}

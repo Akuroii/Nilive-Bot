@@ -100,6 +100,11 @@ PAGE_PERMISSIONS = {
     # nothing here needs owner-only.
     "minigames":          LEVEL_ADMIN,
 
+    # Missions (Phase 6, built ahead of the Trade-verification gate —
+    # see utils/mission_engine.py header). Same tier as minigames:
+    # mission definition CRUD is an admin action.
+    "missions":           LEVEL_ADMIN,
+
     "general_settings":   LEVEL_OWNER,
     "welcome":            LEVEL_ADMIN,
     "boost":              LEVEL_ADMIN,
