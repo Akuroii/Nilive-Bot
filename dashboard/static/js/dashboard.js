@@ -204,6 +204,40 @@ function syncColorInput(pickerId, textId) {
     });
 }
 
+// ── USER IDENTITY CELL (client-rendered pages) ────────────────
+// JS twin of dashboard/templates/macros/user_identity.html and
+// dashboard/utils/user_identity.py — for pages that build their
+// table rows entirely client-side via fetch() + template literals
+// (Trade History, Missions) rather than server-rendered/htmx-partial
+// HTML. Escapes name/id since a Discord nickname is attacker-
+// controlled text being inserted via innerHTML.
+function _escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str == null ? '' : String(str);
+    return div.innerHTML;
+}
+
+function userIdentityHtml(userId, displayName, avatarUrl, compact = false) {
+    const rawName = displayName || `User ${userId}`;
+    const name    = _escapeHtml(rawName);
+    const idStr   = _escapeHtml(userId);
+    const initial = _escapeHtml((rawName[0] || '?').toUpperCase());
+
+    let avatarHtml = '';
+    if (!compact) {
+        if (avatarUrl) {
+            const avatarEsc = _escapeHtml(avatarUrl);
+            avatarHtml = `<img src="${avatarEsc}" class="user-identity-avatar"
+                onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+                <div class="user-identity-avatar-fallback" style="display:none;">${initial}</div>`;
+        } else {
+            avatarHtml = `<div class="user-identity-avatar-fallback">${initial}</div>`;
+        }
+    }
+    const compactClass = compact ? ' user-identity-compact' : '';
+    return `<div class="user-identity${compactClass}">${avatarHtml}<div class="user-identity-text"><div class="user-identity-name">${name}</div><div class="user-identity-id">${idStr}</div></div></div>`;
+}
+
 // ── CLOSE MODAL ON OVERLAY CLICK ─────────────────────────────
 document.addEventListener('click', function(e) {
     const co = document.getElementById('confirm-overlay');
