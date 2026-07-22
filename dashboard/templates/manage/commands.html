@@ -6,7 +6,7 @@
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
     <div>
         <h2 style="margin:0;font-size:18px;">🎮 Command Manager</h2>
-        <div class="text-muted text-sm">Toggle and configure bot commands per category.</div>
+        <div class="text-muted text-sm">Toggle commands, or click Edit for aliases, cooldowns, and role/channel restrictions.</div>
     </div>
     <div style="display:flex;gap:8px;">
         <button class="btn btn-secondary"
@@ -25,41 +25,290 @@
                     onclick="bulkCategory('{{ category }}', true)">Enable All</button>
             <button class="btn btn-sm btn-danger"
                     onclick="bulkCategory('{{ category }}', false)">Disable All</button>
+            <button class="btn btn-sm btn-secondary cmd-category-restrict-btn"
+                    onclick="openCategoryRestrictModal('{{ category }}')"
+                    title="Apply the same role/channel restriction to every command in this category">
+                🔐 Restrict Category
+            </button>
         </div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;">
+    <div class="cmd-list">
         {% for cmd in cmds %}
         {% set t = toggles.get(cmd, {}) %}
         {% set enabled = t.get('enabled', 1) %}
-        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;
-                    padding:12px 14px;display:flex;align-items:center;
-                    justify-content:space-between;gap:8px;"
-             id="cmd-{{ cmd }}">
-            <div>
-                <div style="font-weight:600;font-size:13px;">/{{ cmd }}</div>
-                {% if t.get('cooldown') %}
-                <div style="font-size:11px;color:var(--text3);">⏱ {{ t.cooldown }}s cooldown</div>
-                {% endif %}
-                <div style="font-size:11px;margin-top:2px;">
-                    {% if enabled %}
-                    <span style="color:var(--success);">● Enabled</span>
-                    {% else %}
-                    <span style="color:var(--danger);">● Disabled</span>
-                    {% endif %}
+        {% set has_restrictions = t.get('enabled_roles') or t.get('disabled_roles') or t.get('enabled_channels') or t.get('disabled_channels') %}
+        {% set has_cooldown = t.get('cooldown') %}
+        {% set has_aliases = t.get('aliases') %}
+        <div class="cmd-row" id="cmd-{{ cmd }}" data-command="{{ cmd }}">
+            <div class="cmd-row-header">
+                <div class="cmd-row-main">
+                    <div class="cmd-row-name-line">
+                        <span class="cmd-row-name">/{{ cmd }}</span>
+                        {% if has_cooldown %}
+                        <span class="cmd-chip" title="Cooldown">⏱ {{ t.cooldown }}s</span>
+                        {% endif %}
+                        {% if has_restrictions %}
+                        <span class="cmd-chip cmd-chip-accent" title="Restricted to specific roles/channels">🔐 Restricted</span>
+                        {% endif %}
+                        {% if has_aliases %}
+                        <span class="cmd-chip" title="Aliases">{{ has_aliases | length if has_aliases is iterable and has_aliases is not string else '' }}</span>
+                        {% endif %}
+                    </div>
+                    <div class="cmd-row-status">
+                        {% if enabled %}
+                        <span class="cmd-status-dot cmd-status-on"></span><span class="text-muted text-sm">Enabled</span>
+                        {% else %}
+                        <span class="cmd-status-dot cmd-status-off"></span><span class="text-muted text-sm">Disabled</span>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="cmd-row-actions">
+                    <button type="button" class="btn btn-sm btn-secondary cmd-edit-toggle"
+                            id="edit-btn-{{ cmd }}"
+                            onclick="toggleEditPanel('{{ cmd }}')">
+                        <span class="cmd-edit-chevron">›</span> Edit
+                    </button>
+                    <label class="toggle" title="{% if enabled %}Disable{% else %}Enable{% endif %} /{{ cmd }}">
+                        <input type="checkbox" {% if enabled %}checked{% endif %}
+                               onchange="toggleCmd('{{ cmd }}', this.checked, this)">
+                        <span class="toggle-slider"></span>
+                    </label>
                 </div>
             </div>
-            <button class="btn btn-sm {% if enabled %}btn-danger{% else %}btn-success{% endif %}"
-                    onclick="toggleCmd('{{ cmd }}', {% if enabled %}false{% else %}true{% endif %}, this)">
-                {% if enabled %}Disable{% else %}Enable{% endif %}
-            </button>
+
+            <div class="cmd-edit-panel" id="edit-panel-{{ cmd }}">
+                <div class="cmd-edit-panel-inner">
+                    <div class="cmd-edit-panel-content" id="edit-content-{{ cmd }}">
+                        <div class="cmd-edit-loading" id="edit-loading-{{ cmd }}">
+                            <span class="ns-spinner"></span> Loading settings…
+                        </div>
+                        <div class="cmd-edit-fields" id="edit-fields-{{ cmd }}" style="display:none;">
+                            <div class="cmd-edit-grid">
+                                <div class="form-group" style="margin-bottom:0;">
+                                    <label class="form-label">Aliases</label>
+                                    <input class="form-input" id="edit-aliases-{{ cmd }}"
+                                           placeholder="e.g. p, pf, profil">
+                                    <div class="form-hint">Comma-separated. Cosmetic only — shown in the dashboard, not re-registered with Discord.</div>
+                                </div>
+                                <div class="form-group" style="margin-bottom:0;">
+                                    <label class="form-label">Cooldown (seconds)</label>
+                                    <input class="form-input" type="number" min="0" id="edit-cooldown-{{ cmd }}"
+                                           placeholder="0 = no cooldown">
+                                    <div class="form-hint">Members with a bypass role skip this.</div>
+                                </div>
+                                <div class="form-group" style="margin-bottom:0;">
+                                    <label class="form-label">Enabled roles</label>
+                                    <select class="form-input cmd-multi-role" id="edit-enabled-roles-{{ cmd }}" multiple></select>
+                                    <div class="form-hint">Only these roles can use it. Empty = everyone.</div>
+                                </div>
+                                <div class="form-group" style="margin-bottom:0;">
+                                    <label class="form-label">Disabled roles</label>
+                                    <select class="form-input cmd-multi-role" id="edit-disabled-roles-{{ cmd }}" multiple></select>
+                                    <div class="form-hint">These roles are blocked, even if enabled above.</div>
+                                </div>
+                                <div class="form-group" style="margin-bottom:0;">
+                                    <label class="form-label">Enabled channels</label>
+                                    <select class="form-input cmd-multi-channel" id="edit-enabled-channels-{{ cmd }}" multiple></select>
+                                    <div class="form-hint">Only usable in these channels. Empty = everywhere.</div>
+                                </div>
+                                <div class="form-group" style="margin-bottom:0;">
+                                    <label class="form-label">Disabled channels</label>
+                                    <select class="form-input cmd-multi-channel" id="edit-disabled-channels-{{ cmd }}" multiple></select>
+                                    <div class="form-hint">Blocked in these channels, even if enabled above.</div>
+                                </div>
+                            </div>
+                            <div class="cmd-edit-actions">
+                                <button type="button" class="btn btn-primary" onclick="saveCommandSettings('{{ cmd }}', this)">
+                                    💾 Save Changes
+                                </button>
+                                <button type="button" class="btn btn-secondary" onclick="toggleEditPanel('{{ cmd }}')">
+                                    Cancel
+                                </button>
+                                <span class="cmd-edit-status" id="edit-status-{{ cmd }}"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
         {% endfor %}
     </div>
 </div>
 {% endfor %}
 
+<!-- Category-level bulk restriction modal -->
+<div id="cat-restrict-modal" class="modal-overlay" style="display:none;">
+    <div class="modal">
+        <div class="modal-title">🔐 Restrict Category — <span id="cat-restrict-name" style="color:var(--accent);"></span></div>
+        <div class="modal-body">
+            Applies these role/channel restrictions to every command in this category, replacing whatever
+            each command had configured individually. Leave a field empty to leave that restriction untouched
+            for every command in the category.
+        </div>
+        <div class="form-group">
+            <label class="form-label">Enabled roles</label>
+            <select class="form-input cmd-multi-role" id="cat-restrict-enabled-roles" multiple></select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Disabled roles</label>
+            <select class="form-input cmd-multi-role" id="cat-restrict-disabled-roles" multiple></select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Enabled channels</label>
+            <select class="form-input cmd-multi-channel" id="cat-restrict-enabled-channels" multiple></select>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+            <label class="form-label">Disabled channels</label>
+            <select class="form-input cmd-multi-channel" id="cat-restrict-disabled-channels" multiple></select>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" onclick="closeCategoryRestrictModal()">Cancel</button>
+            <button class="btn btn-primary" id="cat-restrict-apply-btn" onclick="applyCategoryRestrict()">Apply to Category</button>
+        </div>
+        <div id="cat-restrict-status" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+</div>
+
+<style>
+/* ── Command rows ─────────────────────────────────────────────────── */
+.cmd-list { display: flex; flex-direction: column; gap: 8px; }
+
+.cmd-row {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    transition: border-color 200ms ease;
+    overflow: hidden;
+}
+.cmd-row:hover { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+
+.cmd-row-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 13px 16px;
+}
+
+.cmd-row-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+
+.cmd-row-name-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cmd-row-name { font-weight: 600; font-size: 13px; color: var(--text); }
+
+.cmd-chip {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text3);
+    background: var(--bg4);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 8px;
+    line-height: 1.5;
+    white-space: nowrap;
+}
+.cmd-chip-accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); background: rgba(124,92,191,.12); }
+
+.cmd-row-status { display: flex; align-items: center; gap: 6px; }
+.cmd-status-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.cmd-status-on  { background: var(--success); box-shadow: 0 0 0 3px rgba(87,242,135,.15); }
+.cmd-status-off { background: var(--danger);  box-shadow: 0 0 0 3px rgba(237,66,69,.15); }
+
+.cmd-row-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+
+.cmd-edit-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.cmd-edit-chevron {
+    display: inline-block;
+    font-size: 13px;
+    transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+    transform: rotate(0deg);
+}
+.cmd-row.cmd-row-expanded .cmd-edit-chevron { transform: rotate(90deg); }
+
+/* Respond on press, not release — Apple HIG "Response" principle */
+.cmd-edit-toggle:active { transform: scale(0.96); transition: transform 100ms ease-out; }
+
+/* ── Expand/collapse panel ────────────────────────────────────────── */
+/* grid-rows 0fr -> 1fr gives a real "auto height" animation without
+   JS measuring the content — asymmetric timing (slower open, snappier
+   close) is a deliberate small polish detail, not an accident. */
+.cmd-edit-panel {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 340ms cubic-bezier(0.22, 1, 0.36, 1);
+    border-top: 0px solid var(--border);
+}
+.cmd-row.cmd-row-expanded .cmd-edit-panel {
+    grid-template-rows: 1fr;
+    border-top: 1px solid var(--border);
+    transition: grid-template-rows 260ms cubic-bezier(0.22, 1, 0.36, 1), border-color 200ms ease;
+}
+.cmd-edit-panel-inner { overflow: hidden; min-height: 0; }
+.cmd-edit-panel-content { padding: 16px; }
+
+.cmd-edit-fields, .cmd-edit-loading {
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity 220ms ease, transform 220ms ease;
+}
+.cmd-row.cmd-row-expanded .cmd-edit-fields,
+.cmd-row.cmd-row-expanded .cmd-edit-loading {
+    opacity: 1;
+    transform: translateY(0);
+    transition-delay: 90ms;
+}
+
+.cmd-edit-loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text3);
+    padding: 8px 0;
+}
+
+.cmd-edit-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+@media (max-width: 640px) { .cmd-edit-grid { grid-template-columns: 1fr; } }
+
+.cmd-edit-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+}
+.cmd-edit-status { font-size: 12px; font-weight: 500; }
+.cmd-edit-status.ok    { color: var(--success); }
+.cmd-edit-status.error { color: var(--danger); }
+
+/* Focus glow on select2 fields inside the edit panel — matches
+   .form-input:focus elsewhere, select2 just needs its own hook since
+   the real focusable element is inside the select2 wrapper. */
+.cmd-edit-fields .select2-container--focus .select2-selection,
+.cmd-edit-fields .select2-container--open .select2-selection {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 3px rgba(124,92,191,.18);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .cmd-edit-panel { transition: opacity 150ms ease !important; }
+    .cmd-edit-fields, .cmd-edit-loading { transition: opacity 150ms ease !important; transform: none !important; transition-delay: 0ms !important; }
+    .cmd-edit-chevron { transition: none !important; }
+}
+</style>
+
+{% block scripts %}
 <script>
-async function toggleCmd(cmd, enable, btn) {
+// ── ENABLE/DISABLE (per-command toggle switch) ──────────────────────
+async function toggleCmd(cmd, enable, checkboxEl) {
     const res = await fetch('/api/commands/toggle', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -68,20 +317,16 @@ async function toggleCmd(cmd, enable, btn) {
     const data = await res.json();
     if (data.success) {
         showToast(`/${cmd} ${enable ? 'enabled' : 'disabled'}`, 'success');
-        // Update UI without reload
-        const card = document.getElementById(`cmd-${cmd}`);
-        if (card) {
-            const status = card.querySelector('[style*="color:var(--success)"], [style*="color:var(--danger)"]');
-            if (status) {
-                status.style.color = enable ? 'var(--success)' : 'var(--danger)';
-                status.textContent = enable ? '● Enabled' : '● Disabled';
-            }
-            btn.textContent = enable ? 'Disable' : 'Enable';
-            btn.className = `btn btn-sm ${enable ? 'btn-danger' : 'btn-success'}`;
-            btn.onclick = function() { toggleCmd(cmd, !enable, btn); };
+        const row = document.getElementById(`cmd-${cmd}`);
+        if (row) {
+            const dot = row.querySelector('.cmd-status-dot');
+            const label = row.querySelector('.cmd-row-status .text-muted');
+            if (dot) { dot.classList.toggle('cmd-status-on', enable); dot.classList.toggle('cmd-status-off', !enable); }
+            if (label) label.textContent = enable ? 'Enabled' : 'Disabled';
         }
     } else {
         showToast(data.error || 'Failed', 'error');
+        checkboxEl.checked = !enable; // revert the switch on failure
     }
 }
 
@@ -115,5 +360,194 @@ async function bulkCategory(category, enable) {
         showToast(data.error || 'Failed', 'error');
     }
 }
+
+// ── EDIT PANEL (expand/collapse + lazy load + save) ─────────────────
+const _cmdPanelLoaded = new Set();
+
+function toggleEditPanel(cmd) {
+    const row = document.getElementById(`cmd-${cmd}`);
+    if (!row) return;
+    const opening = !row.classList.contains('cmd-row-expanded');
+    row.classList.toggle('cmd-row-expanded', opening);
+
+    const btn = document.getElementById(`edit-btn-${cmd}`);
+    if (btn) {
+        const label = opening ? 'Close' : 'Edit';
+        btn.innerHTML = `<span class="cmd-edit-chevron">›</span> ${label}`;
+    }
+
+    if (opening && !_cmdPanelLoaded.has(cmd)) {
+        _cmdPanelLoaded.add(cmd);
+        loadCommandSettings(cmd);
+    }
+}
+
+async function loadCommandSettings(cmd) {
+    let data = {};
+    try {
+        const res = await fetch(`/api/commands/settings/${encodeURIComponent(cmd)}`);
+        data = await res.json();
+    } catch (e) {
+        data = {};
+    }
+
+    const parseArr = v => {
+        if (Array.isArray(v)) return v;
+        if (!v) return [];
+        try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch (e) { return []; }
+    };
+
+    document.getElementById(`edit-aliases-${cmd}`).value = parseArr(data.aliases).join(', ');
+    document.getElementById(`edit-cooldown-${cmd}`).value = data.cooldown_seconds || '';
+
+    await Promise.all([
+        NeroSelect.initMulti(document.getElementById(`edit-enabled-roles-${cmd}`), 'role', parseArr(data.enabled_roles)),
+        NeroSelect.initMulti(document.getElementById(`edit-disabled-roles-${cmd}`), 'role', parseArr(data.disabled_roles)),
+        NeroSelect.initMulti(document.getElementById(`edit-enabled-channels-${cmd}`), 'channel', parseArr(data.enabled_channels)),
+        NeroSelect.initMulti(document.getElementById(`edit-disabled-channels-${cmd}`), 'channel', parseArr(data.disabled_channels)),
+    ]);
+
+    document.getElementById(`edit-loading-${cmd}`).style.display = 'none';
+    document.getElementById(`edit-fields-${cmd}`).style.display = 'block';
+}
+
+async function saveCommandSettings(cmd, btn) {
+    const aliases = document.getElementById(`edit-aliases-${cmd}`).value
+        .split(',').map(a => a.trim()).filter(Boolean);
+    const cooldown = document.getElementById(`edit-cooldown-${cmd}`).value;
+
+    const payload = {
+        aliases,
+        cooldown_seconds: cooldown ? parseInt(cooldown) : null,
+        enabled_roles:    NeroSelect.getMultiValues(document.getElementById(`edit-enabled-roles-${cmd}`)),
+        disabled_roles:   NeroSelect.getMultiValues(document.getElementById(`edit-disabled-roles-${cmd}`)),
+        enabled_channels: NeroSelect.getMultiValues(document.getElementById(`edit-enabled-channels-${cmd}`)),
+        disabled_channels:NeroSelect.getMultiValues(document.getElementById(`edit-disabled-channels-${cmd}`)),
+    };
+
+    const statusEl = document.getElementById(`edit-status-${cmd}`);
+    statusEl.textContent = '';
+    statusEl.className = 'cmd-edit-status';
+
+    const data = await ajaxSave(`/api/commands/settings/${encodeURIComponent(cmd)}`, payload, btn, `/${cmd} settings saved`);
+    if (data && data.success) {
+        statusEl.textContent = '✅ Saved';
+        statusEl.classList.add('ok');
+        refreshRowChips(cmd, payload);
+    } else {
+        statusEl.textContent = '❌ ' + ((data && data.error) || 'Save failed');
+        statusEl.classList.add('error');
+    }
+    setTimeout(() => { statusEl.textContent = ''; statusEl.className = 'cmd-edit-status'; }, 3000);
+}
+
+// Updates the collapsed row's chips (cooldown / restricted) after a
+// save, so the at-a-glance summary is correct without a full reload.
+function refreshRowChips(cmd, payload) {
+    const row = document.getElementById(`cmd-${cmd}`);
+    if (!row) return;
+    const nameLine = row.querySelector('.cmd-row-name-line');
+    if (!nameLine) return;
+
+    nameLine.querySelectorAll('.cmd-chip').forEach(el => el.remove());
+
+    if (payload.cooldown_seconds) {
+        const chip = document.createElement('span');
+        chip.className = 'cmd-chip';
+        chip.title = 'Cooldown';
+        chip.textContent = `⏱ ${payload.cooldown_seconds}s`;
+        nameLine.appendChild(chip);
+    }
+    const restricted = (payload.enabled_roles || []).length || (payload.disabled_roles || []).length ||
+                        (payload.enabled_channels || []).length || (payload.disabled_channels || []).length;
+    if (restricted) {
+        const chip = document.createElement('span');
+        chip.className = 'cmd-chip cmd-chip-accent';
+        chip.title = 'Restricted to specific roles/channels';
+        chip.textContent = '🔐 Restricted';
+        nameLine.appendChild(chip);
+    }
+}
+
+// ── CATEGORY-LEVEL BULK RESTRICTION ──────────────────────────────────
+let _catRestrictCategory = null;
+let _catRestrictInit = false;
+
+function openCategoryRestrictModal(category) {
+    _catRestrictCategory = category;
+    document.getElementById('cat-restrict-name').textContent = category;
+    document.getElementById('cat-restrict-status').textContent = '';
+    document.getElementById('cat-restrict-modal').style.display = 'flex';
+
+    if (!_catRestrictInit) {
+        _catRestrictInit = true;
+        NeroSelect.initMulti(document.getElementById('cat-restrict-enabled-roles'), 'role', []);
+        NeroSelect.initMulti(document.getElementById('cat-restrict-disabled-roles'), 'role', []);
+        NeroSelect.initMulti(document.getElementById('cat-restrict-enabled-channels'), 'channel', []);
+        NeroSelect.initMulti(document.getElementById('cat-restrict-disabled-channels'), 'channel', []);
+    }
+}
+
+function closeCategoryRestrictModal() {
+    document.getElementById('cat-restrict-modal').style.display = 'none';
+}
+
+// Reuses the existing per-command save endpoint in a loop — same
+// pattern bulkCategory() already uses for enable/disable, just POSTing
+// role/channel fields instead of {enabled}. No new backend route.
+async function applyCategoryRestrict() {
+    if (!_catRestrictCategory) return;
+    const enabledRoles    = NeroSelect.getMultiValues(document.getElementById('cat-restrict-enabled-roles'));
+    const disabledRoles   = NeroSelect.getMultiValues(document.getElementById('cat-restrict-disabled-roles'));
+    const enabledChannels = NeroSelect.getMultiValues(document.getElementById('cat-restrict-enabled-channels'));
+    const disabledChannels= NeroSelect.getMultiValues(document.getElementById('cat-restrict-disabled-channels'));
+
+    const commands = CATEGORY_COMMANDS[_catRestrictCategory] || [];
+    const btn = document.getElementById('cat-restrict-apply-btn');
+    setLoading(btn, true, 'Applying…');
+
+    let okCount = 0;
+    for (const cmd of commands) {
+        try {
+            const res = await fetch(`/api/commands/settings/${encodeURIComponent(cmd)}`);
+            const existing = await res.json();
+            const payload = {
+                aliases: existing.aliases ? (typeof existing.aliases === 'string' ? JSON.parse(existing.aliases) : existing.aliases) : [],
+                cooldown_seconds: existing.cooldown_seconds || null,
+                enabled_roles: enabledRoles,
+                disabled_roles: disabledRoles,
+                enabled_channels: enabledChannels,
+                disabled_channels: disabledChannels,
+            };
+            const saveRes = await fetch(`/api/commands/settings/${encodeURIComponent(cmd)}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload),
+            });
+            const saveData = await saveRes.json();
+            if (saveData.success) okCount++;
+        } catch (e) { /* keep going — one bad command shouldn't stop the rest */ }
+    }
+
+    setLoading(btn, false);
+    const statusEl = document.getElementById('cat-restrict-status');
+    statusEl.textContent = `✅ Applied to ${okCount}/${commands.length} commands`;
+    statusEl.style.color = 'var(--success)';
+    showToast(`Restricted ${okCount} commands in ${_catRestrictCategory}`, 'success');
+    setTimeout(() => { closeCategoryRestrictModal(); location.reload(); }, 900);
+}
+
+document.getElementById('cat-restrict-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeCategoryRestrictModal();
+});
+
+// Command lists per category, for the bulk-restrict loop above —
+// mirrors COMMAND_CATEGORIES from dashboard/app.py.
+const CATEGORY_COMMANDS = {
+    {% for category, cmds in categories.items() %}
+    "{{ category }}": [{% for cmd in cmds %}"{{ cmd }}"{% if not loop.last %}, {% endif %}{% endfor %}],
+    {% endfor %}
+};
 </script>
+{% endblock %}
 {% endblock %}
