@@ -57,13 +57,31 @@ async function loadTrades() {
         tbody.innerHTML = "<tr><td colspan='4' class='empty'>No trades recorded yet</td></tr>";
         return;
     }
-    tbody.innerHTML = data.trades.map(t => `
+
+    // dark-fixes pass #18 (username resolver rollout, task #4 of 6):
+    // data.user_map is keyed by user_id (JSON coerces int keys to
+    // strings — template literals below stringify t.user_a/t.user_b
+    // the same way, so the lookup lines up either way). userIdentityHtml()
+    // is the JS twin of dashboard/utils/user_identity.py — same
+    // escaping, same markup, just rendered client-side since this
+    // page builds its table from fetch() rather than server templates.
+    // compact=true here: this cell already carries a "gave <offer>"
+    // sentence after the name, so the avatar is dropped to keep each
+    // row from growing too tall.
+    const userMap = data.user_map || {};
+    tbody.innerHTML = data.trades.map(t => {
+        const a = userMap[t.user_a] || {};
+        const b = userMap[t.user_b] || {};
+        const aName = a.display_name || a.username;
+        const bName = b.display_name || b.username;
+        return `
         <tr>
             <td><strong>#${t.id}</strong></td>
-            <td><code>${t.user_a}</code> gave ${summarizeOffer(t.offer_a)}</td>
-            <td><code>${t.user_b}</code> gave ${summarizeOffer(t.offer_b)}</td>
+            <td>${userIdentityHtml(t.user_a, aName, a.avatar_url, true)} gave ${summarizeOffer(t.offer_a)}</td>
+            <td>${userIdentityHtml(t.user_b, bName, b.avatar_url, true)} gave ${summarizeOffer(t.offer_b)}</td>
             <td class="text-muted">${t.created_at ? t.created_at.slice(0,16) : '—'}</td>
-        </tr>`).join('');
+        </tr>`;
+    }).join('');
 }
 
 document.getElementById('trade-user').addEventListener('keydown', e => {

@@ -23,6 +23,18 @@ from dashboard.api import api_bp
 # re-validation happens inside that transaction). A dashboard "create/edit
 # trade" surface would need to reimplement that same re-validation to be
 # safe, which is out of scope for what Dark asked for (history view only).
+#
+# dark-fixes pass #18 (username resolver rollout, task #4 of 6): trades
+# only ever stored user_a/user_b as raw IDs — no snapshot, same "ID only"
+# bucket as Economy. One batched resolve_users() call per request covering
+# both sides of every trade on the page, returned alongside the trade rows
+# as `user_map` so the client renders it in a single pass instead of
+# firing a lookup per row. Mirrors dashboard/api/economy_shop.py's
+# server-rendered pattern, except this page renders client-side (JS
+# builds the table from fetch()), so the map travels in the JSON payload
+# and dashboard.js's userIdentityHtml() (the JS twin of
+# dashboard/utils/user_identity.py) renders it — same visual component,
+# different render path.
 
 
 @api_bp.route("/trade/history")
@@ -38,4 +50,16 @@ def api_trade_history():
         return await get_trade_history(guild_id, uid, limit=limit)
 
     rows = run_async(fetch())
-    return jsonify({"trades": rows, "guild_id": guild_id})
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        ids = set()
+        for t in rows:
+            ids.add(t["user_a"])
+            ids.add(t["user_b"])
+        if not ids:
+            return {}
+        return await resolve_users(guild_id, list(ids))
+
+    user_map = run_async(resolve())
+    return jsonify({"trades": rows, "guild_id": guild_id, "user_map": user_map})
