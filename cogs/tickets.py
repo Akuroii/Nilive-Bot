@@ -30,13 +30,29 @@ class TicketOpenButton(discord.ui.View):
     async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT name FROM ticket_categories
+                SELECT name, emoji, required_role_id FROM ticket_categories
                 WHERE guild_id=? AND enabled=1 ORDER BY sort_order ASC
             """, (interaction.guild.id,))
             rows = await cursor.fetchall()
+
         if rows:
-            cats = [(r[0], "🎫") for r in rows]
-            view = TicketCreateView(cats)
+            # PERMISSIONS FEATURE (TASK 4): a category with
+            # required_role_id set is only offered to members holding
+            # that role — this is the dashboard Permissions tab's
+            # "who can open this ticket type" control. Categories with
+            # no required role stay open to everyone, unchanged from
+            # before this feature existed.
+            member_role_ids = {r.id for r in interaction.user.roles}
+            visible = [
+                (name, emoji or "🎫") for (name, emoji, req_role) in rows
+                if not req_role or int(req_role) in member_role_ids
+            ]
+            if not visible:
+                await interaction.response.send_message(
+                    "You don't have permission to open a ticket in any "
+                    "available category.", ephemeral=True)
+                return
+            view = TicketCreateView(visible)
             await interaction.response.send_message("Please select a category:", view=view, ephemeral=True)
         else:
             await create_ticket(interaction, "General Support")
@@ -216,7 +232,8 @@ async def create_ticket(interaction: discord.Interaction, category: str):
         settings = await settings_cur.fetchone()
 
         cat_cur = await db.execute("""
-            SELECT id, name, viewer_roles, closer_roles, auto_assign_roles, open_embed
+            SELECT id, name, viewer_roles, closer_roles, auto_assign_roles,
+                   open_embed, required_role_id
             FROM ticket_categories
             WHERE guild_id=? AND name=? AND enabled=1
         """, (guild.id, category))
@@ -232,6 +249,20 @@ async def create_ticket(interaction: discord.Interaction, category: str):
         await interaction.response.send_message(
             f"You already have {open_count} open ticket(s) (max {max_per_user}).", ephemeral=True)
         return
+
+    # PERMISSIONS FEATURE (TASK 4, defense in depth): open_ticket()'s
+    # select menu already filters out categories the member can't
+    # access, but this re-checks at creation time too, so the gate
+    # holds even if create_ticket() is ever reached another way
+    # (e.g. a future slash-command shortcut into a specific category).
+    required_role_id = cat_row[6] if cat_row else None
+    if required_role_id:
+        member_role_ids = {r.id for r in interaction.user.roles}
+        if int(required_role_id) not in member_role_ids:
+            await interaction.response.send_message(
+                "You don't have permission to open this ticket category.",
+                ephemeral=True)
+            return
 
     staff_role_id = settings[0] if settings else None
     viewer_role_ids = json.loads(cat_row[2]) if cat_row and cat_row[2] else []
@@ -281,8 +312,21 @@ async def create_ticket(interaction: discord.Interaction, category: str):
               datetime.utcnow().isoformat()))
         await db.commit()
 
-    title = open_embed_data.get("title") or f"Ticket #{count:04d} — {category}"
-    description = open_embed_data.get("description") or (
+    # TASK 4 upgrade: embed customization now supports the same
+    # placeholders welcome embeds already use (cogs/welcome.py's
+    # build_embed), plus footer/thumbnail/image — previously only
+    # title/description/color were ever read here, so anything an
+    # admin set for those three fields in the dashboard silently did
+    # nothing.
+    def _ph(text):
+        if not text:
+            return text
+        return (text.replace("{user}", interaction.user.mention)
+                    .replace("{name}", interaction.user.display_name)
+                    .replace("{server}", guild.name))
+
+    title = _ph(open_embed_data.get("title")) or f"Ticket #{count:04d} — {category}"
+    description = _ph(open_embed_data.get("description")) or (
         f"Hello {interaction.user.mention}! Support will be with you shortly.\n\n"
         f"Please describe your issue in detail.")
     color_str = open_embed_data.get("color", "#5865F2")
@@ -292,7 +336,14 @@ async def create_ticket(interaction: discord.Interaction, category: str):
         color_int = discord.Color.blurple().value
 
     embed = discord.Embed(title=title, description=description, color=color_int)
-    embed.set_footer(text=f"Opened by {interaction.user.display_name}")
+    if open_embed_data.get("footer"):
+        embed.set_footer(text=_ph(open_embed_data["footer"]))
+    else:
+        embed.set_footer(text=f"Opened by {interaction.user.display_name}")
+    if open_embed_data.get("thumbnail"):
+        embed.set_thumbnail(url=open_embed_data["thumbnail"])
+    if open_embed_data.get("image"):
+        embed.set_image(url=open_embed_data["image"])
 
     ping = interaction.user.mention
     for rid in closer_role_ids or ([staff_role_id] if staff_role_id else []):

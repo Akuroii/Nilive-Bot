@@ -1007,6 +1007,22 @@ async def init_db():
             ON ticket_categories(guild_id)
         """)
 
+        # TASK 4 — Ticket Config: "who can open this category" gate.
+        # Without this, every enabled category was shown to every
+        # member with no way to restrict it — TicketTool-style configs
+        # always let you gate a ticket type behind a role (e.g. only
+        # @Verified can open "Ban Appeal"). NULL = open to everyone,
+        # same as today's behavior, so this is additive/non-breaking.
+        try:
+            cursor = await db.execute("PRAGMA table_info(ticket_categories)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "required_role_id" not in cols:
+                await db.execute(
+                    "ALTER TABLE ticket_categories ADD COLUMN required_role_id INTEGER")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] ticket_categories.required_role_id: {e}")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ticket_panels (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,

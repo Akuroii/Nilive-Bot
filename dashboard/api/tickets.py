@@ -124,7 +124,8 @@ def api_tickets_categories():
         async with aiosqlite.connect(DB_PATH) as db:
             cur = await db.execute("""
                 SELECT id, name, emoji, viewer_roles, closer_roles,
-                       auto_assign_roles, open_embed, enabled, sort_order
+                       auto_assign_roles, open_embed, enabled, sort_order,
+                       required_role_id
                 FROM ticket_categories WHERE guild_id=? ORDER BY sort_order ASC
             """, (guild_id,))
             rows = await cur.fetchall()
@@ -135,6 +136,7 @@ def api_tickets_categories():
                 "auto_assign_roles": json.loads(r[5] or "[]"),
                 "open_embed":        json.loads(r[6] or "{}"),
                 "enabled": r[7], "sort_order": r[8],
+                "required_role_id": r[9],
             } for r in rows]
 
     return jsonify({"categories": run_async(get())})
@@ -152,7 +154,8 @@ def api_tickets_save_category():
                 await db.execute("""
                     UPDATE ticket_categories SET
                         name=?, emoji=?, viewer_roles=?, closer_roles=?,
-                        auto_assign_roles=?, open_embed=?, enabled=?
+                        auto_assign_roles=?, open_embed=?, enabled=?,
+                        required_role_id=?
                     WHERE id=? AND guild_id=?
                 """, (data["name"], data.get("emoji", "🎫"),
                       json.dumps(data.get("viewer_roles", [])),
@@ -160,18 +163,20 @@ def api_tickets_save_category():
                       json.dumps(data.get("auto_assign_roles", [])),
                       json.dumps(data.get("open_embed", {})),
                       int(data.get("enabled", 1)),
+                      data.get("required_role_id") or None,
                       data["id"], guild_id))
             else:
                 await db.execute("""
                     INSERT INTO ticket_categories
                         (guild_id, name, emoji, viewer_roles, closer_roles,
-                         auto_assign_roles, open_embed)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                         auto_assign_roles, open_embed, required_role_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (guild_id, data["name"], data.get("emoji", "🎫"),
                       json.dumps(data.get("viewer_roles", [])),
                       json.dumps(data.get("closer_roles", [])),
                       json.dumps(data.get("auto_assign_roles", [])),
-                      json.dumps(data.get("open_embed", {}))))
+                      json.dumps(data.get("open_embed", {})),
+                      data.get("required_role_id") or None))
             await db.commit()
 
     run_async(save())
@@ -358,5 +363,3 @@ def api_tickets_ratings():
         "user_id": r[0], "rating": r[1],
         "comment": r[2], "created_at": r[3],
     } for r in rows])
-
-

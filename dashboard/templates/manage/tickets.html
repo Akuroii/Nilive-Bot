@@ -18,51 +18,372 @@
     </div>
 </div>
 
-<div class="card">
-    <div class="card-header">
-        <div class="card-title" style="margin:0">🎫 All Tickets</div>
-        <select class="form-input" style="width:140px;"
-                hx-get="/api/tickets/list"
-                hx-target="#tickets-tbody"
-                hx-trigger="change"
-                name="status">
-            <option value="">All</option>
-            <option value="open">Open</option>
-            <option value="closed">Closed</option>
-        </select>
-    </div>
-    <div class="table-wrap">
-        <table class="table">
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>User ID</th>
-                    <th>Category</th>
-                    <th>Status</th>
-                    <th>Created</th>
-                </tr>
-            </thead>
-            <tbody id="tickets-tbody"
-                   hx-get="/api/tickets/list"
-                   hx-trigger="load"
-                   hx-swap="innerHTML">
-                {% for t in tickets %}
-                <tr>
-                    <td><strong>#{{ t[0] }}</strong></td>
-                    <td><code>{{ t[2] }}</code></td>
-                    <td>{{ t[4] or 'General' }}</td>
-                    <td>
-                        <span class="badge {% if t[3] == 'open' %}badge-success{% else %}badge-danger{% endif %}">
-                            {{ t[3] }}
-                        </span>
-                    </td>
-                    <td class="text-muted">{{ t[5][:10] if t[5] else '—' }}</td>
-                </tr>
-                {% else %}
-                <tr><td colspan="5" class="empty">No tickets yet</td></tr>
-                {% endfor %}
-            </tbody>
-        </table>
+<div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--border);padding-bottom:0;">
+    {% for tab, label in [('list','🎫 Tickets'),('general','⚙️ General'),('perms','🔐 Permissions & Embeds')] %}
+    <button onclick="switchTicketTab('{{ tab }}')" id="ttab-{{ tab }}"
+        style="padding:10px 18px;border:none;background:transparent;color:var(--text2);
+               font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;
+               transition:all .15s;margin-bottom:-1px;min-height:44px;"
+        class="ttab-btn">{{ label }}</button>
+    {% endfor %}
+</div>
+
+<!-- ── TICKETS TAB ─────────────────────────────────────────── -->
+<div id="ttab-content-list" class="ttab-content">
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title" style="margin:0">🎫 All Tickets</div>
+            <select class="form-input" style="width:140px;"
+                    hx-get="/api/tickets/list" hx-target="#tickets-tbody"
+                    hx-trigger="change" name="status">
+                <option value="">All</option>
+                <option value="open">Open</option>
+                <option value="closed">Closed</option>
+            </select>
+        </div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>User ID</th>
+                        <th>Category</th>
+                        <th>Status</th>
+                        <th>Created</th>
+                    </tr>
+                </thead>
+                <tbody id="tickets-tbody"
+                       hx-get="/api/tickets/list"
+                       hx-trigger="load"
+                       hx-swap="innerHTML">
+                    {% for t in tickets %}
+                    <tr>
+                        <td><strong>#{{ t[0] }}</strong></td>
+                        <td><code>{{ t[2] }}</code></td>
+                        <td>{{ t[4] or 'General' }}</td>
+                        <td>
+                            <span class="badge {% if t[3] == 'open' %}badge-success{% else %}badge-danger{% endif %}">
+                                {{ t[3] }}
+                            </span>
+                        </td>
+                        <td class="text-muted">{{ t[5][:10] if t[5] else '—' }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="5" class="empty">No tickets yet</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
     </div>
 </div>
+
+<!-- ── GENERAL TAB ─────────────────────────────────────────── -->
+<div id="ttab-content-general" class="ttab-content" style="display:none;">
+    <div class="card">
+        <div class="card-title">⚙️ General Ticket Settings</div>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+            <label class="toggle">
+                <input type="checkbox" id="gen-enabled">
+                <span class="toggle-slider"></span>
+            </label>
+            <span style="font-size:13px;color:var(--text2);">Ticket system enabled</span>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">Max open tickets per member</label>
+                <input class="form-input" id="gen-max-per-user" type="number" min="1" value="1">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Auto-close after (hours, 0 = never)</label>
+                <input class="form-input" id="gen-auto-close" type="number" min="0" value="0">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Channel name format</label>
+                <input class="form-input" id="gen-name-format" placeholder="ticket-{number}">
+                <div class="form-hint">Use {number} and {user}</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Default Staff / Admin Role</label>
+                <select class="nero-role-picker form-input" id="gen-support-role"></select>
+                <div class="form-hint">Fallback role for claim/close/add-member when a category has none configured</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Transcript log channel</label>
+                <select class="nero-channel-picker form-input" id="gen-transcript-channel"></select>
+            </div>
+        </div>
+        <label class="form-check" style="margin-bottom:16px;">
+            <input type="checkbox" id="gen-save-transcripts"> Save transcripts when a ticket is deleted
+        </label>
+        <button class="btn btn-primary" id="gen-save-btn" onclick="saveGeneralTicketSettings(this)">Save Settings</button>
+    </div>
+</div>
+
+<!-- ── PERMISSIONS & EMBEDS TAB ────────────────────────────── -->
+<div id="ttab-content-perms" class="ttab-content" style="display:none;">
+    <div class="card">
+        <div class="card-title" id="cat-form-title">➕ Add Ticket Category</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Each category is its own ticket type (like TicketTool's panel configs) — its own
+            permissions AND its own embed message posted inside the created channel.
+        </p>
+        <input type="hidden" id="cat-id">
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">Category name</label>
+                <input class="form-input" id="cat-name" placeholder="e.g. General Support">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Emoji</label>
+                <input class="form-input" id="cat-emoji" placeholder="🎫" value="🎫">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Who can open this category</label>
+                <select class="nero-role-picker form-input" id="cat-required-role"></select>
+                <div class="form-hint">Empty = anyone can open it</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Viewer roles (can see the ticket)</label>
+                <input class="form-input" id="cat-viewer-roles" placeholder="Role IDs, comma separated">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Admin/Closer roles (can claim, close, delete)</label>
+                <input class="form-input" id="cat-closer-roles" placeholder="Role IDs, comma separated">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Auto-assign roles on open</label>
+                <input class="form-input" id="cat-autoassign-roles" placeholder="Role IDs, comma separated">
+            </div>
+        </div>
+
+        <div class="card-title" style="font-size:13px;margin-top:8px;">✉️ Ticket Embed</div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">Title</label>
+                <input class="form-input" id="cat-embed-title" placeholder="Ticket #{number} — General Support">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Color</label>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <input type="color" id="cat-embed-color" value="#5865F2"
+                        style="width:42px;height:36px;border-radius:8px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:2px;">
+                    <input class="form-input" id="cat-embed-color-hex" value="#5865F2" style="flex:1;"
+                        oninput="if(/^#[0-9A-Fa-f]{6}$/.test(this.value)) document.getElementById('cat-embed-color').value=this.value;">
+                </div>
+            </div>
+            <div class="form-group" style="grid-column:1/-1;">
+                <label class="form-label">Description</label>
+                <textarea class="form-input" id="cat-embed-desc" rows="3"
+                    placeholder="Hello {user}! Support will be with you shortly. Use {name} and {server} too."></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Footer</label>
+                <input class="form-input" id="cat-embed-footer" placeholder="Defaults to 'Opened by {name}'">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Thumbnail URL</label>
+                <input class="form-input" id="cat-embed-thumb" placeholder="https://...">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Image URL</label>
+                <input class="form-input" id="cat-embed-image" placeholder="https://...">
+            </div>
+        </div>
+
+        <div style="display:flex;gap:10px;">
+            <button class="btn btn-primary" onclick="saveCategory()">Save Category</button>
+            <button class="btn btn-secondary" id="cat-cancel-edit" style="display:none;" onclick="resetCategoryForm()">Cancel Edit</button>
+        </div>
+        <div id="cat-status" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">📋 Configured Categories</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Category</th>
+                        <th>Who can open</th>
+                        <th>Admin roles</th>
+                        <th>Status</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="cat-tbody"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+function switchTicketTab(name) {
+    document.querySelectorAll('.ttab-content').forEach(el => el.style.display = 'none');
+    document.getElementById('ttab-content-' + name).style.display = 'block';
+    document.querySelectorAll('.ttab-btn').forEach(btn => {
+        btn.style.borderBottomColor = 'transparent';
+        btn.style.color = 'var(--text2)';
+    });
+    const active = document.getElementById('ttab-' + name);
+    active.style.borderBottomColor = 'var(--accent)';
+    active.style.color = 'var(--text)';
+}
+switchTicketTab('list');
+
+document.getElementById('cat-embed-color').addEventListener('input', function() {
+    document.getElementById('cat-embed-color-hex').value = this.value;
+});
+
+// ── GENERAL SETTINGS ──────────────────────────────────────────
+async function loadGeneralTicketSettings() {
+    const res = await fetch('/api/tickets/settings');
+    if (!res.ok) return;
+    const c = await res.json();
+    document.getElementById('gen-enabled').checked = c.enabled === undefined ? true : !!c.enabled;
+    document.getElementById('gen-max-per-user').value = c.max_per_user || 1;
+    document.getElementById('gen-auto-close').value = c.auto_close_hours || 0;
+    document.getElementById('gen-name-format').value = c.name_format || 'ticket-{number}';
+    document.getElementById('gen-save-transcripts').checked = c.save_transcripts === undefined ? true : !!c.save_transcripts;
+    setTimeout(() => {
+        const rp = document.getElementById('gen-support-role');
+        const cp = document.getElementById('gen-transcript-channel');
+        if (rp && c.support_role_id) $(rp).val(String(c.support_role_id)).trigger('change.select2');
+        if (cp && c.transcript_channel_id) $(cp).val(String(c.transcript_channel_id)).trigger('change.select2');
+    }, 700);
+}
+loadGeneralTicketSettings();
+
+async function saveGeneralTicketSettings(btn) {
+    const rp = document.getElementById('gen-support-role');
+    const cp = document.getElementById('gen-transcript-channel');
+    const payload = {
+        enabled: document.getElementById('gen-enabled').checked,
+        max_per_user: parseInt(document.getElementById('gen-max-per-user').value) || 1,
+        auto_close_hours: parseInt(document.getElementById('gen-auto-close').value) || 0,
+        name_format: document.getElementById('gen-name-format').value || 'ticket-{number}',
+        save_transcripts: document.getElementById('gen-save-transcripts').checked,
+        support_role_id: rp ? ($(rp).val() || null) : null,
+        transcript_channel_id: cp ? ($(cp).val() || null) : null,
+    };
+    await ajaxSave('/api/tickets/settings', payload, btn, 'Ticket settings saved!');
+}
+
+// ── CATEGORIES (Permissions + Embed) ─────────────────────────
+function csv2list(str) {
+    return str.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function resetCategoryForm() {
+    document.getElementById('cat-id').value = '';
+    document.getElementById('cat-name').value = '';
+    document.getElementById('cat-emoji').value = '🎫';
+    document.getElementById('cat-viewer-roles').value = '';
+    document.getElementById('cat-closer-roles').value = '';
+    document.getElementById('cat-autoassign-roles').value = '';
+    document.getElementById('cat-embed-title').value = '';
+    document.getElementById('cat-embed-desc').value = '';
+    document.getElementById('cat-embed-footer').value = '';
+    document.getElementById('cat-embed-thumb').value = '';
+    document.getElementById('cat-embed-image').value = '';
+    document.getElementById('cat-embed-color').value = '#5865F2';
+    document.getElementById('cat-embed-color-hex').value = '#5865F2';
+    document.getElementById('cat-form-title').textContent = '➕ Add Ticket Category';
+    document.getElementById('cat-cancel-edit').style.display = 'none';
+    const rrp = document.getElementById('cat-required-role');
+    if (rrp) $(rrp).val('').trigger('change.select2');
+}
+
+async function loadCategories() {
+    const res = await fetch('/api/tickets/categories');
+    if (!res.ok) return;
+    const data = await res.json();
+    const tbody = document.getElementById('cat-tbody');
+    if (!data.categories || !data.categories.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">No categories configured — a default "General Support" is used until you add one.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = data.categories.map(c => `
+        <tr>
+            <td>${c.emoji || '🎫'} <strong>${c.name}</strong></td>
+            <td>${c.required_role_id ? `<code>${c.required_role_id}</code>` : '<span class="text-muted">Everyone</span>'}</td>
+            <td>${(c.closer_roles || []).length ? c.closer_roles.map(r => `<code>${r}</code>`).join(' ') : '<span class="text-muted">Default staff role</span>'}</td>
+            <td><span class="badge ${c.enabled ? 'badge-success' : 'badge-danger'}">${c.enabled ? 'Active' : 'Disabled'}</span></td>
+            <td style="display:flex;gap:6px;">
+                <button class="btn btn-sm btn-secondary" onclick='editCategory(${JSON.stringify(c)})'>Edit</button>
+                <button class="btn btn-sm btn-danger" onclick="showConfirm('Delete category ${c.name}?', () => deleteCategory(${c.id}))">Delete</button>
+            </td>
+        </tr>`).join('');
+}
+loadCategories();
+
+function editCategory(c) {
+    document.getElementById('cat-id').value = c.id;
+    document.getElementById('cat-name').value = c.name || '';
+    document.getElementById('cat-emoji').value = c.emoji || '🎫';
+    document.getElementById('cat-viewer-roles').value = (c.viewer_roles || []).join(', ');
+    document.getElementById('cat-closer-roles').value = (c.closer_roles || []).join(', ');
+    document.getElementById('cat-autoassign-roles').value = (c.auto_assign_roles || []).join(', ');
+    const e = c.open_embed || {};
+    document.getElementById('cat-embed-title').value = e.title || '';
+    document.getElementById('cat-embed-desc').value = e.description || '';
+    document.getElementById('cat-embed-footer').value = e.footer || '';
+    document.getElementById('cat-embed-thumb').value = e.thumbnail || '';
+    document.getElementById('cat-embed-image').value = e.image || '';
+    document.getElementById('cat-embed-color').value = e.color || '#5865F2';
+    document.getElementById('cat-embed-color-hex').value = e.color || '#5865F2';
+    document.getElementById('cat-form-title').textContent = `✏️ Editing "${c.name}"`;
+    document.getElementById('cat-cancel-edit').style.display = 'inline-flex';
+    setTimeout(() => {
+        const rrp = document.getElementById('cat-required-role');
+        if (rrp) $(rrp).val(c.required_role_id ? String(c.required_role_id) : '').trigger('change.select2');
+    }, 300);
+    switchTicketTab('perms');
+    window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+async function saveCategory() {
+    const name = document.getElementById('cat-name').value.trim();
+    if (!name) { showToast('Enter a category name', 'warning'); return; }
+    const rrp = document.getElementById('cat-required-role');
+    const payload = {
+        id: document.getElementById('cat-id').value || null,
+        name,
+        emoji: document.getElementById('cat-emoji').value || '🎫',
+        required_role_id: rrp ? ($(rrp).val() || null) : null,
+        viewer_roles: csv2list(document.getElementById('cat-viewer-roles').value),
+        closer_roles: csv2list(document.getElementById('cat-closer-roles').value),
+        auto_assign_roles: csv2list(document.getElementById('cat-autoassign-roles').value),
+        enabled: 1,
+        open_embed: {
+            title: document.getElementById('cat-embed-title').value,
+            description: document.getElementById('cat-embed-desc').value,
+            color: document.getElementById('cat-embed-color').value,
+            footer: document.getElementById('cat-embed-footer').value,
+            thumbnail: document.getElementById('cat-embed-thumb').value,
+            image: document.getElementById('cat-embed-image').value,
+        },
+    };
+    const res = await fetch('/api/tickets/categories', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast('Category saved!');
+        resetCategoryForm();
+        loadCategories();
+    } else {
+        showToast(data.error || 'Error saving category', 'error');
+    }
+}
+
+async function deleteCategory(id) {
+    const res = await fetch(`/api/tickets/categories/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) { showToast('Category deleted', 'info'); loadCategories(); }
+    else showToast('Error', 'error');
+}
+</script>
+{% endblock %}
 {% endblock %}
