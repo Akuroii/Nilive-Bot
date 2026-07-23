@@ -44,16 +44,22 @@ window.NeroSelect = (function () {
             $el.append(`<option value="${r.id}" ${selected}>${r.text}</option>`);
         });
 
-        $el.select2({
-            theme: 'default',
-            width: '100%',
-            allowClear: true,
-            placeholder: kind === 'role' ? 'Select a role...' : 'Select a channel...',
-            templateResult: kind === 'role' ? formatRole : formatChannel,
-            templateSelection: kind === 'role' ? formatRole : formatChannel,
-        });
-
-        if (preselect) $el.val(preselect).trigger('change.select2');
+        try {
+            $el.select2({
+                theme: 'default',
+                width: '100%',
+                allowClear: true,
+                placeholder: kind === 'role' ? 'Select a role...' : 'Select a channel...',
+                templateResult: kind === 'role' ? formatRole : formatChannel,
+                templateSelection: kind === 'role' ? formatRole : formatChannel,
+            });
+            if (preselect) $el.val(preselect).trigger('change.select2');
+        } catch (e) {
+            // select2 itself failed (blocked CDN, version mismatch, etc) —
+            // leave it as a plain <select>. Still functional, just unstyled.
+            console.error('NeroSelect: select2 init failed, using plain <select>', e);
+            if (preselect) $el.val(preselect);
+        }
     }
 
     function initAll(root) {
@@ -79,6 +85,18 @@ window.NeroSelect = (function () {
     // these pickers are multi-select. Same dedupe guard
     // (dataset.nsInit) as initOne so re-opening an already-initialized
     // panel doesn't refetch or re-wrap Select2 around itself.
+    //
+    // IMPORTANT: this must never reject. commands.html's
+    // loadCommandSettings() awaits several of these via
+    // Promise.allSettled and needs to always be able to reveal the panel
+    // afterward — the earlier version let a select2 failure propagate as
+    // a rejection, which silently killed the whole panel (stuck on
+    // "Loading settings…" forever, Save button never reachable, since it
+    // lives inside the still-hidden fields container). The select2 call
+    // is now wrapped so a broken/missing select2 degrades to a plain
+    // native <select multiple> instead of taking the panel down with it —
+    // getMultiValues() below reads via jQuery .val(), which works on a
+    // plain <select> exactly the same as a select2-enhanced one.
     async function initMulti(el, kind, preselect) {
         if (!el || el.dataset.nsInit === '1') return;
         el.dataset.nsInit = '1';
@@ -94,16 +112,20 @@ window.NeroSelect = (function () {
             $el.append(`<option value="${r.id}" ${selected}>${r.text}</option>`);
         });
 
-        $el.select2({
-            theme: 'default',
-            width: '100%',
-            closeOnSelect: false,
-            placeholder: kind === 'role' ? 'None selected — applies to everyone' : 'None selected — applies to all channels',
-            templateResult: kind === 'role' ? formatRole : formatChannel,
-            templateSelection: kind === 'role' ? formatRole : formatChannel,
-        });
-
-        if (preselectStr.length) $el.val(preselectStr).trigger('change.select2');
+        try {
+            $el.select2({
+                theme: 'default',
+                width: '100%',
+                closeOnSelect: false,
+                placeholder: kind === 'role' ? 'Everyone' : 'All channels',
+                templateResult: kind === 'role' ? formatRole : formatChannel,
+                templateSelection: kind === 'role' ? formatRole : formatChannel,
+            });
+            if (preselectStr.length) $el.val(preselectStr).trigger('change.select2');
+        } catch (e) {
+            console.error('NeroSelect: multi select2 init failed, using plain <select multiple>', e);
+            if (preselectStr.length) $el.val(preselectStr);
+        }
     }
 
     // Returns the current value as an array of ID strings — used when
