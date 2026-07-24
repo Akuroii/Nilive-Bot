@@ -4,66 +4,149 @@
 <span data-page-title="Bot Profile"></span>
 
 <div class="card">
-    <div class="card-title">🤖 Per-Server Bot Profile</div>
-    <p class="text-muted text-sm" style="margin-bottom:16px;">
-        Give the bot a different nickname just for this server — this is a real Discord
-        nickname change, applied immediately, and only affects how the bot appears here.
-        Every other server keeps its own nickname (or the bot's global name) untouched.
-    </p>
-    <div class="form-group" style="max-width:360px;">
-        <label class="form-label">Nickname in this server</label>
-        <input class="form-input" id="bp-nickname" maxlength="32" placeholder="Leave empty to use the global name">
-        <div class="form-hint">Max 32 characters (Discord's limit)</div>
-    </div>
-    <div style="display:flex;gap:10px;">
-        <button class="btn btn-primary" id="bp-save-btn" onclick="saveBotProfile(this)">Save & Apply</button>
+    <div class="card-header">
+        <div class="card-title" style="margin:0;display:flex;align-items:center;gap:10px;">
+            🪪 Custom Bot Profile
+            <span class="badge badge-success">Live via Discord API</span>
+        </div>
         <button class="btn btn-secondary" onclick="resetBotProfile()">Reset to Default</button>
     </div>
+    <p class="text-muted text-sm" style="margin-bottom:18px;">
+        Nickname, avatar, banner, and bio here are genuinely per-server — Discord's own
+        guild member profile fields, applied directly to the bot's account for
+        <strong>this server only</strong>. Every other server the bot is in keeps its own
+        settings (or the bot's global defaults), completely unaffected.
+    </p>
+
+    <div class="bp-preview-wrap">
+        <div class="bp-banner" id="bp-banner-box">
+            <span class="bp-banner-placeholder" id="bp-banner-placeholder">Paste a banner URL below to preview it here</span>
+            <img id="bp-banner-img" alt=""
+                 onload="document.getElementById('bp-banner-placeholder').style.display='none';this.style.display='block';"
+                 onerror="this.style.display='none';document.getElementById('bp-banner-placeholder').style.display='block';">
+        </div>
+        <div class="bp-avatar-ring">
+            <img id="bp-avatar-img" class="bp-avatar" alt=""
+                 onload="document.getElementById('bp-avatar-fallback').style.display='none';this.style.display='block';"
+                 onerror="this.style.display='none';document.getElementById('bp-avatar-fallback').style.display='flex';">
+            <div id="bp-avatar-fallback" class="bp-avatar-fallback">🤖</div>
+        </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
+        <div class="form-group">
+            <label class="form-label">Nickname</label>
+            <input class="form-input" id="bp-nickname" maxlength="32" placeholder="Leave empty to use the global name">
+            <div class="form-hint"><span id="bp-nick-counter">0/32</span> — Discord's hard limit</div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Avatar URL</label>
+            <input class="form-input" id="bp-avatar-url" placeholder="https://...">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Banner URL</label>
+            <input class="form-input" id="bp-banner-url" placeholder="https://...">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Bio</label>
+            <textarea class="form-input" id="bp-bio" rows="2" maxlength="190"
+                      placeholder="A short line shown on the bot's profile card in this server"></textarea>
+            <div class="form-hint" style="text-align:right;"><span id="bp-bio-counter">0/190</span></div>
+        </div>
+    </div>
+
+    <button class="btn btn-primary" id="bp-save-btn" onclick="saveBotProfile(this)">Save & Apply</button>
     <div id="bp-status" style="margin-top:10px;font-size:13px;"></div>
 </div>
 
 <div class="card">
-    <div class="card-title">🖼️ Branding Icon (optional)</div>
-    <p class="text-muted text-sm" style="margin-bottom:16px;">
-        <strong>Heads up:</strong> Discord does not let a bot have a different profile
-        picture in different servers — a bot account has exactly one avatar, everywhere,
-        the same way it has exactly one username. There's no API for a bot to change that
-        per-server (this differs from the per-server avatar feature Discord gives
-        <em>human</em> accounts, which bots were never included in).
-        <br><br>
-        What you set below is just a URL stored for this server — it doesn't touch the
-        bot's real profile picture anywhere. It's saved for optional future use (e.g. a
-        branding icon in embeds the bot sends in this server), not shown as the bot's
-        avatar in Discord's member list, DMs, or anywhere else.
-    </p>
-    <div class="form-group" style="max-width:420px;">
-        <label class="form-label">Branding icon URL</label>
-        <input class="form-input" id="bp-avatar" placeholder="https://...">
-    </div>
-</div>
-
-<div class="card">
-    <div class="card-title">👁️ Current State</div>
+    <div class="card-title">👁️ Current Live State (from Discord, right now)</div>
     <table class="table">
         <tbody>
-            <tr>
-                <td style="width:180px;">Live nickname (Discord)</td>
-                <td id="bp-live-nick" class="text-muted">Loading…</td>
-            </tr>
-            <tr>
-                <td>Global bot name</td>
-                <td id="bp-live-username" class="text-muted">Loading…</td>
-            </tr>
-            <tr>
-                <td>Global bot avatar</td>
-                <td id="bp-live-avatar" class="text-muted">Loading…</td>
-            </tr>
+            <tr><td style="width:200px;">Nickname (this server)</td><td id="bp-live-nick" class="text-muted">Loading…</td></tr>
+            <tr><td>Bio (this server)</td><td id="bp-live-bio" class="text-muted">Loading…</td></tr>
+            <tr><td>Global bot name</td><td id="bp-live-username" class="text-muted">Loading…</td></tr>
+            <tr><td>Global avatar (fallback everywhere else)</td><td id="bp-live-global-avatar" class="text-muted">Loading…</td></tr>
         </tbody>
     </table>
 </div>
 
+<style>
+.bp-preview-wrap { position: relative; margin-bottom: 44px; }
+
+.bp-banner {
+    width: 100%;
+    height: 160px;
+    border-radius: 12px;
+    background: var(--bg3);
+    border: 2px dashed var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    position: relative;
+}
+.bp-banner-placeholder { color: var(--text3); font-size: 13px; }
+.bp-banner img { display: none; width: 100%; height: 100%; object-fit: cover; }
+
+.bp-avatar-ring {
+    position: absolute;
+    left: 24px;
+    bottom: -32px;
+    width: 88px;
+    height: 88px;
+    border-radius: 50%;
+    background: var(--bg2);
+    border: 4px solid var(--bg2);
+    box-shadow: 0 2px 10px rgba(0,0,0,.3);
+}
+.bp-avatar {
+    display: none;
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    object-fit: cover;
+}
+.bp-avatar-fallback {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+}
+</style>
+
 {% block scripts %}
 <script>
+function bindCounter(inputId, counterId, max) {
+    const el = document.getElementById(inputId);
+    const counter = document.getElementById(counterId);
+    const update = () => { counter.textContent = `${el.value.length}/${max}`; };
+    el.addEventListener('input', update);
+    update();
+}
+bindCounter('bp-nickname', 'bp-nick-counter', 32);
+bindCounter('bp-bio', 'bp-bio-counter', 190);
+
+document.getElementById('bp-avatar-url').addEventListener('input', function() {
+    const img = document.getElementById('bp-avatar-img');
+    const fallback = document.getElementById('bp-avatar-fallback');
+    const url = this.value.trim();
+    if (url) { img.src = url; }
+    else { img.removeAttribute('src'); img.style.display = 'none'; fallback.style.display = 'flex'; }
+});
+
+document.getElementById('bp-banner-url').addEventListener('input', function() {
+    const img = document.getElementById('bp-banner-img');
+    const placeholder = document.getElementById('bp-banner-placeholder');
+    const url = this.value.trim();
+    if (url) { img.src = url; }
+    else { img.removeAttribute('src'); img.style.display = 'none'; placeholder.style.display = 'block'; }
+});
+
 async function loadBotProfile() {
     const res = await fetch('/api/botprofile/config');
     if (!res.ok) return;
@@ -72,22 +155,35 @@ async function loadBotProfile() {
     const live = data.live || {};
 
     document.getElementById('bp-nickname').value = stored.nickname || '';
-    document.getElementById('bp-avatar').value = stored.avatar_url || '';
+    document.getElementById('bp-avatar-url').value = stored.avatar_url || '';
+    document.getElementById('bp-banner-url').value = stored.banner_url || '';
+    document.getElementById('bp-bio').value = stored.bio || '';
+    ['bp-nickname', 'bp-bio'].forEach(id => document.getElementById(id).dispatchEvent(new Event('input')));
 
-    document.getElementById('bp-live-nick').textContent =
-        live.nick || '(no nickname set — using global name)';
+    // Prefer showing what's actually LIVE right now (guild avatar/banner)
+    // over the stored URL, so the preview never lies about what Discord
+    // is really displaying.
+    const avatarUrl = live.guild_avatar_url || stored.avatar_url || '';
+    const bannerUrl = live.guild_banner_url || stored.banner_url || '';
+    document.getElementById('bp-avatar-url').value = stored.avatar_url || '';
+    document.getElementById('bp-banner-url').value = stored.banner_url || '';
+    if (avatarUrl) document.getElementById('bp-avatar-img').src = avatarUrl;
+    if (bannerUrl) document.getElementById('bp-banner-img').src = bannerUrl;
+
+    document.getElementById('bp-live-nick').textContent = live.nick || '(no nickname — using global name)';
+    document.getElementById('bp-live-bio').textContent = live.bio || '(none set)';
     document.getElementById('bp-live-username').textContent = live.username || '—';
 
-    const avatarCell = document.getElementById('bp-live-avatar');
-    avatarCell.innerHTML = '';
+    const gAvatarCell = document.getElementById('bp-live-global-avatar');
+    gAvatarCell.innerHTML = '';
     if (live.global_avatar_url) {
         const img = document.createElement('img');
         img.src = live.global_avatar_url;
-        img.style.cssText = 'width:32px;height:32px;border-radius:50%;vertical-align:middle;margin-right:8px;';
-        avatarCell.appendChild(img);
-        avatarCell.appendChild(document.createTextNode('Same everywhere — see explanation above'));
+        img.style.cssText = 'width:28px;height:28px;border-radius:50%;vertical-align:middle;margin-right:8px;';
+        gAvatarCell.appendChild(img);
+        gAvatarCell.appendChild(document.createTextNode('shown in every server without a custom avatar set'));
     } else {
-        avatarCell.textContent = '—';
+        gAvatarCell.textContent = '—';
     }
 }
 loadBotProfile();
@@ -95,37 +191,65 @@ loadBotProfile();
 async function saveBotProfile(btn) {
     const payload = {
         nickname: document.getElementById('bp-nickname').value.trim(),
-        avatar_url: document.getElementById('bp-avatar').value.trim(),
+        avatar_url: document.getElementById('bp-avatar-url').value.trim(),
+        banner_url: document.getElementById('bp-banner-url').value.trim(),
+        bio: document.getElementById('bp-bio').value.trim(),
     };
-    const data = await ajaxSave('/api/botprofile/config', payload, btn, 'Bot profile saved!');
-    const status = document.getElementById('bp-status');
-    if (data && data.success) {
-        if (data.nickname_applied === false) {
-            status.textContent = '⚠️ ' + (data.warning || 'Saved, but the live nickname could not be applied.');
-            status.style.color = 'var(--warning)';
-        } else {
-            status.textContent = '✅ Applied live in Discord.';
-            status.style.color = 'var(--success)';
-        }
-        loadBotProfile();
+    setLoading(btn, true);
+    let data;
+    try {
+        const res = await fetch('/api/botprofile/config', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+        });
+        data = await res.json();
+    } catch (e) {
+        showToast('Connection error', 'error');
+        setLoading(btn, false);
+        return;
     }
-    setTimeout(() => status.textContent = '', 4000);
+    setLoading(btn, false);
+
+    const status = document.getElementById('bp-status');
+    if (data.success === false && data.error) {
+        status.textContent = '❌ ' + data.error;
+        status.style.color = 'var(--danger)';
+        showToast(data.error, 'error');
+        return;
+    }
+
+    const applied = data.applied || [];
+    const errors = data.errors || {};
+    const errorKeys = Object.keys(errors);
+
+    if (applied.length && !errorKeys.length) {
+        status.textContent = `✅ Applied live: ${applied.join(', ')}`;
+        status.style.color = 'var(--success)';
+        showToast('Bot profile updated!');
+    } else if (applied.length && errorKeys.length) {
+        const msg = errorKeys.map(k => `${k}: ${errors[k]}`).join(' · ');
+        status.textContent = `⚠️ Applied ${applied.join(', ')}. Issues — ${msg}`;
+        status.style.color = 'var(--warning)';
+        showToast('Saved with some issues — see details below', 'warning');
+    } else {
+        const msg = errors._general || errorKeys.map(k => `${k}: ${errors[k]}`).join(' · ') || 'Unknown error';
+        status.textContent = '❌ ' + msg;
+        status.style.color = 'var(--danger)';
+        showToast('Could not apply bot profile', 'error');
+    }
+    loadBotProfile();
 }
 
 async function resetBotProfile() {
-    showConfirm("Reset this server's bot nickname back to the global default?", async () => {
+    showConfirm("Reset this server's bot profile — nickname, avatar, banner, and bio — back to the global default?", async () => {
         const res = await fetch('/api/botprofile/reset', { method: 'POST' });
         const data = await res.json();
-        if (data.success) {
-            showToast(data.nickname_applied === false
-                ? (data.warning || 'Reset saved, but live nickname could not be cleared.')
-                : 'Reset — back to the global name.',
-                data.nickname_applied === false ? 'warning' : 'success');
-            document.getElementById('bp-nickname').value = '';
-            loadBotProfile();
-        } else {
-            showToast('Error resetting', 'error');
-        }
+        showToast(data.success ? 'Reset — back to the global default.' : 'Error resetting', data.success ? 'success' : 'error');
+        document.getElementById('bp-nickname').value = '';
+        document.getElementById('bp-avatar-url').value = '';
+        document.getElementById('bp-banner-url').value = '';
+        document.getElementById('bp-bio').value = '';
+        loadBotProfile();
     });
 }
 </script>
