@@ -60,6 +60,7 @@ def _enforce_csrf():
 # registering its routes onto the single api_bp object above. Order
 # doesn't matter for correctness (no route path collisions across
 # sections), only listed alphabetically for readability.
+from dashboard.api import botprofile    # noqa: E402,F401
 from dashboard.api import core          # noqa: E402,F401
 from dashboard.api import economy_shop  # noqa: E402,F401
 from dashboard.api import leveling      # noqa: E402,F401
