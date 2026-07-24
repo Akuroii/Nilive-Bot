@@ -1191,6 +1191,15 @@ def config_boost():
                   config=config, saved=request.args.get("saved"), **ctx)
 
 
+# ── Config: Bot Profile (per-server nickname + branding icon) ──────────────────
+
+@app.route("/config/botprofile")
+@require_page("botprofile")
+def config_botprofile():
+    ctx = get_current_user_context()
+    return render("config/botprofile.html", **ctx)
+
+
 # ── Config: Announcements ──────────────────────────────────────────────────────
 
 @app.route("/config/announcements")
