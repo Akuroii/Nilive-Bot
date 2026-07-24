@@ -474,20 +474,34 @@ async def init_db():
             )
         """)
 
-        # Per-server bot profile: nickname is a real Discord API
-        # operation (PATCH /guilds/{id}/members/@me, applied directly by
-        # dashboard/api/botprofile.py via the bot token — see
-        # utils/bot_profile.py's header for why avatar_url is branding
-        # metadata only, not a real per-guild bot avatar (Discord has no
-        # API for that).
+        # Per-server bot profile: nickname, avatar, banner, and bio are
+        # ALL genuinely per-guild via Discord's "Modify Current Member"
+        # endpoint (PATCH /guilds/{id}/members/@me — see
+        # utils/bot_profile.py's header for the confirmed field list).
+        # Nothing here is cosmetic-only; this is what Discord's own
+        # client shows for the bot in THIS server, and nowhere else.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_bot_profile (
                 guild_id   INTEGER PRIMARY KEY,
                 nickname   TEXT,
                 avatar_url TEXT,
+                banner_url TEXT,
+                bio        TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        try:
+            cursor = await db.execute("PRAGMA table_info(guild_bot_profile)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "banner_url" not in cols:
+                await db.execute(
+                    "ALTER TABLE guild_bot_profile ADD COLUMN banner_url TEXT")
+            if "bio" not in cols:
+                await db.execute(
+                    "ALTER TABLE guild_bot_profile ADD COLUMN bio TEXT")
+            await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] guild_bot_profile.banner_url/bio: {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS status_messages (
