@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Bot Profile{% endblock %}
+{% block content %}
+<span data-page-title="Bot Profile"></span>
+
+<div class="card">
+    <div class="card-title">🤖 Per-Server Bot Profile</div>
+    <p class="text-muted text-sm" style="margin-bottom:16px;">
+        Give the bot a different nickname just for this server — this is a real Discord
+        nickname change, applied immediately, and only affects how the bot appears here.
+        Every other server keeps its own nickname (or the bot's global name) untouched.
+    </p>
+    <div class="form-group" style="max-width:360px;">
+        <label class="form-label">Nickname in this server</label>
+        <input class="form-input" id="bp-nickname" maxlength="32" placeholder="Leave empty to use the global name">
+        <div class="form-hint">Max 32 characters (Discord's limit)</div>
+    </div>
+    <div style="display:flex;gap:10px;">
+        <button class="btn btn-primary" id="bp-save-btn" onclick="saveBotProfile(this)">Save & Apply</button>
+        <button class="btn btn-secondary" onclick="resetBotProfile()">Reset to Default</button>
+    </div>
+    <div id="bp-status" style="margin-top:10px;font-size:13px;"></div>
+</div>
+
+<div class="card">
+    <div class="card-title">🖼️ Branding Icon (optional)</div>
+    <p class="text-muted text-sm" style="margin-bottom:16px;">
+        <strong>Heads up:</strong> Discord does not let a bot have a different profile
+        picture in different servers — a bot account has exactly one avatar, everywhere,
+        the same way it has exactly one username. There's no API for a bot to change that
+        per-server (this differs from the per-server avatar feature Discord gives
+        <em>human</em> accounts, which bots were never included in).
+        <br><br>
+        What you set below is just a URL stored for this server — it doesn't touch the
+        bot's real profile picture anywhere. It's saved for optional future use (e.g. a
+        branding icon in embeds the bot sends in this server), not shown as the bot's
+        avatar in Discord's member list, DMs, or anywhere else.
+    </p>
+    <div class="form-group" style="max-width:420px;">
+        <label class="form-label">Branding icon URL</label>
+        <input class="form-input" id="bp-avatar" placeholder="https://...">
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">👁️ Current State</div>
+    <table class="table">
+        <tbody>
+            <tr>
+                <td style="width:180px;">Live nickname (Discord)</td>
+                <td id="bp-live-nick" class="text-muted">Loading…</td>
+            </tr>
+            <tr>
+                <td>Global bot name</td>
+                <td id="bp-live-username" class="text-muted">Loading…</td>
+            </tr>
+            <tr>
+                <td>Global bot avatar</td>
+                <td id="bp-live-avatar" class="text-muted">Loading…</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+{% block scripts %}
+<script>
+async function loadBotProfile() {
+    const res = await fetch('/api/botprofile/config');
+    if (!res.ok) return;
+    const data = await res.json();
+    const stored = data.stored || {};
+    const live = data.live || {};
+
+    document.getElementById('bp-nickname').value = stored.nickname || '';
+    document.getElementById('bp-avatar').value = stored.avatar_url || '';
+
+    document.getElementById('bp-live-nick').textContent =
+        live.nick || '(no nickname set — using global name)';
+    document.getElementById('bp-live-username').textContent = live.username || '—';
+
+    const avatarCell = document.getElementById('bp-live-avatar');
+    avatarCell.innerHTML = '';
+    if (live.global_avatar_url) {
+        const img = document.createElement('img');
+        img.src = live.global_avatar_url;
+        img.style.cssText = 'width:32px;height:32px;border-radius:50%;vertical-align:middle;margin-right:8px;';
+        avatarCell.appendChild(img);
+        avatarCell.appendChild(document.createTextNode('Same everywhere — see explanation above'));
+    } else {
+        avatarCell.textContent = '—';
+    }
+}
+loadBotProfile();
+
+async function saveBotProfile(btn) {
+    const payload = {
+        nickname: document.getElementById('bp-nickname').value.trim(),
+        avatar_url: document.getElementById('bp-avatar').value.trim(),
+    };
+    const data = await ajaxSave('/api/botprofile/config', payload, btn, 'Bot profile saved!');
+    const status = document.getElementById('bp-status');
+    if (data && data.success) {
+        if (data.nickname_applied === false) {
+            status.textContent = '⚠️ ' + (data.warning || 'Saved, but the live nickname could not be applied.');
+            status.style.color = 'var(--warning)';
+        } else {
+            status.textContent = '✅ Applied live in Discord.';
+            status.style.color = 'var(--success)';
+        }
+        loadBotProfile();
+    }
+    setTimeout(() => status.textContent = '', 4000);
+}
+
+async function resetBotProfile() {
+    showConfirm("Reset this server's bot nickname back to the global default?", async () => {
+        const res = await fetch('/api/botprofile/reset', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+            showToast(data.nickname_applied === false
+                ? (data.warning || 'Reset saved, but live nickname could not be cleared.')
+                : 'Reset — back to the global name.',
+                data.nickname_applied === false ? 'warning' : 'success');
+            document.getElementById('bp-nickname').value = '';
+            loadBotProfile();
+        } else {
+            showToast('Error resetting', 'error');
+        }
+    });
+}
+</script>
+{% endblock %}
+{% endblock %}
