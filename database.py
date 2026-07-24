@@ -474,6 +474,21 @@ async def init_db():
             )
         """)
 
+        # Per-server bot profile: nickname is a real Discord API
+        # operation (PATCH /guilds/{id}/members/@me, applied directly by
+        # dashboard/api/botprofile.py via the bot token — see
+        # utils/bot_profile.py's header for why avatar_url is branding
+        # metadata only, not a real per-guild bot avatar (Discord has no
+        # API for that).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_bot_profile (
+                guild_id   INTEGER PRIMARY KEY,
+                nickname   TEXT,
+                avatar_url TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS status_messages (
                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
