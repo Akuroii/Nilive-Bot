@@ -113,6 +113,7 @@ PAGE_PERMISSIONS = {
     "general_settings":   LEVEL_OWNER,
     "welcome":            LEVEL_ADMIN,
     "boost":              LEVEL_ADMIN,
+    "botprofile":         LEVEL_ADMIN,
     "announcements":      LEVEL_ADMIN,
     "commands":           LEVEL_OWNER,
     "dashboard_access":   LEVEL_OWNER,
