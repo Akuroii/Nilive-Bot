@@ -235,6 +235,7 @@ async def load_cogs():
         "cogs.trade",
         "cogs.missions",
         "cogs.boost",
+        "cogs.botprofile",
         "cogs.reactionroles",
         "cogs.tickets",
         "cogs.embedbuilder",
