@@ -5,18 +5,18 @@ from dashboard.permissions import (
 )
 from dashboard.api import api_bp
 
-# ── Bot Profile (per-server nickname + branding icon) ───────────────────
+# ── Bot Profile (real per-server nickname + avatar + banner + bio) ─────────
 #
-# Nickname changes are applied immediately via a direct Discord REST call
-# using the bot token (utils.bot_profile.apply_nickname_via_rest) — same
-# "Flask process talks to Discord's API directly with the bot token"
+# All four fields go in ONE call to Discord's "Modify Current Member"
+# endpoint (PATCH /guilds/{id}/members/@me), which accepts
+# nick/avatar/banner/bio for whichever token calls it — bot tokens
+# included. avatar/banner must be base64 data URIs, so
+# utils/bot_profile.py downloads whatever URL is pasted here and
+# re-encodes it before sending.
+#
+# Applied directly from this Flask process via the bot token — same
 # pattern dashboard/api/core.py already uses for role/channel lookups
-# and dashboard/auth.py uses for bot_is_in_guild()/get_bot_invite_url().
-# No dependency on the live bot process being reachable from here.
-#
-# avatar_url is stored as branding metadata ONLY — see utils/bot_profile.py
-# and cogs/botprofile.py for why Discord doesn't support a true
-# per-server bot avatar via any API.
+# — so there's no dependency on the bot's gateway connection being up.
 
 
 @api_bp.route("/botprofile/config", methods=["GET"])
@@ -44,31 +44,33 @@ def save_botprofile_config():
 
     nickname   = (data.get("nickname") or "").strip() or None
     avatar_url = (data.get("avatar_url") or "").strip() or None
+    banner_url = (data.get("banner_url") or "").strip() or None
+    bio        = (data.get("bio") or "").strip() or None
 
     if nickname and len(nickname) > 32:
         return jsonify({"success": False,
                         "error": "Nickname must be 32 characters or fewer (Discord's limit)"})
+    if bio and len(bio) > 190:
+        return jsonify({"success": False,
+                        "error": "Bio must be 190 characters or fewer"})
+
+    from utils.bot_profile import apply_bot_profile_via_rest, save_guild_bot_profile
+    result = apply_bot_profile_via_rest(guild_id, nickname, avatar_url, banner_url, bio)
 
     async def save():
-        from utils.bot_profile import save_guild_bot_profile
-        await save_guild_bot_profile(guild_id, nickname, avatar_url)
+        await save_guild_bot_profile(guild_id, nickname, avatar_url, banner_url, bio)
 
     run_async(save())
-
-    from utils.bot_profile import apply_nickname_via_rest
-    applied, error = apply_nickname_via_rest(guild_id, nickname)
 
     log_action(guild_id,
                f"Updated bot profile (nickname={nickname or 'default'})",
                "botprofile")
 
-    if not applied:
-        return jsonify({
-            "success": True,
-            "nickname_applied": False,
-            "warning": f"Saved, but couldn't apply the nickname live: {error}",
-        })
-    return jsonify({"success": True, "nickname_applied": True})
+    return jsonify({
+        "success": result["success"],
+        "applied": result.get("applied", []),
+        "errors": result.get("errors", {}),
+    })
 
 
 @api_bp.route("/botprofile/reset", methods=["POST"])
@@ -76,21 +78,17 @@ def save_botprofile_config():
 def reset_botprofile():
     guild_id = get_session_guild_id()
 
+    from utils.bot_profile import apply_bot_profile_via_rest, save_guild_bot_profile
+    result = apply_bot_profile_via_rest(guild_id, None, None, None, None)
+
     async def save():
-        from utils.bot_profile import save_guild_bot_profile
-        await save_guild_bot_profile(guild_id, None, None)
+        await save_guild_bot_profile(guild_id, None, None, None, None)
 
     run_async(save())
-
-    from utils.bot_profile import apply_nickname_via_rest
-    applied, error = apply_nickname_via_rest(guild_id, None)
-
     log_action(guild_id, "Reset bot profile to default", "botprofile")
 
-    if not applied:
-        return jsonify({
-            "success": True,
-            "nickname_applied": False,
-            "warning": f"Reset saved, but couldn't clear the live nickname: {error}",
-        })
-    return jsonify({"success": True, "nickname_applied": True})
+    return jsonify({
+        "success": result["success"],
+        "applied": result.get("applied", []),
+        "errors": result.get("errors", {}),
+    })
