@@ -210,21 +210,28 @@ async function loadBotProfile() {
     const stored = data.stored || {};
     const live = data.live || {};
 
-    document.getElementById('bp-nickname').value = stored.nickname || '';
+document.getElementById('bp-nickname').value = stored.nickname || '';
     document.getElementById('bp-avatar-url').value = stored.avatar_url || '';
     document.getElementById('bp-banner-url').value = stored.banner_url || '';
     document.getElementById('bp-bio').value = stored.bio || '';
+    document.getElementById('bp-preview-name').textContent = stored.nickname || live.username || 'Bot Name';
     ['bp-nickname', 'bp-bio'].forEach(id => document.getElementById(id).dispatchEvent(new Event('input')));
 
     // Prefer showing what's actually LIVE right now (guild avatar/banner)
-    // over the stored URL, so the preview never lies about what Discord
+    // in the preview card — the input fields still show the stored URL
+    // you typed, but the picture itself never lies about what Discord
     // is really displaying.
-    const avatarUrl = live.guild_avatar_url || stored.avatar_url || '';
-    const bannerUrl = live.guild_banner_url || stored.banner_url || '';
-    document.getElementById('bp-avatar-url').value = stored.avatar_url || '';
-    document.getElementById('bp-banner-url').value = stored.banner_url || '';
-    if (avatarUrl) document.getElementById('bp-avatar-img').src = avatarUrl;
-    if (bannerUrl) document.getElementById('bp-banner-img').src = bannerUrl;
+    const avatarImg = document.getElementById('bp-avatar-img');
+    const avatarFallback = document.getElementById('bp-avatar-fallback');
+    const previewAvatarUrl = live.guild_avatar_url || stored.avatar_url || '';
+    if (previewAvatarUrl) { avatarImg.src = previewAvatarUrl; }
+    else { avatarFallback.style.display = 'flex'; }
+
+    const bannerImg = document.getElementById('bp-banner-img');
+    const bannerPlaceholder = document.getElementById('bp-banner-placeholder');
+    const previewBannerUrl = live.guild_banner_url || stored.banner_url || '';
+    if (previewBannerUrl) { bannerImg.src = previewBannerUrl; }
+    else { bannerPlaceholder.style.display = 'flex'; }
 
     document.getElementById('bp-live-nick').textContent = live.nick || '(no nickname — using global name)';
     document.getElementById('bp-live-bio').textContent = live.bio || '(none set)';
