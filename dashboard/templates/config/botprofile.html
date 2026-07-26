@@ -60,51 +60,115 @@
 </div>
 
 <style>
-.bp-preview-wrap { position: relative; margin-bottom: 44px; }
+.bp-preview-outer { margin-bottom: 20px; }
+
+.bp-card {
+    position: relative;
+    width: min(340px, 100%);
+    border-radius: 16px;
+    overflow: hidden;
+    background: var(--bg3);
+    box-shadow: 0 8px 24px rgba(0,0,0,.25);
+}
 
 .bp-banner {
+    position: relative;
     width: 100%;
-    height: 160px;
-    border-radius: 12px;
-    background: var(--bg3);
-    border: 2px dashed var(--border);
+    aspect-ratio: 2.5 / 1;
+}
+
+.bp-banner-inner {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    background: var(--bg4);
+    border-bottom: 1px solid var(--border);
+}
+
+.bp-banner-placeholder {
+    position: absolute;
+    inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    overflow: hidden;
-    position: relative;
+    padding: 0 16px;
+    text-align: center;
+    color: var(--text3);
+    font-size: 12px;
 }
-.bp-banner-placeholder { color: var(--text3); font-size: 13px; }
-.bp-banner img { display: none; width: 100%; height: 100%; object-fit: cover; }
+
+.bp-banner-inner img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 0;
+    transition: opacity 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.bp-banner-inner img.is-loaded { opacity: 1; }
 
 .bp-avatar-ring {
     position: absolute;
-    left: 24px;
-    bottom: -32px;
-    width: 88px;
-    height: 88px;
+    left: 16px;
+    bottom: -28px;
+    width: 72px;
+    height: 72px;
     border-radius: 50%;
-    background: var(--bg2);
-    border: 4px solid var(--bg2);
-    box-shadow: 0 2px 10px rgba(0,0,0,.3);
+    background: var(--bg3);
+    border: 4px solid var(--bg3);
+    box-shadow: 0 2px 8px rgba(0,0,0,.35);
+    z-index: 2;
 }
 .bp-avatar {
-    display: none;
-    width: 80px;
-    height: 80px;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     border-radius: 50%;
     object-fit: cover;
+    opacity: 0;
+    transition: opacity 200ms cubic-bezier(0.23, 1, 0.32, 1);
 }
+.bp-avatar.is-loaded { opacity: 1; }
 .bp-avatar-fallback {
-    width: 80px;
-    height: 80px;
+    position: absolute;
+    inset: 0;
     border-radius: 50%;
     background: var(--accent);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 32px;
+    font-size: 26px;
 }
+
+.bp-card-footer { padding: 36px 16px 14px; }
+.bp-card-name { font-size: 15px; font-weight: 700; color: var(--text); }
+.bp-card-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text3);
+    margin-top: 4px;
+}
+.bp-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    flex-shrink: 0;
+}
+
+.bp-preview-caption {
+    font-size: 11px;
+    color: var(--text3);
+    margin-top: 8px;
+    max-width: 340px;
+}
+
+.bp-banner { border-radius: 16px 16px 0 0; }
+#bp-save-btn:active { transform: scale(0.97); transition: transform 100ms ease-out; }
 </style>
 
 {% block scripts %}
@@ -119,12 +183,16 @@ function bindCounter(inputId, counterId, max) {
 bindCounter('bp-nickname', 'bp-nick-counter', 32);
 bindCounter('bp-bio', 'bp-bio-counter', 190);
 
+document.getElementById('bp-nickname').addEventListener('input', function() {
+    document.getElementById('bp-preview-name').textContent = this.value.trim() || 'Bot Name';
+});
+
 document.getElementById('bp-avatar-url').addEventListener('input', function() {
     const img = document.getElementById('bp-avatar-img');
     const fallback = document.getElementById('bp-avatar-fallback');
     const url = this.value.trim();
     if (url) { img.src = url; }
-    else { img.removeAttribute('src'); img.style.display = 'none'; fallback.style.display = 'flex'; }
+    else { img.classList.remove('is-loaded'); img.removeAttribute('src'); fallback.style.display = 'flex'; }
 });
 
 document.getElementById('bp-banner-url').addEventListener('input', function() {
@@ -132,7 +200,7 @@ document.getElementById('bp-banner-url').addEventListener('input', function() {
     const placeholder = document.getElementById('bp-banner-placeholder');
     const url = this.value.trim();
     if (url) { img.src = url; }
-    else { img.removeAttribute('src'); img.style.display = 'none'; placeholder.style.display = 'block'; }
+    else { img.classList.remove('is-loaded'); img.removeAttribute('src'); placeholder.style.display = 'flex'; }
 });
 
 async function loadBotProfile() {
