@@ -18,8 +18,29 @@
         settings (or the bot's global defaults), completely unaffected.
     </p>
 
-    <div class="bp-preview-wrap">
-
+    <div class="bp-preview-outer">
+        <div class="bp-card">
+            <div class="bp-banner">
+                <div class="bp-banner-inner">
+                    <span class="bp-banner-placeholder" id="bp-banner-placeholder">Paste a banner URL to preview it here</span>
+                    <img id="bp-banner-img" alt=""
+                         onload="document.getElementById('bp-banner-placeholder').style.display='none';this.classList.add('is-loaded');"
+                         onerror="this.classList.remove('is-loaded');this.removeAttribute('src');document.getElementById('bp-banner-placeholder').style.display='flex';">
+                </div>
+                <div class="bp-avatar-ring">
+                    <img id="bp-avatar-img" class="bp-avatar" alt=""
+                         onload="document.getElementById('bp-avatar-fallback').style.display='none';this.classList.add('is-loaded');"
+                         onerror="this.classList.remove('is-loaded');this.removeAttribute('src');document.getElementById('bp-avatar-fallback').style.display='flex';">
+                    <div id="bp-avatar-fallback" class="bp-avatar-fallback">🤖</div>
+                </div>
+            </div>
+            <div class="bp-card-footer">
+                <div class="bp-card-name" id="bp-preview-name">Bot Name</div>
+                <div class="bp-card-status"><span class="bp-status-dot"></span>Online in this server</div>
+            </div>
+        </div>
+        <div class="bp-preview-caption">Proportioned to match Discord's real member popout — not interactive Discord chrome.</div>
+    </div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
         <div class="form-group">
@@ -210,7 +231,7 @@ async function loadBotProfile() {
     const stored = data.stored || {};
     const live = data.live || {};
 
-document.getElementById('bp-nickname').value = stored.nickname || '';
+    document.getElementById('bp-nickname').value = stored.nickname || '';
     document.getElementById('bp-avatar-url').value = stored.avatar_url || '';
     document.getElementById('bp-banner-url').value = stored.banner_url || '';
     document.getElementById('bp-bio').value = stored.bio || '';
