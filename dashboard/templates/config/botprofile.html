@@ -44,20 +44,21 @@
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
         <div class="form-group">
-            <label class="form-label">Nickname</label>
+            <label class="form-label" for="bp-nickname">Nickname</label>
             <input class="form-input" id="bp-nickname" maxlength="32" placeholder="Leave empty to use the global name">
             <div class="form-hint"><span id="bp-nick-counter">0/32</span> — Discord's hard limit</div>
         </div>
         <div class="form-group">
-            <label class="form-label">Avatar URL</label>
+            <label class="form-label" for="bp-avatar-url">Avatar URL</label>
             <input class="form-input" id="bp-avatar-url" placeholder="https://...">
         </div>
         <div class="form-group">
-            <label class="form-label">Banner URL</label>
+            <label class="form-label" for="bp-banner-url">Banner URL</label>
             <input class="form-input" id="bp-banner-url" placeholder="https://...">
+            <div class="form-hint">Crops to a wide ~2.5:1 banner — landscape images (roughly 1000×400 or wider) look best</div>
         </div>
         <div class="form-group">
-            <label class="form-label">Bio</label>
+            <label class="form-label" for="bp-bio">Bio</label>
             <textarea class="form-input" id="bp-bio" rows="2" maxlength="190"
                       placeholder="A short line shown on the bot's profile card in this server"></textarea>
             <div class="form-hint" style="text-align:right;"><span id="bp-bio-counter">0/190</span></div>
@@ -190,10 +191,72 @@
 
 .bp-banner { border-radius: 16px 16px 0 0; }
 #bp-save-btn:active { transform: scale(0.97); transition: transform 100ms ease-out; }
+
+/* Unsaved-changes indicator — added when fields differ from the last
+   loaded/saved state (see markDirty/markClean below). Subtle ring +
+   pulsing dot rather than blocking UI; title attr covers screen readers. */
+#bp-save-btn.bp-dirty {
+    box-shadow: 0 0 0 3px rgba(254,231,92,.25);
+}
+#bp-save-btn.bp-dirty::after {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--warning);
+    margin-left: 8px;
+    animation: bp-dirty-pulse 1.6s ease-in-out infinite;
+}
+@keyframes bp-dirty-pulse {
+    0%, 100% { opacity: .4; transform: scale(0.85); }
+    50% { opacity: 1; transform: scale(1.1); }
+}
+@media (prefers-reduced-motion: reduce) {
+    #bp-save-btn.bp-dirty::after { animation: none; opacity: 1; }
+}
 </style>
 
 {% block scripts %}
 <script>
+// live.username, kept in sync from loadBotProfile() so the nickname
+// input's live-typing preview can fall back to the bot's real global
+// name (not a hardcoded string) when the field is cleared.
+let liveBotUsername = '';
+
+// Unsaved-changes tracking. formDirty flips true the moment any of the
+// four fields receives real user input, and back to false whenever the
+// form is repopulated fresh from the server (initial load, post-save
+// refresh, or reset) — see markClean() calls below.
+let formDirty = false;
+
+function markDirty() {
+    if (formDirty) return;
+    formDirty = true;
+    const btn = document.getElementById('bp-save-btn');
+    btn.classList.add('bp-dirty');
+    btn.title = 'You have unsaved changes';
+}
+
+function markClean() {
+    formDirty = false;
+    const btn = document.getElementById('bp-save-btn');
+    btn.classList.remove('bp-dirty');
+    btn.removeAttribute('title');
+}
+
+// Native browser warning for a real page unload (closing the tab,
+// typing a new URL, hard refresh) while there are unsaved edits. This
+// does NOT cover this dashboard's htmx-driven in-app sidebar
+// navigation — that swaps #content-area without a real unload event,
+// so it can't be caught here. The Save button's dirty indicator is
+// the signal for that case.
+window.addEventListener('beforeunload', function(e) {
+    if (!formDirty) return;
+    e.preventDefault();
+    e.returnValue = '';
+});
+
 function bindCounter(inputId, counterId, max) {
     const el = document.getElementById(inputId);
     const counter = document.getElementById(counterId);
@@ -204,8 +267,12 @@ function bindCounter(inputId, counterId, max) {
 bindCounter('bp-nickname', 'bp-nick-counter', 32);
 bindCounter('bp-bio', 'bp-bio-counter', 190);
 
+['bp-nickname', 'bp-avatar-url', 'bp-banner-url', 'bp-bio'].forEach(id => {
+    document.getElementById(id).addEventListener('input', markDirty);
+});
+
 document.getElementById('bp-nickname').addEventListener('input', function() {
-    document.getElementById('bp-preview-name').textContent = this.value.trim() || 'Bot Name';
+    document.getElementById('bp-preview-name').textContent = this.value.trim() || liveBotUsername || 'Bot Name';
 });
 
 document.getElementById('bp-avatar-url').addEventListener('input', function() {
@@ -231,20 +298,23 @@ async function loadBotProfile() {
     const stored = data.stored || {};
     const live = data.live || {};
 
+    liveBotUsername = live.username || '';
+
     document.getElementById('bp-nickname').value = stored.nickname || '';
     document.getElementById('bp-avatar-url').value = stored.avatar_url || '';
     document.getElementById('bp-banner-url').value = stored.banner_url || '';
     document.getElementById('bp-bio').value = stored.bio || '';
-    document.getElementById('bp-preview-name').textContent = stored.nickname || live.username || 'Bot Name';
+    document.getElementById('bp-preview-name').textContent = stored.nickname || liveBotUsername || 'Bot Name';
     ['bp-nickname', 'bp-bio'].forEach(id => document.getElementById(id).dispatchEvent(new Event('input')));
 
     // Prefer showing what's actually LIVE right now (guild avatar/banner)
-    // in the preview card — the input fields still show the stored URL
-    // you typed, but the picture itself never lies about what Discord
-    // is really displaying.
+    // in the preview card, falling back further to the bot's real GLOBAL
+    // avatar (not a generic placeholder icon) when nothing per-guild or
+    // stored is set — so the "empty" preview state matches what Discord
+    // actually shows for this bot when nothing's been customized yet.
     const avatarImg = document.getElementById('bp-avatar-img');
     const avatarFallback = document.getElementById('bp-avatar-fallback');
-    const previewAvatarUrl = live.guild_avatar_url || stored.avatar_url || '';
+    const previewAvatarUrl = live.guild_avatar_url || stored.avatar_url || live.global_avatar_url || '';
     if (previewAvatarUrl) { avatarImg.src = previewAvatarUrl; }
     else { avatarFallback.style.display = 'flex'; }
 
@@ -269,6 +339,12 @@ async function loadBotProfile() {
     } else {
         gAvatarCell.textContent = '—';
     }
+
+    // Fresh from the server = nothing unsaved. Placed last so the
+    // synthetic input events dispatched above (counter/preview refresh)
+    // don't get mistaken for real user edits and leave the dirty flag
+    // stuck on right after a load.
+    markClean();
 }
 loadBotProfile();
 
