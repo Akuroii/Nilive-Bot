@@ -37,6 +37,11 @@ from flask import Blueprint, jsonify, request, session
 # read-only Trade history page flagged since pass #15 (Trade dashboard
 # page, "not yet built"). Same registration pattern as minigames and
 # missions above.
+#
+# CREATOR pass: added dashboard.api.creator — full CRUD (add/delete/
+# toggle) for YouTube and Twitch, replacing the old read-only
+# "Announcements" page. Same registration pattern as every other
+# submodule.
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -62,6 +67,7 @@ def _enforce_csrf():
 # sections), only listed alphabetically for readability.
 from dashboard.api import botprofile    # noqa: E402,F401
 from dashboard.api import core          # noqa: E402,F401
+from dashboard.api import creator       # noqa: E402,F401
 from dashboard.api import economy_shop  # noqa: E402,F401
 from dashboard.api import leveling      # noqa: E402,F401
 from dashboard.api import minigames     # noqa: E402,F401

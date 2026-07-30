@@ -115,6 +115,16 @@ PAGE_PERMISSIONS = {
     "boost":              LEVEL_ADMIN,
     "botprofile":         LEVEL_ADMIN,
     "announcements":      LEVEL_ADMIN,
+
+    # CREATOR pass: replaces the old read-only "Announcements" page
+    # with a real CRUD hub for YouTube/Twitch. Same tier as the page
+    # it replaces — adding/removing a watched channel/streamer is an
+    # admin action, not owner-only. "announcements" key kept above so
+    # the old /config/announcements URL (now just a redirect to
+    # /creator) still resolves a permission level rather than 403ing
+    # on a missing dict key.
+    "creator":            LEVEL_ADMIN,
+
     "commands":           LEVEL_OWNER,
     "dashboard_access":   LEVEL_OWNER,
 

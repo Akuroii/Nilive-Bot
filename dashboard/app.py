@@ -842,14 +842,6 @@ def economy():
 
     balances, diamonds, exchange_rate = run_async(get_data())
 
-    # dark-fixes pass #18 (username resolver rollout, task #3 of 6):
-    # Economy previously showed raw user_id in both the Coins and
-    # Diamonds tabs — no snapshot table backs this page (unlike
-    # moderation_logs/purchase_history/etc), so a live resolve is the
-    # only correct source here. One batched resolve_users() call per
-    # page load covering every ID from both lists (not per-row), same
-    # "resolve once, render many" shape the Trade History page already
-    # established client-side via /api/trade/history.
     async def resolve():
         from utils.discord_user_cache import resolve_users
         ids = {r[0] for r in balances} | {r[0] for r in diamonds}
@@ -910,13 +902,6 @@ def events():
 
 
 # ── Minigames / Event Stack Builder (dark-fixes pass #13) ───────────────────
-#
-# Dashboard config/tier-management page for cogs/minigames.py, which was
-# previously Discord-command-only (/minigames_setup, /minigames_tier_add,
-# etc). Reuses cogs.minigames.ensure_tables()/get_config()/get_tiers()
-# rather than re-declaring the schema/query logic — see
-# dashboard/api/minigames.py for the matching write-side routes this
-# page's JS calls into.
 
 @app.route("/minigames")
 @require_page("minigames")
@@ -946,10 +931,6 @@ def minigames_page():
 
 
 # ── Missions ─────────────────────────────────────────────────────────────────
-#
-# Page data loads client-side via /api/missions/list and
-# /api/missions/completions (same pattern the minigames page already
-# uses), so no server-side query is needed in the route itself.
 
 @app.route("/missions")
 @require_page("missions")
@@ -1015,6 +996,20 @@ def trade_page():
     guild_id = get_session_guild_id()
     ctx = get_current_user_context()
     return render("systems/trade.html", **ctx)
+
+
+# ── Creator Hub (YouTube / Twitch) ──────────────────────────────────────────
+#
+# Replaces the old read-only "Announcements" page. Full add/delete/toggle
+# CRUD lives client-side via /api/creator/* (dashboard/api/creator.py);
+# this route just renders the shell, same pattern as /missions and
+# /minigames (both of which also load their data via fetch()).
+
+@app.route("/creator")
+@require_page("creator")
+def creator_page():
+    ctx = get_current_user_context()
+    return render("config/creator.html", **ctx)
 
 
 # ── Config: General ────────────────────────────────────────────────────────────
@@ -1192,6 +1187,14 @@ def config_boost():
 
 
 # ── Config: Bot Profile (per-server nickname + branding icon) ──────────────────
+#
+# REGRESSION FIX (creator-notify pass): this route was silently dropped
+# from app.py somewhere between the Bot Profile feature landing and the
+# Creator Hub delta being built — the file that added /creator and the
+# announcements->creator redirect was apparently edited from a copy of
+# app.py that predated Bot Profile. dashboard/api/botprofile.py (the
+# actual route handlers) was never touched or lost, only this page's
+# entry point — restored verbatim from before the Creator Hub delta.
 
 @app.route("/config/botprofile")
 @require_page("botprofile")
@@ -1200,26 +1203,17 @@ def config_botprofile():
     return render("config/botprofile.html", **ctx)
 
 
-# ── Config: Announcements ──────────────────────────────────────────────────────
+# ── Config: Announcements (legacy — redirects to /creator) ─────────────────
+#
+# CREATOR pass: this used to render a read-only view of youtube_config +
+# twitch_config. It's fully superseded by /creator (full CRUD), so the
+# route stays only so any bookmarked/linked /config/announcements URL
+# still lands somewhere useful instead of 404ing.
 
 @app.route("/config/announcements")
-@require_page("announcements")
+@require_page("creator")
 def config_announcements():
-    guild_id = get_session_guild_id()
-
-    async def get_configs():
-        async with aiosqlite.connect(DB_PATH) as db:
-            yt = await (await db.execute(
-                "SELECT * FROM youtube_config WHERE guild_id=?",
-                (guild_id,))).fetchall()
-            tw = await (await db.execute(
-                "SELECT * FROM twitch_config WHERE guild_id=?",
-                (guild_id,))).fetchall()
-        return yt, tw
-
-    yt, tw = run_async(get_configs())
-    ctx    = get_current_user_context()
-    return render("config/announcements.html", youtube=yt, twitch=tw, **ctx)
+    return redirect(url_for("creator_page"))
 
 
 # ── Commands dashboard ─────────────────────────────────────────────────────────
@@ -1241,14 +1235,13 @@ COMMAND_CATEGORIES = {
         "embed_create","embed_edit","sticky_set","sticky_remove",
         "trigger_add","trigger_remove","trigger_list",
     ],
-    "Config": ["boost_setup","youtube_setup","youtube_remove","ticket_setup"],
+    "Config": [
+        "boost_setup",
+        "youtube_setup", "youtube_remove", "youtube_list",
+        "twitch_setup", "twitch_remove", "twitch_list",
+        "ticket_setup",
+    ],
     "Events": ["event_create","event_end","event_list"],
-    # dark-fixes pass #13: cogs/minigames.py's slash commands existed
-    # with no entry here, so they never showed up in the Commands
-    # page's per-command enable/disable toggle list even though every
-    # other command in the bot does. Names match the
-    # @app_commands.command(name=...) values in cogs/minigames.py
-    # exactly.
     "Minigames": [
         "minigames_setup", "minigames_tier_add", "minigames_tier_list",
         "minigames_tier_remove", "minigames_force", "minigames_stats",

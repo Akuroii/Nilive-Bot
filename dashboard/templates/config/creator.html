@@ -1,0 +1,686 @@
+{% extends "base.html" %}
+{% block title %}Creator Hub{% endblock %}
+{% block content %}
+<span data-page-title="Creator Hub"></span>
+
+<div style="display:flex;gap:4px;margin-bottom:20px;
+            border-bottom:1px solid var(--border);padding-bottom:0;">
+    {% for tab, label in [('uploads','📹 Uploads'),('live','🔴 Live'),('groups','🔗 Creator Groups')] %}
+    <button onclick="switchCreatorTab('{{ tab }}')" id="ctab-{{ tab }}"
+        style="padding:10px 18px;border:none;background:transparent;
+               color:var(--text2);font-size:13px;font-weight:500;
+               cursor:pointer;border-bottom:2px solid transparent;
+               transition:all .15s;margin-bottom:-1px;min-height:44px;"
+        class="ctab-btn">{{ label }}</button>
+    {% endfor %}
+</div>
+
+<!-- ══════════════════ UPLOADS TAB (YouTube) ══════════════════ -->
+<div id="ctab-content-uploads" class="ctab-content">
+    <div class="card">
+        <div class="card-title">➕ Watch a YouTube Channel</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Paste a channel URL — either form works
+            (<code>youtube.com/channel/UC...</code> or
+            <code>youtube.com/@handle</code>). Checked every 10 minutes.
+            Video notifications post to the channel you pick here by
+            default; Shorts and Live can each be pointed at a different
+            channel below, or left to share this one.
+        </p>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">Channel URL</label>
+                <input class="form-input" id="yt-add-url" placeholder="https://youtube.com/@channel">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Post videos to</label>
+                <select class="nero-channel-picker form-input" id="yt-add-channel-picker"></select>
+            </div>
+        </div>
+        <button class="btn btn-primary" onclick="addYoutubeChannel()">Add Channel</button>
+        <div id="yt-add-status" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+
+    <div id="yt-channels-list">
+        <div class="card"><span class="text-muted text-sm">Loading…</span></div>
+    </div>
+</div>
+
+<!-- ══════════════════ LIVE TAB (Twitch) ══════════════════ -->
+<div id="ctab-content-live" class="ctab-content" style="display:none;">
+    <div class="card">
+        <div class="card-title">🟣 Watch a Twitch Streamer</div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">Twitch username</label>
+                <input class="form-input" id="tw-add-username" placeholder="e.g. meowlyva">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Post to</label>
+                <select class="nero-channel-picker form-input" id="tw-add-channel-picker"></select>
+            </div>
+        </div>
+        <button class="btn btn-primary" onclick="addTwitchEntry()">Add Streamer</button>
+        <div id="tw-add-status" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+
+    <div id="tw-entries-list">
+        <div class="card"><span class="text-muted text-sm">Loading…</span></div>
+    </div>
+</div>
+
+<!-- ══════════════════ CREATOR GROUPS TAB ══════════════════ -->
+<div id="ctab-content-groups" class="ctab-content" style="display:none;">
+    <div class="card">
+        <div class="card-title">🔗 New Creator Group</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Bundles two or more of your watches above (any mix of YouTube
+            and Twitch) into one consolidated live message instead of each
+            posting its own — one message gets sent when the first linked
+            platform goes live, then edited in place to add or drop a line
+            as the others go live/offline:
+        </p>
+        <div style="background:var(--bg3);border:1px solid var(--border);
+                    border-radius:8px;padding:12px 14px;margin-bottom:16px;
+                    font-size:13px;line-height:1.7;color:var(--text2);">
+            @everyone 🔴 <strong>MeowlyVA is LIVE!</strong><br>
+            🟣 Twitch — https://twitch.tv/meowlyva<br>
+            🔴 YouTube — https://youtube.com/live/XVJpU9UgXY4
+        </div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            After creating a group, link watches to it from the ➕ picker on
+            each channel/streamer card in the Uploads and Live tabs above —
+            not here. A watch left unlinked keeps posting its own
+            independent message exactly as before.
+        </p>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">Display name</label>
+                <input class="form-input" id="cg-add-name" placeholder="e.g. MeowlyVA">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Post to</label>
+                <select class="nero-channel-picker form-input" id="cg-add-channel-picker"></select>
+            </div>
+        </div>
+        <div id="cg-add-mention-fields"></div>
+        <button class="btn btn-primary" onclick="addCreatorGroup()">Create Group</button>
+        <div id="cg-add-status" style="margin-top:10px;font-size:13px;"></div>
+    </div>
+
+    <div id="cg-groups-list">
+        <div class="card"><span class="text-muted text-sm">Loading…</span></div>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+// ── TAB SWITCHING ──────────────────────────────────────────────
+function switchCreatorTab(name) {
+    document.querySelectorAll('.ctab-content').forEach(el => el.style.display = 'none');
+    document.getElementById('ctab-content-' + name).style.display = 'block';
+    document.querySelectorAll('.ctab-btn').forEach(btn => {
+        btn.style.borderBottomColor = 'transparent';
+        btn.style.color = 'var(--text2)';
+    });
+    const active = document.getElementById('ctab-' + name);
+    active.style.borderBottomColor = 'var(--accent)';
+    active.style.color = 'var(--text)';
+}
+switchCreatorTab('uploads');
+
+// Escapes for BOTH text-content and HTML-attribute-value contexts —
+// this template inserts custom_message/display_name into value="..."
+// attributes as well as between tags, and a DOM textContent->innerHTML
+// round-trip (the pattern dashboard.js's _escapeHtml uses) only
+// escapes &/</>, not quotes, so it's unsafe wherever the result lands
+// inside value="..." or data-value="...". Escaping quotes everywhere,
+// including plain text-content spots, is a harmless no-op there
+// (&quot; still renders as a normal " to the reader) — one function,
+// safe in every context used below, rather than two that are easy to
+// mix up.
+function _esc(str) {
+    return String(str == null ? '' : str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// ── SHARED: mention type picker (dropdown + conditional role picker) ──
+// Used by every YouTube/Twitch/Group form below. idPrefix must be
+// unique per rendered instance (e.g. 'yt-video-42').
+function mentionFieldsHtml(idPrefix, currentType, currentRoleId) {
+    currentType = currentType || 'none';
+    return `
+        <div class="form-group">
+            <label class="form-label">Mention</label>
+            <select class="form-input" id="${idPrefix}-mtype" onchange="toggleMentionRoleWrap('${idPrefix}')">
+                <option value="none" ${currentType === 'none' ? 'selected' : ''}>No mention</option>
+                <option value="everyone" ${currentType === 'everyone' ? 'selected' : ''}>@everyone</option>
+                <option value="role" ${currentType === 'role' ? 'selected' : ''}>Specific role</option>
+            </select>
+        </div>
+        <div class="form-group" id="${idPrefix}-mrole-wrap" style="display:${currentType === 'role' ? 'block' : 'none'};">
+            <label class="form-label">Role to mention</label>
+            <select class="nero-role-picker form-input" id="${idPrefix}-mrole" data-value="${currentRoleId || ''}"></select>
+        </div>`;
+}
+
+function toggleMentionRoleWrap(idPrefix) {
+    const type = document.getElementById(`${idPrefix}-mtype`).value;
+    const wrap = document.getElementById(`${idPrefix}-mrole-wrap`);
+    if (wrap) wrap.style.display = type === 'role' ? 'block' : 'none';
+}
+
+function readMentionFields(idPrefix) {
+    const type = document.getElementById(`${idPrefix}-mtype`).value;
+    const rp = document.getElementById(`${idPrefix}-mrole`);
+    const roleId = (type === 'role' && rp) ? ($(rp).val() || null) : null;
+    return { mention_type: type, mention_role_id: roleId };
+}
+
+// ── SHARED: "part of a Creator Group?" picker, shown on every watch
+// card. Reads from the page-wide _cachedGroups list (loaded once,
+// refreshed whenever the Groups tab saves/deletes something).
+let _cachedGroups = [];
+
+function groupPickerHtml(platform, entryId, currentGroupId) {
+    const options = _cachedGroups.map(g => `
+        <option value="${g.id}" ${String(g.id) === String(currentGroupId) ? 'selected' : ''}>
+            ${_esc(g.display_name)}
+        </option>`).join('');
+    return `
+        <select class="form-input" style="max-width:230px;"
+                onchange="setWatchGroup('${platform}', ${entryId}, this.value)">
+            <option value="">Independent (own message)</option>
+            ${options}
+        </select>`;
+}
+
+async function setWatchGroup(platform, entryId, groupId) {
+    const res = await fetch(`/api/creator/${platform}/${entryId}/group`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ group_id: groupId || null }),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast(groupId ? 'Linked to creator group' : 'Back to independent messages');
+        loadCreatorGroups();
+    } else {
+        showToast(data.error || 'Error', 'error');
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// YOUTUBE
+// ══════════════════════════════════════════════════════════════
+let _ytConfigs = [];
+
+async function loadYoutubeChannels() {
+    const res = await fetch('/api/creator/youtube');
+    const data = await res.json();
+    _ytConfigs = data.configs || [];
+    renderYoutubeChannels();
+}
+
+function renderYoutubeChannels() {
+    const c = document.getElementById('yt-channels-list');
+    if (!_ytConfigs.length) {
+        c.innerHTML = '<div class="card"><span class="text-muted text-sm">No YouTube channels watched yet.</span></div>';
+        return;
+    }
+    c.innerHTML = _ytConfigs.map(cfg => `
+        <div class="card">
+            <div class="card-header">
+                <div style="display:flex;align-items:center;gap:12px;">
+                    <label class="toggle">
+                        <input type="checkbox" id="yt-enabled-${cfg.id}" ${cfg.enabled ? 'checked' : ''}
+                               onchange="toggleYoutubeChannel(${cfg.id}, this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <div>
+                        <div style="font-weight:600;font-size:14px;">${_esc(cfg.channel_url)}</div>
+                        <div class="text-muted text-sm">${cfg.channel_id ? _esc(cfg.channel_id) : '⚠️ Channel ID not resolved'}</div>
+                    </div>
+                </div>
+                <button class="btn btn-sm btn-danger"
+                    onclick="showConfirm('Stop watching this channel?', () => deleteYoutubeChannel(${cfg.id}))">
+                    Delete
+                </button>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+                <span class="text-muted text-sm">Creator Group:</span>
+                ${groupPickerHtml('youtube', cfg.id, cfg.creator_group_id)}
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+                <button class="btn btn-sm btn-secondary" onclick="toggleYtPanel(${cfg.id}, 'video')">📹 Video settings</button>
+                <button class="btn btn-sm btn-secondary" onclick="toggleYtPanel(${cfg.id}, 'shorts')">🩳 Shorts settings</button>
+                <button class="btn btn-sm btn-secondary" onclick="toggleYtPanel(${cfg.id}, 'live')">
+                    🔴 Live settings ${cfg.live.is_live ? '<span class="badge badge-danger" style="margin-left:4px;">LIVE</span>' : ''}
+                </button>
+            </div>
+
+            <div id="yt-panel-video-${cfg.id}" style="display:none;border-top:1px solid var(--border);padding-top:14px;margin-top:10px;">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Post to</label>
+                        <select class="nero-channel-picker form-input" id="yt-video-ch-${cfg.id}"
+                                data-value="${cfg.video.discord_channel_id || ''}"></select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Custom message</label>
+                        <input class="form-input" id="yt-video-msg-${cfg.id}" placeholder="Use {title} and {url}"
+                               value="${_esc(cfg.video.custom_message || '')}">
+                    </div>
+                    ${mentionFieldsHtml(`yt-video-${cfg.id}`, cfg.video.mention_type, cfg.video.mention_role_id)}
+                </div>
+                <button class="btn btn-sm btn-primary" onclick="saveYoutubeVideoSettings(${cfg.id})">Save Video Settings</button>
+            </div>
+
+            <div id="yt-panel-shorts-${cfg.id}" style="display:none;border-top:1px solid var(--border);padding-top:14px;margin-top:10px;">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+                    <label class="toggle">
+                        <input type="checkbox" id="yt-shorts-enabled-${cfg.id}" ${cfg.shorts.enabled ? 'checked' : ''}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span class="text-muted text-sm">Post Shorts separately</span>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Post to (blank = same as Video)</label>
+                        <select class="nero-channel-picker form-input" id="yt-shorts-ch-${cfg.id}"
+                                data-value="${cfg.shorts.discord_channel_id || ''}"></select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Custom message</label>
+                        <input class="form-input" id="yt-shorts-msg-${cfg.id}" placeholder="Use {title} and {url}"
+                               value="${_esc(cfg.shorts.custom_message || '')}">
+                    </div>
+                    ${mentionFieldsHtml(`yt-shorts-${cfg.id}`, cfg.shorts.mention_type, cfg.shorts.mention_role_id)}
+                </div>
+                <button class="btn btn-sm btn-primary" onclick="saveYoutubeShortsSettings(${cfg.id})">Save Shorts Settings</button>
+            </div>
+
+            <div id="yt-panel-live-${cfg.id}" style="display:none;border-top:1px solid var(--border);padding-top:14px;margin-top:10px;">
+                <p class="text-muted text-sm" style="margin-bottom:14px;">
+                    Requires <code>YOUTUBE_API_KEY</code> to be set on the bot host —
+                    checked alongside the RSS feed, no extra polling.
+                </p>
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+                    <label class="toggle">
+                        <input type="checkbox" id="yt-live-enabled-${cfg.id}" ${cfg.live.enabled ? 'checked' : ''}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span class="text-muted text-sm">Detect and announce livestreams/premieres</span>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Post to (blank = same as Video)</label>
+                        <select class="nero-channel-picker form-input" id="yt-live-ch-${cfg.id}"
+                                data-value="${cfg.live.discord_channel_id || ''}"></select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Custom message</label>
+                        <input class="form-input" id="yt-live-msg-${cfg.id}" placeholder="Use {title} and {url}"
+                               value="${_esc(cfg.live.custom_message || '')}">
+                    </div>
+                    ${mentionFieldsHtml(`yt-live-${cfg.id}`, cfg.live.mention_type, cfg.live.mention_role_id)}
+                </div>
+                <button class="btn btn-sm btn-primary" onclick="saveYoutubeLiveSettings(${cfg.id})">Save Live Settings</button>
+            </div>
+        </div>`).join('');
+
+    if (window.NeroSelect) window.NeroSelect.initAll(c);
+}
+
+function toggleYtPanel(id, type) {
+    ['video', 'shorts', 'live'].forEach(t => {
+        const el = document.getElementById(`yt-panel-${t}-${id}`);
+        if (!el) return;
+        el.style.display = (t === type && el.style.display === 'none') ? 'block' : 'none';
+    });
+}
+
+async function addYoutubeChannel() {
+    const url = document.getElementById('yt-add-url').value.trim();
+    const cp  = document.getElementById('yt-add-channel-picker');
+    const discord_channel_id = cp ? ($(cp).val() || '') : '';
+    if (!url || !discord_channel_id) {
+        showToast('Enter a channel URL and pick a channel', 'warning');
+        return;
+    }
+    const res = await fetch('/api/creator/youtube', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ channel_url: url, discord_channel_id }),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast(data.warning || 'Channel added!', data.warning ? 'warning' : 'success');
+        document.getElementById('yt-add-url').value = '';
+        loadYoutubeChannels();
+    } else {
+        showToast(data.error || 'Error adding channel', 'error');
+    }
+}
+
+async function deleteYoutubeChannel(id) {
+    const res = await fetch(`/api/creator/youtube/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) { showToast('Channel removed', 'info'); loadYoutubeChannels(); }
+    else showToast('Error', 'error');
+}
+
+async function toggleYoutubeChannel(id, enabled) {
+    await fetch(`/api/creator/youtube/${id}/toggle`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ enabled }),
+    });
+    showToast(enabled ? 'Channel enabled' : 'Channel disabled', 'info');
+}
+
+async function saveYoutubeVideoSettings(id) {
+    const cp = document.getElementById(`yt-video-ch-${id}`);
+    const payload = {
+        enabled: document.getElementById(`yt-enabled-${id}`).checked,
+        discord_channel_id: cp ? ($(cp).val() || '') : '',
+        custom_message: document.getElementById(`yt-video-msg-${id}`).value || null,
+        ...readMentionFields(`yt-video-${id}`),
+    };
+    if (!payload.discord_channel_id) { showToast('Pick a channel', 'warning'); return; }
+    const res = await fetch(`/api/creator/youtube/${id}/video`, {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    showToast(data.success ? 'Video settings saved!' : (data.error || 'Error'), data.success ? 'success' : 'error');
+}
+
+async function saveYoutubeShortsSettings(id) {
+    const cp = document.getElementById(`yt-shorts-ch-${id}`);
+    const payload = {
+        enabled: document.getElementById(`yt-shorts-enabled-${id}`).checked,
+        discord_channel_id: (cp ? ($(cp).val() || '') : '') || null,
+        custom_message: document.getElementById(`yt-shorts-msg-${id}`).value || null,
+        ...readMentionFields(`yt-shorts-${id}`),
+    };
+    const res = await fetch(`/api/creator/youtube/${id}/shorts`, {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    showToast(data.success ? 'Shorts settings saved!' : (data.error || 'Error'), data.success ? 'success' : 'error');
+}
+
+async function saveYoutubeLiveSettings(id) {
+    const cp = document.getElementById(`yt-live-ch-${id}`);
+    const payload = {
+        enabled: document.getElementById(`yt-live-enabled-${id}`).checked,
+        discord_channel_id: (cp ? ($(cp).val() || '') : '') || null,
+        custom_message: document.getElementById(`yt-live-msg-${id}`).value || null,
+        ...readMentionFields(`yt-live-${id}`),
+    };
+    const res = await fetch(`/api/creator/youtube/${id}/live`, {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    showToast(data.success ? 'Live settings saved!' : (data.error || 'Error'), data.success ? 'success' : 'error');
+}
+
+// ══════════════════════════════════════════════════════════════
+// TWITCH
+// ══════════════════════════════════════════════════════════════
+let _twConfigs = [];
+
+async function loadTwitchEntries() {
+    const res = await fetch('/api/creator/twitch');
+    const data = await res.json();
+    _twConfigs = data.configs || [];
+    renderTwitchEntries();
+}
+
+function renderTwitchEntries() {
+    const c = document.getElementById('tw-entries-list');
+    if (!_twConfigs.length) {
+        c.innerHTML = '<div class="card"><span class="text-muted text-sm">No Twitch streamers watched yet.</span></div>';
+        return;
+    }
+    c.innerHTML = _twConfigs.map(cfg => `
+        <div class="card">
+            <div class="card-header">
+                <div style="display:flex;align-items:center;gap:12px;">
+                    <label class="toggle">
+                        <input type="checkbox" ${cfg.enabled ? 'checked' : ''}
+                               onchange="toggleTwitchEntry(${cfg.id}, this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <div>
+                        <div style="font-weight:600;font-size:14px;">🟣 ${_esc(cfg.username)}
+                            ${cfg.is_live ? '<span class="badge badge-danger" style="margin-left:6px;">LIVE</span>' : ''}
+                        </div>
+                    </div>
+                </div>
+                <button class="btn btn-sm btn-danger"
+                    onclick="showConfirm('Stop watching ${_esc(cfg.username)}?', () => deleteTwitchEntry(${cfg.id}))">
+                    Delete
+                </button>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+                <span class="text-muted text-sm">Creator Group:</span>
+                ${groupPickerHtml('twitch', cfg.id, cfg.creator_group_id)}
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">Post to</label>
+                    <select class="nero-channel-picker form-input" id="tw-ch-${cfg.id}"
+                            data-value="${cfg.discord_channel_id || ''}"></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Custom message</label>
+                    <input class="form-input" id="tw-msg-${cfg.id}" placeholder="Use {streamer}, {title}, {game}, {url}"
+                           value="${_esc(cfg.custom_message || '')}">
+                </div>
+                ${mentionFieldsHtml(`tw-${cfg.id}`, cfg.mention_type, cfg.mention_role_id)}
+                <div class="form-group">
+                    <label class="form-label">Give role while live (optional)</label>
+                    <select class="nero-role-picker form-input" id="tw-giverole-${cfg.id}"
+                            data-value="${cfg.give_role_id || ''}"></select>
+                </div>
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="saveTwitchSettings(${cfg.id})">Save Settings</button>
+        </div>`).join('');
+
+    if (window.NeroSelect) window.NeroSelect.initAll(c);
+}
+
+async function addTwitchEntry() {
+    const username = document.getElementById('tw-add-username').value.trim();
+    const cp = document.getElementById('tw-add-channel-picker');
+    const discord_channel_id = cp ? ($(cp).val() || '') : '';
+    if (!username || !discord_channel_id) {
+        showToast('Enter a username and pick a channel', 'warning');
+        return;
+    }
+    const res = await fetch('/api/creator/twitch', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ username, discord_channel_id }),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast(data.warning || 'Streamer added!', data.warning ? 'warning' : 'success');
+        document.getElementById('tw-add-username').value = '';
+        loadTwitchEntries();
+    } else {
+        showToast(data.error || 'Error adding streamer', 'error');
+    }
+}
+
+async function deleteTwitchEntry(id) {
+    const res = await fetch(`/api/creator/twitch/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) { showToast('Streamer removed', 'info'); loadTwitchEntries(); }
+    else showToast('Error', 'error');
+}
+
+async function toggleTwitchEntry(id, enabled) {
+    await fetch(`/api/creator/twitch/${id}/toggle`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ enabled }),
+    });
+    showToast(enabled ? 'Enabled' : 'Disabled', 'info');
+}
+
+async function saveTwitchSettings(id) {
+    const cp = document.getElementById(`tw-ch-${id}`);
+    const rp = document.getElementById(`tw-giverole-${id}`);
+    const payload = {
+        discord_channel_id: cp ? ($(cp).val() || '') : '',
+        custom_message: document.getElementById(`tw-msg-${id}`).value || null,
+        give_role_id: rp ? ($(rp).val() || null) : null,
+        ...readMentionFields(`tw-${id}`),
+    };
+    if (!payload.discord_channel_id) { showToast('Pick a channel', 'warning'); return; }
+    const res = await fetch(`/api/creator/twitch/${id}/settings`, {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    showToast(data.success ? 'Settings saved!' : (data.error || 'Error'), data.success ? 'success' : 'error');
+}
+
+// ══════════════════════════════════════════════════════════════
+// CREATOR GROUPS
+// ══════════════════════════════════════════════════════════════
+function initGroupAddMentionField() {
+    document.getElementById('cg-add-mention-fields').innerHTML =
+        mentionFieldsHtml('cg-add', 'none', null);
+    if (window.NeroSelect) window.NeroSelect.initAll(document.getElementById('cg-add-mention-fields'));
+}
+
+async function loadCreatorGroups() {
+    const res = await fetch('/api/creator/groups');
+    const data = await res.json();
+    _cachedGroups = data.groups || [];
+    renderCreatorGroups();
+    // Any already-rendered watch cards show a group picker built from
+    // the OLD _cachedGroups — refresh them too so a rename/new group
+    // shows up there without a full page reload.
+    if (_ytConfigs.length) renderYoutubeChannels();
+    if (_twConfigs.length) renderTwitchEntries();
+}
+
+const PLATFORM_LABEL = { youtube: '🔴 YouTube', twitch: '🟣 Twitch' };
+
+function renderCreatorGroups() {
+    const c = document.getElementById('cg-groups-list');
+    if (!_cachedGroups.length) {
+        c.innerHTML = '<div class="card"><span class="text-muted text-sm">No creator groups yet — every watch above posts its own independent message.</span></div>';
+        return;
+    }
+    c.innerHTML = _cachedGroups.map(g => {
+        const watchesHtml = g.watches.length
+            ? g.watches.map(w => `<span class="badge badge-accent" style="margin-right:6px;margin-bottom:4px;">${PLATFORM_LABEL[w.platform] || w.platform} — ${_esc(w.label)}</span>`).join('')
+            : '<span class="text-muted text-sm">No watches linked yet — use the Creator Group picker on a channel/streamer card above.</span>';
+        return `
+        <div class="card">
+            <div class="card-header">
+                <div style="display:flex;align-items:center;gap:12px;">
+                    <label class="toggle">
+                        <input type="checkbox" ${g.enabled ? 'checked' : ''}
+                               onchange="toggleCreatorGroup(${g.id}, this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <div style="font-weight:600;font-size:14px;">🔗 ${_esc(g.display_name)}</div>
+                </div>
+                <button class="btn btn-sm btn-danger"
+                    onclick="showConfirm('Delete creator group &quot;${_esc(g.display_name)}&quot;? Linked watches go back to independent messages.', () => deleteCreatorGroup(${g.id}))">
+                    Delete
+                </button>
+            </div>
+            <div style="margin-bottom:14px;">${watchesHtml}</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">Post to</label>
+                    <select class="nero-channel-picker form-input" id="cg-ch-${g.id}"
+                            data-value="${g.discord_channel_id || ''}"></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Display name</label>
+                    <input class="form-input" id="cg-name-${g.id}" value="${_esc(g.display_name)}">
+                </div>
+                ${mentionFieldsHtml(`cg-${g.id}`, g.mention_type, g.mention_role_id)}
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="saveCreatorGroup(${g.id})">Save Group</button>
+        </div>`;
+    }).join('');
+
+    if (window.NeroSelect) window.NeroSelect.initAll(c);
+}
+
+async function addCreatorGroup() {
+    const name = document.getElementById('cg-add-name').value.trim();
+    const cp = document.getElementById('cg-add-channel-picker');
+    const discord_channel_id = cp ? ($(cp).val() || '') : '';
+    if (!name || !discord_channel_id) {
+        showToast('Enter a display name and pick a channel', 'warning');
+        return;
+    }
+    const payload = {
+        display_name: name,
+        discord_channel_id,
+        ...readMentionFields('cg-add'),
+    };
+    const res = await fetch('/api/creator/groups', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast('Creator group created!');
+        document.getElementById('cg-add-name').value = '';
+        loadCreatorGroups();
+    } else {
+        showToast(data.error || 'Error creating group', 'error');
+    }
+}
+
+async function saveCreatorGroup(id) {
+    const cp = document.getElementById(`cg-ch-${id}`);
+    const payload = {
+        display_name: document.getElementById(`cg-name-${id}`).value.trim(),
+        discord_channel_id: cp ? ($(cp).val() || '') : '',
+        ...readMentionFields(`cg-${id}`),
+    };
+    if (!payload.display_name || !payload.discord_channel_id) {
+        showToast('Name and channel are required', 'warning');
+        return;
+    }
+    const res = await fetch(`/api/creator/groups/${id}`, {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.success) { showToast('Group saved!'); loadCreatorGroups(); }
+    else showToast(data.error || 'Error', 'error');
+}
+
+async function deleteCreatorGroup(id) {
+    const res = await fetch(`/api/creator/groups/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) { showToast('Group deleted', 'info'); loadCreatorGroups(); }
+    else showToast('Error', 'error');
+}
+
+async function toggleCreatorGroup(id, enabled) {
+    await fetch(`/api/creator/groups/${id}/toggle`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ enabled }),
+    });
+    showToast(enabled ? 'Group enabled' : 'Group disabled — linked watches post independently while off', 'info');
+}
+
+// ── INIT ───────────────────────────────────────────────────────
+initGroupAddMentionField();
+loadCreatorGroups().then(() => {
+    loadYoutubeChannels();
+    loadTwitchEntries();
+});
+</script>
+{% endblock %}
+{% endblock %}

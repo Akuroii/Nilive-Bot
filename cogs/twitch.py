@@ -3,9 +3,32 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import aiosqlite
 import aiohttp
-import json
 from database import DB_PATH
 from utils.permissions import check_bot_role_position
+from utils import creator_notify_engine as engine
+
+# ═══════════════════════════════════════════════════════════════════════
+# TWITCH INTEGRATION
+#
+# CREATOR pass 2: routes live/ended notifications through the shared
+# utils/creator_notify_engine.py — previously this cog only ever sent a
+# new message on going live and never posted anything (edited or new)
+# when the stream ended. See that module's header for the state
+# machine / concurrency / failure-mode guarantees this relies on.
+#
+# check_stream_live() returns a TRI-STATE result:
+#   dict   -> confirmed live right now (the stream object)
+#   False  -> confirmed NOT live right now (a real 200 response with an
+#             empty stream list)
+#   None   -> the check FAILED (bad token, rate limit, network error,
+#             unexpected response) — UNKNOWN. This used to be
+#             indistinguishable from "confirmed offline", meaning a
+#             single failed Helix call could have looked exactly like
+#             the stream ending.
+# ═══════════════════════════════════════════════════════════════════════
+
+TWITCH_COLOR = 0x9147FF
+ENDED_COLOR  = 0x4E5058
 
 
 async def get_twitch_token(client_id: str, client_secret: str) -> str | None:
@@ -29,7 +52,7 @@ async def get_twitch_token(client_id: str, client_secret: str) -> str | None:
         return None
 
 
-async def check_stream_live(username: str, client_id: str, token: str) -> dict | None:
+async def check_stream_live(username: str, client_id: str, token: str) -> dict | bool | None:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -38,11 +61,15 @@ async def check_stream_live(username: str, client_id: str, token: str) -> dict |
                 headers={"Client-ID": client_id, "Authorization": f"Bearer {token}"},
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
+                if resp.status == 401:
+                    # Token expired/invalid — will be refreshed on the
+                    # next tick. Unknown, not a confirmed offline read.
+                    return None
                 if resp.status != 200:
                     return None
                 data = await resp.json()
                 streams = data.get("data", [])
-                return streams[0] if streams else None
+                return streams[0] if streams else False
     except Exception as e:
         print(f"[TWITCH] Stream check error: {e}")
         return None
@@ -66,6 +93,45 @@ async def get_user_info(username: str, client_id: str, token: str) -> dict | Non
         return None
 
 
+def build_twitch_live_embed(username: str, stream: dict) -> discord.Embed:
+    title    = stream.get("title", "")
+    game     = stream.get("game_name", "")
+    viewers  = stream.get("viewer_count", 0)
+    twitch_url = f"https://twitch.tv/{username}"
+
+    embed = discord.Embed(
+        title=title or f"{username} is live!", url=twitch_url, color=TWITCH_COLOR)
+    embed.add_field(name="Game", value=game or "Unknown")
+    embed.add_field(name="Viewers", value=f"{viewers:,}")
+    thumbnail = stream.get("thumbnail_url", "")
+    if thumbnail:
+        thumbnail = thumbnail.replace("{width}", "640").replace("{height}", "360")
+        embed.set_image(url=thumbnail)
+    embed.set_footer(text="🟣 Live on Twitch")
+    return embed
+
+
+def build_twitch_ended_embed(username: str) -> discord.Embed:
+    twitch_url = f"https://twitch.tv/{username}"
+    embed = discord.Embed(
+        title=f"{username} was live", url=twitch_url, color=ENDED_COLOR)
+    embed.set_footer(text="⚫ Stream ended")
+    return embed
+
+
+def _build_content(mention: str, custom_msg: str | None, username: str,
+                    title: str, game: str, url: str) -> str:
+    if custom_msg:
+        text = (custom_msg
+                .replace("{streamer}", username)
+                .replace("{title}", title)
+                .replace("{game}", game)
+                .replace("{url}", url))
+    else:
+        text = f"🔴 **{username}** is now LIVE!"
+    return f"{mention} {text}".strip() if mention else text
+
+
 class Twitch(commands.Cog):
     def __init__(self, bot):
         self.bot    = bot
@@ -74,6 +140,9 @@ class Twitch(commands.Cog):
 
     def cog_unload(self):
         self.check_streams.cancel()
+
+    async def cog_load(self):
+        await engine.ensure_tables()
 
     async def _ensure_token(self) -> bool:
         import os
@@ -98,7 +167,7 @@ class Twitch(commands.Cog):
             cursor = await db.execute("""
                 SELECT id, guild_id, twitch_username,
                        discord_channel_id, custom_message,
-                       embed_data, ping_role_id,
+                       mention_type, ping_role_id,
                        give_role_id, role_duration_hours,
                        is_live
                 FROM twitch_config WHERE enabled = 1
@@ -107,120 +176,142 @@ class Twitch(commands.Cog):
 
         for cfg in configs:
             (cid, guild_id, username, discord_ch_id,
-             custom_msg, embed_data_str, ping_role_id,
+             custom_msg, mention_type, ping_role_id,
              give_role_id, role_duration_hours, was_live) = cfg
 
             try:
-                stream = await check_stream_live(username, client_id, self._token)
-                is_live_now = stream is not None
+                result = await check_stream_live(username, client_id, self._token)
 
-                if bool(is_live_now) == bool(was_live):
+                if result is None:
+                    # Token invalid/expired or a transient Helix
+                    # failure — reset the cached token so the next tick
+                    # re-fetches one, but otherwise skip this watch
+                    # entirely this round. No state change.
+                    self._token = None
                     continue
-
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute("""
-                        UPDATE twitch_config SET is_live = ? WHERE id = ?
-                    """, (int(is_live_now), cid))
-                    await db.commit()
 
                 guild = self.bot.get_guild(guild_id)
-                if not guild:
-                    continue
+                is_live_now = isinstance(result, dict)
 
                 if is_live_now:
-                    await self._handle_went_live(
-                        guild, username, stream, discord_ch_id, custom_msg,
-                        embed_data_str, ping_role_id, give_role_id, role_duration_hours)
+                    if not was_live:
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute(
+                                "UPDATE twitch_config SET is_live = 1 WHERE id = ?",
+                                (cid,))
+                            await db.commit()
+                        if guild:
+                            await self._go_live(
+                                guild, cid, guild_id, username, result,
+                                discord_ch_id, custom_msg, mention_type,
+                                ping_role_id, give_role_id)
+                    else:
+                        await engine.note_still_live(guild_id, "twitch", cid)
                 else:
-                    await self._handle_went_offline(guild, username, give_role_id)
+                    if was_live:
+                        confirmed_offline = await engine.note_offline_tick(
+                            guild_id, "twitch", cid)
+                        if confirmed_offline:
+                            async with aiosqlite.connect(DB_PATH) as db:
+                                await db.execute(
+                                    "UPDATE twitch_config SET is_live = 0 WHERE id = ?",
+                                    (cid,))
+                                await db.commit()
+                            if guild:
+                                await self._go_offline(
+                                    guild, guild_id, cid, username, give_role_id)
 
             except Exception as e:
                 print(f"[TWITCH] Error for config {cid}: {e}")
 
-    async def _handle_went_live(self, guild, username, stream, discord_ch_id,
-                                  custom_msg, embed_data_str, ping_role_id,
-                                  give_role_id, role_duration_hours):
-        channel = guild.get_channel(int(discord_ch_id))
-        if not channel:
-            return
+    async def _go_live(self, guild, cid, guild_id, username, stream,
+                        discord_ch_id, custom_msg, mention_type,
+                        ping_role_id, give_role_id):
+        twitch_url  = f"https://twitch.tv/{username}"
+        title       = stream.get("title", "")
+        game        = stream.get("game_name", "")
+        external_id = str(stream.get("id", ""))
 
-        title    = stream.get("title", "")
-        game     = stream.get("game_name", "")
-        viewers  = stream.get("viewer_count", 0)
-        twitch_url = f"https://twitch.tv/{username}"
-
-        content = ""
-        if ping_role_id:
-            role = guild.get_role(int(ping_role_id))
-            if role:
-                content = role.mention + " "
-
-        if custom_msg:
-            content += (custom_msg
-                        .replace("{streamer}", username)
-                        .replace("{title}", title)
-                        .replace("{game}", game)
-                        .replace("{url}", twitch_url))
+        # CREATOR pass 3 (consolidated notifications): a watch linked
+        # to a Creator Group posts/edits that group's single shared
+        # message instead of sending its own — detecting "is it live"
+        # above this point is completely unchanged either way. See
+        # utils/creator_notify_engine.py's "CREATOR GROUPS" section
+        # for the full design. Unlinked watches (get_watch_group
+        # returns None — the default for every watch that exists
+        # today) fall straight through to the exact same
+        # start_live_session() call this cog always made.
+        group = await engine.get_watch_group("twitch", cid)
+        if group:
+            tracked = await engine.start_watch_tracking(
+                guild_id, "twitch", cid, group["discord_channel_id"], external_id)
+            if tracked.get("started"):
+                result = await engine.note_platform_live_grouped(
+                    self.bot, group, "twitch", cid, "Twitch", "🟣", twitch_url)
+                if not result.get("sent"):
+                    print(f"[TWITCH] Group notification not sent for "
+                          f"config {cid}: {result.get('reason')}")
         else:
-            content += f"🔴 **{username}** is now LIVE!"
+            mention = engine.build_mention(guild, mention_type, ping_role_id)
+            content = _build_content(mention, custom_msg, username, title, game, twitch_url)
+            embed   = build_twitch_live_embed(username, stream)
+            view    = engine.WatchNowView(twitch_url)
 
-        try:
-            if embed_data_str:
-                embed_data = json.loads(embed_data_str)
-                color_str  = embed_data.get("color", "#9147FF")
-            else:
-                embed_data = {}
-                color_str  = "#9147FF"
+            result = await engine.start_live_session(
+                self.bot, guild_id, "twitch", cid, discord_ch_id,
+                external_id=external_id,
+                content=content, embed=embed, view=view)
 
-            try:
-                color_int = int(color_str.strip("#"), 16)
-            except Exception:
-                color_int = 0x9147FF
-
-            embed = discord.Embed(title=title or f"{username} is live!", url=twitch_url, color=color_int)
-            embed.add_field(name="Game", value=game or "Unknown")
-            embed.add_field(name="Viewers", value=f"{viewers:,}")
-            embed.add_field(name="Watch", value=twitch_url, inline=False)
-
-            thumbnail = stream.get("thumbnail_url", "")
-            if thumbnail:
-                thumbnail = thumbnail.replace("{width}", "640").replace("{height}", "360")
-                embed.set_image(url=thumbnail)
-
-            await channel.send(content=content, embed=embed)
-        except Exception as e:
-            print(f"[TWITCH] Send error: {e}")
-            await channel.send(content)
+            if not result.get("sent") and result.get("reason") not in (
+                    "already_active", "duplicate_suppressed"):
+                print(f"[TWITCH] Live notification not sent for config {cid}: "
+                      f"{result.get('reason')}")
 
         if give_role_id:
             import os
             client_id = os.getenv("TWITCH_CLIENT_ID")
             user_info = await get_user_info(username, client_id, self._token)
             if user_info:
-                for member in guild.members:
-                    if not member.bot:
-                        role = guild.get_role(int(give_role_id))
-                        if role:
-                            can, warn = check_bot_role_position(guild, role)
-                            if can:
+                role = guild.get_role(int(give_role_id))
+                if role:
+                    can, warn = check_bot_role_position(guild, role)
+                    if can:
+                        for member in guild.members:
+                            if not member.bot and role not in member.roles:
                                 try:
-                                    await member.add_roles(role, reason="Streamer went live")
+                                    await member.add_roles(
+                                        role, reason="Streamer went live")
                                     break
                                 except Exception:
                                     pass
+                    else:
+                        print(f"[TWITCH ROLE WARNING] {warn}")
 
-    async def _handle_went_offline(self, guild, username, give_role_id):
-        if not give_role_id:
-            return
-        role = guild.get_role(int(give_role_id))
-        if not role:
-            return
-        for member in guild.members:
-            if role in member.roles:
-                try:
-                    await member.remove_roles(role, reason="Stream ended")
-                except Exception:
-                    pass
+    async def _go_offline(self, guild, guild_id, cid, username, give_role_id):
+        group = await engine.get_watch_group("twitch", cid)
+        if group:
+            result = await engine.note_platform_offline_grouped(
+                self.bot, guild_id, group["id"], "twitch", cid)
+            if not result.get("updated"):
+                print(f"[TWITCH] Group offline update failed for config "
+                      f"{cid}: {result.get('reason')}")
+            await engine.stop_watch_tracking(guild_id, "twitch", cid)
+        else:
+            ended_embed = build_twitch_ended_embed(username)
+            view = engine.WatchNowView(f"https://twitch.tv/{username}", "Channel")
+            await engine.end_live_session(
+                self.bot, guild_id, "twitch", cid,
+                ended_content=None, ended_embed=ended_embed, view=view)
+
+        if give_role_id:
+            role = guild.get_role(int(give_role_id))
+            if role:
+                for member in guild.members:
+                    if role in member.roles:
+                        try:
+                            await member.remove_roles(role, reason="Stream ended")
+                        except Exception:
+                            pass
 
     @check_streams.before_loop
     async def before_check(self):
@@ -240,18 +331,20 @@ class Twitch(commands.Cog):
                 ephemeral=True)
             return
 
+        mention_type = "role" if ping_role else "none"
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO twitch_config
                     (guild_id, twitch_username, discord_channel_id, custom_message,
-                     ping_role_id, give_role_id, enabled)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
+                     mention_type, ping_role_id, give_role_id, enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
             """, (interaction.guild.id, twitch_username.lower(), discord_channel.id,
-                  custom_message, ping_role.id if ping_role else None,
+                  custom_message, mention_type,
+                  ping_role.id if ping_role else None,
                   give_role.id if give_role else None))
             await db.commit()
 
-        embed = discord.Embed(title="Twitch Alerts Set Up", color=0x9147FF)
+        embed = discord.Embed(title="Twitch Alerts Set Up", color=TWITCH_COLOR)
         embed.add_field(name="Streamer", value=twitch_username)
         embed.add_field(name="Posts to", value=discord_channel.mention)
         if ping_role:
@@ -284,7 +377,7 @@ class Twitch(commands.Cog):
             await interaction.response.send_message("No Twitch configs set up.", ephemeral=True)
             return
 
-        embed = discord.Embed(title="Twitch Configs", color=0x9147FF)
+        embed = discord.Embed(title="Twitch Configs", color=TWITCH_COLOR)
         for (cid, username, dch, is_live, enabled) in rows:
             status = "🔴 LIVE" if is_live else "⚫ Offline"
             active = "✅" if enabled else "❌"
