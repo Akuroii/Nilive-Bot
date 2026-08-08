@@ -7,10 +7,17 @@ import time
 import sys
 import traceback
 from dotenv import load_dotenv
-import aiosqlite
-from database import DB_PATH, add_guild_owner
 
 load_dotenv()
+
+# ORDERING FIX: database.py reads OWNER_ID / DATABASE_PATH /
+# NERO_ENVIRONMENT at import time (module-level, not inside a
+# function) — importing it before load_dotenv() has run meant a value
+# only set in a local .env file (not a real process env var) was
+# silently invisible to it. Moved below load_dotenv() so both sources
+# work the same way.
+import aiosqlite
+from database import DB_PATH, add_guild_owner
 
 print("Starting Nero bot...")
 
@@ -254,6 +261,8 @@ async def load_cogs():
         "cogs.health",
         "cogs.backup",
         "cogs.scheduler",
+        "cogs.tagmissions",
+        "cogs.tagpartners",
     ]
     bot.loaded_cogs = []
     bot.failed_cogs = []

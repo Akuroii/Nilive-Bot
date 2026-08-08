@@ -169,7 +169,7 @@ class Twitch(commands.Cog):
                        discord_channel_id, custom_message,
                        mention_type, ping_role_id,
                        give_role_id, role_duration_hours,
-                       is_live
+                       is_live, discord_user_id
                 FROM twitch_config WHERE enabled = 1
             """)
             configs = await cursor.fetchall()
@@ -177,7 +177,8 @@ class Twitch(commands.Cog):
         for cfg in configs:
             (cid, guild_id, username, discord_ch_id,
              custom_msg, mention_type, ping_role_id,
-             give_role_id, role_duration_hours, was_live) = cfg
+             give_role_id, role_duration_hours, was_live,
+             discord_user_id) = cfg
 
             try:
                 result = await check_stream_live(username, client_id, self._token)
@@ -204,7 +205,7 @@ class Twitch(commands.Cog):
                             await self._go_live(
                                 guild, cid, guild_id, username, result,
                                 discord_ch_id, custom_msg, mention_type,
-                                ping_role_id, give_role_id)
+                                ping_role_id, give_role_id, discord_user_id)
                     else:
                         await engine.note_still_live(guild_id, "twitch", cid)
                 else:
@@ -219,14 +220,15 @@ class Twitch(commands.Cog):
                                 await db.commit()
                             if guild:
                                 await self._go_offline(
-                                    guild, guild_id, cid, username, give_role_id)
+                                    guild, guild_id, cid, username,
+                                    give_role_id, discord_user_id)
 
             except Exception as e:
                 print(f"[TWITCH] Error for config {cid}: {e}")
 
     async def _go_live(self, guild, cid, guild_id, username, stream,
                         discord_ch_id, custom_msg, mention_type,
-                        ping_role_id, give_role_id):
+                        ping_role_id, give_role_id, discord_user_id=None):
         twitch_url  = f"https://twitch.tv/{username}"
         title       = stream.get("title", "")
         game        = stream.get("game_name", "")
@@ -268,26 +270,30 @@ class Twitch(commands.Cog):
                       f"{result.get('reason')}")
 
         if give_role_id:
-            import os
-            client_id = os.getenv("TWITCH_CLIENT_ID")
-            user_info = await get_user_info(username, client_id, self._token)
-            if user_info:
+            if not discord_user_id:
+                print(f"[TWITCH] give_role_id is configured for config {cid} "
+                      f"({username}) but no discord_user_id is set — skipping "
+                      f"role grant rather than guessing which member to give "
+                      f"it to. Set the streamer's Discord user in /twitch_setup "
+                      f"or the dashboard.")
+            else:
                 role = guild.get_role(int(give_role_id))
                 if role:
                     can, warn = check_bot_role_position(guild, role)
                     if can:
-                        for member in guild.members:
-                            if not member.bot and role not in member.roles:
-                                try:
-                                    await member.add_roles(
-                                        role, reason="Streamer went live")
-                                    break
-                                except Exception:
-                                    pass
+                        member = guild.get_member(int(discord_user_id))
+                        if member and role not in member.roles:
+                            try:
+                                await member.add_roles(
+                                    role, reason="Streamer went live")
+                            except Exception as e:
+                                print(f"[TWITCH] Failed to add live role to "
+                                      f"{discord_user_id} in {guild_id}: {e}")
                     else:
                         print(f"[TWITCH ROLE WARNING] {warn}")
 
-    async def _go_offline(self, guild, guild_id, cid, username, give_role_id):
+    async def _go_offline(self, guild, guild_id, cid, username,
+                           give_role_id, discord_user_id=None):
         group = await engine.get_watch_group("twitch", cid)
         if group:
             result = await engine.note_platform_offline_grouped(
@@ -303,15 +309,15 @@ class Twitch(commands.Cog):
                 self.bot, guild_id, "twitch", cid,
                 ended_content=None, ended_embed=ended_embed, view=view)
 
-        if give_role_id:
+        if give_role_id and discord_user_id:
             role = guild.get_role(int(give_role_id))
-            if role:
-                for member in guild.members:
-                    if role in member.roles:
-                        try:
-                            await member.remove_roles(role, reason="Stream ended")
-                        except Exception:
-                            pass
+            member = guild.get_member(int(discord_user_id))
+            if role and member and role in member.roles:
+                try:
+                    await member.remove_roles(role, reason="Stream ended")
+                except Exception as e:
+                    print(f"[TWITCH] Failed to remove live role from "
+                          f"{discord_user_id} in {guild_id}: {e}")
 
     @check_streams.before_loop
     async def before_check(self):
@@ -323,6 +329,7 @@ class Twitch(commands.Cog):
                             discord_channel: discord.TextChannel,
                             ping_role: discord.Role = None,
                             give_role: discord.Role = None,
+                            discord_streamer: discord.Member = None,
                             custom_message: str = None):
         import os
         if not os.getenv("TWITCH_CLIENT_ID"):
@@ -336,12 +343,13 @@ class Twitch(commands.Cog):
             await db.execute("""
                 INSERT INTO twitch_config
                     (guild_id, twitch_username, discord_channel_id, custom_message,
-                     mention_type, ping_role_id, give_role_id, enabled)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                     mention_type, ping_role_id, give_role_id, discord_user_id, enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
             """, (interaction.guild.id, twitch_username.lower(), discord_channel.id,
                   custom_message, mention_type,
                   ping_role.id if ping_role else None,
-                  give_role.id if give_role else None))
+                  give_role.id if give_role else None,
+                  discord_streamer.id if discord_streamer else None))
             await db.commit()
 
         embed = discord.Embed(title="Twitch Alerts Set Up", color=TWITCH_COLOR)
@@ -351,6 +359,14 @@ class Twitch(commands.Cog):
             embed.add_field(name="Pings", value=ping_role.mention)
         if give_role:
             embed.add_field(name="Live Role", value=give_role.mention)
+            if discord_streamer:
+                embed.add_field(name="Role goes to", value=discord_streamer.mention)
+            else:
+                embed.add_field(
+                    name="⚠️ Missing discord_streamer",
+                    value="give_role won't be granted to anyone until you "
+                          "also set discord_streamer (re-run /twitch_setup).",
+                    inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="twitch_remove", description="Remove a Twitch alert")

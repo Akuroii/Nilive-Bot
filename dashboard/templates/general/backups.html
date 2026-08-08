@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}Backups{% endblock %}
+{% block content %}
+<span data-page-title="Backups"></span>
+
+<div style="display:flex;align-items:center;justify-content:space-between;
+            flex-wrap:wrap;gap:12px;margin-bottom:20px;">
+    <p class="text-muted text-sm" style="margin:0;max-width:520px;">
+        Full-database snapshots. One runs automatically every 24h; the last
+        {{ keep_backups }} are kept and older ones are pruned.
+    </p>
+    <button class="btn btn-primary" id="trigger-backup-btn" onclick="triggerBackup()">
+        💾 Trigger Backup Now
+    </button>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card stat-accent">
+        <div class="stat-label">Backups Stored</div>
+        <div class="stat-value">{{ backups|length }}</div>
+        <div class="stat-sub">of {{ keep_backups }} retained</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Total Size</div>
+        <div class="stat-value">{{ total_display }}</div>
+    </div>
+    <div class="stat-card {% if not backups %}{% elif backups[0].exists_on_disk %}stat-success{% else %}stat-danger{% endif %}">
+        <div class="stat-label">Most Recent</div>
+        <div class="stat-value" style="font-size:16px;">
+            {{ backups[0].created_relative if backups else 'None yet' }}
+        </div>
+        {% if backups and not backups[0].exists_on_disk %}
+        <div class="stat-sub" style="color:var(--danger);">file missing on disk</div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">💾 Backup History</div>
+    {% if not backups %}
+    <div class="empty-state">
+        <div class="empty-icon">💾</div>
+        <div class="empty-text">
+            No backups yet — the daily automated backup hasn't run, or
+            <code>cogs.backup</code> isn't loaded. Trigger one manually above.
+        </div>
+    </div>
+    {% else %}
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Filename</th>
+                    <th>Size</th>
+                    <th>Created</th>
+                    <th>On Disk</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for b in backups %}
+                <tr>
+                    <td><code>{{ b.filename }}</code></td>
+                    <td>{{ b.size_display }}</td>
+                    <td>
+                        {{ b.created_display }}
+                        <div class="text-muted text-sm">{{ b.created_relative }}</div>
+                    </td>
+                    <td>
+                        {% if b.exists_on_disk %}
+                        <span class="badge badge-success">Yes</span>
+                        {% else %}
+                        <span class="badge badge-warning">Missing</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+    <div class="text-muted text-sm" style="margin-top:12px;">
+        Stored at <code>{{ backup_dir }}</code> on the Railway volume — survives
+        redeploys, not volume deletion.
+    </div>
+</div>
+
+<script>
+async function triggerBackup() {
+    const btn  = document.getElementById('trigger-backup-btn');
+    const data = await ajaxSave('/api/backups/trigger', {}, btn, 'Backup created!');
+    if (data && data.success) {
+        setTimeout(() => location.reload(), 600);
+    }
+}
+</script>
+{% endblock %}

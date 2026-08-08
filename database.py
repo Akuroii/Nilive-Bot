@@ -1,13 +1,62 @@
 import aiosqlite
 import asyncio
 import os
+import sys
 
-DB_PATH = os.getenv("DATABASE_PATH", "/app/data/nero.db")
+# STAGING / PRODUCTION SEPARATION: set NERO_ENVIRONMENT=staging on a
+# second deploy (e.g. a throwaway Oracle Cloud instance or a local dev
+# box) to point at a separate DB file without touching production data.
+# Unset (the default) behaves exactly as before — DATABASE_PATH (or the
+# hardcoded /app/data/nero.db default) is used untouched, so existing
+# deploys need zero config changes.
+NERO_ENVIRONMENT = os.getenv("NERO_ENVIRONMENT", "production").strip().lower()
 
-OWNER_DISCORD_ID = int(os.getenv("OWNER_ID", "704453350384730237"))
+if NERO_ENVIRONMENT == "staging":
+    DB_PATH = os.getenv("STAGING_DATABASE_PATH", "/app/data/nero_staging.db")
+    # Safety guard: if someone sets NERO_ENVIRONMENT=staging but a
+    # STAGING_DATABASE_PATH that (accidentally or via copy-paste) points
+    # at the same file as production, refuse to start rather than let a
+    # staging session silently read/write prod data.
+    _prod_path = os.getenv("DATABASE_PATH", "/app/data/nero.db")
+    if os.path.abspath(DB_PATH) == os.path.abspath(_prod_path):
+        print("=" * 60)
+        print("FATAL: NERO_ENVIRONMENT=staging but STAGING_DATABASE_PATH")
+        print("  resolves to the SAME file as production DATABASE_PATH.")
+        print(f"  Both resolve to: {os.path.abspath(DB_PATH)}")
+        print("  -> Set STAGING_DATABASE_PATH to a different path.")
+        print("=" * 60)
+        sys.exit(1)
+else:
+    DB_PATH = os.getenv("DATABASE_PATH", "/app/data/nero.db")
 
+# SECURITY FIX: OWNER_DISCORD_ID previously had a hardcoded fallback —
+# anyone deploying from this source without setting OWNER_ID got a
+# working bot that silently granted dashboard owner access to whatever
+# Discord account that literal ID belonged to. Now required; the
+# process refuses to start rather than boot with a wrong or absent
+# owner. If this is your own existing deploy, set OWNER_ID to your
+# Discord user ID (it was previously hardcoded to 704453350384730237)
+# as an env var before redeploying.
+_owner_id_raw = os.getenv("OWNER_ID", "").strip()
+if not _owner_id_raw:
+    print("=" * 60)
+    print("FATAL: OWNER_ID is missing or empty.")
+    print("  -> Set OWNER_ID to your Discord user ID as an env var.")
+    print("  -> This used to default to a hardcoded ID baked into the")
+    print("     source — that fallback has been removed for security.")
+    print("=" * 60)
+    sys.exit(1)
+OWNER_DISCORD_ID = int(_owner_id_raw)
+
+# SECURITY FIX: previously a hardcoded guild ID. FALLBACK_GUILD_IDS is
+# only ever used as a first-boot backstop (ensure_owner_access() below
+# already discovers real guild IDs from actual data in every scanned
+# table) — an empty default here is safe, it just means owner access
+# won't be pre-seeded for a guild with zero rows in every table until
+# either real data exists or this env var is set explicitly
+# (comma-separated guild IDs).
 FALLBACK_GUILD_IDS = [
-    1360461358486913145,
+    int(g) for g in os.getenv("FALLBACK_GUILD_IDS", "").split(",") if g.strip()
 ]
 
 
@@ -213,24 +262,14 @@ async def init_db():
             )
         """)
 
-        # PHASE 5 TAIL FIX (reaction_role_expiry sentinel collision):
-        # this table used to be keyed by (guild_id, user_id, role_id)
-        # only. That let the SAME role, added to two different
-        # reaction-role panels with two different expiry_days values,
-        # collide: the second /reactionrole_add's sentinel row
-        # (user_id=0, "this role's template expiry") silently
-        # overwrote the first panel's, and a member claiming the role
-        # from EITHER panel picked up whichever panel's expiry was
-        # configured last. message_id is now part of the key so each
-        # panel's copy of a role's expiry is tracked independently.
-        #
-        # message_id is NOT NULL DEFAULT 0 rather than nullable —
-        # SQLite treats NULL as distinct-from-itself in a PRIMARY KEY,
-        # which would silently defeat the "INSERT OR REPLACE dedupes
-        # on conflict" behavior every read/write in cogs/reactionroles.py
-        # relies on. 0 is never a real Discord message ID, so it's a
-        # safe non-nullable default for legacy rows that predate this
-        # column (see the migration block below).
+        # PHASE 5 TAIL FIX: message_id added to the key here too,
+        # matching database.py's central schema/migration — see
+        # that file for the full explanation. This CREATE is a
+        # no-op in practice (database.py's init_db() already runs
+        # and migrates the table before any cog's on_ready fires),
+        # kept only so this cog's own schema doesn't drift from
+        # the canonical one if ensure_table() is ever called from
+        # a context where init_db() hasn't run yet.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS reaction_role_expiry (
                 guild_id   INTEGER,
@@ -1323,6 +1362,104 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Server Tags — Tag-Loyalty Missions + Cross-Server Join Reward.
+        # Both features read/write these tables via cogs/tagmissions.py
+        # and cogs/tagpartners.py, which are otherwise self-contained
+        # (they grant rewards through the existing utils/reward_engine.py,
+        # same as every other reward source in this project).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS tag_missions (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id              INTEGER NOT NULL,
+                title                 TEXT NOT NULL,
+                confirm_message       TEXT NOT NULL DEFAULT 'Confirmed — wait until the mission ends to receive your prize.',
+                not_wearing_message   TEXT NOT NULL DEFAULT 'You need to be wearing this server''s tag to confirm.',
+                success_message       TEXT NOT NULL DEFAULT 'Mission complete! Your reward has been sent.',
+                failure_message       TEXT NOT NULL DEFAULT 'You removed the server tag before the mission ended — no reward this time.',
+                already_message       TEXT NOT NULL DEFAULT 'You already confirmed participation in this mission.',
+                reward_type           TEXT NOT NULL,
+                reward_amount         TEXT,
+                reward_role_id        INTEGER,
+                reward_duration_hours INTEGER,
+                channel_id            INTEGER,
+                message_id            INTEGER,
+                starts_at             TIMESTAMP NOT NULL,
+                ends_at               TIMESTAMP NOT NULL,
+                status                TEXT NOT NULL DEFAULT 'scheduled',
+                created_by            INTEGER,
+                created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tagm_guild
+            ON tag_missions(guild_id)
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS tag_mission_participants (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                mission_id   INTEGER NOT NULL,
+                guild_id     INTEGER NOT NULL,
+                user_id      INTEGER NOT NULL,
+                confirmed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                outcome      TEXT,
+                resolved_at  TIMESTAMP,
+                UNIQUE(mission_id, user_id)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tagmp_guild
+            ON tag_mission_participants(guild_id, mission_id)
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS tag_partner_rewards (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id         INTEGER NOT NULL,
+                partner_guild_id INTEGER NOT NULL,
+                partner_label    TEXT,
+                reward_type      TEXT NOT NULL,
+                reward_amount    TEXT,
+                reward_role_id   INTEGER,
+                welcome_message  TEXT,
+                enabled          INTEGER DEFAULT 1,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, partner_guild_id)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tagpr_guild
+            ON tag_partner_rewards(guild_id)
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS tag_join_reward_log (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id         INTEGER NOT NULL,
+                partner_guild_id INTEGER NOT NULL,
+                user_id          INTEGER NOT NULL,
+                rewarded_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, partner_guild_id, user_id)
+            )
+        """)
+
+        # SECURITY / CORRECTNESS FIX: twitch_config.give_role_id used to
+        # grant the "live" role to whichever guild member happened to be
+        # first in Discord's member iteration order — there was no
+        # stored link between a Twitch username and the Discord member
+        # who owns it. This column is that missing link, set via
+        # /twitch_setup's new `streamer` option or the dashboard; the
+        # role grant is skipped (not guessed) when it's unset.
+        try:
+            cursor = await db.execute("PRAGMA table_info(twitch_config)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "discord_user_id" not in cols:
+                await db.execute(
+                    "ALTER TABLE twitch_config ADD COLUMN discord_user_id INTEGER")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] twitch_config.discord_user_id: {e}")
 
         await db.commit()
 

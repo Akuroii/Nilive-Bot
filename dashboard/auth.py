@@ -17,20 +17,68 @@ SESSION_DURATION_REMEMBER = 60 * 60 * 24 * 7
 
 # Phase 0 Extension — Server Permission Gating (Sapphire-style)
 DISCORD_PERMISSION_ADMINISTRATOR = 0x8
-# Bot invite permission bitfield — defaults to Administrator (8) like the
-# existing invite flow implied by DEBUG_GUIDE.md's bot+applications.commands
-# scopes. Overridable via env if a narrower permission set is ever wanted.
-BOT_INVITE_PERMISSIONS = os.getenv("BOT_INVITE_PERMISSIONS", "8")
+# SECURITY HARDENING: default narrowed from Administrator (8) to the
+# specific permissions the bot actually uses (manage roles/channels,
+# kick/ban/timeout, manage nicknames, manage messages, send/embed/
+# attach, mention everyone, connect/speak). Only affects the invite
+# link generated for servers that DON'T have the bot yet — already-
+# installed servers are untouched. Still overridable via env if
+# Administrator is ever wanted back.
+_DEFAULT_BOT_PERMISSIONS = (
+    0x10 | 0x2 | 0x4 | 0x400 | 0x800 | 0x2000 | 0x4000 | 0x8000
+    | 0x10000 | 0x40 | 0x10000000 | 0x10000000000
+)
+BOT_INVITE_PERMISSIONS = os.getenv(
+    "BOT_INVITE_PERMISSIONS", str(_DEFAULT_BOT_PERMISSIONS))
 
 
-def get_discord_oauth_url() -> str:
+def get_discord_oauth_url(remember: bool = False) -> str:
+    # SECURITY FIX: OAuth `state` parameter was previously never
+    # generated or checked — a login CSRF gap where an attacker could
+    # pre-generate/replay an authorization request and bind a victim's
+    # session to an attacker-controlled Discord account. A random
+    # per-flow token is stored in the pre-auth session and must match
+    # what Discord echoes back to /callback before any code exchange
+    # happens (see verify_oauth_state below).
+    #
+    # BUGFIX, same change: "remember me" was already non-functional —
+    # login.html wrote a `nero_remember` cookie nothing server-side
+    # ever read, and `?remember=1` on /discord_login was silently
+    # dropped since Discord's redirect back to /callback only ever
+    # echoes `code` (and now `state`), not arbitrary extra params from
+    # the original authorize request. The choice is now threaded
+    # through the session alongside the state token so it actually
+    # survives the round trip — see consume_oauth_remember below.
+    state = secrets.token_urlsafe(24)
+    session["oauth_state"] = state
+    session["oauth_remember"] = bool(remember)
     return (
         f"https://discord.com/oauth2/authorize"
         f"?client_id={CLIENT_ID}"
         f"&redirect_uri={REDIRECT_URI}"
         f"&response_type=code"
         f"&scope=identify+guilds"
+        f"&state={state}"
     )
+
+
+def verify_oauth_state(returned_state: str | None) -> bool:
+    """
+    Call from /callback before exchanging the code. Consumes the
+    stored state (single-use) so a replayed callback URL can't be
+    reused. Returns False on any mismatch or missing state — callers
+    should treat that as an auth failure and redirect back to /login,
+    never proceed.
+    """
+    expected = session.pop("oauth_state", None)
+    if not expected or not returned_state:
+        return False
+    return secrets.compare_digest(expected, returned_state)
+
+
+def consume_oauth_remember() -> bool:
+    """Pops the remember-me choice stashed by get_discord_oauth_url()."""
+    return bool(session.pop("oauth_remember", False))
 
 
 def exchange_code(code: str) -> dict | None:

@@ -130,6 +130,18 @@ PAGE_PERMISSIONS = {
 
     "reports":            LEVEL_MODERATOR,
     "health":             LEVEL_OWNER,
+
+    # Server Tags — Tag-Loyalty Missions + Cross-Server Join Reward.
+    # Same tier as minigames/missions: reward-tier CRUD is an admin
+    # action, not owner-only.
+    "tagmissions":        LEVEL_ADMIN,
+    "tagpartners":        LEVEL_ADMIN,
+
+    # Backups page. Deliberately still LEVEL_OWNER here (the page-load
+    # gate) — the bot-wide, cross-guild check lives one level deeper,
+    # in dashboard.permissions.require_bot_owner / require_bot_owner_api,
+    # which every /backups route/API also stacks on top of this.
+    "backups":            LEVEL_OWNER,
 }
 
 

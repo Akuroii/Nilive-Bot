@@ -4,25 +4,39 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import math
+import time
+from functools import wraps
 import aiosqlite
+from dotenv import load_dotenv
 from flask import (
     Flask, redirect, url_for, session,
     request, render_template, jsonify, abort,
 )
-from database import DB_PATH, init_db, OWNER_DISCORD_ID, add_guild_owner
+from database import DB_PATH, init_db, OWNER_DISCORD_ID, add_guild_owner, NERO_ENVIRONMENT
 from dashboard.utils.async_utils import run_async
 from dashboard.auth import (
     login_required, create_session, clear_session,
     get_discord_oauth_url, exchange_code, fetch_discord_user,
     fetch_discord_guilds, current_user, current_user_id,
+    verify_oauth_state, consume_oauth_remember,
 )
 from dashboard.permissions import (
     require_page, get_current_user_context, log_action,
     get_session_guild_id, set_session_guild,
+    require_bot_owner,
     LEVEL_RANK, LEVEL_OWNER,
 )
 from dashboard.api import api_bp
 from utils.xp_calculator import calculate_level_from_xp
+from utils.formatters import format_relative, format_timestamp
+
+# staging-db delta: dashboard/app.py never called load_dotenv() itself —
+# it worked anyway in production because Railway injects real env vars
+# directly (no .env file involved), but any local/dev run relying on a
+# .env file for DATABASE_PATH / NERO_ENVIRONMENT / SECRET_KEY etc. would
+# silently not see them, since database.py (imported two lines up) reads
+# those at MODULE IMPORT time.
+load_dotenv()
 
 app = Flask(__name__,
             template_folder="templates",
@@ -54,6 +68,30 @@ if len(_secret_key) < 32:
 
 app.secret_key = _secret_key
 app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7
+
+# SECURITY FIX: the session cookie (which carries the signed user
+# identity + CSRF token) previously had no explicit Secure/HttpOnly/
+# SameSite flags, so Flask's defaults applied — HttpOnly is on by
+# default, but Secure is NOT, meaning the cookie could legally be sent
+# over a plain HTTP connection if one ever existed in the request path
+# (a misconfigured proxy, HTTP-only health checks hitting the same
+# host, etc). SameSite=Lax blocks the cookie being sent on cross-site
+# requests except top-level GET navigations (the normal case for
+# following a link here), which is good baseline CSRF-adjacent
+# hardening on top of the existing X-CSRF-Token mechanism, not a
+# replacement for it.
+#
+# DASHBOARD_FORCE_HTTP is an explicit, opt-in escape hatch for local
+# dev over plain http://localhost — Secure cookies are simply never
+# sent by browsers over HTTP, so leaving Secure on in that setup would
+# make login appear to silently fail with no obvious cause. Unset (the
+# default) is correct for the real Oracle Cloud deployment, which
+# should terminate TLS in front of the app.
+_force_http = os.getenv("DASHBOARD_FORCE_HTTP", "").strip().lower() in ("1", "true", "yes")
+app.config["SESSION_COOKIE_SECURE"]   = not _force_http
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
 app.register_blueprint(api_bp)
 
 print("Initializing database (dashboard process)...")
@@ -83,6 +121,96 @@ def render(template, **ctx):
     return render_template(template, **ctx)
 
 
+# SECURITY FIX: baseline response security headers — none of these
+# were set anywhere before. Frame/MIME/referrer hardening is
+# unconditional; HSTS only makes sense once the connection is actually
+# HTTPS (harmless but pointless over plain HTTP dev), so it's skipped
+# when DASHBOARD_FORCE_HTTP opts out of Secure cookies too.
+#
+# img-src is deliberately looser than a strict "self + Discord's CDN
+# only" policy would be. Several existing, intentional features let an
+# admin paste an arbitrary image URL — Embed Builder's thumbnail/image
+# fields, Welcome's embed images, Bot Profile's avatar/banner preview,
+# ticket category embeds, Creator Hub's YouTube/Twitch thumbnails —
+# none of which are limited to Discord's CDN. A stricter img-src would
+# silently break every one of those previews with no visible error
+# beyond "the image just doesn't show up". Allowing any https: image
+# source keeps that intact while still blocking plain-http image loads.
+@app.after_request
+def _set_security_headers(response):
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if not _force_http:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'"
+    )
+    return response
+
+
+# SECURITY FIX: /login, /discord_login, and /callback are the only
+# routes reachable with zero authentication at all — everything else
+# sits behind @login_required or @require_page. Nothing previously
+# rate-limited repeated hits against them, which matters most for
+# /callback (repeatedly replaying/guessing an authorization code) and
+# /discord_login (hammering the OAuth redirect). Keyed by remote IP; a
+# small in-memory sliding window, not a distributed store — sufficient
+# for this project's actual scale (a handful of trusted admins), not
+# meant to survive a multi-instance deployment. Same opportunistic-
+# prune shape already used for the cooldown dicts in cogs/economy.py,
+# cogs/triggers.py, and main.py.
+_rate_limit_buckets: dict[str, list] = {}
+
+
+def rate_limit(max_requests: int, window_seconds: int):
+    def decorator(f):
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            key = f"{request.remote_addr}:{f.__name__}"
+            now = time.time()
+            bucket = _rate_limit_buckets.get(key, [])
+            bucket = [t for t in bucket if now - t < window_seconds]
+            if len(bucket) >= max_requests:
+                abort(429)
+            bucket.append(now)
+            _rate_limit_buckets[key] = bucket
+
+            if len(_rate_limit_buckets) > 2000:
+                cutoff = now - window_seconds
+                for k in [k for k, v in _rate_limit_buckets.items()
+                          if not v or v[-1] < cutoff]:
+                    del _rate_limit_buckets[k]
+
+            return f(*args, **kwargs)
+        return wrapped
+    return decorator
+
+
+@app.errorhandler(429)
+def rate_limited(e):
+    return jsonify({"success": False, "error": "Too many requests — try again shortly."}), 429
+
+
+# staging-db feature: makes nero_environment/is_staging available to
+# EVERY template render (context processors apply globally, not just
+# to calls through this file's render() helper) — used by the staging
+# banner in base.html, the staging badge on login.html, and the
+# Environment row on health.html.
+@app.context_processor
+def inject_environment():
+    return {
+        "nero_environment": NERO_ENVIRONMENT,
+        "is_staging": NERO_ENVIRONMENT == "staging",
+    }
+
+
 # ── Error handlers ─────────────────────────────────────────────────────────────
 
 @app.errorhandler(403)
@@ -103,6 +231,7 @@ def server_error(e):
 # ── Auth routes ────────────────────────────────────────────────────────────────
 
 @app.route("/login")
+@rate_limit(20, 60)
 def login():
     if session.get("user"):
         return redirect(url_for("server_select"))
@@ -110,14 +239,42 @@ def login():
 
 
 @app.route("/discord_login")
+@rate_limit(10, 60)
 def discord_login():
-    return redirect(get_discord_oauth_url())
+    # SECURITY FIX: the OAuth authorize URL previously carried no
+    # `state` parameter at all — textbook OAuth CSRF: nothing stopped
+    # an attacker from tricking a victim's browser into completing an
+    # authorization flow the attacker initiated (e.g. to bind the
+    # victim's session to an attacker-controlled Discord account, or
+    # replay a captured callback URL). get_discord_oauth_url() now
+    # mints a random state, stashes it in the session, and /callback
+    # below verifies the round-tripped value matches before doing
+    # anything else.
+    #
+    # BUGFIX, same change: `remember` was previously read from
+    # request.args at /callback, but Discord's redirect_uri is a
+    # fixed, pre-registered value — nothing about the ORIGINAL
+    # /discord_login request (including ?remember=1) survives the
+    # round trip to Discord and back. "Remember me" was silently a
+    # no-op regardless of the checkbox. It's now stashed in the
+    # session here (alongside state) and read back by
+    # consume_oauth_remember() in /callback, which actually survives
+    # the redirect.
+    remember = request.args.get("remember") == "1"
+    return redirect(get_discord_oauth_url(remember=remember))
 
 
 @app.route("/callback")
+@rate_limit(15, 60)
 def callback():
-    code = request.args.get("code")
+    code  = request.args.get("code")
+    state = request.args.get("state")
     if not code:
+        return redirect(url_for("login"))
+    if not verify_oauth_state(state):
+        # Expired session, replayed/forged callback, or a genuine CSRF
+        # attempt — indistinguishable from here, and all three get the
+        # same safe response: back to login, no session created.
         return redirect(url_for("login"))
     tokens = exchange_code(code)
     if not tokens or not tokens.get("access_token"):
@@ -125,7 +282,7 @@ def callback():
     user = fetch_discord_user(tokens["access_token"])
     if not user:
         return redirect(url_for("login"))
-    remember = request.args.get("remember") == "1"
+    remember = consume_oauth_remember()
     create_session(user, remember_me=remember)
     session["access_token"] = tokens["access_token"]
     return redirect(url_for("server_select"))
@@ -996,6 +1153,78 @@ def trade_page():
     guild_id = get_session_guild_id()
     ctx = get_current_user_context()
     return render("systems/trade.html", **ctx)
+
+
+# ── Backups (bot-wide — every guild's data lives in one DB file) ───────────
+
+@app.route("/backups")
+@require_page("backups")
+@require_bot_owner
+def backups():
+    async def get_backups():
+        async with aiosqlite.connect(DB_PATH) as db:
+            # id DESC tie-break: created_at is 1-second resolution, and two
+            # backups CAN land in the same second (the manual trigger makes
+            # this realistic in a way the old daily-only cron never was).
+            # Without the tie-break, SQLite's order among tied rows is scan
+            # order, not insertion order, so "most recent first" would
+            # silently be wrong sometimes.
+            cursor = await db.execute("""
+                SELECT id, filename, size_bytes, created_at
+                FROM backup_log
+                ORDER BY created_at DESC, id DESC
+            """)
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, r)) for r in rows]
+
+    from cogs.backup import BACKUP_DIR, KEEP_BACKUPS
+
+    def fmt_size(n):
+        n = n or 0
+        if n >= 1024 * 1024:
+            return f"{n / 1024 / 1024:.2f} MB"
+        if n >= 1024:
+            return f"{n / 1024:.1f} KB"
+        return f"{n} B"
+
+    raw_rows = run_async(get_backups())
+    rows = []
+    for r in raw_rows:
+        rows.append({
+            **r,
+            "size_display":     fmt_size(r["size_bytes"]),
+            "created_display":  format_timestamp(r["created_at"]),
+            "created_relative": format_relative(r["created_at"]),
+            "exists_on_disk":   os.path.exists(os.path.join(BACKUP_DIR, r["filename"])),
+        })
+
+    total_display = fmt_size(sum((r["size_bytes"] or 0) for r in raw_rows))
+
+    ctx = get_current_user_context()
+    return render(
+        "general/backups.html",
+        backups=rows,
+        total_display=total_display,
+        keep_backups=KEEP_BACKUPS,
+        backup_dir=BACKUP_DIR,
+        **ctx)
+
+
+# ── Server Tags — Tag-Loyalty Missions + Cross-Server Join Reward ──────────
+
+@app.route("/tag-missions")
+@require_page("tagmissions")
+def tagmissions_page():
+    ctx = get_current_user_context()
+    return render("systems/tagmissions.html", **ctx)
+
+
+@app.route("/tag-partners")
+@require_page("tagpartners")
+def tagpartners_page():
+    ctx = get_current_user_context()
+    return render("systems/tagpartners.html", **ctx)
 
 
 # ── Creator Hub (YouTube / Twitch) ──────────────────────────────────────────

@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aiosqlite
 from functools import wraps
 from flask import session, redirect, url_for, abort, jsonify
-from database import DB_PATH
+from database import DB_PATH, OWNER_DISCORD_ID
 from dashboard.utils.async_utils import run_async
 from utils.permissions import (
     LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
@@ -123,3 +123,68 @@ def get_current_user_context() -> dict:
         "is_admin":     LEVEL_RANK.get(user_level, 0) >= LEVEL_RANK[LEVEL_ADMIN],
         "is_moderator": LEVEL_RANK.get(user_level, 0) >= LEVEL_RANK[LEVEL_MODERATOR],
     }
+
+
+def _trusted_backup_user_ids() -> set[int]:
+    """
+    backup_log/BACKUP_DIR are bot-wide — one backup snapshots the
+    ENTIRE database, every guild at once — but require_page("backups")
+    / require_api_permission(LEVEL_OWNER) alone only check LEVEL_OWNER
+    *within whichever guild happens to be selected in the current
+    session*. A LEVEL_OWNER in ANY one guild could otherwise read AND
+    trigger backups covering every OTHER guild's data too.
+
+    This is the fix: a check that ignores guild_id entirely.
+    OWNER_DISCORD_ID (database.py — the real bot owner, already used
+    for the Discord-side /backup_now and /backup_list owner-only
+    commands) is always trusted. BACKUP_TRUSTED_USER_IDS (env var,
+    comma-separated Discord IDs) can add more without a code change.
+    Deliberately scoped to backups only — every other LEVEL_OWNER page
+    (health, commands, general_settings, dashboard_access) keeps its
+    existing guild-scoped-only check, unchanged. The same latent gap
+    still applies to those pages; out of scope here.
+    """
+    ids = {OWNER_DISCORD_ID}
+    extra = os.getenv("BACKUP_TRUSTED_USER_IDS", "")
+    for part in extra.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return ids
+
+
+def require_bot_owner(f):
+    """Page-route variant — stacks on top of require_page("backups"), which
+    already handled login/guild-selection/guild-scoped-LEVEL_OWNER before
+    this ever runs. Renders the existing 403 page on failure, same as
+    require_page itself."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        user = session.get("user", {})
+        try:
+            user_id = int(user.get("id", 0))
+        except (TypeError, ValueError):
+            user_id = 0
+        if user_id not in _trusted_backup_user_ids():
+            abort(403)
+        return f(*args, **kwargs)
+    return decorated
+
+
+def require_bot_owner_api(f):
+    """API-route variant — stacks on top of require_api_permission(LEVEL_OWNER).
+    Returns JSON, same shape as require_api_permission's own 403s."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        user = session.get("user", {})
+        try:
+            user_id = int(user.get("id", 0))
+        except (TypeError, ValueError):
+            user_id = 0
+        if user_id not in _trusted_backup_user_ids():
+            return jsonify({
+                "success": False,
+                "error": "This action is restricted to the bot owner.",
+            }), 403
+        return f(*args, **kwargs)
+    return decorated

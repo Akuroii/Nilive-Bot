@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+{% block title %}Tag Missions{% endblock %}
+{% block content %}
+<span data-page-title="Tag Missions"></span>
+
+<div class="card">
+    <div class="card-title">🏷️ Create Mission</div>
+    <p class="text-muted text-sm" style="margin-bottom:16px;">
+        Members confirm by pressing a button while wearing this server's own Discord
+        tag. The reward only pays out if they're still wearing it when the mission
+        ends — confirming, then removing it, gets nothing.
+    </p>
+    <div class="form-row">
+        <div class="form-group" style="flex:2;">
+            <label class="form-label">Title</label>
+            <input class="form-input" id="tm-title" placeholder="e.g. Rep the server this weekend">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Post in</label>
+            <select class="nero-channel-picker form-input" id="tm-channel" data-value=""></select>
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label class="form-label">Starts <span class="text-muted text-sm">(your local time)</span></label>
+            <input class="form-input" id="tm-starts" type="datetime-local">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Ends <span class="text-muted text-sm">(your local time)</span></label>
+            <input class="form-input" id="tm-ends" type="datetime-local">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Reward type</label>
+            <select class="form-input" id="tm-reward-type" onchange="tmUpdateRewardFields()">
+                <option value="coins">Coins</option>
+                <option value="diamonds">Diamonds</option>
+                <option value="xp">XP</option>
+                <option value="role">Role (permanent)</option>
+                <option value="temp_role">Role (temporary)</option>
+            </select>
+        </div>
+        <div class="form-group" id="tm-amount-group">
+            <label class="form-label">Amount</label>
+            <input class="form-input" id="tm-amount" type="number" min="1" placeholder="e.g. 500">
+        </div>
+        <div class="form-group" id="tm-role-group" style="display:none;">
+            <label class="form-label">Role</label>
+            <select class="nero-role-picker form-input" id="tm-role" data-value=""></select>
+        </div>
+        <div class="form-group" id="tm-duration-group" style="display:none;">
+            <label class="form-label">Duration (hours)</label>
+            <input class="form-input" id="tm-duration" type="number" min="1" placeholder="e.g. 168">
+        </div>
+    </div>
+
+    <details style="margin:8px 0 16px;">
+        <summary style="cursor:pointer;color:var(--text2);font-size:13px;">
+            Customize messages (optional — sane defaults are used otherwise)
+        </summary>
+        <div class="form-row" style="margin-top:12px;">
+            <div class="form-group">
+                <label class="form-label">On confirm</label>
+                <input class="form-input" id="tm-msg-confirm"
+                       placeholder="Confirmed — wait until the mission ends to receive your prize.">
+            </div>
+            <div class="form-group">
+                <label class="form-label">If not wearing the tag</label>
+                <input class="form-input" id="tm-msg-not-wearing"
+                       placeholder="You need to be wearing this server's tag to confirm.">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label class="form-label">On success (DM at mission end)</label>
+                <input class="form-input" id="tm-msg-success"
+                       placeholder="Mission complete! Your reward has been sent.">
+            </div>
+            <div class="form-group">
+                <label class="form-label">On failure (DM at mission end)</label>
+                <input class="form-input" id="tm-msg-failure"
+                       placeholder="You removed the server tag before the mission ended — no reward this time.">
+            </div>
+            <div class="form-group">
+                <label class="form-label">If already confirmed</label>
+                <input class="form-input" id="tm-msg-already"
+                       placeholder="You already confirmed participation in this mission.">
+            </div>
+        </div>
+    </details>
+
+    <button class="btn btn-primary" onclick="tmSave()">Create Mission</button>
+</div>
+
+<div class="card">
+    <div class="card-title">Missions</div>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Window (UTC)</th>
+                <th>Participants</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="tm-list-body">
+            <tr><td colspan="5" class="empty">Loading...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<script>
+function toUTCSqlString(localDatetimeValue) {
+    // datetime-local inputs carry no timezone info -- the browser
+    // treats the string as local time when parsed via `new Date(...)`.
+    // The poll task in cogs/tagmissions.py compares starts_at/ends_at
+    // against SQLite's CURRENT_TIMESTAMP, which is UTC -- sending the
+    // raw local string here would start/end every mission off by
+    // whatever the admin's UTC offset happens to be. Convert once,
+    // at the point it's typed, so every value in the database is UTC.
+    if (!localDatetimeValue) return null;
+    return new Date(localDatetimeValue).toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function tmUpdateRewardFields() {
+    const type = document.getElementById('tm-reward-type').value;
+    const isRole = (type === 'role' || type === 'temp_role');
+    document.getElementById('tm-amount-group').style.display = isRole ? 'none' : '';
+    document.getElementById('tm-role-group').style.display = isRole ? '' : 'none';
+    document.getElementById('tm-duration-group').style.display = (type === 'temp_role') ? '' : 'none';
+    if (isRole) window.NeroSelect.initAll(document.getElementById('tm-role-group'));
+}
+
+function tmStatusBadge(status) {
+    const map = {
+        scheduled: ['badge-info', 'Scheduled'],
+        active: ['badge-success', 'Active'],
+        completed: ['badge', 'Completed'],
+        cancelled: ['badge-danger', 'Cancelled'],
+    };
+    const [cls, label] = map[status] || ['badge', status];
+    return `<span class="badge ${cls}">${label}</span>`;
+}
+
+async function tmLoad() {
+    const res  = await fetch('/api/tagmissions/list');
+    const rows = await res.json();
+    const body = document.getElementById('tm-list-body');
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="5" class="empty">No missions yet.</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map(r => {
+        const actions = [];
+        if (r.status === 'scheduled' || r.status === 'active') {
+            actions.push(`<button class="btn btn-sm" onclick="tmCancel(${r.id})">Cancel</button>`);
+        }
+        if (r.status !== 'active') {
+            actions.push(`<button class="btn btn-sm btn-danger" onclick="tmDelete(${r.id})">Delete</button>`);
+        }
+        return `
+        <tr>
+            <td><strong>${r.title}</strong><br>
+                <span class="text-muted text-sm">${r.reward_type}${r.reward_amount ? ' × ' + r.reward_amount : ''}</span></td>
+            <td>${tmStatusBadge(r.status)}</td>
+            <td class="text-sm text-muted">${(r.starts_at || '').slice(0,16)} → ${(r.ends_at || '').slice(0,16)}</td>
+            <td class="text-sm">${r.participant_count} confirmed
+                ${r.status === 'completed' ? `<br><span class="text-muted">${r.rewarded_count} rewarded · ${r.removed_tag_count} removed tag</span>` : ''}</td>
+            <td>${actions.join(' ')}</td>
+        </tr>`;
+    }).join('');
+}
+
+async function tmSave() {
+    const type = document.getElementById('tm-reward-type').value;
+    const isRole = (type === 'role' || type === 'temp_role');
+    const payload = {
+        title:                 document.getElementById('tm-title').value.trim(),
+        channel_id:            $('#tm-channel').val(),
+        starts_at:             toUTCSqlString(document.getElementById('tm-starts').value),
+        ends_at:               toUTCSqlString(document.getElementById('tm-ends').value),
+        reward_type:           type,
+        reward_amount:         isRole ? null : document.getElementById('tm-amount').value,
+        reward_role_id:        isRole ? $('#tm-role').val() : null,
+        reward_duration_hours: (type === 'temp_role') ? document.getElementById('tm-duration').value : null,
+        confirm_message:       document.getElementById('tm-msg-confirm').value.trim(),
+        not_wearing_message:   document.getElementById('tm-msg-not-wearing').value.trim(),
+        success_message:       document.getElementById('tm-msg-success').value.trim(),
+        failure_message:       document.getElementById('tm-msg-failure').value.trim(),
+        already_message:       document.getElementById('tm-msg-already').value.trim(),
+    };
+    const res  = await fetch('/api/tagmissions/save', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast('Mission created!');
+        document.getElementById('tm-title').value = '';
+        document.getElementById('tm-amount').value = '';
+        tmLoad();
+    } else {
+        showToast(data.error || 'Error creating mission', 'error');
+    }
+}
+
+async function tmCancel(id) {
+    const res  = await fetch(`/api/tagmissions/${id}/cancel`, { method: 'POST' });
+    const data = await res.json();
+    if (!data.success) showToast(data.error || 'Error cancelling mission', 'error');
+    tmLoad();
+}
+
+async function tmDelete(id) {
+    const res  = await fetch(`/api/tagmissions/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!data.success) showToast(data.error || 'Error deleting mission', 'error');
+    tmLoad();
+}
+
+tmUpdateRewardFields();
+tmLoad();
+</script>
+{% endblock %}

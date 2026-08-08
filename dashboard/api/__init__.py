@@ -66,6 +66,7 @@ def _enforce_csrf():
 # doesn't matter for correctness (no route path collisions across
 # sections), only listed alphabetically for readability.
 from dashboard.api import botprofile    # noqa: E402,F401
+from dashboard.api import backups       # noqa: E402,F401
 from dashboard.api import core          # noqa: E402,F401
 from dashboard.api import creator       # noqa: E402,F401
 from dashboard.api import economy_shop  # noqa: E402,F401
@@ -75,5 +76,7 @@ from dashboard.api import missions      # noqa: E402,F401
 from dashboard.api import misc          # noqa: E402,F401
 from dashboard.api import moderation    # noqa: E402,F401
 from dashboard.api import mvp           # noqa: E402,F401
+from dashboard.api import tagmissions   # noqa: E402,F401
+from dashboard.api import tagpartners   # noqa: E402,F401
 from dashboard.api import tickets       # noqa: E402,F401
 from dashboard.api import trade         # noqa: E402,F401

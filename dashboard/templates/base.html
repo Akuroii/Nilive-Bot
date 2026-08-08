@@ -264,6 +264,26 @@
         <span class="nav-icon">🗺️</span>
         <span class="nav-text">Missions</span>
     </a>
+    <a href="/tag-missions"
+       hx-get="/tag-missions"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🏷️</span>
+        <span class="nav-text">Tag Missions</span>
+    </a>
+    <a href="/tag-partners"
+       hx-get="/tag-partners"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🤝</span>
+        <span class="nav-text">Tag Partners</span>
+    </a>
     <a href="/ledger"
        hx-get="/ledger"
        hx-target="#content-area"
@@ -367,6 +387,16 @@
         <span class="nav-icon">🔐</span>
         <span class="nav-text">Dashboard Access</span>
     </a>
+    <a href="/backups"
+       hx-get="/backups"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">💾</span>
+        <span class="nav-text">Backups</span>
+    </a>
     <a href="/health"
        hx-get="/health"
        hx-target="#content-area"
@@ -411,6 +441,9 @@
     </div>
 </div>
 <div class="main-content">
+    {% if is_staging %}
+    <div class="staging-banner">🧪 STAGING ENVIRONMENT — changes here do not affect production data</div>
+    {% endif %}
     <div class="topbar">
         <div style="display:flex;align-items:center;gap:12px;">
             <div class="topbar-title" id="page-title">{% block title %}Dashboard{% endblock %}</div>
@@ -524,6 +557,15 @@
 .nav-link:hover { background: var(--bg4); color: var(--text); }
 .nav-link.active { background: var(--accent); color: #fff; }
 .nav-icon { font-size: 15px; width: 18px; text-align: center; flex-shrink: 0; }
+.staging-banner {
+    background: var(--warning);
+    color: #000;
+    font-size: 12px;
+    font-weight: 700;
+    text-align: center;
+    padding: 6px 12px;
+    letter-spacing: .02em;
+}
 </style>
 </body>
 </html>

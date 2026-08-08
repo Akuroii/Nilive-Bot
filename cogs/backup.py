@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+import shutil
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -23,12 +24,26 @@ from database import DB_PATH
 # persistent volume (/app/data), so backups written next to it survive
 # process restarts and redeploys. They do NOT protect against the
 # volume itself being deleted — that would need off-volume storage
-# (S3, etc.), which is out of scope here. This covers "oops, bad
-# migration / bad query wiped a table" recovery, not full disaster
-# recovery.
+# (S3, etc.). See SECONDARY_BACKUP_DIR below for an optional mitigation.
 
 BACKUP_DIR   = os.path.join(os.path.dirname(DB_PATH), "backups")
 KEEP_BACKUPS = 7  # prune anything past the most recent N
+
+# RELIABILITY FIX: backups previously lived exclusively under
+# BACKUP_DIR, which is on the SAME persistent volume as the live
+# database (DB_PATH). If that volume is ever lost (disk failure,
+# accidental deletion, a redeploy that drops the mount), the last 7
+# daily backups are destroyed right alongside the live DB — a backup
+# strategy that shares a single point of failure with the thing it's
+# backing up isn't a real safety net.
+#
+# SECONDARY_BACKUP_DIR is an optional escape hatch: if set to a path
+# on a genuinely different volume/mount (a second disk, a mounted
+# network share, anything not sharing physical storage with DB_PATH's
+# volume), every backup is also copied there. Left unset, behavior is
+# identical to before — this is additive, not a replacement for
+# actually mounting a second location.
+SECONDARY_BACKUP_DIR = os.getenv("SECONDARY_BACKUP_DIR", "").strip() or None
 
 
 async def _do_backup() -> dict:
@@ -58,8 +73,24 @@ async def _do_backup() -> dict:
         """, (filename, size_bytes))
         await db.commit()
 
+    # RELIABILITY FIX: best-effort copy to a second, operator-
+    # configured location. Failure here must never break the primary
+    # backup (which already succeeded above) or the calling command —
+    # logged and swallowed, same defensive pattern as the rest of this
+    # cog's error handling.
+    secondary_ok = None
+    if SECONDARY_BACKUP_DIR:
+        try:
+            os.makedirs(SECONDARY_BACKUP_DIR, exist_ok=True)
+            shutil.copy2(dest_path, os.path.join(SECONDARY_BACKUP_DIR, filename))
+            secondary_ok = True
+        except Exception as e:
+            print(f"[BACKUP] Secondary copy to {SECONDARY_BACKUP_DIR} failed: {e}")
+            secondary_ok = False
+
     await _prune_old_backups()
-    return {"filename": filename, "size_bytes": size_bytes}
+    return {"filename": filename, "size_bytes": size_bytes,
+            "secondary_ok": secondary_ok}
 
 
 async def _prune_old_backups():
@@ -77,6 +108,16 @@ async def _prune_old_backups():
                     os.remove(path)
             except Exception as e:
                 print(f"[BACKUP] Failed to remove old backup {filename}: {e}")
+            # Prune the secondary copy too, if configured — same
+            # KEEP_BACKUPS retention window applies to both locations
+            # so the secondary doesn't grow unbounded.
+            if SECONDARY_BACKUP_DIR:
+                sec_path = os.path.join(SECONDARY_BACKUP_DIR, filename)
+                try:
+                    if os.path.exists(sec_path):
+                        os.remove(sec_path)
+                except Exception as e:
+                    print(f"[BACKUP] Failed to remove old secondary backup {filename}: {e}")
             await db.execute("DELETE FROM backup_log WHERE id = ?", (row_id,))
         await db.commit()
 
@@ -94,7 +135,8 @@ class Backup(commands.Cog):
         try:
             result = await _do_backup()
             print(f"[BACKUP] Created {result['filename']} "
-                  f"({result['size_bytes']:,} bytes)")
+                  f"({result['size_bytes']:,} bytes)"
+                  + (" [+secondary]" if result.get("secondary_ok") else ""))
         except Exception as e:
             print(f"[BACKUP] Automated backup failed: {e}")
 
@@ -112,9 +154,13 @@ class Backup(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         try:
             result = await _do_backup()
+            sec_note = ""
+            if SECONDARY_BACKUP_DIR:
+                sec_note = (" · secondary copy ✅" if result.get("secondary_ok")
+                            else " · ⚠️ secondary copy FAILED (check logs)")
             await interaction.followup.send(
                 f"✅ Backup created: `{result['filename']}` "
-                f"({result['size_bytes']:,} bytes)", ephemeral=True)
+                f"({result['size_bytes']:,} bytes){sec_note}", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Backup failed: {e}", ephemeral=True)
 
@@ -136,8 +182,12 @@ class Backup(commands.Cog):
                 "No backups yet.", ephemeral=True)
             return
         embed = discord.Embed(title="💾 Recent Backups", color=0x5865F2)
+        note = (f"\nSecondary location: `{SECONDARY_BACKUP_DIR}`"
+                if SECONDARY_BACKUP_DIR else
+                "\n⚠️ No SECONDARY_BACKUP_DIR configured — backups share "
+                "a volume with the live DB. See cogs/backup.py notes.")
         embed.description = "\n".join(
-            f"`{f}` — {s:,} bytes — {c}" for f, s, c in rows)
+            f"`{f}` — {s:,} bytes — {c}" for f, s, c in rows) + note
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

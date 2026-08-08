@@ -39,11 +39,23 @@ h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
 }
 .remember-row label { font-size: 13px; color: var(--text2); cursor: pointer; }
 .footer-note { font-size: 11px; color: var(--text3); margin-top: 20px; }
+.staging-badge {
+    display: inline-block;
+    background: var(--warning);
+    color: #000;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 999px;
+    margin-bottom: 16px;
+    letter-spacing: .02em;
+}
 </style>
 </head>
 <body>
 <div class="login-card">
     <div class="logo">N</div>
+    {% if is_staging %}<div class="staging-badge">🧪 STAGING</div>{% endif %}
     <h1>Nero Dashboard</h1>
     <p class="subtitle">Sign in with your Discord account to manage your server bot settings.</p>
 
@@ -66,7 +78,6 @@ h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
 document.getElementById('login-btn').addEventListener('click', function(e) {
     e.preventDefault();
     const remember = document.getElementById('remember-me').checked;
-    document.cookie = `nero_remember=${remember};path=/;max-age=300`;
     window.location.href = "{{ url_for('discord_login') }}" + (remember ? "?remember=1" : "");
 });
 const saved = localStorage.getItem('nero-theme');

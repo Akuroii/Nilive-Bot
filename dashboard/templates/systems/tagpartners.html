@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Tag Partners{% endblock %}
+{% block content %}
+<span data-page-title="Tag Partners"></span>
+
+<div class="card">
+    <div class="card-title">🤝 Add Partner Server</div>
+    <p class="text-muted text-sm" style="margin-bottom:16px;">
+        Anyone who joins this server while wearing the partner server's Discord tag
+        gets the reward below, automatically, once per person. Set up the matching
+        reward on the partner's own server (in their Tag Partners page) if you want
+        it to work both ways.
+    </p>
+    <div class="form-row">
+        <div class="form-group">
+            <label class="form-label">Partner server ID</label>
+            <input class="form-input" id="tp-partner-id" placeholder="e.g. 123456789012345678">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Label (optional)</label>
+            <input class="form-input" id="tp-label" placeholder="e.g. OMORI">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Reward type</label>
+            <select class="form-input" id="tp-reward-type" onchange="tpUpdateRewardFields()">
+                <option value="coins">Coins</option>
+                <option value="diamonds">Diamonds</option>
+                <option value="xp">XP</option>
+                <option value="role">Role</option>
+            </select>
+        </div>
+        <div class="form-group" id="tp-amount-group">
+            <label class="form-label">Amount</label>
+            <input class="form-input" id="tp-amount" type="number" min="1" placeholder="e.g. 500">
+        </div>
+        <div class="form-group" id="tp-role-group" style="display:none;">
+            <label class="form-label">Role</label>
+            <select class="nero-role-picker form-input" id="tp-role" data-value=""></select>
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group" style="flex:2;">
+            <label class="form-label">Welcome message (optional, sent as a DM)</label>
+            <input class="form-input" id="tp-welcome-msg"
+                   placeholder="e.g. Thanks for repping OMORI! Here's a little something.">
+        </div>
+    </div>
+    <button class="btn btn-primary" onclick="tpSave()">Add Partner</button>
+</div>
+
+<div class="card">
+    <div class="card-title">Configured Partners</div>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Partner</th>
+                <th>Reward</th>
+                <th>Enabled</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="tp-list-body">
+            <tr><td colspan="4" class="empty">Loading...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<script>
+function tpUpdateRewardFields() {
+    const type = document.getElementById('tp-reward-type').value;
+    document.getElementById('tp-amount-group').style.display = (type === 'role') ? 'none' : '';
+    document.getElementById('tp-role-group').style.display = (type === 'role') ? '' : 'none';
+    if (type === 'role') window.NeroSelect.initAll(document.getElementById('tp-role-group'));
+}
+
+async function tpLoad() {
+    const res  = await fetch('/api/tagpartners/list');
+    const rows = await res.json();
+    const body = document.getElementById('tp-list-body');
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="4" class="empty">No partner servers configured yet.</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map(r => `
+        <tr>
+            <td><strong>${r.partner_label || 'Unlabeled'}</strong><br>
+                <span class="text-muted text-sm"><code>${r.partner_guild_id}</code></span></td>
+            <td>${r.reward_type}${r.reward_amount ? ' × ' + r.reward_amount : ''}</td>
+            <td>${r.enabled ? '✅' : '⛔'}</td>
+            <td><button class="btn btn-sm btn-danger" onclick="tpDelete(${r.id})">Delete</button></td>
+        </tr>
+    `).join('');
+}
+
+async function tpSave() {
+    const type = document.getElementById('tp-reward-type').value;
+    const payload = {
+        partner_guild_id: document.getElementById('tp-partner-id').value.trim(),
+        partner_label:    document.getElementById('tp-label').value.trim(),
+        reward_type:      type,
+        reward_amount:    document.getElementById('tp-amount').value,
+        reward_role_id:   type === 'role' ? $('#tp-role').val() : null,
+        welcome_message:  document.getElementById('tp-welcome-msg').value.trim(),
+        enabled:          true,
+    };
+    const res  = await fetch('/api/tagpartners/save', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast('Partner added!');
+        document.getElementById('tp-partner-id').value = '';
+        document.getElementById('tp-label').value = '';
+        document.getElementById('tp-amount').value = '';
+        document.getElementById('tp-welcome-msg').value = '';
+        tpLoad();
+    } else {
+        showToast(data.error || 'Error saving partner', 'error');
+    }
+}
+
+async function tpDelete(id) {
+    await fetch(`/api/tagpartners/${id}`, { method: 'DELETE' });
+    tpLoad();
+}
+
+tpLoad();
+</script>
+{% endblock %}
