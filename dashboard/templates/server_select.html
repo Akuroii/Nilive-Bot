@@ -139,11 +139,13 @@ async function loadManageServers() {
                 // dashboard_users — clicking this does NOT bypass that.
                 // For most admins without an existing access row it'll
                 // land on the 403 page (same message as elsewhere:
-                // "ask your server owner to get access"). The one
-                // exception is the global super-admin (OWNER_DISCORD_ID),
-                // for whom /select-guild now auto-grants owner access
-                // when the bot is confirmed present — see
-                // dashboard/app.py select_guild().
+// "ask your server owner to get access"). The one
+                // exception is the developer's own trusted bypass ID
+                // (dashboard/permissions.py's is_trusted_super_admin) —
+                // /select-guild grants access for that account without
+                // ever writing a dashboard_users row, so it never shows
+                // up in Current Access either. See select_guild() in
+                // dashboard/app.py.
                 return `
                 <a href="/select-guild/${s.id}"
                    style="display:flex;align-items:center;gap:12px;padding:12px 14px;
