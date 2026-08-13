@@ -48,17 +48,6 @@ if not _owner_id_raw:
     sys.exit(1)
 OWNER_DISCORD_ID = int(_owner_id_raw)
 
-# SECURITY FIX: previously a hardcoded guild ID. FALLBACK_GUILD_IDS is
-# only ever used as a first-boot backstop (ensure_owner_access() below
-# already discovers real guild IDs from actual data in every scanned
-# table) — an empty default here is safe, it just means owner access
-# won't be pre-seeded for a guild with zero rows in every table until
-# either real data exists or this env var is set explicitly
-# (comma-separated guild IDs).
-FALLBACK_GUILD_IDS = [
-    int(g) for g in os.getenv("FALLBACK_GUILD_IDS", "").split(",") if g.strip()
-]
-
 
 async def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -1461,62 +1450,71 @@ async def init_db():
         except Exception as e:
             print(f"[MIGRATION] twitch_config.discord_user_id: {e}")
 
-        await db.commit()
+await db.commit()
 
-    await ensure_owner_access()
+        # SUPER-ADMIN BYPASS MIGRATION: the old ensure_owner_access()
+        # (removed) used to auto-seed the developer (OWNER_DISCORD_ID)
+        # as a visible 'owner' dashboard_users row in every guild.
+        # That's replaced by a guild-blind bypass (see
+        # dashboard/permissions.py's is_trusted_super_admin) that
+        # never writes a row at all, so the developer stays out of
+        # Current Access. This is a one-time cleanup of rows that old
+        # mechanism already wrote — scoped to the legacy 'auto-setup'
+        # label specifically, so it can never touch the NEW per-guild
+        # real-owner rows add_guild_owner() writes going forward
+        # (those use a different label, 'guild-owner-sync', precisely
+        # so this cleanup can't collide with a guild the developer
+        # happens to genuinely, personally own on Discord too). Safe
+        # to leave running forever — a no-op once the legacy rows are
+        # gone.
+        try:
+            cursor = await db.execute("""
+                SELECT COUNT(*) FROM dashboard_users
+                WHERE user_id = ? AND added_by_name = 'auto-setup'
+            """, (OWNER_DISCORD_ID,))
+            legacy_count = (await cursor.fetchone())[0]
+            if legacy_count:
+                await db.execute("""
+                    DELETE FROM dashboard_users
+                    WHERE user_id = ? AND added_by_name = 'auto-setup'
+                """, (OWNER_DISCORD_ID,))
+                await db.commit()
+                print(f"[MIGRATION] Removed {legacy_count} legacy "
+                      f"auto-setup dashboard_users row(s) for the "
+                      f"developer — access is now via the guild-blind "
+                      f"bypass, not a DB row.")
+        except Exception as e:
+            print(f"[MIGRATION] developer legacy row cleanup: {e}")
+
     print("✅ Database initialized — all tables ready")
-    print(f"✅ Owner access ensured for user ID: {OWNER_DISCORD_ID}")
+    print(f"✅ Developer bypass active for user ID: {OWNER_DISCORD_ID} "
+          f"(guild-blind, never written to dashboard_users)")
 
 
-async def ensure_owner_access():
+async def add_guild_owner(guild_id: int, owner_discord_id: int):
+    """
+    Grants dashboard 'owner' access to a guild's REAL Discord server
+    owner (guild.owner_id, passed in by the caller — this file has no
+    live Discord data of its own). Not used for the developer's own
+    access anymore — see dashboard/permissions.py's guild-blind
+    super-admin bypass, which never writes a dashboard_users row.
+    added_by_name is 'guild-owner-sync', deliberately distinct from
+    the legacy 'auto-setup' label the old (removed)
+    ensure_owner_access() used to write, so init_db()'s one-time
+    cleanup of THOSE rows can never collide with a fresh row here.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
-        guild_ids = set()
-
-        for table in ["levels", "economy", "warnings", "tickets",
-                      "mvp_scores", "mod_logs", "boost_config",
-                      "mvp_config", "guild_settings"]:
-            try:
-                cursor = await db.execute(
-                    f"SELECT DISTINCT guild_id FROM {table} "
-                    f"WHERE guild_id IS NOT NULL"
-                )
-                rows = await cursor.fetchall()
-                for row in rows:
-                    if row[0]:
-                        guild_ids.add(int(row[0]))
-            except Exception:
-                pass
-
-        for gid in FALLBACK_GUILD_IDS:
-            guild_ids.add(gid)
-
-        for gid in guild_ids:
-            # Now that idx_du_unique on (guild_id, user_id) exists,
-            # this actually ignores an existing row instead of
-            # inserting a fresh duplicate on every restart.
-            await db.execute("""
-                INSERT OR IGNORE INTO dashboard_users
-                    (guild_id, user_id, permission_level,
-                     added_by_name, enabled)
-                VALUES (?, ?, 'owner', 'auto-setup', 1)
-            """, (gid, OWNER_DISCORD_ID))
-
-        await db.commit()
-        print(f"✅ Owner access confirmed for {len(guild_ids)} guilds")
-
-
-async def add_guild_owner(guild_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        # Same fix as ensure_owner_access() above — relies on
-        # idx_du_unique(guild_id, user_id) to actually dedupe.
+        # Relies on idx_du_unique(guild_id, user_id) to dedupe repeat
+        # calls (on_guild_join firing again, or main.py's on_ready
+        # backfill sweep re-running on every reconnect).
         await db.execute("""
             INSERT OR IGNORE INTO dashboard_users
                 (guild_id, user_id, permission_level,
                  added_by_name, enabled)
-            VALUES (?, ?, 'owner', 'auto-setup', 1)
-        """, (guild_id, OWNER_DISCORD_ID))
+            VALUES (?, ?, 'owner', 'guild-owner-sync', 1)
+        """, (guild_id, owner_discord_id))
         await db.commit()
-    print(f"✅ Owner access granted for new guild: {guild_id}")
+    print(f"✅ Owner access granted for guild {guild_id} (owner={owner_discord_id})")
 
 
 if __name__ == "__main__":
