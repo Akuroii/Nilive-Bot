@@ -284,9 +284,10 @@ async def on_ready():
         await bot.tree.sync()
         synced = await bot.tree.fetch_commands()
         print(f"Synced {len(synced)} slash commands")
-    except Exception as e:
+except Exception as e:
         print(f"Sync error: {e}")
         traceback.print_exc()
+    await backfill_guild_owners()
     rotate_status.start()
 
 
@@ -337,17 +338,30 @@ async def on_guild_join(guild: discord.Guild):
     await add_guild_owner(guild.id)
 
 
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    print(f"Joined new guild: {guild.name} ({guild.id})")
+    await add_guild_owner(guild.id, guild.owner_id)
+
+
+async def backfill_guild_owners():
+    """
+    Grants each guild's REAL Discord owner (guild.owner_id) a
+    dashboard_users 'owner' row, for every guild the bot is ALREADY
+    in — on_guild_join above only covers guilds joined after this
+    deploy. Called from on_ready, which re-fires on every reconnect;
+    safe to re-run every time since add_guild_owner()'s INSERT OR
+    IGNORE is idempotent against idx_du_unique(guild_id, user_id).
+    """
+    for guild in bot.guilds:
+        if guild.owner_id:
+            await add_guild_owner(guild.id, guild.owner_id)
+    print(f"✅ Backfilled real owner access for {len(bot.guilds)} guilds")
+
+
 @bot.command()
 @commands.is_owner()
 async def sync(ctx):
-    await bot.tree.sync()
-    cmds = await bot.tree.fetch_commands()
-    await ctx.send(f"Synced {len(cmds)} commands!")
-
-
-@bot.command()
-@commands.is_owner()
-async def reload(ctx, cog: str):
     try:
         await bot.reload_extension(f"cogs.{cog}")
         await ctx.send(f"Reloaded cogs.{cog}")
