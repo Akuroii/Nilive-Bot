@@ -308,10 +308,29 @@ def server_select():
     access_token = session.get("access_token", "")
     guilds       = fetch_discord_guilds(access_token) if access_token else []
 
-    async def get_accessible_guilds():
+async def get_accessible_guilds():
+        user_id = current_user_id()
+
+        # Developer bypass — every guild the BOT is currently in, not
+        # just guilds the logged-in developer personally belongs to
+        # on Discord. fetch_discord_guilds() above is scoped to the
+        # LOGGED-IN USER's own OAuth membership, which would
+        # otherwise hide any server the developer isn't personally a
+        # member of even though their bypass access covers it.
+        # Checked before the "no guilds" early return below, since an
+        # empty personal guild list shouldn't short-circuit this.
+        if is_trusted_super_admin(user_id):
+            from dashboard.auth import fetch_bot_guilds_full
+            bot_guilds = fetch_bot_guilds_full()
+            return [{
+                "id":    int(g["id"]),
+                "name":  g.get("name", "Unknown Server"),
+                "icon":  g.get("icon"),
+                "level": LEVEL_OWNER,
+            } for g in bot_guilds]
+
         if not guilds:
             return []
-        user_id    = current_user_id()
         accessible = []
         async with aiosqlite.connect(DB_PATH) as db:
             for gid in [int(g["id"]) for g in guilds]:
