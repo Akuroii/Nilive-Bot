@@ -162,9 +162,50 @@ def fetch_discord_bot_guilds() -> set[int]:
             if len(page) < params["limit"]:
                 break
             params["after"] = page[-1]["id"]
-    except Exception as e:
+except Exception as e:
         print(f"[AUTH] fetch_discord_bot_guilds error: {e}")
     return guild_ids
+
+
+def fetch_bot_guilds_full() -> list[dict]:
+    """
+    Full guild objects (id, name, icon, ...) the bot is currently a
+    member of, read via the BOT token — same endpoint
+    fetch_discord_bot_guilds() above reduces to a bare ID set. Used
+    by /server-select to render the developer's "every bot guild"
+    view (dashboard/permissions.py's is_trusted_super_admin), which
+    needs a name/icon per server to render, not just membership IDs.
+
+    Kept as its own function rather than having
+    fetch_discord_bot_guilds() build on top of it, so neither
+    function's existing behavior is at risk from touching the other.
+
+    Empty list (never raises) if DISCORD_TOKEN isn't set or the API
+    call fails.
+    """
+    bot_token = os.getenv("DISCORD_TOKEN", "")
+    if not bot_token:
+        return []
+    guilds: list[dict] = []
+    headers = {"Authorization": f"Bot {bot_token}"}
+    params  = {"limit": 200}
+    try:
+        while True:
+            r = requests.get(
+                f"{DISCORD_API}/users/@me/guilds",
+                headers=headers, params=params, timeout=10)
+            if r.status_code != 200:
+                break
+            page = r.json()
+            if not page:
+                break
+            guilds.extend(page)
+            if len(page) < params["limit"]:
+                break
+            params["after"] = page[-1]["id"]
+    except Exception as e:
+        print(f"[AUTH] fetch_bot_guilds_full error: {e}")
+    return guilds
 
 
 def bot_is_in_guild(guild_id: int) -> bool:
