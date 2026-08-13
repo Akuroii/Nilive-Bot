@@ -284,7 +284,7 @@ async def on_ready():
         await bot.tree.sync()
         synced = await bot.tree.fetch_commands()
         print(f"Synced {len(synced)} slash commands")
-except Exception as e:
+    except Exception as e:
         print(f"Sync error: {e}")
         traceback.print_exc()
     await backfill_guild_owners()
@@ -335,12 +335,6 @@ async def on_app_command_error(interaction: discord.Interaction,
 @bot.event
 async def on_guild_join(guild: discord.Guild):
     print(f"Joined new guild: {guild.name} ({guild.id})")
-    await add_guild_owner(guild.id)
-
-
-@bot.event
-async def on_guild_join(guild: discord.Guild):
-    print(f"Joined new guild: {guild.name} ({guild.id})")
     await add_guild_owner(guild.id, guild.owner_id)
 
 
@@ -363,8 +357,8 @@ async def backfill_guild_owners():
 @commands.is_owner()
 async def sync(ctx):
     try:
-        await bot.reload_extension(f"cogs.{cog}")
-        await ctx.send(f"Reloaded cogs.{cog}")
+        await bot.tree.sync()
+        await ctx.send("Synced slash commands.")
     except Exception as e:
         await ctx.send(f"Failed: {e}")
 
