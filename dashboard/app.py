@@ -12,13 +12,19 @@ from flask import (
     Flask, redirect, url_for, session,
     request, render_template, jsonify, abort,
 )
-from database import DB_PATH, init_db, OWNER_DISCORD_ID, add_guild_owner, NERO_ENVIRONMENT
+from database import DB_PATH, init_db, NERO_ENVIRONMENT
 from dashboard.utils.async_utils import run_async
 from dashboard.auth import (
     login_required, create_session, clear_session,
     get_discord_oauth_url, exchange_code, fetch_discord_user,
     fetch_discord_guilds, current_user, current_user_id,
     verify_oauth_state, consume_oauth_remember,
+)
+from dashboard.permissions import (
+    require_page, get_current_user_context, log_action,
+    get_session_guild_id, set_session_guild,
+    require_bot_owner, is_trusted_super_admin,
+    LEVEL_RANK, LEVEL_OWNER,
 )
 from dashboard.permissions import (
     require_page, get_current_user_context, log_action,
@@ -344,19 +350,23 @@ def select_guild(guild_id: int):
             """, (guild_id, user_id))
             return await cursor.fetchone()
 
-    row = run_async(check())
+row = run_async(check())
+    level = row[0] if row else None
 
-    if not row and user_id == OWNER_DISCORD_ID:
+    # Developer bypass — never writes a dashboard_users row, so the
+    # developer never appears in Current Access. bot_is_in_guild is
+    # still checked so a guessed/typo'd guild_id the bot isn't
+    # actually in still 403s instead of silently "succeeding".
+    if not level and is_trusted_super_admin(user_id):
         from dashboard.auth import bot_is_in_guild
         if bot_is_in_guild(guild_id):
-            run_async(add_guild_owner(guild_id))
-            row = run_async(check())
+            level = LEVEL_OWNER
 
-    if not row:
+    if not level:
         abort(403)
 
     set_session_guild(guild_id)
-    session["user_level"] = row[0]
+    session["user_level"] = level
 
     access_token = session.get("access_token", "")
     if access_token:
