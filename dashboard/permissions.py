@@ -188,7 +188,7 @@ def require_bot_owner_api(f):
             user_id = int(user.get("id", 0))
         except (TypeError, ValueError):
             user_id = 0
-if user_id not in _trusted_backup_user_ids():
+        if user_id not in _trusted_backup_user_ids():
             return jsonify({
                 "success": False,
                 "error": "This action is restricted to the bot owner.",

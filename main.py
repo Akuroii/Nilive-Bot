@@ -356,9 +356,17 @@ async def backfill_guild_owners():
 @bot.command()
 @commands.is_owner()
 async def sync(ctx):
+    await bot.tree.sync()
+    cmds = await bot.tree.fetch_commands()
+    await ctx.send(f"Synced {len(cmds)} commands!")
+
+
+@bot.command()
+@commands.is_owner()
+async def reload(ctx, cog: str):
     try:
-        await bot.tree.sync()
-        await ctx.send("Synced slash commands.")
+        await bot.reload_extension(f"cogs.{cog}")
+        await ctx.send(f"Reloaded cogs.{cog}")
     except Exception as e:
         await ctx.send(f"Failed: {e}")
 

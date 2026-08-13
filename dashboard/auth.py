@@ -162,7 +162,7 @@ def fetch_discord_bot_guilds() -> set[int]:
             if len(page) < params["limit"]:
                 break
             params["after"] = page[-1]["id"]
-except Exception as e:
+    except Exception as e:
         print(f"[AUTH] fetch_discord_bot_guilds error: {e}")
     return guild_ids
 

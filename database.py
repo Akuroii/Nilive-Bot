@@ -1450,7 +1450,7 @@ async def init_db():
         except Exception as e:
             print(f"[MIGRATION] twitch_config.discord_user_id: {e}")
 
-await db.commit()
+        await db.commit()
 
         # SUPER-ADMIN BYPASS MIGRATION: the old ensure_owner_access()
         # (removed) used to auto-seed the developer (OWNER_DISCORD_ID)
