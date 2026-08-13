@@ -26,12 +26,6 @@ from dashboard.permissions import (
     require_bot_owner, is_trusted_super_admin,
     LEVEL_RANK, LEVEL_OWNER,
 )
-from dashboard.permissions import (
-    require_page, get_current_user_context, log_action,
-    get_session_guild_id, set_session_guild,
-    require_bot_owner,
-    LEVEL_RANK, LEVEL_OWNER,
-)
 from dashboard.api import api_bp
 from utils.xp_calculator import calculate_level_from_xp
 from utils.formatters import format_relative, format_timestamp
@@ -308,7 +302,7 @@ def server_select():
     access_token = session.get("access_token", "")
     guilds       = fetch_discord_guilds(access_token) if access_token else []
 
-async def get_accessible_guilds():
+    async def get_accessible_guilds():
         user_id = current_user_id()
 
         # Developer bypass — every guild the BOT is currently in, not
@@ -369,7 +363,7 @@ def select_guild(guild_id: int):
             """, (guild_id, user_id))
             return await cursor.fetchone()
 
-row = run_async(check())
+    row = run_async(check())
     level = row[0] if row else None
 
     # Developer bypass — never writes a dashboard_users row, so the
@@ -2069,7 +2063,6 @@ def api_rr_panels():
 
     return jsonify({"panels": run_async(get())})
 
-import os
 
 if __name__ == "__main__":
     port = int(os.getenv('PORT', 5000))
