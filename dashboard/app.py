@@ -396,26 +396,38 @@ def select_guild(guild_id: int):
 @login_required
 def api_user_servers():
     from dashboard.auth import (
-        guild_permissions_include_admin, fetch_discord_bot_guilds,
+        guild_permissions_include_admin, fetch_bot_guilds_full,
     )
 
     access_token = session.get("access_token", "")
     if not access_token:
         return jsonify({"servers": []})
 
-    guilds        = fetch_discord_guilds(access_token)
-    bot_guild_ids = fetch_discord_bot_guilds()
+    guilds     = fetch_discord_guilds(access_token)
+    # BUGFIX: this used to source name/icon purely from the user's own
+    # OAuth guild list (fetch_discord_guilds) and only use the bot's
+    # guild data for the is_bot_member flag. Confirmed by screenshot
+    # that this OAuth list can carry icon: null for a guild that does
+    # have one set (name and bot-installed status came through fine,
+    # icon specifically didn't) — root cause on Discord's side wasn't
+    # pinned down, so rather than depend on that diagnosis, guilds the
+    # bot is actually in now use the bot's own (bot-token) view of
+    # name/icon instead, which is already proven reliable — same data
+    # /server-select's developer-bypass view already uses. Guilds the
+    # bot ISN'T in still fall back to the OAuth data, same as before.
+    bot_guilds = {int(g["id"]): g for g in fetch_bot_guilds_full()}
 
     servers = []
     for g in guilds:
         if not guild_permissions_include_admin(g.get("permissions")):
             continue
-        gid = int(g["id"])
+        gid      = int(g["id"])
+        bot_data = bot_guilds.get(gid)
         servers.append({
             "id":            gid,
-            "name":          g.get("name", "Unknown Server"),
-            "icon":          g.get("icon"),
-            "is_bot_member": gid in bot_guild_ids,
+            "name":          (bot_data or g).get("name", "Unknown Server"),
+            "icon":          (bot_data or g).get("icon"),
+            "is_bot_member": bot_data is not None,
         })
 
     servers.sort(key=lambda s: (not s["is_bot_member"], s["name"].lower()))
