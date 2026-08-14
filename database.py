@@ -839,6 +839,86 @@ async def init_db():
         except Exception as e:
             print(f"[MIGRATION] shop_items.xp_boost_multiplier: {e}")
 
+        # Rank Card foundation (item catalog / rarity / equip system,
+        # pass 1 — schema + backend). shop_items gets two new,
+        # optional admin-set fields: icon_url (shown on the future
+        # /rank card's item grid + equipped-role slot) and rarity
+        # (Common/Rare/Epic/Legendary/Mythical/Secret — the PRIMARY
+        # sort key for that grid, locked with Dark; price is only a
+        # tiebreaker within the same rarity, since minigame/event/
+        # mission drops are often "free" and rarity is the only
+        # signal that makes those sort sensibly against purchased
+        # items). Both nullable/defaulted so every existing shop item
+        # keeps working unchanged (rarity='common', icon_url=NULL —
+        # renders with no icon, sorts at the bottom of its price
+        # bracket, same as before this migration ran).
+        try:
+            cursor = await db.execute("PRAGMA table_info(shop_items)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "icon_url" not in cols:
+                await db.execute(
+                    "ALTER TABLE shop_items ADD COLUMN icon_url TEXT")
+            if "rarity" not in cols:
+                await db.execute(
+                    "ALTER TABLE shop_items ADD COLUMN "
+                    "rarity TEXT DEFAULT 'common'")
+            await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] shop_items.icon_url/rarity: {e}")
+
+        # Rank Card foundation: item_catalog is the single, source-
+        # agnostic place the future card renderer (and /inventory)
+        # resolve an item's icon/rarity/value from — keyed by
+        # (guild_id, item_name), NOT by shop_items.id, matching how
+        # inventory_items already references items purely by name
+        # (a purchased item's inventory row already survives the shop
+        # listing being edited/deleted; this follows the same loose
+        # coupling). Auto-populated whenever a shop item is saved
+        # (see dashboard/api/economy_shop.py); items granted only via
+        # events/minigames/missions simply have no row here yet and
+        # fall back to rarity='common', no icon — a deliberate,
+        # documented gap (no admin UI for that yet, per Dark: "not
+        # now"), not an oversight.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS item_catalog (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id       INTEGER NOT NULL,
+                item_name      TEXT NOT NULL,
+                icon_url       TEXT,
+                rarity         TEXT NOT NULL DEFAULT 'common',
+                value_currency TEXT,
+                value_amount   INTEGER,
+                updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, item_name)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ic_guild
+            ON item_catalog(guild_id)
+        """)
+
+        # Rank Card foundation: equipped_roles tracks, per member, the
+        # ONE role/temp_role-type inventory item currently "worn" —
+        # single row per (guild_id, user_id) by design (PK enforces
+        # it), since only one purchased/won cosmetic role can be
+        # equipped at a time (locked with Dark: equipping swaps the
+        # actual Discord role, doesn't just relabel something).
+        # Materialized here rather than derived by scanning
+        # member.roles at read time, matching how the rest of this
+        # project caches live-ish state in the DB instead of
+        # re-deriving it from Discord on every read (twitch_config.
+        # is_live, youtube_config.live_video_id, etc).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS equipped_roles (
+                guild_id    INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,
+                item_name   TEXT NOT NULL,
+                role_id     INTEGER NOT NULL,
+                equipped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS purchase_history (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
