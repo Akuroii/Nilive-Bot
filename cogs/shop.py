@@ -33,6 +33,53 @@ class BuyView(discord.ui.View):
         await process_purchase(interaction, self.item_id)
 
 
+# Rank Card foundation / Equip system: lets a member pick which owned
+# role/temp_role item to wear from /inventory. Shares equip_role()
+# (utils/equip_engine.py) with the auto-equip-on-grant path in
+# utils/reward_engine.py — this is purely the manual-swap entry point,
+# same underlying logic either way.
+class InventoryEquipSelect(discord.ui.Select):
+    def __init__(self, guild_id: int, user_id: int,
+                 role_items: list[dict], equipped_name: str | None):
+        options = []
+        for it in role_items[:25]:
+            label = it["item_name"]
+            if it["item_name"] == equipped_name:
+                label = f"✅ {label} (equipped)"
+            options.append(discord.SelectOption(
+                label=label[:100], value=it["item_name"][:100]))
+        super().__init__(
+            placeholder="Equip a role...", options=options,
+            custom_id="inventory_equip_select")
+        self.guild_id = guild_id
+        self.user_id  = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This isn't your inventory.", ephemeral=True)
+            return
+        from utils.equip_engine import equip_role
+        result = await equip_role(
+            interaction.client, self.guild_id, self.user_id, self.values[0])
+        if result.get("success"):
+            await interaction.response.send_message(
+                f"✅ Equipped Role: **{result['role_name']}**",
+                ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                f"❌ {result.get('error', 'Something went wrong.')}",
+                ephemeral=True)
+
+
+class InventoryEquipView(discord.ui.View):
+    def __init__(self, guild_id: int, user_id: int,
+                 role_items: list[dict], equipped_name: str | None):
+        super().__init__(timeout=120)
+        self.add_item(InventoryEquipSelect(
+            guild_id, user_id, role_items, equipped_name))
+
+
 async def process_purchase(interaction: discord.Interaction,
                             item_id: int):
     guild_id = interaction.guild.id
@@ -177,6 +224,11 @@ async def process_purchase(interaction: discord.Interaction,
         # item's declared type was "role" (permanent) or "temp_role" —
         # now it's keyed off itype itself, matching what the admin
         # actually configured in the shop.
+        # Rank Card foundation / Equip system: item_name=name is now
+        # passed through so the inventory row give_reward() writes
+        # (and the single-equipped-slot swap it performs) shows the
+        # shop's own configured item name ("Flame") rather than
+        # falling back to the raw Discord role name.
         from utils.reward_engine import give_reward
         result = await give_reward(
             interaction.client, guild_id, user_id, itype,
@@ -184,6 +236,7 @@ async def process_purchase(interaction: discord.Interaction,
             duration_hours=duration_hours if itype == "temp_role" else None,
             reason=f"Shop purchase: {name}",
             source="shop",
+            item_name=name,
         )
         if not result.get("success"):
             print(f"[SHOP] Role give error: {result.get('error')}")
@@ -302,6 +355,21 @@ class Shop(commands.Cog):
                             "DELETE FROM temp_roles WHERE id = ?",
                             (entry_id,))
                         await db.commit()
+
+                    # Rank Card foundation / Equip system: the role's
+                    # inventory row (and equipped_roles entry, if this
+                    # was the equipped one) need to catch up now that
+                    # the Discord role is actually gone — otherwise
+                    # /inventory and the rank card would keep showing
+                    # an item the member no longer has.
+                    try:
+                        from utils.equip_engine import cleanup_expired_role_item
+                        await cleanup_expired_role_item(
+                            guild_id, user_id, role_id)
+                    except Exception as e:
+                        print(f"[SHOP] temp_role inventory cleanup "
+                              f"failed for entry {entry_id} "
+                              f"(user={user_id} role={role_id}): {e}")
             except Exception as e:
                 print(f"[SHOP] temp_role_cleanup error for entry "
                       f"{entry_id}: {e}")
@@ -412,6 +480,22 @@ class Shop(commands.Cog):
         held_items = await get_inventory(
             interaction.guild.id, interaction.user.id)
 
+        # Rank Card foundation / Equip system: role/temp_role items
+        # now also land in inventory_items (see
+        # utils/reward_engine.py) so they can be equipped from here —
+        # shown in their own section + the equip picker below rather
+        # than mixed into "Held Items", since only one can ever be
+        # worn at a time.
+        role_items = [it for it in held_items
+                      if it["item_type"] in ("role", "temp_role")]
+        non_role_items = [it for it in held_items
+                          if it["item_type"] not in ("role", "temp_role")]
+
+        from utils.equip_engine import get_equipped
+        equipped = await get_equipped(
+            interaction.guild.id, interaction.user.id)
+        equipped_name = equipped["item_name"] if equipped else None
+
         # Phase 5 / Leveling expansion: show any currently active XP
         # boosts alongside held items — same "what do I actually have
         # right now" purpose, just a different table.
@@ -433,10 +517,26 @@ class Shop(commands.Cog):
                 name="⚡ Active XP Boost",
                 value=f"{active_boost}x XP", inline=False)
 
-        if held_items:
+        if equipped_name:
+            embed.add_field(
+                name="🎭 Equipped Role",
+                value=f"**{equipped_name}**", inline=False)
+        elif role_items:
+            embed.add_field(
+                name="🎭 Equipped Role",
+                value="*(none — pick one below)*", inline=False)
+
+        if role_items:
+            role_text = "\n".join(
+                f"{'✅ ' if it['item_name'] == equipped_name else ''}"
+                f"**{it['item_name']}**"
+                for it in role_items[:10])
+            embed.add_field(name="Owned Roles", value=role_text, inline=False)
+
+        if non_role_items:
             items_text = "\n".join(
                 f"**{it['item_name']}** ×{it['quantity']}"
-                for it in held_items[:15])
+                for it in non_role_items[:15])
             embed.add_field(name="Held Items", value=items_text, inline=False)
 
         for name, price, bought_at, expires_at in rows[:10]:
@@ -449,7 +549,15 @@ class Shop(commands.Cog):
                        f"Bought: {bought_at[:10] if bought_at else '?'}"
                        f"{exp_str}"),
                 inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        view = None
+        if role_items:
+            view = InventoryEquipView(
+                interaction.guild.id, interaction.user.id,
+                role_items, equipped_name)
+
+        await interaction.response.send_message(
+            embed=embed, view=view, ephemeral=True)
 
 
 async def setup(bot):

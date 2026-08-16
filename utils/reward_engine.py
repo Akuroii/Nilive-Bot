@@ -152,14 +152,44 @@ async def give_reward(bot: discord.Client,
             return {"success": False, "reward_type": reward_type,
                     "error": warning}
 
-        try:
-            await member.add_roles(role, reason=reason)
-        except Exception as e:
+        expires_at = None
+        if reward_type == "temp_role" and duration_hours:
+            expires_at = (
+                datetime.now(timezone.utc) +
+                timedelta(hours=duration_hours)
+            ).isoformat()
+
+        # Rank Card foundation / Equip system (locked with Dark): a
+        # role/temp_role reward is a cosmetic collectible now, not
+        # just a Discord permission grant — it lands in inventory_items
+        # (quantity fixed at 1, roles don't stack) and, since the
+        # Discord role has always been granted immediately on this
+        # reward path, it also auto-equips (swapping out whatever was
+        # previously equipped) via the same equip_role() swap the
+        # manual /inventory picker uses. The inventory row is written
+        # FIRST so equip_role() — which reads role_id back out of
+        # inventory metadata rather than taking it as a raw param —
+        # has something to resolve. display_name falls back to the
+        # Discord role's own name only when the caller doesn't supply
+        # a nicer one (cogs/shop.py passes the shop item's configured
+        # name; other callers currently don't have one to offer).
+        display_name = item_name or role.name
+
+        from utils.inventory import set_quantity
+        await set_quantity(
+            guild_id, user_id, display_name, 1,
+            item_type=reward_type, source=source,
+            metadata={"role_id": role_id, "expires_at": expires_at})
+
+        from utils.equip_engine import equip_role
+        equip_result = await equip_role(
+            bot, guild_id, user_id, display_name, reason=reason)
+        if not equip_result.get("success"):
             return {"success": False, "reward_type": reward_type,
-                    "error": f"Discord error: {e}"}
+                    "error": equip_result.get("error", "Failed to equip role")}
 
         result = {"success": True, "reward_type": reward_type,
-                  "role_id": role_id}
+                  "role_id": role_id, "item_name": display_name}
 
         if reward_type == "temp_role":
             if not duration_hours:
@@ -167,10 +197,6 @@ async def give_reward(bot: discord.Client,
                                       "was granted but NOT scheduled "
                                       "to expire.")
             else:
-                expires_at = (
-                    datetime.now(timezone.utc) +
-                    timedelta(hours=duration_hours)
-                ).isoformat()
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute("""
                         INSERT INTO temp_roles

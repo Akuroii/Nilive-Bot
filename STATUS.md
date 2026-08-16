@@ -1,113 +1,115 @@
-# NILIVE BOT — SHIFT CHECKPOINT (dark-fixes pass #16)
+# NILIVE BOT — SHIFT CHECKPOINT — Rank Card foundation (pass 1: schema + backend)
 
-## Done this pass: Missions v1 (built ahead of the Trade-verification gate — Dark's explicit override)
+## Done this pass
 
-**Gate note:** prior STATUS.md locked "Missions comes after Trade is
-verified live." Trade shipped last pass but is still unverified. Dark
-was asked directly this pass and chose to override and build Missions
-now anyway. Flagged in `utils/mission_engine.py`'s header too, so a
-future session doesn't mistake this for the gate being forgotten.
+Schema + backend logic for the item catalog / rarity / equip system,
+per the design locked with Dark over this session. NO visual card work
+this pass — that's next session, per Dark's own ordering.
 
-Files in this delta:
+**Files:**
+- `database.py` — 3 migrations: `shop_items.icon_url` / `.rarity`
+  (nullable/defaulted, existing items unaffected), new `item_catalog`
+  table, new `equipped_roles` table. Verified idempotent (ran
+  `init_db()` twice against a scratch DB, no errors).
+- `utils/item_catalog.py` — NEW. `RARITY_ORDER`
+  (common→rare→epic→legendary→mythical→secret), `RARITY_COLORS`
+  (Dark's exact locked gradient hex values, ready for the card
+  renderer to import directly), `item_sort_key()` (rarity first,
+  value tiebreaker), `get_catalog_entry()` / `upsert_catalog_entry()`.
+- `utils/equip_engine.py` — NEW. `equip_role()` — the single place
+  that does the actual Discord role swap (remove old equipped role if
+  different, add new, update `equipped_roles`). `get_equipped()`,
+  `cleanup_expired_role_item()` (wired into temp_role_cleanup).
+- `utils/reward_engine.py` — role/temp_role branch rewritten: writes
+  an `inventory_items` row (quantity fixed at 1) THEN calls
+  `equip_role()` instead of a raw `add_roles()`. This one change
+  covers shop, events, minigames, missions, tag missions, and tag
+  partners automatically — none of those callers needed touching
+  except cogs/shop.py (see below).
+- `utils/inventory.py` — `set_quantity()` gained an optional
+  `metadata` param (role_id + expires_at for role items), backward
+  compatible.
+- `utils/rank_card_data.py` — NEW. `get_rank_card_data()` — aggregates
+  everything the future card renderer needs (xp/level/prestige,
+  balances, message/voice totals, minigame wins, equipped role,
+  rarity-sorted item grid) into one call. Pure data, zero image work.
+  Built now so next session is visual-only.
+- `cogs/shop.py` — `process_purchase()` now passes `item_name=name`
+  to `give_reward()` so the inventory row shows the shop's configured
+  name ("Flame") instead of the raw Discord role name.
+  `temp_role_cleanup()` now calls `cleanup_expired_role_item()` after
+  a successful removal. `/inventory` rewritten: splits role items
+  from consumables, shows equipped role, attaches
+  `InventoryEquipView` (a Select menu) when the member owns any role
+  items. New `InventoryEquipSelect`/`InventoryEquipView` classes.
+- `cogs/minigames.py` — added `get_user_win_count()` (free query
+  against existing `minigames_log`, no schema change).
+- `dashboard/api/economy_shop.py` — `add_shop_item()` accepts
+  `icon_url` + `rarity`, upserts into `item_catalog` with the item's
+  price as the tiebreaker value. `shop_items_partial()` now shows the
+  icon + a rarity badge in the admin table.
+- `dashboard/templates/systems/shop.html` — added Icon URL + Rarity
+  fields to the Add Shop Item form.
 
-- `utils/mission_engine.py` — NEW. Own standalone schema (own
-  `ensure_tables()`, not in `database.py`'s `init_db()` — same
-  pattern `cogs/minigames.py`/`utils/trade_engine.py` already
-  established).
-  - `missions_definitions` — per-guild mission config: type
-    (messages/words/voice_minutes), target, period
-    (daily/weekly/once), reward_type/value/duration.
-  - `mission_progress` — per (guild, user, mission, period_key) row.
-    Daily/weekly reset is implicit: period_key changes every
-    day/week, so a new period is just a fresh row — no cron job.
-  - `record_activity()` — atomic (`BEGIN IMMEDIATE` per mission
-    definition, same concurrency pattern as
-    `utils/reward_engine.py`'s xp branch) progress increment +
-    completion check. Reward is granted the instant a mission
-    completes via `utils/reward_engine.give_reward()` — no separate
-    claim step.
-- `cogs/missions.py` — NEW. Listens on the SAME events
-  `cogs/activity_engine.py` already dispatches
-  (`on_activity_message`, `on_activity_voice_tick`) — no new
-  tracking hooks added anywhere.
-  - `/missions` — member-facing progress view.
-  - `/mission_create`, `/mission_list`, `/mission_remove` — admin
-    Discord-side CRUD (dashboard CRUD also shipped, see below).
-- `dashboard/api/missions.py` — NEW. CRUD routes
-  (`/api/missions/list`, `/definition` POST/DELETE, `/toggle`,
-  `/completions`), same shape as `dashboard/api/minigames.py`.
-- `dashboard/templates/systems/missions.html` — NEW. Config +
-  completions-log page, same tab/style pattern as
-  `systems/minigames.html`.
-- `dashboard/api/__init__.py` — added `from dashboard.api import
-  missions` import.
-- `utils/permissions.py` — added `"missions": LEVEL_ADMIN` to
-  `PAGE_PERMISSIONS`.
-- `main.py` — added `"cogs.missions"` to `load_cogs()`'s
-  `cog_files` list (right after `cogs.trade`).
+All Python files `py_compile` clean. Ran a full runtime smoke test
+against a scratch SQLite DB (not just compile-check): confirmed
+`item_sort_key` produces the *exact* Mofasa > Lady Bug > Gumball
+ordering Dark specified, confirmed `set_quantity`'s metadata COALESCE
+doesn't get wiped by a re-purchase, confirmed
+`cleanup_expired_role_item` correctly clears both the inventory row
+and `equipped_roles` when a temp role expires.
 
-All six `.py` files `py_compile` clean.
+## Locked design decisions this pass (flagging so next session doesn't relitigate)
 
-**NOT included in this ZIP (needs 5 min manual wiring — see
-`MISSIONS_WIRING.md` in this delta):** the `/missions` Flask route in
-`dashboard/app.py`, the `"Missions"` entry in `app.py`'s
-`COMMAND_CATEGORIES`, and the sidebar nav link in `base.html`. Those
-three files are too large to re-ship whole for this small an addition
-— same reasoning `NAV_LINK_SNIPPET.html` already used for minigames.
-`MISSIONS_WIRING.md` has the exact snippets to paste in.
+1. **Rarity is the primary sort key, price is a tiebreaker.** Solves
+   "minigame drops are technically free" — a free Legendary drop
+   outranks a purchased Common item.
+2. **Buying/winning a role/temp_role auto-equips it**, swapping out
+   whatever was previously equipped. This matches the *existing*
+   behavior (the Discord role has always been granted immediately on
+   this reward path) — this pass just routes that grant through the
+   shared swap instead of a raw `add_roles()` call, so it also stays
+   correct in `equipped_roles`/inventory.
+3. **Single-equipped-slot applies to EVERY reward_type
+   role/temp_role grant** — shop, events, minigames, missions, tag
+   missions, tag partners — not just shop purchases. All of those are
+   "you got a cosmetic role as a reward" in the same sense.
+4. **The Rank Card has zero connection to the equip system** —
+   equipping/swapping never touches, never displays anything about
+   equip history on the card. Confirmed explicitly by Dark.
+5. **No dashboard catalog editor for non-shop items this pass** — an
+   event/minigame/mission-only item has no `item_catalog` row until
+   an admin manually adds one (future work); falls back to
+   `rarity='common'`, no icon. Per Dark: "not now."
+6. **Custom title/rank name: not being added.** Confirmed by Dark.
 
-## Scope notes (v1, deliberately not built yet)
+## NOT done this pass (deliberately deferred, per agreed order)
 
-- No channel announcement on mission completion — `/missions` shows
-  completed state, but nothing posts to a channel. A natural follow-up
-  if wanted, not done this pass to fit budget.
-- Only 3 trackable types (messages/words/voice_minutes) — an
-  `xp_earned` type was considered but skipped for v1 since XP is
-  granted by `cogs/leveling.py` via the reward engine already, and
-  hooking a second listener onto that grant path risked double-
-  counting against message/voice XP's own cooldown logic. Can be
-  added later as its own listener on `give_reward`'s result if wanted.
-- No per-mission max-completions cap beyond one per period_key
-  (already enforced structurally — a "once" mission can't be
-  re-completed, a "daily" one resets once per day).
+- **The actual `/rank` card visuals.** Pillow renderer, layout,
+  mailbox art compositing, avatar ring, rarity-colored borders/
+  badges on grid tiles, equipped-role slot rendering. This is next
+  session. `utils/rank_card_data.py` already has everything it needs
+  to consume.
+- No dashboard route/UI change for `/rank` itself yet (still the old
+  embed-or-Pillow-fallback in `cogs/leveling.py` — untouched this
+  pass).
+- No admin catalog editor for minigame-tier / mission-reward items
+  (rarity/icon only settable via the shop item form right now).
 
-## Verified NOT touched this pass (scope discipline)
+## Still needed, in order
 
-- No changes to `utils/reward_engine.py`, `utils/trade_engine.py`,
-  `cogs/trade.py`, `cogs/minigames.py`, `utils/economy_safe.py`, or
-  any Prestige/Leveling file — Missions only reads mission-progress
-  state it owns and calls `give_reward()` the same way every other
-  reward source already does.
-- `dashboard/api.py` deletion — still pending, unchanged. Still needs
-  someone with repo access, or the file uploaded here.
-
-## Stopped at: Missions v1 shipped (engine + Discord UI + dashboard CRUD + main.py/permissions.py wiring). Not yet: app.py route + base.html nav link (manual, see MISSIONS_WIRING.md), live verification of Missions OR Trade.
-
-## Still needed, in order:
-
-1. **Apply `MISSIONS_WIRING.md`** — 3 small manual edits to
-   `dashboard/app.py` (x2) and `base.html` (x1).
-2. **Live verification of Trade** — still outstanding from last pass;
-   `/trade`, add coins/diamonds/items both sides, Ready both, confirm
-   atomic swap lands and ledger/inventory reflect it.
-3. **Live verification of Missions** — send messages / sit in voice,
-   confirm progress increments and reward grants on completion; check
-   a "daily" mission actually resets the next day (period_key rolls).
-4. **Delete `dashboard/api.py`** — still queued since pass #12.
-5. **Zero automated test coverage** — still open.
-
-## Design decisions locked (unchanged + new)
-
-- Prestige: carry-over XP, keep-all level-role rewards, one role per
-  tier (swapped), `min_level` default 50, leaderboard sorted
-  `prestige DESC, xp DESC`.
-- Trade System: built pass #15. Straight 1:1 swap, no fees, max 10
-  distinct items per side. Still unverified live.
-- Missions: built this pass (#16), ahead of the original "after Trade
-  verified" gate — Dark's explicit override, documented above and in
-  `utils/mission_engine.py`. Auto-granted reward on completion, no
-  claim step. 3 trackable types: messages, words, voice_minutes.
-- Event Stack Builder: max 5 reward slots per event, hard currency
-  caps per tier (bronze/silver/gold/diamond), max 3 active events.
-- ZIP = source of truth. Always verify against actual code before
-  scheduling work.
+1. Restart the bot once so `database.py`'s `init_db()` runs the 3 new
+   migrations against the real DB.
+2. Live-test: buy a role item from the shop → confirm it lands in
+   `/inventory` under "Owned Roles" and shows as equipped. Buy a
+   *second* role item → confirm the first one's Discord role is
+   actually removed and the second is added (the swap).
+3. Live-test: buy a `temp_role` item with a short duration, wait for
+   `temp_role_cleanup` (10 min loop) to fire → confirm the item drops
+   out of `/inventory` and `equipped_roles` is cleared if it was
+   equipped.
+4. Set icon + rarity on a couple of real shop items via the dashboard,
+   confirm the admin table shows the icon + colored rarity badge.
+5. **Next session: the `/rank` card visual build.** Needs from Dark
+   at that point: nothing new — rarity colors, sort logic, and all
+   data plumbing are already locked and built. Just start it.

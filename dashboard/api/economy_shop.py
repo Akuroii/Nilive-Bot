@@ -153,13 +153,21 @@ def shop_items_partial():
             cursor = await db.execute("""
                 SELECT id, name, description, price, type,
                        role_id, duration_hours, featured, enabled,
-                       price_diamonds
+                       price_diamonds, icon_url, rarity
                 FROM shop_items WHERE guild_id = ?
                 ORDER BY featured DESC, created_at DESC
             """, (guild_id,))
             return await cursor.fetchall()
 
     rows = run_async(fetch())
+    # Rank Card foundation: rarity badge colors on the admin table —
+    # matches the tier ordering in utils/item_catalog.py, using the
+    # dashboard's existing badge classes (no new CSS needed).
+    RARITY_BADGE = {
+        "common": "badge", "rare": "badge-accent", "epic": "badge-accent",
+        "legendary": "badge-warning", "mythical": "badge-danger",
+        "secret": "badge-danger",
+    }
     html = ""
     for r in rows:
         status = "badge-success" if r[8] else "badge-danger"
@@ -167,12 +175,21 @@ def shop_items_partial():
         dur    = f"{r[6]}h" if r[6] else "Permanent"
         price_diamonds = r[9]
         price_str = f"💎 {price_diamonds:,}" if price_diamonds else f"🪙 {r[3]:,}"
+        rarity = r[11] or "common"
+        rarity_class = RARITY_BADGE.get(rarity, "badge")
+        icon_html = (
+            f"<img src='{_esc(r[10])}' style='width:20px;height:20px;"
+            f"border-radius:4px;vertical-align:middle;margin-right:6px;' "
+            f"onerror=\"this.style.display='none';\">"
+            if r[10] else ""
+        )
         # r[1] (name) and r[2] (description) are admin-entered but
         # still free text — escaped so a mischievous/compromised admin
         # account can't plant stored XSS for the next admin to view.
         html  += (
             f"<tr>"
-            f"<td><strong>{_esc(r[1])}</strong>{'⭐' if r[7] else ''}</td>"
+            f"<td>{icon_html}<strong>{_esc(r[1])}</strong>{'⭐' if r[7] else ''} "
+            f"<span class='badge {rarity_class}'>{_esc(rarity.title())}</span></td>"
             f"<td class='text-muted'>{_esc(r[2]) if r[2] else '—'}</td>"
             f"<td>{price_str}</td>"
             f"<td>{_esc(r[4])}</td>"
@@ -225,6 +242,19 @@ def add_shop_item():
     except (TypeError, ValueError):
         price_diamonds_val = None
 
+    price_val = int(data.get("price", 0) or 0)
+    item_name = data.get("name")
+    icon_url  = (data.get("icon_url") or "").strip() or None
+
+    # Rank Card foundation: rarity is admin-set at creation time,
+    # same place price/icon are already captured. Falls back to
+    # 'common' on anything unrecognized rather than rejecting the
+    # save — a typo'd rarity shouldn't block adding the item.
+    from utils.item_catalog import is_valid_rarity, upsert_catalog_entry
+    rarity = (data.get("rarity") or "common").strip().lower()
+    if not is_valid_rarity(rarity):
+        rarity = "common"
+
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -232,13 +262,14 @@ def add_shop_item():
                     (guild_id, name, description, price, type,
                      role_id, duration_hours, featured,
                      required_level, required_role_id,
-                     max_stock, current_stock, enabled, price_diamonds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                     max_stock, current_stock, enabled, price_diamonds,
+                     icon_url, rarity)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             """, (
                 guild_id,
-                data.get("name"),
+                item_name,
                 data.get("description"),
-                int(data.get("price", 0)),
+                price_val,
                 data.get("type", "role"),
                 data.get("role_id") or None,
                 data.get("duration_hours") or None,
@@ -248,8 +279,16 @@ def add_shop_item():
                 max_stock_val,
                 current_stock_val,
                 price_diamonds_val,
+                icon_url,
+                rarity,
             ))
             await db.commit()
+
+        value_currency = "diamonds" if price_diamonds_val else ("balance" if price_val else None)
+        value_amount = price_diamonds_val if price_diamonds_val else (price_val or None)
+        await upsert_catalog_entry(
+            guild_id, item_name, icon_url=icon_url, rarity=rarity,
+            value_currency=value_currency, value_amount=value_amount)
 
     run_async(save())
     log_action(guild_id, f"Added shop item: {data.get('name')}", "shop")

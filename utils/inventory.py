@@ -77,20 +77,32 @@ async def remove_item(guild_id: int, user_id: int, item_name: str,
 
 async def set_quantity(guild_id: int, user_id: int, item_name: str,
                         quantity: int, item_type: str = "custom",
-                        source: str = "admin") -> int:
+                        source: str = "admin", metadata: dict = None) -> int:
+    """
+    metadata is optional and additive (Rank Card foundation / equip
+    system) — used for role/temp_role items to carry {"role_id":...,
+    "expires_at":...} so equip_engine.py can resolve which Discord
+    role an inventory row actually points to without a second table.
+    Existing callers that don't pass it are unaffected: meta_json
+    stays None, and COALESCE keeps whatever metadata (if any) the row
+    already had, same as give_item()'s upsert already does.
+    """
     if quantity < 0:
         raise ValueError("quantity cannot be negative")
+    meta_json = json.dumps(metadata) if metadata else None
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO inventory_items
                 (guild_id, user_id, item_name, item_type,
-                 quantity, source, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                 quantity, metadata, source, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(guild_id, user_id, item_name) DO UPDATE SET
                 quantity   = excluded.quantity,
+                item_type  = excluded.item_type,
+                metadata   = COALESCE(excluded.metadata, inventory_items.metadata),
                 updated_at = CURRENT_TIMESTAMP
-        """, (guild_id, user_id, item_name, item_type, quantity, source))
+        """, (guild_id, user_id, item_name, item_type, quantity, meta_json, source))
         await db.commit()
     return quantity
 

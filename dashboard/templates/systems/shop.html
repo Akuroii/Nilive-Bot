@@ -78,6 +78,23 @@
                 <input class="form-input" id="item-level"
                        type="number" min="0" value="0">
             </div>
+            <div class="form-group">
+                <label class="form-label">Icon URL (optional)</label>
+                <input class="form-input" id="item-icon"
+                       placeholder="https://... — shown on the rank card">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Rarity</label>
+                <select class="form-input" id="item-rarity">
+                    <option value="common">Common</option>
+                    <option value="rare">Rare</option>
+                    <option value="epic">Epic</option>
+                    <option value="legendary">Legendary</option>
+                    <option value="mythical">Mythical</option>
+                    <option value="secret">Secret</option>
+                </select>
+                <div class="form-hint">Primary sort order on the rank card's item grid</div>
+            </div>
             <div class="form-group"
                  style="grid-column:1/-1;">
                 <label class="form-label">Description</label>
@@ -291,6 +308,8 @@ async function addItem() {
         required_level:parseInt(
             document.getElementById('item-level').value) || 0,
         description:   document.getElementById('item-desc').value,
+        icon_url:      document.getElementById('item-icon').value.trim() || null,
+        rarity:        document.getElementById('item-rarity').value,
         featured:      document.getElementById('item-featured')
                                .checked ? 1 : 0,
         max_stock:     stock > 0 ? stock : null,

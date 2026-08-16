@@ -142,6 +142,19 @@ async def get_tiers(guild_id: int) -> list[dict]:
     } for r in rows]
 
 
+# Rank Card foundation: minigames_log already records winner_id per
+# fired event — no new counter/table needed. Used by the future
+# /rank card's "mini games" stat (utils/rank_card_data.py).
+async def get_user_win_count(guild_id: int, user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT COUNT(*) FROM minigames_log
+            WHERE guild_id = ? AND winner_id = ?
+        """, (guild_id, user_id))
+        row = await cursor.fetchone()
+    return row[0] if row else 0
+
+
 def _monday_of(d) -> str:
     monday = d.date() if hasattr(d, "date") else d
     from datetime import timedelta as _td
