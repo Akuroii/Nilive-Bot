@@ -226,14 +226,21 @@ async function loadMissionLog() {
         tbody.innerHTML = '<tr><td colspan="5" class="empty">No completions yet</td></tr>';
         return;
     }
-    tbody.innerHTML = data.completions.map(c => `
+    // dark-fixes pass #18 (username resolver rollout): data.user_map is
+    // keyed by user_id; userIdentityHtml() is the JS twin of
+    // dashboard/utils/user_identity.py (same pattern as trade.html).
+    const userMap = data.user_map || {};
+    tbody.innerHTML = data.completions.map(c => {
+        const u = userMap[c.user_id] || {};
+        return `
         <tr>
-            <td><code>${c.user_id}</code></td>
+            <td>${userIdentityHtml(c.user_id, u.display_name || u.username, u.avatar_url)}</td>
             <td>${c.mission_name}</td>
             <td>${c.reward_type}: <code>${c.reward_value}</code></td>
             <td class="text-muted">${c.period_key}</td>
             <td class="text-muted">${c.completed_at ? c.completed_at.slice(0,16) : '—'}</td>
-        </tr>`).join('');
+        </tr>`;
+    }).join('');
 }
 loadMissionLog();
 </script>

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "macros/user_identity.html" import user_identity %}
 {% block title %}Dashboard Access{% endblock %}
 {% block content %}
 
@@ -47,8 +48,9 @@
             </thead>
             <tbody>
                 {% for u in users %}
+                {% set um = user_map.get(u[1], {}) %}
                 <tr>
-                    <td><code>{{ u[1] }}</code></td>
+                    <td>{{ user_identity(u[1], um.get('display_name'), um.get('username'), um.get('avatar_url')) }}</td>
                     <td>
                         <span class="badge
                             {% if u[2] == 'owner' %}badge-danger

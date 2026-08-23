@@ -497,8 +497,18 @@ def members():
                  "level": r[2], "coins": r[3]} for r in rows]
 
     member_list = run_async(get_members())
-    ctx         = get_current_user_context()
-    return render("general/members.html", members=member_list, **ctx)
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        ids = [m["user_id"] for m in member_list]
+        if not ids:
+            return {}
+        return await resolve_users(guild_id, ids)
+
+    user_map = run_async(resolve())
+    ctx      = get_current_user_context()
+    return render("general/members.html", members=member_list,
+                  user_map=user_map, **ctx)
 
 
 @app.route("/members/<int:user_id>")
@@ -553,9 +563,15 @@ def member_profile(user_id: int):
         }
 
     profile = run_async(get_profile())
-    ctx     = get_current_user_context()
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        return await resolve_users(guild_id, [user_id])
+
+    user_map = run_async(resolve())
+    ctx      = get_current_user_context()
     return render("general/member_profile.html",
-                  profile=profile, member_id=user_id, **ctx)
+                  profile=profile, member_id=user_id, user_map=user_map, **ctx)
 
 
 # ── Audit log ──────────────────────────────────────────────────────────────────
@@ -883,6 +899,15 @@ def tickets():
     data["ticket_open"]   = sum(1 for t in tickets if t[3] == "open")
     data["ticket_closed"] = sum(1 for t in tickets if t[3] == "closed")
     data["ticket_total"]  = len(tickets)
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        ids = [t[2] for t in tickets]
+        if not ids:
+            return {}
+        return await resolve_users(guild_id, ids)
+
+    data["user_map"] = run_async(resolve())
     ctx  = get_current_user_context()
     return render("manage/tickets.html", tab=tab, **data, **ctx)
 
@@ -974,8 +999,18 @@ def mvp():
         return scores, history
 
     scores, history = run_async(get_data())
-    ctx             = get_current_user_context()
-    return render("systems/mvp.html", scores=scores, history=history, **ctx)
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        ids = [s[0] for s in scores]
+        if not ids:
+            return {}
+        return await resolve_users(guild_id, ids)
+
+    user_map = run_async(resolve())
+    ctx      = get_current_user_context()
+    return render("systems/mvp.html", scores=scores, history=history,
+                  user_map=user_map, **ctx)
 
 
 # ── Leveling ───────────────────────────────────────────────────────────────────
@@ -1000,8 +1035,18 @@ def leveling():
         return levels, rewards
 
     levels, rewards = run_async(get_data())
-    ctx             = get_current_user_context()
-    return render("systems/leveling.html", levels=levels, rewards=rewards, **ctx)
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        ids = [l[0] for l in levels]
+        if not ids:
+            return {}
+        return await resolve_users(guild_id, ids)
+
+    user_map = run_async(resolve())
+    ctx      = get_current_user_context()
+    return render("systems/leveling.html", levels=levels, rewards=rewards,
+                  user_map=user_map, **ctx)
 
 
 # ── Economy ────────────────────────────────────────────────────────────────────
@@ -1144,8 +1189,18 @@ def ledger_page():
         return await get_guild_ledger(guild_id, limit=100)
 
     entries = run_async(get_recent())
-    ctx     = get_current_user_context()
-    return render("systems/ledger.html", entries=entries, **ctx)
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        ids = [e["user_id"] for e in entries]
+        if not ids:
+            return {}
+        return await resolve_users(guild_id, ids)
+
+    user_map = run_async(resolve())
+    ctx      = get_current_user_context()
+    return render("systems/ledger.html", entries=entries,
+                  user_map=user_map, **ctx)
 
 
 # ── Inventory (Phase 3 E4 CLOSEOUT — read-only) ─────────────────────────────
@@ -1160,9 +1215,18 @@ def inventory_page():
         return await get_guild_inventory_summary(guild_id, limit=200)
 
     items = run_async(get_summary())
-    ctx   = get_current_user_context()
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        ids = [it["user_id"] for it in items]
+        if not ids:
+            return {}
+        return await resolve_users(guild_id, ids)
+
+    user_map = run_async(resolve())
+    ctx      = get_current_user_context()
     return render("systems/inventory.html",
-                  items=items, target_user_id=None, **ctx)
+                  items=items, target_user_id=None, user_map=user_map, **ctx)
 
 
 @app.route("/inventory/<int:user_id>")
@@ -1175,9 +1239,15 @@ def inventory_user_page(user_id: int):
         return await get_inventory(guild_id, user_id, include_empty=False)
 
     items = run_async(get_user_items())
-    ctx   = get_current_user_context()
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        return await resolve_users(guild_id, [user_id])
+
+    user_map = run_async(resolve())
+    ctx      = get_current_user_context()
     return render("systems/inventory.html",
-                  items=items, target_user_id=user_id, **ctx)
+                  items=items, target_user_id=user_id, user_map=user_map, **ctx)
 
 
 # ── Trade (read-only history) ───────────────────────────────────────────────
@@ -1811,8 +1881,17 @@ def config_access():
         return redirect(url_for("config_access"))
 
     users = run_async(get_users())
-    ctx   = get_current_user_context()
-    return render("config/access.html", users=users, **ctx)
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        ids = [u[1] for u in users]
+        if not ids:
+            return {}
+        return await resolve_users(guild_id, ids)
+
+    user_map = run_async(resolve())
+    ctx      = get_current_user_context()
+    return render("config/access.html", users=users, user_map=user_map, **ctx)
 
 
 # ── Member edit API ────────────────────────────────────────────────────────────

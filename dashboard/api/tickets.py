@@ -41,15 +41,26 @@ def tickets_partial():
             return await cursor.fetchall()
 
     rows = run_async(fetch())
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        return await resolve_users(guild_id, [r[2] for r in rows])
+
+    user_map = run_async(resolve()) if rows else {}
+
+    from dashboard.utils.user_identity import render_user_identity_html
     html = ""
     for r in rows:
         color = "badge-success" if r[3] == "open" else "badge-danger"
+        u = user_map.get(r[2], {})
+        identity_html = render_user_identity_html(
+            r[2], u.get("display_name"), u.get("username"), u.get("avatar_url"))
         # r[4] (category) is admin-configured but still free text —
         # escaped defensively rather than assumed trusted.
         html += (
             f"<tr>"
             f"<td><strong>#{r[0]}</strong></td>"
-            f"<td><code>{r[2]}</code></td>"
+            f"<td>{identity_html}</td>"
             f"<td>{_esc(r[4]) if r[4] else 'General'}</td>"
             f"<td><span class='badge {color}'>{_esc(r[3])}</span></td>"
             f"<td class='text-muted'>{str(r[5])[:10] if r[5] else '—'}</td>"

@@ -40,7 +40,7 @@ async def log_transaction(guild_id: int, user_id: int, currency: str,
 async def get_user_ledger(guild_id: int, user_id: int,
                            limit: int = 50, currency: str = None) -> list[dict]:
     query = """
-        SELECT id, currency, amount, balance_after, type, reason,
+        SELECT id, user_id, currency, amount, balance_after, type, reason,
                source, related_user_id, reversed, reversed_at, created_at
         FROM transaction_ledger
         WHERE guild_id = ? AND user_id = ?
@@ -57,10 +57,10 @@ async def get_user_ledger(guild_id: int, user_id: int,
         rows = await cursor.fetchall()
 
     return [{
-        "id": r[0], "currency": r[1], "amount": r[2],
-        "balance_after": r[3], "type": r[4], "reason": r[5],
-        "source": r[6], "related_user_id": r[7],
-        "reversed": bool(r[8]), "reversed_at": r[9], "created_at": r[10],
+        "id": r[0], "user_id": r[1], "currency": r[2], "amount": r[3],
+        "balance_after": r[4], "type": r[5], "reason": r[6],
+        "source": r[7], "related_user_id": r[8],
+        "reversed": bool(r[9]), "reversed_at": r[10], "created_at": r[11],
     } for r in rows]
 
 

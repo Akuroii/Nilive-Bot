@@ -32,13 +32,24 @@ def leveling_leaderboard_partial():
             return await cursor.fetchall()
 
     rows = run_async(fetch())
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        return await resolve_users(guild_id, [r[0] for r in rows])
+
+    user_map = run_async(resolve()) if rows else {}
+
+    from dashboard.utils.user_identity import render_user_identity_html
     html = ""
     for i, r in enumerate(rows, 1):
         prestige = r[3] or 0
-        badge = f"★{prestige} " if prestige else ""
+        badge = f"<span class='badge badge-accent'>★{prestige}</span>" if prestige else ""
+        u = user_map.get(r[0], {})
+        identity_html = render_user_identity_html(
+            r[0], u.get("display_name"), u.get("username"), u.get("avatar_url"))
         html += (
             f"<tr><td>#{i}</td>"
-            f"<td><code>{badge}{r[0]}</code></td>"
+            f"<td><div style='display:flex;align-items:center;gap:8px;'>{badge}{identity_html}</div></td>"
             f"<td><span class='badge badge-accent'>Lv {r[2]}</span></td>"
             f"<td>{r[1]:,} XP</td></tr>"
         )

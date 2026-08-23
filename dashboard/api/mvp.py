@@ -36,12 +36,23 @@ def mvp_scores_partial():
             return await cursor.fetchall()
 
     rows = run_async(fetch())
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        return await resolve_users(guild_id, [r[0] for r in rows])
+
+    user_map = run_async(resolve()) if rows else {}
+
+    from dashboard.utils.user_identity import render_user_identity_html
     html = ""
     for i, r in enumerate(rows, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"#{i}"
+        u = user_map.get(r[0], {})
+        identity_html = render_user_identity_html(
+            r[0], u.get("display_name"), u.get("username"), u.get("avatar_url"))
         html += (
             f"<tr><td>{medal}</td>"
-            f"<td><code>{r[0]}</code></td>"
+            f"<td>{identity_html}</td>"
             f"<td>{r[1]:.1f}</td>"
             f"<td>{r[2]:.1f}</td>"
             f"<td><strong>{r[3]:.1f}</strong></td></tr>"
