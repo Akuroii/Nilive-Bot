@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "macros/user_identity.html" import user_identity %}
 {% block title %}Leveling{% endblock %}
 {% block content %}
 <span data-page-title="Leveling"></span>
@@ -29,13 +30,19 @@
                        hx-boost="false"
                        hx-swap="innerHTML">
                     {% for l in levels %}
+                    {% set u = user_map.get(l[0], {}) %}
                     <tr>
                         <td>
                             <div class="rank-badge {% if loop.index == 1 %}rank-1{% elif loop.index == 2 %}rank-2{% elif loop.index == 3 %}rank-3{% else %}rank-n{% endif %}">
                                 {{ loop.index }}
                             </div>
                         </td>
-                        <td><code>{% if l[3] %}★{{ l[3] }} {% endif %}{{ l[0] }}</code></td>
+                        <td>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                {% if l[3] %}<span class="badge badge-accent">★{{ l[3] }}</span>{% endif %}
+                                {{ user_identity(l[0], u.get('display_name'), u.get('username'), u.get('avatar_url')) }}
+                            </div>
+                        </td>
                         <td><span class="badge badge-accent">Lv {{ l[2] }}</span></td>
                         <td>{{ "{:,}".format(l[1]) }}</td>
                         <td>

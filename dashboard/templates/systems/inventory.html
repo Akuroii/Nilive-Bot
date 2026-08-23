@@ -1,12 +1,16 @@
 {% extends "base.html" %}
+{% from "macros/user_identity.html" import user_identity %}
 {% block title %}Inventory{% endblock %}
 {% block content %}
 <span data-page-title="Inventory"></span>
 
 <div class="card">
     <div class="card-header">
-        <div class="card-title" style="margin:0">
-            🎒 {% if target_user_id %}Inventory — <code>{{ target_user_id }}</code>{% else %}Guild Inventory{% endif %}
+        <div class="card-title" style="margin:0;display:flex;align-items:center;gap:8px;">
+            🎒 {% if target_user_id %}
+                {% set u = user_map.get(target_user_id, {}) %}
+                Inventory — {{ user_identity(target_user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}
+            {% else %}Guild Inventory{% endif %}
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <input class="form-input" id="inv-user" placeholder="View a User ID..." style="max-width:200px;"
@@ -41,7 +45,8 @@
                     <td><span class="badge badge-source">{{ it.source }}</span></td>
                     <td class="text-muted">{{ it.updated_at[:16] if it.updated_at else "—" }}</td>
                     {% else %}
-                    <td><code>{{ it.user_id }}</code></td>
+                    {% set u = user_map.get(it.user_id, {}) %}
+                    <td>{{ user_identity(it.user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
                     <td><strong>{{ it.item_name }}</strong></td>
                     <td><span class="badge badge-accent">{{ it.item_type }}</span></td>
                     <td>×{{ it.quantity }}</td>

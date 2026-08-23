@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "macros/user_identity.html" import user_identity %}
 {% block title %}Members{% endblock %}
 {% block content %}
 
@@ -23,8 +24,9 @@
             </thead>
             <tbody id="members-tbody">
                 {% for m in members %}
+                {% set u = user_map.get(m.user_id, {}) %}
                 <tr class="member-row" data-id="{{ m.user_id }}">
-                    <td><code>{{ m.user_id }}</code></td>
+                    <td>{{ user_identity(m.user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
                     <td><span class="badge badge-accent">Level {{ m.level }}</span></td>
                     <td>{{ "{:,}".format(m.xp) }} XP</td>
                     <td>🪙 {{ "{:,}".format(m.coins) }}</td>

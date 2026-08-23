@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "macros/user_identity.html" import user_identity %}
 {% block title %}Member Profile{% endblock %}
 {% block content %}
 
@@ -6,7 +7,8 @@
     <a href="{{ url_for('members') }}" class="btn btn-secondary">← Back</a>
     <div>
         <div style="font-size:20px;font-weight:700;">Member Profile</div>
-        <div class="text-muted text-sm">User ID: <code>{{ member_id }}</code></div>
+        {% set u = user_map.get(member_id, {}) %}
+        {{ user_identity(member_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}
     </div>
 </div>
 
