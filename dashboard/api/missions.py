@@ -136,4 +136,19 @@ def get_mission_completions_api():
         await ensure_tables()
         return await get_recent_completions(guild_id, limit=limit)
 
-    return jsonify({"completions": run_async(fetch())})
+    rows = run_async(fetch())
+
+    # dark-fixes pass #18 (username resolver rollout): one batched
+    # resolve_users() call covering every user on the page. The map
+    # travels in the JSON payload so loadMissionLog() renders the user
+    # cell client-side via dashboard.js's userIdentityHtml() — same
+    # pattern as /api/trade/history.
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        ids = {c["user_id"] for c in rows}
+        if not ids:
+            return {}
+        return await resolve_users(guild_id, list(ids))
+
+    user_map = run_async(resolve())
+    return jsonify({"completions": rows, "user_map": user_map})

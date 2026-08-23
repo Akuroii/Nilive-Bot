@@ -264,7 +264,22 @@ def api_ledger():
             guild_id, limit=limit, currency=currency, source=source)
 
     entries = run_async(fetch())
-    return jsonify({"entries": entries, "guild_id": guild_id})
+
+    # dark-fixes pass #18 (username resolver rollout): one batched
+    # resolve_users() call covering every user on the page. The map
+    # travels in the JSON payload so loadLedger() renders the user cell
+    # client-side via dashboard.js's userIdentityHtml() — same pattern
+    # as /api/trade/history.
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        ids = {e["user_id"] for e in entries}
+        if not ids:
+            return {}
+        return await resolve_users(guild_id, list(ids))
+
+    user_map = run_async(resolve())
+    return jsonify({"entries": entries, "guild_id": guild_id,
+                    "user_map": user_map})
 
 
 @api_bp.route("/ledger/reverse/<int:ledger_id>", methods=["POST"])

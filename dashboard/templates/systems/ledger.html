@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "macros/user_identity.html" import user_identity %}
 {% block title %}Transaction Ledger{% endblock %}
 {% block content %}
 <span data-page-title="Transaction Ledger"></span>
@@ -32,8 +33,9 @@
             </thead>
             <tbody id="ledger-tbody">
                 {% for e in entries %}
+                {% set u = user_map.get(e.user_id, {}) %}
                 <tr id="ledger-row-{{ e.id }}">
-                    <td><code>{{ e.user_id }}</code></td>
+                    <td>{{ user_identity(e.user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
                     <td><span class="badge badge-accent">{{ e.currency }}</span></td>
                     <td style="color:{% if e.amount >= 0 %}var(--success){% else %}var(--danger){% endif %};font-weight:600;">
                         {{ "+" if e.amount >= 0 else "" }}{{ "{:,}".format(e.amount) }}
@@ -83,9 +85,19 @@ async function loadLedger() {
         tbody.innerHTML = "<tr><td colspan='9' class='empty'>No transactions found</td></tr>";
         return;
     }
-    tbody.innerHTML = data.entries.map(e => `
+    // dark-fixes pass #18 (username resolver rollout): data.user_map is
+    // keyed by user_id (JSON coerces int keys to strings — the lookup
+    // below stringifies e.user_id the same way, so it lines up either
+    // way). userIdentityHtml() is the JS twin of
+    // dashboard/utils/user_identity.py — same escaping, same markup,
+    // rendered client-side since this table is rebuilt from fetch() on
+    // every filter/refresh. Same pattern as trade.html.
+    const userMap = data.user_map || {};
+    tbody.innerHTML = data.entries.map(e => {
+        const u = userMap[e.user_id] || {};
+        return `
         <tr id="ledger-row-${e.id}">
-            <td><code>${e.user_id}</code></td>
+            <td>${userIdentityHtml(e.user_id, u.display_name || u.username, u.avatar_url)}</td>
             <td><span class="badge badge-accent">${e.currency}</span></td>
             <td style="color:${e.amount >= 0 ? 'var(--success)' : 'var(--danger)'};font-weight:600;">
                 ${e.amount >= 0 ? '+' : ''}${e.amount.toLocaleString()}
@@ -103,7 +115,8 @@ async function loadLedger() {
                     : '<span class="text-muted text-sm">—</span>')}
             </td>
             {% endif %}
-        </tr>`).join('');
+        </tr>`;
+    }).join('');
 }
 
 async function reverseLedger(id) {

@@ -347,11 +347,22 @@ def shop_temp_roles():
             return await cursor.fetchall()
 
     rows = run_async(fetch())
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        return await resolve_users(guild_id, [r[0] for r in rows])
+
+    user_map = run_async(resolve()) if rows else {}
+
+    from dashboard.utils.user_identity import render_user_identity_html
     html = ""
     for r in rows:
+        u = user_map.get(r[0], {})
+        identity_html = render_user_identity_html(
+            r[0], u.get("display_name"), u.get("username"), u.get("avatar_url"))
         html += (
             f"<tr>"
-            f"<td><code>{r[0]}</code></td>"
+            f"<td>{identity_html}</td>"
             f"<td><code>{r[1]}</code></td>"
             f"<td class='text-muted'>{str(r[2])[:16] if r[2] else '—'}</td>"
             f"<td><span class='badge badge-accent'>{_esc(r[3])}</span></td>"

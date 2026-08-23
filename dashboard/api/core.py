@@ -116,13 +116,26 @@ def members_search():
     rows = run_async(fetch())
     if query:
         rows = [r for r in rows if query in str(r[0])]
+
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        return await resolve_users(guild_id, [r[0] for r in rows])
+
+    user_map = run_async(resolve()) if rows else {}
+
+    from dashboard.utils.user_identity import render_user_identity_html
     html = ""
     for r in rows:
-        # r[0] (user_id) is always numeric — safe to interpolate raw
-        # into both the HTML and the inline onclick's JS-string args.
+        # r[0] (user_id) is still interpolated raw into the inline
+        # onclick's JS-string args below — safe because it is always
+        # numeric (the identity cell itself goes through the escaped
+        # render_user_identity_html helper).
+        u = user_map.get(r[0], {})
+        identity_html = render_user_identity_html(
+            r[0], u.get("display_name"), u.get("username"), u.get("avatar_url"))
         html += (
             f"<tr>"
-            f"<td><code>{r[0]}</code></td>"
+            f"<td>{identity_html}</td>"
             f"<td><span class='badge badge-accent'>Level {r[2]}</span></td>"
             f"<td>{r[1]:,} XP</td>"
             f"<td>🪙 {r[3]:,}</td>"
