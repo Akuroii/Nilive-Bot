@@ -92,6 +92,40 @@ def get_channels():
     return get_guild_channels()
 
 
+@api_bp.route("/guild/emojis")
+@require_api_permission(LEVEL_MODERATOR)
+def get_guild_emojis():
+    guild_id  = get_session_guild_id()
+    bot_token = os.getenv("DISCORD_TOKEN", "")
+    if not bot_token:
+        return jsonify({"results": [], "error": "BOT_TOKEN not set"})
+    resp = _req.get(
+        f"https://discord.com/api/v10/guilds/{guild_id}/emojis",
+        headers={"Authorization": f"Bot {bot_token}"},
+        timeout=8,
+    )
+    if resp.status_code != 200:
+        return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
+    emojis = resp.json()
+    results = []
+    for e in emojis:
+        if not e.get("available", True):
+            continue
+        results.append({
+            "id":       e["id"],
+            "name":     e["name"],
+            "animated": e.get("animated", False),
+        })
+    results.sort(key=lambda x: x["name"].lower())
+    return jsonify({"results": results})
+
+
+@api_bp.route("/emojis")
+@require_api_permission(LEVEL_MODERATOR)
+def get_emojis():
+    return get_guild_emojis()
+
+
 # ── Members ───────────────────────────────────────────────────────────────────
 
 @api_bp.route("/members/search")

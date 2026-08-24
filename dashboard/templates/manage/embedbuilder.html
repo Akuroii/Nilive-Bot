@@ -2,6 +2,134 @@
 {% block title %}Embed Builder{% endblock %}
 {% block content %}
 
+<style>
+.toolbar-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text2);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all .15s ease;
+    padding: 0;
+    user-select: none;
+    line-height: 1;
+}
+.toolbar-btn:hover {
+    background: var(--bg4);
+    color: var(--text);
+    border-color: var(--border);
+}
+.toolbar-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+.toolbar-divider {
+    width: 1px;
+    height: 16px;
+    background: var(--border);
+    margin: 0 4px;
+    flex-shrink: 0;
+}
+.emoji-popover {
+    display: flex;
+    flex-direction: column;
+}
+.emoji-category-tabs {
+    display: flex;
+    gap: 3px;
+    overflow-x: auto;
+    padding-bottom: 6px;
+    margin-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+    scrollbar-width: none;
+}
+.emoji-category-tabs::-webkit-scrollbar { display: none; }
+.emoji-tab-btn {
+    background: transparent;
+    border: none;
+    font-size: 13px;
+    padding: 3px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text3);
+    transition: all .12s;
+    line-height: 1.2;
+    flex-shrink: 0;
+}
+.emoji-tab-btn:hover, .emoji-tab-btn.active {
+    background: var(--bg3);
+    color: var(--text);
+}
+.emoji-grid-container {
+    max-height: 240px;
+    overflow-y: auto;
+    padding-right: 4px;
+    overscroll-behavior: contain;
+}
+.emoji-grid-container::-webkit-scrollbar {
+    width: 4px;
+}
+.emoji-grid-container::-webkit-scrollbar-track {
+    background: transparent;
+}
+.emoji-grid-container::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 2px;
+}
+.emoji-section-title {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    margin: 8px 0 4px 2px;
+}
+.emoji-section-title:first-child {
+    margin-top: 2px;
+}
+.emoji-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 2px;
+    margin-bottom: 6px;
+}
+.emoji-item-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    aspect-ratio: 1;
+    border-radius: 6px;
+    background: transparent;
+    border: 1px solid transparent;
+    cursor: pointer;
+    font-size: 18px;
+    transition: background .12s, transform .1s;
+    padding: 0;
+    line-height: 1;
+}
+.emoji-item-btn:hover {
+    background: var(--bg4);
+    border-color: var(--border);
+    transform: scale(1.15);
+}
+.emoji-item-btn:focus-visible {
+    outline: 2px solid var(--accent);
+}
+.emoji-custom-img {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+}
+</style>
+
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;">
     <div>
         <div class="card">
@@ -11,10 +139,55 @@
                 <input class="form-input" id="e-title" placeholder="Embed title..." oninput="updatePreview()">
             </div>
             <div class="form-group">
-                <label class="form-label">Description</label>
-                <textarea class="form-input" id="e-desc" rows="4"
-                    placeholder="Embed description..." oninput="updatePreview()"></textarea>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                    <label class="form-label" style="margin-bottom:0;" for="e-desc">DESCRIPTION</label>
+                    <span id="desc-char-count" style="font-size:11px;color:var(--text3);font-family:'JetBrains Mono','Fira Code',monospace;">0 / 4096</span>
+                </div>
+                
+                <div class="embed-toolbar-wrapper" style="position:relative;">
+                    <div class="embed-toolbar" style="display:flex;align-items:center;gap:4px;background:var(--bg3);border:1px solid var(--border);border-bottom:none;border-radius:8px 8px 0 0;padding:6px 8px;">
+                        <button type="button" class="toolbar-btn" id="tb-bold" aria-label="Bold" title="Bold" onclick="formatText('**', '**')">
+                            <strong>B</strong>
+                        </button>
+                        <button type="button" class="toolbar-btn" id="tb-italic" aria-label="Italic" title="Italic" onclick="formatText('*', '*')">
+                            <em>I</em>
+                        </button>
+                        <button type="button" class="toolbar-btn" id="tb-underline" aria-label="Underline" title="Underline" onclick="formatText('__', '__')">
+                            <u>U</u>
+                        </button>
+                        <button type="button" class="toolbar-btn" id="tb-strike" aria-label="Strikethrough" title="Strikethrough" onclick="formatText('~~', '~~')">
+                            <s>S</s>
+                        </button>
+                        
+                        <div class="toolbar-divider"></div>
+                        
+                        <button type="button" class="toolbar-btn" id="tb-mention" aria-label="Add Mention" title="Add Mention" onclick="openMentionModal()">
+                            @
+                        </button>
+                        <button type="button" class="toolbar-btn" id="tb-emoji" aria-label="Insert Emoji" title="Insert Emoji" onclick="toggleEmojiPopover(event)">
+                            😊
+                        </button>
+                    </div>
+
+                    <!-- Emoji Popover -->
+                    <div id="emoji-popover" class="emoji-popover" style="display:none;position:absolute;top:calc(100% + 4px);left:0;width:340px;max-width:95vw;background:var(--bg2);border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,0.5);padding:10px;z-index:1000;">
+                        <input type="text" class="form-input" id="emoji-search-input" placeholder="Search emojis..." style="padding:6px 10px;font-size:12px;margin-bottom:8px;" oninput="onEmojiSearch(this.value)">
+                        
+                        <div id="emoji-category-tabs" class="emoji-category-tabs">
+                            <!-- Populated dynamically -->
+                        </div>
+
+                        <div id="emoji-grid-container" class="emoji-grid-container">
+                            <!-- Populated dynamically -->
+                        </div>
+                    </div>
+                </div>
+
+                <textarea class="form-input" id="e-desc" rows="4" maxlength="4096"
+                    placeholder="Embed description..." oninput="onDescInput()"
+                    style="border-top-left-radius:0;border-top-right-radius:0;margin-top:0;"></textarea>
             </div>
+
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
                 <div class="form-group">
                     <label class="form-label">Color</label>
@@ -101,8 +274,1012 @@
     </div>
 </div>
 
+<!-- Mention Modal -->
+<div id="mention-modal" class="modal-overlay" style="display:none;">
+    <div class="modal" style="width:480px;max-width:95vw;">
+        <div class="modal-title">Add a mention</div>
+        <div class="modal-body" style="margin-bottom:18px;">
+            Mention a channel, role, or user in your message.
+        </div>
+        
+        <!-- Channel Mention -->
+        <div class="form-group" style="background:var(--bg3);padding:14px;border-radius:10px;border:1px solid var(--border);margin-bottom:12px;">
+            <label class="form-label" style="font-weight:600;margin-bottom:8px;color:var(--text);">Channel</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <div style="flex:1;min-width:0;">
+                    <select class="nero-channel-picker form-input" id="mention-channel-select"></select>
+                </div>
+                <button type="button" class="btn btn-sm btn-primary" onclick="insertChannelMention()">Mention Channel</button>
+            </div>
+        </div>
+
+        <!-- Role Mention -->
+        <div class="form-group" style="background:var(--bg3);padding:14px;border-radius:10px;border:1px solid var(--border);margin-bottom:12px;">
+            <label class="form-label" style="font-weight:600;margin-bottom:8px;color:var(--text);">Role</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <div style="flex:1;min-width:0;">
+                    <select class="nero-role-picker form-input" id="mention-role-select"></select>
+                </div>
+                <button type="button" class="btn btn-sm btn-primary" onclick="insertRoleMention()">Mention Role</button>
+            </div>
+        </div>
+
+        <!-- User Mention -->
+        <div class="form-group" style="background:var(--bg3);padding:14px;border-radius:10px;border:1px solid var(--border);margin-bottom:20px;">
+            <label class="form-label" style="font-weight:600;margin-bottom:8px;color:var(--text);">User ID</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <input type="text" class="form-input" id="mention-user-input" placeholder="e.g. 123456789012345678" style="flex:1;" onkeydown="if(event.key==='Enter'){event.preventDefault();insertUserMention();}">
+                <button type="button" class="btn btn-sm btn-primary" onclick="insertUserMention()">Mention User</button>
+            </div>
+            <div id="mention-user-error" style="color:var(--danger);font-size:11px;margin-top:6px;display:none;"></div>
+        </div>
+
+        <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" onclick="closeMentionModal()">Cancel</button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
 {% block scripts %}
 <script>
+// ═══════════════════════════════════════════════════════════════
+// EMOJI DATASET
+// ═══════════════════════════════════════════════════════════════
+const UNICODE_EMOJI_CATEGORIES = [
+    {
+        id: 'smileys',
+        name: 'Smileys & Emotion',
+        icon: '😀',
+        emojis: [
+            { c: '😀', n: 'grinning smile happy' },
+            { c: '😃', n: 'smiley happy haha' },
+            { c: '😄', n: 'smile grin joy' },
+            { c: '😁', n: 'beam grin smile' },
+            { c: '😆', n: 'laughing lol haha' },
+            { c: '😅', n: 'sweat smile relief nervous' },
+            { c: '🤣', n: 'rofl rolling laugh lol' },
+            { c: '😂', n: 'joy cry laugh lol tears' },
+            { c: '🙂', n: 'slightly smiling smile' },
+            { c: '🙃', n: 'upside down silly sarcasm' },
+            { c: '😉', n: 'wink flirt joke' },
+            { c: '😊', n: 'blush smile warm happy' },
+            { c: '😇', n: 'innocent halo angel' },
+            { c: '🥰', n: 'smiling face with hearts love' },
+            { c: '😍', n: 'heart eyes love crush' },
+            { c: '🤩', n: 'star struck excited star' },
+            { c: '😘', n: 'kissing heart kiss love' },
+            { c: '😗', n: 'kissing kiss' },
+            { c: '😚', n: 'kissing closed eyes kiss' },
+            { c: '😋', n: 'yum delicious tongue food' },
+            { c: '😛', n: 'stuck out tongue silly' },
+            { c: '😜', n: 'winking tongue crazy party' },
+            { c: '🤪', n: 'zany face wild crazy' },
+            { c: '😝', n: 'tongue closed eyes playful' },
+            { c: '🤑', n: 'money mouth rich cash money' },
+            { c: '🤗', n: 'hugs hug warmth' },
+            { c: '🤭', n: 'hand over mouth oops giggle' },
+            { c: '🤫', n: 'shushing quiet secret shh' },
+            { c: '🤔', n: 'thinking hmm wonder think' },
+            { c: '🤐', n: 'zipper mouth quiet secret' },
+            { c: '🤨', n: 'raised eyebrow suspicious doubt' },
+            { c: '😐', n: 'neutral face meh poker' },
+            { c: '😑', n: 'expressionless blank meh' },
+            { c: '😶', n: 'no mouth silent quiet' },
+            { c: '😏', n: 'smirk smug flirt' },
+            { c: '😒', n: 'unamused side eye bored' },
+            { c: '🙄', n: 'roll eyes eye roll whatever' },
+            { c: '😬', n: 'grimacing awkward nervous' },
+            { c: '🤥', n: 'lying face liar pinocchio' },
+            { c: '😌', n: 'relieved calm peaceful' },
+            { c: '😔', n: 'pensive sad down' },
+            { c: '😪', n: 'sleepy tired snot' },
+            { c: '🤤', n: 'drooling drool food hungry' },
+            { c: '😴', n: 'sleeping zzz tired sleep' },
+            { c: '😷', n: 'mask sick doctor flu' },
+            { c: '🤒', n: 'thermometer fever sick ill' },
+            { c: '🤕', n: 'bandage hurt injured head' },
+            { c: '🤢', n: 'nauseated gross green sick' },
+            { c: '🤮', n: 'vomiting puke sick throw up' },
+            { c: '🤧', n: 'sneezing sneeze cold sick' },
+            { c: '🥵', n: 'hot face heat sweating summer' },
+            { c: '🥶', n: 'cold face freezing ice winter' },
+            { c: '🥴', n: 'woozy face dizzy drunk' },
+            { c: '😵', n: 'dizzy knocked out dead' },
+            { c: '🤯', n: 'exploding head mind blown shock' },
+            { c: '🤠', n: 'cowboy yeehaw hat' },
+            { c: '🥳', n: 'partying face celebration party celebrate' },
+            { c: '🥸', n: 'disguised disguise glasses mustache' },
+            { c: '😎', n: 'sunglasses cool swag shades' },
+            { c: '🤓', n: 'nerd geek glasses smart' },
+            { c: '🧐', n: 'monocle curious inspect' },
+            { c: '😕', n: 'confused puzzled doubt' },
+            { c: '😟', n: 'worried concerned anxious' },
+            { c: '🙁', n: 'frowning sad unhappy' },
+            { c: '😮', n: 'open mouth surprise wow' },
+            { c: '😯', n: 'hushed quiet surprise' },
+            { c: '😲', n: 'astonished shock wow omg' },
+            { c: '😳', n: 'flushed embarrassed wide eyes' },
+            { c: '🥺', n: 'pleading puppy eyes please beg' },
+            { c: '😦', n: 'frowning upset' },
+            { c: '😧', n: 'anguished shocked' },
+            { c: '😨', n: 'fearful scared panic' },
+            { c: '😰', n: 'cold sweat anxious nervous' },
+            { c: '😥', n: 'sad relieved phew' },
+            { c: '😢', n: 'crying tear sad cry' },
+            { c: '😭', n: 'sob crying tears wtf loud' },
+            { c: '😱', n: 'scream panic terrified scream' },
+            { c: '😖', n: 'confounded helpless frustrated' },
+            { c: '😣', n: 'persevering struggle pain' },
+            { c: '😞', n: 'disappointed depressed sad' },
+            { c: '😓', n: 'sweat tired worry' },
+            { c: '😩', n: 'weary exhausted tired' },
+            { c: '😫', n: 'tired frustrated groan' },
+            { c: '🥱', n: 'yawn yawning sleep tired' },
+            { c: '😤', n: 'triumph proud huff rage' },
+            { c: '😡', n: 'rage angry mad red furious' },
+            { c: '😠', n: 'angry mad annoyed cross' },
+            { c: '🤬', n: 'cursing swearing fuming anger' },
+            { c: '😈', n: 'smiling imp devil evil horn' },
+            { c: '👿', n: 'imp angry devil demon' },
+            { c: '💀', n: 'skull dead skeleton death' },
+            { c: '☠️', n: 'skull and crossbones danger toxic' },
+            { c: '💩', n: 'poop crap turd shit' },
+            { c: '🤡', n: 'clown fool circus' },
+            { c: '👻', n: 'ghost spooky halloween booo' },
+            { c: '👽', n: 'alien extraterrestrial ufo space' },
+            { c: '🤖', n: 'robot bot ai machine' },
+            { c: '👾', n: 'monster space invader retro game' },
+            { c: '🎃', n: 'jack o lantern pumpkin halloween' }
+        ]
+    },
+    {
+        id: 'people',
+        name: 'People & Gestures',
+        icon: '👋',
+        emojis: [
+            { c: '👋', n: 'wave hello goodbye hand' },
+            { c: '🤚', n: 'raised back of hand' },
+            { c: '🖐️', n: 'hand splayed five' },
+            { c: '✋', n: 'hand stop high five' },
+            { c: '🖖', n: 'vulcan spock star trek' },
+            { c: '🤙', n: 'call me hang loose shaka' },
+            { c: '👈', n: 'point left finger' },
+            { c: '👉', n: 'point right finger' },
+            { c: '👆', n: 'point up finger' },
+            { c: '🖕', n: 'middle finger' },
+            { c: '👇', n: 'point down finger' },
+            { c: '☝️', n: 'index pointing up' },
+            { c: '👍', n: 'thumbsup like good yes +1' },
+            { c: '👎', n: 'thumbsdown dislike bad no -1' },
+            { c: '✊', n: 'fist raised power' },
+            { c: '👊', n: 'punch fist bump attack' },
+            { c: '🤛', n: 'left fist bump' },
+            { c: '🤜', n: 'right fist bump' },
+            { c: '👏', n: 'clap applause bravo hands' },
+            { c: '🙌', n: 'raised hands hooray celebrate' },
+            { c: '👐', n: 'open hands' },
+            { c: '🤲', n: 'palms up prayer' },
+            { c: '🤝', n: 'handshake deal agree partnership' },
+            { c: '🙏', n: 'pray thanks please hope pray' },
+            { c: '✍️', n: 'writing hand write pencil' },
+            { c: '💅', n: 'nail polish sassy manicure' },
+            { c: '🤳', n: 'selfie phone camera' },
+            { c: '💪', n: 'muscle flex strong gym workout' },
+            { c: '🧠', n: 'brain smart mind think' },
+            { c: '🫀', n: 'anatomical heart organ' },
+            { c: '🫁', n: 'lungs breath organ' },
+            { c: '👁️', n: 'eye look see sight' },
+            { c: '👀', n: 'eyes look peeking drama gaze' },
+            { c: '👅', n: 'tongue lick taste' },
+            { c: '👄', n: 'mouth lips kiss speak' },
+            { c: '👶', n: 'baby infant child' },
+            { c: '👧', n: 'girl child' },
+            { c: '👦', n: 'boy child' },
+            { c: '👩', n: 'woman female person' },
+            { c: '👨', n: 'man male person' },
+            { c: '🧑', n: 'adult person' },
+            { c: '👵', n: 'older woman grandma' },
+            { c: '👴', n: 'older man grandpa' },
+            { c: '👮', n: 'police officer cop law' },
+            { c: '🕵️', n: 'detective spy sleuth agent' },
+            { c: '💂', n: 'guard soldier royal' },
+            { c: '👷', n: 'construction worker build' },
+            { c: '🤴', n: 'prince royal king' },
+            { c: '👸', n: 'princess royal queen' },
+            { c: '👳', n: 'turban person' },
+            { c: '🧕', n: 'woman with headscarf hijab' },
+            { c: '🤵', n: 'person in tuxedo suit wedding' },
+            { c: '👰', n: 'bride with veil wedding' },
+            { c: '👼', n: 'baby angel cherub' },
+            { c: '🎅', n: 'santa claus christmas xmas' },
+            { c: '🤶', n: 'mrs claus christmas xmas' },
+            { c: '🧙', n: 'mage wizard witch magic' },
+            { c: '🧚', n: 'fairy magic wings' },
+            { c: '🧛', n: 'vampire dracula blood' },
+            { c: '🧜', n: 'merperson mermaid sea' },
+            { c: '🧝', n: 'elf fantasy ears' },
+            { c: '🧞', n: 'genie lamp magic' },
+            { c: '🧟', n: 'zombie undead apocalypse' }
+        ]
+    },
+    {
+        id: 'animals',
+        name: 'Animals & Nature',
+        icon: '🐶',
+        emojis: [
+            { c: '🐶', n: 'dog puppy pet cute bark' },
+            { c: '🐱', n: 'cat kitten pet meow' },
+            { c: '🐭', n: 'mouse rodent pet cheese' },
+            { c: '🐹', n: 'hamster pet rodent' },
+            { c: '🐰', n: 'rabbit bunny pet cute' },
+            { c: '🦊', n: 'fox wild animal clever' },
+            { c: '🐻', n: 'bear wild animal forest' },
+            { c: '🐼', n: 'panda bear bamboo cute' },
+            { c: '🐨', n: 'koala australia bear' },
+            { c: '🐯', n: 'tiger wild animal cat' },
+            { c: '🦁', n: 'lion king roar wild' },
+            { c: '🐮', n: 'cow farm milk beef' },
+            { c: '🐷', n: 'pig farm oink pork' },
+            { c: '🐸', n: 'frog toad pepe amphibian' },
+            { c: '🐵', n: 'monkey animal banana' },
+            { c: '🐔', n: 'chicken hen farm bird' },
+            { c: '🐧', n: 'penguin bird antarctica ice' },
+            { c: '🐦', n: 'bird tweet fly chirp' },
+            { c: '🦆', n: 'duck quack bird lake' },
+            { c: '🦅', n: 'eagle bird america predator' },
+            { c: '🦉', n: 'owl wise night bird' },
+            { c: '🦇', n: 'bat night vampire cave' },
+            { c: '🐺', n: 'wolf pack howl predator' },
+            { c: '🐗', n: 'boar wild pig' },
+            { c: '🐴', n: 'horse pony animal' },
+            { c: '🦄', n: 'unicorn magic horn pony' },
+            { c: '🐝', n: 'bee honey insect bug' },
+            { c: '🐛', n: 'bug caterpillar insect' },
+            { c: '🦋', n: 'butterfly wings insect pretty' },
+            { c: '🐌', n: 'snail slow shell' },
+            { c: '🐞', n: 'ladybug insect bug red' },
+            { c: '🐜', n: 'ant insect bug small' },
+            { c: '🦟', n: 'mosquito bug bite' },
+            { c: '🐢', n: 'turtle tortoise slow reptile' },
+            { c: '🐍', n: 'snake reptile danger venom' },
+            { c: '🦎', n: 'lizard reptile gecko' },
+            { c: '🐙', n: 'octopus sea ocean tentacle' },
+            { c: '🦑', n: 'squid calamari ocean' },
+            { c: '🦐', n: 'shrimp prawn seafood' },
+            { c: '🦞', n: 'lobster seafood red ocean' },
+            { c: '🦀', n: 'crab seafood beach' },
+            { c: '🐡', n: 'blowfish puff fish ocean' },
+            { c: '🐠', n: 'tropical fish aquarium ocean' },
+            { c: '🐟', n: 'fish swimming ocean food' },
+            { c: '🐬', n: 'dolphin ocean intelligent' },
+            { c: '🐳', n: 'whale ocean mammal big' },
+            { c: '🦈', n: 'shark ocean predator danger' },
+            { c: '🐊', n: 'crocodile alligator swamp' },
+            { c: '🐅', n: 'tiger wild predator' },
+            { c: '🐆', n: 'leopard cheetah fast' },
+            { c: '🦓', n: 'zebra safari stripe' },
+            { c: '🦍', n: 'gorilla ape monkey' },
+            { c: '🦧', n: 'orangutan ape monkey' },
+            { c: '🐘', n: 'elephant safari trunk large' },
+            { c: '🦛', n: 'hippopotamus hippo water' },
+            { c: '🦏', n: 'rhinoceros rhino horn' },
+            { c: '🐪', n: 'camel desert hump' },
+            { c: '🦒', n: 'giraffe tall neck safari' },
+            { c: '🦘', n: 'kangaroo australia hop' },
+            { c: '🌸', n: 'cherry blossom flower pink' },
+            { c: '🌹', n: 'rose flower red love' },
+            { c: '🌺', n: 'hibiscus flower tropical' },
+            { c: '🌻', n: 'sunflower yellow flower' },
+            { c: '🌼', n: 'blossom flower yellow' },
+            { c: '🌷', n: 'tulip flower spring' },
+            { c: '🌱', n: 'seedling plant grow green' },
+            { c: '🌲', n: 'evergreen tree pine forest' },
+            { c: '🌳', n: 'deciduous tree wood nature' },
+            { c: '🌴', n: 'palm tree beach tropical' },
+            { c: '🌵', n: 'cactus desert plant prick' },
+            { c: '🍀', n: 'four leaf clover luck shamrock' },
+            { c: '🍁', n: 'maple leaf autumn fall canada' },
+            { c: '🍂', n: 'fallen leaf autumn nature' },
+            { c: '🍃', n: 'leaf fluttering wind nature' }
+        ]
+    },
+    {
+        id: 'food',
+        name: 'Food & Drink',
+        icon: '🍔',
+        emojis: [
+            { c: '🍏', n: 'green apple fruit healthy' },
+            { c: '🍎', n: 'red apple fruit' },
+            { c: '🍐', n: 'pear fruit food' },
+            { c: '🍊', n: 'tangerine orange citrus fruit' },
+            { c: '🍋', n: 'lemon citrus sour yellow' },
+            { c: '🍌', n: 'banana fruit monkey yellow' },
+            { c: '🍉', n: 'watermelon summer fruit melon' },
+            { c: '🍇', n: 'grapes fruit wine purple' },
+            { c: '🍓', n: 'strawberry berry fruit red' },
+            { c: '🫐', n: 'blueberries berry fruit' },
+            { c: '🍈', n: 'melon cantaloupe fruit' },
+            { c: '🍒', n: 'cherries cherry fruit red' },
+            { c: '🍑', n: 'peach fruit butt' },
+            { c: '🥭', n: 'mango tropical fruit sweet' },
+            { c: '🍍', n: 'pineapple tropical fruit' },
+            { c: '🥥', n: 'coconut tropical palm' },
+            { c: '🥝', n: 'kiwi fruit food' },
+            { c: '🍅', n: 'tomato salad vegetable red' },
+            { c: '🥑', n: 'avocado guacamole healthy' },
+            { c: '🥦', n: 'broccoli vegetable green healthy' },
+            { c: '🥬', n: 'leafy green salad vegetable' },
+            { c: '🥒', n: 'cucumber pickle vegetable' },
+            { c: '🌶️', n: 'hot pepper chili spicy fire' },
+            { c: '🌽', n: 'ear of corn maize food' },
+            { c: '🥕', n: 'carrot vegetable orange rabbit' },
+            { c: '🧄', n: 'garlic vegetable food cooking' },
+            { c: '🧅', n: 'onion vegetable food cooking' },
+            { c: '🥔', n: 'potato vegetable food' },
+            { c: '🍞', n: 'bread toast loaf bakery' },
+            { c: '🥐', n: 'croissant bakery pastry french' },
+            { c: '🥖', n: 'baguette bread french bakery' },
+            { c: '🥨', n: 'pretzel snack bakery' },
+            { c: '🧀', n: 'cheese cheddar food swiss' },
+            { c: '🥚', n: 'egg breakfast cooking' },
+            { c: '🍳', n: 'cooking fried egg breakfast pan' },
+            { c: '🧈', n: 'butter dairy cooking' },
+            { c: '🥞', n: 'pancakes breakfast syrup' },
+            { c: '🧇', n: 'waffle breakfast food' },
+            { c: '🥓', n: 'bacon meat breakfast pork' },
+            { c: '🥩', n: 'cut of meat steak bbq beef' },
+            { c: '🍗', n: 'poultry leg chicken bbq food' },
+            { c: '🍖', n: 'meat on bone anime food bbq' },
+            { c: '🌭', n: 'hot dog sausage fastfood' },
+            { c: '🍔', n: 'hamburger burger fastfood food' },
+            { c: '🍟', n: 'french fries potato fastfood' },
+            { c: '🍕', n: 'pizza cheese fastfood slice' },
+            { c: '🥪', n: 'sandwich lunch food' },
+            { c: '🥙', n: 'stuffed flatbread pita kebab' },
+            { c: '🌮', n: 'taco mexican food fastfood' },
+            { c: '🌯', n: 'burrito mexican wrap food' },
+            { c: '🥗', n: 'green salad healthy diet' },
+            { c: '🍿', n: 'popcorn movie cinema snack' },
+            { c: '🍜', n: 'steaming bowl ramen noodles soup' },
+            { c: '🍝', n: 'spaghetti pasta italian food' },
+            { c: '🍣', n: 'sushi japanese fish food' },
+            { c: '🍱', n: 'bento box japanese lunch food' },
+            { c: '🍦', n: 'soft ice cream dessert dairy' },
+            { c: '🍧', n: 'shaved ice dessert summer' },
+            { c: '🍨', n: 'ice cream dessert dairy sweet' },
+            { c: '🍩', n: 'doughnut donut sweet dessert' },
+            { c: '🍪', n: 'cookie chocolate chip biscuit' },
+            { c: '🎂', n: 'birthday cake party celebration' },
+            { c: '🍰', n: 'shortcake cake sweet dessert' },
+            { c: '🧁', n: 'cupcake dessert sweet muffin' },
+            { c: '🍫', n: 'chocolate bar sweet candy' },
+            { c: '🍬', n: 'candy sweet sugar' },
+            { c: '🍭', n: 'lollipop candy sweet' },
+            { c: '☕', n: 'coffee tea hot beverage morning cafe' },
+            { c: '🍵', n: 'teacup without handle green tea matcha' },
+            { c: '🧃', n: 'beverage box juice drink' },
+            { c: '🥤', n: 'cup with straw soda drink cola' },
+            { c: '🧋', n: 'bubble tea boba drink' },
+            { c: '🍺', n: 'beer mug pub drink alcohol' },
+            { c: '🍻', n: 'clinking beer mugs cheers party' },
+            { c: '🥂', n: 'clinking glasses champagne toast' },
+            { c: '🍷', n: 'wine glass red alcohol drink' },
+            { c: '🍹', n: 'tropical drink cocktail summer' }
+        ]
+    },
+    {
+        id: 'objects',
+        name: 'Objects & Activities',
+        icon: '🎮',
+        emojis: [
+            { c: '⚽', n: 'soccer ball football sport game' },
+            { c: '🏀', n: 'basketball sport game' },
+            { c: '🏈', n: 'american football sport game' },
+            { c: '⚾', n: 'baseball sport game' },
+            { c: '🥎', n: 'softball sport game' },
+            { c: '🎾', n: 'tennis ball sport game' },
+            { c: '🏐', n: 'volleyball sport game' },
+            { c: '🏉', n: 'rugby football sport game' },
+            { c: '🥏', n: 'flying disc frisbee sport' },
+            { c: '🎱', n: 'pool 8 ball billiards game' },
+            { c: '🪀', n: 'yo-yo toy game' },
+            { c: '🏓', n: 'ping pong table tennis sport' },
+            { c: '🏸', n: 'badminton sport game' },
+            { c: '🏒', n: 'ice hockey sport game' },
+            { c: '🥅', n: 'goal net sport' },
+            { c: '⛳', n: 'flag in hole golf sport' },
+            { c: '🏹', n: 'bow and arrow archery target' },
+            { c: '🎣', n: 'fishing pole fish hook' },
+            { c: '🥊', n: 'boxing glove fight sport' },
+            { c: '🥋', n: 'martial arts karate uniform' },
+            { c: '🛹', n: 'skateboard skate sport' },
+            { c: '🛼', n: 'roller skate retro' },
+            { c: '🎮', n: 'video game controller gaming play' },
+            { c: '🕹️', n: 'joystick arcade gaming retro' },
+            { c: '🎲', n: 'game die dice random gamble' },
+            { c: '🧩', n: 'puzzle piece jigsaw solve' },
+            { c: '🎨', n: 'artist palette art painting draw' },
+            { c: '🎭', n: 'performing arts theater drama acting' },
+            { c: '🎤', n: 'microphone singing karaoke music' },
+            { c: '🎧', n: 'headphone music audio listen' },
+            { c: '🎷', n: 'saxophone music jazz brass' },
+            { c: '🎸', n: 'guitar music rock instrument' },
+            { c: '🎹', n: 'musical keyboard piano music' },
+            { c: '🎺', n: 'trumpet brass music instrument' },
+            { c: '🎻', n: 'violin music instrument classical' },
+            { c: '🥁', n: 'drum music beat instrument' },
+            { c: '📱', n: 'mobile phone cell smartphone tech' },
+            { c: '💻', n: 'laptop computer pc tech coding' },
+            { c: '🖥️', n: 'desktop computer monitor pc' },
+            { c: '🖨️', n: 'printer office paper tech' },
+            { c: '📷', n: 'camera photo picture photography' },
+            { c: '📹', n: 'video camera recording film' },
+            { c: '📺', n: 'television tv screen show' },
+            { c: '📻', n: 'radio audio broadcast' },
+            { c: '⏰', n: 'alarm clock time wake morning' },
+            { c: '⏱️', n: 'stopwatch timer sport time' },
+            { c: '⏳', n: 'hourglass time waiting sand' },
+            { c: '💡', n: 'light bulb idea idea bright' },
+            { c: '🔦', n: 'flashlight torch dark light' },
+            { c: '🕯️', n: 'candle flame light wax' },
+            { c: '💸', n: 'money with wings fly cash rich' },
+            { c: '💵', n: 'dollar banknote cash money' },
+            { c: '🪙', n: 'coin gold money currency' },
+            { c: '💳', n: 'credit card payment money buy' },
+            { c: '💎', n: 'gem stone diamond jewel crystal' },
+            { c: '📦', n: 'package box delivery parcel' },
+            { c: '🎁', n: 'wrapped gift present birthday surprise' },
+            { c: '🎈', n: 'balloon party celebration birthday' },
+            { c: '🎉', n: 'party popper tada celebration party' },
+            { c: '🎊', n: 'confetti ball party celebrate' },
+            { c: '🏆', n: 'trophy prize winner champion gold' },
+            { c: '🥇', n: '1st place medal gold winner' },
+            { c: '🥈', n: '2nd place medal silver' },
+            { c: '🥉', n: '3rd place medal bronze' },
+            { c: '📜', n: 'scroll document paper rules' },
+            { c: '📝', n: 'memo note write paper memo' },
+            { c: '📌', n: 'pushpin pin map notice' },
+            { c: '📍', n: 'round pushpin location pin map' },
+            { c: '🔒', n: 'locked lock security safe privacy' },
+            { c: '🔓', n: 'unlocked lock open access' },
+            { c: '🔑', n: 'key password unlock secret access' },
+            { c: '🔨', n: 'hammer tool build fix repair' },
+            { c: '🔧', n: 'wrench tool fix mechanic' },
+            { c: '⚙️', n: 'gear settings cog configuration' },
+            { c: '💣', n: 'bomb explode explosive danger' },
+            { c: '🛡️', n: 'shield protection defense guard' },
+            { c: '⚔️', n: 'crossed swords battle fight weapon' }
+        ]
+    },
+    {
+        id: 'symbols',
+        name: 'Symbols',
+        icon: '❤️',
+        emojis: [
+            { c: '❤️', n: 'red heart love like romance' },
+            { c: '🧡', n: 'orange heart love' },
+            { c: '💛', n: 'yellow heart love' },
+            { c: '💚', n: 'green heart love' },
+            { c: '💙', n: 'blue heart love' },
+            { c: '💜', n: 'purple heart love' },
+            { c: '🤎', n: 'brown heart love' },
+            { c: '🖤', n: 'black heart love dark' },
+            { c: '🤍', n: 'white heart love pure' },
+            { c: '💔', n: 'broken heart sad heartbreak' },
+            { c: '❣️', n: 'heart exclamation love' },
+            { c: '💕', n: 'two hearts love pink' },
+            { c: '💞', n: 'revolving hearts love' },
+            { c: '💓', n: 'beating heart pulse love' },
+            { c: '💗', n: 'growing heart love' },
+            { c: '💖', n: 'sparkling heart love shine' },
+            { c: '💘', n: 'heart with arrow cupid love' },
+            { c: '💝', n: 'heart with ribbon gift love' },
+            { c: '⭐️', n: 'star favorite rating yellow' },
+            { c: '🌟', n: 'glowing star shine bright sparkle' },
+            { c: '✨', n: 'sparkles sparkle magic shine new' },
+            { c: '⚡️', n: 'high voltage lightning zap power electricity' },
+            { c: '💥', n: 'collision boom explosion bang' },
+            { c: '🔥', n: 'fire flame lit hot burn energy' },
+            { c: '🌈', n: 'rainbow pride colors nature' },
+            { c: '☀️', n: 'sun sunny weather warm' },
+            { c: '⛅️', n: 'sun behind cloud weather' },
+            { c: '☁️', n: 'cloud weather sky' },
+            { c: '🌧️', n: 'cloud with rain weather storm' },
+            { c: '⛈️', n: 'thunder cloud and rain lightning' },
+            { c: '❄️', n: 'snowflake snow winter cold ice' },
+            { c: '💧', n: 'droplet water drop tear rain' },
+            { c: '💦', n: 'sweat drops water splash' },
+            { c: '💫', n: 'dizzy star sparkle loop' },
+            { c: '💯', n: 'hundred points 100 score perfect' },
+            { c: '💢', n: 'anger symbol mad manga anime' },
+            { c: '💬', n: 'speech balloon chat message speak' },
+            { c: '💭', n: 'thought balloon think dream' },
+            { c: '💤', n: 'zzz sleep tired snoring' },
+            { c: '⚠️', n: 'warning alert caution danger' },
+            { c: '⛔️', n: 'no entry stop forbidden' },
+            { c: '🚫', n: 'prohibited banned no sign' },
+            { c: '🛑', n: 'stop sign red octagon' },
+            { c: 'ℹ️', n: 'information info source' },
+            { c: '🎵', n: 'musical note music song' },
+            { c: '🎶', n: 'musical notes music song audio' },
+            { c: '✔️', n: 'check mark tick done yes' },
+            { c: '✅', n: 'check mark button verified pass ok' },
+            { c: '❌', n: 'cross mark cancel error x fail' },
+            { c: '❎', n: 'cross mark button no reject' },
+            { c: '➕', n: 'plus add math positive' },
+            { c: '➖', n: 'minus subtract math negative' },
+            { c: '➗', n: 'division math divide' },
+            { c: '✖️', n: 'multiplication multiply math x' },
+            { c: '💲', n: 'dollar sign money currency' },
+            { c: '🔴', n: 'red circle dot shape' },
+            { c: '🟠', n: 'orange circle shape' },
+            { c: '🟡', n: 'yellow circle shape' },
+            { c: '🟢', n: 'green circle shape' },
+            { c: '🔵', n: 'blue circle shape' },
+            { c: '🟣', n: 'purple circle shape' },
+            { c: '⚫', n: 'black circle shape' },
+            { c: '⚪', n: 'white circle shape' },
+            { c: '🟥', n: 'red square shape' },
+            { c: '🟧', n: 'orange square shape' },
+            { c: '🟨', n: 'yellow square shape' },
+            { c: '🟩', n: 'green square shape' },
+            { c: '🟦', n: 'blue square shape' },
+            { c: '🟪', n: 'purple square shape' },
+            { c: '⬛', n: 'black square shape' },
+            { c: '⬜', n: 'white square shape' },
+            { c: '🔔', n: 'bell notification alert chime' },
+            { c: '🔕', n: 'bell with slash mute silent' },
+            { c: '📣', n: 'megaphone announcement cheer' },
+            { c: '📢', n: 'loudspeaker announcement broadcast' }
+        ]
+    },
+    {
+        id: 'flags',
+        name: 'Flags',
+        icon: '🚩',
+        emojis: [
+            { c: '🚩', n: 'triangular flag red flag notice' },
+            { c: '🏁', n: 'chequered flag finish race win' },
+            { c: '🏳️', n: 'white flag surrender peace' },
+            { c: '🏴', n: 'black flag pirate' },
+            { c: '🏳️‍🌈', n: 'rainbow flag pride lgbt' },
+            { c: '🏳️‍⚧️', n: 'transgender flag pride' },
+            { c: '🇺🇸', n: 'flag united states usa america' },
+            { c: '🇬🇧', n: 'flag united kingdom uk britain' },
+            { c: '🇨🇦', n: 'flag canada ca' },
+            { c: '🇦🇺', n: 'flag australia au' },
+            { c: '🇩🇪', n: 'flag germany de deutschland' },
+            { c: '🇫🇷', n: 'flag france fr' },
+            { c: '🇪🇸', n: 'flag spain es' },
+            { c: '🇮🇹', n: 'flag italy it' },
+            { c: '🇯🇵', n: 'flag japan jp' },
+            { c: '🇰🇷', n: 'flag south korea kr' },
+            { c: '🇨🇳', n: 'flag china cn' },
+            { c: '🇧🇷', n: 'flag brazil br' },
+            { c: '🇲🇽', n: 'flag mexico mx' },
+            { c: '🇮🇳', n: 'flag india in' },
+            { c: '🇷🇺', n: 'flag russia ru' },
+            { c: '🇪🇬', n: 'flag egypt eg' },
+            { c: '🇸🇦', n: 'flag saudi arabia sa' },
+            { c: '🇦🇪', n: 'flag united arab emirates uae' }
+        ]
+    }
+];
+
+// ═══════════════════════════════════════════════════════════════
+// SHARED INSERTION & CURSOR STATE
+// ═══════════════════════════════════════════════════════════════
+let savedDescSelection = { start: 0, end: 0 };
+let customServerEmojis = [];
+let customEmojisLoaded = false;
+let currentActiveEmojiTab = 'frequent';
+
+function saveDescCursor() {
+    const desc = document.getElementById('e-desc');
+    if (desc) {
+        savedDescSelection = {
+            start: typeof desc.selectionStart === 'number' ? desc.selectionStart : desc.value.length,
+            end: typeof desc.selectionEnd === 'number' ? desc.selectionEnd : desc.value.length,
+        };
+    }
+}
+
+function restoreDescCursor() {
+    const desc = document.getElementById('e-desc');
+    if (desc) {
+        desc.focus();
+        desc.setSelectionRange(savedDescSelection.start, savedDescSelection.end);
+    }
+}
+
+function updateCharCount() {
+    const desc = document.getElementById('e-desc');
+    const counter = document.getElementById('desc-char-count');
+    if (!desc || !counter) return;
+    const len = desc.value.length;
+    counter.textContent = `${len} / 4096`;
+    if (len >= 4096) {
+        counter.style.color = 'var(--danger)';
+    } else if (len > 3800) {
+        counter.style.color = 'var(--warning)';
+    } else {
+        counter.style.color = 'var(--text3)';
+    }
+}
+
+function onDescInput() {
+    updateCharCount();
+    updatePreview();
+}
+
+/**
+ * Shared insertion mechanism for all rich text toolbar actions.
+ * Handles selection replacement, cursor positioning, maxlength clamping (4096),
+ * character counter updates, and triggers input event for embed live preview.
+ */
+function insertAtCursor(textarea, textToInsert, { wrap = false, prefix = '', suffix = '' } = {}) {
+    if (!textarea) return;
+    textarea.focus();
+
+    const start = typeof textarea.selectionStart === 'number' ? textarea.selectionStart : textarea.value.length;
+    const end = typeof textarea.selectionEnd === 'number' ? textarea.selectionEnd : textarea.value.length;
+    const val = textarea.value;
+    const maxLen = 4096;
+
+    if (wrap) {
+        const selectedText = val.substring(start, end);
+        if (selectedText.length > 0) {
+            const wrapped = prefix + selectedText + suffix;
+            const newTotalLen = val.length - (end - start) + wrapped.length;
+            if (newTotalLen > maxLen) {
+                if (window.showToast) showToast('Exceeds 4096 character limit', 'warning');
+                return;
+            }
+            textarea.value = val.substring(0, start) + wrapped + val.substring(end);
+            const newStart = start + prefix.length;
+            const newEnd = newStart + selectedText.length;
+            textarea.setSelectionRange(newStart, newEnd);
+        } else {
+            const emptyWrap = prefix + suffix;
+            if (val.length + emptyWrap.length > maxLen) {
+                if (window.showToast) showToast('Exceeds 4096 character limit', 'warning');
+                return;
+            }
+            textarea.value = val.substring(0, start) + emptyWrap + val.substring(end);
+            const newPos = start + prefix.length;
+            textarea.setSelectionRange(newPos, newPos);
+        }
+    } else {
+        const text = textToInsert || '';
+        const currentLenWithoutSel = val.length - (end - start);
+        if (currentLenWithoutSel + text.length > maxLen) {
+            const allowed = maxLen - currentLenWithoutSel;
+            if (allowed <= 0) {
+                if (window.showToast) showToast('Description limit (4096) reached', 'warning');
+                return;
+            }
+            const truncated = text.substring(0, allowed);
+            textarea.value = val.substring(0, start) + truncated + val.substring(end);
+            const newPos = start + truncated.length;
+            textarea.setSelectionRange(newPos, newPos);
+            if (window.showToast) showToast('Text truncated to 4096 characters', 'warning');
+        } else {
+            textarea.value = val.substring(0, start) + text + val.substring(end);
+            const newPos = start + text.length;
+            textarea.setSelectionRange(newPos, newPos);
+        }
+    }
+
+    updateCharCount();
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.focus();
+}
+
+function formatText(prefix, suffix) {
+    const desc = document.getElementById('e-desc');
+    insertAtCursor(desc, '', { wrap: true, prefix, suffix });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MENTION MODAL LOGIC
+// ═══════════════════════════════════════════════════════════════
+function openMentionModal() {
+    saveDescCursor();
+    const modal = document.getElementById('mention-modal');
+    modal.style.display = 'flex';
+    document.getElementById('mention-user-input').value = '';
+    document.getElementById('mention-user-error').style.display = 'none';
+
+    // Ensure Select2 pickers are initialized inside modal
+    if (window.NeroSelect && window.NeroSelect.initAll) {
+        window.NeroSelect.initAll(modal);
+    }
+}
+
+function closeMentionModal() {
+    document.getElementById('mention-modal').style.display = 'none';
+    restoreDescCursor();
+}
+
+function insertChannelMention() {
+    const chId = $('#mention-channel-select').val();
+    if (!chId) {
+        if (window.showToast) showToast('Please select a channel to mention', 'warning');
+        return;
+    }
+    document.getElementById('mention-modal').style.display = 'none';
+    restoreDescCursor();
+    const desc = document.getElementById('e-desc');
+    insertAtCursor(desc, `<#${chId}>`);
+}
+
+function insertRoleMention() {
+    const roleId = $('#mention-role-select').val();
+    if (!roleId) {
+        if (window.showToast) showToast('Please select a role to mention', 'warning');
+        return;
+    }
+    document.getElementById('mention-modal').style.display = 'none';
+    restoreDescCursor();
+    const desc = document.getElementById('e-desc');
+    insertAtCursor(desc, `<@&${roleId}>`);
+}
+
+function insertUserMention() {
+    const input = document.getElementById('mention-user-input');
+    const errEl = document.getElementById('mention-user-error');
+    const uid = input.value.trim();
+    if (!/^\d{17,20}$/.test(uid)) {
+        errEl.textContent = 'Please enter a valid numeric Discord User ID (17-20 digits)';
+        errEl.style.display = 'block';
+        input.focus();
+        return;
+    }
+    errEl.style.display = 'none';
+    document.getElementById('mention-modal').style.display = 'none';
+    restoreDescCursor();
+    const desc = document.getElementById('e-desc');
+    insertAtCursor(desc, `<@${uid}>`);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// EMOJI PICKER POPOVER LOGIC
+// ═══════════════════════════════════════════════════════════════
+function getFrequentEmojis() {
+    try {
+        return JSON.parse(localStorage.getItem('embed_frequently_used_emojis') || '[]');
+    } catch(e) {
+        return [];
+    }
+}
+
+function recordFrequentEmoji(item) {
+    try {
+        let list = getFrequentEmojis();
+        list = list.filter(x => {
+            if (item.type === 'custom') return !(x.type === 'custom' && x.id === item.id);
+            return !(x.type === 'unicode' && x.char === item.char);
+        });
+        list.unshift(item);
+        if (list.length > 24) list = list.slice(0, 24);
+        localStorage.setItem('embed_frequently_used_emojis', JSON.stringify(list));
+    } catch(e) {}
+}
+
+async function loadCustomEmojis() {
+    if (customEmojisLoaded) return;
+    try {
+        const res = await fetch('/api/guild/emojis');
+        const data = await res.json();
+        if (data && data.results) {
+            customServerEmojis = data.results;
+            customEmojisLoaded = true;
+            renderEmojiPicker();
+        }
+    } catch(e) {
+        console.error('Failed to fetch guild emojis', e);
+    }
+}
+
+function toggleEmojiPopover(e) {
+    if (e) e.stopPropagation();
+    const pop = document.getElementById('emoji-popover');
+    const isHidden = pop.style.display === 'none' || !pop.style.display;
+    
+    if (isHidden) {
+        saveDescCursor();
+        pop.style.display = 'flex';
+        document.getElementById('emoji-search-input').value = '';
+        loadCustomEmojis();
+        renderEmojiPicker();
+        setTimeout(() => document.getElementById('emoji-search-input').focus(), 50);
+    } else {
+        pop.style.display = 'none';
+        restoreDescCursor();
+    }
+}
+
+function onEmojiSearch(query) {
+    renderEmojiPicker(query.trim().toLowerCase());
+}
+
+function selectEmojiTab(tabId) {
+    currentActiveEmojiTab = tabId;
+    document.querySelectorAll('.emoji-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tabId);
+    });
+    const targetSection = document.getElementById(`emoji-sec-${tabId}`);
+    if (targetSection) {
+        targetSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+}
+
+function renderEmojiPicker(searchQuery = '') {
+    const tabsContainer = document.getElementById('emoji-category-tabs');
+    const gridContainer = document.getElementById('emoji-grid-container');
+    const frequent = getFrequentEmojis();
+
+    if (searchQuery) {
+        // Search mode: hide tabs and render matching results
+        tabsContainer.style.display = 'none';
+        let matchCount = 0;
+        let html = '';
+
+        // Match custom server emojis
+        const matchingCustom = customServerEmojis.filter(e => e.name.toLowerCase().includes(searchQuery));
+        if (matchingCustom.length > 0) {
+            matchCount += matchingCustom.length;
+            html += `<div class="emoji-section-title">Server Emojis</div><div class="emoji-grid">`;
+            matchingCustom.forEach(e => {
+                const ext = e.animated ? 'gif' : 'png';
+                const cdnUrl = `https://cdn.discordapp.com/emojis/${e.id}.${ext}?size=48`;
+                html += `<button type="button" class="emoji-item-btn" title=":${e.name}:" onclick="onCustomEmojiClick('${e.id}', '${e.name.replace(/'/g, "\\'")}', ${e.animated ? 'true' : 'false'})">
+                    <img src="${cdnUrl}" class="emoji-custom-img" alt=":${e.name}:" loading="lazy">
+                </button>`;
+            });
+            html += `</div>`;
+        }
+
+        // Match Unicode emojis
+        let matchingUnicode = [];
+        UNICODE_EMOJI_CATEGORIES.forEach(cat => {
+            cat.emojis.forEach(item => {
+                if (item.n.includes(searchQuery) || item.c.includes(searchQuery)) {
+                    matchingUnicode.push(item);
+                }
+            });
+        });
+
+        if (matchingUnicode.length > 0) {
+            matchCount += matchingUnicode.length;
+            html += `<div class="emoji-section-title">Standard Emojis</div><div class="emoji-grid">`;
+            matchingUnicode.forEach(item => {
+                const titleText = item.n.split(' ')[0] || '';
+                html += `<button type="button" class="emoji-item-btn" title="${titleText}" onclick="onUnicodeEmojiClick('${item.c}', '${item.n.replace(/'/g, "\\'")}')">
+                    ${item.c}
+                </button>`;
+            });
+            html += `</div>`;
+        }
+
+        if (matchCount === 0) {
+            html = `<div style="text-align:center;padding:24px 8px;color:var(--text3);font-size:12px;">
+                <div style="font-size:22px;margin-bottom:4px;">🔍</div>
+                No emojis found
+            </div>`;
+        }
+
+        gridContainer.innerHTML = html;
+        return;
+    }
+
+    // Default categorized mode: render tabs and sections
+    tabsContainer.style.display = 'flex';
+    let tabsHtml = '';
+    let sectionsHtml = '';
+
+    if (frequent.length > 0) {
+        tabsHtml += `<button type="button" class="emoji-tab-btn ${currentActiveEmojiTab === 'frequent' ? 'active' : ''}" data-tab="frequent" title="Frequently Used" onclick="selectEmojiTab('frequent')">⏱️</button>`;
+        sectionsHtml += `<div id="emoji-sec-frequent"><div class="emoji-section-title">Frequently Used</div><div class="emoji-grid">`;
+        frequent.forEach(item => {
+            if (item.type === 'custom') {
+                const ext = item.animated ? 'gif' : 'png';
+                const cdnUrl = `https://cdn.discordapp.com/emojis/${item.id}.${ext}?size=48`;
+                sectionsHtml += `<button type="button" class="emoji-item-btn" title=":${item.name}:" onclick="onCustomEmojiClick('${item.id}', '${item.name.replace(/'/g, "\\'")}', ${item.animated ? 'true' : 'false'})">
+                    <img src="${cdnUrl}" class="emoji-custom-img" alt=":${item.name}:" loading="lazy">
+                </button>`;
+            } else {
+                sectionsHtml += `<button type="button" class="emoji-item-btn" title="${item.name || ''}" onclick="onUnicodeEmojiClick('${item.char}', '${(item.name || '').replace(/'/g, "\\'")}')">
+                    ${item.char}
+                </button>`;
+            }
+        });
+        sectionsHtml += `</div></div>`;
+    }
+
+    if (customServerEmojis.length > 0) {
+        tabsHtml += `<button type="button" class="emoji-tab-btn ${currentActiveEmojiTab === 'custom' ? 'active' : ''}" data-tab="custom" title="Server Emojis" onclick="selectEmojiTab('custom')">✨</button>`;
+        sectionsHtml += `<div id="emoji-sec-custom"><div class="emoji-section-title">Server Emojis</div><div class="emoji-grid">`;
+        customServerEmojis.forEach(e => {
+            const ext = e.animated ? 'gif' : 'png';
+            const cdnUrl = `https://cdn.discordapp.com/emojis/${e.id}.${ext}?size=48`;
+            sectionsHtml += `<button type="button" class="emoji-item-btn" title=":${e.name}:" onclick="onCustomEmojiClick('${e.id}', '${e.name.replace(/'/g, "\\'")}', ${e.animated ? 'true' : 'false'})">
+                <img src="${cdnUrl}" class="emoji-custom-img" alt=":${e.name}:" loading="lazy">
+            </button>`;
+        });
+        sectionsHtml += `</div></div>`;
+    }
+
+    UNICODE_EMOJI_CATEGORIES.forEach(cat => {
+        tabsHtml += `<button type="button" class="emoji-tab-btn ${currentActiveEmojiTab === cat.id ? 'active' : ''}" data-tab="${cat.id}" title="${cat.name}" onclick="selectEmojiTab('${cat.id}')">${cat.icon}</button>`;
+        sectionsHtml += `<div id="emoji-sec-${cat.id}"><div class="emoji-section-title">${cat.name}</div><div class="emoji-grid">`;
+        cat.emojis.forEach(item => {
+            const titleText = item.n.split(' ')[0] || '';
+            sectionsHtml += `<button type="button" class="emoji-item-btn" title="${titleText}" onclick="onUnicodeEmojiClick('${item.c}', '${item.n.replace(/'/g, "\\'")}')">
+                ${item.c}
+            </button>`;
+        });
+        sectionsHtml += `</div></div>`;
+    });
+
+    tabsContainer.innerHTML = tabsHtml;
+    gridContainer.innerHTML = sectionsHtml;
+}
+
+function onUnicodeEmojiClick(char, name) {
+    recordFrequentEmoji({ type: 'unicode', char, name });
+    document.getElementById('emoji-popover').style.display = 'none';
+    restoreDescCursor();
+    const desc = document.getElementById('e-desc');
+    insertAtCursor(desc, char);
+}
+
+function onCustomEmojiClick(id, name, animated) {
+    recordFrequentEmoji({ type: 'custom', id, name, animated });
+    document.getElementById('emoji-popover').style.display = 'none';
+    restoreDescCursor();
+    const syntax = animated ? `<a:${name}:${id}>` : `<:${name}:${id}>`;
+    const desc = document.getElementById('e-desc');
+    insertAtCursor(desc, syntax);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GLOBAL EVENT LISTENERS FOR OUTSIDE CLICKS & ESCAPE KEY
+// ═══════════════════════════════════════════════════════════════
+document.addEventListener('click', function(e) {
+    const pop = document.getElementById('emoji-popover');
+    const tbEmoji = document.getElementById('tb-emoji');
+    if (pop && pop.style.display !== 'none') {
+        if (!pop.contains(e.target) && !tbEmoji.contains(e.target)) {
+            pop.style.display = 'none';
+        }
+    }
+
+    const mentionModal = document.getElementById('mention-modal');
+    if (mentionModal && mentionModal.style.display === 'flex' && e.target === mentionModal) {
+        closeMentionModal();
+    }
+});
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        const pop = document.getElementById('emoji-popover');
+        if (pop && pop.style.display !== 'none') {
+            pop.style.display = 'none';
+            restoreDescCursor();
+        }
+        const mentionModal = document.getElementById('mention-modal');
+        if (mentionModal && mentionModal.style.display === 'flex') {
+            closeMentionModal();
+        }
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// EMBED BUILDER CORE LOGIC
+// ═══════════════════════════════════════════════════════════════
 function updatePreview() {
     const title     = document.getElementById('e-title').value;
     const desc      = document.getElementById('e-desc').value;
@@ -258,6 +1435,7 @@ async function loadTemplate(name) {
         last.querySelector('.field-value').value  = f.value  || '';
         last.querySelector('.field-inline').checked = f.inline || false;
     });
+    updateCharCount();
     updatePreview();
     showToast('Template loaded!');
 }
@@ -268,7 +1446,7 @@ async function deleteTemplate(name) {
 }
 
 loadTemplates();
+updateCharCount();
 updatePreview();
 </script>
-{% endblock %}
 {% endblock %}
