@@ -244,6 +244,13 @@ async def execute_trade(guild_id: int, user_a: int, offer_a: dict,
 
 
 async def get_trade_history(guild_id: int, user_id: int = None, limit: int = 50) -> list[dict]:
+    # Self-ensure the table before reading: this is called from the
+    # DASHBOARD process (dashboard/api/trade.py, dashboard/api/backups.py),
+    # which never loads the trade cog, so trade_history may not have been
+    # created yet on a fresh install. A guild that has simply never traded
+    # has an empty history, not a 500 — same "call ensure at the top"
+    # pattern the creator/mission/minigames dashboard routes already use.
+    await ensure_trade_table()
     query = """
         SELECT id, user_a, user_b, offer_a, offer_b, created_at
         FROM trade_history WHERE guild_id = ?
