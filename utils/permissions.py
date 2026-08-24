@@ -80,7 +80,15 @@ PAGE_PERMISSIONS = {
     "moderation_edit":    LEVEL_ADMIN,
     "moderation_delete":  LEVEL_OWNER,
     "tickets":            LEVEL_MODERATOR,
-    "embedbuilder":       LEVEL_ADMIN,
+
+    # Embed Builder v2: content + up to 10 embeds + real attachments,
+    # sent LIVE to any channel the bot can see via a direct Discord API
+    # call — this is meaningfully more powerful than the old "build one
+    # embed, save it as a template" tool (LEVEL_ADMIN), so it's gated
+    # at LEVEL_OWNER now, matching every other route in
+    # dashboard/api/embedbuilder.py.
+    "embedbuilder":       LEVEL_OWNER,
+
     "reactionroles":      LEVEL_ADMIN,
     "triggers":           LEVEL_ADMIN,
     "customcommands":     LEVEL_ADMIN,

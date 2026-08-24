@@ -42,6 +42,12 @@ from flask import Blueprint, jsonify, request, session
 # toggle) for YouTube and Twitch, replacing the old read-only
 # "Announcements" page. Same registration pattern as every other
 # submodule.
+#
+# Embed Builder v2 pass: added dashboard.api.embedbuilder — the new
+# "Send" / template-save-whole-message / (channel-scoped) routes for
+# the multi-embed + content + attachments composer. /api/guild/emojis
+# lives in core.py alongside /api/guild/roles and /api/guild/channels,
+# same pattern, no new submodule needed for it.
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -65,18 +71,19 @@ def _enforce_csrf():
 # registering its routes onto the single api_bp object above. Order
 # doesn't matter for correctness (no route path collisions across
 # sections), only listed alphabetically for readability.
-from dashboard.api import botprofile    # noqa: E402,F401
-from dashboard.api import backups       # noqa: E402,F401
-from dashboard.api import core          # noqa: E402,F401
-from dashboard.api import creator       # noqa: E402,F401
-from dashboard.api import economy_shop  # noqa: E402,F401
-from dashboard.api import leveling      # noqa: E402,F401
-from dashboard.api import minigames     # noqa: E402,F401
-from dashboard.api import missions      # noqa: E402,F401
-from dashboard.api import misc          # noqa: E402,F401
-from dashboard.api import moderation    # noqa: E402,F401
-from dashboard.api import mvp           # noqa: E402,F401
-from dashboard.api import tagmissions   # noqa: E402,F401
-from dashboard.api import tagpartners   # noqa: E402,F401
-from dashboard.api import tickets       # noqa: E402,F401
-from dashboard.api import trade         # noqa: E402,F401
+from dashboard.api import botprofile     # noqa: E402,F401
+from dashboard.api import backups        # noqa: E402,F401
+from dashboard.api import core           # noqa: E402,F401
+from dashboard.api import creator        # noqa: E402,F401
+from dashboard.api import economy_shop   # noqa: E402,F401
+from dashboard.api import embedbuilder   # noqa: E402,F401
+from dashboard.api import leveling       # noqa: E402,F401
+from dashboard.api import minigames      # noqa: E402,F401
+from dashboard.api import missions       # noqa: E402,F401
+from dashboard.api import misc           # noqa: E402,F401
+from dashboard.api import moderation     # noqa: E402,F401
+from dashboard.api import mvp            # noqa: E402,F401
+from dashboard.api import tagmissions    # noqa: E402,F401
+from dashboard.api import tagpartners    # noqa: E402,F401
+from dashboard.api import tickets        # noqa: E402,F401
+from dashboard.api import trade          # noqa: E402,F401

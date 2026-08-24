@@ -74,6 +74,29 @@ class EmbedBuilder(commands.Cog):
                                 inline=field.get("inline", False))
         return embed
 
+    def _doc_to_content_and_embeds(self, raw: str) -> tuple[str | None, list[discord.Embed]]:
+        """
+        Embed Builder v2: embed_templates.data now stores the WHOLE
+        message as {"content": "...", "embeds": [ {...}, {...} ]}
+        (dashboard/api/embedbuilder.py's save route). Older templates
+        saved before that change are still just a single embed dict —
+        those are treated as a one-embed, no-content message so every
+        template saved before this pass keeps working exactly as it
+        did.
+        """
+        try:
+            doc = json.loads(raw)
+        except Exception:
+            return None, []
+
+        if isinstance(doc, dict) and ("embeds" in doc or "content" in doc):
+            content = doc.get("content") or None
+            embeds = [self.build_embed(e) for e in (doc.get("embeds") or [])]
+            return content, embeds
+
+        # Legacy shape: a single embed dict.
+        return None, [self.build_embed(doc)]
+
     @app_commands.command(name="embed_create", description="Create and send a custom embed")
     @app_commands.checks.has_permissions(manage_messages=True)
     async def embed_create(self, interaction: discord.Interaction, channel: discord.TextChannel,
@@ -158,9 +181,19 @@ class EmbedBuilder(commands.Cog):
         if not row:
             await interaction.response.send_message(f"No template found with name `{name}`!", ephemeral=True)
             return
-        data = json.loads(row[0])
-        embed = self.build_embed(data)
-        await channel.send(embed=embed)
+
+        content, embeds = self._doc_to_content_and_embeds(row[0])
+        if not content and not embeds:
+            await interaction.response.send_message(
+                f"Template `{name}` is empty or corrupted.", ephemeral=True)
+            return
+        # Discord's own per-message cap — a template saved with more
+        # than 10 embeds (shouldn't happen, dashboard enforces this,
+        # but defends against a hand-edited row) is trimmed rather
+        # than rejected outright.
+        embeds = embeds[:10]
+
+        await channel.send(content=content, embeds=embeds or None)
         await interaction.response.send_message(f"Template `{name}` sent to {channel.mention}!", ephemeral=True)
 
     @app_commands.command(name="embed_list", description="List all saved embed templates")
