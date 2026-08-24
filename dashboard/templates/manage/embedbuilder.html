@@ -1,274 +1,1122 @@
 {% extends "base.html" %}
 {% block title %}Embed Builder{% endblock %}
 {% block content %}
+<span data-page-title="Embed Builder"></span>
 
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;">
     <div>
+        <!-- ── CONTENT ─────────────────────────────────────────── -->
         <div class="card">
-            <div class="card-title">✉️ Build Your Embed</div>
-            <div class="form-group">
-                <label class="form-label">Title</label>
-                <input class="form-input" id="e-title" placeholder="Embed title..." oninput="updatePreview()">
+            <div class="eb-field-header">
+                <span class="eb-field-label">CONTENT</span>
+                <span class="eb-counter" id="eb-content-counter">0 / 2000</span>
             </div>
-            <div class="form-group">
-                <label class="form-label">Description</label>
-                <textarea class="form-input" id="e-desc" rows="4"
-                    placeholder="Embed description..." oninput="updatePreview()"></textarea>
+            <div class="eb-toolbar" role="toolbar" aria-label="Content formatting">
+                <button type="button" class="eb-tbtn" data-fmt="bold" aria-label="Bold" title="Bold">B</button>
+                <button type="button" class="eb-tbtn" data-fmt="italic" aria-label="Italic" title="Italic"><i>I</i></button>
+                <button type="button" class="eb-tbtn" data-fmt="underline" aria-label="Underline" title="Underline"><u>U</u></button>
+                <button type="button" class="eb-tbtn" data-fmt="strike" aria-label="Strikethrough" title="Strikethrough"><s>S</s></button>
+                <span class="eb-tdivider"></span>
+                <button type="button" class="eb-tbtn" id="eb-mention-btn" aria-label="Add Mention" title="Add Mention">@</button>
+                <button type="button" class="eb-tbtn" id="eb-emoji-btn" aria-label="Insert Emoji" title="Insert Emoji">🙂</button>
             </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                <div class="form-group">
-                    <label class="form-label">Color</label>
-                    <div style="display:flex;gap:8px;align-items:center;">
-                        <input type="color" id="e-color" value="#7c5cbf" oninput="updatePreview()"
-                            style="width:42px;height:36px;border-radius:8px;
-                                   border:1px solid var(--border);background:transparent;
-                                   cursor:pointer;padding:2px;">
-                        <input class="form-input" id="e-color-hex" value="#7c5cbf"
-                            style="flex:1;" oninput="syncColor(this.value)">
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Author</label>
-                    <input class="form-input" id="e-author" placeholder="Author name..." oninput="updatePreview()">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Footer</label>
-                    <input class="form-input" id="e-footer" placeholder="Footer text..." oninput="updatePreview()">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Thumbnail URL</label>
-                    <input class="form-input" id="e-thumbnail" placeholder="https://..." oninput="updatePreview()">
-                </div>
-            </div>
-            <div class="form-group">
-                <label class="form-label">Image URL</label>
-                <input class="form-input" id="e-image" placeholder="https://..." oninput="updatePreview()">
-            </div>
-            <div class="form-group">
-                <label class="form-label">Fields</label>
-                <div id="fields-container"></div>
-                <button class="btn btn-secondary" style="margin-top:8px;font-size:12px;"
-                    onclick="addField()">+ Add Field</button>
-            </div>
+            <textarea class="form-input eb-content-input" id="eb-content" rows="3" maxlength="2000"
+                placeholder="Message content shown above the embed(s)..."></textarea>
         </div>
 
+        <!-- ── ATTACHMENTS ─────────────────────────────────────── -->
+        <div class="card">
+            <div class="eb-field-header">
+                <span class="eb-field-label">📎 ATTACHMENTS</span>
+                <span class="eb-counter" id="eb-attach-counter">0 / 10 &middot; 0MB / 25MB</span>
+            </div>
+            <p class="text-muted text-sm" style="margin-bottom:12px;">
+                Files stay in your browser only — nothing is uploaded until you press Send.
+            </p>
+            <div class="eb-dropzone" id="eb-dropzone">
+                <input type="file" id="eb-file-input" multiple style="display:none;">
+                <span>Drag files here, or <button type="button" class="eb-link-btn" id="eb-file-browse">browse</button></span>
+            </div>
+            <div class="eb-attach-grid" id="eb-attach-grid"></div>
+        </div>
+
+        <!-- ── EMBEDS ───────────────────────────────────────────── -->
+        <div class="card">
+            <div class="eb-field-header">
+                <span class="eb-field-label">🎨 EMBEDS</span>
+                <span class="eb-counter" id="eb-embed-counter">1 / 10</span>
+            </div>
+            <div id="eb-embeds-list"></div>
+            <button type="button" class="btn btn-secondary" id="eb-add-embed" style="margin-top:4px;">+ Add Embed</button>
+        </div>
+
+        <!-- ── SAVE / SEND ──────────────────────────────────────── -->
         <div class="card">
             <div class="card-title">💾 Save / Send</div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">Send to channel</label>
+                    <select class="nero-channel-picker form-input" id="eb-send-channel"></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Save as template</label>
+                    <input class="form-input" id="eb-template-name" placeholder="e.g. welcome, rules...">
+                </div>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+                <button type="button" class="btn btn-primary" id="eb-send-btn">🚀 Send</button>
+                <button type="button" class="btn btn-secondary" id="eb-save-template-btn">Save Template</button>
+                <button type="button" class="btn btn-secondary" id="eb-copy-json-btn">Copy JSON</button>
+                <span style="flex:1;"></span>
+                <button type="button" class="btn btn-icon btn-secondary" id="eb-undo-btn" title="Undo" aria-label="Undo">↩</button>
+                <button type="button" class="btn btn-icon btn-secondary" id="eb-redo-btn" title="Redo" aria-label="Redo">↪</button>
+                <button type="button" class="btn btn-danger" id="eb-clear-btn">Clear All</button>
+            </div>
             <div class="form-group">
-                <label class="form-label">Save as template</label>
-                <input class="form-input" id="save-name" placeholder="e.g. welcome, rules...">
+                <label class="form-label">Load a saved template</label>
+                <div style="display:flex;gap:8px;">
+                    <select class="form-input" id="eb-template-select" style="flex:1;"><option value="">Select a template…</option></select>
+                    <button type="button" class="btn btn-secondary" id="eb-load-template-btn">Load</button>
+                    <button type="button" class="btn btn-danger" id="eb-delete-template-btn">Delete</button>
+                </div>
             </div>
-            <div style="display:flex;gap:10px;flex-wrap:wrap;">
-                <button class="btn btn-primary" onclick="saveTemplate()">Save Template</button>
-                <button class="btn btn-secondary" onclick="copyJSON()">Copy JSON</button>
-            </div>
-            <div id="embed-status" style="margin-top:10px;font-size:13px;"></div>
-        </div>
-
-        <div class="card">
-            <div class="card-title">📋 Saved Templates</div>
-            <div id="templates-list">
-                <span class="text-muted text-sm">Loading...</span>
-            </div>
+            <div id="eb-status" style="margin-top:6px;font-size:13px;"></div>
         </div>
     </div>
 
+    <!-- ── LIVE PREVIEW ─────────────────────────────────────────── -->
     <div style="position:sticky;top:80px;">
         <div class="card">
             <div class="card-title">👁️ Live Preview</div>
-            <div style="background:#313338;border-radius:8px;padding:16px;">
-                <div id="preview-box"
-                     style="border-left:4px solid #7c5cbf;background:#2b2d31;
-                            border-radius:0 4px 4px 0;padding:12px 16px;position:relative;">
-                    <div id="prev-author" style="font-size:12px;color:#b5bac1;margin-bottom:4px;display:none;"></div>
-                    <div id="prev-title"  style="font-weight:700;color:#fff;font-size:15px;margin-bottom:4px;display:none;"></div>
-                    <div id="prev-desc"   style="color:#dbdee1;font-size:13px;line-height:1.5;display:none;white-space:pre-wrap;"></div>
-                    <div id="prev-fields" style="display:grid;gap:8px;margin-top:8px;"></div>
-                    <div id="prev-img-container" style="margin-top:10px;display:none;">
-                        <img id="prev-img" style="max-width:100%;border-radius:4px;" src="">
-                    </div>
-                    <div id="prev-footer" style="font-size:12px;color:#b5bac1;margin-top:8px;display:none;"></div>
-                    <div id="prev-empty"  style="color:#72767d;font-size:13px;text-align:center;padding:20px 0;">
-                        Start typing to see preview...
-                    </div>
-                    <div id="prev-thumb-container"
-                         style="position:absolute;top:12px;right:12px;display:none;">
-                        <img id="prev-thumb" style="width:72px;height:72px;border-radius:4px;object-fit:cover;" src="">
-                    </div>
-                </div>
-            </div>
+            <div class="eb-preview-box" id="eb-preview"></div>
         </div>
     </div>
 </div>
 
+<!-- ── MENTION MODAL ────────────────────────────────────────────── -->
+<div id="eb-mention-modal" class="modal-overlay" style="display:none;">
+    <div class="modal">
+        <div class="modal-title">Add a mention</div>
+        <div class="modal-body" style="margin-bottom:16px;">Mention a channel, role, or user in your message.</div>
+
+        <div class="eb-mention-row">
+            <select class="nero-channel-picker form-input" id="eb-mention-channel"></select>
+            <button type="button" class="btn btn-primary" id="eb-mention-channel-btn">Mention Channel</button>
+        </div>
+        <div class="eb-mention-row">
+            <select class="nero-role-picker form-input" id="eb-mention-role"></select>
+            <button type="button" class="btn btn-primary" id="eb-mention-role-btn">Mention Role</button>
+        </div>
+        <div class="eb-mention-row">
+            <input class="form-input" id="eb-mention-user" placeholder="User ID (17–20 digits)">
+            <button type="button" class="btn btn-primary" id="eb-mention-user-btn">Mention User</button>
+        </div>
+
+        <div class="modal-actions" style="margin-top:8px;">
+            <button type="button" class="btn btn-secondary" id="eb-mention-cancel">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- ── EMOJI POPOVER ────────────────────────────────────────────── -->
+<div id="eb-emoji-popover" class="eb-emoji-popover" style="display:none;">
+    <input class="form-input" id="eb-emoji-search" placeholder="Search emoji..." style="margin-bottom:8px;">
+    <div class="eb-emoji-scroll" id="eb-emoji-scroll"></div>
+</div>
+
+<style>
+.eb-field-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+.eb-field-label { font-size:11px; font-weight:700; letter-spacing:.05em; color:var(--text3); }
+.eb-counter { font-size:11px; color:var(--text3); font-family:'JetBrains Mono','Fira Code',monospace; }
+.eb-counter.eb-counter-warn { color:var(--warning); }
+.eb-counter.eb-counter-danger { color:var(--danger); }
+
+.eb-toolbar { display:flex; align-items:center; gap:4px; margin-bottom:8px; flex-wrap:wrap; }
+.eb-tbtn {
+    min-width:32px; height:32px; padding:0 8px;
+    display:inline-flex; align-items:center; justify-content:center;
+    background:var(--bg3); border:1px solid var(--border); border-radius:6px;
+    color:var(--text2); font-size:13px; font-weight:700; cursor:pointer;
+    transition:all .12s;
+}
+.eb-tbtn:hover { background:var(--bg4); color:var(--text); border-color:var(--accent); }
+.eb-tbtn:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.eb-tdivider { width:1px; height:20px; background:var(--border); margin:0 4px; }
+
+.eb-content-input { resize:vertical; min-height:70px; }
+
+.eb-dropzone {
+    border:1.5px dashed var(--border); border-radius:10px; padding:20px;
+    text-align:center; font-size:13px; color:var(--text2);
+    transition:all .15s; margin-bottom:12px; cursor:pointer;
+}
+.eb-dropzone.eb-dragover { border-color:var(--accent); background:rgba(124,92,191,.08); }
+.eb-link-btn { background:none; border:none; color:var(--accent); font-size:13px; cursor:pointer; text-decoration:underline; padding:0; }
+
+.eb-attach-grid { display:flex; flex-wrap:wrap; gap:10px; }
+.eb-attach-item {
+    position:relative; width:96px; background:var(--bg3); border:1px solid var(--border);
+    border-radius:8px; overflow:hidden; font-size:10px;
+}
+.eb-attach-thumb { width:100%; height:64px; object-fit:cover; display:block; background:var(--bg4); }
+.eb-attach-icon { width:100%; height:64px; display:flex; align-items:center; justify-content:center; font-size:24px; background:var(--bg4); }
+.eb-attach-name { padding:4px 6px; color:var(--text2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.eb-attach-remove {
+    position:absolute; top:3px; right:3px; width:18px; height:18px; border-radius:50%;
+    background:rgba(0,0,0,.6); color:#fff; border:none; font-size:11px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center; line-height:1;
+}
+
+.eb-embed-card { border:1px solid var(--border); border-radius:10px; margin-bottom:10px; overflow:hidden; }
+.eb-embed-head {
+    display:flex; align-items:center; gap:10px; padding:10px 14px; cursor:pointer;
+    background:var(--bg3); user-select:none;
+}
+.eb-embed-head:hover { background:var(--bg4); }
+.eb-embed-chevron { display:inline-block; transition:transform .15s; font-size:12px; color:var(--text3); }
+.eb-embed-card.eb-expanded .eb-embed-chevron { transform:rotate(90deg); }
+.eb-embed-title-preview { flex:1; font-size:13px; font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.eb-embed-actions { display:flex; gap:6px; }
+.eb-embed-body { display:none; padding:16px; }
+.eb-embed-card.eb-expanded .eb-embed-body { display:block; }
+.eb-embed-fieldrow { display:grid; grid-template-columns:1fr 1fr auto auto; gap:8px; margin-bottom:8px; align-items:center; }
+
+.eb-mention-row { display:flex; gap:8px; margin-bottom:10px; align-items:center; }
+.eb-mention-row select, .eb-mention-row input { flex:1; }
+.eb-mention-row .btn { flex-shrink:0; white-space:nowrap; }
+
+.eb-emoji-popover {
+    position:fixed; z-index:1100; width:320px; max-height:380px;
+    background:var(--bg2); border:1px solid var(--border); border-radius:12px;
+    box-shadow:0 12px 32px rgba(0,0,0,.5); padding:12px; display:flex; flex-direction:column;
+}
+.eb-emoji-scroll { overflow-y:auto; flex:1; }
+.eb-emoji-cat-label { font-size:10px; font-weight:700; color:var(--text3); text-transform:uppercase; letter-spacing:.05em; margin:8px 0 4px; }
+.eb-emoji-cat-label:first-child { margin-top:0; }
+.eb-emoji-grid { display:grid; grid-template-columns:repeat(8, 1fr); gap:2px; }
+.eb-emoji-cell {
+    width:32px; height:32px; display:flex; align-items:center; justify-content:center;
+    font-size:19px; background:none; border:none; border-radius:6px; cursor:pointer;
+}
+.eb-emoji-cell:hover { background:var(--bg4); }
+.eb-emoji-cell img { width:22px; height:22px; object-fit:contain; }
+.eb-emoji-empty { text-align:center; color:var(--text3); font-size:12px; padding:20px 0; }
+
+.eb-preview-box { background:#313338; border-radius:8px; padding:16px; min-height:60px; }
+.eb-preview-content { color:#dbdee1; font-size:14px; white-space:pre-wrap; word-break:break-word; margin-bottom:10px; line-height:1.4; }
+.eb-preview-attachments { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
+.eb-preview-attachments img { max-width:120px; max-height:120px; border-radius:6px; object-fit:cover; }
+.eb-preview-embed {
+    border-left:4px solid #7c5cbf; background:#2b2d31; border-radius:0 4px 4px 0;
+    padding:12px 16px; margin-bottom:8px; position:relative;
+}
+.eb-pe-author { font-size:12px; color:#b5bac1; margin-bottom:4px; display:flex; align-items:center; gap:6px; }
+.eb-pe-title { font-weight:700; color:#fff; font-size:15px; margin-bottom:4px; }
+.eb-pe-desc { color:#dbdee1; font-size:13px; line-height:1.5; white-space:pre-wrap; }
+.eb-pe-fields { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+.eb-pe-field { min-width:0; }
+.eb-pe-field-name { font-weight:700; color:#fff; font-size:13px; }
+.eb-pe-field-value { color:#dbdee1; font-size:13px; }
+.eb-pe-image { max-width:100%; border-radius:4px; margin-top:10px; display:block; }
+.eb-pe-thumb { position:absolute; top:12px; right:12px; width:72px; height:72px; border-radius:4px; object-fit:cover; }
+.eb-pe-footer { font-size:12px; color:#b5bac1; margin-top:8px; }
+.eb-preview-empty { color:#72767d; font-size:13px; text-align:center; padding:20px 0; }
+</style>
+
 {% block scripts %}
 <script>
-function updatePreview() {
-    const title     = document.getElementById('e-title').value;
-    const desc      = document.getElementById('e-desc').value;
-    const color     = document.getElementById('e-color').value;
-    const author    = document.getElementById('e-author').value;
-    const footer    = document.getElementById('e-footer').value;
-    const image     = document.getElementById('e-image').value;
-    const thumbnail = document.getElementById('e-thumbnail').value;
+(function() {
+'use strict';
 
-    document.getElementById('preview-box').style.borderLeftColor = color;
-    document.getElementById('e-color-hex').value = color;
+// ═══════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════
+const MAX_EMBEDS = 10;
+const MAX_ATTACHMENTS = 10;
+const MAX_ATTACH_TOTAL_BYTES = 25 * 1024 * 1024;
+const MAX_CONTENT = 2000;
 
-    const hasContent = title || desc || author || footer;
-    document.getElementById('prev-empty').style.display = hasContent ? 'none' : 'block';
+function blankEmbed() {
+    return { title:'', description:'', color:'#7c5cbf', author:'', footer:'',
+             thumbnail:'', image:'', fields: [] };
+}
 
-    setPrev('prev-author', author);
-    setPrev('prev-title',  title);
-    setPrev('prev-desc',   desc);
-    setPrev('prev-footer', footer);
+let state = {
+    content: '',
+    embeds: [ blankEmbed() ],
+};
+let attachments = []; // { id, name, type, size, blob }
+let activeEmbed = 0;
 
-    const imgEl = document.getElementById('prev-img');
-    const imgC  = document.getElementById('prev-img-container');
-    if (image) { imgEl.src = image; imgC.style.display = 'block'; }
-    else imgC.style.display = 'none';
+// ═══════════════════════════════════════════════════════════════
+// INDEXEDDB DRAFT PERSISTENCE (content/embeds/attachments — client-
+// side only, nothing ever touches the server until Send is pressed)
+// ═══════════════════════════════════════════════════════════════
+const IDB_NAME = 'nero_embedbuilder';
+const IDB_STORE = 'draft';
+let _idb = null;
 
-    const thumbEl = document.getElementById('prev-thumb');
-    const thumbC  = document.getElementById('prev-thumb-container');
-    if (thumbnail) { thumbEl.src = thumbnail; thumbC.style.display = 'block'; }
-    else thumbC.style.display = 'none';
-
-    const pf = document.getElementById('prev-fields');
-    pf.innerHTML = '';
-    document.querySelectorAll('.field-row').forEach(row => {
-        const fname   = row.querySelector('.field-name').value;
-        const fvalue  = row.querySelector('.field-value').value;
-        const finline = row.querySelector('.field-inline').checked;
-        if (fname || fvalue) {
-            const d = document.createElement('div');
-            d.style.cssText = `display:inline-block;${finline ? 'width:45%;margin-right:8px;' : 'width:100%;'}vertical-align:top;`;
-            d.innerHTML = `<div style="font-weight:700;color:#fff;font-size:13px;">${fname}</div>
-                           <div style="color:#dbdee1;font-size:13px;">${fvalue}</div>`;
-            pf.appendChild(d);
-        }
+function openIdb() {
+    return new Promise((resolve, reject) => {
+        if (_idb) return resolve(_idb);
+        const req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = () => {
+            req.result.createObjectStore(IDB_STORE);
+        };
+        req.onsuccess = () => { _idb = req.result; resolve(_idb); };
+        req.onerror = () => reject(req.error);
     });
 }
 
-function setPrev(id, value) {
-    const el = document.getElementById(id);
-    el.textContent = value;
-    el.style.display = value ? 'block' : 'none';
+async function idbSet(key, value) {
+    try {
+        const db = await openIdb();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_STORE, 'readwrite');
+            tx.objectStore(IDB_STORE).put(value, key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    } catch (e) { console.error('[embedbuilder] idbSet failed', e); }
 }
 
-function syncColor(hex) {
-    if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
-        document.getElementById('e-color').value = hex;
-        updatePreview();
+async function idbGet(key) {
+    try {
+        const db = await openIdb();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_STORE, 'readonly');
+            const req = tx.objectStore(IDB_STORE).get(key);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    } catch (e) { console.error('[embedbuilder] idbGet failed', e); return null; }
+}
+
+async function idbClear() {
+    try {
+        const db = await openIdb();
+        return new Promise((resolve) => {
+            const tx = db.transaction(IDB_STORE, 'readwrite');
+            tx.objectStore(IDB_STORE).clear();
+            tx.oncomplete = () => resolve();
+        });
+    } catch (e) { console.error('[embedbuilder] idbClear failed', e); }
+}
+
+function debounce(fn, ms) {
+    let t;
+    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+const saveDraft = debounce(async function() {
+    await idbSet('composer', {
+        content: state.content,
+        embeds: state.embeds,
+        attachments: attachments.map(a => ({ id:a.id, name:a.name, type:a.type, size:a.size, blob:a.blob })),
+        ts: Date.now(),
+    });
+}, 500);
+
+async function restoreDraft() {
+    const draft = await idbGet('composer');
+    if (!draft) return;
+    if (draft.content) state.content = draft.content;
+    if (draft.embeds && draft.embeds.length) state.embeds = draft.embeds;
+    if (draft.attachments && draft.attachments.length) {
+        attachments = draft.attachments.map(a => ({ ...a }));
     }
 }
 
-function addField() {
-    const div = document.createElement('div');
-    div.className = 'field-row';
-    div.style.cssText = 'display:grid;grid-template-columns:1fr 1fr auto auto;gap:8px;margin-bottom:8px;align-items:center;';
-    div.innerHTML = `
-        <input class="form-input field-name" placeholder="Name" oninput="updatePreview()" style="font-size:12px;padding:7px;">
-        <input class="form-input field-value" placeholder="Value" oninput="updatePreview()" style="font-size:12px;padding:7px;">
-        <label class="form-check" style="white-space:nowrap;font-size:12px;">
-            <input type="checkbox" class="field-inline" onchange="updatePreview()"> Inline
-        </label>
-        <button onclick="this.parentElement.remove();updatePreview()"
-            style="background:var(--danger);color:#fff;border:none;border-radius:6px;
-                   padding:6px 10px;cursor:pointer;font-size:12px;">✕</button>`;
-    document.getElementById('fields-container').appendChild(div);
+// ═══════════════════════════════════════════════════════════════
+// UNDO / REDO (content + embeds only — attachments are large binary
+// blobs and are excluded from the history stack by design)
+// ═══════════════════════════════════════════════════════════════
+let history = [];
+let historyIndex = -1;
+let suppressHistory = false;
+
+function snapshotForHistory() {
+    return JSON.stringify({ content: state.content, embeds: state.embeds });
 }
 
-function getEmbedData() {
-    const fields = [];
-    document.querySelectorAll('.field-row').forEach(row => {
-        fields.push({
-            name:   row.querySelector('.field-name').value,
-            value:  row.querySelector('.field-value').value,
-            inline: row.querySelector('.field-inline').checked,
-        });
-    });
-    return {
-        title:       document.getElementById('e-title').value,
-        description: document.getElementById('e-desc').value,
-        color:       document.getElementById('e-color').value,
-        author:      document.getElementById('e-author').value,
-        footer:      document.getElementById('e-footer').value,
-        image:       document.getElementById('e-image').value,
-        thumbnail:   document.getElementById('e-thumbnail').value,
-        fields,
-    };
+const pushHistory = debounce(function() {
+    if (suppressHistory) return;
+    const snap = snapshotForHistory();
+    if (history[historyIndex] === snap) return;
+    history = history.slice(0, historyIndex + 1);
+    history.push(snap);
+    if (history.length > 60) history.shift();
+    historyIndex = history.length - 1;
+    updateUndoRedoButtons();
+}, 350);
+
+function applySnapshot(snap) {
+    const parsed = JSON.parse(snap);
+    suppressHistory = true;
+    state.content = parsed.content;
+    state.embeds = parsed.embeds;
+    activeEmbed = Math.min(activeEmbed, state.embeds.length - 1);
+    renderAll();
+    suppressHistory = false;
 }
 
-async function saveTemplate() {
-    const name = document.getElementById('save-name').value.trim();
-    if (!name) { showToast('Enter a template name', 'danger'); return; }
-    const res  = await fetch('/api/save-embed-template', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ name, embed: getEmbedData() }),
-    });
-    const data = await res.json();
-    if (data.success) { showToast('Template saved!'); loadTemplates(); }
-    else showToast('Error saving', 'danger');
+function undo() {
+    if (historyIndex <= 0) return;
+    historyIndex--;
+    applySnapshot(history[historyIndex]);
+    updateUndoRedoButtons();
 }
 
-function copyJSON() {
-    navigator.clipboard.writeText(JSON.stringify(getEmbedData(), null, 2));
-    showToast('JSON copied!');
+function redo() {
+    if (historyIndex >= history.length - 1) return;
+    historyIndex++;
+    applySnapshot(history[historyIndex]);
+    updateUndoRedoButtons();
 }
 
-async function loadTemplates() {
-    const res  = await fetch('/api/embed-templates');
-    const data = await res.json();
-    const c    = document.getElementById('templates-list');
-    if (!data.templates || !data.templates.length) {
-        c.innerHTML = '<span class="text-muted text-sm">No saved templates yet.</span>';
+function updateUndoRedoButtons() {
+    document.getElementById('eb-undo-btn').disabled = historyIndex <= 0;
+    document.getElementById('eb-redo-btn').disabled = historyIndex >= history.length - 1;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SHARED INSERTION HELPER
+// ═══════════════════════════════════════════════════════════════
+function insertAtCursor(textarea, textToInsert, opts) {
+    opts = opts || {};
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const before = textarea.value.slice(0, start);
+    const after = textarea.value.slice(end);
+    let newValue = before + textToInsert + after;
+    let cursorPos = start + textToInsert.length;
+
+    if (opts.cursorOffset !== undefined) {
+        cursorPos = start + opts.cursorOffset;
+    }
+
+    const maxLen = parseInt(textarea.getAttribute('maxlength')) || Infinity;
+    if (newValue.length > maxLen) {
+        const overflow = newValue.length - maxLen;
+        // Trim from the inserted text itself, not the user's existing content.
+        newValue = before + textToInsert.slice(0, Math.max(0, textToInsert.length - overflow)) + after;
+    }
+
+    textarea.value = newValue;
+    textarea.focus();
+    textarea.setSelectionRange(cursorPos, opts.selectInserted ? start + textToInsert.length : cursorPos);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function wrapSelection(textarea, wrapper) {
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selected = textarea.value.slice(start, end);
+    if (selected.length) {
+        const before = textarea.value.slice(0, start);
+        const after = textarea.value.slice(end);
+        textarea.value = before + wrapper + selected + wrapper + after;
+        textarea.focus();
+        textarea.setSelectionRange(start + wrapper.length, start + wrapper.length + selected.length);
+    } else {
+        insertAtCursor(textarea, wrapper + wrapper, { cursorOffset: wrapper.length });
         return;
     }
-    c.innerHTML = data.templates.map(t => `
-        <div style="display:flex;align-items:center;justify-content:space-between;
-                    padding:9px 0;border-bottom:1px solid var(--border);">
-            <span style="font-size:13px;font-weight:500;">${t}</span>
-            <div style="display:flex;gap:6px;">
-                <button class="btn btn-sm btn-secondary" onclick="loadTemplate('${t}')">Load</button>
-                <button class="btn btn-sm btn-danger" onclick="deleteTemplate('${t}')">Delete</button>
-            </div>
-        </div>`).join('');
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-async function loadTemplate(name) {
-    const res  = await fetch(`/api/embed-template/${name}`);
-    const data = await res.json();
-    if (!data.template) return;
-    const t = data.template;
-    document.getElementById('e-title').value     = t.title       || '';
-    document.getElementById('e-desc').value      = t.description || '';
-    document.getElementById('e-color').value     = t.color       || '#7c5cbf';
-    document.getElementById('e-color-hex').value = t.color       || '#7c5cbf';
-    document.getElementById('e-author').value    = t.author      || '';
-    document.getElementById('e-footer').value    = t.footer      || '';
-    document.getElementById('e-image').value     = t.image       || '';
-    document.getElementById('e-thumbnail').value = t.thumbnail   || '';
-    document.getElementById('fields-container').innerHTML = '';
-    (t.fields || []).forEach(f => {
-        addField();
-        const rows = document.querySelectorAll('.field-row');
-        const last = rows[rows.length - 1];
-        last.querySelector('.field-name').value   = f.name   || '';
-        last.querySelector('.field-value').value  = f.value  || '';
-        last.querySelector('.field-inline').checked = f.inline || false;
+// ═══════════════════════════════════════════════════════════════
+// CONTENT FIELD + TOOLBAR
+// ═══════════════════════════════════════════════════════════════
+const contentInput = document.getElementById('eb-content');
+const contentCounter = document.getElementById('eb-content-counter');
+
+contentInput.addEventListener('input', () => {
+    state.content = contentInput.value;
+    updateContentCounter();
+    renderPreview();
+    saveDraft();
+    pushHistory();
+});
+
+function updateContentCounter() {
+    const len = contentInput.value.length;
+    contentCounter.textContent = `${len} / ${MAX_CONTENT}`;
+    contentCounter.classList.toggle('eb-counter-warn', len > MAX_CONTENT * 0.85 && len <= MAX_CONTENT);
+    contentCounter.classList.toggle('eb-counter-danger', len >= MAX_CONTENT);
+}
+
+document.querySelectorAll('.eb-tbtn[data-fmt]').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const map = { bold: '**', italic: '*', underline: '__', strike: '~~' };
+        wrapSelection(contentInput, map[btn.dataset.fmt]);
+        state.content = contentInput.value;
+        updateContentCounter();
+        renderPreview();
+        saveDraft();
+        pushHistory();
     });
-    updatePreview();
+});
+
+// Remembers where the cursor was in the content textarea before a
+// modal/popover steals focus, so mentions/emoji land in the right spot.
+let savedSelection = { start: 0, end: 0 };
+function captureSelection() {
+    savedSelection = { start: contentInput.selectionStart, end: contentInput.selectionEnd };
+}
+function restoreSelectionAndInsert(text) {
+    contentInput.focus();
+    contentInput.setSelectionRange(savedSelection.start, savedSelection.end);
+    insertAtCursor(contentInput, text);
+    state.content = contentInput.value;
+    updateContentCounter();
+    renderPreview();
+    saveDraft();
+    pushHistory();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MENTION MODAL
+// ═══════════════════════════════════════════════════════════════
+const mentionModal = document.getElementById('eb-mention-modal');
+
+document.getElementById('eb-mention-btn').addEventListener('click', () => {
+    captureSelection();
+    mentionModal.style.display = 'flex';
+});
+document.getElementById('eb-mention-cancel').addEventListener('click', closeMentionModal);
+mentionModal.addEventListener('click', (e) => { if (e.target === mentionModal) closeMentionModal(); });
+function closeMentionModal() {
+    mentionModal.style.display = 'none';
+    contentInput.focus();
+}
+
+document.getElementById('eb-mention-channel-btn').addEventListener('click', () => {
+    const id = $('#eb-mention-channel').val();
+    if (!id) { showToast('Pick a channel', 'warning'); return; }
+    restoreSelectionAndInsert(`<#${id}>`);
+    closeMentionModal();
+});
+document.getElementById('eb-mention-role-btn').addEventListener('click', () => {
+    const id = $('#eb-mention-role').val();
+    if (!id) { showToast('Pick a role', 'warning'); return; }
+    restoreSelectionAndInsert(`<@&${id}>`);
+    closeMentionModal();
+});
+document.getElementById('eb-mention-user-btn').addEventListener('click', () => {
+    const val = document.getElementById('eb-mention-user').value.trim();
+    if (!/^\d{17,20}$/.test(val)) { showToast('Enter a valid Discord user ID', 'warning'); return; }
+    restoreSelectionAndInsert(`<@${val}>`);
+    document.getElementById('eb-mention-user').value = '';
+    closeMentionModal();
+});
+
+// ═══════════════════════════════════════════════════════════════
+// EMOJI POPOVER
+// ═══════════════════════════════════════════════════════════════
+const UNICODE_EMOJI = {
+    'Frequently Used': [],
+    'Smileys': ['😀','😁','😂','🤣','😊','😇','🙂','🙃','😉','😌','😍','🥰','😘','😗','😋','😛','😜','🤪','😝','🤑','🤗','🤔','🤨','😐','😑','😶','🙄','😏','😣','😥','😮','🤐','😯','😪','😫','🥱','😴','😌','😛','🤤','😒','😓','😔','😕','🙃','🫠','🥲','😢','😭','😤','😠','😡','🤬','🤯','😳','🥵','🥶','😱','😨','😰','😥','😓'],
+    'People': ['👋','🤚','🖐️','✋','🖖','👌','🤌','🤏','✌️','🤞','🫰','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','👍','👎','✊','👊','🤛','🤜','👏','🙌','🫶','👐','🤲','🙏','💪','🦾','🫵','🧠','👀','👁️','👶','🧒','👦','👧','🧑','👨','👩','🧓','👴','👵'],
+    'Animals': ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐔','🐧','🐦','🐤','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🐛','🦋','🐌','🐞','🐢','🐍','🦎','🦖','🐙','🐳','🐬','🐟','🐠'],
+    'Food': ['🍏','🍎','🍐','🍊','🍋','🍌','🍉','🍇','🍓','🫐','🍈','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🍆','🥑','🥦','🌽','🥕','🥐','🍞','🥖','🧀','🍗','🍔','🍟','🍕','🌭','🥪','🌮','🌯','🍜','🍣','🍱','🍰','🎂','🍩','🍪','🍫','🍿','🍵','☕'],
+    'Objects': ['⌚','📱','💻','⌨️','🖥️','🖨️','📷','🎥','📞','📺','🎮','🕹️','💡','🔦','📔','📚','📝','✏️','🖊️','📌','📎','✂️','🔒','🔑','🔨','🧰','⚙️','🧲','🔫','🎁','🎈','🎉','🎊','🏆','🥇','🎖️'],
+    'Symbols': ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','✨','⭐','🌟','💫','⚡','🔥','💥','💯','✅','❌','❗','❓','💤','🔔','🔕','🚫','⚠️','♻️','🆗','🆕','🆒','🔞'],
+    'Flags': ['🏁','🚩','🎌','🏴','🏳️','🏳️‍🌈'],
+};
+
+let customEmojiCache = null;
+
+async function loadCustomEmojis() {
+    if (customEmojiCache) return customEmojiCache;
+    try {
+        const res = await fetch('/api/guild/emojis');
+        const data = await res.json();
+        customEmojiCache = data.results || [];
+    } catch (e) {
+        customEmojiCache = [];
+    }
+    return customEmojiCache;
+}
+
+function emojiUrl(id, animated) {
+    return `https://cdn.discordapp.com/emojis/${id}.${animated ? 'gif' : 'png'}`;
+}
+
+function loadFrequentEmojis() {
+    try { return JSON.parse(localStorage.getItem('nero_eb_freq_emoji') || '[]'); }
+    catch (e) { return []; }
+}
+function bumpFrequentEmoji(token) {
+    let freq = loadFrequentEmojis();
+    const idx = freq.findIndex(f => f.token === token.token);
+    if (idx >= 0) freq[idx].count++;
+    else freq.push({ ...token, count: 1 });
+    freq.sort((a, b) => b.count - a.count);
+    freq = freq.slice(0, 16);
+    localStorage.setItem('nero_eb_freq_emoji', JSON.stringify(freq));
+}
+
+const emojiPopover = document.getElementById('eb-emoji-popover');
+const emojiScroll = document.getElementById('eb-emoji-scroll');
+const emojiSearch = document.getElementById('eb-emoji-search');
+let emojiInsertTarget = null; // which textarea gets the emoji
+
+async function openEmojiPopover(anchorBtn, targetTextarea) {
+    emojiInsertTarget = targetTextarea;
+    if (targetTextarea === contentInput) captureSelection();
+    await loadCustomEmojis();
+    emojiSearch.value = '';
+    renderEmojiGrid('');
+    const rect = anchorBtn.getBoundingClientRect();
+    emojiPopover.style.top = `${rect.bottom + 6}px`;
+    emojiPopover.style.left = `${Math.max(8, rect.left - 280)}px`;
+    emojiPopover.style.display = 'flex';
+    emojiSearch.focus();
+}
+function closeEmojiPopover() { emojiPopover.style.display = 'none'; emojiInsertTarget = null; }
+
+document.getElementById('eb-emoji-btn').addEventListener('click', (e) => openEmojiPopover(e.currentTarget, contentInput));
+document.addEventListener('click', (e) => {
+    if (emojiPopover.style.display !== 'none' && !emojiPopover.contains(e.target) && e.target.id !== 'eb-emoji-btn' && !e.target.closest('.eb-emoji-embed-btn')) {
+        closeEmojiPopover();
+    }
+});
+
+function renderEmojiGrid(query) {
+    const q = query.trim().toLowerCase();
+    const freq = loadFrequentEmojis();
+    let html = '';
+
+    function cell(display, token, isImg) {
+        return `<button type="button" class="eb-emoji-cell" data-token="${_ebEsc(token)}" title="${_ebEsc(token)}">${isImg ? display : display}</button>`;
+    }
+
+    if (!q && freq.length) {
+        html += `<div class="eb-emoji-cat-label">Frequently Used</div><div class="eb-emoji-grid">`;
+        html += freq.map(f => f.img
+            ? cell(`<img src="${_ebEsc(f.img)}" alt="">`, f.token, true)
+            : cell(_ebEsc(f.char), f.token, false)).join('');
+        html += `</div>`;
+    }
+
+    for (const [cat, list] of Object.entries(UNICODE_EMOJI)) {
+        if (cat === 'Frequently Used') continue;
+        const filtered = q ? list.filter(e => true) : list; // unicode has no name metadata here — search matches by category name below
+        if (q && !cat.toLowerCase().includes(q)) {
+            // still allow individual glyphs through on generic queries — keep it simple, skip category filtering by glyph name
+            continue;
+        }
+        if (!filtered.length) continue;
+        html += `<div class="eb-emoji-cat-label">${_ebEsc(cat)}</div><div class="eb-emoji-grid">`;
+        html += filtered.map(ch => cell(_ebEsc(ch), ch, false)).join('');
+        html += `</div>`;
+    }
+
+    const custom = (customEmojiCache || []).filter(e => !q || e.name.toLowerCase().includes(q));
+    if (custom.length) {
+        html += `<div class="eb-emoji-cat-label">Custom Emojis</div><div class="eb-emoji-grid">`;
+        html += custom.map(e => {
+            const token = e.animated ? `<a:${e.name}:${e.id}>` : `<:${e.name}:${e.id}>`;
+            return cell(`<img src="${emojiUrl(e.id, e.animated)}" alt="${_ebEsc(e.name)}">`, token, true);
+        }).join('');
+        html += `</div>`;
+    }
+
+    if (!html) html = `<div class="eb-emoji-empty">No emoji matched "${_ebEsc(query)}"</div>`;
+    emojiScroll.innerHTML = html;
+
+    emojiScroll.querySelectorAll('.eb-emoji-cell').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const token = btn.dataset.token;
+            const imgEl = btn.querySelector('img');
+            bumpFrequentEmoji(imgEl
+                ? { token, img: imgEl.getAttribute('src') }
+                : { token, char: token });
+            if (emojiInsertTarget === contentInput) {
+                restoreSelectionAndInsert(token);
+            } else if (emojiInsertTarget) {
+                insertAtCursor(emojiInsertTarget, token);
+                emojiInsertTarget.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            closeEmojiPopover();
+        });
+    });
+}
+
+emojiSearch.addEventListener('input', () => renderEmojiGrid(emojiSearch.value));
+
+function _ebEsc(str) {
+    const d = document.createElement('div');
+    d.textContent = str == null ? '' : String(str);
+    return d.innerHTML;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ATTACHMENTS
+// ═══════════════════════════════════════════════════════════════
+const dropzone = document.getElementById('eb-dropzone');
+const fileInput = document.getElementById('eb-file-input');
+const attachGrid = document.getElementById('eb-attach-grid');
+const attachCounter = document.getElementById('eb-attach-counter');
+
+document.getElementById('eb-file-browse').addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('click', (e) => { if (e.target === dropzone || e.target.tagName !== 'BUTTON') fileInput.click(); });
+fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
+
+['dragenter', 'dragover'].forEach(evt => dropzone.addEventListener(evt, (e) => {
+    e.preventDefault(); dropzone.classList.add('eb-dragover');
+}));
+['dragleave', 'drop'].forEach(evt => dropzone.addEventListener(evt, (e) => {
+    e.preventDefault(); dropzone.classList.remove('eb-dragover');
+}));
+dropzone.addEventListener('drop', (e) => addFiles(e.dataTransfer.files));
+
+function addFiles(fileList) {
+    let totalBytes = attachments.reduce((s, a) => s + a.size, 0);
+    for (const f of fileList) {
+        if (attachments.length >= MAX_ATTACHMENTS) {
+            showToast(`Max ${MAX_ATTACHMENTS} attachments`, 'warning'); break;
+        }
+        if (totalBytes + f.size > MAX_ATTACH_TOTAL_BYTES) {
+            showToast('Attachments would exceed the 25MB total limit', 'warning'); break;
+        }
+        totalBytes += f.size;
+        attachments.push({
+            id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            name: f.name, type: f.type, size: f.size, blob: f,
+        });
+    }
+    renderAttachments();
+    renderPreview();
+    saveDraft();
+}
+
+function removeAttachment(id) {
+    attachments = attachments.filter(a => a.id !== id);
+    renderAttachments();
+    renderPreview();
+    saveDraft();
+}
+
+function fmtBytes(n) {
+    if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(2) + 'MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + 'KB';
+    return n + 'B';
+}
+
+function renderAttachments() {
+    const totalBytes = attachments.reduce((s, a) => s + a.size, 0);
+    attachCounter.textContent = `${attachments.length} / ${MAX_ATTACHMENTS} · ${fmtBytes(totalBytes)} / 25MB`;
+    attachCounter.classList.toggle('eb-counter-warn', totalBytes > MAX_ATTACH_TOTAL_BYTES * 0.8);
+
+    attachGrid.innerHTML = attachments.map(a => {
+        const isImg = a.type && a.type.startsWith('image/');
+        const url = URL.createObjectURL(a.blob);
+        const inner = isImg
+            ? `<img class="eb-attach-thumb" src="${url}" alt="">`
+            : `<div class="eb-attach-icon">📄</div>`;
+        return `<div class="eb-attach-item">
+            <button type="button" class="eb-attach-remove" data-id="${a.id}" aria-label="Remove ${_ebEsc(a.name)}">✕</button>
+            ${inner}
+            <div class="eb-attach-name" title="${_ebEsc(a.name)}">${_ebEsc(a.name)}</div>
+        </div>`;
+    }).join('');
+
+    attachGrid.querySelectorAll('.eb-attach-remove').forEach(btn => {
+        btn.addEventListener('click', () => removeAttachment(btn.dataset.id));
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// EMBEDS (accordion, up to 10)
+// ═══════════════════════════════════════════════════════════════
+const embedsList = document.getElementById('eb-embeds-list');
+const embedCounter = document.getElementById('eb-embed-counter');
+
+document.getElementById('eb-add-embed').addEventListener('click', () => {
+    if (state.embeds.length >= MAX_EMBEDS) { showToast(`Max ${MAX_EMBEDS} embeds per message`, 'warning'); return; }
+    state.embeds.push(blankEmbed());
+    activeEmbed = state.embeds.length - 1;
+    renderEmbeds();
+    renderPreview();
+    saveDraft();
+    pushHistory();
+});
+
+function duplicateEmbed(i) {
+    if (state.embeds.length >= MAX_EMBEDS) { showToast(`Max ${MAX_EMBEDS} embeds per message`, 'warning'); return; }
+    state.embeds.splice(i + 1, 0, JSON.parse(JSON.stringify(state.embeds[i])));
+    activeEmbed = i + 1;
+    renderEmbeds(); renderPreview(); saveDraft(); pushHistory();
+}
+function deleteEmbed(i) {
+    if (state.embeds.length <= 1) { showToast('At least one embed is required — clear its fields instead', 'warning'); return; }
+    state.embeds.splice(i, 1);
+    activeEmbed = Math.min(activeEmbed, state.embeds.length - 1);
+    renderEmbeds(); renderPreview(); saveDraft(); pushHistory();
+}
+
+function renderEmbeds() {
+    embedCounter.textContent = `${state.embeds.length} / ${MAX_EMBEDS}`;
+    embedsList.innerHTML = state.embeds.map((e, i) => `
+        <div class="eb-embed-card ${i === activeEmbed ? 'eb-expanded' : ''}" data-idx="${i}">
+            <div class="eb-embed-head" data-toggle="${i}">
+                <span class="eb-embed-chevron">›</span>
+                <span class="eb-embed-title-preview">Embed ${i + 1}${e.title ? ' — ' + _ebEsc(e.title) : ''}</span>
+                <div class="eb-embed-actions">
+                    <button type="button" class="btn btn-sm btn-secondary" data-dup="${i}" title="Duplicate">⧉</button>
+                    <button type="button" class="btn btn-sm btn-danger" data-del="${i}" title="Delete">🗑️</button>
+                </div>
+            </div>
+            <div class="eb-embed-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Title</label>
+                        <input class="form-input" data-field="title" data-idx="${i}" value="${_ebAttr(e.title)}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Color</label>
+                        <div style="display:flex;gap:8px;align-items:center;">
+                            <input type="color" data-field="color" data-idx="${i}" value="${_ebAttr(e.color || '#7c5cbf')}"
+                                style="width:42px;height:36px;border-radius:8px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:2px;">
+                            <input class="form-input" data-field="color-hex" data-idx="${i}" value="${_ebAttr(e.color || '#7c5cbf')}" style="flex:1;">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Author</label>
+                        <input class="form-input" data-field="author" data-idx="${i}" value="${_ebAttr(e.author)}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Footer</label>
+                        <input class="form-input" data-field="footer" data-idx="${i}" value="${_ebAttr(e.footer)}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Thumbnail URL</label>
+                        <input class="form-input" data-field="thumbnail" data-idx="${i}" value="${_ebAttr(e.thumbnail)}" placeholder="https://...">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Image URL</label>
+                        <input class="form-input" data-field="image" data-idx="${i}" value="${_ebAttr(e.image)}" placeholder="https://...">
+                    </div>
+                    <div class="form-group" style="grid-column:1/-1;">
+                        <label class="form-label">Description <span class="text-muted text-sm">(${(e.description||'').length} / 4096)</span></label>
+                        <textarea class="form-input" data-field="description" data-idx="${i}" rows="3" maxlength="4096">${_ebEsc(e.description)}</textarea>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Fields</label>
+                    <div data-fields-for="${i}">
+                        ${(e.fields || []).map((f, fi) => `
+                        <div class="eb-embed-fieldrow" data-field-idx="${fi}">
+                            <input class="form-input" placeholder="Name" data-fieldname="${i}:${fi}" value="${_ebAttr(f.name)}">
+                            <input class="form-input" placeholder="Value" data-fieldvalue="${i}:${fi}" value="${_ebAttr(f.value)}">
+                            <label class="form-check" style="white-space:nowrap;"><input type="checkbox" data-fieldinline="${i}:${fi}" ${f.inline ? 'checked' : ''}> Inline</label>
+                            <button type="button" class="btn btn-sm btn-danger" data-fielddel="${i}:${fi}">✕</button>
+                        </div>`).join('')}
+                    </div>
+                    <button type="button" class="btn btn-sm btn-secondary" data-addfield="${i}" style="margin-top:6px;">+ Add Field</button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+
+    wireEmbedEvents();
+}
+
+function _ebAttr(str) { return _ebEsc(str || ''); }
+
+function wireEmbedEvents() {
+    embedsList.querySelectorAll('[data-toggle]').forEach(head => {
+        head.addEventListener('click', () => {
+            const i = parseInt(head.dataset.toggle);
+            activeEmbed = (activeEmbed === i) ? -1 : i;
+            renderEmbeds();
+        });
+    });
+    embedsList.querySelectorAll('[data-dup]').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); duplicateEmbed(parseInt(btn.dataset.dup)); }));
+    embedsList.querySelectorAll('[data-del]').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); deleteEmbed(parseInt(btn.dataset.del)); }));
+
+    embedsList.querySelectorAll('[data-field]').forEach(el => {
+        el.addEventListener('input', () => {
+            const i = parseInt(el.dataset.idx);
+            const field = el.dataset.field;
+            if (field === 'color') {
+                state.embeds[i].color = el.value;
+                const hexInput = embedsList.querySelector(`[data-field="color-hex"][data-idx="${i}"]`);
+                if (hexInput) hexInput.value = el.value;
+            } else if (field === 'color-hex') {
+                if (/^#[0-9A-Fa-f]{6}$/.test(el.value)) {
+                    state.embeds[i].color = el.value;
+                    const picker = embedsList.querySelector(`[data-field="color"][data-idx="${i}"]`);
+                    if (picker) picker.value = el.value;
+                }
+            } else {
+                state.embeds[i][field] = el.value;
+            }
+            if (field === 'title') {
+                const label = embedsList.querySelector(`.eb-embed-card[data-idx="${i}"] .eb-embed-title-preview`);
+                if (label) label.textContent = `Embed ${i + 1}${el.value ? ' — ' + el.value : ''}`;
+            }
+            if (field === 'description') {
+                const counter = el.closest('.form-group').querySelector('.text-muted');
+                if (counter) counter.textContent = `(${el.value.length} / 4096)`;
+            }
+            renderPreview();
+            saveDraft();
+            pushHistory();
+        });
+    });
+
+    embedsList.querySelectorAll('[data-addfield]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const i = parseInt(btn.dataset.addfield);
+            state.embeds[i].fields = state.embeds[i].fields || [];
+            if (state.embeds[i].fields.length >= 25) { showToast('Discord caps embeds at 25 fields', 'warning'); return; }
+            state.embeds[i].fields.push({ name: '', value: '', inline: false });
+            renderEmbeds(); renderPreview(); saveDraft(); pushHistory();
+        });
+    });
+
+    embedsList.querySelectorAll('[data-fieldname]').forEach(el => el.addEventListener('input', () => {
+        const [i, fi] = el.dataset.fieldname.split(':').map(Number);
+        state.embeds[i].fields[fi].name = el.value;
+        renderPreview(); saveDraft(); pushHistory();
+    }));
+    embedsList.querySelectorAll('[data-fieldvalue]').forEach(el => el.addEventListener('input', () => {
+        const [i, fi] = el.dataset.fieldvalue.split(':').map(Number);
+        state.embeds[i].fields[fi].value = el.value;
+        renderPreview(); saveDraft(); pushHistory();
+    }));
+    embedsList.querySelectorAll('[data-fieldinline]').forEach(el => el.addEventListener('change', () => {
+        const [i, fi] = el.dataset.fieldinline.split(':').map(Number);
+        state.embeds[i].fields[fi].inline = el.checked;
+        renderPreview(); saveDraft(); pushHistory();
+    }));
+    embedsList.querySelectorAll('[data-fielddel]').forEach(el => el.addEventListener('click', () => {
+        const [i, fi] = el.dataset.fielddel.split(':').map(Number);
+        state.embeds[i].fields.splice(fi, 1);
+        renderEmbeds(); renderPreview(); saveDraft(); pushHistory();
+    }));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LIVE PREVIEW
+// ═══════════════════════════════════════════════════════════════
+const previewBox = document.getElementById('eb-preview');
+
+function renderPreview() {
+    let html = '';
+    if (state.content) html += `<div class="eb-preview-content">${_ebEsc(state.content)}</div>`;
+
+    if (attachments.length) {
+        html += `<div class="eb-preview-attachments">`;
+        html += attachments.filter(a => a.type && a.type.startsWith('image/')).map(a =>
+            `<img src="${URL.createObjectURL(a.blob)}" alt="${_ebAttr(a.name)}">`).join('');
+        const nonImg = attachments.filter(a => !a.type || !a.type.startsWith('image/'));
+        if (nonImg.length) html += nonImg.map(a => `<span class="badge">📄 ${_ebEsc(a.name)}</span>`).join('');
+        html += `</div>`;
+    }
+
+    const nonEmpty = state.embeds.filter(e => e.title || e.description || e.author || e.footer || e.image || e.thumbnail || (e.fields && e.fields.length));
+    for (const e of nonEmpty) {
+        html += `<div class="eb-preview-embed" style="border-left-color:${_ebAttr(e.color || '#7c5cbf')};">`;
+        if (e.author) html += `<div class="eb-pe-author">${_ebEsc(e.author)}</div>`;
+        if (e.title) html += `<div class="eb-pe-title">${_ebEsc(e.title)}</div>`;
+        if (e.description) html += `<div class="eb-pe-desc">${_ebEsc(e.description)}</div>`;
+        if (e.fields && e.fields.length) {
+            html += `<div class="eb-pe-fields">`;
+            html += e.fields.filter(f => f.name || f.value).map(f =>
+                `<div class="eb-pe-field" style="${f.inline ? 'width:31%;' : 'width:100%;'}">
+                    <div class="eb-pe-field-name">${_ebEsc(f.name)}</div>
+                    <div class="eb-pe-field-value">${_ebEsc(f.value)}</div>
+                </div>`).join('');
+            html += `</div>`;
+        }
+        if (e.image) html += `<img class="eb-pe-image" src="${_ebAttr(e.image)}" alt="">`;
+        if (e.thumbnail) html += `<img class="eb-pe-thumb" src="${_ebAttr(e.thumbnail)}" alt="">`;
+        if (e.footer) html += `<div class="eb-pe-footer">${_ebEsc(e.footer)}</div>`;
+        html += `</div>`;
+    }
+
+    if (!html) html = `<div class="eb-preview-empty">Start typing to see a preview...</div>`;
+    previewBox.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SEND / TEMPLATES / CLEAR
+// ═══════════════════════════════════════════════════════════════
+function setStatus(msg, ok) {
+    const el = document.getElementById('eb-status');
+    el.textContent = msg;
+    el.style.color = ok ? 'var(--success)' : 'var(--danger)';
+    setTimeout(() => { el.textContent = ''; }, 4000);
+}
+
+function cleanEmbedsForPayload() {
+    return state.embeds
+        .filter(e => e.title || e.description || e.author || e.footer || e.image || e.thumbnail || (e.fields && e.fields.length))
+        .map(e => {
+            const out = {};
+            if (e.title) out.title = e.title;
+            if (e.description) out.description = e.description;
+            if (e.color) { try { out.color = parseInt(e.color.replace('#', ''), 16); } catch (err) {} }
+            if (e.author) out.author = { name: e.author };
+            if (e.footer) out.footer = { text: e.footer };
+            if (e.image) out.image = { url: e.image };
+            if (e.thumbnail) out.thumbnail = { url: e.thumbnail };
+            if (e.fields && e.fields.length) {
+                out.fields = e.fields.filter(f => f.name || f.value).map(f => ({
+                    name: f.name || '\u200b', value: f.value || '\u200b', inline: !!f.inline,
+                }));
+            }
+            return out;
+        });
+}
+
+document.getElementById('eb-send-btn').addEventListener('click', async () => {
+    const channelId = $('#eb-send-channel').val();
+    if (!channelId) { showToast('Pick a channel to send to', 'warning'); return; }
+
+    const embeds = cleanEmbedsForPayload();
+    if (!state.content && !embeds.length && !attachments.length) {
+        showToast('Nothing to send — add content, an embed, or an attachment', 'warning');
+        return;
+    }
+
+    showConfirm(`Send this message to the selected channel now? This cannot be undone.`, async () => {
+        const btn = document.getElementById('eb-send-btn');
+        setLoading(btn, true, 'Sending…');
+        try {
+            const fd = new FormData();
+            fd.append('channel_id', channelId);
+            fd.append('payload_json', JSON.stringify({ content: state.content || undefined, embeds }));
+            attachments.forEach(a => fd.append('files', a.blob, a.name));
+
+            const res = await fetch('/api/embedbuilder/send', {
+                method: 'POST',
+                headers: { 'X-CSRF-Token': window.__CSRF_TOKEN__ || '' },
+                body: fd,
+            });
+            const data = await res.json();
+            if (data.success) {
+                setStatus('✅ Sent!', true);
+                showToast('Message sent!');
+            } else {
+                setStatus('❌ ' + (data.error || 'Send failed'), false);
+                showToast(data.error || 'Send failed', 'error');
+            }
+        } catch (e) {
+            setStatus('❌ Connection error', false);
+        } finally {
+            setLoading(btn, false);
+        }
+    });
+});
+
+document.getElementById('eb-save-template-btn').addEventListener('click', async () => {
+    const name = document.getElementById('eb-template-name').value.trim();
+    if (!name) { showToast('Enter a template name', 'warning'); return; }
+    const res = await fetch('/api/embedbuilder/template/save', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, content: state.content, embeds: cleanEmbedsForPayload() }),
+    });
+    const data = await res.json();
+    if (data.success) { showToast('Template saved!'); loadTemplateOptions(); }
+    else showToast(data.error || 'Error saving template', 'error');
+});
+
+document.getElementById('eb-copy-json-btn').addEventListener('click', () => {
+    const payload = { content: state.content, embeds: cleanEmbedsForPayload() };
+    navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+    showToast('JSON copied!');
+});
+
+async function loadTemplateOptions() {
+    const res = await fetch('/api/embedbuilder/templates');
+    const data = await res.json();
+    const sel = document.getElementById('eb-template-select');
+    sel.innerHTML = '<option value="">Select a template…</option>' +
+        (data.templates || []).map(t => `<option value="${_ebAttr(t)}">${_ebEsc(t)}</option>`).join('');
+}
+loadTemplateOptions();
+
+document.getElementById('eb-load-template-btn').addEventListener('click', async () => {
+    const name = document.getElementById('eb-template-select').value;
+    if (!name) { showToast('Pick a template to load', 'warning'); return; }
+    const res = await fetch(`/api/embedbuilder/template/${encodeURIComponent(name)}`);
+    const data = await res.json();
+    if (!data.template) { showToast('Template not found', 'error'); return; }
+    state.content = data.template.content || '';
+    state.embeds = (data.template.embeds || []).map(e => ({
+        title: e.title || '', description: e.description || '',
+        color: e.color !== undefined ? '#' + (typeof e.color === 'number' ? e.color.toString(16).padStart(6, '0') : e.color) : '#7c5cbf',
+        author: (e.author && e.author.name) || e.author || '',
+        footer: (e.footer && e.footer.text) || e.footer || '',
+        thumbnail: (e.thumbnail && e.thumbnail.url) || e.thumbnail || '',
+        image: (e.image && e.image.url) || e.image || '',
+        fields: e.fields || [],
+    }));
+    if (!state.embeds.length) state.embeds = [blankEmbed()];
+    activeEmbed = 0;
+    renderAll();
+    saveDraft();
+    pushHistory();
     showToast('Template loaded!');
+});
+
+document.getElementById('eb-delete-template-btn').addEventListener('click', () => {
+    const name = document.getElementById('eb-template-select').value;
+    if (!name) { showToast('Pick a template to delete', 'warning'); return; }
+    showConfirm(`Delete template "${name}"?`, async () => {
+        const res = await fetch(`/api/embedbuilder/template/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.success) { showToast('Template deleted', 'info'); loadTemplateOptions(); }
+        else showToast('Error deleting template', 'error');
+    });
+});
+
+document.getElementById('eb-clear-btn').addEventListener('click', () => {
+    showConfirm('Clear the entire composer — content, all embeds, and attachments? This cannot be undone.', async () => {
+        state = { content: '', embeds: [blankEmbed()] };
+        attachments = [];
+        activeEmbed = 0;
+        history = [];
+        historyIndex = -1;
+        renderAll();
+        await idbClear();
+        pushHistory();
+        showToast('Composer cleared', 'info');
+    });
+});
+
+document.getElementById('eb-undo-btn').addEventListener('click', undo);
+document.getElementById('eb-redo-btn').addEventListener('click', redo);
+document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+    if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// RENDER ALL / INIT
+// ═══════════════════════════════════════════════════════════════
+function renderAll() {
+    contentInput.value = state.content;
+    updateContentCounter();
+    renderEmbeds();
+    renderAttachments();
+    renderPreview();
 }
 
-async function deleteTemplate(name) {
-    await fetch(`/api/embed-template/${name}`, { method: 'DELETE' });
-    loadTemplates();
-}
+(async function init() {
+    await restoreDraft();
+    renderAll();
+    history = [snapshotForHistory()];
+    historyIndex = 0;
+    updateUndoRedoButtons();
+})();
 
-loadTemplates();
-updatePreview();
+})();
 </script>
 {% endblock %}
 {% endblock %}

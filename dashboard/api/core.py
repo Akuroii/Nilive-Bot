@@ -79,6 +79,36 @@ def get_guild_channels():
     return jsonify({"results": results})
 
 
+# ── Custom guild emojis (Embed Builder emoji picker) ────────────────────────
+#
+# Same shape/pattern as get_guild_roles/get_guild_channels above — the bot
+# token never reaches the frontend, only the fields the emoji picker needs
+# (name, id, animated). Cached client-side for the session by the composer
+# JS rather than re-fetched on every popover open.
+@api_bp.route("/guild/emojis")
+@require_api_permission(LEVEL_MODERATOR)
+def get_guild_emojis():
+    guild_id  = get_session_guild_id()
+    bot_token = os.getenv("DISCORD_TOKEN", "")
+    if not bot_token:
+        return jsonify({"results": [], "error": "BOT_TOKEN not set"})
+    resp = _req.get(
+        f"https://discord.com/api/v10/guilds/{guild_id}/emojis",
+        headers={"Authorization": f"Bot {bot_token}"},
+        timeout=8,
+    )
+    if resp.status_code != 200:
+        return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
+    emojis = resp.json()
+    results = [{
+        "id":       e["id"],
+        "name":     e["name"],
+        "animated": bool(e.get("animated")),
+    } for e in emojis if e.get("id") and e.get("name")]
+    results.sort(key=lambda e: e["name"].lower())
+    return jsonify({"results": results})
+
+
 # Compatibility shims
 @api_bp.route("/roles")
 @require_api_permission(LEVEL_MODERATOR)
@@ -194,5 +224,3 @@ def api_activity_user(user_id: int):
             "forum_posts_count": r[4],
         } for r in daily],
     })
-
-
