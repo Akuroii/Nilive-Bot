@@ -86,9 +86,11 @@ async function loadLedger() {
         return;
     }
     // dark-fixes pass #18 (username resolver rollout): data.user_map is
-    // keyed by user_id (JSON coerces int keys to strings — the lookup
-    // below stringifies e.user_id the same way, so it lines up either
-    // way). userIdentityHtml() is the JS twin of
+    // keyed by user_id and e.user_id travels as a STRING — the API
+    // stringifies it because Discord snowflakes exceed JS's 2^53 number
+    // precision, so a JSON number would arrive with corrupted trailing
+    // digits and this lookup would silently miss (falling back to the
+    // "User <id>" no-avatar cell). userIdentityHtml() is the JS twin of
     // dashboard/utils/user_identity.py — same escaping, same markup,
     // rendered client-side since this table is rebuilt from fetch() on
     // every filter/refresh. Same pattern as trade.html.

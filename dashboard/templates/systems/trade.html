@@ -59,9 +59,11 @@ async function loadTrades() {
     }
 
     // dark-fixes pass #18 (username resolver rollout, task #4 of 6):
-    // data.user_map is keyed by user_id (JSON coerces int keys to
-    // strings — template literals below stringify t.user_a/t.user_b
-    // the same way, so the lookup lines up either way). userIdentityHtml()
+    // data.user_map is keyed by user_id and t.user_a/t.user_b travel
+    // as STRINGS — the API stringifies them because Discord snowflakes
+    // exceed JS's 2^53 number precision, so a JSON number would arrive
+    // with corrupted trailing digits and this lookup would silently
+    // miss (falling back to the "User <id>" no-avatar cell). userIdentityHtml()
     // is the JS twin of dashboard/utils/user_identity.py — same
     // escaping, same markup, just rendered client-side since this
     // page builds its table from fetch() rather than server templates.
