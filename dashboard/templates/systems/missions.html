@@ -227,7 +227,9 @@ async function loadMissionLog() {
         return;
     }
     // dark-fixes pass #18 (username resolver rollout): data.user_map is
-    // keyed by user_id; userIdentityHtml() is the JS twin of
+    // keyed by user_id and c.user_id travels as a STRING (snowflakes
+    // exceed JS's 2^53 number precision — see /api/trade/history);
+    // userIdentityHtml() is the JS twin of
     // dashboard/utils/user_identity.py (same pattern as trade.html).
     const userMap = data.user_map || {};
     tbody.innerHTML = data.completions.map(c => {
