@@ -65,9 +65,13 @@ async function loadTrades() {
     // is the JS twin of dashboard/utils/user_identity.py — same
     // escaping, same markup, just rendered client-side since this
     // page builds its table from fetch() rather than server templates.
-    // compact=true here: this cell already carries a "gave <offer>"
-    // sentence after the name, so the avatar is dropped to keep each
-    // row from growing too tall.
+    //
+    // UPDATED: now rendered full-size (avatar included, compact=false)
+    // to match the rest of the dashboard's "Username (big) / User ID
+    // (small)" pattern (Economy, Members, Ledger, Missions, Tickets),
+    // with the "gave <offer>" line stacked underneath instead of
+    // trailing inline — same layout used elsewhere whenever an
+    // identity cell needs a second line of context.
     const userMap = data.user_map || {};
     tbody.innerHTML = data.trades.map(t => {
         const a = userMap[t.user_a] || {};
@@ -77,8 +81,18 @@ async function loadTrades() {
         return `
         <tr>
             <td><strong>#${t.id}</strong></td>
-            <td>${userIdentityHtml(t.user_a, aName, a.avatar_url, true)} gave ${summarizeOffer(t.offer_a)}</td>
-            <td>${userIdentityHtml(t.user_b, bName, b.avatar_url, true)} gave ${summarizeOffer(t.offer_b)}</td>
+            <td>
+                <div style="display:flex;flex-direction:column;gap:6px;">
+                    ${userIdentityHtml(t.user_a, aName, a.avatar_url, false)}
+                    <span class="text-muted text-sm">gave ${summarizeOffer(t.offer_a)}</span>
+                </div>
+            </td>
+            <td>
+                <div style="display:flex;flex-direction:column;gap:6px;">
+                    ${userIdentityHtml(t.user_b, bName, b.avatar_url, false)}
+                    <span class="text-muted text-sm">gave ${summarizeOffer(t.offer_b)}</span>
+                </div>
+            </td>
             <td class="text-muted">${t.created_at ? t.created_at.slice(0,16) : '—'}</td>
         </tr>`;
     }).join('');
