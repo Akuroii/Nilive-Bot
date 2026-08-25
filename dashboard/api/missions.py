@@ -138,6 +138,12 @@ def get_mission_completions_api():
 
     rows = run_async(fetch())
 
+    # Snowflake safety: user IDs travel to the client as STRINGS — same
+    # reason as /api/trade/history (JS numbers lose precision past 2^53,
+    # which would corrupt trailing digits and break loadMissionLog()'s
+    # userMap lookup).
+    rows = [{**c, "user_id": str(c["user_id"])} for c in rows]
+
     # dark-fixes pass #18 (username resolver rollout): one batched
     # resolve_users() call covering every user on the page. The map
     # travels in the JSON payload so loadMissionLog() renders the user

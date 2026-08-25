@@ -51,6 +51,18 @@ def api_trade_history():
 
     rows = run_async(fetch())
 
+    # Snowflake safety: user IDs travel to the client as STRINGS, not JSON
+    # numbers. Discord snowflakes (~1.7e18) exceed JS's
+    # Number.MAX_SAFE_INTEGER (2^53), so if user_a/user_b were serialized
+    # as numbers, JSON.parse() would silently corrupt their trailing
+    # digits (704453350384730200 → …240) and the userMap[t.user_a]
+    # lookup in trade.html would never match the user_map keys (whose
+    # digits ARE exact — Python int keys stringify losslessly in JSON).
+    # Every client-side consumer of this payload uses the value only for
+    # display + map lookup, so string form is safe everywhere.
+    rows = [{**t, "user_a": str(t["user_a"]), "user_b": str(t["user_b"])}
+            for t in rows]
+
     async def resolve():
         from utils.discord_user_cache import resolve_users
         ids = set()

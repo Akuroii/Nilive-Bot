@@ -265,6 +265,18 @@ def api_ledger():
 
     entries = run_async(fetch())
 
+    # Snowflake safety: user IDs travel to the client as STRINGS — same
+    # reason as /api/trade/history (JS numbers lose precision past 2^53,
+    # which would corrupt trailing digits and break loadLedger()'s
+    # userMap lookup on the refresh/filter path). The initial server-
+    # rendered pass is Python-side and already exact.
+    entries = [{
+        **e,
+        "user_id": str(e["user_id"]),
+        "related_user_id": (str(e["related_user_id"])
+                            if e["related_user_id"] is not None else None),
+    } for e in entries]
+
     # dark-fixes pass #18 (username resolver rollout): one batched
     # resolve_users() call covering every user on the page. The map
     # travels in the JSON payload so loadLedger() renders the user cell
