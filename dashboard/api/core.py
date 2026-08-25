@@ -109,6 +109,100 @@ def get_guild_emojis():
     return jsonify({"results": results})
 
 
+# ── "External" custom emojis — every OTHER guild the bot is in ─────────────
+#
+# Discord has no concept of "any emoji from anywhere" for a bot — a bot can
+# only reliably render/send a custom emoji from a guild it is actually a
+# member of, and the DESTINATION channel needs "Use External Emojis" enabled
+# for the bot for it to render there. There is no safe way to accept an
+# arbitrary emoji ID from a server the bot has never joined.
+#
+# Nilive is already a small, controlled multi-server bot (2-10 friend
+# servers, per project scope) — every one of those IS a guild the bot is a
+# member of, so surfacing their emoji lists in the picker (clearly labeled
+# by server) is both possible and safe: every emoji offered here is one the
+# bot can actually deliver, unlike a free-text "type any ID" field would be.
+# Discord's own message-send call is still the final authority — if the
+# destination channel doesn't have Use External Emojis enabled for the bot,
+# Discord's API rejects the send and dashboard/api/embedbuilder.py's
+# /send route already surfaces that error back to the composer.
+#
+# Reuses fetch_bot_guilds_full() (dashboard/auth.py — already powers the
+# developer's "every bot guild" server-select view) rather than adding a
+# second way to enumerate the bot's guilds. Capped implicitly by the
+# project's own guild count (2-10), so no pagination/rate-limit concerns.
+@api_bp.route("/guild/emojis/external")
+@require_api_permission(LEVEL_MODERATOR)
+def get_external_guild_emojis():
+    current_guild_id = get_session_guild_id()
+    bot_token = os.getenv("DISCORD_TOKEN", "")
+    if not bot_token:
+        return jsonify({"servers": [], "error": "BOT_TOKEN not set"})
+
+    from dashboard.auth import fetch_bot_guilds_full
+    other_guilds = [g for g in fetch_bot_guilds_full() if int(g["id"]) != current_guild_id]
+
+    headers = {"Authorization": f"Bot {bot_token}"}
+    servers = []
+    for g in other_guilds:
+        try:
+            resp = _req.get(
+                f"https://discord.com/api/v10/guilds/{g['id']}/emojis",
+                headers=headers, timeout=8)
+            if resp.status_code != 200:
+                continue
+            emojis = [{
+                "id": e["id"], "name": e["name"], "animated": bool(e.get("animated")),
+            } for e in resp.json() if e.get("id") and e.get("name")]
+            if not emojis:
+                continue
+            emojis.sort(key=lambda e: e["name"].lower())
+            servers.append({
+                "guild_id": g["id"],
+                "guild_name": g.get("name", "Unknown Server"),
+                "emojis": emojis,
+            })
+        except Exception:
+            continue
+
+    servers.sort(key=lambda s: s["guild_name"].lower())
+    return jsonify({"servers": servers})
+
+
+# ── Resolve a single user by ID (mention preview) ───────────────────────────
+#
+# Discord's GET /users/{id} is a global lookup keyed on the bot's own token
+# and works for ANY valid user ID, regardless of whether that user shares a
+# guild with the bot — there is no live member-list endpoint in this
+# project (by design, see utils/discord_user_cache.py's header), but a
+# single-user global lookup is a different, much narrower, already-public
+# capability and doesn't require one. Used only to show a real username in
+# the Embed Builder's <@id> mention preview instead of the raw ID; never
+# exposes the bot token to the frontend.
+@api_bp.route("/guild/resolve-user/<user_id>")
+@require_api_permission(LEVEL_MODERATOR)
+def resolve_single_user(user_id: str):
+    if not user_id.isdigit():
+        return jsonify({"resolved": False})
+    bot_token = os.getenv("DISCORD_TOKEN", "")
+    if not bot_token:
+        return jsonify({"resolved": False})
+    try:
+        resp = _req.get(
+            f"https://discord.com/api/v10/users/{user_id}",
+            headers={"Authorization": f"Bot {bot_token}"}, timeout=6)
+    except Exception:
+        return jsonify({"resolved": False})
+    if resp.status_code != 200:
+        return jsonify({"resolved": False})
+    u = resp.json()
+    return jsonify({
+        "resolved": True,
+        "id": user_id,
+        "username": u.get("global_name") or u.get("username") or user_id,
+    })
+
+
 # Compatibility shims
 @api_bp.route("/roles")
 @require_api_permission(LEVEL_MODERATOR)

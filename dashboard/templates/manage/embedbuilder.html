@@ -120,8 +120,13 @@
 
 <!-- ── EMOJI POPOVER ────────────────────────────────────────────── -->
 <div id="eb-emoji-popover" class="eb-emoji-popover" style="display:none;">
-    <input class="form-input" id="eb-emoji-search" placeholder="Search emoji..." style="margin-bottom:8px;">
+    <input class="form-input eb-emoji-search-input" id="eb-emoji-search" placeholder="Search emoji...">
     <div class="eb-emoji-scroll" id="eb-emoji-scroll"></div>
+    <div class="eb-emoji-import-row">
+        <input class="form-input" id="eb-emoji-import-input" placeholder="Paste an emoji ID or <:name:id>…">
+        <button type="button" class="btn btn-sm btn-primary" id="eb-emoji-import-btn">Import</button>
+    </div>
+    <div class="eb-emoji-hover-bar" id="eb-emoji-hover-bar"><span class="eb-emoji-hover-empty">Pick an emoji…</span></div>
 </div>
 
 <style>
@@ -185,42 +190,98 @@
 .eb-mention-row select, .eb-mention-row input { flex:1; }
 .eb-mention-row .btn { flex-shrink:0; white-space:nowrap; }
 
+/* ── Emoji popover — polished to sit closer to Discord's own picker:
+   tighter auto-fill grid, a filled hover square (not just a tint),
+   and a footer bar that names whatever's under the cursor. ────── */
 .eb-emoji-popover {
-    position:fixed; z-index:1100; width:320px; max-height:380px;
-    background:var(--bg2); border:1px solid var(--border); border-radius:12px;
-    box-shadow:0 12px 32px rgba(0,0,0,.5); padding:12px; display:flex; flex-direction:column;
+    position:fixed; z-index:1100; width:340px; max-height:420px;
+    background:#111214; border:1px solid var(--border); border-radius:12px;
+    box-shadow:0 16px 40px rgba(0,0,0,.55); padding:10px; display:flex; flex-direction:column;
 }
-.eb-emoji-scroll { overflow-y:auto; flex:1; }
-.eb-emoji-cat-label { font-size:10px; font-weight:700; color:var(--text3); text-transform:uppercase; letter-spacing:.05em; margin:8px 0 4px; }
+.eb-emoji-search-input {
+    margin-bottom:8px; background:#1e1f22; border-color:#2b2d31;
+}
+.eb-emoji-search-input:focus { border-color:var(--accent); }
+.eb-emoji-scroll { overflow-y:auto; flex:1; padding-right:2px; }
+.eb-emoji-scroll::-webkit-scrollbar { width:6px; }
+.eb-emoji-scroll::-webkit-scrollbar-thumb { background:#3f4147; border-radius:3px; }
+.eb-emoji-cat-label {
+    font-size:12px; font-weight:700; color:#949ba4; text-transform:uppercase;
+    letter-spacing:.02em; margin:10px 2px 6px; position:sticky; top:0; background:#111214; padding:4px 0 2px;
+}
 .eb-emoji-cat-label:first-child { margin-top:0; }
-.eb-emoji-grid { display:grid; grid-template-columns:repeat(8, 1fr); gap:2px; }
+.eb-emoji-server-label { font-size:11px; font-weight:600; color:var(--text3); margin:8px 2px 4px; display:flex; align-items:center; gap:4px; }
+.eb-emoji-grid { display:grid; grid-template-columns:repeat(auto-fill, 36px); gap:2px; justify-content:start; }
 .eb-emoji-cell {
-    width:32px; height:32px; display:flex; align-items:center; justify-content:center;
-    font-size:19px; background:none; border:none; border-radius:6px; cursor:pointer;
+    width:36px; height:36px; display:flex; align-items:center; justify-content:center;
+    font-size:22px; line-height:1; background:none; border:none; border-radius:8px; cursor:pointer;
+    transition:background-color .08s ease, transform .08s ease;
 }
-.eb-emoji-cell:hover { background:var(--bg4); }
-.eb-emoji-cell img { width:22px; height:22px; object-fit:contain; }
-.eb-emoji-empty { text-align:center; color:var(--text3); font-size:12px; padding:20px 0; }
+.eb-emoji-cell:hover, .eb-emoji-cell:focus-visible {
+    background:#2b2d31; transform:scale(1.08); outline:none;
+}
+.eb-emoji-cell:active { transform:scale(0.96); }
+.eb-emoji-cell img { width:26px; height:26px; object-fit:contain; }
+.eb-emoji-empty { text-align:center; color:var(--text3); font-size:12px; padding:24px 0; }
+.eb-emoji-ext-toggle {
+    background:none; border:none; color:var(--accent); font-size:11px; font-weight:600;
+    cursor:pointer; padding:6px 2px; text-align:left; width:100%;
+}
+.eb-emoji-ext-toggle:hover { text-decoration:underline; }
+.eb-emoji-import-row { display:flex; gap:6px; margin-top:8px; }
+.eb-emoji-import-row input { flex:1; padding:6px 10px; font-size:12px; background:#1e1f22; border-color:#2b2d31; }
+.eb-emoji-import-row .btn { padding:0 12px; }
+.eb-emoji-hover-bar {
+    display:flex; align-items:center; gap:8px; margin-top:8px; padding-top:8px;
+    border-top:1px solid #2b2d31; font-size:12px; color:var(--text2); min-height:20px;
+}
+.eb-emoji-hover-bar img { width:20px; height:20px; object-fit:contain; }
+.eb-emoji-hover-empty { color:var(--text3); }
+.eb-emoji-hover-name { font-weight:600; color:var(--text); }
+.eb-emoji-hover-id { color:var(--text3); font-family:'JetBrains Mono','Fira Code',monospace; font-size:11px; }
 
+/* ── Live Preview — mirrors real Discord message chrome so this is a
+   preview of the actual send, not a generic mock. ─────────────────── */
 .eb-preview-box { background:#313338; border-radius:8px; padding:16px; min-height:60px; }
-.eb-preview-content { color:#dbdee1; font-size:14px; white-space:pre-wrap; word-break:break-word; margin-bottom:10px; line-height:1.4; }
-.eb-preview-attachments { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
-.eb-preview-attachments img { max-width:120px; max-height:120px; border-radius:6px; object-fit:cover; }
-.eb-preview-embed {
-    border-left:4px solid #7c5cbf; background:#2b2d31; border-radius:0 4px 4px 0;
-    padding:12px 16px; margin-bottom:8px; position:relative;
+.eb-msg { display:flex; gap:16px; }
+.eb-msg-avatar { width:40px; height:40px; border-radius:50%; flex-shrink:0; margin-top:2px; object-fit:cover; background:var(--accent); }
+.eb-msg-body { min-width:0; flex:1; }
+.eb-msg-header { display:flex; align-items:baseline; gap:7px; margin-bottom:2px; flex-wrap:wrap; }
+.eb-msg-name { font-weight:600; font-size:16px; color:#f2f3f5; }
+.eb-msg-app-badge {
+    background:#5865f2; color:#fff; font-size:10px; font-weight:600;
+    padding:1px 4px; border-radius:3px; letter-spacing:.02em; line-height:1.4;
 }
-.eb-pe-author { font-size:12px; color:#b5bac1; margin-bottom:4px; display:flex; align-items:center; gap:6px; }
-.eb-pe-title { font-weight:700; color:#fff; font-size:15px; margin-bottom:4px; }
-.eb-pe-desc { color:#dbdee1; font-size:13px; line-height:1.5; white-space:pre-wrap; }
+.eb-msg-time { font-size:12px; color:#949ba4; }
+.eb-msg-content { color:#dbdee1; font-size:16px; line-height:1.375; white-space:pre-wrap; word-break:break-word; }
+.eb-msg-content.eb-emoji-only-content { font-size:2.25rem; line-height:1.25; }
+.eb-msg-content.eb-emoji-only-content .eb-inline-emoji { width:44px; height:44px; }
+.eb-preview-empty { color:#72767d; font-size:13px; text-align:center; padding:20px 0; }
+
+.eb-inline-emoji { width:22px; height:22px; object-fit:contain; vertical-align:-6px; margin:0 1px; }
+
+.eb-mention {
+    background:rgba(88,101,242,.3); color:#c9cdfb; border-radius:3px;
+    padding:0 2px; font-weight:500; cursor:default; unicode-bidi:plaintext;
+}
+.eb-mention:hover { background:rgba(88,101,242,.5); text-decoration:underline; }
+
+.eb-preview-attachments { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+.eb-preview-attachments img { max-width:200px; max-height:200px; border-radius:6px; object-fit:cover; }
+.eb-preview-embed {
+    border-left:4px solid #7c5cbf; background:#2b2d31; border-radius:4px;
+    padding:8px 16px 16px; margin-top:8px; position:relative; max-width:432px;
+}
+.eb-pe-author { font-size:14px; font-weight:600; color:#f2f3f5; margin:8px 0 8px; display:flex; align-items:center; gap:6px; }
+.eb-pe-title { font-weight:700; color:#fff; font-size:16px; margin-bottom:8px; line-height:1.3; }
+.eb-pe-desc { color:#dbdee1; font-size:14px; line-height:1.375; white-space:pre-wrap; }
 .eb-pe-fields { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
 .eb-pe-field { min-width:0; }
-.eb-pe-field-name { font-weight:700; color:#fff; font-size:13px; }
-.eb-pe-field-value { color:#dbdee1; font-size:13px; }
-.eb-pe-image { max-width:100%; border-radius:4px; margin-top:10px; display:block; }
-.eb-pe-thumb { position:absolute; top:12px; right:12px; width:72px; height:72px; border-radius:4px; object-fit:cover; }
-.eb-pe-footer { font-size:12px; color:#b5bac1; margin-top:8px; }
-.eb-preview-empty { color:#72767d; font-size:13px; text-align:center; padding:20px 0; }
+.eb-pe-field-name { font-weight:600; color:#f2f3f5; font-size:14px; margin-bottom:2px; }
+.eb-pe-field-value { color:#dbdee1; font-size:14px; line-height:1.375; }
+.eb-pe-image { max-width:100%; border-radius:4px; margin-top:16px; display:block; }
+.eb-pe-thumb { position:absolute; top:16px; right:16px; width:80px; height:80px; border-radius:4px; object-fit:cover; }
+.eb-pe-footer { font-size:12px; color:#b5bac1; margin-top:8px; display:flex; align-items:center; gap:6px; }
 </style>
 
 {% block scripts %}
@@ -526,6 +587,9 @@ const UNICODE_EMOJI = {
 };
 
 let customEmojiCache = null;
+let externalEmojiCache = null; // null = not loaded yet, [] = loaded, empty
+let externalEmojiExpanded = false;
+let appEmojiCache = null; // Application Emojis already imported (bot-wide, always usable)
 
 async function loadCustomEmojis() {
     if (customEmojiCache) return customEmojiCache;
@@ -537,6 +601,34 @@ async function loadCustomEmojis() {
         customEmojiCache = [];
     }
     return customEmojiCache;
+}
+
+async function loadAppEmojis(force) {
+    if (appEmojiCache && !force) return appEmojiCache;
+    try {
+        const res = await fetch('/api/app-emojis');
+        const data = await res.json();
+        appEmojiCache = data.results || [];
+    } catch (e) {
+        appEmojiCache = appEmojiCache || [];
+    }
+    return appEmojiCache;
+}
+
+// External emojis (from the bot's OTHER servers) are fetched lazily, only
+// once the person actually asks for them — this is an N-guild fan-out on
+// the backend (see /api/guild/emojis/external), so it's worth not paying
+// for it on every popover open, only the first time it's expanded.
+async function loadExternalEmojis() {
+    if (externalEmojiCache) return externalEmojiCache;
+    try {
+        const res = await fetch('/api/guild/emojis/external');
+        const data = await res.json();
+        externalEmojiCache = data.servers || [];
+    } catch (e) {
+        externalEmojiCache = [];
+    }
+    return externalEmojiCache;
 }
 
 function emojiUrl(id, animated) {
@@ -560,17 +652,21 @@ function bumpFrequentEmoji(token) {
 const emojiPopover = document.getElementById('eb-emoji-popover');
 const emojiScroll = document.getElementById('eb-emoji-scroll');
 const emojiSearch = document.getElementById('eb-emoji-search');
+const emojiHoverBar = document.getElementById('eb-emoji-hover-bar');
 let emojiInsertTarget = null; // which textarea gets the emoji
 
 async function openEmojiPopover(anchorBtn, targetTextarea) {
     emojiInsertTarget = targetTextarea;
     if (targetTextarea === contentInput) captureSelection();
-    await loadCustomEmojis();
+    await Promise.all([loadCustomEmojis(), loadAppEmojis()]);
     emojiSearch.value = '';
+    document.getElementById('eb-emoji-import-input').value = '';
+    resetEmojiHoverBar();
     renderEmojiGrid('');
     const rect = anchorBtn.getBoundingClientRect();
+    const popW = 340;
     emojiPopover.style.top = `${rect.bottom + 6}px`;
-    emojiPopover.style.left = `${Math.max(8, rect.left - 280)}px`;
+    emojiPopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - popW - 8))}px`;
     emojiPopover.style.display = 'flex';
     emojiSearch.focus();
 }
@@ -583,33 +679,33 @@ document.addEventListener('click', (e) => {
     }
 });
 
+function resetEmojiHoverBar() {
+    emojiHoverBar.innerHTML = `<span class="eb-emoji-hover-empty">Pick an emoji…</span>`;
+}
+
 function renderEmojiGrid(query) {
     const q = query.trim().toLowerCase();
     const freq = loadFrequentEmojis();
     let html = '';
 
-    function cell(display, token, isImg) {
-        return `<button type="button" class="eb-emoji-cell" data-token="${_ebEsc(token)}" title="${_ebEsc(token)}">${isImg ? display : display}</button>`;
+    function cell(display, token, name) {
+        return `<button type="button" class="eb-emoji-cell" data-token="${_ebEsc(token)}" data-name="${_ebEsc(name || '')}">${display}</button>`;
     }
 
     if (!q && freq.length) {
         html += `<div class="eb-emoji-cat-label">Frequently Used</div><div class="eb-emoji-grid">`;
         html += freq.map(f => f.img
-            ? cell(`<img src="${_ebEsc(f.img)}" alt="">`, f.token, true)
-            : cell(_ebEsc(f.char), f.token, false)).join('');
+            ? cell(`<img src="${_ebEsc(f.img)}" alt="">`, f.token, f.name)
+            : cell(_ebEsc(f.char), f.token, '')).join('');
         html += `</div>`;
     }
 
     for (const [cat, list] of Object.entries(UNICODE_EMOJI)) {
         if (cat === 'Frequently Used') continue;
-        const filtered = q ? list.filter(e => true) : list; // unicode has no name metadata here — search matches by category name below
-        if (q && !cat.toLowerCase().includes(q)) {
-            // still allow individual glyphs through on generic queries — keep it simple, skip category filtering by glyph name
-            continue;
-        }
-        if (!filtered.length) continue;
+        if (q && !cat.toLowerCase().includes(q)) continue; // no per-glyph name metadata to search against
+        if (!list.length) continue;
         html += `<div class="eb-emoji-cat-label">${_ebEsc(cat)}</div><div class="eb-emoji-grid">`;
-        html += filtered.map(ch => cell(_ebEsc(ch), ch, false)).join('');
+        html += list.map(ch => cell(_ebEsc(ch), ch, '')).join('');
         html += `</div>`;
     }
 
@@ -618,33 +714,121 @@ function renderEmojiGrid(query) {
         html += `<div class="eb-emoji-cat-label">Custom Emojis</div><div class="eb-emoji-grid">`;
         html += custom.map(e => {
             const token = e.animated ? `<a:${e.name}:${e.id}>` : `<:${e.name}:${e.id}>`;
-            return cell(`<img src="${emojiUrl(e.id, e.animated)}" alt="${_ebEsc(e.name)}">`, token, true);
+            return cell(`<img src="${emojiUrl(e.id, e.animated)}" alt="${_ebEsc(e.name)}">`, token, e.name);
         }).join('');
         html += `</div>`;
+    }
+
+    // Application Emojis — bot-owned, usable in every channel with no
+    // USE_EXTERNAL_EMOJIS needed. Anything imported via the "paste to
+    // import" box below lands here for instant reuse afterward.
+    const appEmojis = (appEmojiCache || []).filter(e => !q || e.name.toLowerCase().includes(q));
+    if (appEmojis.length) {
+        html += `<div class="eb-emoji-cat-label">App Emojis</div><div class="eb-emoji-grid">`;
+        html += appEmojis.map(e => {
+            const token = e.animated ? `<a:${e.name}:${e.id}>` : `<:${e.name}:${e.id}>`;
+            return cell(`<img src="${emojiUrl(e.id, e.animated)}" alt="${_ebEsc(e.name)}">`, token, e.name);
+        }).join('');
+        html += `</div>`;
+    }
+
+    // Other-servers emoji: only rendered once expanded (see the toggle
+    // button below) or once a search query is active, so a query can
+    // reach across every server the bot is in without an extra click.
+    if (externalEmojiExpanded || q) {
+        if (externalEmojiCache) {
+            for (const server of externalEmojiCache) {
+                const matched = server.emojis.filter(e => !q || e.name.toLowerCase().includes(q));
+                if (!matched.length) continue;
+                html += `<div class="eb-emoji-server-label">🌐 ${_ebEsc(server.guild_name)}</div><div class="eb-emoji-grid">`;
+                html += matched.map(e => {
+                    const token = e.animated ? `<a:${e.name}:${e.id}>` : `<:${e.name}:${e.id}>`;
+                    return cell(`<img src="${emojiUrl(e.id, e.animated)}" alt="${_ebEsc(e.name)}">`, token, `${e.name} · ${server.guild_name}`);
+                }).join('');
+                html += `</div>`;
+            }
+        }
+    } else {
+        html += `<button type="button" class="eb-emoji-ext-toggle" id="eb-emoji-ext-toggle">🌐 Show emojis from other servers</button>`;
     }
 
     if (!html) html = `<div class="eb-emoji-empty">No emoji matched "${_ebEsc(query)}"</div>`;
     emojiScroll.innerHTML = html;
 
+    const extToggle = document.getElementById('eb-emoji-ext-toggle');
+    if (extToggle) {
+        extToggle.addEventListener('click', async () => {
+            extToggle.textContent = 'Loading…';
+            await loadExternalEmojis();
+            externalEmojiExpanded = true;
+            renderEmojiGrid(emojiSearch.value);
+        });
+    }
+
     emojiScroll.querySelectorAll('.eb-emoji-cell').forEach(btn => {
+        btn.addEventListener('mouseenter', () => {
+            const imgEl = btn.querySelector('img');
+            const name = btn.dataset.name;
+            if (imgEl) {
+                emojiHoverBar.innerHTML = `<img src="${imgEl.getAttribute('src')}" alt="">` +
+                    (name ? `<span class="eb-emoji-hover-name">:${_ebEsc(name.split(' · ')[0])}:</span>` : '');
+            } else if (name === '') {
+                emojiHoverBar.innerHTML = `<span class="eb-emoji-hover-name" style="font-size:18px;">${btn.textContent}</span>`;
+            }
+        });
+        btn.addEventListener('mouseleave', resetEmojiHoverBar);
         btn.addEventListener('click', () => {
             const token = btn.dataset.token;
             const imgEl = btn.querySelector('img');
             bumpFrequentEmoji(imgEl
-                ? { token, img: imgEl.getAttribute('src') }
-                : { token, char: token });
-            if (emojiInsertTarget === contentInput) {
-                restoreSelectionAndInsert(token);
-            } else if (emojiInsertTarget) {
-                insertAtCursor(emojiInsertTarget, token);
-                emojiInsertTarget.dispatchEvent(new Event('input', { bubbles: true }));
-            }
+                ? { token, img: imgEl.getAttribute('src'), name: btn.dataset.name }
+                : { token, char: token, name: '' });
+            insertEmojiToken(token);
             closeEmojiPopover();
         });
     });
 }
 
+function insertEmojiToken(token) {
+    if (emojiInsertTarget === contentInput) {
+        restoreSelectionAndInsert(token);
+    } else if (emojiInsertTarget) {
+        insertAtCursor(emojiInsertTarget, token);
+        emojiInsertTarget.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+}
+
 emojiSearch.addEventListener('input', () => renderEmojiGrid(emojiSearch.value));
+
+document.getElementById('eb-emoji-import-btn').addEventListener('click', async () => {
+    const input = document.getElementById('eb-emoji-import-input');
+    const raw = input.value.trim();
+    if (!raw) { showToast('Paste an emoji ID or its <:name:id> markdown', 'warning'); return; }
+    const btn = document.getElementById('eb-emoji-import-btn');
+    setLoading(btn, true, '…');
+    try {
+        const res = await fetch('/api/app-emojis/import', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ raw }),
+        });
+        const data = await res.json();
+        if (data.success) {
+            const token = data.animated ? `<a:${data.name}:${data.id}>` : `<:${data.name}:${data.id}>`;
+            showToast(data.cached ? 'Already imported — inserted!' : 'Imported as an Application Emoji!');
+            await loadAppEmojis(true);
+            input.value = '';
+            insertEmojiToken(token);
+            renderEmojiGrid(emojiSearch.value);
+        } else {
+            showToast(data.error || 'Import failed', 'error');
+        }
+    } catch (e) {
+        showToast('Connection error', 'error');
+    } finally {
+        setLoading(btn, false);
+    }
+});
+
 
 function _ebEsc(str) {
     const d = document.createElement('div');
@@ -901,13 +1085,168 @@ function wireEmbedEvents() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// LIVE PREVIEW
+// LIVE PREVIEW — mirrors the real Discord message this will send:
+// bot avatar/name, rendered markdown, resolved mentions, real inline
+// emoji, so this is a preview of the actual output, not a mockup.
 // ═══════════════════════════════════════════════════════════════
 const previewBox = document.getElementById('eb-preview');
 
+let botIdentity = { name: 'Nero', avatar: null };
+let roleMap = {};    // id -> { name, color }
+let channelMap = {}; // id -> { name }
+const userNameCache = {};   // id -> username (resolved)
+const userResolving = new Set();
+
+async function loadBotIdentity() {
+    try {
+        const res = await fetch('/api/botprofile/config');
+        const data = await res.json();
+        const live = data.live || {};
+        const stored = data.stored || {};
+        botIdentity = {
+            name: stored.nickname || live.nick || live.username || 'Nero',
+            avatar: live.guild_avatar_url || stored.avatar_url || live.global_avatar_url || null,
+        };
+    } catch (e) { /* falls back to defaults above */ }
+}
+
+async function loadMentionLookups() {
+    try {
+        const [rolesRes, channelsRes] = await Promise.all([
+            fetch('/api/guild/roles'), fetch('/api/guild/channels'),
+        ]);
+        const roles = (await rolesRes.json()).results || [];
+        const channels = (await channelsRes.json()).results || [];
+        roleMap = {}; channels.forEach(() => {});
+        roles.forEach(r => { roleMap[r.id] = { name: r.text, color: r.color }; });
+        channelMap = {};
+        channels.forEach(c => { channelMap[c.id] = { name: c.text }; });
+    } catch (e) { /* preview falls back to raw IDs */ }
+}
+
+function resolveUserAsync(id) {
+    if (userNameCache[id] || userResolving.has(id)) return;
+    userResolving.add(id);
+    fetch(`/api/guild/resolve-user/${id}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.resolved) userNameCache[id] = data.username;
+            userResolving.delete(id);
+            renderPreview(); // re-render once resolved so the pill updates in place
+        })
+        .catch(() => userResolving.delete(id));
+}
+
+// Discord message-content markdown + mention/emoji rendering — matches
+// what the real client does closely enough for an accurate preview:
+// bold/italic/underline/strike, <#id>/<@&id>/<@id> mention pills
+// (resolved against the real channel/role lists + a live user lookup
+// when possible, falling back to the raw ID exactly like Discord does
+// for anything it can't resolve), and real inline custom/unicode emoji.
+const EMOJI_UNICODE_RE = /\p{Extended_Pictographic}(\u200d\p{Extended_Pictographic})*\ufe0f?/gu;
+const TOKEN_RE = /<(a?):(\w+):(\d+)>|<#(\d+)>|<@&(\d+)>|<@!?(\d+)>/g;
+
+function renderToken(match) {
+    let m;
+    TOKEN_RE.lastIndex = 0;
+    m = TOKEN_RE.exec(match);
+    if (!m) return _ebEsc(match);
+    const [, animFlag, ename, eid, chid, rid, uid] = m;
+    if (eid) {
+        return `<img class="eb-inline-emoji" src="${emojiUrl(eid, !!animFlag)}" alt=":${_ebAttr(ename)}:">`;
+    }
+    if (chid) {
+        const ch = channelMap[chid];
+        return `<span class="eb-mention">#${_ebEsc(ch ? ch.name : chid)}</span>`;
+    }
+    if (rid) {
+        const role = roleMap[rid];
+        const label = role ? role.name : rid;
+        let style = '';
+        if (role && role.color) {
+            style = ` style="background:${role.color}33;color:${role.color};"`;
+        }
+        return `<span class="eb-mention"${style}>@${_ebEsc(label)}</span>`;
+    }
+    if (uid) {
+        if (userNameCache[uid]) return `<span class="eb-mention">@${_ebEsc(userNameCache[uid])}</span>`;
+        resolveUserAsync(uid);
+        return `<span class="eb-mention">@${_ebEsc(uid)}</span>`;
+    }
+    return _ebEsc(match);
+}
+
+function renderDiscordMarkup(text, opts) {
+    opts = opts || {};
+    if (!text) return '';
+
+    const tokens = [];
+    let working = text.replace(TOKEN_RE, (match) => {
+        tokens.push(match);
+        return `\u0001${tokens.length - 1}\u0002`;
+    });
+
+    // Emoji-only-line sizing: Discord renders a message as large emoji
+    // when, once every recognized token/emoji is stripped out, nothing
+    // but whitespace is left.
+    let isEmojiOnly = false;
+    if (opts.checkEmojiOnly) {
+        const stripped = working.replace(/\u0001\d+\u0002/g, '').replace(EMOJI_UNICODE_RE, '').trim();
+        isEmojiOnly = stripped.length === 0 && (tokens.length + (text.match(EMOJI_UNICODE_RE) || []).length) > 0;
+    }
+
+    let escaped = _ebEsc(working);
+
+    // Markdown — bold before italic so `**x**` isn't half-consumed by
+    // the single-asterisk italic pattern first.
+    escaped = escaped.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
+    escaped = escaped.replace(/__([\s\S]+?)__/g, '<u>$1</u>');
+    escaped = escaped.replace(/\*([\s\S]+?)\*/g, '<em>$1</em>');
+    escaped = escaped.replace(/~~([\s\S]+?)~~/g, '<s>$1</s>');
+
+    // Standalone unicode emoji get the large-size treatment too.
+    if (isEmojiOnly) {
+        escaped = escaped.replace(EMOJI_UNICODE_RE, (m) => `<span>${m}</span>`);
+    }
+
+    escaped = escaped.replace(/\u0001(\d+)\u0002/g, (m, idx) => renderToken(tokens[parseInt(idx)]));
+
+    return { html: escaped, isEmojiOnly };
+}
+
+function fmtPreviewTime() {
+    const d = new Date();
+    let h = d.getHours();
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    const m = String(d.getMinutes()).padStart(2, '0');
+    return `Today at ${h}:${m} ${ampm}`;
+}
+
 function renderPreview() {
-    let html = '';
-    if (state.content) html += `<div class="eb-preview-content">${_ebEsc(state.content)}</div>`;
+    const hasAnything = state.content || attachments.length ||
+        state.embeds.some(e => e.title || e.description || e.author || e.footer || e.image || e.thumbnail || (e.fields && e.fields.length));
+
+    if (!hasAnything) {
+        previewBox.innerHTML = `<div class="eb-preview-empty">Start typing to see a preview...</div>`;
+        return;
+    }
+
+    let html = `<div class="eb-msg">`;
+    html += botIdentity.avatar
+        ? `<img class="eb-msg-avatar" src="${_ebAttr(botIdentity.avatar)}" alt="">`
+        : `<div class="eb-msg-avatar"></div>`;
+    html += `<div class="eb-msg-body">`;
+    html += `<div class="eb-msg-header">
+        <span class="eb-msg-name">${_ebEsc(botIdentity.name)}</span>
+        <span class="eb-msg-app-badge">APP</span>
+        <span class="eb-msg-time">${fmtPreviewTime()}</span>
+    </div>`;
+
+    if (state.content) {
+        const rendered = renderDiscordMarkup(state.content, { checkEmojiOnly: true });
+        html += `<div class="eb-msg-content${rendered.isEmojiOnly ? ' eb-emoji-only-content' : ''}">${rendered.html}</div>`;
+    }
 
     if (attachments.length) {
         html += `<div class="eb-preview-attachments">`;
@@ -923,13 +1262,13 @@ function renderPreview() {
         html += `<div class="eb-preview-embed" style="border-left-color:${_ebAttr(e.color || '#7c5cbf')};">`;
         if (e.author) html += `<div class="eb-pe-author">${_ebEsc(e.author)}</div>`;
         if (e.title) html += `<div class="eb-pe-title">${_ebEsc(e.title)}</div>`;
-        if (e.description) html += `<div class="eb-pe-desc">${_ebEsc(e.description)}</div>`;
+        if (e.description) html += `<div class="eb-pe-desc">${renderDiscordMarkup(e.description).html}</div>`;
         if (e.fields && e.fields.length) {
             html += `<div class="eb-pe-fields">`;
             html += e.fields.filter(f => f.name || f.value).map(f =>
                 `<div class="eb-pe-field" style="${f.inline ? 'width:31%;' : 'width:100%;'}">
                     <div class="eb-pe-field-name">${_ebEsc(f.name)}</div>
-                    <div class="eb-pe-field-value">${_ebEsc(f.value)}</div>
+                    <div class="eb-pe-field-value">${renderDiscordMarkup(f.value).html}</div>
                 </div>`).join('');
             html += `</div>`;
         }
@@ -939,7 +1278,7 @@ function renderPreview() {
         html += `</div>`;
     }
 
-    if (!html) html = `<div class="eb-preview-empty">Start typing to see a preview...</div>`;
+    html += `</div></div>`;
     previewBox.innerHTML = html;
 }
 
@@ -1109,7 +1448,12 @@ function renderAll() {
 }
 
 (async function init() {
+    // Bot identity + role/channel lookups load in parallel with the
+    // draft restore — renderAll() below re-renders once everything is
+    // in, so the preview never flashes stale/placeholder data.
+    const identityLoad = Promise.all([loadBotIdentity(), loadMentionLookups()]);
     await restoreDraft();
+    await identityLoad;
     renderAll();
     history = [snapshotForHistory()];
     historyIndex = 0;
