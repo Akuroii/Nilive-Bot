@@ -1230,6 +1230,21 @@ async def init_db():
             ON reports(guild_id, status)
         """)
 
+        # Migration: Add resolved_by tracking for reports
+        try:
+            cursor = await db.execute("PRAGMA table_info(reports)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "resolved_by_id" not in cols:
+                await db.execute(
+                    "ALTER TABLE reports ADD COLUMN resolved_by_id INTEGER")
+                await db.commit()
+            if "resolved_by_name" not in cols:
+                await db.execute(
+                    "ALTER TABLE reports ADD COLUMN resolved_by_name TEXT")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] reports.resolved_by: {e}")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bot_status (
                 id                INTEGER PRIMARY KEY CHECK (id = 1),

@@ -485,7 +485,8 @@ def members():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT l.user_id, l.xp, l.level,
-                       COALESCE(e.balance, 0) AS coins
+                       COALESCE(e.balance, 0) AS coins,
+                       COALESCE(e.diamonds, 0) AS diamonds
                 FROM levels l
                 LEFT JOIN economy e
                   ON l.user_id = e.user_id AND l.guild_id = e.guild_id
@@ -494,7 +495,7 @@ def members():
             """, (guild_id,))
             rows = await cursor.fetchall()
         return [{"user_id": r[0], "xp": r[1],
-                 "level": r[2], "coins": r[3]} for r in rows]
+                 "level": r[2], "coins": r[3], "diamonds": r[4]} for r in rows]
 
     member_list = run_async(get_members())
 
@@ -524,7 +525,7 @@ def member_profile(user_id: int):
             level_row = await lc.fetchone()
 
             ec       = await db.execute(
-                "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                "SELECT balance, diamonds FROM economy WHERE guild_id=? AND user_id=?",
                 (guild_id, user_id))
             econ_row = await ec.fetchone()
 
@@ -557,6 +558,7 @@ def member_profile(user_id: int):
             "xp":       level_row[0] if level_row else 0,
             "level":    level_row[1] if level_row else 0,
             "coins":    econ_row[0]  if econ_row  else 0,
+            "diamonds": econ_row[1]  if econ_row  else 0,
             "warnings": warnings,
             "mod_logs": mod_logs,
             "purchases": purchases,
@@ -609,7 +611,7 @@ def reports():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT id, reporter_name, reported_user_name, reason,
-                       message_jump_url, status, created_at
+                       message_jump_url, status, created_at, resolved_by_name
                 FROM reports
                 WHERE guild_id = ? AND status = ?
                 ORDER BY created_at DESC LIMIT 100
@@ -1904,6 +1906,7 @@ def api_edit_member():
     user_id   = data.get("user_id")
     xp        = max(0, int(data.get("xp", 0)))
     coins     = max(0, int(data.get("coins", 0)))
+    diamonds  = max(0, int(data.get("diamonds", 0)))
     new_level = calculate_level_from_xp(xp)
 
     async def update():
@@ -1915,15 +1918,15 @@ def api_edit_member():
                 DO UPDATE SET xp=?, level=?
             """, (guild_id, user_id, xp, new_level, xp, new_level))
             await db.execute("""
-                INSERT INTO economy (guild_id, user_id, balance)
-                VALUES (?,?,?)
+                INSERT INTO economy (guild_id, user_id, balance, diamonds)
+                VALUES (?,?,?,?)
                 ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET balance=?
-            """, (guild_id, user_id, coins, coins))
+                DO UPDATE SET balance=?, diamonds=?
+            """, (guild_id, user_id, coins, diamonds, coins, diamonds))
             await db.commit()
 
     run_async(update())
-    log_action(guild_id, f"Edited member {user_id}: xp={xp} coins={coins}",
+    log_action(guild_id, f"Edited member {user_id}: xp={xp} coins={coins} diamonds={diamonds}",
                "members", target_id=int(user_id) if user_id else None)
     return jsonify({"success": True})
 
