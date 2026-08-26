@@ -5,7 +5,7 @@ import aiosqlite
 from datetime import datetime, timedelta
 from database import DB_PATH
 from utils.permissions import can_moderate, check_bot_role_position
-from utils.formatters import snapshot_user, now_iso, format_duration
+from utils.formatters import snapshot_user, now_iso, format_duration, parse_duration
 
 
 async def log_mod_action(guild_id: int, user: discord.Member,
@@ -236,23 +236,63 @@ class Moderation(commands.Cog):
     @app_commands.checks.has_permissions(ban_members=True)
     async def ban(self, interaction: discord.Interaction,
                   member: discord.Member, reason: str = "No reason provided",
-                  delete_days: int = 0):
+                  delete_days: int = 0, duration: str = None):
         allowed, msg = await can_moderate(
             interaction.user, member, interaction.guild.id)
         if not allowed:
             await interaction.response.send_message(msg, ephemeral=True)
             return
-        await member.ban(reason=reason,
-                         delete_message_days=min(delete_days, 7))
-        await log_mod_action(interaction.guild.id, member,
-                             interaction.user, "ban", reason)
-        embed = discord.Embed(
-            title="Member Banned",
-            description=f"{member.mention} has been banned.",
-            color=0xED4245)
-        embed.add_field(name="Reason", value=reason)
-        embed.add_field(name="Moderator", value=interaction.user.mention)
-        await interaction.response.send_message(embed=embed)
+        
+        # Handle temporary ban if duration is provided
+        if duration:
+            try:
+                duration_seconds = parse_duration(duration)
+                duration_minutes = duration_seconds // 60
+                expires_at = (datetime.utcnow() + timedelta(seconds=duration_seconds)).isoformat()
+            except ValueError as e:
+                await interaction.response.send_message(
+                    f"Invalid duration: {e}", ephemeral=True)
+                return
+            
+            # Ban the user via Discord API
+            await member.ban(reason=reason,
+                             delete_message_days=min(delete_days, 7))
+            
+            # Insert into temp_bans table for automatic unban
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("""
+                    INSERT INTO temp_bans
+                        (guild_id, user_id, expires_at, reason, source)
+                    VALUES (?, ?, ?, ?, 'command')
+                """, (interaction.guild.id, member.id, expires_at, reason))
+                await db.commit()
+            
+            # Log as temp_ban with duration info
+            await log_mod_action(interaction.guild.id, member,
+                                 interaction.user, "temp_ban", reason, 
+                                 duration_minutes=duration_minutes, expires_at=expires_at)
+            
+            embed = discord.Embed(
+                title="Member Temporarily Banned",
+                description=f"{member.mention} has been temporarily banned.",
+                color=0xFEE75C)
+            embed.add_field(name="Reason", value=reason)
+            embed.add_field(name="Duration", value=format_duration(duration_minutes))
+            embed.add_field(name="Moderator", value=interaction.user.mention)
+            await interaction.response.send_message(embed=embed)
+        else:
+            # Permanent ban (original behavior)
+            await member.ban(reason=reason,
+                             delete_message_days=min(delete_days, 7))
+            await log_mod_action(interaction.guild.id, member,
+                                 interaction.user, "ban", reason)
+            embed = discord.Embed(
+                title="Member Banned",
+                description=f"{member.mention} has been banned.",
+                color=0xED4245)
+            embed.add_field(name="Reason", value=reason)
+            embed.add_field(name="Moderator", value=interaction.user.mention)
+            await interaction.response.send_message(embed=embed)
 
     # ─── UNBAN ──────────────────────────────────────────
     @app_commands.command(name="unban", description="Unban a user by ID")

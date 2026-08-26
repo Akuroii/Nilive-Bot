@@ -146,9 +146,11 @@ class ReportActionView(discord.ui.View):
                               footer_prefix: str):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                UPDATE reports SET status = ?
+                UPDATE reports
+                SET status = ?, resolved_by_id = ?, resolved_by_name = ?
                 WHERE guild_id = ? AND report_message_id = ?
-            """, (new_status, interaction.guild.id, interaction.message.id))
+            """, (new_status, interaction.user.id, str(interaction.user),
+                  interaction.guild.id, interaction.message.id))
             await db.commit()
 
         embed = interaction.message.embeds[0]
