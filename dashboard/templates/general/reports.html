@@ -42,7 +42,7 @@
     <div class="table-wrap">
         <table class="table">
             <thead>
-                <tr><th>Reported User</th><th>Reported By</th><th>Reason</th><th>Message</th><th>Date</th></tr>
+                <tr><th>Reported User</th><th>Reported By</th><th>Reason</th><th>Message</th><th>Date</th><th>Resolved/Dismissed By</th></tr>
             </thead>
             <tbody>
                 {% for r in reports %}
@@ -52,9 +52,10 @@
                     <td class="text-muted" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ r[3] or '—' }}</td>
                     <td><a href="{{ r[4] }}" target="_blank" rel="noopener">Jump ↗</a></td>
                     <td class="text-muted">{{ r[6][:16] if r[6] else '—' }}</td>
+                    <td class="text-muted">{{ r[7] or '—' }}</td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5" class="empty">No {{ status }} reports</td></tr>
+                <tr><td colspan="6" class="empty">No {{ status }} reports</td></tr>
                 {% endfor %}
             </tbody>
         </table>

@@ -19,6 +19,7 @@
                     <th>Level</th>
                     <th>XP</th>
                     <th>Coins</th>
+                    <th>Diamonds</th>
                     {% if is_admin %}<th>Actions</th>{% endif %}
                 </tr>
             </thead>
@@ -30,17 +31,18 @@
                     <td><span class="badge badge-accent">Level {{ m.level }}</span></td>
                     <td>{{ "{:,}".format(m.xp) }} XP</td>
                     <td>🪙 {{ "{:,}".format(m.coins) }}</td>
+                    <td>💎 {{ "{:,}".format(m.diamonds) }}</td>
                     {% if is_admin %}
                     <td>
                         <button class="btn btn-sm btn-secondary"
-                            onclick="openEditModal('{{ m.user_id }}', {{ m.xp }}, {{ m.coins }})">
+                            onclick="openEditModal('{{ m.user_id }}', {{ m.xp }}, {{ m.coins }}, {{ m.diamonds }})">
                             Edit
                         </button>
                     </td>
                     {% endif %}
                 </tr>
                 {% else %}
-                <tr><td colspan="5" class="empty">No members found</td></tr>
+                <tr><td colspan="6" class="empty">No members found</td></tr>
                 {% endfor %}
             </tbody>
         </table>

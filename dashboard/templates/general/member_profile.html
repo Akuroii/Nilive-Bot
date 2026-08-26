@@ -22,11 +22,15 @@
         <div class="stat-label">Coins</div>
         <div class="stat-value">{{ "{:,}".format(profile.coins) }}</div>
     </div>
+    <div class="stat-card stat-warning">
+        <div class="stat-label">Diamonds</div>
+        <div class="stat-value">{{ "{:,}".format(profile.diamonds) }}</div>
+    </div>
     <div class="stat-card stat-danger">
         <div class="stat-label">Warnings</div>
         <div class="stat-value">{{ profile.warnings | length }}</div>
     </div>
-    <div class="stat-card stat-warning">
+    <div class="stat-card stat-secondary">
         <div class="stat-label">Mod Actions</div>
         <div class="stat-value">{{ profile.mod_logs | length }}</div>
     </div>
@@ -46,6 +50,12 @@
             <label class="form-label">Coins</label>
             <input class="form-input" id="edit-coins"
                    value="{{ profile.coins }}" type="number" min="0"
+                   style="width:160px;">
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+            <label class="form-label">Diamonds</label>
+            <input class="form-input" id="edit-diamonds"
+                   value="{{ profile.diamonds }}" type="number" min="0"
                    style="width:160px;">
         </div>
         <button class="btn btn-primary"
@@ -148,13 +158,14 @@
 {% block scripts %}
 <script>
 async function saveProfile() {
-    const xp    = parseInt(document.getElementById('edit-xp').value);
-    const coins = parseInt(document.getElementById('edit-coins').value);
-    const res   = await fetch('/api/edit-member', {
+    const xp       = parseInt(document.getElementById('edit-xp').value);
+    const coins    = parseInt(document.getElementById('edit-coins').value);
+    const diamonds = parseInt(document.getElementById('edit-diamonds').value);
+    const res      = await fetch('/api/edit-member', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
-            user_id: '{{ member_id }}', xp, coins
+            user_id: '{{ member_id }}', xp, coins, diamonds
         }),
     });
     const data = await res.json();
