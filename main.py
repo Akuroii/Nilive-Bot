@@ -135,7 +135,8 @@ class NeroCommandTree(discord.app_commands.CommandTree):
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT enabled, allowed_roles, allowed_channels, owner_only,
-                       cooldown_seconds, bypass_cooldown_roles, error_message
+                       cooldown_seconds, bypass_cooldown_roles, error_message,
+                       enabled_roles, disabled_roles, enabled_channels, disabled_channels
                 FROM command_toggles
                 WHERE guild_id = ? AND command_name = ?
             """, (interaction.guild.id, cmd_name))
@@ -145,7 +146,8 @@ class NeroCommandTree(discord.app_commands.CommandTree):
             return True
 
         (enabled, allowed_roles, allowed_channels, owner_only,
-         cooldown_seconds, bypass_cooldown_roles, error_message) = row
+         cooldown_seconds, bypass_cooldown_roles, error_message,
+         enabled_roles, disabled_roles, enabled_channels, disabled_channels) = row
 
         if not enabled:
             msg = error_message or f"`/{cmd_name}` is currently disabled on this server."
@@ -157,27 +159,48 @@ class NeroCommandTree(discord.app_commands.CommandTree):
                 "This command is restricted to the server owner.", ephemeral=True)
             return False
 
-        if allowed_roles:
+        def _parse_id_set(raw_val) -> set[int]:
+            if not raw_val:
+                return set()
+            if isinstance(raw_val, (list, set)):
+                return {int(x) for x in raw_val if str(x).isdigit()}
             try:
-                role_ids = {int(r) for r in json.loads(allowed_roles)}
+                parsed = json.loads(raw_val)
+                if isinstance(parsed, list):
+                    return {int(x) for x in parsed if str(x).isdigit()}
             except Exception:
-                role_ids = set()
-            if role_ids:
-                member_role_ids = {r.id for r in interaction.user.roles}
-                if not member_role_ids & role_ids:
-                    await interaction.response.send_message(
-                        "You don't have permission to use this command.", ephemeral=True)
-                    return False
+                pass
+            return set()
 
-        if allowed_channels:
-            try:
-                channel_ids = {int(c) for c in json.loads(allowed_channels)}
-            except Exception:
-                channel_ids = set()
-            if channel_ids and interaction.channel_id not in channel_ids:
-                await interaction.response.send_message(
-                    "This command can't be used in this channel.", ephemeral=True)
-                return False
+        member_role_ids = {r.id for r in interaction.user.roles}
+
+        # Role Blacklist: if member has ANY disabled role, block
+        dis_roles = _parse_id_set(disabled_roles)
+        if dis_roles and (member_role_ids & dis_roles):
+            await interaction.response.send_message(
+                "You don't have permission to use this command.", ephemeral=True)
+            return False
+
+        # Role Whitelist: enabled_roles or legacy allowed_roles
+        allow_roles = _parse_id_set(enabled_roles) | _parse_id_set(allowed_roles)
+        if allow_roles and not (member_role_ids & allow_roles):
+            await interaction.response.send_message(
+                "You don't have permission to use this command.", ephemeral=True)
+            return False
+
+        # Channel Blacklist: if invoked in disabled channel, block
+        dis_channels = _parse_id_set(disabled_channels)
+        if dis_channels and interaction.channel_id in dis_channels:
+            await interaction.response.send_message(
+                "This command can't be used in this channel.", ephemeral=True)
+            return False
+
+        # Channel Whitelist: enabled_channels or legacy allowed_channels
+        allow_channels = _parse_id_set(enabled_channels) | _parse_id_set(allowed_channels)
+        if allow_channels and interaction.channel_id not in allow_channels:
+            await interaction.response.send_message(
+                "This command can't be used in this channel.", ephemeral=True)
+            return False
 
         if cooldown_seconds and cooldown_seconds > 0:
             bypass_roles = set()
@@ -247,7 +270,6 @@ async def load_cogs():
         "cogs.tickets",
         "cogs.embedbuilder",
         "cogs.sticky",
-        "cogs.roleplay",
         "cogs.youtube",
         "cogs.triggers",
         "cogs.customcommands",
@@ -394,5 +416,6 @@ async def main():
         print(f"FATAL ERROR: {e}")
         traceback.print_exc()
 
-print("Running main...")
-asyncio.run(main())
+if __name__ == '__main__':
+    print("Running main...")
+    asyncio.run(main())

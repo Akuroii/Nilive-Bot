@@ -1,10 +1,17 @@
 window.NeroSelect = (function () {
+    const _optionsCache = {};
+
     async function fetchOptions(kind) {
+        if (_optionsCache[kind]) {
+            return _optionsCache[kind];
+        }
         const url = kind === 'role' ? '/api/guild/roles' : '/api/guild/channels';
         try {
             const res = await fetch(url);
             const data = await res.json();
-            return data.results || [];
+            const results = data.results || [];
+            _optionsCache[kind] = results;
+            return results;
         } catch (e) {
             console.error('NeroSelect fetch failed', e);
             return [];

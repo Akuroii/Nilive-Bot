@@ -1413,12 +1413,36 @@ async def init_db():
                 cmd_emoji             TEXT,
                 category_color        TEXT,
                 hide_from_help        INTEGER DEFAULT 0,
-                updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, command_name)
             )
         """)
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_ct_guild
             ON command_toggles(guild_id)
+        """)
+        # Ensure unique index exists for ON CONFLICT(guild_id, command_name) UPSERT queries
+        await db.execute("""
+            DELETE FROM command_toggles
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM command_toggles
+                GROUP BY guild_id, command_name
+            )
+        """)
+        await db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ct_guild_cmd
+            ON command_toggles(guild_id, command_name)
+        """)
+        # Clean up legacy/removed fun commands, work command, and non-existent ghost commands
+        await db.execute("""
+            DELETE FROM command_toggles
+            WHERE command_name IN (
+                'work', 'hug', 'pat', 'slap', 'kiss', 'poke',
+                'cuddle', 'wave', 'bite', 'cry', 'dance', 'highfive',
+                '8ball', 'coinflip', 'buy', 'event_end',
+                'ticket_claim', 'ticket_transfer'
+            )
         """)
 
         await db.execute("""
