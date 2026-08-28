@@ -232,6 +232,7 @@ class MessageRouter:
 
         content = message.content or ""
         if not content.strip():
+            print(f"[DIAG-ROUTER] message id={getattr(message, 'id', None)} has empty content ({repr(content)}). Returning Route.NONE.")
             return decision
 
         # 1. Real prefix command? Ask discord.py's own resolver rather than
@@ -242,6 +243,7 @@ class MessageRouter:
             ctx = None
         if ctx is not None and ctx.command is not None:
             decision.route = Route.PREFIX_COMMAND
+            print(f"[DIAG-ROUTER] Resolved as PREFIX_COMMAND: ctx.command={ctx.command.name}")
             return decision
 
         first = first_token(content)
@@ -253,6 +255,7 @@ class MessageRouter:
         guild_id = message.guild.id
         parent = None if first.startswith("!") else (
             self.alias_for(guild_id, first) or self.alias_for(guild_id, bare))
+        print(f"[DIAG-ROUTER] Lookup alias for guild={guild_id}, first={repr(first)}, bare={repr(bare)} -> parent={repr(parent)}")
         if parent:
             decision.route = Route.ALIAS
             decision.alias = {
@@ -271,10 +274,12 @@ class MessageRouter:
             if cmd is not None:
                 decision.route = Route.CUSTOM_COMMAND
                 decision.custom_command = cmd
+                print(f"[DIAG-ROUTER] Resolved as CUSTOM_COMMAND: trigger={first}")
                 return decision
 
         # 4. Free for message-reactive systems.
         decision.route = Route.TRIGGER
+        print(f"[DIAG-ROUTER] No command/alias match for {repr(first)}. Resolved as Route.TRIGGER.")
         return decision
 
     # ── shared lookups ─────────────────────────────────────────────────

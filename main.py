@@ -263,6 +263,12 @@ async def on_ready():
 
 
 @bot.event
+async def on_message(message: discord.Message):
+    print(f"[DIAG-GATEWAY] Message event received: author={message.author} (bot={getattr(message.author, 'bot', False)}), guild_id={getattr(message.guild, 'id', None)}, channel_id={getattr(message.channel, 'id', None)}, content={repr(message.content)}")
+    await bot.process_commands(message)
+
+
+@bot.event
 async def on_error(event_method, *args, **kwargs):
     tb = traceback.format_exc()
     print(f"[ON_ERROR] in {event_method}:\n{tb}")
