@@ -92,6 +92,7 @@ class _PrefixResponse:
 
     async def send_message(self, content=None, *, embed=None, ephemeral=False,
                            view=None, delete_after=None, allowed_mentions=None):
+        print(f"[DIAG-ALIAS:10] _PrefixResponse.send_message called: content={repr(content)}, has_embed={embed is not None}, ephemeral={ephemeral}")
         kwargs: Dict[str, Any] = {}
         if view is not None:
             kwargs["view"] = view
@@ -102,12 +103,18 @@ class _PrefixResponse:
         # `ephemeral` has no message equivalent: an alias reply is public by
         # definition. Kept in the signature so callbacks that pass it do not
         # blow up.
-        await self._ctx.send(content=content, embed=embed, **kwargs)
-        self._done = True
+        try:
+            await self._ctx.send(content=content, embed=embed, **kwargs)
+            self._done = True
+            print("[DIAG-ALIAS:10-SUCCESS] ctx.send completed successfully.")
+        except Exception as e:
+            print(f"[DIAG-ALIAS:10-ERROR] ctx.send failed: {type(e).__name__}: {e}")
+            raise
 
     async def defer(self, ephemeral=False, thinking=False):
         # No-op: message commands have no 3-second interaction deadline, so a
         # command that defers then uses followup.send() just sends normally.
+        print("[DIAG-ALIAS:DEFER] interaction.response.defer called (no-op)")
         pass
 
     def is_done(self):
@@ -123,6 +130,7 @@ class _PrefixFollowup:
     async def send(self, content=None, *, embed=None, ephemeral=False,
                    view=None, delete_after=None, allowed_mentions=None,
                    silent=False):
+        print(f"[DIAG-ALIAS:11] _PrefixFollowup.send called: content={repr(content)}, has_embed={embed is not None}")
         kwargs: Dict[str, Any] = {}
         if view is not None:
             kwargs["view"] = view
@@ -130,7 +138,12 @@ class _PrefixFollowup:
             kwargs["delete_after"] = delete_after
         if allowed_mentions is not None:
             kwargs["allowed_mentions"] = allowed_mentions
-        await self._ctx.send(content=content, embed=embed, **kwargs)
+        try:
+            await self._ctx.send(content=content, embed=embed, **kwargs)
+            print("[DIAG-ALIAS:11-SUCCESS] followup.send completed successfully.")
+        except Exception as e:
+            print(f"[DIAG-ALIAS:11-ERROR] followup.send failed: {type(e).__name__}: {e}")
+            raise
 
 
 class PrefixInteraction:
@@ -510,6 +523,7 @@ class CommandAliases(commands.Cog):
         await self._record_sync_status(registered, skipped)
 
         print(f"[ALIASES] {registered} alias(es) across {len(table)} guild(s)")
+        print(f"[DIAG-ALIAS:SYNC] Runtime alias table: {table}")
         for note in skipped[:10]:
             print(f"[ALIASES] skipped {note}")
         return registered
@@ -551,11 +565,13 @@ class CommandAliases(commands.Cog):
             names = list(ctx.command.params.keys())
             bound: Dict[str, Any] = dict(zip(names, args))
             bound.update(kwargs)
+            print(f"[DIAG-ALIAS:8] Runner started for /{parent_name} with bound args: {bound}")
 
             # Look the command up at call time, not sync time, so a reloaded
             # cog / re-synced tree is picked up without waiting for a re-sync.
             sc = self.bot.tree.get_command(parent_name)
             if sc is None:
+                print(f"[DIAG-ALIAS:8-ERR] Command /{parent_name} not found in bot.tree")
                 await ctx.send(f"Command `/{parent_name}` not found. "
                                f"It may have been removed.")
                 return
@@ -565,6 +581,7 @@ class CommandAliases(commands.Cog):
             slash_checks = list(getattr(sc, "checks", None) or [])
             passed, perm_msg = await _run_slash_checks(slash_checks, interaction)
             if not passed:
+                print(f"[DIAG-ALIAS:8-PERM] Slash checks failed for /{parent_name}: {perm_msg}")
                 await ctx.send(perm_msg)
                 return
 
@@ -576,19 +593,23 @@ class CommandAliases(commands.Cog):
                 # prefix-command API) — reading it raises AttributeError, which
                 # is exactly what killed the previous implementation.
                 binding = getattr(sc, "binding", None)
+                print(f"[DIAG-ALIAS:9] Invoking sc.callback for /{parent_name} on binding {binding}")
                 if binding is None:
                     await sc.callback(interaction, **bound)
                 else:
                     await sc.callback(binding, interaction, **bound)
+                print(f"[DIAG-ALIAS:9-SUCCESS] sc.callback for /{parent_name} finished without error")
             except TypeError as e:
                 # The usual cause is a parameter we could not bridge (e.g. a
                 # custom annotation). Say so instead of dying silently.
+                print(f"[DIAG-ALIAS:9-TYPEERR] TypeError in sc.callback: {e}")
                 raise commands.CommandInvokeError(
                     TypeError(f"`{ctx.command.name}` could not be run as an "
                               f"alias: {e}")) from e
             except commands.CommandError:
                 raise
             except discord.HTTPException as e:
+                print(f"[DIAG-ALIAS:9-HTTPERR] HTTPException in sc.callback: {e}")
                 raise commands.CommandInvokeError(e) from e
 
         return runner
@@ -665,12 +686,14 @@ class CommandAliases(commands.Cog):
     async def _invoke_alias(self, message, decision) -> None:
         alias_word = decision.alias["alias"]
         parent_name = decision.alias["parent"]
+        print(f"[DIAG-ALIAS:6] _invoke_alias started: alias_word={repr(alias_word)}, parent_name={repr(parent_name)}, author={message.author.id}")
 
         content = message.content or ""
         prefix = await self._resolve_prefix(message)
         if prefix and content.startswith(prefix):
             # Already a prefixed invocation: process_commands owns it, and the
             # router agrees (it would not have returned ALIAS).
+            print(f"[DIAG-ALIAS:6-SKIP] Message already starts with prefix {prefix}, skipping alias invoke.")
             return
 
         # Build a *throwaway* message view that carries the prefix so
@@ -690,6 +713,7 @@ class CommandAliases(commands.Cog):
         )
 
         cmd = self._command_for(parent_name, alias_word)
+        print(f"[DIAG-ALIAS:7] _command_for result: cmd={cmd}, parent={parent_name}, params={list(cmd.params.keys()) if cmd else None}")
         if cmd is None:
             # Routed correctly, but the command behind the word is not in the
             # tree at this instant. Say so — a silent no-op is how this feature
@@ -710,7 +734,9 @@ class CommandAliases(commands.Cog):
             ctx.prefix = prefix
 
         try:
+            print(f"[DIAG-ALIAS:7.5] Calling bot.invoke(ctx) for alias `{alias_word}`")
             await self.bot.invoke(ctx)
+            print(f"[DIAG-ALIAS:7.5-SUCCESS] bot.invoke(ctx) completed for `{alias_word}`")
         except Exception as e:  # anything that escaped invoke()'s own handling
             print(f"[ALIASES] error while running `{alias_word}` -> /{parent_name}: "
                   f"{type(e).__name__}: {e}")
@@ -723,14 +749,32 @@ class CommandAliases(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or message.guild is None:
+        # ── [DIAG-ALIAS:1] Checkpoint 1 & 2: Gateway receive + content ──
+        author_is_bot = getattr(message.author, "bot", False)
+        guild_id = getattr(message.guild, "id", None)
+        raw_content = getattr(message, "content", None)
+        content_len = len(raw_content) if raw_content is not None else -1
+
+        print(f"[DIAG-ALIAS:1] on_message: author={message.author} (bot={author_is_bot}), guild_id={guild_id}, channel_id={getattr(message.channel, 'id', None)}, content={repr(raw_content)}, len={content_len}")
+
+        if message.author.bot:
+            print(f"[DIAG-ALIAS:DROP] Ignored: author is a bot ({message.author})")
+            return
+        if message.guild is None:
+            print(f"[DIAG-ALIAS:DROP] Ignored: message is in DMs (guild is None)")
             return
         if not message.content:
+            print(f"[DIAG-ALIAS:DROP] ⚠️ WARNING: message.content is empty/blank (len={content_len})! Check Discord Developer Portal > Privileged Gateway Intents > Message Content Intent.")
             return
+
+        # ── [DIAG-ALIAS:3] Checkpoint 3: Table lookup ──
+        guild_aliases = self._table.get(message.guild.id, {})
+        print(f"[DIAG-ALIAS:3] Guild {message.guild.id} runtime alias table: {guild_aliases}")
 
         router = get_router(self.bot)
         try:
             decision = await router.decide(message)
+            print(f"[DIAG-ALIAS:4] Router decide result: route={decision.route}, alias={decision.alias}")
         except Exception as e:
             # Never let the router's own failure break message handling — but
             # do say something, and stay conservative: on a router error the
@@ -739,6 +783,7 @@ class CommandAliases(commands.Cog):
             return
 
         if decision.route is not Route.ALIAS:
+            print(f"[DIAG-ALIAS:5] Router did not claim this message as ALIAS (route={decision.route}). CommandAliases stands down.")
             return
         await self._invoke_alias(message, decision)
 
@@ -748,6 +793,7 @@ class CommandAliases(commands.Cog):
     async def on_command_error(self, ctx, error):
         """Friendly messages for alias invocations (they have no slash UI)."""
         command = ctx.command
+        print(f"[DIAG-ALIAS:CMD-ERROR] on_command_error invoked for ctx.command={command}: {type(error).__name__}: {error}")
         if command is None or not command.extras.get("nero_alias_parent"):
             return
 
