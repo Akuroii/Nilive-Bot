@@ -29,6 +29,7 @@ run "p4  dashboard api + page + assets"    "$PYTHON" tools/alias_probes/p4_flask
 run "p6  router consistency"              "$PYTHON" tools/alias_probes/p6_race.py
 run "p8  alias acceptance (real cogs)"     "$PYTHON" tools/alias_probes/p8_acceptance.py
 run "p10 full boot + reverse reload"       "$PYTHON" tools/alias_probes/p10_full_boot.py
+run "p12 real-message surface (live crash)" "$PYTHON" tools/alias_probes/p12_real_message_surface.py
 
 if [ -n "${JSDOM_PATH:-}" ] || node -e "require('jsdom')" >/dev/null 2>&1 \
    || [ -d "$HOME/.cache/jstest/node_modules/jsdom" ] \
@@ -36,8 +37,11 @@ if [ -n "${JSDOM_PATH:-}" ] || node -e "require('jsdom')" >/dev/null 2>&1 \
     run "p9  chip input in a real DOM" "$NODE" tools/alias_probes/p9_chips_dom.js
     run "p11 dashboard htmx + edit + save + role-picker failsafe" \
         "$NODE" tools/alias_probes/p11_dashboard_htmx.js
+    # Self-skips (exit 0) when jquery + select2 aren't installed alongside jsdom.
+    run "p13 role/channel picker renders real data" \
+        "$NODE" tools/alias_probes/p13_picker_render.js
 else
-    printf '\n\033[33m! skipping p9 / p11 (jsdom not found — npm i jsdom, or set JSDOM_PATH)\033[0m\n'
+    printf '\n\033[33m! skipping p9 / p11 / p13 (jsdom not found — npm i jsdom, or set JSDOM_PATH)\033[0m\n'
 fi
 
 printf '\n'
