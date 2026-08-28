@@ -132,99 +132,40 @@ class NeroCommandTree(discord.app_commands.CommandTree):
 
         cmd_name = interaction.command.qualified_name
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT enabled, allowed_roles, allowed_channels, owner_only,
-                       cooldown_seconds, bypass_cooldown_roles, error_message,
-                       enabled_roles, disabled_roles, enabled_channels, disabled_channels
-                FROM command_toggles
-                WHERE guild_id = ? AND command_name = ?
-            """, (interaction.guild.id, cmd_name))
-            row = await cursor.fetchone()
+        # SHARED GATING (2026-08-28): this whole body — enabled/disabled,
+        # owner-only, role + channel black/whitelists, cooldown_seconds with
+        # its bypass roles and the error_message override — now lives in
+        # utils/command_gating.py, because the bare-alias path
+        # (cogs/command_aliases.py) has to apply the *same* rules and had
+        # already started to drift from this copy. One implementation, one
+        # cooldown dict, so /kick and the alias `k` cannot disagree about
+        # whether a member may run something, or double up on rate limiting.
+        # Imported lazily (same reason as cogs.health below): main.py must not
+        # need cogs/* at module import time.
+        from utils.command_gating import evaluate_toggle_row, load_toggle_row
 
-        if not row:
-            return True
+        row = await load_toggle_row(interaction.guild.id, cmd_name)
+        now = time.time()
+        allowed, msg = evaluate_toggle_row(
+            row,
+            guild_id=interaction.guild.id,
+            command_name=cmd_name,
+            member=interaction.user,
+            channel_id=interaction.channel_id,
+            guild_owner_id=interaction.guild.owner_id,
+            cooldowns=_command_cooldowns,
+            now=now,
+        )
+        # Pruning used to happen only when a cooldown was actually hit, which
+        # meant a busy bot with mostly-unlimited commands never pruned at all.
+        _prune_command_cooldowns(now)
 
-        (enabled, allowed_roles, allowed_channels, owner_only,
-         cooldown_seconds, bypass_cooldown_roles, error_message,
-         enabled_roles, disabled_roles, enabled_channels, disabled_channels) = row
-
-        if not enabled:
-            msg = error_message or f"`/{cmd_name}` is currently disabled on this server."
-            await interaction.response.send_message(msg, ephemeral=True)
+        if not allowed and msg:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(msg, ephemeral=True)
             return False
-
-        if owner_only and interaction.user.id != interaction.guild.owner_id:
-            await interaction.response.send_message(
-                "This command is restricted to the server owner.", ephemeral=True)
-            return False
-
-        def _parse_id_set(raw_val) -> set[int]:
-            if not raw_val:
-                return set()
-            if isinstance(raw_val, (list, set)):
-                return {int(x) for x in raw_val if str(x).isdigit()}
-            try:
-                parsed = json.loads(raw_val)
-                if isinstance(parsed, list):
-                    return {int(x) for x in parsed if str(x).isdigit()}
-            except Exception:
-                pass
-            return set()
-
-        member_role_ids = {r.id for r in interaction.user.roles}
-
-        # Role Blacklist: if member has ANY disabled role, block
-        dis_roles = _parse_id_set(disabled_roles)
-        if dis_roles and (member_role_ids & dis_roles):
-            await interaction.response.send_message(
-                "You don't have permission to use this command.", ephemeral=True)
-            return False
-
-        # Role Whitelist: enabled_roles or legacy allowed_roles
-        allow_roles = _parse_id_set(enabled_roles) | _parse_id_set(allowed_roles)
-        if allow_roles and not (member_role_ids & allow_roles):
-            await interaction.response.send_message(
-                "You don't have permission to use this command.", ephemeral=True)
-            return False
-
-        # Channel Blacklist: if invoked in disabled channel, block
-        dis_channels = _parse_id_set(disabled_channels)
-        if dis_channels and interaction.channel_id in dis_channels:
-            await interaction.response.send_message(
-                "This command can't be used in this channel.", ephemeral=True)
-            return False
-
-        # Channel Whitelist: enabled_channels or legacy allowed_channels
-        allow_channels = _parse_id_set(enabled_channels) | _parse_id_set(allowed_channels)
-        if allow_channels and interaction.channel_id not in allow_channels:
-            await interaction.response.send_message(
-                "This command can't be used in this channel.", ephemeral=True)
-            return False
-
-        if cooldown_seconds and cooldown_seconds > 0:
-            bypass_roles = set()
-            if bypass_cooldown_roles:
-                try:
-                    bypass_roles = {int(r) for r in json.loads(bypass_cooldown_roles)}
-                except Exception:
-                    pass
-            member_role_ids = {r.id for r in interaction.user.roles}
-            if not (member_role_ids & bypass_roles):
-                key = (interaction.guild.id, interaction.user.id, cmd_name)
-                now = time.time()
-                last = _command_cooldowns.get(key, 0)
-                if now - last < cooldown_seconds:
-                    remaining = round(cooldown_seconds - (now - last), 1)
-                    await interaction.response.send_message(
-                        f"Slow down — try again in {remaining}s.", ephemeral=True)
-                    return False
-                _command_cooldowns[key] = now
-                _prune_command_cooldowns(now)
 
         return True
-
-
 bot = commands.Bot(command_prefix="!", intents=intents, tree_cls=NeroCommandTree, case_insensitive=True)
 
 _status_index = 0
@@ -285,10 +226,13 @@ async def load_cogs():
         "cogs.scheduler",
         "cogs.tagmissions",
         "cogs.tagpartners",
-        # MUST be last: its on_message listener rewrites bare alias
-        # messages (e.g. "k @User" → "!k @User") so that
-        # process_commands can dispatch them. All other on_message
-        # listeners must see the original content first.
+        # Load order does NOT matter for aliases any more (2026-08-28). The
+        # old comment here said "MUST be last, it rewrites message.content so
+        # process_commands can dispatch it" — that was wrong twice over:
+        # discord.py runs process_commands before every cog on_message
+        # listener, and the rewrite leaked into the listeners that ran
+        # concurrently. Aliases now go through utils/message_router.py, which
+        # decides one owner per message without touching the message at all.
         "cogs.command_aliases",
     ]
     bot.loaded_cogs = []

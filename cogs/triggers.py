@@ -6,6 +6,7 @@ import json
 import random
 import time
 from database import DB_PATH
+from utils.message_router import Route, get_router
 
 try:
     from thefuzz import fuzz
@@ -146,6 +147,18 @@ class Triggers(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
+            return
+
+        # PRECEDENCE (2026-08-28): a message that belongs to a real prefix
+        # command, a slash-command alias, or a custom command is NOT a trigger
+        # candidate. This used to be impossible to guarantee — the trigger
+        # listener and the alias listener ran as sibling tasks with no
+        # coordination, so a bare alias word (e.g. "k" -> /kick) could also
+        # fire a trigger, and the alias listener's message.content rewrite
+        # silently broke exact/startswith trigger matching. The router decides
+        # once, per message, for everyone.
+        decision = await get_router(self.bot).decide(message)
+        if decision.route is not Route.TRIGGER:
             return
 
         async with aiosqlite.connect(DB_PATH) as db:

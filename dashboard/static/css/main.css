@@ -991,3 +991,106 @@ code {
     .stats-grid { grid-template-columns: 1fr; }
     .btn        { min-height: 44px; }
 }
+
+/* ── Alias chip input (nero-alias-input.js) ─────────────────────────
+   ProBot-style: a box that looks like a text field but holds removable
+   chips. Kept in main.css rather than the page's <style> block because
+   the triggers / custom-command pages may want the same field later. */
+.alias-host,
+.na-box {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    min-height: 38px;
+    padding: 5px 7px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius, 8px);
+    cursor: text;
+    transition: border-color .15s ease, box-shadow .15s ease;
+}
+.na-box:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(124, 92, 191, .18);
+}
+.na-chips {
+    display: contents;
+}
+/* the authoritative <input type=hidden>: stays in the host so the page can
+   still read it by id, but must never take up room */
+.na-source {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+.na-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--accent);
+    background: rgba(124, 92, 191, .14);
+    border: 1px solid rgba(124, 92, 191, .4);
+    border-radius: 999px;
+    padding: 2px 4px 2px 9px;
+    cursor: pointer;
+    animation: na-pop .12s ease-out;
+}
+.na-chip:hover { background: rgba(124, 92, 191, .24); }
+@keyframes na-pop {
+    from { transform: scale(.85); opacity: .4; }
+    to   { transform: scale(1);    opacity: 1; }
+}
+.na-chip-text { font-family: var(--mono, ui-monospace, monospace); }
+.na-chip-x {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 4px;
+    border-radius: 50%;
+    cursor: pointer;
+    opacity: .65;
+}
+.na-chip-x:hover { opacity: 1; background: rgba(237, 66, 69, .8); color: #fff; }
+.na-chip--warn {
+    color: var(--warning);
+    border-color: rgba(250, 166, 26, .55);
+    background: rgba(250, 166, 26, .12);
+}
+.na-chip-warn {
+    display: inline-grid;
+    place-items: center;
+    width: 13px;
+    height: 13px;
+    font-size: 10px;
+    font-weight: 800;
+    border-radius: 50%;
+    background: var(--warning);
+    color: #000;
+}
+.na-input {
+    flex: 1;
+    min-width: 130px;
+    border: 0;
+    background: transparent;
+    color: var(--text1);
+    font-size: 13px;
+    padding: 2px 0;
+    outline: none;
+}
+.na-input::placeholder { color: var(--text3); }
+.na-hint {
+    flex-basis: 100%;
+    font-size: 11px;
+    color: var(--text3);
+    min-height: 0;
+}
+.na-hint--error { color: var(--danger); }
+.na-hint--ok    { color: var(--success); }
