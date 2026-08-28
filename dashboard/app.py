@@ -1909,23 +1909,20 @@ def api_command_settings_save(command: str):
     cooldown_raw = data.get("cooldown_seconds")
     cooldown_sec = int(cooldown_raw) if cooldown_raw is not None and str(cooldown_raw).lstrip("-").isdigit() and int(cooldown_raw) >= 0 else None
 
-    # Validate aliases
+    # Validate aliases — advisory, not blocking except for format
     aliases_raw = data.get("aliases", [])
     if aliases_raw:
-        # Normalize: strip whitespace, lowercase, remove empty
         aliases_raw = [a.strip().lower() for a in aliases_raw if a.strip()]
-        # Remove duplicates
         aliases_raw = list(dict.fromkeys(aliases_raw))
 
-        # Validate each alias
         for alias in aliases_raw:
-            # Must be alphanumeric (allow hyphens)
-            if not alias.replace("-", "").isalnum():
-                return jsonify({
-                    "success": False,
-                    "error": f"Alias '{alias}' is invalid — use only letters, numbers, and hyphens."
-                }), 400
-            # Must not be empty or too long
+            if not alias.replace("-", "").replace("_", "").isalnum():
+                # Allow alphanumeric + hyphen/underscore only
+                if not all(c.isalnum() or c in "-_" for c in alias):
+                    return jsonify({
+                        "success": False,
+                        "error": f"Alias '{alias}' is invalid — use only letters, numbers, hyphens, underscores."
+                    }), 400
             if len(alias) < 1 or len(alias) > 32:
                 return jsonify({
                     "success": False,
@@ -1934,93 +1931,161 @@ def api_command_settings_save(command: str):
 
     aliases = json.dumps(aliases_raw) if aliases_raw else None
 
+    # Conflict detection — ADVISORY ONLY (Option R)
+    # We collect warnings but do NOT block save. Runtime router precedence is authoritative.
+    warnings = []
+
+    async def collect_warnings():
+        warns = []
+        if not aliases_raw:
+            return warns
+
+        # Slash command names
+        slash_names = set(COMMAND_METADATA.keys())
+        built_in_prefix = {"sync", "reload", "help"}
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Custom command triggers for this guild + global
+            cursor = await db.execute(
+                "SELECT trigger, guild_id FROM custom_commands WHERE guild_id = ? OR guild_id = 0",
+                (guild_id,))
+            custom_rows = await cursor.fetchall()
+            custom_triggers = {}
+            for trig, gid in custom_rows:
+                if trig:
+                    custom_triggers[trig.lower()] = gid
+
+            # Trigger words for this guild + global
+            cursor = await db.execute(
+                "SELECT trigger_words, match_type, guild_id FROM triggers WHERE (guild_id = ? OR guild_id = 0) AND enabled = 1",
+                (guild_id,))
+            trigger_rows = await cursor.fetchall()
+            trigger_words_map = []  # list of (word, match_type, guild_id)
+            trigger_words_set = set()
+            for tw_raw, mt, gid in trigger_rows:
+                if not tw_raw:
+                    continue
+                for w in tw_raw.split(","):
+                    w = w.strip().lower()
+                    if w:
+                        trigger_words_set.add(w)
+                        trigger_words_map.append((w, mt or "contains", gid))
+
+            # Other aliases from OTHER commands in same guild
+            cursor = await db.execute(
+                "SELECT command_name, aliases, guild_id FROM command_toggles WHERE aliases IS NOT NULL AND aliases != '[]' AND aliases != ''",
+                )
+            all_alias_rows = await cursor.fetchall()
+            other_aliases = {}  # alias -> (cmd, guild_id)
+            global_aliases = {}  # alias from guild 0
+            for cname, al_json, gid in all_alias_rows:
+                if cname == cmd_clean and gid == guild_id:
+                    continue
+                try:
+                    al_list = json.loads(al_json)
+                    for a in al_list:
+                        a_low = a.strip().lower()
+                        if not a_low:
+                            continue
+                        if gid == 0:
+                            global_aliases[a_low] = cname
+                        else:
+                            # Only consider same guild for direct conflict, plus global
+                            if gid == guild_id:
+                                other_aliases[a_low] = (cname, gid)
+                except Exception:
+                    pass
+
+        for alias in aliases_raw:
+            # Exact conflict with slash command
+            if alias in slash_names:
+                warnings.append({
+                    "type": "exact_slash",
+                    "alias": alias,
+                    "message": f"Alias '{alias}' matches slash command /{alias} — alias will win at runtime, but consider renaming to avoid confusion.",
+                    "severity": "warning"
+                })
+            # Built-in prefix conflict
+            if alias in built_in_prefix:
+                warnings.append({
+                    "type": "builtin_prefix",
+                    "alias": alias,
+                    "message": f"Alias '{alias}' conflicts with built-in prefix command !{alias} — alias will win for bare messages, prefix command still works with !{alias}.",
+                    "severity": "warning"
+                })
+            # Custom command trigger conflict (exact)
+            if alias in custom_triggers:
+                gid = custom_triggers[alias]
+                scope = "global" if gid == 0 else "this server"
+                warnings.append({
+                    "type": "custom_trigger_exact",
+                    "alias": alias,
+                    "message": f"Alias '{alias}' conflicts with custom command trigger '!{alias}' ({scope}) — alias wins by precedence, custom command will not fire for bare '{alias}' but still works with '!{alias}'.",
+                    "severity": "warning"
+                })
+            # Custom trigger substring / fuzzy overlap
+            for c_trig in custom_triggers:
+                if c_trig == alias:
+                    continue
+                # If alias is substring of custom trigger or vice versa, and custom uses word-boundary now,
+                # it won't fire accidentally, but warn for awareness
+                if alias in c_trig or c_trig in alias:
+                    warnings.append({
+                        "type": "custom_trigger_fuzzy",
+                        "alias": alias,
+                        "message": f"Alias '{alias}' overlaps with custom trigger '!{c_trig}' (substring) — runtime is deterministic (alias > custom for bare, custom uses word-boundary for !), but review for clarity.",
+                        "severity": "info"
+                    })
+                    break
+
+            # Trigger system exact
+            if alias in trigger_words_set:
+                warnings.append({
+                    "type": "trigger_exact",
+                    "alias": alias,
+                    "message": f"Alias '{alias}' matches an auto-response trigger word — alias wins by precedence (bare '{alias}' will execute /{cmd_clean}, not the trigger).",
+                    "severity": "warning"
+                })
+            # Trigger fuzzy / substring overlaps
+            for tw, mt, gid in trigger_words_map:
+                if tw == alias:
+                    continue
+                # For contains/startswith triggers, substring overlap matters
+                if alias in tw or tw in alias:
+                    scope = "global" if gid == 0 else "this server"
+                    warnings.append({
+                        "type": "trigger_fuzzy",
+                        "alias": alias,
+                        "message": f"Alias '{alias}' overlaps with trigger '{tw}' (match_type={mt}, {scope}) — alias wins at runtime, trigger may still fire for other messages.",
+                        "severity": "info"
+                    })
+                    break
+
+            # Other command alias conflict
+            if alias in other_aliases:
+                other_cmd, _ = other_aliases[alias]
+                warnings.append({
+                    "type": "alias_conflict",
+                    "alias": alias,
+                    "message": f"Alias '{alias}' is already used by /{other_cmd} in this server — runtime will use first writer wins per guild, but you should keep aliases unique.",
+                    "severity": "warning"
+                })
+
+            # Global alias conflict
+            if alias in global_aliases:
+                warnings.append({
+                    "type": "global_alias",
+                    "alias": alias,
+                    "message": f"Alias '{alias}' exists as global (guild 0) alias for /{global_aliases[alias]} — this server's alias will override global.",
+                    "severity": "info"
+                })
+
+        return warns
+
+    warnings = run_async(collect_warnings())
+
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
-            # Check for alias conflicts with slash commands
-            if aliases_raw:
-                # Get all slash command names
-                # (We can't easily get these from the DB, so we check
-                # against COMMAND_METADATA which mirrors the tree)
-                slash_names = set(COMMAND_METADATA.keys())
-
-                # Get all existing prefix commands (sync, reload, etc.)
-                # We check bot.all_commands but that's in the bot process,
-                # not the dashboard. Instead, check against known built-ins.
-                built_in_prefix = {"sync", "reload", "help"}
-
-                # Get all custom command triggers for this guild
-                cursor = await db.execute(
-                    "SELECT trigger FROM custom_commands WHERE guild_id = ?",
-                    (guild_id,))
-                custom_triggers = {r[0].lower() for r in await cursor.fetchall()}
-
-                # Get all trigger words for this guild (from the
-                # triggers system) — bare aliases could match triggers
-                # with "contains" or "startswith" match_type, causing
-                # double execution.
-                cursor = await db.execute(
-                    "SELECT trigger_words, match_type FROM triggers "
-                    "WHERE (guild_id = ? OR guild_id = 0) AND enabled = 1",
-                    (guild_id,))
-                trigger_rows = await cursor.fetchall()
-                trigger_words_set: set[str] = set()
-                for tw_raw, mt in trigger_rows:
-                    if not tw_raw:
-                        continue
-                    for w in tw_raw.split(","):
-                        w = w.strip().lower()
-                        if w:
-                            trigger_words_set.add(w)
-
-                # Get all aliases from OTHER commands (to detect cross-command conflicts)
-                cursor = await db.execute(
-                    "SELECT command_name, aliases FROM command_toggles "
-                    "WHERE guild_id = ? AND command_name != ? AND aliases IS NOT NULL",
-                    (guild_id, cmd_clean))
-                other_aliases = {}
-                for row in await cursor.fetchall():
-                    try:
-                        other_als = json.loads(row[1])
-                        for a in other_als:
-                            other_aliases[a.lower()] = row[0]
-                    except Exception:
-                        pass
-
-                for alias in aliases_raw:
-                    # Conflict with slash command name
-                    if alias in slash_names:
-                        raise ValueError(
-                            f"Alias '{alias}' conflicts with the slash command /{alias}. "
-                            "Choose a different alias."
-                        )
-                    # Conflict with built-in prefix commands
-                    if alias in built_in_prefix:
-                        raise ValueError(
-                            f"Alias '{alias}' conflicts with a built-in bot command. "
-                            "Choose a different alias."
-                        )
-                    # Conflict with custom command triggers
-                    if alias in custom_triggers:
-                        raise ValueError(
-                            f"Alias '{alias}' conflicts with custom command trigger '!{alias}'. "
-                            "Choose a different alias or remove the custom command first."
-                        )
-                    # Conflict with trigger system words — a bare alias
-                    # would match triggers with "contains" or
-                    # "startswith" match_type, causing double execution
-                    if alias in trigger_words_set:
-                        raise ValueError(
-                            f"Alias '{alias}' conflicts with an auto-response trigger "
-                            f"matching '{alias}'. Remove or rename the trigger first, "
-                            "or choose a different alias."
-                        )
-                    # Conflict with other command's aliases
-                    if alias in other_aliases:
-                        raise ValueError(
-                            f"Alias '{alias}' is already used by /{other_aliases[alias]}. "
-                            "Each alias must be unique."
-                        )
-
             await db.execute("""
                 INSERT INTO command_toggles
                     (guild_id, command_name, enabled, allowed_roles,
@@ -2048,7 +2113,6 @@ def api_command_settings_save(command: str):
                 enabled_val,
             ))
 
-            # Signal the bot to re-sync aliases
             await db.execute("""
                 INSERT INTO bot_settings (key, value)
                 VALUES ('command_aliases_sync_needed', '1')
@@ -2056,13 +2120,104 @@ def api_command_settings_save(command: str):
             """)
             await db.commit()
 
-    try:
-        run_async(save())
-    except ValueError as e:
-        return jsonify({"success": False, "error": str(e)}), 400
+    run_async(save())
 
     log_action(guild_id, f"Updated settings for /{cmd_clean}", "commands")
-    return jsonify({"success": True, "command": cmd_clean})
+    return jsonify({"success": True, "command": cmd_clean, "warnings": warnings})
+
+
+@app.route("/api/commands/check-conflicts/<command>", methods=["POST"])
+@require_page("commands")
+def api_check_alias_conflicts(command: str):
+    """
+    Live advisory conflict check for alias UI — does not save.
+    Returns warnings array for given alias list.
+    """
+    guild_id = get_session_guild_id()
+    data = request.json or {}
+    cmd_clean = command.strip().lstrip("/")
+    aliases_raw = data.get("aliases", [])
+    if aliases_raw:
+        aliases_raw = [a.strip().lower() for a in aliases_raw if a.strip()]
+        aliases_raw = list(dict.fromkeys(aliases_raw))
+
+    async def collect():
+        warns = []
+        if not aliases_raw:
+            return warns
+        slash_names = set(COMMAND_METADATA.keys())
+        built_in_prefix = {"sync", "reload", "help"}
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT trigger, guild_id FROM custom_commands WHERE guild_id = ? OR guild_id = 0",
+                (guild_id,))
+            custom_rows = await cursor.fetchall()
+            custom_triggers = {r[0].lower(): r[1] for r in custom_rows if r[0]}
+
+            cursor = await db.execute(
+                "SELECT trigger_words, match_type, guild_id FROM triggers WHERE (guild_id = ? OR guild_id = 0) AND enabled = 1",
+                (guild_id,))
+            trigger_rows = await cursor.fetchall()
+            trigger_words_set = set()
+            trigger_map = []
+            for tw_raw, mt, gid in trigger_rows:
+                if not tw_raw:
+                    continue
+                for w in tw_raw.split(","):
+                    w = w.strip().lower()
+                    if w:
+                        trigger_words_set.add(w)
+                        trigger_map.append((w, mt or "contains", gid))
+
+            cursor = await db.execute(
+                "SELECT command_name, aliases, guild_id FROM command_toggles WHERE aliases IS NOT NULL AND aliases != '[]' AND aliases != ''",
+            )
+            all_alias_rows = await cursor.fetchall()
+            other_aliases = {}
+            global_aliases = {}
+            for cname, al_json, gid in all_alias_rows:
+                if cname == cmd_clean and gid == guild_id:
+                    continue
+                try:
+                    al_list = json.loads(al_json)
+                    for a in al_list:
+                        a_low = a.strip().lower()
+                        if not a_low:
+                            continue
+                        if gid == 0:
+                            global_aliases[a_low] = cname
+                        elif gid == guild_id:
+                            other_aliases[a_low] = cname
+                except Exception:
+                    pass
+
+        for alias in aliases_raw:
+            if alias in slash_names:
+                warns.append({"type": "exact_slash", "alias": alias, "message": f"Alias '{alias}' matches slash command /{alias} — alias wins at runtime."})
+            if alias in built_in_prefix:
+                warns.append({"type": "builtin_prefix", "alias": alias, "message": f"Alias '{alias}' conflicts with built-in !{alias} — alias wins for bare messages."})
+            if alias in custom_triggers:
+                warns.append({"type": "custom_trigger_exact", "alias": alias, "message": f"Alias '{alias}' conflicts with custom trigger '!{alias}' — alias wins."})
+            if alias in trigger_words_set:
+                warns.append({"type": "trigger_exact", "alias": alias, "message": f"Alias '{alias}' matches trigger word — alias wins."})
+            if alias in other_aliases:
+                warns.append({"type": "alias_conflict", "alias": alias, "message": f"Alias '{alias}' already used by /{other_aliases[alias]}."})
+            if alias in global_aliases:
+                warns.append({"type": "global_alias", "alias": alias, "message": f"Alias '{alias}' exists as global alias for /{global_aliases[alias]}."})
+            # fuzzy checks
+            for c_trig in custom_triggers:
+                if c_trig != alias and (alias in c_trig or c_trig in alias):
+                    warns.append({"type": "custom_trigger_fuzzy", "alias": alias, "message": f"Alias '{alias}' overlaps with custom trigger '!{c_trig}' (substring)."})
+                    break
+            for tw, mt, gid in trigger_map:
+                if tw != alias and (alias in tw or tw in alias):
+                    warns.append({"type": "trigger_fuzzy", "alias": alias, "message": f"Alias '{alias}' overlaps with trigger '{tw}' (match_type={mt})."})
+                    break
+
+        return warns
+
+    warnings = run_async(collect())
+    return jsonify({"success": True, "warnings": warnings})
 
 
 @app.route("/api/commands/bulk-restrict", methods=["POST"])
@@ -2305,42 +2460,43 @@ def api_save_trigger():
     guild_id = get_session_guild_id()
     data     = request.json
 
-    # ALIAS CONFLICT CHECK: reject trigger words that match an existing
-    # functional alias, to prevent double execution when a bare alias
-    # message also matches this trigger.
-    trigger_words_raw = data.get("trigger_words", "")
-    if trigger_words_raw:
-        async def check_alias_conflicts():
-            async with aiosqlite.connect(DB_PATH) as db:
-                cursor = await db.execute(
-                    "SELECT aliases FROM command_toggles "
-                    "WHERE guild_id = ? AND aliases IS NOT NULL "
-                    "AND aliases != '[]' AND aliases != ''",
-                    (guild_id,))
-                rows = await cursor.fetchall()
-            all_aliases: set[str] = set()
-            for (aliases_json,) in rows:
-                try:
-                    for a in json.loads(aliases_json):
-                        a = a.strip().lower()
-                        if a:
-                            all_aliases.add(a)
-                except Exception:
-                    pass
-            return all_aliases
+    # Advisory conflict check — alias wins by precedence, so we allow save
+    # but return warnings. Runtime router is authoritative.
+    trigger_words_raw = data.get("trigger_words", "") or ""
+    warnings = []
 
-        existing_aliases = run_async(check_alias_conflicts())
-        new_words = {w.strip().lower() for w in trigger_words_raw.split(",")
-                     if w.strip()}
-        conflicts = new_words & existing_aliases
-        if conflicts:
-            word_list = ", ".join(f"'{w}'" for w in sorted(conflicts))
-            return jsonify({
-                "success": False,
-                "error": f"Trigger word(s) {word_list} conflict with "
-                         f"existing command alias(es). Remove the "
-                         f"alias first or choose different trigger words."
-            }), 400
+    async def check_alias_conflicts_advisory():
+        warns = []
+        if not trigger_words_raw:
+            return warns
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT command_name, aliases FROM command_toggles "
+                "WHERE (guild_id = ? OR guild_id = 0) AND aliases IS NOT NULL "
+                "AND aliases != '[]' AND aliases != ''",
+                (guild_id,))
+            rows = await cursor.fetchall()
+        all_aliases = {}
+        for cname, aliases_json in rows:
+            try:
+                for a in json.loads(aliases_json):
+                    a_low = a.strip().lower()
+                    if a_low:
+                        all_aliases[a_low] = cname
+            except Exception:
+                pass
+        new_words = {w.strip().lower() for w in trigger_words_raw.split(",") if w.strip()}
+        for w in new_words:
+            if w in all_aliases:
+                warns.append(f"Trigger word '{w}' conflicts with alias for /{all_aliases[w]} — alias will win for bare '{w}' at runtime.")
+            # fuzzy
+            for al in all_aliases:
+                if al != w and (w in al or al in w):
+                    warns.append(f"Trigger word '{w}' overlaps with alias '{al}' (substring) — alias wins by precedence.")
+                    break
+        return warns
+
+    warnings = run_async(check_alias_conflicts_advisory())
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -2370,7 +2526,7 @@ def api_save_trigger():
 
     run_async(save())
     log_action(guild_id, f"Added trigger: {data.get('trigger_words')}", "triggers")
-    return jsonify({"success": True})
+    return jsonify({"success": True, "warnings": warnings})
 
 
 @app.route("/api/delete-trigger/<int:trigger_id>", methods=["DELETE"])
@@ -2397,6 +2553,39 @@ def api_save_custom_command():
     guild_id = get_session_guild_id()
     data     = request.json
 
+    # Advisory alias conflict check — alias wins, but warn
+    trigger_raw = (data.get("trigger") or "").strip().lower()
+    warnings = []
+
+    async def check_alias_conflicts():
+        warns = []
+        if not trigger_raw:
+            return warns
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT command_name, aliases FROM command_toggles "
+                "WHERE (guild_id = ? OR guild_id = 0) AND aliases IS NOT NULL AND aliases != '[]' AND aliases != ''",
+                (guild_id,))
+            rows = await cursor.fetchall()
+        alias_map = {}
+        for cname, al_json in rows:
+            try:
+                for a in json.loads(al_json):
+                    a_low = a.strip().lower()
+                    if a_low:
+                        alias_map[a_low] = cname
+            except Exception:
+                pass
+        if trigger_raw in alias_map:
+            warns.append(f"Custom trigger '!{trigger_raw}' conflicts with alias '{trigger_raw}' for /{alias_map[trigger_raw]} — alias will win for bare '{trigger_raw}', custom still works with '!{trigger_raw}'.")
+        for al in alias_map:
+            if al != trigger_raw and (trigger_raw in al or al in trigger_raw):
+                warns.append(f"Custom trigger '!{trigger_raw}' overlaps with alias '{al}' (substring) — runtime is deterministic (alias > custom for bare).")
+                break
+        return warns
+
+    warnings = run_async(check_alias_conflicts())
+
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -2404,8 +2593,8 @@ def api_save_custom_command():
                     (guild_id, trigger, allowed_roles, actions,
                      embed_title, embed_description, embed_color,
                      log_channel_id, same_channel, dm_member,
-                     dm_message, requires_mention, requires_reason)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     dm_message, requires_mention, requires_reason, enabled)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1)
             """, (
                 guild_id,
                 data.get("trigger"),
@@ -2426,7 +2615,7 @@ def api_save_custom_command():
     run_async(save())
     log_action(guild_id, f"Added custom command: !{data.get('trigger')}",
                "customcommands")
-    return jsonify({"success": True})
+    return jsonify({"success": True, "warnings": warnings})
 
 
 @app.route("/api/delete-custom-command/<int:cmd_id>", methods=["DELETE"])

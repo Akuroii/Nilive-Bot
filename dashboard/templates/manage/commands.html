@@ -178,10 +178,13 @@
                                     <div class="form-hint">Rate limit per user in seconds</div>
                                 </div>
                                 <div class="form-group" style="margin-bottom:0;">
-                                    <label class="form-label" for="edit-aliases-{{ cmd }}">Aliases</label>
-                                    <input class="form-input" id="edit-aliases-{{ cmd }}"
-                                           placeholder="e.g. k, remove (comma-separated)">
-                                    <div class="form-hint">Message command aliases — users can type <code>alias</code> instead of <code>/{{ cmd }}</code>. Case-insensitive.</div>
+                                    <label class="form-label">Aliases</label>
+                                    <div class="alias-chip-wrapper" id="alias-wrapper-{{ cmd }}">
+                                        <div class="alias-chips" id="alias-chips-{{ cmd }}"></div>
+                                        <input type="text" class="form-input alias-chip-input" id="edit-aliases-{{ cmd }}" placeholder="Type alias and press Space..." autocomplete="off" spellcheck="false">
+                                    </div>
+                                    <div class="form-hint">Type <code>k</code> + Space → chip <code>× k</code>. Bare-only: <code>k @user</code> triggers <code>/{{ cmd }}</code>. No <code>!k</code> form. Single-char like <code>k</code> valid.</div>
+                                    <div class="alias-warnings" id="alias-warnings-{{ cmd }}" style="display:none;"></div>
                                 </div>
                             </div>
 
@@ -626,6 +629,97 @@
     .cmd-edit-panel { transition: none !important; }
     .cmd-edit-chevron { transition: none !important; }
 }
+
+/* ── Alias Chip UI — ProBot-style ─────────────────────────────────── */
+.alias-chip-wrapper {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    min-height: 42px;
+    padding: 6px 8px;
+    background: var(--bg4);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: text;
+    transition: border-color .15s;
+}
+.alias-chip-wrapper:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(124,92,191,.15);
+}
+.alias-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+.alias-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    background: rgba(124,92,191,.18);
+    border: 1px solid rgba(124,92,191,.35);
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1;
+    user-select: none;
+}
+.alias-chip .alias-chip-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: rgba(0,0,0,.2);
+    border: none;
+    color: var(--text2);
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    padding: 0;
+}
+.alias-chip .alias-chip-remove:hover {
+    background: rgba(237,66,69,.25);
+    color: var(--danger);
+}
+.alias-chip-input {
+    flex: 1;
+    min-width: 120px;
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    padding: 4px 2px !important;
+    height: 28px !important;
+    font-size: 13px;
+}
+.alias-chip-input:focus {
+    outline: none !important;
+}
+.alias-warnings {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: rgba(254,231,92,.12);
+    border: 1px solid rgba(254,231,92,.25);
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.4;
+}
+.alias-warnings .alias-warning-item {
+    margin-bottom: 4px;
+    color: var(--text2);
+}
+.alias-warnings .alias-warning-item:last-child {
+    margin-bottom: 0;
+}
+.alias-warnings .alias-warning-exact {
+    color: var(--warning);
+    font-weight: 600;
+}
 </style>
 
 {% block scripts %}
@@ -764,6 +858,158 @@ function toggleEditPanel(cmd) {
     }
 }
 
+// ── ALIAS CHIP UI — ProBot-style ────────────────────────────────────
+function createAliasChip(cmd, aliasText) {
+    const chipsContainer = document.getElementById(`alias-chips-${cmd}`);
+    if (!chipsContainer) return null;
+    // Prevent duplicates
+    const existing = Array.from(chipsContainer.querySelectorAll('.alias-chip')).map(c => c.dataset.alias);
+    if (existing.includes(aliasText.toLowerCase())) return null;
+
+    const chip = document.createElement('span');
+    chip.className = 'alias-chip';
+    chip.dataset.alias = aliasText.toLowerCase();
+    chip.innerHTML = `<button type="button" class="alias-chip-remove" title="Remove ${aliasText}">×</button><span>${aliasText}</span>`;
+    const removeBtn = chip.querySelector('.alias-chip-remove');
+    removeBtn.onclick = () => {
+        chip.remove();
+        updateAliasUsageHint(cmd);
+        checkAliasConflictsLive(cmd);
+    };
+    chipsContainer.appendChild(chip);
+    return chip;
+}
+
+function getAliasesForCommand(cmd) {
+    const chipsContainer = document.getElementById(`alias-chips-${cmd}`);
+    if (!chipsContainer) return [];
+    return Array.from(chipsContainer.querySelectorAll('.alias-chip')).map(c => c.dataset.alias);
+}
+
+function addAliasFromInput(cmd, raw) {
+    if (!raw) return false;
+    raw = raw.trim().toLowerCase();
+    if (!raw) return false;
+    // Remove trailing comma or space that triggered creation
+    raw = raw.replace(/[,\s]+$/, '').trim();
+    if (!raw) return false;
+    // Validate: 1-32, alphanumeric + hyphen/underscore
+    if (raw.length < 1 || raw.length > 32) {
+        showToast(`Alias '${raw}' must be 1-32 characters`, 'warning');
+        return false;
+    }
+    if (!/^[a-z0-9-_]+$/.test(raw)) {
+        showToast(`Alias '${raw}' invalid — use only letters, numbers, hyphens`, 'warning');
+        return false;
+    }
+    const chip = createAliasChip(cmd, raw);
+    if (!chip) {
+        // Duplicate, silently ignore or toast
+        return false;
+    }
+    updateAliasUsageHint(cmd);
+    checkAliasConflictsLive(cmd);
+    return true;
+}
+
+function updateAliasUsageHint(cmd) {
+    const aliasHint = document.getElementById(`usage-alias-${cmd}`);
+    if (!aliasHint) return;
+    const aliases = getAliasesForCommand(cmd);
+    if (aliases.length > 0) {
+        const firstAlias = aliases[0];
+        const usageEl = document.getElementById(`usage-${cmd}`);
+        const paramsStr = usageEl ? usageEl.dataset.params || '' : '';
+        const params = paramsStr ? paramsStr.split(',').map(p => ` [${p}]`).join('') : '';
+        aliasHint.innerHTML = `&nbsp;or&nbsp;<code>${firstAlias}${params}</code>`;
+        aliasHint.style.display = 'inline';
+    } else {
+        aliasHint.style.display = 'none';
+    }
+}
+
+async function checkAliasConflictsLive(cmd) {
+    const aliases = getAliasesForCommand(cmd);
+    const warningsEl = document.getElementById(`alias-warnings-${cmd}`);
+    if (!warningsEl) return;
+    if (aliases.length === 0) {
+        warningsEl.style.display = 'none';
+        warningsEl.innerHTML = '';
+        return;
+    }
+    try {
+        const res = await fetch(`/api/commands/check-conflicts/${encodeURIComponent(cmd)}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({aliases: aliases})
+        });
+        const data = await res.json();
+        if (data.success && data.warnings && data.warnings.length > 0) {
+            warningsEl.innerHTML = data.warnings.map(w => `<div class="alias-warning-item ${w.type && w.type.includes('exact') ? 'alias-warning-exact' : ''}">⚠️ ${w.message}</div>`).join('');
+            warningsEl.style.display = 'block';
+        } else {
+            warningsEl.style.display = 'none';
+            warningsEl.innerHTML = '';
+        }
+    } catch (e) {
+        // Silent fail for live check
+    }
+}
+
+function initAliasInput(cmd) {
+    const input = document.getElementById(`edit-aliases-${cmd}`);
+    const wrapper = document.getElementById(`alias-wrapper-${cmd}`);
+    if (!input || !wrapper) return;
+    // Click wrapper focuses input
+    wrapper.addEventListener('click', (e) => {
+        if (e.target === wrapper || e.target.classList.contains('alias-chips')) {
+            input.focus();
+        }
+    });
+    input.addEventListener('keydown', (e) => {
+        if (e.key === ' ' || e.key === 'Spacebar' || e.key === 'Enter' || e.key === ',') {
+            e.preventDefault();
+            const val = input.value;
+            if (val.trim()) {
+                if (addAliasFromInput(cmd, val)) {
+                    input.value = '';
+                } else {
+                    // If duplicate or invalid, clear to avoid stuck
+                    if (val.trim().toLowerCase().replace(/[,\s]+$/, '').length > 0) {
+                        // Keep invalid for user to edit? Clear anyway for chip UX
+                        input.value = '';
+                    }
+                }
+            }
+        } else if (e.key === 'Backspace' && !input.value) {
+            // Remove last chip if input empty and Backspace
+            const chipsContainer = document.getElementById(`alias-chips-${cmd}`);
+            if (chipsContainer) {
+                const chips = chipsContainer.querySelectorAll('.alias-chip');
+                if (chips.length > 0) {
+                    chips[chips.length - 1].remove();
+                    updateAliasUsageHint(cmd);
+                    checkAliasConflictsLive(cmd);
+                }
+            }
+        }
+    });
+    // Handle paste of comma-separated list
+    input.addEventListener('paste', (e) => {
+        e.preventDefault();
+        const pasted = (e.clipboardData || window.clipboardData).getData('text');
+        if (!pasted) return;
+        const parts = pasted.split(/[,\s\n]+/).map(s => s.trim()).filter(Boolean);
+        let added = 0;
+        parts.forEach(p => {
+            if (addAliasFromInput(cmd, p)) added++;
+        });
+        if (added > 0) {
+            input.value = '';
+        }
+    });
+}
+
 async function loadCommandSettings(cmd) {
     const loadingEl = document.getElementById(`edit-loading-${cmd}`);
     const fieldsEl  = document.getElementById(`edit-fields-${cmd}`);
@@ -783,26 +1029,20 @@ async function loadCommandSettings(cmd) {
             try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch (e) { return []; }
         };
 
-        const aliasesEl  = document.getElementById(`edit-aliases-${cmd}`);
         const cooldownEl = document.getElementById(`edit-cooldown-${cmd}`);
-        if (aliasesEl)  aliasesEl.value  = parseArr(data.aliases).join(', ');
         if (cooldownEl) cooldownEl.value = (data.cooldown_seconds !== null && data.cooldown_seconds !== undefined) ? data.cooldown_seconds : '';
 
-        // Update alias usage hint
-        const aliasHint = document.getElementById(`usage-alias-${cmd}`);
-        if (aliasHint) {
-            const aliases = parseArr(data.aliases);
-            if (aliases.length > 0) {
-                const firstAlias = aliases[0];
-                const usageEl = document.getElementById(`usage-${cmd}`);
-                const paramsStr = usageEl ? usageEl.dataset.params || '' : '';
-                const params = paramsStr ? paramsStr.split(',').map(p => ` [${p}]`).join('') : '';
-                aliasHint.innerHTML = `&nbsp;or&nbsp;<code>${firstAlias}${params}</code>`;
-                aliasHint.style.display = 'inline';
-            } else {
-                aliasHint.style.display = 'none';
-            }
-        }
+        // Alias chips — new UI
+        const aliases = parseArr(data.aliases);
+        const chipsContainer = document.getElementById(`alias-chips-${cmd}`);
+        if (chipsContainer) chipsContainer.innerHTML = '';
+        aliases.forEach(alias => {
+            createAliasChip(cmd, alias);
+        });
+        updateAliasUsageHint(cmd);
+        initAliasInput(cmd);
+        // Live conflict check after load
+        setTimeout(() => checkAliasConflictsLive(cmd), 100);
 
         const pickers = [
             [`edit-enabled-roles-${cmd}`,    'role',    parseArr(data.enabled_roles || data.allowed_roles)],
@@ -823,11 +1063,10 @@ async function loadCommandSettings(cmd) {
 }
 
 async function saveCommandSettings(cmd, btn) {
-    const aliasesInput = document.getElementById(`edit-aliases-${cmd}`);
     const cooldownInput = document.getElementById(`edit-cooldown-${cmd}`);
     const cb = document.getElementById(`toggle-input-${cmd}`);
 
-    const aliases = aliasesInput ? aliasesInput.value.split(',').map(a => a.trim()).filter(Boolean) : [];
+    const aliases = getAliasesForCommand(cmd);
     const cooldownVal = cooldownInput && cooldownInput.value !== '' ? parseInt(cooldownInput.value) : null;
     const isEnabled = cb ? cb.checked : true;
 
@@ -847,6 +1086,7 @@ async function saveCommandSettings(cmd, btn) {
     };
 
     const statusEl = document.getElementById(`edit-status-${cmd}`);
+    const warningsEl = document.getElementById(`alias-warnings-${cmd}`);
     if (statusEl) {
         statusEl.textContent = '';
         statusEl.className = 'cmd-edit-status';
@@ -857,6 +1097,13 @@ async function saveCommandSettings(cmd, btn) {
         if (statusEl) {
             statusEl.textContent = '✅ Saved';
             statusEl.classList.add('ok');
+        }
+        // Show advisory warnings if any
+        if (data.warnings && data.warnings.length > 0 && warningsEl) {
+            warningsEl.innerHTML = data.warnings.map(w => `<div class="alias-warning-item ${w.type && w.type.includes('exact') ? 'alias-warning-exact' : ''}">⚠️ ${w.message}</div>`).join('');
+            warningsEl.style.display = 'block';
+            // Also toast first warning
+            showToast(data.warnings[0].message, 'warning', 5000);
         }
         refreshRowChips(cmd, payload);
         updateStatsCounts();

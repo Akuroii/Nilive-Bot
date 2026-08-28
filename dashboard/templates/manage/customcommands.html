@@ -189,14 +189,23 @@ async function saveCommand() {
     });
     const data = await res.json();
     if (data.success) {
-        showToast(`!${trigger} saved!`);
+        if (data.warnings && data.warnings.length > 0) {
+            showToast(data.warnings[0], 'warning', 6000);
+            const statusEl = document.getElementById('cmd-status');
+            if (statusEl) {
+                statusEl.innerHTML = data.warnings.map(w => `⚠️ ${w}`).join('<br>');
+                statusEl.style.color = 'var(--warning)';
+            }
+        } else {
+            showToast(`!${trigger} saved!`);
+        }
         actions = [];
         renderActions();
         document.getElementById('cmd-trigger').value = '';
         document.getElementById('cmd-title').value   = '';
         document.getElementById('cmd-desc').value    = '';
-        setTimeout(() => location.reload(), 800);
-    } else showToast('Error saving', 'danger');
+        setTimeout(() => location.reload(), 1200);
+    } else showToast(data.error || 'Error saving', 'danger');
 }
 
 function confirmDeleteCmd(id, trigger) {

@@ -148,6 +148,11 @@ class Triggers(commands.Cog):
         if message.author.bot or not message.guild:
             return
 
+        # Router claimed check — alias wins over triggers, custom wins over triggers
+        # Guarantees exactly one executor per message (Option R)
+        if hasattr(self.bot, "_nero_claimed_messages") and message.id in self.bot._nero_claimed_messages:
+            return
+
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT id, guild_id, trigger_words, response_text,
@@ -205,6 +210,10 @@ class Triggers(commands.Cog):
             chance = int(response_chance) if response_chance else 100
             if chance < 100 and random.randint(1, 100) > chance:
                 continue
+
+            # Claim to prevent double execution (alias > trigger, custom > trigger)
+            if hasattr(self.bot, "_nero_claimed_messages"):
+                self.bot._nero_claimed_messages[message.id] = now
 
             # Send response
             try:

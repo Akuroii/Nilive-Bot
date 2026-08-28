@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import aiosqlite
 import json
+import time
 from database import DB_PATH
 from utils.permissions import can_moderate, check_bot_role_position
 
@@ -11,15 +12,10 @@ class CustomCommands(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
-        # PERFORMANCE FIX (dark-fixes pass #2): same class of fix as
-        # cogs/triggers.py — database.py's central init_db() already
-        # creates "custom_commands" before the bot comes online, so
-        # running ensure_table() again inside on_message (previously,
-        # for every message starting with "!") was redundant work on
-        # the hottest path in the bot.
         await self.ensure_table()
 
     async def ensure_table(self):
+        # Keep schema in sync with database.py central init_db
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS custom_commands (
@@ -36,17 +32,47 @@ class CustomCommands(commands.Cog):
                     dm_member         INTEGER DEFAULT 0,
                     dm_message        TEXT,
                     requires_mention  INTEGER DEFAULT 1,
-                    requires_reason   INTEGER DEFAULT 0
+                    requires_reason   INTEGER DEFAULT 0,
+                    enabled           INTEGER DEFAULT 1,
+                    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             await db.commit()
 
     async def get_commands(self, guild_id):
+        # FIX: explicit columns, not SELECT *, and respect enabled + guild 0
         async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "SELECT * FROM custom_commands WHERE guild_id = ? OR guild_id = 0",
-                (guild_id,))
+            cursor = await db.execute("""
+                SELECT id, guild_id, trigger, allowed_roles, actions,
+                       embed_title, embed_description, embed_color,
+                       log_channel_id, same_channel, dm_member, dm_message,
+                       requires_mention, requires_reason, enabled
+                FROM custom_commands
+                WHERE (guild_id = ? OR guild_id = 0) AND enabled = 1
+                ORDER BY id ASC
+            """, (guild_id,))
             return await cursor.fetchall()
+
+    def _matches_word_boundary(self, content: str, trigger: str) -> bool:
+        """
+        Word-boundary-aware matching for custom commands.
+        Prevents "!k" from firing on "!kick".
+        Matches "!trigger" exactly or "!trigger " (space after).
+        Case-insensitive, as before.
+        """
+        if not trigger:
+            return False
+        content_lower = content.lower().strip()
+        trig_lower = trigger.lower().strip()
+        if not trig_lower:
+            return False
+        # Exact match: "!k"
+        if content_lower == f"!{trig_lower}":
+            return True
+        # Prefix with space: "!k @user" or "!k reason"
+        if content_lower.startswith(f"!{trig_lower} "):
+            return True
+        return False
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -55,23 +81,36 @@ class CustomCommands(commands.Cog):
         if not message.content.startswith("!"):
             return
 
-        # ALIAS CONFLICT FIX: if the first word after "!" matches a
-        # registered prefix command (e.g., !k from an alias), skip
-        # custom command processing to prevent double execution.
-        # The bot's process_commands handler will pick it up instead.
+        # Router claimed check — if router (alias cog) already handled this message
+        # (e.g., alias wins over custom), skip to guarantee exactly one executor
+        if hasattr(self.bot, "_nero_claimed_messages") and message.id in self.bot._nero_claimed_messages:
+            return
+
+        # Prefix command check — let process_commands handle real prefix commands
         first_word = message.content.split()[0][1:].lower()
         if first_word and first_word in self.bot.all_commands:
             return
 
         cmds = await self.get_commands(message.guild.id)
 
-        for cmd in cmds:
+        for cmd_row in cmds:
+            # Explicit unpacking — 15 columns, not SELECT *
             (id_, guild_id, trigger, allowed_roles, actions, embed_title,
              embed_desc, embed_color, log_channel_id, same_channel,
-             dm_member, dm_message, requires_mention, requires_reason) = cmd
+             dm_member, dm_message, requires_mention, requires_reason, enabled) = cmd_row
 
-            if not message.content.lower().startswith(f"!{trigger.lower()}"):
+            # Enabled already filtered in SQL, but double-check
+            if not enabled:
                 continue
+
+            # Word-boundary matching fix
+            if not self._matches_word_boundary(message.content, trigger):
+                continue
+
+            # If router decides to handle custom, it would have claimed already
+            # But we also claim here to prevent triggers from firing after custom
+            if hasattr(self.bot, "_nero_claimed_messages"):
+                self.bot._nero_claimed_messages[message.id] = time.time()
 
             allowed = json.loads(allowed_roles) if allowed_roles else []
             if allowed:
@@ -93,7 +132,7 @@ class CustomCommands(commands.Cog):
                         delete_after=5)
                     return
                 target_member = message.mentions[0]
-                reason_parts  = parts[2:] if len(parts) > 2 else []
+                reason_parts = parts[2:] if len(parts) > 2 else []
                 reason = " ".join(reason_parts) if reason_parts else "No reason provided"
             else:
                 reason_parts = parts[1:] if len(parts) > 1 else []
@@ -102,23 +141,15 @@ class CustomCommands(commands.Cog):
             action_list = json.loads(actions) if actions else []
             action_errors = []
 
-            # Hierarchy check — block privilege escalation via custom commands
-            #
-            # SECURITY FIX: "warn" is now included here too. It's less
-            # destructive than ban/kick, but it still writes a moderation
-            # record against the target and previously let a member with a
-            # custom-command trigger warn someone ABOVE them in the role
-            # hierarchy, bypassing can_moderate() entirely — the same class
-            # of gap that was already fixed for ban/kick/timeout/remove_all_roles.
             destructive = {"ban", "kick", "remove_all_roles", "warn"}
             is_destructive = (
                 bool(destructive & set(action_list))
                 or any(a.startswith("timeout:") for a in action_list)
             )
             if target_member and is_destructive:
-                allowed, hmsg = await can_moderate(
+                allowed_mod, hmsg = await can_moderate(
                     message.author, target_member, message.guild.id)
-                if not allowed:
+                if not allowed_mod:
                     await message.channel.send(
                         f"{message.author.mention} {hmsg}", delete_after=6)
                     return
@@ -163,20 +194,8 @@ class CustomCommands(commands.Cog):
                             await target_member.remove_roles(*roles_to_remove)
                     elif action.startswith("add_role:") and target_member:
                         role_id = int(action.split(":")[1])
-                        role    = message.guild.get_role(role_id)
+                        role = message.guild.get_role(role_id)
                         if role:
-                            # SECURITY FIX: this only ever checked whether the
-                            # BOT could assign the role (check_bot_role_position)
-                            # — it never checked whether the ACTOR (the member
-                            # who typed the !command) was allowed to grant it.
-                            # A moderator with access to a custom command whose
-                            # actions included add_role:<high-privilege-role-id>
-                            # could hand out roles above their own rank —
-                            # straightforward privilege escalation. Now also
-                            # requires the actor be guild owner, or have a top
-                            # role strictly above the role being granted — the
-                            # same rule utils.permissions.check_hierarchy()
-                            # already uses for /ban, /kick, /timeout, /warn.
                             can_assign, warn = check_bot_role_position(
                                 message.guild, role)
                             actor_ok = (
@@ -194,12 +213,8 @@ class CustomCommands(commands.Cog):
                                 action_errors.append(warn)
                     elif action.startswith("remove_role:") and target_member:
                         role_id = int(action.split(":")[1])
-                        role    = message.guild.get_role(role_id)
+                        role = message.guild.get_role(role_id)
                         if role:
-                            # SECURITY FIX: same gap as add_role above, mirrored
-                            # for removal — previously any actor with access to
-                            # the trigger could strip a role off anyone,
-                            # including roles above the actor's own rank.
                             actor_ok = (
                                 message.author.id == message.guild.owner_id
                                 or message.author.top_role.position > role.position

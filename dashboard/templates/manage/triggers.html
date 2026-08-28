@@ -143,8 +143,20 @@ async function addTrigger() {
         body:    JSON.stringify(payload),
     });
     const data = await res.json();
-    if (data.success) { showToast('Trigger added!'); setTimeout(() => location.reload(), 800); }
-    else showToast('Error saving trigger', 'danger');
+    if (data.success) {
+        if (data.warnings && data.warnings.length > 0) {
+            showToast(data.warnings[0], 'warning', 6000);
+            const statusEl = document.getElementById('trigger-status');
+            if (statusEl) {
+                statusEl.innerHTML = data.warnings.map(w => `⚠️ ${w}`).join('<br>');
+                statusEl.style.color = 'var(--warning)';
+            }
+        } else {
+            showToast('Trigger added!');
+        }
+        setTimeout(() => location.reload(), 1200);
+    }
+    else showToast(data.error || 'Error saving trigger', 'danger');
 }
 
 async function deleteTrigger(id) {

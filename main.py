@@ -257,6 +257,11 @@ async def rotate_status():
 
 async def load_cogs():
     cog_files = [
+        # Option R: alias router must be FIRST so its on_message runs
+        # before triggers/customcommands, allowing it to claim messages
+        # and enforce alias > custom > trigger precedence with exactly
+        # one executor per message. No mutation of original message.
+        "cogs.command_aliases",
         "cogs.activity_engine",
         "cogs.mvp",
         "cogs.moderation",
@@ -285,11 +290,6 @@ async def load_cogs():
         "cogs.scheduler",
         "cogs.tagmissions",
         "cogs.tagpartners",
-        # MUST be last: its on_message listener rewrites bare alias
-        # messages (e.g. "k @User" → "!k @User") so that
-        # process_commands can dispatch them. All other on_message
-        # listeners must see the original content first.
-        "cogs.command_aliases",
     ]
     bot.loaded_cogs = []
     bot.failed_cogs = []
