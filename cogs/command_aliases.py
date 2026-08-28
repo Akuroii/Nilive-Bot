@@ -870,12 +870,21 @@ class _SyntheticMessage:
 
     ``Context.__init__`` only reads ``content``, ``author``, ``guild``,
     ``channel`` and ``_state`` off the message (verified against 2.7.1
-    ``ext/commands/context.py:182-216``), and ``_parse_arguments`` also looks
-    at ``attachments``; everything else — ``ctx.send``, converters that hit the
-    API — goes through the *real* state object copied from the triggering
-    message, so replies land in the right channel with working rate limits.
-    Deliberately not a discord.py ``Message`` subclass: no cache entry, no
-    lifecycle, nothing to keep in sync.
+    ``ext/commands/context.py:182-216``), and converters look at
+    ``attachments`` and ``mentions``; everything else — ``ctx.send``,
+    converters that hit the API — goes through the *real* state object copied
+    from the triggering message, so replies land in the right channel with
+    working rate limits. Deliberately not a discord.py ``Message`` subclass:
+    no cache entry, no lifecycle, nothing to keep in sync.
+
+    Every attribute copied from the triggering message is read defensively
+    (``getattr`` with a default): a missing non-essential attribute must read
+    as "nothing" instead of raising. This mattered in production — a real
+    ``discord.Message`` (2.7.1) has ``reference``, but NOT
+    ``message_reference`` (that name only exists on discord.py 1.x), so the
+    old unguarded ``real.message_reference`` crashed every alias invocation
+    with ``AttributeError: 'Message' object has no attribute
+    'message_reference'``.
     """
 
     __slots__ = ("content", "author", "guild", "channel", "_state", "id",
@@ -888,19 +897,25 @@ class _SyntheticMessage:
         self.author = author
         self.guild = guild
         self.channel = channel
-        self._state = real._state
-        self.id = real.id
-        self.type = real.type
-        self.attachments = real.attachments
-        self.embeds = real.embeds
-        self.mentions = real.mentions
-        self.edited_at = real.edited_at
-        self.created_at = real.created_at
-        self.reference = real.reference
-        self.message_reference = real.message_reference
-        self.webhook_id = real.webhook_id
-        self.reactions = real.reactions
-        self.flags = real.flags
+        self._state = getattr(real, "_state", None)
+        self.id = getattr(real, "id", None)
+        self.type = getattr(real, "type", None)
+        self.attachments = getattr(real, "attachments", None) or []
+        self.embeds = getattr(real, "embeds", None) or []
+        self.mentions = getattr(real, "mentions", None) or []
+        self.edited_at = getattr(real, "edited_at", None)
+        self.created_at = getattr(real, "created_at", None)
+        # discord.py renamed ``message_reference`` to ``reference`` in 2.0 —
+        # a 2.x Message only has ``reference`` and a 1.x one only has
+        # ``message_reference``. Read whichever exists and expose *both*
+        # names here, so neither this module's history nor a future
+        # version-bump can reintroduce the AttributeError.
+        self.reference = (getattr(real, "reference", None)
+                          or getattr(real, "message_reference", None))
+        self.message_reference = self.reference
+        self.webhook_id = getattr(real, "webhook_id", None)
+        self.reactions = getattr(real, "reactions", None)
+        self.flags = getattr(real, "flags", None)
 
 
 async def setup(bot):

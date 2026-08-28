@@ -36,8 +36,14 @@ def get_guild_roles():
         if r.get("managed"):         return (1, -r["position"])
         return (0, -r["position"])
     roles.sort(key=sort_key)
+    # Contract consumed by nero-select.js: ``id`` + ``text``/``name`` (the
+    # display string) + ``color`` (hex or null). ``text`` and ``name`` carry
+    # the same value so the picker is robust to which one it reads; ``color``
+    # is null (not 0) for the default @everyone role so the frontend falls
+    # back to its own neutral dot instead of rendering a black one.
     return jsonify({"results": [{
         "id":       r["id"],
+        "name":     r["name"],
         "text":     r["name"],
         "color":    f"#{r['color']:06x}" if r["color"] else None,
         "position": r["position"],
@@ -67,8 +73,13 @@ def get_guild_channels():
     for ch in channels:
         if ch["type"] == 4:
             continue
+        # Same contract as the roles endpoint above: ``id`` +
+        # ``text``/``name`` + ``type_icon``. The icon is a short emoji that
+        # nero-select.js stamps onto the <option> as data-type-icon, so the
+        # picker shows a type glyph next to every channel name.
         results.append({
             "id":        ch["id"],
+            "name":      ch["name"],
             "text":      ch["name"],
             "type_icon": TYPE_ICON.get(ch["type"], "💬"),
             "category":  categories.get(str(ch.get("parent_id", "")), ""),

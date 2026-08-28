@@ -18,21 +18,109 @@ window.NeroSelect = (function () {
         }
     }
 
+    // ── Display helpers ────────────────────────────────────────────────
+    //
+    // Select2 4.1.0-rc.0 hands ``templateResult`` / ``templateSelection`` a
+    // data object built *only* from the <option>: {id, text, disabled,
+    // selected, title, element}. Any extra field the API sent (``color``,
+    // ``type_icon``) is silently dropped — the ONLY way a per-option value
+    // reaches a template is via the option's own ``data-*`` attributes
+    // (``opt.element.dataset`` / ``opt.element.getAttribute``). That is why
+    // initOne()/initMulti() below stamp ``data-color`` / ``data-type-icon``
+    // onto every <option>: without them every role dot was the grey fallback
+    // and every channel icon the generic 💬, no matter what the API returned.
+    //
+    // The name is read with a hard fallback chain (opt.text -> the <option>'s
+    // text content -> the id) so it can never be ``undefined`` or empty, and
+    // it is inserted with textContent (never string-interpolated into HTML)
+    // so a name containing & / < / > renders as text instead of breaking the
+    // markup. Both are what produced the "empty block / square" rendering.
+
+    function esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    // Resolve a custom per-option value from the select2 data object.
+    // Tries, in order: opt.<camel> (select2 may expose it), opt.<snake>
+    // (our own data), opt.element.dataset.<camel> (data-attr, camelCase),
+    // opt.element.getAttribute('data-<attr>') (the literal attribute).
+    function readField(opt, camel, snake, attr) {
+        if (opt == null) return null;
+        if (opt[camel] != null && String(opt[camel]).trim() !== '') return opt[camel];
+        if (snake && opt[snake] != null && String(opt[snake]).trim() !== '') return opt[snake];
+        const el = opt.element;
+        if (el) {
+            const ds = el.dataset || {};
+            if (ds[camel] != null && String(ds[camel]).trim() !== '') return ds[camel];
+            if (attr && typeof el.getAttribute === 'function') {
+                const v = el.getAttribute('data-' + attr);
+                if (v != null && String(v).trim() !== '') return v;
+            }
+        }
+        return null;
+    }
+
+    // The display name — never undefined, never empty, never the string
+    // "undefined". Fallback: option text content, then the raw id.
+    function optText(opt) {
+        let t = (opt && opt.text != null) ? String(opt.text) : '';
+        if (t.trim() === '' && opt && opt.element &&
+            typeof opt.element.textContent === 'string') {
+            t = opt.element.textContent;
+        }
+        if ((t == null || t.trim() === '') && opt && opt.id != null) {
+            t = String(opt.id);
+        }
+        return t == null ? '' : String(t);
+    }
+
+    function el(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text != null) node.textContent = text;
+        return node;
+    }
+
     function formatRole(opt) {
-        if (!opt.id) return opt.text;
-        const color = opt.color || '#99aab5';
-        return $(`<span class="ns-role-option">
-            <span class="ns-color-dot" style="background:${color}"></span>
-            <span class="ns-role-name">${opt.text}</span>
-        </span>`);
+        const text = optText(opt);
+        if (!opt || opt.id == null || opt.id === '') return el('span', 'ns-role-name', text);
+        const color = readField(opt, 'color', 'color', 'color') || '#99aab5';
+        const root = el('span', 'ns-role-option');
+        const dot = el('span', 'ns-color-dot');
+        dot.style.background = color;
+        root.appendChild(dot);
+        root.appendChild(el('span', 'ns-role-name', text));
+        return $(root);
     }
 
     function formatChannel(opt) {
-        if (!opt.id) return opt.text;
-        return $(`<span class="ns-ch-option">
-            <span class="ns-ch-icon">${opt.type_icon || '💬'}</span>
-            <span class="ns-ch-name">${opt.text}</span>
-        </span>`);
+        const text = optText(opt);
+        if (!opt || opt.id == null || opt.id === '') return el('span', 'ns-ch-name', text);
+        const icon = readField(opt, 'typeIcon', 'type_icon', 'type-icon') || '💬';
+        const root = el('span', 'ns-ch-option');
+        root.appendChild(el('span', 'ns-ch-icon', icon));
+        root.appendChild(el('span', 'ns-ch-name', text));
+        return $(root);
+    }
+
+    // Build the <option> for one API row. The name goes in as escaped text
+    // content and the custom display fields are stamped on as data-* attrs
+    // (see the note above) so the templates can read them back off
+    // opt.element.
+    function makeOption(r, selected) {
+        const id = r.id != null ? String(r.id) : '';
+        const name = r.text != null ? String(r.text)
+            : (r.name != null ? String(r.name) : id);
+        const color = r.color != null ? String(r.color) : '';
+        const icon = (r.type_icon != null ? r.type_icon
+                    : (r.typeIcon != null ? r.typeIcon : '')) || '';
+        return `<option value="${esc(id)}" ${selected ? 'selected' : ''} ` +
+            `data-color="${esc(color)}" data-type-icon="${esc(icon)}">${esc(name)}</option>`;
     }
 
     async function initOne(el, kind) {
@@ -47,8 +135,8 @@ window.NeroSelect = (function () {
         $el.empty();
         $el.append('<option value=""></option>');
         results.forEach(r => {
-            const selected = String(r.id) === String(preselect) ? 'selected' : '';
-            $el.append(`<option value="${r.id}" ${selected}>${r.text}</option>`);
+            const selected = String(r.id) === String(preselect);
+            $el.append(makeOption(r, selected));
         });
 
         try {
@@ -115,8 +203,8 @@ window.NeroSelect = (function () {
 
         $el.empty();
         results.forEach(r => {
-            const selected = preselectStr.includes(String(r.id)) ? 'selected' : '';
-            $el.append(`<option value="${r.id}" ${selected}>${r.text}</option>`);
+            const selected = preselectStr.includes(String(r.id));
+            $el.append(makeOption(r, selected));
         });
 
         try {

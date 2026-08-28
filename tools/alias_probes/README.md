@@ -32,6 +32,16 @@ export PROBE_DIR=~/.cache/probe-db      # scratch DBs; NOT under /tmp (wiped bet
 npm i jsdom            # or: JSDOM_PATH=/path/to/node_modules/jsdom node tools/alias_probes/p9_chips_dom.js
 ```
 
+`p13_picker_render.js` additionally wants the **real** `jquery` and
+`select2@4.1.0-rc.0` (the exact build the dashboard loads from a CDN) so it can
+assert what Select2 actually renders. It self-skips (exit 0) if any of
+jsdom / jquery / select2 is missing, so the jsdom-only setup above still runs
+the whole suite green:
+
+```bash
+npm i jsdom jquery select2@4.1.0-rc.0   # one node_modules dir, then JSDOM_PATH=.../jsdom
+```
+
 ## Run
 
 ```bash
@@ -44,6 +54,8 @@ python tools/alias_probes/p6_race.py     # one decision per message, shared by s
 python tools/alias_probes/p8_acceptance.py # THE acceptance run: bare `k`, args, converters, scoping, gates, reloads
 node   tools/alias_probes/p9_chips_dom.js  # the chip field itself: Space commits, × removes, paste splits, conflict ⚠
 python tools/alias_probes/p10_full_boot.py # all 29 cogs load; reverse-order reload; other listeners untouched
+python tools/alias_probes/p12_real_message_surface.py # a REAL discord.Message (reference, no message_reference) runs the alias
+node   tools/alias_probes/p13_picker_render.js # role/channel pickers render the real colour dot / type icon / name (needs jsdom+jquery+select2; self-skips otherwise)
 ```
 
 `legacy/` holds the three probes that measured the *old* implementation
@@ -62,6 +74,8 @@ current tree — their headers say so.
 | `p6_race.py` | `MessageRouter.decide()` is computed once per message id and shared by all three cog listeners; `set_alias_table` invalidates the memo so a save isn't stuck behind it; eviction never cancels an in-flight decision; with the real cogs, exactly one system acts |
 | `p8_acceptance.py` | end-to-end: `ta hello some long response text` runs `/trigger_add`; `k <@id> being rude` really kicks (real `MemberConverter`, real `discord.Member`, only `Member.kick` stubbed); no double execution with triggers/custom commands; guild scoping (an alias in A does nothing in B); `enabled` + `error_message` + cooldown parity with the slash path; missing-argument and permission errors surface instead of vanishing; sync flag consumed and reported; aliases survive their parent cog being reloaded; load order irrelevant |
 | `p10_full_boot.py` | nothing unrelated broke: every cog in `main.py`'s list loads, the whole set unloads and reloads **in reverse order** with the alias index still correct, the other four `on_message` listeners each still receive the untouched text, and a sentence with no alias word runs no command |
+| `p12_real_message_surface.py` | the 2026-08-28 live crash stays dead: a **real** `discord.Message` (which has `reference`, NOT `message_reference`) drives `k <@id> reason` → real `/kick` and `ta …` → `/trigger_add`, including one carrying a live `MessageReference`; the synthetic view exposes both reference names |
+| `p13_picker_render.js` | the dashboard role/channel pickers render **real** data with real Select2 4.1.0-rc.0: the `<option>` stamps `data-color`/`data-type-icon`, the colour dot / type icon use the API values (not the grey/💬 fallbacks), names are never undefined/blank, and a name full of `&`/`<` stays valid markup. Self-skips when jsdom+jquery+select2 aren't all installed |
 | `p9_chips_dom.js` | the ProBot-style field: type + `Space` → chip, `×` removes one, `Backspace` pops the last, click re-edits, paste splits, duplicates don't destroy the existing chip, over-long names truncate with a note, invalid words stay editable in the box, and the hidden input the page already posts holds the joined value |
 
 ## Expected noise (not failures)
