@@ -10,6 +10,7 @@
             <span class="badge badge-source">{{ stats.total }} commands</span>
         </div>
         <div class="text-muted text-sm">Configure slash commands, custom cooldowns, and role/channel permissions.</div>
+        <div class="cmd-alias-status" id="alias-status" hidden></div>
     </div>
     <div class="cmd-header-actions">
         <button type="button" class="btn btn-secondary" onclick="bulkToggle(true)">Enable All</button>
@@ -178,10 +179,19 @@
                                     <div class="form-hint">Rate limit per user in seconds</div>
                                 </div>
                                 <div class="form-group" style="margin-bottom:0;">
-                                    <label class="form-label" for="edit-aliases-{{ cmd }}">Aliases</label>
-                                    <input class="form-input" id="edit-aliases-{{ cmd }}"
-                                           placeholder="e.g. k, remove (comma-separated)">
-                                    <div class="form-hint">Message command aliases — users can type <code>alias</code> instead of <code>/{{ cmd }}</code>. Case-insensitive.</div>
+                                    <label class="form-label">Aliases</label>
+                                    <div class="alias-host" data-alias-input
+                                         data-alias-command="{{ cmd }}"
+                                         id="edit-aliases-host-{{ cmd }}">
+                                        <input type="hidden" name="aliases-{{ cmd }}"
+                                               id="edit-aliases-{{ cmd }}">
+                                    </div>
+                                    <div class="form-hint">
+                                        Type a word, press <kbd>Space</kbd> to add it. Members can then
+                                        type <code>alias [args]</code> — bare, no <code>!</code>
+                                        prefix — to run <code>/{{ cmd }}</code>. A single character is
+                                        fine, case does not matter, and it applies to this server only.
+                                    </div>
                                 </div>
                             </div>
 
@@ -509,6 +519,13 @@
     color: var(--accent);
 }
 
+.cmd-alias-status {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text3);
+}
+.cmd-alias-status.is-warn { color: var(--warning); }
+
 .cmd-chip {
     font-size: 11px;
     font-weight: 600;
@@ -785,7 +802,14 @@ async function loadCommandSettings(cmd) {
 
         const aliasesEl  = document.getElementById(`edit-aliases-${cmd}`);
         const cooldownEl = document.getElementById(`edit-cooldown-${cmd}`);
-        if (aliasesEl)  aliasesEl.value  = parseArr(data.aliases).join(', ');
+        if (window.NeroAlias) {
+            // The chip box owns the value; the hidden input it writes is the
+            // aliasesEl above, so the save path below needs no special case.
+            window.NeroAlias.setValues(
+                document.getElementById(`edit-aliases-host-${cmd}`), parseArr(data.aliases));
+        } else if (aliasesEl) {
+            aliasesEl.value = parseArr(data.aliases).join(', ');
+        }
         if (cooldownEl) cooldownEl.value = (data.cooldown_seconds !== null && data.cooldown_seconds !== undefined) ? data.cooldown_seconds : '';
 
         // Update alias usage hint
@@ -827,7 +851,14 @@ async function saveCommandSettings(cmd, btn) {
     const cooldownInput = document.getElementById(`edit-cooldown-${cmd}`);
     const cb = document.getElementById(`toggle-input-${cmd}`);
 
-    const aliases = aliasesInput ? aliasesInput.value.split(',').map(a => a.trim()).filter(Boolean) : [];
+    let aliases = [];
+    if (window.NeroAlias) {
+        aliases = window.NeroAlias.getValues(
+            document.getElementById(`edit-aliases-host-${cmd}`));
+    }
+    if (!aliases.length && aliasesInput) {
+        aliases = aliasesInput.value.split(',').map(a => a.trim()).filter(Boolean);
+    }
     const cooldownVal = cooldownInput && cooldownInput.value !== '' ? parseInt(cooldownInput.value) : null;
     const isEnabled = cb ? cb.checked : true;
 
@@ -861,6 +892,7 @@ async function saveCommandSettings(cmd, btn) {
         refreshRowChips(cmd, payload);
         updateStatsCounts();
         filterCommands();
+        refreshAliasStatus();
     } else {
         if (statusEl) {
             statusEl.textContent = '❌ ' + ((data && data.error) || 'Save failed');
@@ -871,6 +903,46 @@ async function saveCommandSettings(cmd, btn) {
         if (statusEl) { statusEl.textContent = ''; statusEl.className = 'cmd-edit-status'; }
     }, 3500);
 }
+
+// ── ALIAS STATUS LINE ───────────────────────────────────────────
+// What the *bot* last registered, from bot_settings. Before this the sync
+// result was invisible: the cog could fail, or never have run at all, and the
+// page still looked saved. Advisory only — it never blocks an edit.
+async function refreshAliasStatus() {
+    const el = document.getElementById('alias-status');
+    if (!el) return;
+    try {
+        const res = await fetch('/api/commands/alias-registry');
+        if (!res.ok) return;
+        const reg = await res.json();
+        const words = Object.keys(reg.aliases || {}).length;
+        const sync = reg.last_sync || {};
+        const bits = [];
+        bits.push(words === 0
+            ? 'No aliases set in this server'
+            : `${words} alias word${words === 1 ? '' : 's'} in this server`);
+        if (reg.pending_resync) {
+            bits.push('bot will pick up the change within a few seconds');
+        } else if (sync.at) {
+            const when = new Date(sync.at * 1000).toLocaleTimeString();
+            bits.push(`bot has ${sync.registered != null ? sync.registered : words}`
+                      + ` registered · ${when}`);
+        } else {
+            bits.push('the bot has not reported a sync yet');
+        }
+        const shadowed = (reg.shadowed || []).length;
+        if (shadowed) bits.push(`\u26a0 ${shadowed} word${shadowed === 1 ? '' : 's'} claimed by two commands`);
+        if (sync.error) bits.push(`\u26a0 last sync: ${sync.error}`);
+        el.textContent = bits.join('  ·  ');
+        el.classList.toggle('is-warn', Boolean(sync.error || shadowed
+            || (!reg.pending_resync && !sync.at)));
+        el.hidden = false;
+    } catch (e) {
+        /* the page is perfectly usable without this */
+    }
+}
+
+document.addEventListener('DOMContentLoaded', refreshAliasStatus);
 
 function refreshRowChips(cmd, payload) {
     const row = document.getElementById(`cmd-${cmd}`);

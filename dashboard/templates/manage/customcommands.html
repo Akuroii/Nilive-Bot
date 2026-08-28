@@ -189,7 +189,11 @@ async function saveCommand() {
     });
     const data = await res.json();
     if (data.success) {
-        showToast(`!${trigger} saved!`);
+        if (data.warnings && data.warnings.length && window.NeroWarnings) {
+            window.NeroWarnings.remember(data.warnings, `!${trigger} saved`);
+        } else {
+            showToast(`!${trigger} saved!`);
+        }
         actions = [];
         renderActions();
         document.getElementById('cmd-trigger').value = '';
