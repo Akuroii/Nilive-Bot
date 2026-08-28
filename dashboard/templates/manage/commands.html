@@ -138,6 +138,14 @@
                         {% if meta.desc %}
                         <div class="cmd-description text-muted text-sm">{{ meta.desc }}</div>
                         {% endif %}
+                        <div class="cmd-usage text-muted text-xs" id="usage-{{ cmd }}" style="margin-top:3px;"
+                             data-params="{{ meta.params|default([])|join(',') }}">
+                            <span class="cmd-usage-label">Usage:</span>
+                            <code>/{{ cmd }}{% for param in meta.params|default([]) %} [{{ param }}]{% endfor %}</code>
+                            <span class="cmd-usage-alias-hint" id="usage-alias-{{ cmd }}" style="display:none;">
+                                &nbsp;or&nbsp;<code>alias{% for param in meta.params|default([]) %} [{{ param }}]{% endfor %}</code>
+                            </span>
+                        </div>
                     </div>
                 </div>
 
@@ -170,10 +178,10 @@
                                     <div class="form-hint">Rate limit per user in seconds</div>
                                 </div>
                                 <div class="form-group" style="margin-bottom:0;">
-                                    <label class="form-label" for="edit-aliases-{{ cmd }}">Aliases (cosmetic)</label>
+                                    <label class="form-label" for="edit-aliases-{{ cmd }}">Aliases</label>
                                     <input class="form-input" id="edit-aliases-{{ cmd }}"
                                            placeholder="e.g. k, remove (comma-separated)">
-                                    <div class="form-hint">Alternative command names (display only)</div>
+                                    <div class="form-hint">Message command aliases — users can type <code>alias</code> instead of <code>/{{ cmd }}</code>. Case-insensitive.</div>
                                 </div>
                             </div>
 
@@ -480,6 +488,26 @@
     color: var(--text2);
     margin-top: 2px;
 }
+.cmd-usage {
+    font-size: 11px;
+    line-height: 1.4;
+}
+.cmd-usage code {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    background: var(--bg4);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 4px;
+}
+.cmd-usage-label {
+    font-weight: 600;
+    color: var(--text3);
+    margin-right: 2px;
+}
+.cmd-usage-alias-hint {
+    color: var(--accent);
+}
 
 .cmd-chip {
     font-size: 11px;
@@ -760,6 +788,22 @@ async function loadCommandSettings(cmd) {
         if (aliasesEl)  aliasesEl.value  = parseArr(data.aliases).join(', ');
         if (cooldownEl) cooldownEl.value = (data.cooldown_seconds !== null && data.cooldown_seconds !== undefined) ? data.cooldown_seconds : '';
 
+        // Update alias usage hint
+        const aliasHint = document.getElementById(`usage-alias-${cmd}`);
+        if (aliasHint) {
+            const aliases = parseArr(data.aliases);
+            if (aliases.length > 0) {
+                const firstAlias = aliases[0];
+                const usageEl = document.getElementById(`usage-${cmd}`);
+                const paramsStr = usageEl ? usageEl.dataset.params || '' : '';
+                const params = paramsStr ? paramsStr.split(',').map(p => ` [${p}]`).join('') : '';
+                aliasHint.innerHTML = `&nbsp;or&nbsp;<code>${firstAlias}${params}</code>`;
+                aliasHint.style.display = 'inline';
+            } else {
+                aliasHint.style.display = 'none';
+            }
+        }
+
         const pickers = [
             [`edit-enabled-roles-${cmd}`,    'role',    parseArr(data.enabled_roles || data.allowed_roles)],
             [`edit-disabled-roles-${cmd}`,   'role',    parseArr(data.disabled_roles)],
@@ -853,6 +897,23 @@ function refreshRowChips(cmd, payload) {
         restrChip.style.display = hasRestr ? 'inline-flex' : 'none';
     }
     row.dataset.restricted = hasRestr ? '1' : '0';
+
+    // Update alias usage hint
+    const aliasHint = document.getElementById(`usage-alias-${cmd}`);
+    if (aliasHint) {
+        if (payload.aliases && payload.aliases.length > 0) {
+            // Show the first alias in the usage hint
+            const firstAlias = payload.aliases[0];
+            // Get params from the data attribute
+            const usageEl = document.getElementById(`usage-${cmd}`);
+            const paramsStr = usageEl ? usageEl.dataset.params || '' : '';
+            const params = paramsStr ? paramsStr.split(',').map(p => ` [${p}]`).join('') : '';
+            aliasHint.innerHTML = `&nbsp;or&nbsp;<code>${firstAlias}${params}</code>`;
+            aliasHint.style.display = 'inline';
+        } else {
+            aliasHint.style.display = 'none';
+        }
+    }
 }
 
 // ── CATEGORY RESTRICTION MODAL ──────────────────────────────────────
