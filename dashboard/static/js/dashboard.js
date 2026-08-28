@@ -319,13 +319,43 @@ document.addEventListener('htmx:afterRequest', function(e) {
     }
 });
 
-// ── HTMX AFTER SWAP: Re-init Select2 and update page title ──────
-document.addEventListener('htmx:afterSwap', function(e) {
-    // Re-initialize Select2 pickers if NeroSelect is available
+// ── HTMX AFTER SWAP: re-init dashboard components on swapped content ──────
+//
+// WHY THIS LIVES HERE (and not on the page-level script alone)
+// ---------------------------------------------------------
+// dashboard.js is loaded once in base.html and therefore not re-evaluated
+// when htmx swaps in a new page fragment. The page-level inline script in
+// commands.html is re-executed by htmx, but the COMPONENTS it depends on
+// (NeroAlias.initAll, NeroSelect.initAll) only walk the DOM and bind
+// handlers on whatever is currently in the document — they do not run
+// again on their own. Without re-running them here, after a sidebar click
+// every `[data-alias-input]` host in the freshly swapped Commands page
+// stays as an empty <div> with a hidden input and no chip UI, and the
+// user cannot type, see existing chips, or click × on them.
+//
+// The same applies to back/forward navigation (htmx:historyRestore) and
+// htmx:load (a fragment that finished loading outside the afterSwap flow,
+// e.g. via a Boosted link), so we hook all three. Each component's
+// initAll walks the document and short-circuits on elements that are
+// already initialised, so calling it repeatedly is safe.
+function reInitDashboardComponents() {
+    if (window.NeroAlias && window.NeroAlias.initAll) {
+        window.NeroAlias.initAll(document);
+    }
     if (window.NeroSelect && window.NeroSelect.initAll) {
+        // Single-select pickers on every page (overview, members, etc.).
+        // The Commands page's per-command multi-select pickers are still
+        // initialised lazily inside loadCommandSettings() — that hasn't
+        // changed.
         window.NeroSelect.initAll(document);
     }
-    
+}
+
+document.addEventListener('htmx:afterSwap',  reInitDashboardComponents);
+document.addEventListener('htmx:load',        reInitDashboardComponents);
+document.addEventListener('htmx:historyRestore', reInitDashboardComponents);
+
+document.addEventListener('htmx:afterSwap', function(e) {
     // Update page title from data-page-title attribute
     const pageTitle = document.querySelector('[data-page-title]');
     if (pageTitle) {

@@ -144,7 +144,18 @@ window.NeroSelect = (function () {
         return val ? val.map(String) : [];
     }
 
-    return { initAll, initMulti, getMultiValues };
+    // Was the picker initialised? Commands.html's save path uses this to
+    // refuse a save that would post [] for a picker that never finished
+    // its setup (select2 CDN failure, jQuery missing, fetch error). The
+    // picker may still be partially functional — it falls back to a plain
+    // <select multiple> in initMulti — but we want the user to explicitly
+    // confirm the values rather than silently overwrite saved settings
+    // with an empty list.
+    function isReady(el) {
+        return !!(el && el.dataset && el.dataset.nsInit === '1');
+    }
+
+    return { initAll, initMulti, getMultiValues, isReady };
 })();
 
 document.addEventListener('DOMContentLoaded', () => window.NeroSelect.initAll(document));

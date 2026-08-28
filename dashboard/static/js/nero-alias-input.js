@@ -146,9 +146,29 @@ window.NeroAlias = (function () {
             values.forEach(word => {
                 const chip = document.createElement('span');
                 chip.className = 'na-chip';
+                // The chip is interactive (click → reEdit), so it must be
+                // focusable for keyboard users, and the screen reader needs
+                // a label that explains what activating it does. The × is a
+                // separate focusable button inside the chip with its own
+                // aria-label, so we don't say "button" here — that would
+                // mis-describe the chip's role. A pointer cursor is added
+                // by the CSS; we leave the cursor on the host text input
+                // as the default for the box itself.
+                chip.tabIndex = 0;
+                chip.setAttribute('role', 'button');
+                chip.setAttribute('aria-label',
+                    `Edit alias ${word}. Press Enter to edit, Backspace on the empty box to remove.`);
                 const label = document.createElement('span');
                 label.className = 'na-chip-text';
                 label.textContent = word;
+                // Hover/focus-only edit affordance. A pencil that fades in
+                // when the chip is interactive signals "this can be edited"
+                // without cluttering the resting state. `aria-hidden` so
+                // screen readers don't see a duplicate hint.
+                const editHint = document.createElement('span');
+                editHint.className = 'na-chip-edit';
+                editHint.setAttribute('aria-hidden', 'true');
+                editHint.textContent = '\u270e';
                 const x = document.createElement('button');
                 x.type = 'button';
                 x.className = 'na-chip-x';
@@ -156,10 +176,23 @@ window.NeroAlias = (function () {
                 x.textContent = '\u00d7';
                 x.addEventListener('click', () => remove(word));
                 chip.appendChild(label);
+                chip.appendChild(editHint);
                 chip.appendChild(x);
                 chip.addEventListener('click', e => {
                     if (e.target === x) return;
                     reEdit(word, chip);
+                });
+                // Keyboard parity with the click handler. Enter and Space
+                // both commit the chip into edit mode. The × button has
+                // its own click handler and a separate tab stop, so we
+                // early-return when it's the focus owner; the button's
+                // native Enter/Space activation still fires `remove`.
+                chip.addEventListener('keydown', e => {
+                    if (e.target !== chip) return;     // ignore × button
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        reEdit(word, chip);
+                    }
                 });
                 chips.appendChild(chip);
                 markConflict(chip, word);

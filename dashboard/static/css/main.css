@@ -1042,11 +1042,33 @@ code {
     animation: na-pop .12s ease-out;
 }
 .na-chip:hover { background: rgba(124, 92, 191, .24); }
+/* Pencil sits absolutely on the chip so it never contributes to the
+   chip's resting width. The chip is the positioning context. */
+.na-chip { position: relative; }
+.na-chip:focus-visible {
+    background: rgba(124, 92, 191, .22);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(124, 92, 191, .45);
+}
 @keyframes na-pop {
     from { transform: scale(.85); opacity: .4; }
     to   { transform: scale(1);    opacity: 1; }
 }
 .na-chip-text { font-family: var(--mono, ui-monospace, monospace); }
+.na-chip-edit {
+    position: absolute;
+    top: 50%;
+    right: 22px;            /* clear of the × button */
+    transform: translateY(-50%);
+    font-size: 11px;
+    line-height: 1;
+    opacity: 0;
+    transition: opacity .12s ease;
+    pointer-events: none;
+    user-select: none;
+}
+.na-chip:hover  .na-chip-edit,
+.na-chip:focus-visible .na-chip-edit { opacity: .55; }
 .na-chip-x {
     border: 0;
     background: transparent;
@@ -1059,6 +1081,11 @@ code {
     opacity: .65;
 }
 .na-chip-x:hover { opacity: 1; background: rgba(237, 66, 69, .8); color: #fff; }
+.na-chip-x:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
 .na-chip--warn {
     color: var(--warning);
     border-color: rgba(250, 166, 26, .55);

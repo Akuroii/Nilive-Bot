@@ -32,6 +32,12 @@ const TEMPLATE = fs.readFileSync(
     path.join(ROOT, 'dashboard/templates/manage/commands.html'), 'utf8');
 const COMPONENT = fs.readFileSync(
     path.join(ROOT, 'dashboard/static/js/nero-alias-input.js'), 'utf8');
+// Embed the stylesheet so jsdom parses the chip CSS rules. Section 10
+// reads computed style on .na-chip-edit and .na-chip, which requires the
+// stylesheet to be in the document — bare HTML alone doesn't propagate
+// rules into getComputedStyle.
+const CSS = fs.readFileSync(
+    path.join(ROOT, 'dashboard/static/css/main.css'), 'utf8');
 
 // Pull the real markup out of the template so this test cannot drift from it.
 const blockMatch = TEMPLATE.match(
@@ -73,7 +79,7 @@ async function main() {
     check('…with a hidden input holding the comma string',
         /<input type="hidden" name="aliases-kick"/.test(aliasBlock));
 
-    const dom = new JSDOM(`<!doctype html><html><body>${aliasBlock}</body></html>`, {
+    const dom = new JSDOM(`<!doctype html><html><head><style>${CSS}</style></head><body>${aliasBlock}</body></html>`, {
         runScripts: 'outside-only',
         pretendToBeVisual: true,
     });
@@ -239,6 +245,77 @@ async function main() {
     check('× removes exactly the chip it was on',
         chipWords().length === 1 && chipWords()[0] !== lastWord,
         { removed: lastWord, left: chipWords() });
+
+    console.log('\n=== 10. edit affordance: chip is keyboard-accessible, has a hint ===');
+    // Reset to a clean two-chip state for the affordance tests.
+    host._neroAlias.setValues(['aa', 'bb']);
+    await flush(window);
+    const [aChip, bChip] = chips();
+    // Markup: the chip itself is focusable and labelled for screen readers.
+    check('chip is in the tab order (tabIndex=0)', aChip.tabIndex === 0);
+    check('chip carries role=button for screen readers',
+        aChip.getAttribute('role') === 'button');
+    check('chip aria-label mentions the word and how to edit',
+        /Edit alias aa/.test(aChip.getAttribute('aria-label') || ''),
+        aChip.getAttribute('aria-label'));
+    // A small pencil element is in the DOM, hidden from assistive tech.
+    const pencil = aChip.querySelector('.na-chip-edit');
+    check('a .na-chip-edit pencil element is present', !!pencil);
+    check('the pencil is hidden from assistive tech',
+        pencil && pencil.getAttribute('aria-hidden') === 'true');
+    // The pencil is absolutely positioned so it never contributes to the
+    // chip's resting width. A future regression that puts it back in the
+    // flex flow (display: inline-block / inline) would widen the chip at
+    // rest and break this assertion.
+    check('the pencil uses position: absolute (zero resting-width contribution)',
+        window.getComputedStyle(pencil).position === 'absolute',
+        window.getComputedStyle(pencil).position);
+    check('the chip is the positioning context for the pencil (position: relative)',
+        window.getComputedStyle(aChip).position === 'relative',
+        window.getComputedStyle(aChip).position);
+    // The × button still has its own aria-label and is its own focus stop.
+    const xBtn = aChip.querySelector('.na-chip-x');
+    check('the × button keeps its own aria-label',
+        /Remove alias aa/.test(xBtn.getAttribute('aria-label') || ''),
+        xBtn.getAttribute('aria-label'));
+
+    // Keyboard activation: focusing the chip and pressing Enter re-edits.
+    aChip.focus();
+    key(window, aChip, 'Enter');
+    await flush(window);
+    check('Enter on a focused chip re-edits it',
+        text.value === 'aa' && chipWords().join(',') === 'bb',
+        { box: text.value, chips: chipWords() });
+    // Restore the chip.
+    type(window, text, 'aa');
+    key(window, text, ' ');
+    await flush(window);
+
+    // Keyboard activation: Space on a focused chip also re-edits.
+    const freshChips = chips();
+    const c0 = freshChips[0];
+    c0.focus();
+    key(window, c0, ' ');
+    await flush(window);
+    check('Space on a focused chip re-edits it',
+        text.value.length > 0 && chips().length === 1,
+        { box: text.value, chips: chipWords() });
+    // Restore again.
+    type(window, text, c0.querySelector('.na-chip-text').textContent);
+    key(window, text, ' ');
+    await flush(window);
+
+    // The × button's own keyboard activation still works through the chip's
+    // keydown handler. Because the handler early-returns when e.target is
+    // not the chip, the × button's native button-Enter semantics fire
+    // instead. Simulate by dispatching a click on × after focusing it.
+    const beforeRemove = chipWords().length;
+    xBtn.focus();
+    const click = new window.MouseEvent('click', { bubbles: true });
+    xBtn.dispatchEvent(click);
+    await flush(window);
+    check('clicking × from a focused state still removes just that chip',
+        chipWords().length === beforeRemove - 1, chipWords());
 
     console.log(`\n${'='.repeat(60)}`);
     if (failures.length) {

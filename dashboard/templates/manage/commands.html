@@ -802,11 +802,27 @@ async function loadCommandSettings(cmd) {
 
         const aliasesEl  = document.getElementById(`edit-aliases-${cmd}`);
         const cooldownEl = document.getElementById(`edit-cooldown-${cmd}`);
+        const aliasHost  = document.getElementById(`edit-aliases-host-${cmd}`);
         if (window.NeroAlias) {
             // The chip box owns the value; the hidden input it writes is the
             // aliasesEl above, so the save path below needs no special case.
-            window.NeroAlias.setValues(
-                document.getElementById(`edit-aliases-host-${cmd}`), parseArr(data.aliases));
+            //
+            // Defensive init: if the host was never wired up (e.g. the user
+            // reached this panel via htmx navigation and NeroAlias.initAll
+            // for some reason didn't run, or the page-level DOMContentLoaded
+            // handler hadn't fired before the user clicked Edit), setValues
+            // would otherwise fall through to a plain `input.value = ...`
+            // write and the user would see an empty box instead of chips.
+            // initOne short-circuits via dataset.naInit so it's safe to
+            // call when the host is already initialised.
+            if (aliasHost) {
+                if (!aliasHost._neroAlias && window.NeroAlias.initOne) {
+                    window.NeroAlias.initOne(aliasHost);
+                }
+                window.NeroAlias.setValues(aliasHost, parseArr(data.aliases));
+            } else if (aliasesEl) {
+                aliasesEl.value = parseArr(data.aliases).join(', ');
+            }
         } else if (aliasesEl) {
             aliasesEl.value = parseArr(data.aliases).join(', ');
         }
@@ -838,6 +854,17 @@ async function loadCommandSettings(cmd) {
         await Promise.allSettled(
             pickers.map(([id, kind, pre]) => NeroSelect.initMulti(document.getElementById(id), kind, pre))
         );
+
+        // Mark all four role/channel pickers as "ready for save" — the save
+        // path below uses NeroSelect.isReady() to refuse to post empty role
+        // values when the user never got a chance to interact with a
+        // picker that failed to initialise. Without this, a select2/CDN
+        // failure would let getMultiValues() silently return [] and the
+        // next save would overwrite the user's saved roles with nothing.
+        for (const [id] of pickers) {
+            const el = document.getElementById(id);
+            if (el) el.dataset.nsReady = (el.dataset.nsInit === '1') ? '1' : '0';
+        }
     } catch (e) {
         console.error(`[commands] unexpected error loading /${cmd} settings`, e);
     } finally {
@@ -861,6 +888,36 @@ async function saveCommandSettings(cmd, btn) {
     }
     const cooldownVal = cooldownInput && cooldownInput.value !== '' ? parseInt(cooldownInput.value) : null;
     const isEnabled = cb ? cb.checked : true;
+
+    // Role / channel pickers must be initialised before we read their
+    // values. If any of the four failed to init (e.g. select2 didn't load
+    // because the CDN was blocked), NeroSelect.getMultiValues() returns []
+    // — and we would silently overwrite the user's saved roles/channels
+    // with an empty list. Catch that here and refuse to save.
+    const pickerIds = [
+        `edit-enabled-roles-${cmd}`,
+        `edit-disabled-roles-${cmd}`,
+        `edit-enabled-channels-${cmd}`,
+        `edit-disabled-channels-${cmd}`,
+    ];
+    const unready = pickerIds.filter(id => {
+        const el = document.getElementById(id);
+        return el && !NeroSelect.isReady(el);
+    });
+    if (unready.length) {
+        const labels = unready.map(id => id.replace(`edit-`, '').replace(`-${cmd}`, ''));
+        showToast(
+            `Role / channel pickers didn't load (${labels.join(', ')}). ` +
+            'Reload the page before saving to avoid losing your settings.',
+            'error', 7000);
+        const statusEl = document.getElementById(`edit-status-${cmd}`);
+        if (statusEl) {
+            statusEl.textContent = '❌ Pickers not ready — reload first';
+            statusEl.classList.add('error');
+        }
+        if (btn) setLoading(btn, false);
+        return;
+    }
 
     const enabledRoles     = NeroSelect.getMultiValues(document.getElementById(`edit-enabled-roles-${cmd}`));
     const disabledRoles    = NeroSelect.getMultiValues(document.getElementById(`edit-disabled-roles-${cmd}`));
