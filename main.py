@@ -225,7 +225,7 @@ class NeroCommandTree(discord.app_commands.CommandTree):
         return True
 
 
-bot = commands.Bot(command_prefix="!", intents=intents, tree_cls=NeroCommandTree)
+bot = commands.Bot(command_prefix="!", intents=intents, tree_cls=NeroCommandTree, case_insensitive=True)
 
 _status_index = 0
 
@@ -285,6 +285,11 @@ async def load_cogs():
         "cogs.scheduler",
         "cogs.tagmissions",
         "cogs.tagpartners",
+        # MUST be last: its on_message listener rewrites bare alias
+        # messages (e.g. "k @User" → "!k @User") so that
+        # process_commands can dispatch them. All other on_message
+        # listeners must see the original content first.
+        "cogs.command_aliases",
     ]
     bot.loaded_cogs = []
     bot.failed_cogs = []

@@ -55,6 +55,14 @@ class CustomCommands(commands.Cog):
         if not message.content.startswith("!"):
             return
 
+        # ALIAS CONFLICT FIX: if the first word after "!" matches a
+        # registered prefix command (e.g., !k from an alias), skip
+        # custom command processing to prevent double execution.
+        # The bot's process_commands handler will pick it up instead.
+        first_word = message.content.split()[0][1:].lower()
+        if first_word and first_word in self.bot.all_commands:
+            return
+
         cmds = await self.get_commands(message.guild.id)
 
         for cmd in cmds:
