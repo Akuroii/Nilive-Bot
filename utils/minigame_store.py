@@ -256,6 +256,14 @@ async def run_migration(guild_id: int | None = None):
     Idempotent: once a guild has categories the check short-circuits, and
     the tiers table is only ever READ. The table itself is kept on disk
     (never dropped) for rollback safety — plan §3.
+
+    Failure safety: each guild's inserts commit as ONE transaction. If
+    anything fails mid-guild the connection closes without committing
+    and SQLite rolls the whole guild back — the DB is left in its clean
+    pre-migration state for that guild, and the next startup retries
+    (plan §3.4 rollback guarantee; verified by
+    scripts/test_minigame_migration.py). A failed guild never aborts the
+    migration of other guilds — it is logged loudly instead.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         if guild_id is not None:
@@ -292,32 +300,55 @@ async def run_migration(guild_id: int | None = None):
             if not tiers:
                 continue
 
-            seen = set()
-            for tier, weight, rtype, rval, rdur, enabled in tiers:
-                if tier in seen:
-                    # Legacy schema allowed duplicate tier rows; the first
-                    # wins, the rest are skipped (warned, not lost — they
-                    # remain in the kept minigames_tiers table).
-                    print(f"[MINIGAMES] migration: skipping duplicate tier "
-                          f"'{tier}' for guild {g}")
-                    continue
-                seen.add(tier)
-                preset = [{
-                    "type": rtype,
-                    "value": rval,
-                    "duration_hours": rdur,
-                    "weight": 1,
-                }]
-                await db.execute("""
-                    INSERT INTO minigame_categories
-                        (guild_id, parent_id, name, weight, sort_order,
-                         default_rewards_json, enabled)
-                    VALUES (?, NULL, ?, ?, ?, ?, ?)
-                """, (g, tier.title(), max(1, int(weight or 1)),
-                      len(seen) - 1, _dump(preset), int(enabled or 1)))
-            await db.commit()
-            print(f"[MINIGAMES] migration: seeded {len(seen)} categories "
-                  f"from legacy tiers for guild {g}")
+            try:
+                seen = set()
+                for tier, weight, rtype, rval, rdur, enabled in tiers:
+                    if tier in seen:
+                        # Legacy schema allowed duplicate tier rows; the
+                        # first wins, the rest are skipped (warned, not
+                        # lost — they remain in the kept minigames_tiers
+                        # table).
+                        print(f"[MINIGAMES] migration: skipping duplicate "
+                              f"tier '{tier}' for guild {g}")
+                        continue
+                    seen.add(tier)
+                    # Canonical reward-row shape (the keys the UI and
+                    # _insert_rewards read; duration only when the legacy
+                    # row had one — temp roles). A LIST of rows: the
+                    # column is a reward-pool JSON array.
+                    preset = [{
+                        "reward_type": rtype,
+                        "reward_value": rval,
+                        "weight": 1,
+                    }]
+                    if rdur:
+                        preset[0]["duration_hours"] = int(rdur)
+                    # NOTE: `int(enabled or 1)` was a latent bug — a
+                    # DISABLED legacy tier (enabled=0) would have been
+                    # migrated as enabled, because `0 or 1` is 1.
+                    # (Caught by the realistic-fixture migration suite.)
+                    await db.execute("""
+                        INSERT INTO minigame_categories
+                            (guild_id, parent_id, name, weight, sort_order,
+                             default_rewards_json, enabled)
+                        VALUES (?, NULL, ?, ?, ?, ?, ?)
+                    """, (g, tier.title(), max(1, int(weight or 1)),
+                          len(seen) - 1, _dump(preset), 1 if enabled else 0))
+                await db.commit()
+                print(f"[MINIGAMES] migration: seeded {len(seen)} categories "
+                      f"from legacy tiers for guild {g}")
+            except Exception as exc:  # noqa: BLE001 — deliberate, see above
+                try:
+                    await db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                # Explicit rollback (and the connection close, which
+                # rolls back anything left open) guarantee this guild is
+                # left in its clean pre-migration state — no partial
+                # state, and the next startup retries from scratch.
+                print(f"[MINIGAMES] migration ERROR for guild {g}: {exc!r} "
+                      f"— nothing committed for this guild; it will retry "
+                      f"on the next startup. Fix the cause and restart.")
 
 
 # ── CONFIG (weekly pacing + presets) ────────────────────────────────────
@@ -461,6 +492,19 @@ async def get_category(guild_id: int, category_id: int) -> dict | None:
 def _category_row_to_dict(cols, row) -> dict:
     cat = dict(zip(cols, row))
     cat["default_rewards"] = _load(cat.pop("default_rewards_json"), [])
+    # Read-time normalization: very early migration builds (and any
+    # hand-edited rows) may carry the legacy `type`/`value` keys.
+    # Canonical shape is reward_type/reward_value — the UI and the
+    # reward validator both read the canonical keys.
+    norm = []
+    for r in cat["default_rewards"]:
+        if isinstance(r, dict) and "reward_type" not in r and "type" in r:
+            r = dict(r)
+            r["reward_type"] = r.pop("type")
+            if "reward_value" not in r and "value" in r:
+                r["reward_value"] = r.pop("value")
+        norm.append(r)
+    cat["default_rewards"] = norm
     return cat
 
 

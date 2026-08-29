@@ -294,6 +294,30 @@ def logout():
     return redirect(url_for("login"))
 
 
+# ── Local review login (Phase 5 — manual browser check) ─────────────
+# OFF by default: unless DASHBOARD_DEMO_LOGIN=1 is set, this route is a
+# 404 and production/staging behavior is untouched. With the flag set
+# (local preview only) it creates exactly the session the OAuth
+# callback would, for a fixed demo identity — Discord OAuth cannot
+# complete inside the sandboxed preview, and the user asked for a real
+# browser walkthrough of the minigames UI. Pair the flag with
+# OWNER_ID=<demo user id> so the demo user gets the same guild-blind
+# developer bypass the trusted owner gets (no dashboard_users row).
+@app.route("/demo-login")
+def demo_login():
+    if os.getenv("DASHBOARD_DEMO_LOGIN") != "1":
+        abort(404)
+    user_id = int(os.getenv("DASHBOARD_DEMO_USER_ID", "900000000000000001"))
+    create_session({
+        "id": user_id,
+        "username": os.getenv("DASHBOARD_DEMO_USER_NAME", "Reviewer"),
+        "avatar": None,
+    })
+    set_session_guild(int(os.getenv("DASHBOARD_DEMO_GUILD_ID",
+                                    "900000000000000001")))
+    return redirect(url_for("index"))
+
+
 # ── Server select ──────────────────────────────────────────────────────────────
 
 @app.route("/server-select")

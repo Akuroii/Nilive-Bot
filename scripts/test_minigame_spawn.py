@@ -16,7 +16,7 @@ Covers, headless (fake Discord objects + REAL sqlite + REAL engine):
   F. Startup sweep — aborted_restart, embed note, idempotency, grace
   G. Pacing iteration — daily check bookkeeping (reset, one roll/day,
      max cap)
-  H. Deprecated compat surface (dashboard imports keep working)
+  H. v1 retirement (Phase 6) — compat shims removed, live consumers kept
 
 Usage:  python scripts/test_minigame_spawn.py
 """
@@ -980,22 +980,27 @@ async def test_pacing_iteration():
     await drop_cog(cog)
 
 
-async def test_compat_surface():
-    section("H. Deprecated compat surface (Phase 4/6 window)")
-    from cogs.minigames import (ensure_tables, get_config, get_tiers,
-                                VALID_TIERS, get_user_win_count)
-    check("H1: legacy imports resolve",
-          VALID_TIERS == ("bronze", "silver", "gold", "platinum"))
-    cfg = await get_config(G1)
-    check("H2: get_config shim returns the config row",
+async def test_retired_surface():
+    section("H. v1 retirement (Phase 6) — compat shims removed")
+    # Phase 4 replaced the old dashboard (the shims' last consumers)
+    # and Phase 5 verified the migration — so the deprecated window is
+    # closed: the retired names must be GONE from the cog, while the
+    # live consumers (rank card) keep working against the store.
+    from cogs.minigames import get_user_win_count
+    check("H1: VALID_TIERS retired", not hasattr(cog_mod, "VALID_TIERS"))
+    check("H2: get_tiers retired", not hasattr(cog_mod, "get_tiers"))
+    check("H3: ensure_tables/get_config aliases retired",
+          not hasattr(cog_mod, "ensure_tables")
+          and not hasattr(cog_mod, "get_config"))
+    cfg = await store.get_config(G1)
+    check("H4: config now read via the store directly",
           cfg.get("channel_id") == 9001, str(cfg.get("channel_id")))
-    tiers = await get_tiers(G1)
-    check("H3: get_tiers shim (legacy read) works on empty", tiers == [])
     wins = await get_user_win_count(G1, 78)
-    check("H4: get_user_win_count counts v2 first-winner rows",
+    check("H5: get_user_win_count KEPT (rank-card consumer) and counts "
+          "v2 first-winner rows",
           wins >= 1, str(wins))  # user 78 won the E8 game
-    await ensure_tables()
-    check("H5: ensure_tables shim is idempotent (store-driven)", True)
+    await store.ensure_tables()
+    check("H6: store-driven ensure_tables is idempotent", True)
 
     # compute_daily_probability kept verbatim — known values
     cases = [
@@ -1011,7 +1016,7 @@ async def test_compat_surface():
         if abs(got_p - exp_p) > 1e-9 or got_f != exp_f:
             ok = False
             print(f"    case {args}: got ({got_p}, {got_f})")
-    check("H6: compute_daily_probability unchanged (5 known cases)", ok)
+    check("H7: compute_daily_probability unchanged (5 known cases)", ok)
 
 
 async def main():
@@ -1023,7 +1028,7 @@ async def main():
     await test_request_queue()
     await test_startup_sweep()
     await test_pacing_iteration()
-    await test_compat_surface()
+    await test_retired_surface()
 
     print(f"\n{'=' * 50}\nRESULT: {PASS} passed, {FAIL} failed")
     if FAIL:

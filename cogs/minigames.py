@@ -570,53 +570,25 @@ class Minigames(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# ── DEPRECATED compatibility surface ────────────────────────────────────
-# RETIRED IN v2, KEPT FOR ONE PHASE WINDOW:
-#   - the legacy dashboard (/minigames page in dashboard/app.py and the
-#     tier routes in dashboard/api/minigames.py) still imports these names;
-#   - utils/rank_card_data.py imports get_user_win_count (legacy log read).
-# The tier SYSTEM itself is gone: the tier slash commands, MinigameClaimView
-# and the legacy claim/spawn flow were removed in this phase (plan §8).
-# These shims serve the OLD read-only UI with legacy data until Phase 4
-# replaces the dashboard API and Phase 6 removes the shims. Do not build
-# new code on them.
+# ── RETIRED (Phase 6 — migration verified, Phase 5 retirement pass) ──
+# The Phase 4/6 compatibility window is CLOSED:
+#   - VALID_TIERS and get_tiers() — the old dashboard page/API that
+#     read them was replaced in Phase 4 (dashboard/api/minigames.py is
+#     now store-based); nothing in production imported them anymore.
+#   - the ensure_tables()/get_config() aliases — every remaining
+#     caller uses utils.minigame_store directly.
+# The tier SYSTEM (slash commands, MinigameClaimView, legacy
+# claim/spawn flow) was removed in Phase 3 (plan §8).
+#
+# KEPT on purpose:
+#   - the legacy TABLES (minigames_tiers / minigames_config /
+#     minigames_log with their v1 columns) — never dropped, so
+#     redeploying the old code finds its data intact (plan §3.4);
+#   - get_user_win_count() — a LIVE consumer: utils/rank_card_data.py
+#     reads the legacy winner_id column, which v2 rows also fill via
+#     the first-winner mapping.
+# Do not rebuild removed shims.
 # ═══════════════════════════════════════════════════════════════════════
-
-VALID_TIERS = ("bronze", "silver", "gold", "platinum")  # deprecated (Phase 6)
-
-
-async def ensure_tables():  # deprecated alias (Phase 6)
-    await store.ensure_tables()
-
-
-async def get_config(guild_id: int) -> dict:  # deprecated alias (Phase 6)
-    return await store.get_config(guild_id)
-
-
-async def get_tiers(guild_id: int) -> list[dict]:  # deprecated (Phase 6)
-    """Legacy tier rows (read-only) for the old dashboard page.
-    The minigames_tiers table only exists in databases migrated from
-    v1; a fresh install has no such table — return [] instead of
-    raising (the page simply shows 'no tiers')."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name = 'minigames_tiers'")
-        if not await cursor.fetchone():
-            return []
-        cursor = await db.execute("""
-            SELECT id, tier, weight, reward_type, reward_value,
-                   reward_duration_hours, enabled
-            FROM minigames_tiers
-            WHERE guild_id = ? AND enabled = 1
-        """, (guild_id,))
-        rows = await cursor.fetchall()
-    return [{
-        "id": r[0], "tier": r[1], "weight": r[2],
-        "reward_type": r[3], "reward_value": r[4],
-        "reward_duration_hours": r[5], "enabled": r[6],
-    } for r in rows]
-
 
 async def get_user_win_count(guild_id: int, user_id: int) -> int:
     """

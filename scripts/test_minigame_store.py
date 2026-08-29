@@ -106,9 +106,12 @@ async def test_migration():
     check("4 root categories created", len(tree) == 4, f"got {len(tree)}")
     bronze = next(c for c in tree if c["name"] == "Bronze")
     check("bronze weight preserved", bronze["weight"] == 50)
-    check("bronze preset migrated",
+    # Canonical reward-row shape (Phase 5 fix): the UI and the reward
+    # validator read reward_type/reward_value; duration_hours only when
+    # the legacy row had one.
+    check("bronze preset migrated (canonical shape)",
           bronze["default_rewards"] == [
-              {"type": "coins", "value": "100", "duration_hours": None,
+              {"reward_type": "coins", "reward_value": "100",
                "weight": 1}], str(bronze["default_rewards"]))
     # idempotency: re-run must not duplicate
     await ms.run_migration()
