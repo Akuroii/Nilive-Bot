@@ -1140,33 +1140,38 @@ def events():
     return render("systems/events.html", events=event_list, **ctx)
 
 
-# ── Minigames / Event Stack Builder (dark-fixes pass #13) ───────────────────
+# ── Minigames v2 (Phase 4) ──────────────────────────────────────────────────
+#
+# The page is CLIENT-DATA-DRIVEN: it renders an empty shell and the
+# vanilla JS below loads everything through the /api/minigames/*
+# endpoints (dashboard/api/minigames.py) — same pattern as the other
+# systems pages (no server-side prefetch, tabs never reload). The v1
+# tier-based prefetch (cogs.minigames.get_tiers) is retired with the
+# v1 API.
+#
+# Two pages, one permission key:
+#   /minigames          — Config / Categories & Templates / History
+#   /minigames/builder  — the single-page game builder; ?template_id=
+#                         opens an existing template, ?category_id=
+#                         pre-fills the Spawn Settings category.
 
 @app.route("/minigames")
 @require_page("minigames")
 def minigames_page():
-    guild_id = get_session_guild_id()
-
-    async def get_data():
-        from cogs.minigames import ensure_tables, get_config, get_tiers
-        await ensure_tables()
-        config = await get_config(guild_id)
-        tiers  = await get_tiers(guild_id)
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT event_date, tier, winner_id, winner_display_name,
-                       forced, fired_at
-                FROM minigames_log
-                WHERE guild_id = ?
-                ORDER BY fired_at DESC LIMIT 25
-            """, (guild_id,))
-            log = await cursor.fetchall()
-        return config, tiers, log
-
-    config, tiers, log = run_async(get_data())
     ctx = get_current_user_context()
-    return render("systems/minigames.html",
-                  config=config, tiers=tiers, log=log, **ctx)
+    return render("systems/minigames.html", **ctx)
+
+
+@app.route("/minigames/builder")
+@require_page("minigames")
+def minigame_builder_page():
+    ctx = get_current_user_context()
+    template_id = request.args.get("template_id")
+    category_id = request.args.get("category_id")
+    return render("systems/minigame_builder.html",
+                  template_id=int(template_id) if template_id and template_id.isdigit() else None,
+                  category_id=int(category_id) if category_id and category_id.isdigit() else None,
+                  **ctx)
 
 
 # ── Missions ─────────────────────────────────────────────────────────────────
