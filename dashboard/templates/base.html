@@ -7,6 +7,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+<!-- Shared embed composer styles (per-embed editor card + Discord
+     preview chrome + engine component rows) — used by both
+     manage/embedbuilder.html and systems/minigame_builder.html. -->
+<link rel="stylesheet" href="{{ url_for('static', filename='css/embed-composer.css') }}">
 <!-- SECURITY FIX (dark-fixes pass #2, CDN SRI): pins this CSS to the
      exact bytes of select2@4.1.0-rc.0 (hash computed from the real
      published npm package, not guessed). If jsDelivr's CDN is ever
@@ -252,7 +256,7 @@
        hx-push-url="true"
        class="nav-link">
         <span class="nav-icon">🎲</span>
-        <span class="nav-text">Event Stack Builder</span>
+        <span class="nav-text">Minigames</span>
     </a>
     <a href="/missions"
        hx-get="/missions"

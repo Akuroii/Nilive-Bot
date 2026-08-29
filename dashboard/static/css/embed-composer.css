@@ -1,0 +1,344 @@
+/* ═══════════════════════════════════════════════════════════════
+   NERO DASHBOARD — embed-composer.css
+
+   Shared styles for the extracted embed composer
+   (static/js/embed-composer.js): the per-embed editor card, the
+   Discord-message preview chrome, and the emoji popover. Extracted
+   VERBATIM from manage/embedbuilder.html's inline <style> block so
+   the old page renders identically; the minigames builder page
+   (systems/minigame_builder.html) links the same file.
+
+   New additions at the bottom (marked NEW-4PHASE) serve the
+   builder page and the preview's engine component rows.
+   ═══════════════════════════════════════════════════════════════ */
+
+.eb-field-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+.eb-field-label { font-size:11px; font-weight:700; letter-spacing:.05em; color:var(--text3); }
+.eb-counter { font-size:11px; color:var(--text3); font-family:'JetBrains Mono','Fira Code',monospace; }
+.eb-counter.eb-counter-warn { color:var(--warning); }
+.eb-counter.eb-counter-danger { color:var(--danger); }
+
+.eb-toolbar { display:flex; align-items:center; gap:4px; margin-bottom:8px; flex-wrap:wrap; }
+.eb-tbtn {
+    min-width:32px; height:32px; padding:0 8px;
+    display:inline-flex; align-items:center; justify-content:center;
+    background:var(--bg3); border:1px solid var(--border); border-radius:6px;
+    color:var(--text2); font-size:13px; font-weight:700; cursor:pointer;
+    transition:all .12s;
+}
+.eb-tbtn:hover { background:var(--bg4); color:var(--text); border-color:var(--accent); }
+.eb-tbtn:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+.eb-tdivider { width:1px; height:20px; background:var(--border); margin:0 4px; }
+
+.eb-content-input { resize:vertical; min-height:70px; }
+
+.eb-dropzone {
+    border:1.5px dashed var(--border); border-radius:10px; padding:20px;
+    text-align:center; font-size:13px; color:var(--text2);
+    transition:all .15s; margin-bottom:12px; cursor:pointer;
+}
+.eb-dropzone.eb-dragover { border-color:var(--accent); background:rgba(124,92,191,.08); }
+.eb-link-btn { background:none; border:none; color:var(--accent); font-size:13px; cursor:pointer; text-decoration:underline; padding:0; }
+
+.eb-attach-grid { display:flex; flex-wrap:wrap; gap:10px; }
+.eb-attach-item {
+    position:relative; width:96px; background:var(--bg3); border:1px solid var(--border);
+    border-radius:8px; overflow:hidden; font-size:10px;
+}
+.eb-attach-thumb { width:100%; height:64px; object-fit:cover; display:block; background:var(--bg4); }
+.eb-attach-icon { width:100%; height:64px; display:flex; align-items:center; justify-content:center; font-size:24px; background:var(--bg4); }
+.eb-attach-name { padding:4px 6px; color:var(--text2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.eb-attach-remove {
+    position:absolute; top:3px; right:3px; width:18px; height:18px; border-radius:50%;
+    background:rgba(0,0,0,.6); color:#fff; border:none; font-size:11px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center; line-height:1;
+}
+
+.eb-embed-card { border:1px solid var(--border); border-radius:10px; margin-bottom:10px; overflow:hidden; }
+.eb-embed-head {
+    display:flex; align-items:center; gap:10px; padding:10px 14px; cursor:pointer;
+    background:var(--bg3); user-select:none;
+}
+.eb-embed-head:hover { background:var(--bg4); }
+.eb-embed-chevron { display:inline-block; transition:transform .15s; font-size:12px; color:var(--text3); }
+.eb-embed-card.eb-expanded .eb-embed-chevron { transform:rotate(90deg); }
+.eb-embed-title-preview { flex:1; font-size:13px; font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.eb-embed-actions { display:flex; gap:6px; }
+.eb-embed-body { display:none; padding:16px; }
+.eb-embed-card.eb-expanded .eb-embed-body { display:block; }
+.eb-embed-fieldrow { display:grid; grid-template-columns:1fr 1fr auto auto; gap:8px; margin-bottom:8px; align-items:center; }
+
+.eb-mention-row { display:flex; gap:8px; margin-bottom:10px; align-items:center; }
+.eb-mention-row select, .eb-mention-row input { flex:1; }
+.eb-mention-row .btn { flex-shrink:0; white-space:nowrap; }
+
+/* ── Emoji popover — polished to sit closer to Discord's own picker:
+   tighter auto-fill grid, a filled hover square (not just a tint),
+   and a footer bar that names whatever's under the cursor. ────── */
+.eb-emoji-popover {
+    position:fixed; z-index:1100; width:340px; max-height:420px;
+    background:#111214; border:1px solid var(--border); border-radius:12px;
+    box-shadow:0 16px 40px rgba(0,0,0,.55); padding:10px; display:flex; flex-direction:column;
+}
+.eb-emoji-search-input {
+    margin-bottom:8px; background:#1e1f22; border-color:#2b2d31;
+}
+.eb-emoji-search-input:focus { border-color:var(--accent); }
+.eb-emoji-scroll { overflow-y:auto; flex:1; padding-right:2px; }
+.eb-emoji-scroll::-webkit-scrollbar { width:6px; }
+.eb-emoji-scroll::-webkit-scrollbar-thumb { background:#3f4147; border-radius:3px; }
+.eb-emoji-cat-label {
+    font-size:12px; font-weight:700; color:#949ba4; text-transform:uppercase;
+    letter-spacing:.02em; margin:10px 2px 6px; position:sticky; top:0; background:#111214; padding:4px 0 2px;
+}
+.eb-emoji-cat-label:first-child { margin-top:0; }
+.eb-emoji-server-label { font-size:11px; font-weight:600; color:var(--text3); margin:8px 2px 4px; display:flex; align-items:center; gap:4px; }
+.eb-emoji-grid { display:grid; grid-template-columns:repeat(auto-fill, 36px); gap:2px; justify-content:start; }
+.eb-emoji-cell {
+    width:36px; height:36px; display:flex; align-items:center; justify-content:center;
+    font-size:22px; line-height:1; background:none; border:none; border-radius:8px; cursor:pointer;
+    transition:background-color .08s ease, transform .08s ease;
+}
+.eb-emoji-cell:hover, .eb-emoji-cell:focus-visible {
+    background:#2b2d31; transform:scale(1.08); outline:none;
+}
+.eb-emoji-cell:active { transform:scale(0.96); }
+.eb-emoji-cell img { width:26px; height:26px; object-fit:contain; }
+.eb-emoji-empty { text-align:center; color:var(--text3); font-size:12px; padding:24px 0; }
+.eb-emoji-ext-toggle {
+    background:none; border:none; color:var(--accent); font-size:11px; font-weight:600;
+    cursor:pointer; padding:6px 2px; text-align:left; width:100%;
+}
+.eb-emoji-ext-toggle:hover { text-decoration:underline; }
+.eb-emoji-import-row { display:flex; gap:6px; margin-top:8px; }
+.eb-emoji-import-row input { flex:1; padding:6px 10px; font-size:12px; background:#1e1f22; border-color:#2b2d31; }
+.eb-emoji-import-row .btn { padding:0 12px; }
+.eb-emoji-hover-bar {
+    display:flex; align-items:center; gap:8px; margin-top:8px; padding-top:8px;
+    border-top:1px solid #2b2d31; font-size:12px; color:var(--text2); min-height:20px;
+}
+.eb-emoji-hover-bar img { width:20px; height:20px; object-fit:contain; }
+.eb-emoji-hover-empty { color:var(--text3); }
+.eb-emoji-hover-name { font-weight:600; color:var(--text); }
+.eb-emoji-hover-id { color:var(--text3); font-family:'JetBrains Mono','Fira Code',monospace; font-size:11px; }
+
+/* ── Live Preview — mirrors real Discord message chrome so this is a
+   preview of the actual send, not a generic mock. ─────────────────── */
+.eb-preview-box { background:#313338; border-radius:8px; padding:16px; min-height:60px; }
+.eb-msg { display:flex; gap:16px; }
+.eb-msg-avatar { width:40px; height:40px; border-radius:50%; flex-shrink:0; margin-top:2px; object-fit:cover; background:var(--accent); }
+.eb-msg-body { min-width:0; flex:1; }
+.eb-msg-header { display:flex; align-items:baseline; gap:7px; margin-bottom:2px; flex-wrap:wrap; }
+.eb-msg-name { font-weight:600; font-size:16px; color:#f2f3f5; }
+.eb-msg-app-badge {
+    background:#5865f2; color:#fff; font-size:10px; font-weight:600;
+    padding:1px 4px; border-radius:3px; letter-spacing:.02em; line-height:1.4;
+}
+.eb-msg-time { font-size:12px; color:#949ba4; }
+.eb-msg-content { color:#dbdee1; font-size:16px; line-height:1.375; white-space:pre-wrap; word-break:break-word; }
+.eb-msg-content.eb-emoji-only-content { font-size:2.25rem; line-height:1.25; }
+.eb-msg-content.eb-emoji-only-content .eb-inline-emoji { width:44px; height:44px; }
+.eb-preview-empty { color:#72767d; font-size:13px; text-align:center; padding:20px 0; }
+
+.eb-inline-emoji { width:22px; height:22px; object-fit:contain; vertical-align:-6px; margin:0 1px; }
+
+.eb-mention {
+    background:rgba(88,101,242,.3); color:#c9cdfb; border-radius:3px;
+    padding:0 2px; font-weight:500; cursor:default; unicode-bidi:plaintext;
+}
+.eb-mention:hover { background:rgba(88,101,242,.5); text-decoration:underline; }
+
+.eb-preview-attachments { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+.eb-preview-attachments img { max-width:200px; max-height:200px; border-radius:6px; object-fit:cover; }
+.eb-preview-embed {
+    border-left:4px solid #7c5cbf; background:#2b2d31; border-radius:4px;
+    padding:8px 16px 16px; margin-top:8px; position:relative; max-width:432px;
+}
+.eb-pe-author { font-size:14px; font-weight:600; color:#f2f3f5; margin:8px 0 8px; display:flex; align-items:center; gap:6px; }
+.eb-pe-title { font-weight:700; color:#fff; font-size:16px; margin-bottom:8px; line-height:1.3; }
+.eb-pe-desc { color:#dbdee1; font-size:14px; line-height:1.375; white-space:pre-wrap; }
+.eb-pe-fields { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+.eb-pe-field { min-width:0; }
+.eb-pe-field-name { font-weight:600; color:#f2f3f5; font-size:14px; margin-bottom:2px; }
+.eb-pe-field-value { color:#dbdee1; font-size:14px; line-height:1.375; }
+.eb-pe-image { max-width:100%; border-radius:4px; margin-top:16px; display:block; }
+.eb-pe-thumb { position:absolute; top:16px; right:16px; width:80px; height:80px; border-radius:4px; object-fit:cover; }
+.eb-pe-footer { font-size:12px; color:#b5bac1; margin-top:8px; display:flex; align-items:center; gap:6px; }
+
+/* ═══════════════════════════════════════════════════════════════
+   NEW-4PHASE — engine component rows in the preview.
+   Discord renders action rows as a dark rounded container holding
+   up to five pill buttons; this mirrors that so the game's buttons
+   read as part of the message, not a separate system.
+   ═══════════════════════════════════════════════════════════════ */
+.eb-comp-wrap { margin-top:8px; max-width:432px; }
+.eb-comp-row {
+    display:flex; gap:8px; flex-wrap:wrap;
+    background:#2b2d31; border-radius:8px; padding:6px; margin-bottom:6px;
+}
+.eb-comp-btn {
+    display:inline-flex; align-items:center; gap:6px;
+    max-width:100%; padding:6px 14px; border:none; border-radius:6px;
+    font-size:14px; font-weight:500; font-family:inherit;
+    color:#f2f3f5; cursor:default; white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis;
+}
+.eb-comp-btn .eb-cbtn-emoji { display:inline-flex; }
+.eb-cbtn-primary    { background:#5865f2; }
+.eb-cbtn-secondary  { background:#4e5058; }
+.eb-cbtn-success    { background:#248046; }
+.eb-cbtn-danger     { background:#da373c; }
+.eb-comp-btn.disabled {
+    opacity:.6; filter:saturate(.4);
+}
+.eb-comp-btn:disabled { cursor:not-allowed; }
+
+/* ═══════════════════════════════════════════════════════════════
+   NEW-4PHASE — Minigames v2 builder page layout
+   (systems/minigame_builder.html): form left / live preview right,
+   preview stacks below the form on narrow screens.
+   ═══════════════════════════════════════════════════════════════ */
+.mb-grid {
+    display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1fr);
+    gap:24px; align-items:start;
+}
+@media (max-width: 1100px) {
+    .mb-grid { grid-template-columns:1fr; }
+    .mb-preview-col { position:static !important; }
+}
+
+.mb-section { margin-bottom:18px; }
+.mb-section-head { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+.mb-step-no {
+    width:24px; height:24px; border-radius:50%; flex-shrink:0;
+    background:var(--accent); color:#fff; font-size:12px; font-weight:700;
+    display:inline-flex; align-items:center; justify-content:center;
+}
+.mb-section-head .card-title { margin:0; }
+
+/* Game type cards */
+.mb-type-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:10px; }
+.mb-type-card {
+    text-align:left; background:var(--bg3); border:1.5px solid var(--border);
+    border-radius:10px; padding:12px; cursor:pointer; transition:all .12s;
+    color:var(--text); font-family:inherit;
+}
+.mb-type-card:hover { border-color:var(--accent); background:var(--bg4); }
+.mb-type-card.mb-type-active { border-color:var(--accent); background:rgba(124,92,191,.10); }
+.mb-type-icon { font-size:22px; display:block; margin-bottom:6px; }
+.mb-type-name { font-size:14px; font-weight:600; display:block; }
+.mb-type-desc { font-size:11px; color:var(--text3); display:block; margin-top:2px; }
+
+/* Answers list (math/colors/emoji) */
+.mb-answer-row { display:grid; grid-template-columns:28px 1fr 24px; gap:8px; margin-bottom:6px; align-items:center; }
+.mb-answer-key {
+    font-size:12px; font-weight:700; color:var(--text3); text-align:center;
+    font-family:'JetBrains Mono','Fira Code',monospace;
+}
+.mb-correct-mark {
+    background:none; border:1px solid var(--border); border-radius:50%;
+    width:24px; height:24px; cursor:pointer; color:var(--text3); font-size:12px;
+    display:inline-flex; align-items:center; justify-content:center; transition:all .12s;
+}
+.mb-correct-mark:hover { border-color:var(--success); color:var(--success); }
+.mb-correct-mark.mb-correct-on { background:var(--success); border-color:var(--success); color:#000; }
+
+/* Toggle rows with the exact plan copy */
+.mb-toggle-row { display:flex; align-items:flex-start; gap:12px; padding:10px 0; border-bottom:1px solid var(--border); }
+.mb-toggle-row:last-child { border-bottom:none; }
+.mb-toggle-copy { flex:1; }
+.mb-toggle-name { font-size:14px; font-weight:600; }
+.mb-toggle-hint { font-size:12px; color:var(--text3); margin-top:2px; line-height:1.4; }
+
+/* Reward rows */
+.mb-reward-row { display:grid; grid-template-columns:150px 1fr 90px 90px 28px; gap:8px; margin-bottom:8px; align-items:center; }
+@media (max-width: 700px) { .mb-reward-row { grid-template-columns:1fr 1fr; } }
+.mb-reward-pct {
+    display:flex; align-items:center; gap:8px; font-size:11px; color:var(--text3);
+    font-family:'JetBrains Mono','Fira Code',monospace;
+}
+.mb-reward-pct-bar { flex:1; height:4px; border-radius:2px; background:var(--bg4); overflow:hidden; }
+.mb-reward-pct-fill { height:100%; background:var(--accent); border-radius:2px; }
+
+/* Unsaved-changes pill + spawn feedback */
+.mb-dirty-pill {
+    display:none; align-items:center; gap:6px;
+    background:rgba(254,231,92,.12); color:var(--warning);
+    font-size:12px; font-weight:600; padding:3px 10px; border-radius:999px;
+}
+.mb-dirty-pill.mb-dirty-on { display:inline-flex; }
+.mb-spawn-chip {
+    display:inline-flex; align-items:center; gap:8px;
+    font-size:12px; color:var(--text2); background:var(--bg3);
+    border:1px solid var(--border); border-radius:8px; padding:6px 12px;
+}
+.mb-spawn-chip .btn-spinner { width:12px; height:12px; }
+.mb-spawn-chip.mb-chip-ok { color:var(--success); border-color:var(--success); }
+.mb-spawn-chip.mb-chip-err { color:var(--danger); border-color:var(--danger); }
+
+/* ═══════════════════════════════════════════════════════════════
+   NEW-4PHASE — Minigames page v2 (systems/minigames.html):
+   category tree rows, badges, template rows, history.
+   ═══════════════════════════════════════════════════════════════ */
+.mg-tree { display:flex; flex-direction:column; gap:6px; }
+.mg-node {
+    border:1px solid var(--border); border-radius:10px; background:var(--bg3);
+    overflow:hidden;
+}
+.mg-node.mg-node-off { opacity:.55; }
+.mg-node-head {
+    display:flex; align-items:center; gap:10px; padding:10px 14px;
+    cursor:default;
+}
+.mg-node-caret {
+    background:none; border:none; cursor:pointer; font-size:12px; color:var(--text3);
+    width:20px; transition:transform .15s;
+}
+.mg-node-open .mg-node-caret { transform:rotate(90deg); }
+.mg-node-name { font-size:14px; font-weight:600; flex:1; min-width:0;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mg-node-meta { font-size:11px; color:var(--text3); white-space:nowrap;
+    font-family:'JetBrains Mono','Fira Code',monospace; }
+.mg-node-actions { display:flex; gap:6px; align-items:center; }
+.mg-node-body { display:none; border-top:1px solid var(--border); padding:10px 14px; background:var(--bg2); }
+.mg-node-open .mg-node-body { display:block; }
+.mg-node-children { margin:8px 0 8px 26px; display:flex; flex-direction:column; gap:6px; }
+
+.mg-badge {
+    display:inline-flex; align-items:center; gap:4px;
+    font-size:10px; font-weight:700; letter-spacing:.03em;
+    padding:2px 8px; border-radius:999px; white-space:nowrap;
+}
+.mg-badge-live { background:rgba(76,187,121,.15); color:var(--success); }
+.mg-badge-queued { background:rgba(88,101,242,.15); color:#818cf8; }
+.mg-badge-off { background:rgba(148,155,164,.15); color:var(--text3); }
+.mg-badge-nopool { background:rgba(254,231,92,.12); color:var(--warning); }
+
+.mg-tpl-row {
+    display:flex; align-items:center; gap:10px; padding:8px 10px;
+    border:1px solid var(--border); border-radius:8px; background:var(--bg3);
+    margin-bottom:6px; flex-wrap:wrap;
+}
+.mg-tpl-row.mg-row-off { opacity:.55; }
+.mg-tpl-icon { font-size:18px; }
+.mg-tpl-name { font-size:13px; font-weight:600; min-width:120px; }
+.mg-tpl-meta { font-size:11px; color:var(--text3); }
+.mg-tpl-actions { display:flex; gap:6px; margin-left:auto; flex-wrap:wrap; }
+.mg-breadcrumbs { font-size:12px; color:var(--text3); margin-bottom:10px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.mg-breadcrumbs a { color:var(--accent); text-decoration:none; cursor:pointer; }
+.mg-breadcrumbs a:hover { text-decoration:underline; }
+.mg-breadcrumbs .mg-crumb-sep { color:var(--text3); }
+
+/* Config tab presets */
+.mg-preset-row { display:grid; grid-template-columns:150px 1fr 90px 28px; gap:8px; margin-bottom:8px; align-items:center; }
+
+/* Inline field toggles on template rows (Enabled / Rotation) */
+.mg-inline-toggle {
+    display:inline-flex; align-items:center; gap:5px; cursor:pointer;
+    user-select:none; white-space:nowrap;
+}
+
+/* History */
+.mg-hist-sub { cursor:pointer; }
+.mg-hist-detail { background:var(--bg2); }
+.mg-hist-detail td { font-size:12px; color:var(--text2); }

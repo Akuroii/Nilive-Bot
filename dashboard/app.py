@@ -294,6 +294,30 @@ def logout():
     return redirect(url_for("login"))
 
 
+# ── Local review login (Phase 5 — manual browser check) ─────────────
+# OFF by default: unless DASHBOARD_DEMO_LOGIN=1 is set, this route is a
+# 404 and production/staging behavior is untouched. With the flag set
+# (local preview only) it creates exactly the session the OAuth
+# callback would, for a fixed demo identity — Discord OAuth cannot
+# complete inside the sandboxed preview, and the user asked for a real
+# browser walkthrough of the minigames UI. Pair the flag with
+# OWNER_ID=<demo user id> so the demo user gets the same guild-blind
+# developer bypass the trusted owner gets (no dashboard_users row).
+@app.route("/demo-login")
+def demo_login():
+    if os.getenv("DASHBOARD_DEMO_LOGIN") != "1":
+        abort(404)
+    user_id = int(os.getenv("DASHBOARD_DEMO_USER_ID", "900000000000000001"))
+    create_session({
+        "id": user_id,
+        "username": os.getenv("DASHBOARD_DEMO_USER_NAME", "Reviewer"),
+        "avatar": None,
+    })
+    set_session_guild(int(os.getenv("DASHBOARD_DEMO_GUILD_ID",
+                                    "900000000000000001")))
+    return redirect(url_for("index"))
+
+
 # ── Server select ──────────────────────────────────────────────────────────────
 
 @app.route("/server-select")
@@ -1140,33 +1164,38 @@ def events():
     return render("systems/events.html", events=event_list, **ctx)
 
 
-# ── Minigames / Event Stack Builder (dark-fixes pass #13) ───────────────────
+# ── Minigames v2 (Phase 4) ──────────────────────────────────────────────────
+#
+# The page is CLIENT-DATA-DRIVEN: it renders an empty shell and the
+# vanilla JS below loads everything through the /api/minigames/*
+# endpoints (dashboard/api/minigames.py) — same pattern as the other
+# systems pages (no server-side prefetch, tabs never reload). The v1
+# tier-based prefetch (cogs.minigames.get_tiers) is retired with the
+# v1 API.
+#
+# Two pages, one permission key:
+#   /minigames          — Config / Categories & Templates / History
+#   /minigames/builder  — the single-page game builder; ?template_id=
+#                         opens an existing template, ?category_id=
+#                         pre-fills the Spawn Settings category.
 
 @app.route("/minigames")
 @require_page("minigames")
 def minigames_page():
-    guild_id = get_session_guild_id()
-
-    async def get_data():
-        from cogs.minigames import ensure_tables, get_config, get_tiers
-        await ensure_tables()
-        config = await get_config(guild_id)
-        tiers  = await get_tiers(guild_id)
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT event_date, tier, winner_id, winner_display_name,
-                       forced, fired_at
-                FROM minigames_log
-                WHERE guild_id = ?
-                ORDER BY fired_at DESC LIMIT 25
-            """, (guild_id,))
-            log = await cursor.fetchall()
-        return config, tiers, log
-
-    config, tiers, log = run_async(get_data())
     ctx = get_current_user_context()
-    return render("systems/minigames.html",
-                  config=config, tiers=tiers, log=log, **ctx)
+    return render("systems/minigames.html", **ctx)
+
+
+@app.route("/minigames/builder")
+@require_page("minigames")
+def minigame_builder_page():
+    ctx = get_current_user_context()
+    template_id = request.args.get("template_id")
+    category_id = request.args.get("category_id")
+    return render("systems/minigame_builder.html",
+                  template_id=int(template_id) if template_id and template_id.isdigit() else None,
+                  category_id=int(category_id) if category_id and category_id.isdigit() else None,
+                  **ctx)
 
 
 # ── Missions ─────────────────────────────────────────────────────────────────
@@ -1588,8 +1617,7 @@ COMMAND_CATEGORIES = {
         "sticky_set", "sticky_remove", "sticky_list",
     ],
     "Minigames": [
-        "minigames_setup", "minigames_tier_add", "minigames_tier_list",
-        "minigames_tier_remove", "minigames_force", "minigames_stats",
+        "minigames_setup", "minigames_spawn", "minigames_stats",
     ],
     "Missions": [
         "missions", "mission_create", "mission_list", "mission_remove",
@@ -1646,12 +1674,9 @@ COMMAND_METADATA = {
     "resetxp": {"desc": "Reset a member's XP and level back to 0 (admin)", "params": ["member"]},
     "resetleaderboard": {"desc": "Force an immediate leaderboard reset for this server (admin)", "params": []},
     "prestige": {"desc": "Prestige — reset past a level threshold for a permanent status tier", "params": []},
-    "minigames_setup": {"desc": "Configure the Event Stack Builder (minigames)", "params": ["channel", "min_events", "max_events", "claim_seconds", "enabled"]},
-    "minigames_tier_add": {"desc": "Add a reward tier for minigame spawns", "params": ["tier", "reward_type", "reward_value", "weight", "duration_hours"]},
-    "minigames_tier_list": {"desc": "List configured minigame reward tiers", "params": []},
-    "minigames_tier_remove": {"desc": "Remove a minigame reward tier by ID", "params": ["tier_id"]},
-    "minigames_force": {"desc": "Force-spawn a minigame right now (admin, ignores probability)", "params": []},
-    "minigames_stats": {"desc": "View this week's Event Stack Builder progress", "params": []},
+    "minigames_setup": {"desc": "Configure the minigames spawn system (channel + weekly range)", "params": ["channel", "min_events", "max_events", "enabled"]},
+    "minigames_spawn": {"desc": "Spawn a minigame right now (manual, admin). Omit the template to let the rotation pick.", "params": ["template_id"]},
+    "minigames_stats": {"desc": "View this week's minigames progress", "params": []},
     "missions": {"desc": "View your active missions and progress", "params": []},
     "mission_create": {"desc": "Create a mission (admin)", "params": ["name", "type", "target", "reward_type", "reward_value", "period", "description", "duration_hours"]},
     "mission_list": {"desc": "List configured missions (admin)", "params": []},

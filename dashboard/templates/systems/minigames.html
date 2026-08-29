@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% block title %}Event Stack Builder{% endblock %}
+{% block title %}Minigames{% endblock %}
 {% block content %}
-<span data-page-title="Event Stack Builder"></span>
+<span data-page-title="Minigames"></span>
 
 <div style="display:flex;gap:4px;margin-bottom:20px;
             border-bottom:1px solid var(--border);padding-bottom:0;">
-    {% for tab, label in [('config','⚙️ Config'),('tiers','🎁 Reward Tiers'),('log','📜 Recent Winners')] %}
+    {% for tab, label in [('config','⚙️ Config'),('cats','🗂️ Categories & Templates'),('history','📜 History')] %}
     <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
         style="padding:10px 18px;border:none;background:transparent;
                color:var(--text2);font-size:13px;font-weight:500;
@@ -15,7 +15,7 @@
     {% endfor %}
 </div>
 
-<!-- CONFIG TAB -->
+<!-- ═══ CONFIG TAB ═══════════════════════════════════════════════ -->
 <div id="tab-content-config" class="tab-content">
     <div class="card">
         <div class="card-header">
@@ -29,109 +29,123 @@
             </div>
         </div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Events spawn automatically with a probability that adapts daily to stay
+            Games spawn automatically with a probability that adapts daily to stay
             within your min/max weekly range — behind pace pushes the odds up, ahead
             of pace pushes them down. On the last day of the week, if the minimum
-            still hasn't been hit, an event force-fires regardless of the roll.
+            still hasn't been hit, a game force-fires regardless of the roll.
+            <b>Enabled OFF</b> only stops the automatic system — manual and test
+            spawns keep working.
         </p>
         <div class="form-row">
             <div class="form-group">
                 <label class="form-label">Spawn channel</label>
-                <select class="nero-channel-picker form-input"
-                        id="mg-channel-picker"></select>
+                <select class="nero-channel-picker form-input" id="mg-channel-picker"></select>
             </div>
             <div class="form-group">
-                <label class="form-label">Min events per week</label>
+                <label class="form-label">Min games per week</label>
                 <input class="form-input" id="mg-min-events" type="number" min="1" value="5">
             </div>
             <div class="form-group">
-                <label class="form-label">Max events per week</label>
+                <label class="form-label">Max games per week</label>
                 <input class="form-input" id="mg-max-events" type="number" min="1" value="10">
             </div>
-            <div class="form-group">
-                <label class="form-label">Claim window (seconds)</label>
-                <input class="form-input" id="mg-claim-seconds" type="number" min="30" value="300">
-                <div class="form-hint">First member to click Claim! wins — minimum 30s</div>
-            </div>
         </div>
-        <button class="btn btn-primary" onclick="saveMinigamesConfig(this)">Save Settings</button>
-        <div id="mg-config-status" style="margin-top:10px;font-size:13px;"></div>
+        <button class="btn btn-primary" id="mg-config-save-btn" onclick="saveMinigamesConfig(this)">Save Settings</button>
+    </div>
+
+    <div class="card">
+        <div class="card-title">🎁 Global Default Reward Preset</div>
+        <p class="text-muted text-sm" style="margin-bottom:14px;">
+            When a new game is created without its own reward pool (and its
+            category has no preset), it starts with <b>this</b> pool. Each winner
+            rolls one reward independently (weighted). An empty preset is valid —
+            games will just have no rewards.
+        </p>
+        <div id="mg-global-presets"></div>
+        <button class="btn btn-sm btn-secondary" onclick="addRewardRow('mg-global-presets', null, true)">+ Add Reward</button>
+        <div style="margin-top:14px;">
+            <button class="btn btn-primary" onclick="saveGlobalPresets(this)">Save Global Preset</button>
+        </div>
     </div>
 </div>
 
-<!-- TIERS TAB -->
-<div id="tab-content-tiers" class="tab-content" style="display:none;">
-    <div class="card">
-        <div class="card-title">➕ Add Reward Tier</div>
-        <p class="text-muted text-sm" style="margin-bottom:16px;">
-            A spawn randomly picks one enabled tier, weighted by the value below
-            (higher weight = more common). At least one tier is required for events
-            to spawn at all.
-        </p>
+<!-- ═══ CATEGORIES & TEMPLATES TAB ════════════════════════════════ -->
+<div id="tab-content-cats" class="tab-content" style="display:none;">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;">
+        <div class="mg-breadcrumbs" id="mg-breadcrumbs"></div>
+        <span style="flex:1;"></span>
+        <button class="btn btn-sm btn-secondary" onclick="refreshCatsTab()">⟳ Refresh</button>
+        <button class="btn btn-sm btn-primary" onclick="toggleCategoryForm(true)">+ Category</button>
+    </div>
+
+    <!-- create / edit category form (shared, inline) -->
+    <div class="card" id="mg-cat-form-card" style="display:none;margin-bottom:14px;">
+        <div class="card-title" id="mg-cat-form-title">➕ New Category</div>
+        <input type="hidden" id="mg-cat-edit-id">
         <div class="form-row">
             <div class="form-group">
-                <label class="form-label">Tier</label>
-                <select class="form-input" id="mg-tier-select">
-                    <option value="bronze">🥉 Bronze</option>
-                    <option value="silver">🥈 Silver</option>
-                    <option value="gold">🥇 Gold</option>
-                    <option value="platinum">💎 Platinum</option>
-                </select>
+                <label class="form-label">Name</label>
+                <input class="form-input" id="mg-cat-name" placeholder="e.g. Weekend Challenges">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Parent (optional)</label>
+                <select class="form-input" id="mg-cat-parent"><option value="">— none (top level) —</option></select>
             </div>
             <div class="form-group">
                 <label class="form-label">Weight</label>
-                <input class="form-input" id="mg-tier-weight" type="number" min="1" value="1">
+                <input class="form-input" id="mg-cat-weight" type="number" min="1" value="1">
+                <div class="form-hint">Higher = picked more often on rotation</div>
             </div>
             <div class="form-group">
-                <label class="form-label">Reward type</label>
-                <select class="form-input" id="mg-tier-reward-type" onchange="toggleMgDurationField()">
-                    <option value="coins">🪙 Coins</option>
-                    <option value="diamonds">💎 Diamonds</option>
-                    <option value="xp">⭐ XP</option>
-                    <option value="role">Permanent Role</option>
-                    <option value="temp_role">Temporary Role</option>
-                    <option value="item">Item</option>
-                </select>
+                <label class="form-label">Emoji</label>
+                <input class="form-input" id="mg-cat-emoji" placeholder="🎯">
             </div>
             <div class="form-group">
-                <label class="form-label" id="mg-tier-value-label">Amount</label>
-                <input class="form-input" id="mg-tier-value" placeholder="e.g. 500, a Role ID, or an item name">
-            </div>
-            <div class="form-group" id="mg-tier-duration-field" style="display:none;">
-                <label class="form-label">Duration hours (temp_role only)</label>
-                <input class="form-input" id="mg-tier-duration" type="number" min="1">
+                <label class="form-label">Color</label>
+                <input type="color" id="mg-cat-color" value="#7c5cbf"
+                    style="width:42px;height:36px;border-radius:8px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:2px;">
             </div>
         </div>
-        <button class="btn btn-primary" onclick="addMinigamesTier()">Add Tier</button>
-        <div id="mg-tier-status" style="margin-top:10px;font-size:13px;"></div>
+        <div class="form-group" style="margin-bottom:12px;">
+            <label class="form-label">Category default rewards (optional preset)</label>
+            <div id="mg-cat-presets"></div>
+            <button class="btn btn-sm btn-secondary" onclick="addRewardRow('mg-cat-presets', null, true)">+ Add Reward</button>
+            <div class="form-hint">Games created in this category start with this pool unless you give them their own.</div>
+        </div>
+        <div style="display:flex;gap:10px;">
+            <button class="btn btn-primary" id="mg-cat-save-btn" onclick="saveCategoryForm(this)">Save Category</button>
+            <button class="btn btn-secondary" onclick="toggleCategoryForm(false)">Cancel</button>
+        </div>
     </div>
 
-    <div class="card">
-        <div class="card-title">🎁 Configured Tiers</div>
-        <div class="table-wrap">
-            <table class="table">
-                <thead>
-                    <tr><th>Tier</th><th>Weight</th><th>Reward</th><th>Duration</th><th></th></tr>
-                </thead>
-                <tbody id="mg-tiers-tbody">
-                    <tr><td colspan="5" class="empty">Loading…</td></tr>
-                </tbody>
-            </table>
-        </div>
+    <div id="mg-tree" class="mg-tree">
+        <div class="card"><div class="text-muted" style="padding:12px;">Loading…</div></div>
     </div>
 </div>
 
-<!-- LOG TAB -->
-<div id="tab-content-log" class="tab-content" style="display:none;">
+<!-- ═══ HISTORY TAB ═══════════════════════════════════════════════ -->
+<div id="tab-content-history" class="tab-content" style="display:none;">
     <div class="card">
-        <div class="card-title">📜 Recent Winners</div>
+        <div class="card-header">
+            <div class="card-title" style="margin:0;">📜 Game History</div>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <select class="form-input" id="mg-hist-filter" style="width:auto;">
+                    <option value="">All categories</option>
+                </select>
+                <button class="btn btn-sm btn-secondary" onclick="loadHistory()">⟳ Refresh</button>
+            </div>
+        </div>
+        <p class="text-muted text-sm" style="margin-bottom:12px;">
+            Newest first. Click a row to see participants and what each winner
+            received. Old "Event Stack" events (v1) appear as-is below the line.
+        </p>
         <div class="table-wrap">
             <table class="table">
                 <thead>
-                    <tr><th>Date</th><th>Tier</th><th>Winner</th><th>Forced?</th><th>Fired At</th></tr>
+                    <tr><th>When</th><th>Game</th><th>Mode</th><th>Status</th><th>Winners</th><th>Rewards</th></tr>
                 </thead>
-                <tbody id="mg-log-tbody">
-                    <tr><td colspan="5" class="empty">Loading…</td></tr>
+                <tbody id="mg-history-tbody">
+                    <tr><td colspan="6" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -140,8 +154,38 @@
 
 {% block scripts %}
 <script>
-const MG_TIER_EMOJI = {bronze:'🥉', silver:'🥈', gold:'🥇', platinum:'💎'};
+'use strict';
+const MG_TYPES = {
+    quick_click: { icon: '⚡', name: 'Quick Click' },
+    wheel:       { icon: '🎡', name: 'Wheel of Fortune' },
+    math:        { icon: '🧮', name: 'Math' },
+    colors:      { icon: '🎨', name: 'Colors' },
+    emoji:       { icon: '😀', name: 'Emoji Guess' },
+    rps:         { icon: '✊', name: 'Rock Paper Scissors' },
+};
+const REWARD_TYPE_LABELS = {
+    xp: '⭐ XP', coins: '🪙 Coins', diamonds: '💎 Diamonds',
+    item: '📦 Item', role: '🏷️ Permanent Role', temp_role: '⏳ Temporary Role',
+};
+const MG_STATUS_LABELS = {
+    completed: 'Completed', no_winner: 'No winner', canceled: 'Canceled',
+    aborted: 'Aborted', aborted_restart: 'Aborted (restart)', running: 'Running',
+    no_participants: 'No participants',
+};
+const MG_MODE_EMOJI = { auto: '🤖', manual: '👤', test: '🧪' };
 
+const mgState = {
+    config: null,
+    tree: [],
+    templates: [],
+    expanded: new Set(),
+    selected: null,        // selected category id (null = root)
+    catFormOpen: false,
+    historyLoaded: false,
+    spawnPollTimer: null,
+};
+
+// ── Tab switching (same pattern as the v1 page) ───────────────────
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
     document.getElementById('tab-content-' + name).style.display = 'block';
@@ -152,126 +196,567 @@ function switchTab(name) {
     const active = document.getElementById('tab-' + name);
     active.style.borderBottomColor = 'var(--accent)';
     active.style.color = 'var(--text)';
+    if (name === 'history' && !mgState.historyLoaded) loadHistory();
 }
 switchTab('config');
 
-function toggleMgDurationField() {
-    const type = document.getElementById('mg-tier-reward-type').value;
-    const durField = document.getElementById('mg-tier-duration-field');
-    const valLabel = document.getElementById('mg-tier-value-label');
-    durField.style.display = type === 'temp_role' ? 'block' : 'none';
-    if (type === 'role' || type === 'temp_role') valLabel.textContent = 'Role ID';
-    else if (type === 'item') valLabel.textContent = 'Item name';
-    else valLabel.textContent = 'Amount';
+function esc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
-toggleMgDurationField();
+
+// fetch wrapper mirroring ajaxSave (POST only supports that method —
+// PATCH/DELETE get the same loading + toast + CSRF behavior; the
+// global fetch patch attaches the CSRF header automatically).
+async function mgSave(method, url, payload, btn, successMsg, then) {
+    if (btn) setLoading(btn, true);
+    try {
+        const res = await fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: payload === undefined ? undefined : JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (data.success || data.ok) {
+            if (successMsg) showToast(successMsg, 'success');
+            if (then) await then(data);
+        } else {
+            showToast(data.error || 'Save failed', 'error');
+        }
+        return data;
+    } catch (err) {
+        showToast('Connection error', 'error');
+        return null;
+    } finally {
+        if (btn) setLoading(btn, false);
+    }
+}
+
+// ── Reward rows (shared by global preset, category preset) ─────────
+function addRewardRow(containerId, row, showDuration) {
+    const c = document.getElementById(containerId);
+    const div = document.createElement('div');
+    div.className = 'mb-reward-row';
+    div.innerHTML = `
+        <select class="form-input mg-rw-type" onchange="mgRewardRowChanged(this)">
+            ${Object.entries(REWARD_TYPE_LABELS).map(([k, v]) =>
+                `<option value="${k}" ${row && row.reward_type === k ? 'selected' : ''}>${v}</option>`).join('')}
+        </select>
+        <input class="form-input mg-rw-value" placeholder="Amount, item name, or role ID"
+            value="${esc(row ? row.reward_value : '')}">
+        <input class="form-input mg-rw-weight" type="number" min="1" placeholder="Weight"
+            value="${row && row.weight ? row.weight : 1}">
+        <input class="form-input mg-rw-dur" type="number" min="1" placeholder="Hours"
+            value="${row && row.duration_hours ? row.duration_hours : ''}"
+            style="${showDuration ? '' : 'display:none;'}">
+        <button type="button" class="btn btn-sm btn-danger" onclick="this.closest('.mb-reward-row').remove()"
+            title="Remove">✕</button>`;
+    c.appendChild(div);
+    mgRewardRowChanged(div.querySelector('.mg-rw-type'));
+}
+
+function mgRewardRowChanged(sel) {
+    const row = sel.closest('.mb-reward-row');
+    const dur = row.querySelector('.mg-rw-dur');
+    dur.style.display = (sel.value === 'temp_role' || sel.value === 'role') ? '' : 'none';
+}
+
+function readRewardRows(containerId) {
+    return Array.from(document.getElementById(containerId).querySelectorAll('.mb-reward-row')).map(r => {
+        const out = {
+            reward_type: r.querySelector('.mg-rw-type').value,
+            reward_value: r.querySelector('.mg-rw-value').value.trim(),
+            weight: parseInt(r.querySelector('.mg-rw-weight').value) || 1,
+        };
+        const dur = r.querySelector('.mg-rw-dur').value;
+        if (dur) out.duration_hours = parseInt(dur);
+        return out;
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// CONFIG TAB
+// ═══════════════════════════════════════════════════════════════════
+function renderGlobalPresets() {
+    const c = document.getElementById('mg-global-presets');
+    c.innerHTML = '';
+    (mgState.config.global_default_rewards || []).forEach(r => addRewardRow('mg-global-presets', r, true));
+}
 
 async function loadMinigamesConfig() {
     const res = await fetch('/api/minigames/config');
     if (!res.ok) return;
     const data = await res.json();
-    const c = data.config || {};
+    mgState.config = data.config || {};
+    const c = mgState.config;
     document.getElementById('mg-enabled').checked = c.enabled === undefined ? true : !!c.enabled;
     document.getElementById('mg-min-events').value = c.min_events_per_week || 5;
     document.getElementById('mg-max-events').value = c.max_events_per_week || 10;
-    document.getElementById('mg-claim-seconds').value = c.claim_seconds || 300;
-    setTimeout(function() {
+    renderGlobalPresets();
+    setTimeout(function () {
         const cp = document.getElementById('mg-channel-picker');
         if (cp && c.channel_id) { $(cp).val(String(c.channel_id)).trigger('change.select2'); }
     }, 800);
 }
-loadMinigamesConfig();
 
 async function saveMinigamesConfig(btn) {
     const cp = document.getElementById('mg-channel-picker');
     const payload = {
-        enabled:              document.getElementById('mg-enabled').checked,
-        channel_id:           cp ? ($(cp).val() || '') : '',
-        min_events_per_week:  parseInt(document.getElementById('mg-min-events').value) || 5,
-        max_events_per_week:  parseInt(document.getElementById('mg-max-events').value) || 10,
-        claim_seconds:        parseInt(document.getElementById('mg-claim-seconds').value) || 300,
+        enabled: document.getElementById('mg-enabled').checked,
+        channel_id: cp ? ($(cp).val() || '') : '',
+        min_events_per_week: parseInt(document.getElementById('mg-min-events').value) || 1,
+        max_events_per_week: parseInt(document.getElementById('mg-max-events').value) || 1,
+        global_default_rewards: readRewardRows('mg-global-presets'),
     };
-    await ajaxSave('/api/minigames/config', payload, btn, 'Event Stack Builder settings saved!');
+    const data = await mgSave('POST', '/api/minigames/config', payload, btn,
+        'Minigames settings saved!', () => loadMinigamesConfig());
+    return data;
 }
 
-async function loadMinigamesTiers() {
-    const res = await fetch('/api/minigames/tiers');
-    if (!res.ok) return;
-    const data = await res.json();
-    const tbody = document.getElementById('mg-tiers-tbody');
-    if (!data.tiers || !data.tiers.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">No reward tiers configured yet — events cannot spawn without at least one.</td></tr>';
-        return;
-    }
-    tbody.innerHTML = data.tiers.map(t => `
-        <tr>
-            <td>${MG_TIER_EMOJI[t.tier] || '🎁'} ${t.tier.charAt(0).toUpperCase() + t.tier.slice(1)}</td>
-            <td>${t.weight}</td>
-            <td>${t.reward_type}: <code>${t.reward_value}</code></td>
-            <td>${t.reward_duration_hours ? t.reward_duration_hours + 'h' : '—'}</td>
-            <td>
-                <button class="btn btn-sm btn-danger"
-                    onclick="showConfirm('Remove this ${t.tier} tier?', () => deleteMinigamesTier(${t.id}))">
-                    Delete
-                </button>
-            </td>
-        </tr>`).join('');
-}
-loadMinigamesTiers();
-
-async function addMinigamesTier() {
-    const type = document.getElementById('mg-tier-reward-type').value;
-    const value = document.getElementById('mg-tier-value').value.trim();
-    if (!value) { showToast('Enter a reward value', 'warning'); return; }
+async function saveGlobalPresets(btn) {
+    // Preset is part of the config object — saving it persists the
+    // current channel/min/max values along with it (they were loaded
+    // from the same config, so nothing changes silently).
+    const cp = document.getElementById('mg-channel-picker');
     const payload = {
-        tier:                  document.getElementById('mg-tier-select').value,
-        weight:                parseInt(document.getElementById('mg-tier-weight').value) || 1,
-        reward_type:           type,
-        reward_value:          value,
-        reward_duration_hours: type === 'temp_role'
-            ? (parseInt(document.getElementById('mg-tier-duration').value) || null)
-            : null,
+        enabled: document.getElementById('mg-enabled').checked,
+        channel_id: cp ? ($(cp).val() || '') : '',
+        min_events_per_week: parseInt(document.getElementById('mg-min-events').value) || 1,
+        max_events_per_week: parseInt(document.getElementById('mg-max-events').value) || 1,
+        global_default_rewards: readRewardRows('mg-global-presets'),
     };
-    const res  = await fetch('/api/minigames/tier', {
-        method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify(payload),
+    await mgSave('POST', '/api/minigames/config', payload, btn, 'Global reward preset saved!',
+        () => loadMinigamesConfig());
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// CATEGORIES & TEMPLATES TAB
+// ═══════════════════════════════════════════════════════════════════
+async function loadCatsTab() {
+    const [catsRes, tplRes] = await Promise.all([
+        fetch('/api/minigames/categories'), fetch('/api/minigames/templates?include_disabled=1'),
+    ]);
+    if (!catsRes.ok || !tplRes.ok) return;
+    const [catsData, tplData] = await Promise.all([catsRes.json(), tplRes.json()]);
+    mgState.tree = catsData.tree || [];
+    mgState.templates = tplData.templates || [];
+    renderTree();
+    renderBreadcrumbs();
+    renderHistoryFilter();
+}
+
+function refreshCatsTab() {
+    loadCatsTab().then(() => showToast('Refreshed', 'info'));
+}
+
+function renderBreadcrumbs() {
+    const el = document.getElementById('mg-breadcrumbs');
+    let html = '<a onclick="selectCategory(null)">All Games</a>';
+    // walk the trail for the selected node
+    const trail = [];
+    (function walk(nodes, path) {
+        for (const n of nodes) {
+            if (n.id === mgState.selected) { trail.push(...path, n); return; }
+            const r = walk(n.children || [], path.concat(n));
+            if (r) return r;
+        }
+        return false;
+    })(mgState.tree, []);
+    trail.forEach(n => {
+        html += `<span class="mg-crumb-sep">›</span><a onclick="selectCategory(${n.id})">${esc(n.emoji ? n.emoji + ' ' : '')}${esc(n.name)}</a>`;
     });
-    const data = await res.json();
-    if (data.success) {
-        showToast('Tier added!');
-        document.getElementById('mg-tier-value').value = '';
-        loadMinigamesTiers();
-    } else {
-        showToast(data.error || 'Error adding tier', 'error');
+    el.innerHTML = html;
+}
+
+function selectCategory(id) {
+    mgState.selected = id;
+    if (id !== null) mgState.expanded.add(id);
+    renderBreadcrumbs();
+    renderTree();
+}
+
+function renderTree() {
+    const el = document.getElementById('mg-tree');
+    const templates = mgState.templates;
+
+    function templatesFor(node) {
+        // Direct templates only — a node's body lists what lives in IT.
+        // Subtree totals are shown in the node's meta line, and child
+        // categories render their own templates when expanded.
+        return templates.filter(t => t.category_id === node.id);
     }
-}
 
-async function deleteMinigamesTier(id) {
-    const res  = await fetch(`/api/minigames/tier/${id}`, { method: 'DELETE' });
-    const data = await res.json();
-    if (data.success) { showToast('Tier removed', 'info'); loadMinigamesTiers(); }
-    else showToast('Error', 'error');
-}
+    function templateRows(list) {
+        if (!list.length) return '<div class="text-muted text-sm" style="padding:4px 0 8px 26px;">No games here yet — create one with the builder.</div>';
+        return list.map(t => {
+            const type = MG_TYPES[t.game_type] || { icon: '🎮', name: t.game_type };
+            const off = !t.enabled;
+            return `
+            <div class="mg-tpl-row ${off ? 'mg-row-off' : ''}">
+                <span class="mg-tpl-icon">${type.icon}</span>
+                <span class="mg-tpl-name">${esc(t.name)}</span>
+                ${t.live_run ? '<span class="mg-badge mg-badge-live">● live</span>' : ''}
+                ${t.queued ? '<span class="mg-badge mg-badge-queued">queued</span>' : ''}
+                ${!t.has_reward_pool ? '<span class="mg-badge mg-badge-nopool">no reward pool</span>' : ''}
+                <div class="mg-tpl-actions">
+                    <label class="mg-inline-toggle" title="Enabled — allows this game to be used normally">
+                        <input type="checkbox" class="toggle-input" ${t.enabled ? 'checked' : ''}
+                            onchange="toggleTemplateField(${t.id}, 'enabled', this)">
+                        <span class="text-sm text-muted">Enabled</span>
+                    </label>
+                    <label class="mg-inline-toggle" title="Allows the automatic spawn system to select this game">
+                        <input type="checkbox" class="toggle-input" ${t.auto_spawn ? 'checked' : ''}
+                            onchange="toggleTemplateField(${t.id}, 'auto_spawn', this)">
+                        <span class="text-sm text-muted">Rotation</span>
+                    </label>
+                    <a class="btn btn-sm btn-secondary" href="/minigames/builder?template_id=${t.id}">✏️ Builder</a>
+                    <button class="btn btn-sm btn-secondary" onclick="testSpawn(${t.id}, this)">🧪 Test</button>
+                    <button class="btn btn-sm btn-secondary" onclick="manualSpawn(${t.id}, this)">▶ Spawn</button>
+                    <button class="btn btn-sm btn-secondary" onclick="duplicateTemplate(${t.id}, this)">⧉</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteTemplate(${t.id}, '${esc(t.name)}')">🗑️</button>
+                </div>
+            </div>`;
+        }).join('');
+    }
 
-async function loadMinigamesLog() {
-    const res = await fetch('/api/minigames/log');
-    if (!res.ok) return;
-    const data = await res.json();
-    const tbody = document.getElementById('mg-log-tbody');
-    if (!data.log || !data.log.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">No events have fired yet</td></tr>';
+    function nodeHtml(node, depth) {
+        const open = mgState.expanded.has(node.id) || mgState.selected === node.id;
+        const off = !node.enabled;
+        const presets = node.default_rewards || [];
+        return `
+        <div class="mg-node ${open ? 'mg-node-open' : ''} ${off ? 'mg-node-off' : ''}" data-cat="${node.id}">
+            <div class="mg-node-head" onclick="selectCategory(${node.id})">
+                <button type="button" class="mg-node-caret" title="Expand" onclick="event.stopPropagation(); toggleNode(${node.id})">›</button>
+                <span>${node.emoji ? esc(node.emoji) : '📁'}</span>
+                <span class="mg-node-name">${esc(node.name)}</span>
+                <span class="mg-node-meta">w${node.weight} · ${node.subtree_playable} playable / ${node.direct_templates} direct</span>
+                <div class="mg-node-actions" onclick="event.stopPropagation()">
+                    <label title="Auto-rotation exclusion — disabled categories are simply never picked (nothing is deleted)">
+                        <input type="checkbox" class="toggle-input" ${node.enabled ? 'checked' : ''}
+                            onchange="toggleCategoryField(${node.id}, 'enabled', this)">
+                        <span class="text-sm text-muted">Active</span>
+                    </label>
+                    <button class="btn btn-sm btn-primary" onclick="openBuilderForCategory(${node.id})" title="New game in this category">+ Template</button>
+                    <button class="btn btn-sm btn-secondary" onclick="editCategory(${node.id})" title="Edit">✏️</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteCategory(${node.id}, '${esc(node.name)}')" title="Delete">🗑️</button>
+                </div>
+            </div>
+            <div class="mg-node-body">
+                ${presets.length ? `
+                    <div class="text-sm text-muted" style="margin-bottom:6px;">Default reward preset for new games:</div>
+                    <div style="margin-bottom:8px;font-size:13px;">${presets.map(p =>
+                        `<span class="badge" style="margin-right:6px;">${REWARD_TYPE_LABELS[p.reward_type] || esc(p.reward_type)}: ${esc(p.reward_value)} (w${p.weight || 1})</span>`).join('')}</div>` : ''}
+                ${templatesFor(node)}
+            </div>
+            ${node.children && node.children.length ?
+                `<div class="mg-node-children">${node.children.map(ch => nodeHtml(ch, depth + 1)).join('')}</div>` : ''}
+        </div>`;
+    }
+
+    if (!mgState.tree.length) {
+        el.innerHTML = `<div class="card"><div class="text-muted" style="padding:12px;">
+            No categories yet — create your first one (e.g. “Weekend Challenges”) and
+            add games inside it.</div></div>`;
         return;
     }
-    tbody.innerHTML = data.log.map(e => `
-        <tr>
-            <td class="text-muted">${e.event_date || '—'}</td>
-            <td>${MG_TIER_EMOJI[e.tier] || '🎁'} ${e.tier}</td>
-            <td>${e.winner_display_name ? e.winner_display_name : '<span class="text-muted">Unclaimed</span>'}</td>
-            <td>${e.forced ? '<span class="badge badge-warning">Forced</span>' : '—'}</td>
-            <td class="text-muted">${e.fired_at ? e.fired_at.slice(0,16) : '—'}</td>
-        </tr>`).join('');
+    el.innerHTML = mgState.tree.map(n => nodeHtml(n, 0)).join('');
 }
-loadMinigamesLog();
+
+function toggleNode(id) {
+    if (mgState.expanded.has(id)) mgState.expanded.delete(id);
+    else mgState.expanded.add(id);
+    renderTree();
+}
+
+function openBuilderForCategory(id) {
+    window.location.href = '/minigames/builder?category_id=' + id;
+}
+
+// ── Category create/edit form ──────────────────────────────────────
+function populateParentSelect(excludeId) {
+    const sel = document.getElementById('mg-cat-parent');
+    let html = '<option value="">— none (top level) —</option>';
+    (function walk(nodes, prefix) {
+        for (const n of nodes) {
+            if (n.id === excludeId) continue; // cannot be parent of self
+            html += `<option value="${n.id}">${prefix}${esc(n.name)}</option>`;
+            walk(n.children || [], prefix + '　');
+        }
+    })(mgState.tree, '');
+    sel.innerHTML = html;
+}
+
+function toggleCategoryForm(open, id) {
+    mgState.catFormOpen = !!open;
+    document.getElementById('mg-cat-form-card').style.display = open ? 'block' : 'none';
+    if (!open) return;
+    const c = document.getElementById('mg-cat-form-card');
+    c.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    document.getElementById('mg-cat-name').focus();
+}
+
+function editCategory(id) {
+    function find(nodes) {
+        for (const n of nodes) {
+            if (n.id === id) return n;
+            const r = find(n.children || []);
+            if (r) return r;
+        }
+        return null;
+    }
+    const cat = find(mgState.tree);
+    if (!cat) return;
+    document.getElementById('mg-cat-edit-id').value = cat.id;
+    document.getElementById('mg-cat-form-title').textContent = '✏️ Edit Category — ' + cat.name;
+    document.getElementById('mg-cat-name').value = cat.name;
+    document.getElementById('mg-cat-weight').value = cat.weight;
+    document.getElementById('mg-cat-emoji').value = cat.emoji || '';
+    document.getElementById('mg-cat-color').value = cat.color || '#7c5cbf';
+    populateParentSelect(cat.id);
+    document.getElementById('mg-cat-parent').value = cat.parent_id || '';
+    const pc = document.getElementById('mg-cat-presets');
+    pc.innerHTML = '';
+    (cat.default_rewards || []).forEach(r => addRewardRow('mg-cat-presets', r, true));
+    toggleCategoryForm(true);
+}
+
+async function saveCategoryForm(btn) {
+    const editId = document.getElementById('mg-cat-edit-id').value;
+    const name = document.getElementById('mg-cat-name').value.trim();
+    if (!name) { showToast('Enter a category name', 'warning'); return; }
+    const parent = document.getElementById('mg-cat-parent').value;
+    const payload = {
+        name,
+        parent_id: parent || null,
+        weight: parseInt(document.getElementById('mg-cat-weight').value) || 1,
+        emoji: document.getElementById('mg-cat-emoji').value.trim(),
+        color: document.getElementById('mg-cat-color').value,
+        default_rewards: readRewardRows('mg-cat-presets'),
+    };
+    if (editId) {
+        const data = await mgSave('PATCH', `/api/minigames/categories/${editId}`, payload, btn,
+            'Category updated!', () => { toggleCategoryForm(false); loadCatsTab(); });
+        if (data && data.success) document.getElementById('mg-cat-edit-id').value = '';
+    } else {
+        const data = await mgSave('POST', '/api/minigames/categories', payload, btn,
+            'Category created!', () => { toggleCategoryForm(false); loadCatsTab(); });
+    }
+}
+
+async function toggleCategoryField(id, field, el) {
+    const before = el.checked;
+    showConfirm(`Auto-rotation ${before ? 'ON' : 'OFF'} for this category? ` +
+        (before
+            ? 'Disabled categories are simply never picked — nothing is deleted or stopped.'
+            : 'The category (and its subcategories) will be picked by the automatic system again.'),
+        async () => {
+            const data = await mgSave('PATCH', `/api/minigames/categories/${id}`, { [field]: before });
+            if (data && data.success) loadCatsTab();
+            else el.checked = !before; // roll back — show the saved state
+        });
+}
+
+async function deleteCategory(id, name) {
+    showConfirm(`Delete category "${name}"?`, async () => {
+        const data = await mgSave('DELETE', `/api/minigames/categories/${id}`, undefined, null, 'Category deleted!',
+            () => loadCatsTab());
+        if (mgState.selected === id) mgState.selected = null;
+    });
+}
+
+// ── Template quick actions ─────────────────────────────────────────
+async function toggleTemplateField(id, field, el) {
+    const before = el.checked;
+    const label = field === 'enabled' ? 'Enabled' : 'Automatic Rotation';
+    showConfirm(`${label} ${before ? 'ON' : 'OFF'} for this game?`, async () => {
+        const data = await mgSave('PATCH', `/api/minigames/templates/${id}`, { [field]: before });
+        if (!(data && data.success)) {
+            el.checked = !before; // roll back — the state the user sees is the saved state
+        }
+        loadCatsTab();
+    });
+}
+
+async function duplicateTemplate(id, btn) {
+    const data = await mgSave('POST', `/api/minigames/templates/${id}/duplicate`, {}, btn, null, null);
+    if (data && data.success) {
+        showToast(`Duplicated → “${data.template.name}”`, 'success');
+        loadCatsTab();
+    }
+}
+
+async function deleteTemplate(id, name) {
+    showConfirm(`Delete game "${name}"? A game that is currently running keeps its snapshot and finishes normally — deleting only removes it from future spawns.`, async () => {
+        const data = await mgSave('DELETE', `/api/minigames/templates/${id}`, undefined, null, 'Game deleted!',
+            () => loadCatsTab());
+    });
+}
+
+// ── Spawns (test / manual) — queue + poll ──────────────────────────
+async function queueSpawn(id, mode, btn) {
+    if (btn) setLoading(btn, true, '…');
+    try {
+        const res = await fetch(`/api/minigames/templates/${id}/spawn`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode }),
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(`Spawn queued — the bot picks it up within a few seconds`, 'success');
+            loadCatsTab();
+            startSpawnPolling();
+        } else {
+            showToast(data.error || 'Spawn failed', 'error');
+        }
+    } catch (e) {
+        showToast('Connection error', 'error');
+    } finally {
+        if (btn) setLoading(btn, false);
+    }
+}
+function testSpawn(id, btn) { queueSpawn(id, 'test', btn); }
+function manualSpawn(id, btn) {
+    showConfirm('Spawn this game right now in its target channel?', () => queueSpawn(id, 'manual', btn));
+}
+
+function startSpawnPolling() {
+    if (mgState.spawnPollTimer) return;
+    let tries = 0;
+    mgState.spawnPollTimer = setInterval(async () => {
+        tries++;
+        try {
+            const res = await fetch('/api/minigames/spawn-requests');
+            const data = await res.json();
+            if ((data.requests || []).length === 0) {
+                stopSpawnPolling();
+                showToast('Spawn finished — see History for the result', 'info');
+                loadCatsTab();
+                if (document.getElementById('tab-content-history').style.display === 'block') {
+                    mgState.historyLoaded = false;
+                    loadHistory();
+                }
+                return;
+            }
+        } catch (e) { /* keep polling */ }
+        if (tries > 60) stopSpawnPolling(); // ~2 min safety stop
+    }, 2000);
+}
+function stopSpawnPolling() {
+    if (mgState.spawnPollTimer) { clearInterval(mgState.spawnPollTimer); mgState.spawnPollTimer = null; }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// HISTORY TAB
+// ═══════════════════════════════════════════════════════════════════
+function renderHistoryFilter() {
+    const sel = document.getElementById('mg-hist-filter');
+    const current = sel.value;
+    let html = '<option value="">All categories</option>';
+    (function walk(nodes, prefix) {
+        for (const n of nodes) {
+            html += `<option value="${n.id}">${prefix}${esc(n.name)}</option>`;
+            walk(n.children || [], prefix + '　');
+        }
+    })(mgState.tree, '');
+    sel.innerHTML = html;
+    sel.value = current;
+}
+
+function fmtWhen(r) {
+    const t = r.started_at || r.fired_at || r.event_date || '';
+    return String(t).slice(0, 16).replace('T', ' ');
+}
+
+function winnerNames(r) {
+    if (r.legacy) return r.winner_display_name ? esc(r.winner_display_name) : '<span class="text-muted">Unclaimed</span>';
+    const ws = r.winners || [];
+    if (!ws.length) return '<span class="text-muted">—</span>';
+    return ws.map(w => esc(w.display_name || w.name || String(w.id))).join(', ');
+}
+
+function rewardsSummary(r) {
+    if (r.legacy) return '<span class="text-muted">—</span>';
+    const ws = r.winners || [];
+    const rw = ws.filter(w => w.rewards && w.rewards.length);
+    if (!rw.length) return '<span class="text-muted">—</span>';
+    return rw.map(w => w.rewards.map(x => esc(x.reward_type) + ': ' + esc(x.reward_value)).join(', ')).join(' · ');
+}
+
+async function loadHistory() {
+    const tbody = document.getElementById('mg-history-tbody');
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">Loading…</td></tr>';
+    const catId = document.getElementById('mg-hist-filter').value;
+    const url = '/api/minigames/history?limit=50' + (catId ? '&category_id=' + catId : '');
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const data = await res.json();
+    mgState.historyLoaded = true;
+    const rows = data.history || [];
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No games have run yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = rows.map((r, i) => {
+        const isV2 = !r.legacy;
+        const type = isV2 && r.game_type ? (MG_TYPES[r.game_type] || { icon: '🎮', name: r.game_type }) : null;
+        const modeBadge = r.legacy
+            ? '<span class="mg-badge mg-badge-off">legacy</span>'
+            : `<span class="mg-badge ${r.mode === 'auto' ? 'mg-badge-live' : 'mg-badge-queued'}">${MG_MODE_EMOJI[r.mode] || ''} ${esc(r.mode || '?')}</span>`;
+        const statusBadge = isV2
+            ? `<span class="mg-badge ${r.status === 'completed' ? 'mg-badge-live' : r.status === 'running' ? 'mg-badge-queued' : 'mg-badge-off'}">${MG_STATUS_LABELS[r.status] || esc(r.status || '?')}</span>`
+            : (r.forced ? '<span class="badge badge-warning">Forced</span>' : '—');
+        const gameName = isV2
+            ? `<span style="margin-right:4px;">${type ? type.icon : '🎮'}</span><b>${esc(r.template_name || 'Deleted game')}</b>`
+            : `<span class="text-muted">${esc(r.tier || '?')} tier</span>`;
+        const detail = isV2 ? historyDetailHtml(r) : '';
+        return `
+        <tr class="${isV2 ? 'mg-hist-sub' : ''}" ${isV2 ? `onclick="toggleHistDetail(${i})"` : ''}>
+            <td class="text-muted">${fmtWhen(r)}</td>
+            <td>${gameName}</td>
+            <td>${modeBadge}</td>
+            <td>${statusBadge}</td>
+            <td>${winnerNames(r)}</td>
+            <td>${rewardsSummary(r)}</td>
+        </tr>
+        ${detail ? `<tr class="mg-hist-detail" id="mg-hist-detail-${i}" style="display:none;"><td colspan="6">${detail}</td></tr>` : ''}`;
+    }).join('');
+    window._mgHistoryRows = rows;
+}
+
+function historyDetailHtml(r) {
+    const parts = [];
+    const ps = r.participants || [];
+    if (ps.length) {
+        parts.push(`<div style="margin-bottom:8px;"><b>Participants (${ps.length}):</b> ${ps.map(p => esc(p.display_name || p.name || String(p.id))).join(', ')}</div>`);
+    } else {
+        parts.push('<div style="margin-bottom:8px;" class="text-muted">No participants</div>');
+    }
+    const ws = r.winners || [];
+    if (ws.length) {
+        parts.push('<b>Winners:</b>');
+        parts.push(ws.map(w => {
+            const rw = (w.rewards || []).map(x =>
+                `${REWARD_TYPE_LABELS[x.reward_type] || esc(x.reward_type)}: ${esc(x.reward_value)}`).join(', ');
+            return `<div style="margin:2px 0;">🏆 ${esc(w.display_name || w.name || String(w.id))} ${rw ? '— ' + rw : ''}</div>`;
+        }).join(''));
+    } else if (r.result_text) {
+        parts.push(`<div class="text-muted">${esc(r.result_text)}</div>`);
+    }
+    return `<div style="padding:4px 12px;">${parts.join('')}</div>`;
+}
+
+function toggleHistDetail(i) {
+    const el = document.getElementById('mg-hist-detail-' + i);
+    if (el) el.style.display = el.style.display === 'none' ? 'table-row' : 'none';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════════
+loadMinigamesConfig();
+loadCatsTab();
 </script>
 {% endblock %}
 {% endblock %}
