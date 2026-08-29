@@ -1,158 +1,54 @@
+import json
+import random
+import traceback
+from datetime import datetime, timezone
+
+import aiosqlite
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import aiosqlite
-import random
-from datetime import datetime, timezone
+
 from database import DB_PATH
-from utils.formatters import snapshot_user, now_iso
+from utils import minigame_store as store
+from utils import minigame_engine as engine
 
 # ═══════════════════════════════════════════════════════════════════════
-# EVENT STACK BUILDER ("Minigames")
+# MINIGAMES v2 — the Discord surface (Phase 3 of the approved
+# MINIGAMES_V2_PLAN.md).
 #
-# Distinct, standalone automated system — NOT the same thing as
-# cogs/events.py (manual admin-triggered button-race events, which
-# stays untouched). This is a quota-driven weekly scheduler:
+# What this cog owns (plan §1, §21-Phase 3):
+#   * the weekly pacing loop — `daily_check_loop` + compute_daily_probability
+#     KEPT VERBATIM (D5: it decides only WHETHER an automatic spawn happens);
+#   * the recursive weighted selection + shuffle-bag pop (plan §4/§5);
+#   * the shared spawn path `spawn_game()` — auto / manual / test all go
+#     through it (plan §8/§9/§14): snapshot → run row → real engine →
+#     post → (auto only) weekly counter bump AFTER a successful post;
+#   * `spawn_request_loop` (10s) — executes dashboard/slash spawn requests
+#     (plan §9/§19: atomic claim, real engine, no fake implementation);
+#   * the startup sweep — open run rows finalized as aborted_restart with a
+#     best-effort embed note (plan §14, no-forfeit: no rewards);
+#   * the v2 slash commands (/minigames_setup kept, /minigames_spawn new,
+#     /minigames_stats kept) — the tier commands are RETIRED (plan §8).
 #
-#   - Each guild configures a min/max number of events per week
-#     (default 5-10).
-#   - Every day, an adaptive spawn probability is computed from how
-#     many events have already fired this week vs. how many days are
-#     left — behind pace pushes probability up, ahead of pace pushes
-#     it down, and it's capped at 0 once the weekly max is hit.
-#   - On the final day of the week (Sunday), if the weekly minimum
-#     still hasn't been met, the event is force-fired regardless of
-#     the rolled probability.
-#   - The week resets every Monday (weekday index 0).
-#
-# Deliberately does NOT import from cogs/events.py — per project rule,
-# engines/systems must not import each other in load-order-sensitive
-# ways. Reward granting goes through utils/reward_engine.py (the one
-# shared engine every reward path in this project already uses), but
-# the event-spawn/claim mechanics here are self-contained.
+# Deliberately does NOT import from other cogs (project rule). Reward
+# granting goes through utils/reward_engine.py via the engine (the one
+# shared engine every reward path in this project already uses). All
+# minigame SQL lives in utils/minigame_store.py; all game logic lives in
+# utils/minigame_engine.py (Phase 2).
 # ═══════════════════════════════════════════════════════════════════════
 
-VALID_TIERS = ("bronze", "silver", "gold", "platinum")
-TIER_COLOR = {
-    "bronze":   0xCD7F32,
-    "silver":   0xC0C0C0,
-    "gold":     0xFFD700,
-    "platinum": 0xB9F2FF,
-}
-TIER_EMOJI = {
-    "bronze":   "🥉",
-    "silver":   "🥈",
-    "gold":     "🥇",
-    "platinum": "💎",
-}
-
-# Daily-probability tuning. Kept as module constants rather than
-# per-guild config for now — these shape the pacing curve itself, not
-# a guild-facing setting like min/max events are.
+# ── Weekly pacing tuning (kept verbatim from v1 — D5) ──────────────────
 MIN_DAILY_PROB   = 0.10   # floor while still behind pace
 MAX_DAILY_PROB   = 0.60   # ceiling while still behind pace
 BONUS_DAILY_PROB = 0.15   # flat chance once weekly minimum is already met
 
 CHECK_LOOP_MINUTES = 30
-
-
-async def ensure_tables():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS minigames_config (
-                guild_id            INTEGER PRIMARY KEY,
-                enabled             INTEGER DEFAULT 1,
-                channel_id          INTEGER,
-                min_events_per_week INTEGER DEFAULT 5,
-                max_events_per_week INTEGER DEFAULT 10,
-                events_this_week    INTEGER DEFAULT 0,
-                week_start_date     TEXT,
-                last_check_date     TEXT,
-                claim_seconds       INTEGER DEFAULT 300,
-                updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS minigames_tiers (
-                id                     INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id               INTEGER NOT NULL,
-                tier                   TEXT NOT NULL,
-                weight                 INTEGER DEFAULT 1,
-                reward_type            TEXT NOT NULL,
-                reward_value           TEXT NOT NULL,
-                reward_duration_hours  INTEGER,
-                enabled                INTEGER DEFAULT 1,
-                created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_mgt_guild
-            ON minigames_tiers(guild_id)
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS minigames_log (
-                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id           INTEGER NOT NULL,
-                event_date         TEXT NOT NULL,
-                tier               TEXT NOT NULL,
-                channel_id         INTEGER,
-                message_id         INTEGER,
-                winner_id          INTEGER,
-                winner_display_name TEXT,
-                forced             INTEGER DEFAULT 0,
-                fired_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_mgl_guild
-            ON minigames_log(guild_id, event_date)
-        """)
-        await db.commit()
-
-
-async def get_config(guild_id: int) -> dict:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT * FROM minigames_config WHERE guild_id = ?", (guild_id,))
-        row = await cursor.fetchone()
-        if row:
-            cols = [d[0] for d in cursor.description]
-            return dict(zip(cols, row))
-    return {
-        "guild_id": guild_id, "enabled": 1, "channel_id": None,
-        "min_events_per_week": 5, "max_events_per_week": 10,
-        "events_this_week": 0, "week_start_date": None,
-        "last_check_date": None, "claim_seconds": 300,
-    }
-
-
-async def get_tiers(guild_id: int) -> list[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT id, tier, weight, reward_type, reward_value,
-                   reward_duration_hours, enabled
-            FROM minigames_tiers
-            WHERE guild_id = ? AND enabled = 1
-        """, (guild_id,))
-        rows = await cursor.fetchall()
-    return [{
-        "id": r[0], "tier": r[1], "weight": r[2],
-        "reward_type": r[3], "reward_value": r[4],
-        "reward_duration_hours": r[5], "enabled": r[6],
-    } for r in rows]
-
-
-# Rank Card foundation: minigames_log already records winner_id per
-# fired event — no new counter/table needed. Used by the future
-# /rank card's "mini games" stat (utils/rank_card_data.py).
-async def get_user_win_count(guild_id: int, user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT COUNT(*) FROM minigames_log
-            WHERE guild_id = ? AND winner_id = ?
-        """, (guild_id, user_id))
-        row = await cursor.fetchone()
-    return row[0] if row else 0
+REQUEST_POLL_SECONDS = 10
+# A process that just started has NO live in-memory games — its first
+# ready may sweep every open row. A RECONNECT (same process) gets the
+# plan's 5-minute grace window so a still-healthy in-memory run is never
+# touched.
+STARTUP_SWEEP_GRACE_MINUTES = 5
 
 
 def _monday_of(d) -> str:
@@ -195,160 +91,266 @@ def compute_daily_probability(events_so_far: int, weekday: int,
     return BONUS_DAILY_PROB, False
 
 
-def pick_weighted_tier(tiers: list[dict]) -> dict | None:
-    if not tiers:
+# ── Recursive weighted selection (plan §4) + shuffle bags (plan §5) ────
+
+def _effective_playable(node: dict) -> int:
+    """
+    Count of playable (enabled + auto_spawn) templates reachable at or
+    below this node UNDER THE ANCESTOR-ENABLED RULE: a disabled node
+    contributes 0 for its whole branch (D10 — pure rotation exclusion,
+    nothing is modified). `direct_playable` / `children` come from
+    store.get_categories_tree().
+    """
+    if not node.get("enabled"):
+        return 0
+    total = node.get("direct_playable", 0)
+    for child in node.get("children", []):
+        total += _effective_playable(child)
+    return total
+
+
+def _pick_option(options: list[tuple]) -> tuple:
+    """Weighted pick over (kind, target, weight) options — weights are
+    clamped to >=1, relative only (D8: no template-level weights in v1)."""
+    weights = [max(1, int(o[2] or 1)) for o in options]
+    i = random.choices(range(len(options)), weights=weights, k=1)[0]
+    return options[i]
+
+
+async def select_template(guild_id: int) -> dict | None:
+    """
+    The recursive weighted traversal of plan §4:
+
+      * A node is a candidate iff enabled AND it has >=1 playable
+        template somewhere below (counted with the ancestor-enabled
+        rule) — empty/disabled branches NEVER consume a selection.
+      * At any node, its DIRECT playable templates (as one bag-option,
+        weight = the node's weight) compete with its eligible
+        subcategories (weight = each subcategory's own weight).
+      * A bag hit pops the node's shuffle bag (without replacement,
+        persisted, staleness-guarded — plan §5); a sub hit recurses.
+
+    Returns a FRESH full template read (the §14 snapshot source) or
+    None when nothing is eligible.
+    """
+    tree = await store.get_categories_tree(guild_id)
+    if not tree:
         return None
-    weights = [max(1, t["weight"]) for t in tiers]
-    return random.choices(tiers, weights=weights, k=1)[0]
+
+    async def walk(node: dict):
+        options: list[tuple] = []
+        if node.get("direct_playable", 0) > 0:
+            options.append(("bag", node, node.get("weight", 1)))
+        for child in node.get("children", []):
+            if _effective_playable(child) > 0:
+                options.append(("sub", child, child.get("weight", 1)))
+        if not options:
+            return None
+        kind, target, _weight = _pick_option(options)
+        if kind == "sub":
+            return await walk(target)
+        ids = await store.get_direct_playable_ids(guild_id, node["id"])
+        tid, _remaining = await store.pop_bag(guild_id, node["id"], ids)
+        if tid is None:
+            return None
+        return await store.get_template(guild_id, tid)
+
+    roots = [("root", r, r.get("weight", 1)) for r in tree
+             if _effective_playable(r) > 0]
+    if not roots:
+        return None
+    _kind, root, _weight = _pick_option(roots)
+    return await walk(root)
 
 
-class MinigameClaimView(discord.ui.View):
-    """Single-winner, first-click-wins claim button for a spawned event."""
-
-    def __init__(self, guild_id: int, tier: dict, log_id: int, claim_seconds: int):
-        super().__init__(timeout=claim_seconds)
-        self.guild_id  = guild_id
-        self.tier      = tier
-        self.log_id    = log_id
-        self.claimed   = False
-        self.message: discord.Message | None = None
-
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-        if self.message:
-            try:
-                await self.message.edit(view=self)
-            except Exception:
-                pass
-
-    @discord.ui.button(label="Claim!", emoji="🎉", style=discord.ButtonStyle.success,
-                       custom_id="minigame_claim")
-    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.claimed:
-            await interaction.response.send_message(
-                "Someone already claimed this one — better luck next time!",
-                ephemeral=True)
-            return
-        self.claimed = True
-
-        from utils.reward_engine import give_reward
-        result = await give_reward(
-            interaction.client, self.guild_id, interaction.user.id,
-            self.tier["reward_type"],
-            amount=self.tier["reward_value"] if self.tier["reward_type"] in ("coins", "diamonds", "xp") else None,
-            role_id=self.tier["reward_value"] if self.tier["reward_type"] in ("role", "temp_role") else None,
-            item_name=self.tier["reward_value"] if self.tier["reward_type"] == "item" else None,
-            duration_hours=self.tier.get("reward_duration_hours"),
-            reason=f"Minigame reward ({self.tier['tier']})",
-            source="minigame",
-        )
-
-        snap = snapshot_user(interaction.user)
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                UPDATE minigames_log
-                SET winner_id = ?, winner_display_name = ?
-                WHERE id = ?
-            """, (interaction.user.id, snap["display_name"], self.log_id))
-            await db.commit()
-
-        for item in self.children:
-            item.disabled = True
-
-        emoji = TIER_EMOJI.get(self.tier["tier"], "🎁")
-        if not result.get("success"):
-            await interaction.response.edit_message(view=self)
-            await interaction.followup.send(
-                f"⚠️ Claim recorded but reward grant failed: {result.get('error')}",
-                ephemeral=True)
-            return
-
-        await interaction.response.edit_message(view=self)
-        await interaction.followup.send(
-            f"{emoji} You claimed the **{self.tier['tier'].title()}** reward!",
-            ephemeral=True)
-        try:
-            await interaction.channel.send(
-                f"{emoji} {interaction.user.mention} claimed the "
-                f"**{self.tier['tier'].title()}** minigame reward!")
-        except Exception:
-            pass
-
+# ── THE COG ─────────────────────────────────────────────────────────────
 
 class Minigames(commands.Cog):
+    """Minigames v2 — the bot side of the category/template system."""
+
     def __init__(self, bot):
         self.bot = bot
+        # log_id → live engine. The engines keep themselves alive via
+        # their timer tasks; this registry is for observability and
+        # bounded memory (finished entries are pruned on every poll tick
+        # — a finished engine is referenced by its closed log row).
+        self.live_games: dict[int, engine.MinigameEngine] = {}
+        # False until the first on_ready of THIS process has swept.
+        self._sweep_done = False
         self.daily_check_loop.start()
+        self.spawn_request_loop.start()
 
     def cog_unload(self):
         self.daily_check_loop.cancel()
+        self.spawn_request_loop.cancel()
 
     async def cog_load(self):
-        await ensure_tables()
+        await store.ensure_tables()
 
-    async def _spawn_event(self, guild: discord.Guild, config: dict,
-                            forced: bool) -> bool:
-        channel_id = config.get("channel_id")
-        if not channel_id:
-            print(f"[MINIGAMES] guild={guild.id} has no channel configured — skipping spawn")
-            return False
-        channel = guild.get_channel(int(channel_id))
-        if not channel:
-            print(f"[MINIGAMES] guild={guild.id} configured channel {channel_id} not found")
-            return False
+    # ── Startup sweep (plan §14) ───────────────────────────────────────
 
-        tiers = await get_tiers(guild.id)
-        tier = pick_weighted_tier(tiers)
-        if not tier:
-            print(f"[MINIGAMES] guild={guild.id} has no reward tiers configured — skipping spawn")
-            return False
+    @commands.Cog.listener()
+    async def on_ready(self):
+        await self._startup_sweep()
 
-        today = datetime.now(timezone.utc).date().isoformat()
-        claim_seconds = int(config.get("claim_seconds") or 300)
+    async def _startup_sweep(self):
+        """
+        Finalize run rows that are 'running' but have no live in-memory
+        engine behind them (plan §14): a fresh process sweeps EVERY open
+        row (a new process has no live games — applying the 5-minute
+        grace here would leave runs started <5min before a crash stuck
+        forever); a reconnect (same process, live games may still be
+        healthy) only touches rows older than the grace window.
+        Idempotent: the sweep only sees rows with ended_at IS NULL, and
+        finish_run sets ended_at.
+        """
+        grace = 0 if not self._sweep_done else STARTUP_SWEEP_GRACE_MINUTES
+        self._sweep_done = True
+        for row in await store.get_open_runs(max_age_minutes=grace):
+            try:
+                await store.finish_run(row["id"], "aborted_restart")
+            except Exception as e:
+                print(f"[MINIGAMES] sweep: closing run {row['id']} failed: {e}")
+                continue
+            print(f"[MINIGAMES] sweep: run {row['id']} (guild {row['guild_id']}) "
+                  f"finalized as aborted_restart — no rewards")
+            await self._notify_aborted(row)
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                INSERT INTO minigames_log
-                    (guild_id, event_date, tier, channel_id, forced)
-                VALUES (?, ?, ?, ?, ?)
-            """, (guild.id, today, tier["tier"], channel.id, int(forced)))
-            await db.commit()
-            log_id = cursor.lastrowid
-
-        emoji = TIER_EMOJI.get(tier["tier"], "🎁")
-        embed = discord.Embed(
-            title=f"{emoji} A Wild Minigame Appeared!",
-            description=(
-                f"First person to click **Claim!** wins a "
-                f"**{tier['tier'].title()}** reward!\n"
-                f"Expires in {claim_seconds // 60} minute(s)."),
-            color=TIER_COLOR.get(tier["tier"], 0x7c5cbf))
-        embed.set_footer(text=f"Tier: {tier['tier'].title()}")
-
-        view = MinigameClaimView(guild.id, tier, log_id, claim_seconds)
+    async def _notify_aborted(self, row: dict):
+        """Best-effort '⚠️ bot restarted' note on the original message.
+        Never blocks the sweep, never touches rewards (there are none —
+        the row was closed before this runs)."""
         try:
-            msg = await channel.send(embed=embed, view=view)
-            view.message = msg
+            guild = self.bot.get_guild(row["guild_id"])
+            if guild is None or not row.get("channel_id") or not row.get("message_id"):
+                return
+            channel = guild.get_channel(int(row["channel_id"]))
+            if channel is None:
+                return
+            msg = await channel.fetch_message(int(row["message_id"]))
+            embed = msg.embeds[0] if msg.embeds else discord.Embed(description="")
+            base = embed.description or ""
+            embed.description = (base + "\n\n⚠️ **Game ended — bot "
+                                   "restarted**")[:4096]
+            await msg.edit(embed=embed)
         except Exception as e:
-            print(f"[MINIGAMES] guild={guild.id} failed to send spawn message: {e}")
+            print(f"[MINIGAMES] sweep: abort notice for run {row['id']} "
+                  f"failed (row still closed): {e}")
+
+    # ── Channel resolution (plan §8 step 4 / §17 edge matrix) ─────────
+
+    @staticmethod
+    def _resolve_channel(guild: discord.Guild, template: dict,
+                         config: dict) -> tuple[discord.TextChannel | None, str | None]:
+        """
+        Template override first, then the guild default (a deleted
+        override falls back to the default — plan §17). Returns
+        (channel, error).
+        """
+        candidates = [template.get("channel_id"), config.get("channel_id")]
+        tried: set[int] = set()
+        for cid in candidates:
+            try:
+                cid = int(cid) if cid else None
+            except (TypeError, ValueError):
+                cid = None
+            if not cid or cid in tried:
+                continue
+            tried.add(cid)
+            ch = guild.get_channel(cid)
+            if isinstance(ch, (discord.TextChannel, discord.Thread)):
+                return ch, None
+        if tried:
+            return None, ("no valid spawn channel — the template's channel "
+                          "is missing and the configured guild default is "
+                          "missing too")
+        return None, "no spawn channel configured (run /minigames_setup)"
+
+    # ── Shared spawn path (plan §8/§9/§14) ─────────────────────────────
+
+    async def spawn_game(self, guild: discord.Guild, template: dict,
+                         mode: str) -> tuple[bool, str | None]:
+        """
+        THE shared spawn path for auto / manual / test:
+          1. resolve + validate the channel (BEFORE the run row — a
+             channel failure leaves no phantom row, plan §17);
+          2. SNAPSHOT the template (deep copies — plan §14: after start,
+             nothing reads the template again);
+          3. open the run row (auditable even if the post fails);
+          4. real engine → post message + arm timers;
+          5. store the message id, register the live engine.
+        Returns (ok, error). The weekly counter is NOT touched here —
+        the auto caller bumps it only on success (D5).
+        """
+        config = await store.get_config(guild.id)
+        channel, ch_err = self._resolve_channel(guild, template, config)
+        if channel is None:
+            return False, ch_err
+
+        category = await store.get_category(guild.id, template["category_id"])
+        snapshot = {
+            "guild_id": guild.id,
+            "template_id": template["id"],
+            "name": template["name"],
+            "game_type": template["game_type"],
+            "category_id": template["category_id"],
+            "category_name": (category or {}).get("name")
+                              or template["name"],
+            # §14 deep copies — fresh JSON parses on purpose:
+            "embed": json.loads(json.dumps(template.get("embed") or {})),
+            "config": json.loads(json.dumps(template.get("config") or {})),
+            "rewards": json.loads(json.dumps(template.get("rewards") or [])),
+            "channel_id": channel.id,
+        }
+
+        log_id = await store.start_run(
+            guild.id, template["id"], template["name"],
+            template["category_id"], snapshot["category_name"],
+            template["game_type"], mode, channel.id)
+
+        try:
+            game = engine.make_engine(snapshot, mode, log_id, bot=self.bot)
+            message = await game.start(channel)
+        except ValueError as e:
+            # Unplayable template (e.g. no answers) — pref light refusal.
+            await store.finish_run(log_id, "failed")
+            return False, f"template cannot be spawned: {e}"
+        except Exception as e:
+            print(f"[MINIGAMES] guild={guild.id} run {log_id} post failed: {e}")
+            await store.finish_run(log_id, "failed")
+            return False, "failed to post the game message"
+
+        await store.set_run_message(log_id, message.id)
+        self.live_games[log_id] = game
+        return True, None
+
+    # ── Automatic spawn (plan §8) ──────────────────────────────────────
+
+    async def _auto_spawn(self, guild: discord.Guild, config: dict,
+                          forced: bool) -> bool:
+        template = await select_template(guild.id)
+        if not template:
+            print(f"[MINIGAMES] guild={guild.id} no eligible template — "
+                  f"nothing spawns, counter NOT incremented, retried at "
+                  f"the next daily check")
             return False
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "UPDATE minigames_log SET message_id = ? WHERE id = ?",
-                (msg.id, log_id))
-            await db.execute("""
-                UPDATE minigames_config
-                SET events_this_week = events_this_week + 1
-                WHERE guild_id = ?
-            """, (guild.id,))
-            await db.commit()
-
+        ok, err = await self.spawn_game(guild, template, "auto")
+        if not ok:
+            print(f"[MINIGAMES] guild={guild.id} auto spawn of "
+                  f"'{template['name']}' failed: {err} — counter NOT "
+                  f"incremented, retried at the next daily check")
+            return False
+        # D5: the weekly counter increments ONLY after the message posts.
+        await store.bump_events_this_week(guild.id)
         return True
 
     @tasks.loop(minutes=CHECK_LOOP_MINUTES)
     async def daily_check_loop(self):
+        await self._daily_check_iteration()
+
+    async def _daily_check_iteration(self):
+        """The pacing iteration (extracted so tests can drive one pass
+        without waiting 30 minutes — the loop body is unchanged)."""
         now   = datetime.now(timezone.utc)
         today = now.date().isoformat()
         monday = _monday_of(now)
@@ -364,18 +366,14 @@ class Minigames(commands.Cog):
                 if not guild:
                     continue
 
-                config = await get_config(guild_id)
+                config = await store.get_config(guild_id)
 
                 # Weekly reset — new week started since last recorded
                 # week_start_date.
                 if config.get("week_start_date") != monday:
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute("""
-                            UPDATE minigames_config
-                            SET events_this_week = 0, week_start_date = ?
-                            WHERE guild_id = ?
-                        """, (monday, guild_id))
-                        await db.commit()
+                    await store.mark_week(
+                        guild_id, monday, config.get("last_check_date"),
+                        events_this_week=0)
                     config["events_this_week"] = 0
                     config["week_start_date"] = monday
 
@@ -393,16 +391,10 @@ class Minigames(commands.Cog):
 
                 roll_success = force or (random.random() < prob)
 
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute("""
-                        UPDATE minigames_config
-                        SET last_check_date = ?
-                        WHERE guild_id = ?
-                    """, (today, guild_id))
-                    await db.commit()
+                await store.mark_week(guild_id, monday, today)
 
                 if roll_success:
-                    await self._spawn_event(guild, config, forced=force)
+                    await self._auto_spawn(guild, config, forced=force)
 
             except Exception as e:
                 print(f"[MINIGAMES] daily_check_loop error for guild {guild_id}: {e}")
@@ -411,150 +403,150 @@ class Minigames(commands.Cog):
     async def before_daily_check(self):
         await self.bot.wait_until_ready()
 
-    # ─── SLASH COMMANDS ──────────────────────────────────
+    # ── Spawn request queue (plan §9/§19) ──────────────────────────────
+
+    @tasks.loop(seconds=REQUEST_POLL_SECONDS)
+    async def spawn_request_loop(self):
+        if not self.bot.is_ready():
+            return
+        try:
+            await self._process_spawn_requests()
+        except Exception as e:
+            print(f"[MINIGAMES] spawn_request_loop error: {e}")
+            traceback.print_exc()
+
+    async def _process_spawn_requests(self):
+        # Bounded memory: drop finished engines from the registry (their
+        # log rows are already closed — the row is the record).
+        if self.live_games:
+            self.live_games = {k: v for k, v in self.live_games.items()
+                               if not v.finished}
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT DISTINCT guild_id FROM minigame_spawn_requests "
+                "WHERE status = 'pending'")
+            guild_ids = [r[0] for r in await cursor.fetchall()]
+
+        for gid in guild_ids:
+            guild = self.bot.get_guild(gid)
+            if guild is None:
+                # The bot is not in this guild — the request can never
+                # run. Close its pending rows instead of letting them
+                # rot (the dashboard surfaces the error, plan §9).
+                for req in await store.get_in_flight_requests(gid):
+                    if req["status"] == "pending":
+                        await store.finish_request(
+                            req["id"], False, "bot is not in this guild")
+                continue
+
+            req = await store.claim_next_request(gid)
+            if not req:
+                continue
+            try:
+                template = await store.get_template(gid, req["template_id"])
+                if template is None:
+                    await store.finish_request(
+                        req["id"], False, "template no longer exists")
+                    continue
+                # D12: test → always; manual (specific template) → the
+                # template's own enabled toggle (category state is
+                # irrelevant).
+                if req["mode"] == "manual" and not template.get("enabled"):
+                    await store.finish_request(
+                        req["id"], False, "template is disabled")
+                    continue
+                ok, err = await self.spawn_game(guild, template, req["mode"])
+                await store.finish_request(req["id"], ok, err)
+            except Exception as e:
+                print(f"[MINIGAMES] request {req['id']} (guild {gid}) "
+                      f"failed: {e}")
+                traceback.print_exc()
+                try:
+                    await store.finish_request(req["id"], False, str(e)[:400])
+                except Exception:
+                    pass
+
+    # ─── SLASH COMMANDS ───────────────────────────────────────────────
 
     @app_commands.command(name="minigames_setup",
-                          description="Configure the Event Stack Builder (minigames)")
+                          description="Configure the minigames spawn system (channel + weekly range)")
     @app_commands.checks.has_permissions(administrator=True)
     async def minigames_setup(self, interaction: discord.Interaction,
                               channel: discord.TextChannel,
                               min_events: int = 5,
                               max_events: int = 10,
-                              claim_seconds: int = 300,
                               enabled: bool = True):
         if min_events < 1 or max_events < min_events:
             await interaction.response.send_message(
                 "min_events must be >= 1 and max_events must be >= min_events.",
                 ephemeral=True)
             return
-        await ensure_tables()
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO minigames_config
-                    (guild_id, enabled, channel_id, min_events_per_week,
-                     max_events_per_week, claim_seconds)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    enabled              = excluded.enabled,
-                    channel_id           = excluded.channel_id,
-                    min_events_per_week  = excluded.min_events_per_week,
-                    max_events_per_week  = excluded.max_events_per_week,
-                    claim_seconds        = excluded.claim_seconds,
-                    updated_at           = CURRENT_TIMESTAMP
-            """, (interaction.guild.id, int(enabled), channel.id,
-                  min_events, max_events, claim_seconds))
-            await db.commit()
+        await store.save_config(
+            interaction.guild.id,
+            enabled=int(bool(enabled)),
+            channel_id=channel.id,
+            min_events_per_week=min_events,
+            max_events_per_week=max_events)
 
-        embed = discord.Embed(title="Event Stack Builder Configured",
+        embed = discord.Embed(title="Minigames Configured",
                               color=0x57F287 if enabled else 0xED4245)
         embed.add_field(name="Status", value="Enabled" if enabled else "Disabled")
-        embed.add_field(name="Channel", value=channel.mention)
+        embed.add_field(name="Spawn channel", value=channel.mention)
         embed.add_field(name="Weekly range", value=f"{min_events}–{max_events} events")
-        embed.add_field(name="Claim window", value=f"{claim_seconds}s")
+        embed.add_field(name="Note",
+                        value="Categories, templates and rewards are managed "
+                              "in the dashboard.",
+                        inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="minigames_tier_add",
-                          description="Add a reward tier for minigame spawns")
+    @app_commands.command(name="minigames_spawn",
+                          description="Spawn a minigame right now (manual — admin)")
     @app_commands.describe(
-        tier="bronze / silver / gold / platinum",
-        weight="Relative weight for random selection (higher = more common)",
-        reward_type="coins / diamonds / xp / role / temp_role / item",
-        reward_value="Amount (coins/diamonds/xp) or Role ID or Item name",
-        duration_hours="Only used for temp_role")
+        template_id="Optional: force a specific template by ID. "
+                    "Omit to let the rotation pick a game.")
     @app_commands.checks.has_permissions(administrator=True)
-    async def minigames_tier_add(self, interaction: discord.Interaction,
-                                 tier: str, reward_type: str, reward_value: str,
-                                 weight: int = 1, duration_hours: int = None):
-        tier = tier.lower().strip()
-        if tier not in VALID_TIERS:
-            await interaction.response.send_message(
-                f"tier must be one of: {', '.join(VALID_TIERS)}", ephemeral=True)
-            return
-        valid_reward_types = ("coins", "diamonds", "xp", "role", "temp_role", "item")
-        if reward_type not in valid_reward_types:
-            await interaction.response.send_message(
-                f"reward_type must be one of: {', '.join(valid_reward_types)}",
-                ephemeral=True)
-            return
-        await ensure_tables()
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO minigames_tiers
-                    (guild_id, tier, weight, reward_type, reward_value,
-                     reward_duration_hours)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (interaction.guild.id, tier, max(1, weight),
-                  reward_type, reward_value, duration_hours))
-            await db.commit()
-        await interaction.response.send_message(
-            f"{TIER_EMOJI.get(tier, '🎁')} Added **{tier}** tier "
-            f"({reward_type}: {reward_value}, weight {max(1, weight)}).",
-            ephemeral=True)
-
-    @app_commands.command(name="minigames_tier_list",
-                          description="List configured minigame reward tiers")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def minigames_tier_list(self, interaction: discord.Interaction):
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT id, tier, weight, reward_type, reward_value,
-                       reward_duration_hours, enabled
-                FROM minigames_tiers WHERE guild_id = ?
-                ORDER BY tier ASC, id ASC
-            """, (interaction.guild.id,))
-            rows = await cursor.fetchall()
-        if not rows:
-            await interaction.response.send_message(
-                "No reward tiers configured yet. Use /minigames_tier_add.",
-                ephemeral=True)
-            return
-        embed = discord.Embed(title="🎁 Minigame Reward Tiers", color=0x7c5cbf)
-        for (tid, t, w, rtype, rval, dur, enabled) in rows:
-            status = "✅" if enabled else "❌"
-            dur_str = f" ({dur}h)" if dur else ""
-            embed.add_field(
-                name=f"#{tid} {TIER_EMOJI.get(t, '🎁')} {t.title()} {status}",
-                value=f"{rtype}: {rval}{dur_str} · weight {w}",
-                inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="minigames_tier_remove",
-                          description="Remove a minigame reward tier by ID")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def minigames_tier_remove(self, interaction: discord.Interaction, tier_id: int):
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "DELETE FROM minigames_tiers WHERE id = ? AND guild_id = ?",
-                (tier_id, interaction.guild.id))
-            await db.commit()
-            found = cursor.rowcount > 0
-        if found:
-            await interaction.response.send_message(f"Removed tier #{tier_id}.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"No tier #{tier_id} found.", ephemeral=True)
-
-    @app_commands.command(name="minigames_force",
-                          description="Force-spawn a minigame right now (admin, ignores probability)")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def minigames_force(self, interaction: discord.Interaction):
+    async def minigames_spawn(self, interaction: discord.Interaction,
+                              template_id: int | None = None):
         await interaction.response.defer(ephemeral=True)
-        config = await get_config(interaction.guild.id)
-        if not config.get("channel_id"):
-            await interaction.followup.send(
-                "No channel configured — run /minigames_setup first.")
-            return
-        ok = await self._spawn_event(interaction.guild, config, forced=True)
-        if ok:
-            await interaction.followup.send("✅ Minigame spawned.")
+        requester = f"slash:{interaction.user.id}"
+        ok, message = await self._command_spawn(
+            interaction.guild, template_id, requester)
+        await interaction.followup.send(message, ephemeral=True)
+
+    async def _command_spawn(self, guild: discord.Guild,
+                             template_id: int | None,
+                             requester: str) -> tuple[bool, str]:
+        """
+        Manual spawn from a slash command (plan §8/§9): ONE shared path
+        — the request queue. spawn_request_loop executes it with the real
+        engine (~10s latency, the accepted D4 queue delay). D12: a
+        specific template must be enabled (category state irrelevant);
+        no template → the §4 recursive selection. Never touches the
+        weekly counter.
+        """
+        if template_id is not None:
+            tpl = await store.get_template(guild.id, template_id)
+            if tpl is None:
+                return False, "❌ No such template in this server."
+            if not tpl.get("enabled"):
+                return False, "❌ That template is disabled."
         else:
-            await interaction.followup.send(
-                "❌ Couldn't spawn — check that a channel and at least one "
-                "reward tier are configured.")
+            tpl = await select_template(guild.id)
+            if tpl is None:
+                return False, ("❌ Nothing eligible right now — no enabled "
+                               "template with automatic rotation on.")
+        _rid, err = await store.create_spawn_request(
+            guild.id, tpl["id"], "manual", requested_by=requester)
+        if err:
+            return False, f"❌ {err}."
+        return True, f"✅ Queued **{tpl['name']}** — it will appear in a " \
+                     "moment."
 
     @app_commands.command(name="minigames_stats",
-                          description="View this week's Event Stack Builder progress")
+                          description="View this week's minigames progress")
     async def minigames_stats(self, interaction: discord.Interaction):
-        config = await get_config(interaction.guild.id)
+        config = await store.get_config(interaction.guild.id)
         now = datetime.now(timezone.utc)
         weekday = now.weekday()
         remaining_days = 7 - weekday
@@ -563,14 +555,81 @@ class Minigames(commands.Cog):
         so_far = int(config.get("events_this_week") or 0)
         prob, force = compute_daily_probability(so_far, weekday, min_t, max_t)
 
-        embed = discord.Embed(title="🎲 Event Stack Builder — This Week", color=0x7c5cbf)
+        embed = discord.Embed(title="🎲 Minigames — This Week", color=0x7c5cbf)
         embed.add_field(name="Status", value="Enabled" if config.get("enabled") else "Disabled")
-        embed.add_field(name="Events so far", value=f"{so_far} / {min_t}–{max_t}")
+        embed.add_field(name="Automatic spawns so far", value=f"{so_far} / {min_t}–{max_t}")
         embed.add_field(name="Days left in week", value=str(remaining_days))
         embed.add_field(
             name="Today's spawn chance",
             value="Forced (minimum not met)" if force else f"{prob*100:.0f}%")
+        embed.add_field(
+            name="Manual spawns",
+            value="via /minigames_spawn or the dashboard (never counted "
+                  "toward the weekly range)",
+            inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ── DEPRECATED compatibility surface ────────────────────────────────────
+# RETIRED IN v2, KEPT FOR ONE PHASE WINDOW:
+#   - the legacy dashboard (/minigames page in dashboard/app.py and the
+#     tier routes in dashboard/api/minigames.py) still imports these names;
+#   - utils/rank_card_data.py imports get_user_win_count (legacy log read).
+# The tier SYSTEM itself is gone: the tier slash commands, MinigameClaimView
+# and the legacy claim/spawn flow were removed in this phase (plan §8).
+# These shims serve the OLD read-only UI with legacy data until Phase 4
+# replaces the dashboard API and Phase 6 removes the shims. Do not build
+# new code on them.
+# ═══════════════════════════════════════════════════════════════════════
+
+VALID_TIERS = ("bronze", "silver", "gold", "platinum")  # deprecated (Phase 6)
+
+
+async def ensure_tables():  # deprecated alias (Phase 6)
+    await store.ensure_tables()
+
+
+async def get_config(guild_id: int) -> dict:  # deprecated alias (Phase 6)
+    return await store.get_config(guild_id)
+
+
+async def get_tiers(guild_id: int) -> list[dict]:  # deprecated (Phase 6)
+    """Legacy tier rows (read-only) for the old dashboard page.
+    The minigames_tiers table only exists in databases migrated from
+    v1; a fresh install has no such table — return [] instead of
+    raising (the page simply shows 'no tiers')."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'minigames_tiers'")
+        if not await cursor.fetchone():
+            return []
+        cursor = await db.execute("""
+            SELECT id, tier, weight, reward_type, reward_value,
+                   reward_duration_hours, enabled
+            FROM minigames_tiers
+            WHERE guild_id = ? AND enabled = 1
+        """, (guild_id,))
+        rows = await cursor.fetchall()
+    return [{
+        "id": r[0], "tier": r[1], "weight": r[2],
+        "reward_type": r[3], "reward_value": r[4],
+        "reward_duration_hours": r[5], "enabled": r[6],
+    } for r in rows]
+
+
+async def get_user_win_count(guild_id: int, user_id: int) -> int:
+    """
+    Rank Card foundation: minigames_log records winner_id per run —
+    used by utils/rank_card_data.py. (Kept: it reads the LEGACY column,
+    which v2 rows also fill via the first-winner mapping.)
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM minigames_log WHERE guild_id = ? AND winner_id = ?",
+            (guild_id, user_id))
+        row = await cursor.fetchone()
+    return row[0] if row else 0
 
 
 async def setup(bot):

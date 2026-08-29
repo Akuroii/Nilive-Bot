@@ -873,6 +873,21 @@ async def get_sibling_names(guild_id: int, category_id: int) -> list[str]:
         return [r[0] for r in await cursor.fetchall()]
 
 
+async def get_direct_playable_ids(guild_id: int, category_id: int) -> list[int]:
+    """
+    Template ids DIRECTLY in this category that are playable
+    (enabled=1 AND auto_spawn=1) — the recursive selector's bag source
+    (plan §4/§5). One query, ids only.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT id FROM minigame_templates "
+            "WHERE guild_id = ? AND category_id = ? AND enabled = 1 "
+            "AND auto_spawn = 1 ORDER BY id ASC",
+            (guild_id, category_id))
+        return [r[0] for r in await cursor.fetchall()]
+
+
 # ── REWARDS (pools + independent rolls) ─────────────────────────────────
 
 async def get_rewards(template_id: int) -> list[dict]:
