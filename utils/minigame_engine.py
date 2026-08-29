@@ -290,8 +290,16 @@ class MinigameEngine:
             traceback.print_exc()
 
     async def _cancel_timers(self) -> None:
+        # When resolve() is triggered BY one of our own timers, the
+        # currently running task is a timer task itself. Cancelling it
+        # would inject a CancelledError into resolve() at its next
+        # await — finalizing would then be aborted after the reward
+        # grants but before finish_run, leaving the row stuck
+        # 'running' (reward given, log never closed). Skip self.
+        current = asyncio.current_task()
         for t in self._timers:
-            t.cancel()
+            if t is not current:
+                t.cancel()
         self._timers.clear()
 
     def _make_view(self, rows: list[list[dict]]) -> discord.ui.View:
