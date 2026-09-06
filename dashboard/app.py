@@ -294,6 +294,30 @@ def logout():
     return redirect(url_for("login"))
 
 
+# ── Local review login (Phase 5 — manual browser check) ─────────────
+# OFF by default: unless DASHBOARD_DEMO_LOGIN=1 is set, this route is a
+# 404 and production/staging behavior is untouched. With the flag set
+# (local preview only) it creates exactly the session the OAuth
+# callback would, for a fixed demo identity — Discord OAuth cannot
+# complete inside the sandboxed preview, and the user asked for a real
+# browser walkthrough of the minigames UI. Pair the flag with
+# OWNER_ID=<demo user id> so the demo user gets the same guild-blind
+# developer bypass the trusted owner gets (no dashboard_users row).
+@app.route("/demo-login")
+def demo_login():
+    if os.getenv("DASHBOARD_DEMO_LOGIN") != "1":
+        abort(404)
+    user_id = int(os.getenv("DASHBOARD_DEMO_USER_ID", "900000000000000001"))
+    create_session({
+        "id": user_id,
+        "username": os.getenv("DASHBOARD_DEMO_USER_NAME", "Reviewer"),
+        "avatar": None,
+    })
+    set_session_guild(int(os.getenv("DASHBOARD_DEMO_GUILD_ID",
+                                    "900000000000000001")))
+    return redirect(url_for("index"))
+
+
 # ── Server select ──────────────────────────────────────────────────────────────
 
 @app.route("/server-select")
@@ -1140,33 +1164,38 @@ def events():
     return render("systems/events.html", events=event_list, **ctx)
 
 
-# ── Minigames / Event Stack Builder (dark-fixes pass #13) ───────────────────
+# ── Minigames v2 (Phase 4) ──────────────────────────────────────────────────
+#
+# The page is CLIENT-DATA-DRIVEN: it renders an empty shell and the
+# vanilla JS below loads everything through the /api/minigames/*
+# endpoints (dashboard/api/minigames.py) — same pattern as the other
+# systems pages (no server-side prefetch, tabs never reload). The v1
+# tier-based prefetch (cogs.minigames.get_tiers) is retired with the
+# v1 API.
+#
+# Two pages, one permission key:
+#   /minigames          — Config / Categories & Templates / History
+#   /minigames/builder  — the single-page game builder; ?template_id=
+#                         opens an existing template, ?category_id=
+#                         pre-fills the Spawn Settings category.
 
 @app.route("/minigames")
 @require_page("minigames")
 def minigames_page():
-    guild_id = get_session_guild_id()
-
-    async def get_data():
-        from cogs.minigames import ensure_tables, get_config, get_tiers
-        await ensure_tables()
-        config = await get_config(guild_id)
-        tiers  = await get_tiers(guild_id)
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT event_date, tier, winner_id, winner_display_name,
-                       forced, fired_at
-                FROM minigames_log
-                WHERE guild_id = ?
-                ORDER BY fired_at DESC LIMIT 25
-            """, (guild_id,))
-            log = await cursor.fetchall()
-        return config, tiers, log
-
-    config, tiers, log = run_async(get_data())
     ctx = get_current_user_context()
-    return render("systems/minigames.html",
-                  config=config, tiers=tiers, log=log, **ctx)
+    return render("systems/minigames.html", **ctx)
+
+
+@app.route("/minigames/builder")
+@require_page("minigames")
+def minigame_builder_page():
+    ctx = get_current_user_context()
+    template_id = request.args.get("template_id")
+    category_id = request.args.get("category_id")
+    return render("systems/minigame_builder.html",
+                  template_id=int(template_id) if template_id and template_id.isdigit() else None,
+                  category_id=int(category_id) if category_id and category_id.isdigit() else None,
+                  **ctx)
 
 
 # ── Missions ─────────────────────────────────────────────────────────────────
@@ -1556,39 +1585,153 @@ def config_announcements():
 
 COMMAND_CATEGORIES = {
     "Moderation": [
-        "kick","ban","unban","timeout","untimeout",
-        "warn","warnings","clearwarnings","purge",
-        "lock","unlock","slowmode","modlogs",
+        "kick", "ban", "unban", "timeout", "untimeout",
+        "warn", "warnings", "clearwarnings", "purge",
+        "lock", "unlock", "slowmode", "modlogs",
+        "massban", "lockdown", "unlockdown",
     ],
     "Economy": [
-        "balance","daily","work","give","richest","convert",
-        "addcoins","removecoins","adddiamonds","removediamonds",
-        "shop","buy",
+        "balance", "daily", "give", "convert", "richest",
+        "addcoins", "removecoins", "adddiamonds", "removediamonds",
     ],
-    "Leveling": ["rank","leaderboard","setxp","resetxp","resetleaderboard","prestige"],
-    "Fun": ["hug","pat","slap","kiss","dance","coinflip","8ball"],
-    "Utility": [
-        "embed_create","embed_edit","sticky_set","sticky_remove",
-        "trigger_add","trigger_remove","trigger_list",
+    "Leveling": [
+        "rank", "leaderboard", "setxp", "resetxp",
+        "resetleaderboard", "prestige",
     ],
-    "Config": [
-        "boost_setup",
-        "youtube_setup", "youtube_remove", "youtube_list",
-        "twitch_setup", "twitch_remove", "twitch_list",
-        "ticket_setup",
+    "Shop & Inventory": [
+        "shop", "inventory",
     ],
-    "Events": ["event_create","event_end","event_list"],
+    "Tickets": [
+        "ticket_setup", "ticket_add", "ticket_remove", "ticket_close",
+    ],
+    "Reaction Roles": [
+        "reactionrole_create", "reactionrole_add",
+        "reactionrole_remove", "reactionrole_list",
+    ],
+    "Embed Builder": [
+        "embed_create", "embed_field", "embed_edit",
+        "embed_send", "embed_list", "embed_delete_template",
+    ],
+    "Triggers & Sticky": [
+        "trigger_add", "trigger_remove", "trigger_list", "trigger_toggle",
+        "sticky_set", "sticky_remove", "sticky_list",
+    ],
     "Minigames": [
-        "minigames_setup", "minigames_tier_add", "minigames_tier_list",
-        "minigames_tier_remove", "minigames_force", "minigames_stats",
+        "minigames_setup", "minigames_spawn", "minigames_stats",
     ],
     "Missions": [
         "missions", "mission_create", "mission_list", "mission_remove",
     ],
-    "Tickets": [
-        "ticket_close","ticket_claim","ticket_transfer",
-        "reactionrole_create","reactionrole_add",
+    "Events & MVP": [
+        "event_create", "event_list",
+        "mvp_scores", "mvp_setup", "mvp_force",
     ],
+    "Creator & Alerts": [
+        "youtube_setup", "youtube_remove", "youtube_list",
+        "twitch_setup", "twitch_remove", "twitch_list",
+    ],
+    "Server Config": [
+        "boost_setup", "boosters", "boostcolor_add", "boostcolor_remove",
+        "boostcolor_list", "boostcolor", "welcome_setup", "welcome_test",
+        "botprofile_view", "backup_now", "backup_list",
+    ],
+    "Utility & Trade": [
+        "trade", "trade_history", "report_setup", "report_list",
+        "schedule_message", "schedule_list", "schedule_cancel",
+    ],
+}
+
+COMMAND_METADATA = {
+    "backup_now": {"desc": "Trigger an immediate DB backup (owner only)", "params": []},
+    "backup_list": {"desc": "List recent DB backups (owner only)", "params": []},
+    "boost_setup": {"desc": "Configure boost roles and announcements", "params": ["boost1_role", "boost2_role", "announce_channel"]},
+    "boosters": {"desc": "List current server boosters", "params": []},
+    "boostcolor_add": {"desc": "Add a self-pickable color role for boosters", "params": ["role", "requires_boost_level"]},
+    "boostcolor_remove": {"desc": "Remove a color role from the boost picker", "params": ["role"]},
+    "boostcolor_list": {"desc": "List configured boost color role options", "params": []},
+    "boostcolor": {"desc": "Pick your boost color role", "params": ["color"]},
+    "botprofile_view": {"desc": "View this server's configured bot profile", "params": []},
+    "balance": {"desc": "Check your coin and diamond balance", "params": ["member"]},
+    "daily": {"desc": "Claim your daily coins", "params": []},
+    "give": {"desc": "Give coins to another member", "params": ["member", "amount"]},
+    "convert": {"desc": "Convert coins into diamonds", "params": ["coins"]},
+    "richest": {"desc": "View the richest members", "params": []},
+    "addcoins": {"desc": "Add coins to a member (admin)", "params": ["member", "amount"]},
+    "removecoins": {"desc": "Remove coins from a member (admin)", "params": ["member", "amount"]},
+    "adddiamonds": {"desc": "Add diamonds to a member (admin)", "params": ["member", "amount"]},
+    "removediamonds": {"desc": "Remove diamonds from a member (admin)", "params": ["member", "amount"]},
+    "embed_create": {"desc": "Create and send a custom embed", "params": ["channel", "title", "description", "color", "footer", "image", "thumbnail", "author", "save_as"]},
+    "embed_field": {"desc": "Add a field to an existing embed", "params": ["message_id", "field_name", "field_value", "inline"]},
+    "embed_edit": {"desc": "Edit an existing embed sent by the bot", "params": ["message_id", "title", "description", "color", "footer", "image", "thumbnail"]},
+    "embed_send": {"desc": "Send a saved embed template to a channel", "params": ["name", "channel"]},
+    "embed_list": {"desc": "List all saved embed templates", "params": []},
+    "embed_delete_template": {"desc": "Delete a saved embed template", "params": ["name"]},
+    "event_create": {"desc": "Create and launch a button race event", "params": ["title", "reward_type", "reward_value", "max_winners", "description", "channel", "duration_hours"]},
+    "event_list": {"desc": "List recent events", "params": []},
+    "rank": {"desc": "View your rank card", "params": ["member"]},
+    "leaderboard": {"desc": "View the XP leaderboard", "params": []},
+    "setxp": {"desc": "Set XP for a member (admin)", "params": ["member", "xp"]},
+    "resetxp": {"desc": "Reset a member's XP and level back to 0 (admin)", "params": ["member"]},
+    "resetleaderboard": {"desc": "Force an immediate leaderboard reset for this server (admin)", "params": []},
+    "prestige": {"desc": "Prestige — reset past a level threshold for a permanent status tier", "params": []},
+    "minigames_setup": {"desc": "Configure the minigames spawn system (channel + weekly range)", "params": ["channel", "min_events", "max_events", "enabled"]},
+    "minigames_spawn": {"desc": "Spawn a minigame right now (manual, admin). Omit the template to let the rotation pick.", "params": ["template_id"]},
+    "minigames_stats": {"desc": "View this week's minigames progress", "params": []},
+    "missions": {"desc": "View your active missions and progress", "params": []},
+    "mission_create": {"desc": "Create a mission (admin)", "params": ["name", "type", "target", "reward_type", "reward_value", "period", "description", "duration_hours"]},
+    "mission_list": {"desc": "List configured missions (admin)", "params": []},
+    "mission_remove": {"desc": "Remove a mission by ID (admin)", "params": ["mission_id"]},
+    "kick": {"desc": "Kick a member from the server", "params": ["member", "reason"]},
+    "ban": {"desc": "Ban a member from the server", "params": ["member", "reason", "delete_days", "duration"]},
+    "unban": {"desc": "Unban a user by ID", "params": ["user_id", "reason"]},
+    "timeout": {"desc": "Timeout a member for a duration", "params": ["member", "minutes", "reason"]},
+    "untimeout": {"desc": "Remove a timeout from a member", "params": ["member", "reason"]},
+    "warn": {"desc": "Warn a member", "params": ["member", "reason"]},
+    "warnings": {"desc": "View warnings for a member", "params": ["member"]},
+    "clearwarnings": {"desc": "Clear all warnings for a member", "params": ["member"]},
+    "purge": {"desc": "Delete messages in bulk", "params": ["amount", "member"]},
+    "lock": {"desc": "Lock a channel to prevent messages", "params": ["reason"]},
+    "unlock": {"desc": "Unlock a previously locked channel", "params": ["reason"]},
+    "slowmode": {"desc": "Set slowmode in a channel", "params": ["seconds"]},
+    "modlogs": {"desc": "View moderation logs for a member", "params": ["member"]},
+    "massban": {"desc": "Ban multiple users by ID at once", "params": ["user_ids", "reason"]},
+    "lockdown": {"desc": "Lock all channels across the server", "params": ["reason"]},
+    "unlockdown": {"desc": "Unlock all channels across the server", "params": []},
+    "mvp_scores": {"desc": "View today's MVP scores", "params": []},
+    "mvp_setup": {"desc": "Configure the MVP system", "params": ["mvp_role", "announce_channel", "cycle_hours", "chat_weight", "voice_weight"]},
+    "mvp_force": {"desc": "Force a new MVP cycle immediately (admin)", "params": []},
+    "reactionrole_create": {"desc": "Create a reaction role message with buttons", "params": ["channel", "title", "description", "exclusive", "max_roles", "require_confirmation"]},
+    "reactionrole_add": {"desc": "Add a role button to a reaction role message", "params": ["message_id", "role", "label", "color", "emoji", "booster_only", "required_role", "expiry_days"]},
+    "reactionrole_remove": {"desc": "Remove a role button from a reaction role message", "params": ["message_id", "role"]},
+    "reactionrole_list": {"desc": "List all reaction role messages in the server", "params": []},
+    "report_setup": {"desc": "Configure the user report system", "params": ["report_channel", "staff_role", "enabled"]},
+    "report_list": {"desc": "View recent reports (staff only)", "params": ["status"]},
+    "schedule_message": {"desc": "Schedule a message to be sent later (UTC times)", "params": ["channel", "message", "when", "repeat", "repeat_interval"]},
+    "schedule_list": {"desc": "List this server's scheduled messages", "params": []},
+    "schedule_cancel": {"desc": "Cancel a scheduled message by ID", "params": ["message_id"]},
+    "shop": {"desc": "View the server shop items", "params": []},
+    "inventory": {"desc": "View your purchased items and inventory", "params": []},
+    "sticky_set": {"desc": "Set a sticky message in a channel", "params": ["channel", "content"]},
+    "sticky_remove": {"desc": "Remove the sticky message from a channel", "params": ["channel"]},
+    "sticky_list": {"desc": "List all sticky messages in the server", "params": []},
+    "ticket_setup": {"desc": "Set up the ticket support system", "params": ["channel", "staff_role", "log_channel", "ticket_category", "categories"]},
+    "ticket_add": {"desc": "Add a member to the current ticket", "params": ["member"]},
+    "ticket_remove": {"desc": "Remove a member from the current ticket", "params": ["member"]},
+    "ticket_close": {"desc": "Close the current ticket", "params": []},
+    "trade": {"desc": "Start a trade with another member", "params": ["member"]},
+    "trade_history": {"desc": "View your recent trade history", "params": ["member"]},
+    "trigger_add": {"desc": "Add an auto-response trigger", "params": ["trigger", "response"]},
+    "trigger_remove": {"desc": "Remove a trigger by ID", "params": ["trigger_id"]},
+    "trigger_list": {"desc": "List all active triggers", "params": []},
+    "trigger_toggle": {"desc": "Enable or disable a trigger", "params": ["trigger_id"]},
+    "twitch_setup": {"desc": "Set up Twitch stream live alerts", "params": ["twitch_username", "discord_channel", "ping_role", "give_role", "discord_streamer", "custom_message"]},
+    "twitch_remove": {"desc": "Remove a Twitch stream alert", "params": ["entry_id"]},
+    "twitch_list": {"desc": "List configured Twitch alert configs", "params": []},
+    "welcome_setup": {"desc": "Send the welcome / rules gate embed", "params": ["channel"]},
+    "welcome_test": {"desc": "Test the welcome message for yourself", "params": []},
+    "youtube_setup": {"desc": "Add a YouTube channel to watch for uploads", "params": ["youtube_url", "discord_channel", "ping_role", "custom_message"]},
+    "youtube_remove": {"desc": "Remove a YouTube notification", "params": ["entry_id"]},
+    "youtube_list": {"desc": "List YouTube notification configs", "params": []},
 }
 
 
@@ -1596,6 +1739,15 @@ COMMAND_CATEGORIES = {
 @require_page("commands")
 def commands_dashboard():
     guild_id = get_session_guild_id()
+
+    def _has_items(val):
+        if not val:
+            return False
+        try:
+            arr = json.loads(val) if isinstance(val, str) else val
+            return bool(arr)
+        except Exception:
+            return False
 
     async def get_toggles():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1625,40 +1777,43 @@ def commands_dashboard():
                     "require_permission": r[19], "owner_only": r[20],
                     "cmd_emoji": r[21], "category_color": r[22],
                     "hide_from_help": r[23],
+                    "has_restrictions": (
+                        _has_items(r[6]) or _has_items(r[7]) or
+                        _has_items(r[8]) or _has_items(r[9]) or
+                        _has_items(r[2]) or _has_items(r[3])
+                    ),
                 }
             return result
 
     toggles = run_async(get_toggles())
     ctx     = get_current_user_context()
+
+    # Calculate summary stats for the commands dashboard
+    all_cmds = [cmd for cmds in COMMAND_CATEGORIES.values() for cmd in cmds]
+    total_count = len(all_cmds)
+    disabled_count = sum(1 for cmd in all_cmds if toggles.get(cmd, {}).get("enabled", 1) == 0)
+    enabled_count = total_count - disabled_count
+    restricted_count = sum(1 for cmd in all_cmds if toggles.get(cmd, {}).get("has_restrictions"))
+
+    stats = {
+        "total": total_count,
+        "enabled": enabled_count,
+        "disabled": disabled_count,
+        "restricted": restricted_count,
+        "categories": len(COMMAND_CATEGORIES),
+    }
+
     return render("manage/commands.html",
-                  categories=COMMAND_CATEGORIES, toggles=toggles, **ctx)
+                  categories=COMMAND_CATEGORIES,
+                  metadata=COMMAND_METADATA,
+                  toggles=toggles,
+                  stats=stats,
+                  **ctx)
 
 
 @app.route("/config/commands", methods=["GET", "POST"])
 @require_page("commands")
 def config_commands():
-    if request.method == "POST":
-        guild_id = get_session_guild_id()
-
-        submitted_token = request.form.get("csrf_token", "")
-        if not submitted_token or submitted_token != session.get("csrf_token"):
-            abort(403)
-
-        command  = request.form.get("command")
-        action   = request.form.get("action")
-        if command and action:
-            async def toggle_cmd():
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute("""
-                        INSERT INTO command_toggles (guild_id, command_name, enabled)
-                        VALUES (?,?,?)
-                        ON CONFLICT(guild_id, command_name)
-                        DO UPDATE SET enabled=excluded.enabled,
-                                      updated_at=CURRENT_TIMESTAMP
-                    """, (guild_id, command, int(action == "enable")))
-                    await db.commit()
-            run_async(toggle_cmd())
-        return redirect(url_for("config_commands"))
     return redirect(url_for("commands_dashboard"))
 
 
@@ -1668,33 +1823,35 @@ def config_commands():
 @require_page("commands")
 def api_command_toggle():
     guild_id = get_session_guild_id()
-    data     = request.json
-    command  = data.get("command")
-    enabled  = data.get("enabled", True)
+    data     = request.json or {}
+    command  = (data.get("command") or "").strip().lstrip("/")
+    if not command:
+        return jsonify({"success": False, "error": "Command name is required"}), 400
+    enabled  = int(bool(data.get("enabled", True)))
 
     async def toggle():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                INSERT INTO command_toggles (guild_id, command_name, enabled)
-                VALUES (?,?,?)
+                INSERT INTO command_toggles (guild_id, command_name, enabled, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(guild_id, command_name)
                 DO UPDATE SET enabled=excluded.enabled, updated_at=CURRENT_TIMESTAMP
-            """, (guild_id, command, int(bool(enabled))))
+            """, (guild_id, command, enabled))
             await db.commit()
 
     run_async(toggle())
     log_action(guild_id,
                f"{'Enabled' if enabled else 'Disabled'} /{command}", "commands")
-    return jsonify({"success": True})
+    return jsonify({"success": True, "command": command, "enabled": bool(enabled)})
 
 
 @app.route("/api/commands/bulk-toggle", methods=["POST"])
 @require_page("commands")
 def api_commands_bulk_toggle():
     guild_id = get_session_guild_id()
-    data     = request.json
+    data     = request.json or {}
     commands = data.get("commands", [])
-    enabled  = data.get("enabled", True)
+    enabled  = int(bool(data.get("enabled", True)))
     category = data.get("category")
 
     if not commands:
@@ -1707,25 +1864,27 @@ def api_commands_bulk_toggle():
         async with aiosqlite.connect(DB_PATH) as db:
             for cmd in commands:
                 await db.execute("""
-                    INSERT INTO command_toggles (guild_id, command_name, enabled)
-                    VALUES (?,?,?)
+                    INSERT INTO command_toggles (guild_id, command_name, enabled, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(guild_id, command_name)
                     DO UPDATE SET enabled=excluded.enabled,
                                   updated_at=CURRENT_TIMESTAMP
-                """, (guild_id, cmd, int(bool(enabled))))
+                """, (guild_id, cmd, enabled))
             await db.commit()
 
     run_async(bulk())
+    desc = f"in category '{category}'" if category else "globally"
     log_action(guild_id,
-               f"Bulk {'enabled' if enabled else 'disabled'} {len(commands)} commands",
+               f"Bulk {'enabled' if enabled else 'disabled'} {len(commands)} commands {desc}",
                "commands")
-    return jsonify({"success": True, "count": len(commands)})
+    return jsonify({"success": True, "count": len(commands), "enabled": bool(enabled)})
 
 
 @app.route("/api/commands/settings/<command>", methods=["GET"])
 @require_page("commands")
 def api_command_settings_get(command: str):
     guild_id = get_session_guild_id()
+    cmd_clean = command.strip().lstrip("/")
 
     async def get():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1738,90 +1897,440 @@ def api_command_settings_get(command: str):
                        bypass_cooldown_roles, require_permission, owner_only,
                        cmd_emoji, category_color, hide_from_help
                 FROM command_toggles WHERE guild_id=? AND command_name=?
-            """, (guild_id, command))
+            """, (guild_id, cmd_clean))
             row = await cur.fetchone()
             if not row:
-                return {"command_name": command, "enabled": 1}
-            return dict(zip([d[0] for d in cur.description], row))
+                return {"command_name": cmd_clean, "enabled": 1}
+            res = dict(zip([d[0] for d in cur.description], row))
+            if not res.get("enabled_roles") and res.get("allowed_roles"):
+                res["enabled_roles"] = res["allowed_roles"]
+            if not res.get("enabled_channels") and res.get("allowed_channels"):
+                res["enabled_channels"] = res["allowed_channels"]
+            return res
 
     return jsonify(run_async(get()))
+
+
+
+# ── Alias advice (dashboard side, never a veto) ─────────────────────────
+#
+# Which system answers a given message is decided at runtime by
+# utils/message_router.py — prefix command > alias > custom command > trigger,
+# exactly one winner — and that answer is final. So the dashboard does not get
+# to refuse a save because a word is used elsewhere: it gets to *explain* what
+# will happen instead.
+#
+# This is a change of behaviour on purpose. The code before it raised
+# ValueError (HTTP 400) for five different "conflicts", which both contradicted
+# the router and blocked setups that work fine — e.g. alias `k` next to a
+# trigger word `k` is not an error, it just means the trigger stops hearing
+# messages that *begin* with `k`. Format problems (spaces, punctuation, length)
+# stay hard errors, because those words can never work at all.
+
+ALIAS_MAX_LEN = 32
+#: commands the prefix parser owns no matter what (main.py registers them;
+#: the bot process, not this Flask app, is the authority, so this is a hint
+#: list rather than a source of truth)
+ALIAS_BUILTINS = {"sync", "reload", "help"}
+
+
+def _json_word_list(raw):
+    """Parse a JSON array column into normalized alias words."""
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return normalize_aliases(parsed)
+
+
+def normalize_aliases(raw):
+    """Strip, lowercase, dedupe — and drop the `!`/`/` people paste in."""
+    out = []
+    for item in raw or []:
+        if not isinstance(item, str):
+            continue
+        word = item.strip().lower().lstrip("!/")
+        if word and word not in out:
+            out.append(word)
+    return out
+
+
+def alias_format_error(alias: str):
+    """Hard rules only — collisions are not checked here on purpose."""
+    if not alias:
+        return "An alias can't be empty."
+    if len(alias) > ALIAS_MAX_LEN:
+        return (f"Alias '{alias}' is too long — {ALIAS_MAX_LEN} characters "
+                f"maximum.")
+    if any(ch.isspace() for ch in alias):
+        return f"Alias '{alias}' can't contain spaces — one word per alias."
+    if not alias.replace("-", "").replace("_", "").isalnum():
+        return (f"Alias '{alias}' is invalid — use only letters, numbers, "
+                f"hyphens and underscores.")
+    return None
+
+
+async def alias_warnings(db, guild_id, command_name, aliases):
+    """Non-blocking notes about what these alias words will collide with.
+
+    Takes the open aiosqlite connection so a save doesn't need a second one.
+    """
+    if not aliases:
+        return []
+
+    words = list(aliases)
+    notes = []
+
+    def note(kind, alias, message):
+        notes.append({"kind": kind, "alias": alias, "message": message})
+
+    for alias in words:
+        if alias == command_name:
+            note("own-name", alias,
+                 f"'{alias}' is already the name of /{command_name}, so the "
+                 f"alias adds nothing and Nero ignores it. An alias has to be "
+                 f"a different word.")
+        if alias in ALIAS_BUILTINS:
+            note("prefix", alias,
+                 f"'!{alias}' is one of Nero's own commands and keeps that "
+                 f"form: prefixed input always goes to it. Bare "
+                 f"'{alias}' will still run /{command_name}.")
+        if alias in COMMAND_METADATA and alias != command_name:
+            note("slash-name", alias,
+                 f"'{alias}' is also a command name. Typing it without a "
+                 f"prefix now runs /{command_name}; the slash menu entry "
+                 f"/{alias} is unaffected.")
+
+    cursor = await db.execute("""
+        SELECT guild_id, command_name, aliases FROM command_toggles
+        WHERE (guild_id = ? OR guild_id = 0)
+          AND aliases IS NOT NULL AND aliases != '[]' AND aliases != ''
+    """, (guild_id,))
+    for row_guild, other_cmd, aliases_json in await cursor.fetchall():
+        try:
+            same_row = (int(row_guild) == int(guild_id)
+                        and other_cmd == command_name)
+        except (TypeError, ValueError):
+            same_row = False
+        if same_row:
+            continue
+        for alias in _json_word_list(aliases_json):
+            if alias not in words:
+                continue
+            if int(row_guild or 0) == 0:
+                note("global", alias,
+                     f"'{alias}' is also stored on the global (guild 0) row "
+                     f"for /{other_cmd}. Command settings are read per server, "
+                     f"so that row has no effect in a real server — set the "
+                     f"alias on this server's row, as you are doing now.")
+            else:
+                note("duplicate", alias,
+                     f"'{alias}' is currently the alias of /{other_cmd} here. "
+                     f"Saving moves it to /{command_name} and /{other_cmd} "
+                     f"stops answering to it — the most recently saved row "
+                     f"owns the word.")
+
+    cursor = await db.execute("""
+        SELECT trigger FROM custom_commands
+        WHERE (guild_id = ? OR guild_id = 0)
+    """, (guild_id,))
+    for (trigger,) in await cursor.fetchall():
+        token = (trigger or "").strip().lower().lstrip("!")
+        if token not in words:
+            continue
+        note("custom", token,
+             f"A custom command '!{token}' also exists. Both keep working — "
+             f"'{token}' runs /{command_name}, '!{token}' runs the custom "
+             f"command — because aliases are typed bare and have no !-form.")
+
+    cursor = await db.execute("""
+        SELECT trigger_words, match_type, fuzzy_match, fuzzy_threshold
+        FROM triggers
+        WHERE (guild_id = ? OR guild_id = 0) AND enabled = 1
+    """, (guild_id,))
+    rows = await cursor.fetchall()
+    for tw_raw, match_type, fuzzy, threshold in rows:
+        for word in [w.strip().lower() for w in (tw_raw or "").split(",")]:
+            if not word:
+                continue
+            for alias in words:
+                if word == alias:
+                    note("trigger", alias,
+                         f"A trigger listens for the whole message "
+                         f"'{word}'. One message can only run one thing, and "
+                         f"aliases win — so a message that *starts* with "
+                         f"'{alias}' now runs /{command_name} instead of "
+                         f"getting the auto-reply. Rename the trigger if you "
+                         f"want that reply back.")
+                elif match_type == "contains" and (alias in word or
+                                                    word in alias):
+                    note("trigger-substring", alias,
+                         f"The trigger '{word}' matches anywhere in a message, "
+                         f"so it still fires for most sentences — but a message "
+                         f"that starts with '{alias}' runs /{command_name} "
+                         f"first (aliases take priority).")
+                elif match_type == "startswith" and (
+                        word.startswith(alias) or alias.startswith(word)):
+                    note("trigger-substring", alias,
+                         f"The trigger '{word}' matches the start of a message "
+                         f"and overlaps '{alias}'; whichever the router claims "
+                         f"first wins, and aliases outrank triggers.")
+                elif fuzzy:
+                    try:
+                        from thefuzz import fuzz
+                        ratio = fuzz.partial_ratio(alias, word)
+                    except Exception:
+                        ratio = 0
+                    if ratio >= int(threshold or 80) and alias != word:
+                        note("trigger-fuzzy", alias,
+                             f"The fuzzy trigger '{word}' scores {ratio} "
+                             f"against '{alias}' (threshold "
+                             f"{int(threshold or 80)}). The alias wins for "
+                             f"messages that begin with '{alias}'; the trigger "
+                             f"keeps answering elsewhere.")
+    return notes
+
+
+@app.route("/api/commands/alias-registry")
+@require_page("commands")
+def api_command_alias_registry():
+    """The stored alias map for this guild, for the chip input to annotate.
+
+    Read-only, and deliberately narrow: it reports what is in the database and
+    what the bot last reported about building its index. Runtime precedence
+    stays in the bot (utils/message_router.py) — the labels below are the only
+    place this file mentions it, so the two cannot disagree about behaviour.
+    """
+    guild_id = get_session_guild_id()
+
+    async def read():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT guild_id, command_name, aliases, enabled, updated_at
+                FROM command_toggles
+                WHERE (guild_id = ? OR guild_id = 0)
+                  AND aliases IS NOT NULL AND aliases != '[]' AND aliases != ''
+                ORDER BY updated_at DESC, id DESC
+            """, (guild_id,))
+            entries, shadowed = {}, []
+            for row_guild, cmd_name, aliases_json, enabled, updated in \
+                    await cursor.fetchall():
+                for alias in _json_word_list(aliases_json):
+                    if alias in entries:
+                        # newest row already owns it, so this is the loser
+                        shadowed.append({
+                            "alias": alias, "command": cmd_name,
+                            "guild_id": int(row_guild or 0),
+                            "reason": "shadowed-by-newer-save",
+                        })
+                        continue
+                    entries[alias] = {
+                        "command": cmd_name,
+                        "guild_id": int(row_guild or 0),
+                        "scope": "global" if int(row_guild or 0) == 0
+                        else "server",
+                        "enabled": 1 if enabled else 0,
+                        "updated_at": str(updated or ""),
+                    }
+
+            cursor = await db.execute(
+                "SELECT trigger FROM custom_commands "
+                "WHERE guild_id = ? OR guild_id = 0", (guild_id,))
+            custom = sorted({(t or "").strip().lower().lstrip("!")
+                             for (t,) in await cursor.fetchall()
+                             if (t or "").strip()})
+
+            cursor = await db.execute(
+                "SELECT trigger_words FROM triggers "
+                "WHERE (guild_id = ? OR guild_id = 0) AND enabled = 1",
+                (guild_id,))
+            trigger_words = sorted({
+                w.strip().lower()
+                for (tw,) in await cursor.fetchall() if tw
+                for w in str(tw).split(",") if w.strip()
+            })
+
+            cursor = await db.execute(
+                "SELECT value FROM bot_settings "
+                "WHERE key = 'command_aliases_sync_needed'")
+            flag = await cursor.fetchone()
+            cursor = await db.execute(
+                "SELECT value FROM bot_settings "
+                "WHERE key = 'command_aliases_last_sync'")
+            last = await cursor.fetchone()
+
+        try:
+            last_sync = json.loads(last[0]) if last else None
+        except (TypeError, ValueError):
+            last_sync = {"raw": last[0] if last else None}
+        return entries, shadowed, custom, trigger_words, flag, last_sync
+
+    (entries, shadowed, custom, trigger_words, flag,
+     last_sync) = run_async(read())
+
+    return jsonify({
+        "success": True,
+        "guild_id": guild_id,
+        "aliases": entries,
+        "shadowed": shadowed,
+        "custom_commands": custom,
+        "trigger_words": trigger_words,
+        "prefix_commands": sorted(ALIAS_BUILTINS),
+        "slash_commands": sorted(COMMAND_METADATA),
+        "pending_resync": bool(flag and flag[0] == "1"),
+        "last_sync": last_sync,
+    })
 
 
 @app.route("/api/commands/settings/<command>", methods=["POST"])
 @require_page("commands")
 def api_command_settings_save(command: str):
-    guild_id = get_session_guild_id()
-    data     = request.json
+    guild_id  = get_session_guild_id()
+    data      = request.json or {}
+    cmd_clean = command.strip().lstrip("/")
+    if not cmd_clean:
+        return jsonify({"success": False, "error": "Invalid command name"}), 400
+
+    has_enabled = "enabled" in data
+    enabled_val = int(bool(data["enabled"])) if has_enabled else None
+
+    en_roles  = json.dumps(data.get("enabled_roles", [])) if data.get("enabled_roles") else None
+    dis_roles = json.dumps(data.get("disabled_roles", [])) if data.get("disabled_roles") else None
+    en_chans  = json.dumps(data.get("enabled_channels", [])) if data.get("enabled_channels") else None
+    dis_chans = json.dumps(data.get("disabled_channels", [])) if data.get("disabled_channels") else None
+
+    allow_roles = en_roles
+    allow_chans = en_chans
+
+    cooldown_raw = data.get("cooldown_seconds")
+    cooldown_sec = int(cooldown_raw) if cooldown_raw is not None and str(cooldown_raw).lstrip("-").isdigit() and int(cooldown_raw) >= 0 else None
+
+    # Aliases: the *format* is enforced, because a word containing a space or
+    # punctuation can never match; overlap with other systems is reported as a
+    # warning further down instead of blocking the save. Note there is
+    # deliberately no minimum length — `k` is the single most requested alias.
+    aliases_raw = normalize_aliases(data.get("aliases", []))
+    for alias in aliases_raw:
+        problem = alias_format_error(alias)
+        if problem:
+            return jsonify({"success": False, "error": problem}), 400
+
+    aliases = json.dumps(aliases_raw) if aliases_raw else None
+    save_warnings = []
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
+            # Collected while the row is still in its previous state, so
+            # "move this word off /other" reads correctly.
+            save_warnings.extend(
+                await alias_warnings(db, guild_id, cmd_clean, aliases_raw))
+
             await db.execute("""
                 INSERT INTO command_toggles
                     (guild_id, command_name, enabled, allowed_roles,
                      allowed_channels, cooldown_seconds, aliases,
                      enabled_roles, disabled_roles, enabled_channels,
-                     disabled_channels, delete_user_msg, delete_bot_reply,
-                     delete_bot_after, custom_cooldown, success_message,
-                     error_message, ephemeral, dm_response,
-                     bypass_cooldown_roles, require_permission, owner_only,
-                     cmd_emoji, category_color, hide_from_help)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     disabled_channels, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(guild_id, command_name) DO UPDATE SET
-                    enabled=excluded.enabled,
-                    allowed_roles=excluded.allowed_roles,
-                    allowed_channels=excluded.allowed_channels,
-                    cooldown_seconds=excluded.cooldown_seconds,
-                    aliases=excluded.aliases,
-                    enabled_roles=excluded.enabled_roles,
-                    disabled_roles=excluded.disabled_roles,
-                    enabled_channels=excluded.enabled_channels,
-                    disabled_channels=excluded.disabled_channels,
-                    delete_user_msg=excluded.delete_user_msg,
-                    delete_bot_reply=excluded.delete_bot_reply,
-                    delete_bot_after=excluded.delete_bot_after,
-                    custom_cooldown=excluded.custom_cooldown,
-                    success_message=excluded.success_message,
-                    error_message=excluded.error_message,
-                    ephemeral=excluded.ephemeral,
-                    dm_response=excluded.dm_response,
-                    bypass_cooldown_roles=excluded.bypass_cooldown_roles,
-                    require_permission=excluded.require_permission,
-                    owner_only=excluded.owner_only,
-                    cmd_emoji=excluded.cmd_emoji,
-                    category_color=excluded.category_color,
-                    hide_from_help=excluded.hide_from_help,
-                    updated_at=CURRENT_TIMESTAMP
+                    enabled = CASE WHEN ? IS NOT NULL THEN excluded.enabled ELSE command_toggles.enabled END,
+                    allowed_roles = excluded.allowed_roles,
+                    allowed_channels = excluded.allowed_channels,
+                    cooldown_seconds = excluded.cooldown_seconds,
+                    aliases = excluded.aliases,
+                    enabled_roles = excluded.enabled_roles,
+                    disabled_roles = excluded.disabled_roles,
+                    enabled_channels = excluded.enabled_channels,
+                    disabled_channels = excluded.disabled_channels,
+                    updated_at = CURRENT_TIMESTAMP
             """, (
-                guild_id, command,
-                int(bool(data.get("enabled", True))),
-                json.dumps(data.get("allowed_roles", [])) if data.get("allowed_roles") else None,
-                json.dumps(data.get("allowed_channels", [])) if data.get("allowed_channels") else None,
-                data.get("cooldown_seconds"),
-                json.dumps(data.get("aliases", [])) if data.get("aliases") else None,
-                json.dumps(data.get("enabled_roles", [])) if data.get("enabled_roles") else None,
-                json.dumps(data.get("disabled_roles", [])) if data.get("disabled_roles") else None,
-                json.dumps(data.get("enabled_channels", [])) if data.get("enabled_channels") else None,
-                json.dumps(data.get("disabled_channels", [])) if data.get("disabled_channels") else None,
-                int(bool(data.get("delete_user_msg"))),
-                int(bool(data.get("delete_bot_reply"))),
-                int(data.get("delete_bot_after", 0)),
-                data.get("custom_cooldown"),
-                data.get("success_message"),
-                data.get("error_message"),
-                int(bool(data.get("ephemeral"))),
-                int(bool(data.get("dm_response"))),
-                json.dumps(data.get("bypass_cooldown_roles", [])) if data.get("bypass_cooldown_roles") else None,
-                data.get("require_permission"),
-                int(bool(data.get("owner_only"))),
-                data.get("cmd_emoji"),
-                data.get("category_color"),
-                int(bool(data.get("hide_from_help"))),
+                guild_id, cmd_clean,
+                enabled_val if has_enabled else 1,
+                allow_roles, allow_chans,
+                cooldown_sec, aliases,
+                en_roles, dis_roles, en_chans, dis_chans,
+                enabled_val,
             ))
+
+            # Signal the bot to re-sync aliases
+            await db.execute("""
+                INSERT INTO bot_settings (key, value)
+                VALUES ('command_aliases_sync_needed', '1')
+                ON CONFLICT(key) DO UPDATE SET value = '1'
+            """)
             await db.commit()
 
-    run_async(save())
-    log_action(guild_id, f"Updated settings for /{command}", "commands")
-    return jsonify({"success": True})
+    try:
+        run_async(save())
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+    log_action(guild_id, f"Updated settings for /{cmd_clean}", "commands")
+    return jsonify({"success": True, "command": cmd_clean,
+                    "warnings": save_warnings})
+
+
+@app.route("/api/commands/bulk-restrict", methods=["POST"])
+@require_page("commands")
+def api_commands_bulk_restrict():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+    category = data.get("category")
+
+    if not category or category not in COMMAND_CATEGORIES:
+        return jsonify({"success": False, "error": "Invalid category"}), 400
+
+    commands = COMMAND_CATEGORIES[category]
+
+    has_en_roles  = "enabled_roles" in data
+    has_dis_roles = "disabled_roles" in data
+    has_en_chans  = "enabled_channels" in data
+    has_dis_chans = "disabled_channels" in data
+
+    en_roles  = json.dumps(data.get("enabled_roles", [])) if data.get("enabled_roles") else None
+    dis_roles = json.dumps(data.get("disabled_roles", [])) if data.get("disabled_roles") else None
+    en_chans  = json.dumps(data.get("enabled_channels", [])) if data.get("enabled_channels") else None
+    dis_chans = json.dumps(data.get("disabled_channels", [])) if data.get("disabled_channels") else None
+
+    async def bulk_restrict():
+        async with aiosqlite.connect(DB_PATH) as db:
+            for cmd in commands:
+                await db.execute("""
+                    INSERT INTO command_toggles (guild_id, command_name, enabled, updated_at)
+                    VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id, command_name) DO NOTHING
+                """, (guild_id, cmd))
+
+                updates = []
+                params = []
+                if has_en_roles:
+                    updates.append("enabled_roles = ?, allowed_roles = ?")
+                    params.extend([en_roles, en_roles])
+                if has_dis_roles:
+                    updates.append("disabled_roles = ?")
+                    params.append(dis_roles)
+                if has_en_chans:
+                    updates.append("enabled_channels = ?, allowed_channels = ?")
+                    params.extend([en_chans, en_chans])
+                if has_dis_chans:
+                    updates.append("disabled_channels = ?")
+                    params.append(dis_chans)
+
+                if updates:
+                    updates.append("updated_at = CURRENT_TIMESTAMP")
+                    sql = f"UPDATE command_toggles SET {', '.join(updates)} WHERE guild_id = ? AND command_name = ?"
+                    params.extend([guild_id, cmd])
+                    await db.execute(sql, tuple(params))
+
+            await db.commit()
+
+    run_async(bulk_restrict())
+    log_action(guild_id,
+               f"Updated restrictions for category '{category}' ({len(commands)} commands)",
+               "commands")
+    return jsonify({"success": True, "category": category, "count": len(commands)})
 
 
 # ── Config: Access ─────────────────────────────────────────────────────────────
@@ -2003,6 +2512,49 @@ def api_save_trigger():
     guild_id = get_session_guild_id()
     data     = request.json
 
+    # ADVISORY ONLY (2026-08-28): a trigger word that is also an alias used to
+    # be rejected outright. It can't be: the router already settles it (an
+    # alias claims only messages that *start* with that word, and only when the
+    # word isn't a prefix command or custom command). Saving anyway is fine —
+    # the save response says what will change, and the triggers page shows it.
+    trigger_warnings = []
+    trigger_words_raw = data.get("trigger_words", "")
+    if trigger_words_raw:
+        new_words = [w.strip().lower() for w in str(trigger_words_raw).split(",")
+                     if w.strip()]
+
+        async def alias_note_for_words():
+            async with aiosqlite.connect(DB_PATH) as db:
+                cursor = await db.execute("""
+                    SELECT guild_id, command_name, aliases FROM command_toggles
+                    WHERE (guild_id = ? OR guild_id = 0)
+                      AND aliases IS NOT NULL AND aliases != '[]' AND aliases != ''
+                """, (guild_id,))
+                owners = {}
+                for row_guild, cmd_name, aliases_json in await cursor.fetchall():
+                    for alias in _json_word_list(aliases_json):
+                        owners.setdefault(alias, (cmd_name, int(row_guild or 0)))
+            out = []
+            for word in new_words:
+                owner = owners.get(word)
+                if not owner:
+                    continue
+                cmd_name, row_guild = owner
+                scope = ("on the global (guild 0) row" if row_guild == 0
+                         else "in this server")
+                out.append({
+                    "kind": "alias",
+                    "alias": word,
+                    "message": (
+                        f"'{word}' is an alias {scope} for /{cmd_name}. "
+                        f"Messages that start with '{word}' run that command "
+                        f"instead of this trigger; the trigger still answers "
+                        f"everywhere else."),
+                })
+            return out
+
+        trigger_warnings = run_async(alias_note_for_words())
+
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -2031,7 +2583,7 @@ def api_save_trigger():
 
     run_async(save())
     log_action(guild_id, f"Added trigger: {data.get('trigger_words')}", "triggers")
-    return jsonify({"success": True})
+    return jsonify({"success": True, "warnings": trigger_warnings})
 
 
 @app.route("/api/delete-trigger/<int:trigger_id>", methods=["DELETE"])
@@ -2058,6 +2610,40 @@ def api_save_custom_command():
     guild_id = get_session_guild_id()
     data     = request.json
 
+    # ADVISORY ONLY, same reasoning as /api/save-trigger: the router decides
+    # who answers, the dashboard explains. `enabled` is written here too, since
+    # the bot now honours it (a row with enabled=0 is genuinely off — before
+    # this, the column was ignored and "disabled" commands kept replying).
+    trigger_warnings = []
+    cc_token = normalize_aliases([data.get("trigger", "")])
+    if cc_token:
+        async def alias_note_for_token():
+            async with aiosqlite.connect(DB_PATH) as db:
+                cursor = await db.execute("""
+                    SELECT guild_id, command_name, aliases FROM command_toggles
+                    WHERE (guild_id = ? OR guild_id = 0)
+                      AND aliases IS NOT NULL AND aliases != '[]' AND aliases != ''
+                """, (guild_id,))
+                owners = {}
+                for row_guild, cmd_name, aliases_json in await cursor.fetchall():
+                    for alias in _json_word_list(aliases_json):
+                        owners.setdefault(alias, (cmd_name, int(row_guild or 0)))
+            alias, row_guild = owners.get(cc_token[0], (None, None))
+            if alias is None:
+                return []
+            return [{
+                "kind": "alias",
+                "alias": cc_token[0],
+                "message": (
+                    f"'{cc_token[0]}' is also an alias for /{alias} "
+                    f"{'on the global (guild 0) row' if row_guild == 0 else 'in this server'}. "
+                    f"They do not clash — '!{cc_token[0]}' runs this custom "
+                    f"command, bare '{cc_token[0]}' runs /{alias} — but it is "
+                    f"worth knowing, because aliases have no !-form."),
+            }]
+
+        trigger_warnings = run_async(alias_note_for_token())
+
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -2065,8 +2651,9 @@ def api_save_custom_command():
                     (guild_id, trigger, allowed_roles, actions,
                      embed_title, embed_description, embed_color,
                      log_channel_id, same_channel, dm_member,
-                     dm_message, requires_mention, requires_reason)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     dm_message, requires_mention, requires_reason,
+                     enabled)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 guild_id,
                 data.get("trigger"),
@@ -2081,13 +2668,14 @@ def api_save_custom_command():
                 data.get("dm_message"),
                 int(bool(data.get("requires_mention", True))),
                 int(bool(data.get("requires_reason", True))),
+                int(bool(data.get("enabled", True))),
             ))
             await db.commit()
 
     run_async(save())
     log_action(guild_id, f"Added custom command: !{data.get('trigger')}",
                "customcommands")
-    return jsonify({"success": True})
+    return jsonify({"success": True, "warnings": trigger_warnings})
 
 
 @app.route("/api/delete-custom-command/<int:cmd_id>", methods=["DELETE"])

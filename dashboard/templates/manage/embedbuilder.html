@@ -18,7 +18,7 @@
                 <button type="button" class="eb-tbtn" data-fmt="strike" aria-label="Strikethrough" title="Strikethrough"><s>S</s></button>
                 <span class="eb-tdivider"></span>
                 <button type="button" class="eb-tbtn" id="eb-mention-btn" aria-label="Add Mention" title="Add Mention">@</button>
-                <button type="button" class="eb-tbtn" id="eb-emoji-btn" aria-label="Insert Emoji" title="Insert Emoji">🙂</button>
+                <button type="button" class="eb-tbtn" id="eb-emoji-btn" aria-label="Insert Emoji" title="Insert Emoji">🐻‍❄️</button>
             </div>
             <textarea class="form-input eb-content-input" id="eb-content" rows="3" maxlength="2000"
                 placeholder="Message content shown above the embed(s)..."></textarea>
@@ -129,165 +129,27 @@
     <div class="eb-emoji-hover-bar" id="eb-emoji-hover-bar"><span class="eb-emoji-hover-empty">Pick an emoji…</span></div>
 </div>
 
-<style>
-.eb-field-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
-.eb-field-label { font-size:11px; font-weight:700; letter-spacing:.05em; color:var(--text3); }
-.eb-counter { font-size:11px; color:var(--text3); font-family:'JetBrains Mono','Fira Code',monospace; }
-.eb-counter.eb-counter-warn { color:var(--warning); }
-.eb-counter.eb-counter-danger { color:var(--danger); }
-
-.eb-toolbar { display:flex; align-items:center; gap:4px; margin-bottom:8px; flex-wrap:wrap; }
-.eb-tbtn {
-    min-width:32px; height:32px; padding:0 8px;
-    display:inline-flex; align-items:center; justify-content:center;
-    background:var(--bg3); border:1px solid var(--border); border-radius:6px;
-    color:var(--text2); font-size:13px; font-weight:700; cursor:pointer;
-    transition:all .12s;
-}
-.eb-tbtn:hover { background:var(--bg4); color:var(--text); border-color:var(--accent); }
-.eb-tbtn:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
-.eb-tdivider { width:1px; height:20px; background:var(--border); margin:0 4px; }
-
-.eb-content-input { resize:vertical; min-height:70px; }
-
-.eb-dropzone {
-    border:1.5px dashed var(--border); border-radius:10px; padding:20px;
-    text-align:center; font-size:13px; color:var(--text2);
-    transition:all .15s; margin-bottom:12px; cursor:pointer;
-}
-.eb-dropzone.eb-dragover { border-color:var(--accent); background:rgba(124,92,191,.08); }
-.eb-link-btn { background:none; border:none; color:var(--accent); font-size:13px; cursor:pointer; text-decoration:underline; padding:0; }
-
-.eb-attach-grid { display:flex; flex-wrap:wrap; gap:10px; }
-.eb-attach-item {
-    position:relative; width:96px; background:var(--bg3); border:1px solid var(--border);
-    border-radius:8px; overflow:hidden; font-size:10px;
-}
-.eb-attach-thumb { width:100%; height:64px; object-fit:cover; display:block; background:var(--bg4); }
-.eb-attach-icon { width:100%; height:64px; display:flex; align-items:center; justify-content:center; font-size:24px; background:var(--bg4); }
-.eb-attach-name { padding:4px 6px; color:var(--text2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.eb-attach-remove {
-    position:absolute; top:3px; right:3px; width:18px; height:18px; border-radius:50%;
-    background:rgba(0,0,0,.6); color:#fff; border:none; font-size:11px; cursor:pointer;
-    display:flex; align-items:center; justify-content:center; line-height:1;
-}
-
-.eb-embed-card { border:1px solid var(--border); border-radius:10px; margin-bottom:10px; overflow:hidden; }
-.eb-embed-head {
-    display:flex; align-items:center; gap:10px; padding:10px 14px; cursor:pointer;
-    background:var(--bg3); user-select:none;
-}
-.eb-embed-head:hover { background:var(--bg4); }
-.eb-embed-chevron { display:inline-block; transition:transform .15s; font-size:12px; color:var(--text3); }
-.eb-embed-card.eb-expanded .eb-embed-chevron { transform:rotate(90deg); }
-.eb-embed-title-preview { flex:1; font-size:13px; font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.eb-embed-actions { display:flex; gap:6px; }
-.eb-embed-body { display:none; padding:16px; }
-.eb-embed-card.eb-expanded .eb-embed-body { display:block; }
-.eb-embed-fieldrow { display:grid; grid-template-columns:1fr 1fr auto auto; gap:8px; margin-bottom:8px; align-items:center; }
-
-.eb-mention-row { display:flex; gap:8px; margin-bottom:10px; align-items:center; }
-.eb-mention-row select, .eb-mention-row input { flex:1; }
-.eb-mention-row .btn { flex-shrink:0; white-space:nowrap; }
-
-/* ── Emoji popover — polished to sit closer to Discord's own picker:
-   tighter auto-fill grid, a filled hover square (not just a tint),
-   and a footer bar that names whatever's under the cursor. ────── */
-.eb-emoji-popover {
-    position:fixed; z-index:1100; width:340px; max-height:420px;
-    background:#111214; border:1px solid var(--border); border-radius:12px;
-    box-shadow:0 16px 40px rgba(0,0,0,.55); padding:10px; display:flex; flex-direction:column;
-}
-.eb-emoji-search-input {
-    margin-bottom:8px; background:#1e1f22; border-color:#2b2d31;
-}
-.eb-emoji-search-input:focus { border-color:var(--accent); }
-.eb-emoji-scroll { overflow-y:auto; flex:1; padding-right:2px; }
-.eb-emoji-scroll::-webkit-scrollbar { width:6px; }
-.eb-emoji-scroll::-webkit-scrollbar-thumb { background:#3f4147; border-radius:3px; }
-.eb-emoji-cat-label {
-    font-size:12px; font-weight:700; color:#949ba4; text-transform:uppercase;
-    letter-spacing:.02em; margin:10px 2px 6px; position:sticky; top:0; background:#111214; padding:4px 0 2px;
-}
-.eb-emoji-cat-label:first-child { margin-top:0; }
-.eb-emoji-server-label { font-size:11px; font-weight:600; color:var(--text3); margin:8px 2px 4px; display:flex; align-items:center; gap:4px; }
-.eb-emoji-grid { display:grid; grid-template-columns:repeat(auto-fill, 36px); gap:2px; justify-content:start; }
-.eb-emoji-cell {
-    width:36px; height:36px; display:flex; align-items:center; justify-content:center;
-    font-size:22px; line-height:1; background:none; border:none; border-radius:8px; cursor:pointer;
-    transition:background-color .08s ease, transform .08s ease;
-}
-.eb-emoji-cell:hover, .eb-emoji-cell:focus-visible {
-    background:#2b2d31; transform:scale(1.08); outline:none;
-}
-.eb-emoji-cell:active { transform:scale(0.96); }
-.eb-emoji-cell img { width:26px; height:26px; object-fit:contain; }
-.eb-emoji-empty { text-align:center; color:var(--text3); font-size:12px; padding:24px 0; }
-.eb-emoji-ext-toggle {
-    background:none; border:none; color:var(--accent); font-size:11px; font-weight:600;
-    cursor:pointer; padding:6px 2px; text-align:left; width:100%;
-}
-.eb-emoji-ext-toggle:hover { text-decoration:underline; }
-.eb-emoji-import-row { display:flex; gap:6px; margin-top:8px; }
-.eb-emoji-import-row input { flex:1; padding:6px 10px; font-size:12px; background:#1e1f22; border-color:#2b2d31; }
-.eb-emoji-import-row .btn { padding:0 12px; }
-.eb-emoji-hover-bar {
-    display:flex; align-items:center; gap:8px; margin-top:8px; padding-top:8px;
-    border-top:1px solid #2b2d31; font-size:12px; color:var(--text2); min-height:20px;
-}
-.eb-emoji-hover-bar img { width:20px; height:20px; object-fit:contain; }
-.eb-emoji-hover-empty { color:var(--text3); }
-.eb-emoji-hover-name { font-weight:600; color:var(--text); }
-.eb-emoji-hover-id { color:var(--text3); font-family:'JetBrains Mono','Fira Code',monospace; font-size:11px; }
-
-/* ── Live Preview — mirrors real Discord message chrome so this is a
-   preview of the actual send, not a generic mock. ─────────────────── */
-.eb-preview-box { background:#313338; border-radius:8px; padding:16px; min-height:60px; }
-.eb-msg { display:flex; gap:16px; }
-.eb-msg-avatar { width:40px; height:40px; border-radius:50%; flex-shrink:0; margin-top:2px; object-fit:cover; background:var(--accent); }
-.eb-msg-body { min-width:0; flex:1; }
-.eb-msg-header { display:flex; align-items:baseline; gap:7px; margin-bottom:2px; flex-wrap:wrap; }
-.eb-msg-name { font-weight:600; font-size:16px; color:#f2f3f5; }
-.eb-msg-app-badge {
-    background:#5865f2; color:#fff; font-size:10px; font-weight:600;
-    padding:1px 4px; border-radius:3px; letter-spacing:.02em; line-height:1.4;
-}
-.eb-msg-time { font-size:12px; color:#949ba4; }
-.eb-msg-content { color:#dbdee1; font-size:16px; line-height:1.375; white-space:pre-wrap; word-break:break-word; }
-.eb-msg-content.eb-emoji-only-content { font-size:2.25rem; line-height:1.25; }
-.eb-msg-content.eb-emoji-only-content .eb-inline-emoji { width:44px; height:44px; }
-.eb-preview-empty { color:#72767d; font-size:13px; text-align:center; padding:20px 0; }
-
-.eb-inline-emoji { width:22px; height:22px; object-fit:contain; vertical-align:-6px; margin:0 1px; }
-
-.eb-mention {
-    background:rgba(88,101,242,.3); color:#c9cdfb; border-radius:3px;
-    padding:0 2px; font-weight:500; cursor:default; unicode-bidi:plaintext;
-}
-.eb-mention:hover { background:rgba(88,101,242,.5); text-decoration:underline; }
-
-.eb-preview-attachments { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
-.eb-preview-attachments img { max-width:200px; max-height:200px; border-radius:6px; object-fit:cover; }
-.eb-preview-embed {
-    border-left:4px solid #7c5cbf; background:#2b2d31; border-radius:4px;
-    padding:8px 16px 16px; margin-top:8px; position:relative; max-width:432px;
-}
-.eb-pe-author { font-size:14px; font-weight:600; color:#f2f3f5; margin:8px 0 8px; display:flex; align-items:center; gap:6px; }
-.eb-pe-title { font-weight:700; color:#fff; font-size:16px; margin-bottom:8px; line-height:1.3; }
-.eb-pe-desc { color:#dbdee1; font-size:14px; line-height:1.375; white-space:pre-wrap; }
-.eb-pe-fields { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
-.eb-pe-field { min-width:0; }
-.eb-pe-field-name { font-weight:600; color:#f2f3f5; font-size:14px; margin-bottom:2px; }
-.eb-pe-field-value { color:#dbdee1; font-size:14px; line-height:1.375; }
-.eb-pe-image { max-width:100%; border-radius:4px; margin-top:16px; display:block; }
-.eb-pe-thumb { position:absolute; top:16px; right:16px; width:80px; height:80px; border-radius:4px; object-fit:cover; }
-.eb-pe-footer { font-size:12px; color:#b5bac1; margin-top:8px; display:flex; align-items:center; gap:6px; }
-</style>
-
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/embed-composer.js') }}"></script>
 <script>
 (function() {
 'use strict';
+
+// ═══════════════════════════════════════════════════════════════
+// The per-embed editor, the Discord preview renderer, the payload
+// helpers and the markup/mention renderer now live in the shared
+// static/js/embed-composer.js (embed-composer.css carries the
+// styles) — the Minigames v2 builder page uses the exact same
+// code, so the two pages cannot drift apart. Everything below that
+// is specific to THIS page (content card, toolbar, mention modal,
+// emoji popover, attachments, IndexedDB drafts, undo/redo, send /
+// saved templates) is unchanged in behavior.
+// ═══════════════════════════════════════════════════════════════
+const EC = window.EmbedComposer;
+const _ebEsc = EC.esc;
+const _ebAttr = EC.attr;
+const insertAtCursor = EC.insertAtCursor;
+const wrapSelection = EC.wrapSelection;
 
 // ═══════════════════════════════════════════════════════════════
 // STATE
@@ -297,10 +159,7 @@ const MAX_ATTACHMENTS = 10;
 const MAX_ATTACH_TOTAL_BYTES = 25 * 1024 * 1024;
 const MAX_CONTENT = 2000;
 
-function blankEmbed() {
-    return { title:'', description:'', color:'#7c5cbf', author:'', footer:'',
-             thumbnail:'', image:'', fields: [] };
-}
+const blankEmbed = EC.blankEmbed;
 
 let state = {
     content: '',
@@ -448,52 +307,6 @@ function updateUndoRedoButtons() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SHARED INSERTION HELPER
-// ═══════════════════════════════════════════════════════════════
-function insertAtCursor(textarea, textToInsert, opts) {
-    opts = opts || {};
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const before = textarea.value.slice(0, start);
-    const after = textarea.value.slice(end);
-    let newValue = before + textToInsert + after;
-    let cursorPos = start + textToInsert.length;
-
-    if (opts.cursorOffset !== undefined) {
-        cursorPos = start + opts.cursorOffset;
-    }
-
-    const maxLen = parseInt(textarea.getAttribute('maxlength')) || Infinity;
-    if (newValue.length > maxLen) {
-        const overflow = newValue.length - maxLen;
-        // Trim from the inserted text itself, not the user's existing content.
-        newValue = before + textToInsert.slice(0, Math.max(0, textToInsert.length - overflow)) + after;
-    }
-
-    textarea.value = newValue;
-    textarea.focus();
-    textarea.setSelectionRange(cursorPos, opts.selectInserted ? start + textToInsert.length : cursorPos);
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
-function wrapSelection(textarea, wrapper) {
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const selected = textarea.value.slice(start, end);
-    if (selected.length) {
-        const before = textarea.value.slice(0, start);
-        const after = textarea.value.slice(end);
-        textarea.value = before + wrapper + selected + wrapper + after;
-        textarea.focus();
-        textarea.setSelectionRange(start + wrapper.length, start + wrapper.length + selected.length);
-    } else {
-        insertAtCursor(textarea, wrapper + wrapper, { cursorOffset: wrapper.length });
-        return;
-    }
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
-// ═══════════════════════════════════════════════════════════════
 // CONTENT FIELD + TOOLBAR
 // ═══════════════════════════════════════════════════════════════
 const contentInput = document.getElementById('eb-content');
@@ -584,11 +397,11 @@ document.getElementById('eb-mention-user-btn').addEventListener('click', () => {
 // ═══════════════════════════════════════════════════════════════
 const UNICODE_EMOJI = {
     'Frequently Used': [],
-    'Smileys': ['😀','😁','😂','🤣','😊','😇','🙂','🙃','😉','😌','😍','🥰','😘','😗','😋','😛','😜','🤪','😝','🤑','🤗','🤔','🤨','😐','😑','😶','🙄','😏','😣','😥','😮','🤐','😯','😪','😫','🥱','😴','😌','😛','🤤','😒','😓','😔','😕','🙃','🫠','🥲','😢','😭','😤','😠','😡','🤬','🤯','😳','🥵','🥶','😱','😨','😰','😥','😓'],
-    'People': ['👋','🤚','🖐️','✋','🖖','👌','🤌','🤏','✌️','🤞','🫰','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','👍','👎','✊','👊','🤛','🤜','👏','🙌','🫶','👐','🤲','🙏','💪','🦾','🫵','🧠','👀','👁️','👶','🧒','👦','👧','🧑','👨','👩','🧓','👴','👵'],
-    'Animals': ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐔','🐧','🐦','🐤','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🐛','🦋','🐌','🐞','🐢','🐍','🦎','🦖','🐙','🐳','🐬','🐟','🐠'],
+    'Smileys': ['😀','😁','😂','🤣','😊','😇','🙂','🙃','😉','😌','😍','🥰','😘','😗','😋','😛','😜','🤪','🤑','🤗','🤔','🤨','😐','😑','😶','🙄','😏','😣','😥','😮','🤐','😯','😪','😫','🥱','😴','🤤','😒','😓','😔','😕','🫠','🥲','😢','😭','😤','😠','😡','🤬','🤯','😳','🥵','🥶','😱','😨','😰'],
+    'People': ['👋','🤚','🖐️','✋','🖖','👌','🤌','🤏','✌️','🤞','🫰','🤟','🤘','🤙','👈','👉','👆','👇','☝️','👍','👎','✊','👊','🤛','🤜','👏','🙌','🫶','👐','🤲','🙏','💪','🦾','🫵','🧠','👀','👁️','👶','🧒','👦','👧','🧑','👨','👩','🧓','👴','👵'],
+    'Animals': ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐔','🐧','🐦','🐤','🦆','🦅','🦉','🦇','🦺','🐺','🐗','🐴','🦄','🐝','🐛','🦋','🐌','🐞','🐢','🐍','🦎','🦖','🐙','🐳','🐬','🐟','🐠'],
     'Food': ['🍏','🍎','🍐','🍊','🍋','🍌','🍉','🍇','🍓','🫐','🍈','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🍆','🥑','🥦','🌽','🥕','🥐','🍞','🥖','🧀','🍗','🍔','🍟','🍕','🌭','🥪','🌮','🌯','🍜','🍣','🍱','🍰','🎂','🍩','🍪','🍫','🍿','🍵','☕'],
-    'Objects': ['⌚','📱','💻','⌨️','🖥️','🖨️','📷','🎥','📞','📺','🎮','🕹️','💡','🔦','📔','📚','📝','✏️','🖊️','📌','📎','✂️','🔒','🔑','🔨','🧰','⚙️','🧲','🔫','🎁','🎈','🎉','🎊','🏆','🥇','🎖️'],
+    'Objects': ['⌚','📱','💻','⌨️','🖥️','🖨️','📷','🎥','📞','📺','🎮','🕹️','💡','🔦','📔','📚','📝','✏️','🖊️','📌','📎','✂️','🔒','🔑','🔨','🧰','⚙️','🧲','🎁','🎈','🎉','🎊','🏆','🥇','🎖️'],
     'Symbols': ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','✨','⭐','🌟','💫','⚡','🔥','💥','💯','✅','❌','❗','❓','💤','🔔','🔕','🚫','⚠️','♻️','🆗','🆕','🆒','🔞'],
     'Flags': ['🏁','🚩','🎌','🏴','🏳️','🏳️‍🌈'],
 };
@@ -797,12 +610,7 @@ function renderEmojiGrid(query) {
 }
 
 function insertEmojiToken(token) {
-    if (emojiInsertTarget === contentInput) {
-        restoreSelectionAndInsert(token);
-    } else if (emojiInsertTarget) {
-        insertAtCursor(emojiInsertTarget, token);
-        emojiInsertTarget.dispatchEvent(new Event('input', { bubbles: true }));
-    }
+    restoreSelectionAndInsert(token);
 }
 
 emojiSearch.addEventListener('input', () => renderEmojiGrid(emojiSearch.value));
@@ -835,13 +643,6 @@ document.getElementById('eb-emoji-import-btn').addEventListener('click', async (
         setLoading(btn, false);
     }
 });
-
-
-function _ebEsc(str) {
-    const d = document.createElement('div');
-    d.textContent = str == null ? '' : String(str);
-    return d.innerHTML;
-}
 
 // ═══════════════════════════════════════════════════════════════
 // ATTACHMENTS
@@ -901,6 +702,10 @@ function addFiles(fileList) {
 // Fix: mint exactly ONE object URL per local image attachment, cache it
 // on the attachment object, and only revoke+drop it when that attachment
 // is actually removed/cleared or the message is sent.
+//
+// The shared composer (EC.renderPreview) no longer mints URLs itself — this
+// page hands it getAttachmentPreviewUrl through `attachmentPreviewUrl`, so
+// the preview and the thumbnail grid always share ONE url per attachment.
 function getAttachmentPreviewUrl(a) {
     if (a.source === 'remote') return a.url || null; // future Edit flow — not wired up yet
     if (!a.blob) return null;
@@ -979,181 +784,54 @@ function renderAttachments() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// EMBEDS (accordion, up to 10)
+// EMBEDS (accordion, up to 10) — the card markup + field wiring
+// lives in the shared composer; this page keeps ownership of the
+// embed ARRAY and of the max/delete rules (toasts, counters).
 // ═══════════════════════════════════════════════════════════════
 const embedsList = document.getElementById('eb-embeds-list');
 const embedCounter = document.getElementById('eb-embed-counter');
-
-document.getElementById('eb-add-embed').addEventListener('click', () => {
-    if (state.embeds.length >= MAX_EMBEDS) { showToast(`Max ${MAX_EMBEDS} embeds per message`, 'warning'); return; }
-    state.embeds.push(blankEmbed());
-    activeEmbed = state.embeds.length - 1;
-    renderEmbeds();
-    renderPreview();
-    saveDraft();
-    pushHistory();
-});
 
 function duplicateEmbed(i) {
     if (state.embeds.length >= MAX_EMBEDS) { showToast(`Max ${MAX_EMBEDS} embeds per message`, 'warning'); return; }
     state.embeds.splice(i + 1, 0, JSON.parse(JSON.stringify(state.embeds[i])));
     activeEmbed = i + 1;
-    renderEmbeds(); renderPreview(); saveDraft(); pushHistory();
+    editor.render(); renderPreview(); saveDraft(); pushHistory();
 }
 function deleteEmbed(i) {
     if (state.embeds.length <= 1) { showToast('At least one embed is required — clear its fields instead', 'warning'); return; }
     state.embeds.splice(i, 1);
     activeEmbed = Math.min(activeEmbed, state.embeds.length - 1);
-    renderEmbeds(); renderPreview(); saveDraft(); pushHistory();
+    editor.render(); renderPreview(); saveDraft(); pushHistory();
 }
 
-function renderEmbeds() {
-    embedCounter.textContent = `${state.embeds.length} / ${MAX_EMBEDS}`;
-    embedsList.innerHTML = state.embeds.map((e, i) => `
-        <div class="eb-embed-card ${i === activeEmbed ? 'eb-expanded' : ''}" data-idx="${i}">
-            <div class="eb-embed-head" data-toggle="${i}">
-                <span class="eb-embed-chevron">›</span>
-                <span class="eb-embed-title-preview">Embed ${i + 1}${e.title ? ' — ' + _ebEsc(e.title) : ''}</span>
-                <div class="eb-embed-actions">
-                    <button type="button" class="btn btn-sm btn-secondary" data-dup="${i}" title="Duplicate">⧉</button>
-                    <button type="button" class="btn btn-sm btn-danger" data-del="${i}" title="Delete">🗑️</button>
-                </div>
-            </div>
-            <div class="eb-embed-body">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label">Title</label>
-                        <input class="form-input" data-field="title" data-idx="${i}" value="${_ebAttr(e.title)}">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Color</label>
-                        <div style="display:flex;gap:8px;align-items:center;">
-                            <input type="color" data-field="color" data-idx="${i}" value="${_ebAttr(e.color || '#7c5cbf')}"
-                                style="width:42px;height:36px;border-radius:8px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:2px;">
-                            <input class="form-input" data-field="color-hex" data-idx="${i}" value="${_ebAttr(e.color || '#7c5cbf')}" style="flex:1;">
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Author</label>
-                        <input class="form-input" data-field="author" data-idx="${i}" value="${_ebAttr(e.author)}">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Footer</label>
-                        <input class="form-input" data-field="footer" data-idx="${i}" value="${_ebAttr(e.footer)}">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Thumbnail URL</label>
-                        <input class="form-input" data-field="thumbnail" data-idx="${i}" value="${_ebAttr(e.thumbnail)}" placeholder="https://...">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Image URL</label>
-                        <input class="form-input" data-field="image" data-idx="${i}" value="${_ebAttr(e.image)}" placeholder="https://...">
-                    </div>
-                    <div class="form-group" style="grid-column:1/-1;">
-                        <label class="form-label">Description <span class="text-muted text-sm">(${(e.description||'').length} / 4096)</span></label>
-                        <textarea class="form-input" data-field="description" data-idx="${i}" rows="3" maxlength="4096">${_ebEsc(e.description)}</textarea>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Fields</label>
-                    <div data-fields-for="${i}">
-                        ${(e.fields || []).map((f, fi) => `
-                        <div class="eb-embed-fieldrow" data-field-idx="${fi}">
-                            <input class="form-input" placeholder="Name" data-fieldname="${i}:${fi}" value="${_ebAttr(f.name)}">
-                            <input class="form-input" placeholder="Value" data-fieldvalue="${i}:${fi}" value="${_ebAttr(f.value)}">
-                            <label class="form-check" style="white-space:nowrap;"><input type="checkbox" data-fieldinline="${i}:${fi}" ${f.inline ? 'checked' : ''}> Inline</label>
-                            <button type="button" class="btn btn-sm btn-danger" data-fielddel="${i}:${fi}">✕</button>
-                        </div>`).join('')}
-                    </div>
-                    <button type="button" class="btn btn-sm btn-secondary" data-addfield="${i}" style="margin-top:6px;">+ Add Field</button>
-                </div>
-            </div>
-        </div>
-    `).join('');
+const editor = EC.mountEditor({
+    listEl: embedsList,
+    counterEl: embedCounter,
+    maxEmbeds: MAX_EMBEDS,
+    getEmbeds: () => state.embeds,
+    getActive: () => activeEmbed,
+    setActive: (i) => { activeEmbed = i; },
+    onChange: () => { renderPreview(); saveDraft(); pushHistory(); },
+    onDuplicate: duplicateEmbed,
+    onDelete: deleteEmbed,
+});
 
-    wireEmbedEvents();
-}
-
-function _ebAttr(str) { return _ebEsc(str || ''); }
-
-function wireEmbedEvents() {
-    embedsList.querySelectorAll('[data-toggle]').forEach(head => {
-        head.addEventListener('click', () => {
-            const i = parseInt(head.dataset.toggle);
-            activeEmbed = (activeEmbed === i) ? -1 : i;
-            renderEmbeds();
-        });
-    });
-    embedsList.querySelectorAll('[data-dup]').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); duplicateEmbed(parseInt(btn.dataset.dup)); }));
-    embedsList.querySelectorAll('[data-del]').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); deleteEmbed(parseInt(btn.dataset.del)); }));
-
-    embedsList.querySelectorAll('[data-field]').forEach(el => {
-        el.addEventListener('input', () => {
-            const i = parseInt(el.dataset.idx);
-            const field = el.dataset.field;
-            if (field === 'color') {
-                state.embeds[i].color = el.value;
-                const hexInput = embedsList.querySelector(`[data-field="color-hex"][data-idx="${i}"]`);
-                if (hexInput) hexInput.value = el.value;
-            } else if (field === 'color-hex') {
-                if (/^#[0-9A-Fa-f]{6}$/.test(el.value)) {
-                    state.embeds[i].color = el.value;
-                    const picker = embedsList.querySelector(`[data-field="color"][data-idx="${i}"]`);
-                    if (picker) picker.value = el.value;
-                }
-            } else {
-                state.embeds[i][field] = el.value;
-            }
-            if (field === 'title') {
-                const label = embedsList.querySelector(`.eb-embed-card[data-idx="${i}"] .eb-embed-title-preview`);
-                if (label) label.textContent = `Embed ${i + 1}${el.value ? ' — ' + el.value : ''}`;
-            }
-            if (field === 'description') {
-                const counter = el.closest('.form-group').querySelector('.text-muted');
-                if (counter) counter.textContent = `(${el.value.length} / 4096)`;
-            }
-            renderPreview();
-            saveDraft();
-            pushHistory();
-        });
-    });
-
-    embedsList.querySelectorAll('[data-addfield]').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const i = parseInt(btn.dataset.addfield);
-            state.embeds[i].fields = state.embeds[i].fields || [];
-            if (state.embeds[i].fields.length >= 25) { showToast('Discord caps embeds at 25 fields', 'warning'); return; }
-            state.embeds[i].fields.push({ name: '', value: '', inline: false });
-            renderEmbeds(); renderPreview(); saveDraft(); pushHistory();
-        });
-    });
-
-    embedsList.querySelectorAll('[data-fieldname]').forEach(el => el.addEventListener('input', () => {
-        const [i, fi] = el.dataset.fieldname.split(':').map(Number);
-        state.embeds[i].fields[fi].name = el.value;
-        renderPreview(); saveDraft(); pushHistory();
-    }));
-    embedsList.querySelectorAll('[data-fieldvalue]').forEach(el => el.addEventListener('input', () => {
-        const [i, fi] = el.dataset.fieldvalue.split(':').map(Number);
-        state.embeds[i].fields[fi].value = el.value;
-        renderPreview(); saveDraft(); pushHistory();
-    }));
-    embedsList.querySelectorAll('[data-fieldinline]').forEach(el => el.addEventListener('change', () => {
-        const [i, fi] = el.dataset.fieldinline.split(':').map(Number);
-        state.embeds[i].fields[fi].inline = el.checked;
-        renderPreview(); saveDraft(); pushHistory();
-    }));
-    embedsList.querySelectorAll('[data-fielddel]').forEach(el => el.addEventListener('click', () => {
-        const [i, fi] = el.dataset.fielddel.split(':').map(Number);
-        state.embeds[i].fields.splice(fi, 1);
-        renderEmbeds(); renderPreview(); saveDraft(); pushHistory();
-    }));
-}
+document.getElementById('eb-add-embed').addEventListener('click', () => {
+    if (state.embeds.length >= MAX_EMBEDS) { showToast(`Max ${MAX_EMBEDS} embeds per message`, 'warning'); return; }
+    state.embeds.push(blankEmbed());
+    activeEmbed = state.embeds.length - 1;
+    editor.render();
+    renderPreview();
+    saveDraft();
+    pushHistory();
+});
 
 // ═══════════════════════════════════════════════════════════════
 // LIVE PREVIEW — mirrors the real Discord message this will send:
 // bot avatar/name, rendered markdown, resolved mentions, real inline
 // emoji, so this is a preview of the actual output, not a mockup.
+// (renderer: shared composer — same chrome the minigames builder
+// uses, so both previews are pixel-identical for the same input)
 // ═══════════════════════════════════════════════════════════════
 const previewBox = document.getElementById('eb-preview');
 
@@ -1183,7 +861,7 @@ async function loadMentionLookups() {
         ]);
         const roles = (await rolesRes.json()).results || [];
         const channels = (await channelsRes.json()).results || [];
-        roleMap = {}; channels.forEach(() => {});
+        roleMap = {};
         roles.forEach(r => { roleMap[r.id] = { name: r.text, color: r.color }; });
         channelMap = {};
         channels.forEach(c => { channelMap[c.id] = { name: c.text }; });
@@ -1203,158 +881,24 @@ function resolveUserAsync(id) {
         .catch(() => userResolving.delete(id));
 }
 
-// Discord message-content markdown + mention/emoji rendering — matches
-// what the real client does closely enough for an accurate preview:
-// bold/italic/underline/strike, <#id>/<@&id>/<@id> mention pills
-// (resolved against the real channel/role lists + a live user lookup
-// when possible, falling back to the raw ID exactly like Discord does
-// for anything it can't resolve), and real inline custom/unicode emoji.
-const EMOJI_UNICODE_RE = /\p{Extended_Pictographic}(\u200d\p{Extended_Pictographic})*\ufe0f?/gu;
-const TOKEN_RE = /<(a?):(\w+):(\d+)>|<#(\d+)>|<@&(\d+)>|<@!?(\d+)>/g;
-
-function renderToken(match) {
-    let m;
-    TOKEN_RE.lastIndex = 0;
-    m = TOKEN_RE.exec(match);
-    if (!m) return _ebEsc(match);
-    const [, animFlag, ename, eid, chid, rid, uid] = m;
-    if (eid) {
-        return `<img class="eb-inline-emoji" src="${emojiUrl(eid, !!animFlag)}" alt=":${_ebAttr(ename)}:">`;
-    }
-    if (chid) {
-        const ch = channelMap[chid];
-        return `<span class="eb-mention">#${_ebEsc(ch ? ch.name : chid)}</span>`;
-    }
-    if (rid) {
-        const role = roleMap[rid];
-        const label = role ? role.name : rid;
-        let style = '';
-        if (role && role.color) {
-            style = ` style="background:${role.color}33;color:${role.color};"`;
-        }
-        return `<span class="eb-mention"${style}>@${_ebEsc(label)}</span>`;
-    }
-    if (uid) {
-        if (userNameCache[uid]) return `<span class="eb-mention">@${_ebEsc(userNameCache[uid])}</span>`;
-        resolveUserAsync(uid);
-        return `<span class="eb-mention">@${_ebEsc(uid)}</span>`;
-    }
-    return _ebEsc(match);
-}
-
-function renderDiscordMarkup(text, opts) {
-    opts = opts || {};
-    if (!text) return '';
-
-    const tokens = [];
-    let working = text.replace(TOKEN_RE, (match) => {
-        tokens.push(match);
-        return `\u0001${tokens.length - 1}\u0002`;
-    });
-
-    // Emoji-only-line sizing: Discord renders a message as large emoji
-    // when, once every recognized token/emoji is stripped out, nothing
-    // but whitespace is left.
-    let isEmojiOnly = false;
-    if (opts.checkEmojiOnly) {
-        const stripped = working.replace(/\u0001\d+\u0002/g, '').replace(EMOJI_UNICODE_RE, '').trim();
-        isEmojiOnly = stripped.length === 0 && (tokens.length + (text.match(EMOJI_UNICODE_RE) || []).length) > 0;
-    }
-
-    let escaped = _ebEsc(working);
-
-    // Markdown — bold before italic so `**x**` isn't half-consumed by
-    // the single-asterisk italic pattern first.
-    escaped = escaped.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
-    escaped = escaped.replace(/__([\s\S]+?)__/g, '<u>$1</u>');
-    escaped = escaped.replace(/\*([\s\S]+?)\*/g, '<em>$1</em>');
-    escaped = escaped.replace(/~~([\s\S]+?)~~/g, '<s>$1</s>');
-
-    // Standalone unicode emoji get the large-size treatment too.
-    if (isEmojiOnly) {
-        escaped = escaped.replace(EMOJI_UNICODE_RE, (m) => `<span>${m}</span>`);
-    }
-
-    escaped = escaped.replace(/\u0001(\d+)\u0002/g, (m, idx) => renderToken(tokens[parseInt(idx)]));
-
-    return { html: escaped, isEmojiOnly };
-}
-
-function fmtPreviewTime() {
-    const d = new Date();
-    let h = d.getHours();
-    const ampm = h >= 12 ? 'PM' : 'AM';
-    h = h % 12 || 12;
-    const m = String(d.getMinutes()).padStart(2, '0');
-    return `Today at ${h}:${m} ${ampm}`;
-}
-
 function renderPreview() {
-    const hasAnything = state.content || attachments.length ||
-        state.embeds.some(e => e.title || e.description || e.author || e.footer || e.image || e.thumbnail || (e.fields && e.fields.length));
-
-    if (!hasAnything) {
-        previewBox.innerHTML = `<div class="eb-preview-empty">Start typing to see a preview...</div>`;
-        return;
-    }
-
-    let html = `<div class="eb-msg">`;
-    html += botIdentity.avatar
-        ? `<img class="eb-msg-avatar" src="${_ebAttr(botIdentity.avatar)}" alt="">`
-        : `<div class="eb-msg-avatar"></div>`;
-    html += `<div class="eb-msg-body">`;
-    html += `<div class="eb-msg-header">
-        <span class="eb-msg-name">${_ebEsc(botIdentity.name)}</span>
-        <span class="eb-msg-app-badge">APP</span>
-        <span class="eb-msg-time">${fmtPreviewTime()}</span>
-    </div>`;
-
-    if (state.content) {
-        const rendered = renderDiscordMarkup(state.content, { checkEmojiOnly: true });
-        html += `<div class="eb-msg-content${rendered.isEmojiOnly ? ' eb-emoji-only-content' : ''}">${rendered.html}</div>`;
-    }
-
-    if (attachments.length) {
-        html += `<div class="eb-preview-attachments">`;
-        html += attachments.map(a => {
-            try {
-                const isImg = a.type && a.type.startsWith('image/');
-                if (!isImg) return `<span class="badge">📄 ${_ebEsc(a.name)}</span>`;
-                const url = getAttachmentPreviewUrl(a); // cached — see attachments section
-                return url
-                    ? `<img src="${url}" alt="${_ebAttr(a.name)}">`
-                    : `<span class="badge">📄 ${_ebEsc(a.name)}</span>`;
-            } catch (e) {
-                console.error('[embedbuilder] preview render failed for attachment', a && a.name, e);
-                return '';
-            }
-        }).join('');
-        html += `</div>`;
-    }
-
-    const nonEmpty = state.embeds.filter(e => e.title || e.description || e.author || e.footer || e.image || e.thumbnail || (e.fields && e.fields.length));
-    for (const e of nonEmpty) {
-        html += `<div class="eb-preview-embed" style="border-left-color:${_ebAttr(e.color || '#7c5cbf')};">`;
-        if (e.author) html += `<div class="eb-pe-author">${_ebEsc(e.author)}</div>`;
-        if (e.title) html += `<div class="eb-pe-title">${_ebEsc(e.title)}</div>`;
-        if (e.description) html += `<div class="eb-pe-desc">${renderDiscordMarkup(e.description).html}</div>`;
-        if (e.fields && e.fields.length) {
-            html += `<div class="eb-pe-fields">`;
-            html += e.fields.filter(f => f.name || f.value).map(f =>
-                `<div class="eb-pe-field" style="${f.inline ? 'width:31%;' : 'width:100%;'}">
-                    <div class="eb-pe-field-name">${_ebEsc(f.name)}</div>
-                    <div class="eb-pe-field-value">${renderDiscordMarkup(f.value).html}</div>
-                </div>`).join('');
-            html += `</div>`;
-        }
-        if (e.image) html += `<img class="eb-pe-image" src="${_ebAttr(e.image)}" alt="">`;
-        if (e.thumbnail) html += `<img class="eb-pe-thumb" src="${_ebAttr(e.thumbnail)}" alt="">`;
-        if (e.footer) html += `<div class="eb-pe-footer">${_ebEsc(e.footer)}</div>`;
-        html += `</div>`;
-    }
-
-    html += `</div></div>`;
-    previewBox.innerHTML = html;
+    EC.renderPreview(previewBox, {
+        content: state.content,
+        embeds: state.embeds,
+        attachments: attachments,
+        botIdentity: botIdentity,
+        // The composer must NOT mint its own blob: URLs — this page owns
+        // the attachment lifecycle (one cached URL per attachment, revoked
+        // on remove/send/clear). Passing the resolver is what keeps the
+        // preview and the thumbnail grid on the exact same URL.
+        attachmentPreviewUrl: getAttachmentPreviewUrl,
+        lookups: {
+            roles: roleMap,
+            channels: channelMap,
+            users: userNameCache,
+            onUserResolve: (id) => resolveUserAsync(id),
+        },
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1367,26 +911,7 @@ function setStatus(msg, ok) {
     setTimeout(() => { el.textContent = ''; }, 4000);
 }
 
-function cleanEmbedsForPayload() {
-    return state.embeds
-        .filter(e => e.title || e.description || e.author || e.footer || e.image || e.thumbnail || (e.fields && e.fields.length))
-        .map(e => {
-            const out = {};
-            if (e.title) out.title = e.title;
-            if (e.description) out.description = e.description;
-            if (e.color) { try { out.color = parseInt(e.color.replace('#', ''), 16); } catch (err) {} }
-            if (e.author) out.author = { name: e.author };
-            if (e.footer) out.footer = { text: e.footer };
-            if (e.image) out.image = { url: e.image };
-            if (e.thumbnail) out.thumbnail = { url: e.thumbnail };
-            if (e.fields && e.fields.length) {
-                out.fields = e.fields.filter(f => f.name || f.value).map(f => ({
-                    name: f.name || '\u200b', value: f.value || '\u200b', inline: !!f.inline,
-                }));
-            }
-            return out;
-        });
-}
+const cleanEmbedsForPayload = () => EC.cleanEmbedsForPayload(state.embeds);
 
 document.getElementById('eb-send-btn').addEventListener('click', async () => {
     const channelId = $('#eb-send-channel').val();
@@ -1476,16 +1001,7 @@ document.getElementById('eb-load-template-btn').addEventListener('click', async 
     const data = await res.json();
     if (!data.template) { showToast('Template not found', 'error'); return; }
     state.content = data.template.content || '';
-    state.embeds = (data.template.embeds || []).map(e => ({
-        title: e.title || '', description: e.description || '',
-        color: e.color !== undefined ? '#' + (typeof e.color === 'number' ? e.color.toString(16).padStart(6, '0') : e.color) : '#7c5cbf',
-        author: (e.author && e.author.name) || e.author || '',
-        footer: (e.footer && e.footer.text) || e.footer || '',
-        thumbnail: (e.thumbnail && e.thumbnail.url) || e.thumbnail || '',
-        image: (e.image && e.image.url) || e.image || '',
-        fields: e.fields || [],
-    }));
-    if (!state.embeds.length) state.embeds = [blankEmbed()];
+    state.embeds = EC.embedsFromApi(data.template.embeds);
     activeEmbed = 0;
     renderAll();
     saveDraft();
@@ -1532,7 +1048,7 @@ document.addEventListener('keydown', (e) => {
 function renderAll() {
     contentInput.value = state.content;
     updateContentCounter();
-    renderEmbeds();
+    editor.render();
     renderAttachments();
     renderPreview();
 }

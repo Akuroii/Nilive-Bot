@@ -770,11 +770,20 @@ code {
     border: none;
     color: #fff;
     border-radius: 6px;
-    padding: 2px 8px;
+    /* left padding MUST clear the absolutely-positioned × button
+       (select2 default: position:absolute; left:0; ~16px wide). The old
+       `padding: 2px 8px` shrank the left inset to 8px, so the first
+       characters of every selected role/channel name rendered *under* the ×
+       — the "name missing / weird square" look in the multi-select pills. */
+    padding: 2px 8px 2px 22px;
     font-size: 12px;
     margin: 2px;
 }
-.select2-container--default .select2-selection--multiple .select2-selection__choice__remove { color: rgba(255,255,255,.7); margin-right: 4px; }
+.select2-container--default .select2-selection--multiple .select2-selection__choice__remove {
+    color: rgba(255,255,255,.7);
+    margin-right: 4px;
+    border-right: none; /* select2's default #aaa divider looks broken on the accent pill */
+}
 .select2-container--default .select2-selection--single .select2-selection__rendered { color: var(--text); padding: 0 12px; line-height: 40px; }
 .select2-container--default .select2-selection--single .select2-selection__arrow { height: 38px; }
 .select2-container--default .select2-results__option  { background: var(--bg3); color: var(--text2); padding: 8px 12px; }
@@ -793,20 +802,48 @@ code {
 .select2-container--default .select2-selection--single .select2-selection__placeholder { color: var(--text3); }
 
 /* ── NERO SELECT OPTION STYLES ────────────────── */
+/* The same row markup is used by Select2 in two very different containers:
+   full-width dropdown rows (where width:100% is right) and shrink-to-fit
+   multi-select pills (where width:100% collapses the row against a pill
+   that sizes to its content, clipping the name). So the full width is
+   scoped to the dropdown only; everywhere else the row hugs its content. */
 .ns-role-option, .ns-ch-option {
     display: flex;
     align-items: center;
     gap: 8px;
-    width: 100%;
+    min-width: 0;
 }
+.select2-results__option .ns-role-option,
+.select2-results__option .ns-ch-option { width: 100%; }
 .ns-color-dot {
     width: 10px;
     height: 10px;
     border-radius: 50%;
     flex-shrink: 0;
+    /* CSS fallback behind the inline style so the dot is never invisible */
+    background: #99aab5;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.2);
 }
-.ns-role-name, .ns-ch-name { flex: 1; font-size: 13px; }
-.ns-ch-icon { font-size: 13px; width: 16px; flex-shrink: 0; }
+.ns-role-name, .ns-ch-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    /* long names truncate with an ellipsis instead of overflowing the pill
+       (which has white-space:nowrap) or collapsing to zero width */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ns-ch-icon {
+    font-size: 13px;
+    width: 16px;
+    flex-shrink: 0;
+    text-align: center;
+    /* emoji-capable stack: without it, systems whose UI font lacks emoji
+       glyphs render the type icons as tofu squares */
+    font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji',
+                 'Twemoji Mozilla', 'Segoe UI Symbol', sans-serif;
+}
 .ns-id {
     font-size: 10px;
     color: var(--text3);
@@ -991,3 +1028,133 @@ code {
     .stats-grid { grid-template-columns: 1fr; }
     .btn        { min-height: 44px; }
 }
+
+/* ── Alias chip input (nero-alias-input.js) ─────────────────────────
+   ProBot-style: a box that looks like a text field but holds removable
+   chips. Kept in main.css rather than the page's <style> block because
+   the triggers / custom-command pages may want the same field later. */
+.alias-host,
+.na-box {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    min-height: 38px;
+    padding: 5px 7px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius, 8px);
+    cursor: text;
+    transition: border-color .15s ease, box-shadow .15s ease;
+}
+.na-box:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(124, 92, 191, .18);
+}
+.na-chips {
+    display: contents;
+}
+/* the authoritative <input type=hidden>: stays in the host so the page can
+   still read it by id, but must never take up room */
+.na-source {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+.na-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--accent);
+    background: rgba(124, 92, 191, .14);
+    border: 1px solid rgba(124, 92, 191, .4);
+    border-radius: 999px;
+    padding: 2px 4px 2px 9px;
+    cursor: pointer;
+    animation: na-pop .12s ease-out;
+}
+.na-chip:hover { background: rgba(124, 92, 191, .24); }
+/* Pencil sits absolutely on the chip so it never contributes to the
+   chip's resting width. The chip is the positioning context. */
+.na-chip { position: relative; }
+.na-chip:focus-visible {
+    background: rgba(124, 92, 191, .22);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(124, 92, 191, .45);
+}
+@keyframes na-pop {
+    from { transform: scale(.85); opacity: .4; }
+    to   { transform: scale(1);    opacity: 1; }
+}
+.na-chip-text { font-family: var(--mono, ui-monospace, monospace); }
+.na-chip-edit {
+    position: absolute;
+    top: 50%;
+    right: 22px;            /* clear of the × button */
+    transform: translateY(-50%);
+    font-size: 11px;
+    line-height: 1;
+    opacity: 0;
+    transition: opacity .12s ease;
+    pointer-events: none;
+    user-select: none;
+}
+.na-chip:hover  .na-chip-edit,
+.na-chip:focus-visible .na-chip-edit { opacity: .55; }
+.na-chip-x {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 4px;
+    border-radius: 50%;
+    cursor: pointer;
+    opacity: .65;
+}
+.na-chip-x:hover { opacity: 1; background: rgba(237, 66, 69, .8); color: #fff; }
+.na-chip-x:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+.na-chip--warn {
+    color: var(--warning);
+    border-color: rgba(250, 166, 26, .55);
+    background: rgba(250, 166, 26, .12);
+}
+.na-chip-warn {
+    display: inline-grid;
+    place-items: center;
+    width: 13px;
+    height: 13px;
+    font-size: 10px;
+    font-weight: 800;
+    border-radius: 50%;
+    background: var(--warning);
+    color: #000;
+}
+.na-input {
+    flex: 1;
+    min-width: 130px;
+    border: 0;
+    background: transparent;
+    color: var(--text1);
+    font-size: 13px;
+    padding: 2px 0;
+    outline: none;
+}
+.na-input::placeholder { color: var(--text3); }
+.na-hint {
+    flex-basis: 100%;
+    font-size: 11px;
+    color: var(--text3);
+    min-height: 0;
+}
+.na-hint--error { color: var(--danger); }
+.na-hint--ok    { color: var(--success); }

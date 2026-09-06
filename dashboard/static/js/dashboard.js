@@ -121,7 +121,22 @@ async function ajaxSave(url, payload, btn, successMsg = 'Saved!') {
         });
         const data = await res.json();
         if (data.success || data.ok) {
-            showToast(successMsg, 'success');
+            // `warnings` is advisory: the save happened and the feature works,
+            // but something will behave differently than expected (a word two
+            // systems both claim, say). Which one actually answers is decided
+            // at runtime by utils/message_router.py, never by this dialog — so
+            // these are shown as a warning toast, not as a failure.
+            const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+            if (warnings.length) {
+                // Pages that reload after a save need the note parked; the
+                // replay picks it up on the next load. Pages that stay put
+                // just see the toast — remember() is harmless either way,
+                // because replay() only fires once and expires after 30s.
+                window.NeroWarnings && window.NeroWarnings.remember(warnings, successMsg);
+                window.NeroWarnings.showSaveWarnings(warnings, successMsg);
+            } else {
+                showToast(successMsg, 'success');
+            }
         } else {
             showToast(data.error || 'Save failed', 'error');
         }
@@ -133,6 +148,54 @@ async function ajaxSave(url, payload, btn, successMsg = 'Saved!') {
         if (btn) setLoading(btn, false);
     }
 }
+
+// ── SAVE WARNINGS ─────────────────────────────────────────────
+// Advisory notes from the API (an alias that overlaps a trigger word, say).
+// Several manager pages reload after saving, which kills any toast shown
+// first — so they are parked in sessionStorage and replayed on load. The API
+// never blocks on these: runtime precedence in the bot decides who answers,
+// the dashboard only explains it.
+window.NeroWarnings = (function () {
+    const KEY = 'nero:save-warnings';
+
+    function remember(warnings, successMsg) {
+        if (!Array.isArray(warnings) || !warnings.length) return false;
+        try {
+            sessionStorage.setItem(KEY, JSON.stringify({
+                at: Date.now(), successMsg: successMsg || 'Saved',
+                warnings: warnings.slice(0, 6),
+            }));
+        } catch (e) { /* private mode: the inline toast is enough */ }
+        return true;
+    }
+
+    function replay() {
+        let raw = null;
+        try {
+            raw = sessionStorage.getItem(KEY);
+            if (raw) sessionStorage.removeItem(KEY);
+        } catch (e) { return; }
+        if (!raw) return;
+        let payload;
+        try { payload = JSON.parse(raw); } catch (e) { return; }
+        // Only replay something fresh — a note from yesterday's save is noise.
+        if (!payload || Date.now() - (payload.at || 0) > 30000) return;
+        showSaveWarnings(payload.warnings, payload.successMsg);
+    }
+
+    function showSaveWarnings(warnings, successMsg) {
+        if (!warnings || !warnings.length) return;
+        const first = warnings[0].message || String(warnings[0]);
+        const extra = warnings.length > 1 ? ` (+${warnings.length - 1} more)` : '';
+        showToast(`${successMsg} — ${first}${extra}`, 'warning', 9000);
+        document.dispatchEvent(new CustomEvent('nero:save-warnings', {
+            detail: { warnings },
+        }));
+    }
+
+    document.addEventListener('DOMContentLoaded', replay);
+    return { remember, replay, showSaveWarnings };
+})();
 
 // ── CONFIRM MODAL ─────────────────────────────────────────────
 function showConfirm(message, onConfirm) {
@@ -256,13 +319,43 @@ document.addEventListener('htmx:afterRequest', function(e) {
     }
 });
 
-// ── HTMX AFTER SWAP: Re-init Select2 and update page title ──────
-document.addEventListener('htmx:afterSwap', function(e) {
-    // Re-initialize Select2 pickers if NeroSelect is available
+// ── HTMX AFTER SWAP: re-init dashboard components on swapped content ──────
+//
+// WHY THIS LIVES HERE (and not on the page-level script alone)
+// ---------------------------------------------------------
+// dashboard.js is loaded once in base.html and therefore not re-evaluated
+// when htmx swaps in a new page fragment. The page-level inline script in
+// commands.html is re-executed by htmx, but the COMPONENTS it depends on
+// (NeroAlias.initAll, NeroSelect.initAll) only walk the DOM and bind
+// handlers on whatever is currently in the document — they do not run
+// again on their own. Without re-running them here, after a sidebar click
+// every `[data-alias-input]` host in the freshly swapped Commands page
+// stays as an empty <div> with a hidden input and no chip UI, and the
+// user cannot type, see existing chips, or click × on them.
+//
+// The same applies to back/forward navigation (htmx:historyRestore) and
+// htmx:load (a fragment that finished loading outside the afterSwap flow,
+// e.g. via a Boosted link), so we hook all three. Each component's
+// initAll walks the document and short-circuits on elements that are
+// already initialised, so calling it repeatedly is safe.
+function reInitDashboardComponents() {
+    if (window.NeroAlias && window.NeroAlias.initAll) {
+        window.NeroAlias.initAll(document);
+    }
     if (window.NeroSelect && window.NeroSelect.initAll) {
+        // Single-select pickers on every page (overview, members, etc.).
+        // The Commands page's per-command multi-select pickers are still
+        // initialised lazily inside loadCommandSettings() — that hasn't
+        // changed.
         window.NeroSelect.initAll(document);
     }
-    
+}
+
+document.addEventListener('htmx:afterSwap',  reInitDashboardComponents);
+document.addEventListener('htmx:load',        reInitDashboardComponents);
+document.addEventListener('htmx:historyRestore', reInitDashboardComponents);
+
+document.addEventListener('htmx:afterSwap', function(e) {
     // Update page title from data-page-title attribute
     const pageTitle = document.querySelector('[data-page-title]');
     if (pageTitle) {

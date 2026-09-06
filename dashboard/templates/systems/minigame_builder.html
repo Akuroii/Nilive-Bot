@@ -1,0 +1,768 @@
+{% extends "base.html" %}
+{% block title %}Game Builder{% endblock %}
+{% block content %}
+<span data-page-title="Minigames"></span>
+
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
+    <a href="/minigames" style="color:var(--text3);text-decoration:none;font-size:14px;">← Back to Minigames</a>
+    <div style="flex:1;"></div>
+    <span class="mb-dirty-pill" id="mb-dirty-pill">● Unsaved changes</span>
+    <button class="btn btn-secondary" id="mb-test-btn" disabled onclick="testSpawnFromBuilder(this)"
+        title="Queue a test spawn in the game's target channel">🧪 Test Spawn</button>
+    <button class="btn btn-primary" id="mb-save-btn" onclick="saveTemplate(this)">💾 Save</button>
+</div>
+
+<div class="mb-grid">
+    <!-- ═══ LEFT: the build form (one continuous scroll) ═══════ -->
+    <div>
+        <!-- 1 · IDENTITY -->
+        <div class="card mb-section">
+            <div class="mb-section-head">
+                <span class="mb-step-no">1</span>
+                <div class="card-title">Identity</div>
+            </div>
+            <div class="form-group" style="max-width:420px;">
+                <label class="form-label">Game name</label>
+                <input class="form-input" id="mb-name" placeholder="e.g. Weekend Math Rush"
+                    maxlength="60" oninput="onIdentityInput()">
+            </div>
+        </div>
+
+        <!-- 2 · GAME TYPE -->
+        <div class="card mb-section">
+            <div class="mb-section-head">
+                <span class="mb-step-no">2</span>
+                <div class="card-title">Game Type</div>
+            </div>
+            <div class="mb-type-grid" id="mb-type-grid"></div>
+            <p class="text-muted text-sm" id="mb-type-hint" style="margin-top:8px;">
+                Pick the mechanic — the settings below adapt to it.
+            </p>
+        </div>
+
+        <!-- 3 · GAME SETTINGS -->
+        <div class="card mb-section">
+            <div class="mb-section-head">
+                <span class="mb-step-no">3</span>
+                <div class="card-title">Game Settings</div>
+            </div>
+            <div id="mb-game-settings">
+                <p class="text-muted text-sm">Choose a game type first.</p>
+            </div>
+        </div>
+
+        <!-- 4 · EMBED -->
+        <div class="card mb-section">
+            <div class="mb-section-head">
+                <span class="mb-step-no">4</span>
+                <div class="card-title">Embed</div>
+            </div>
+            <p class="text-muted text-sm" style="margin-bottom:10px;">
+                This is the message players see when the game starts. For
+                question games (Math / Colors / Emoji) the question text and
+                image from Game Settings are written here automatically.
+            </p>
+            <div id="mb-embed-editor"></div>
+        </div>
+
+        <!-- 5 · REWARDS -->
+        <div class="card mb-section">
+            <div class="mb-section-head">
+                <span class="mb-step-no">5</span>
+                <div class="card-title">Reward Pool</div>
+            </div>
+            <p class="text-muted text-sm" style="margin-bottom:12px;">
+                Every winner rolls one reward independently (weighted).
+                An empty pool is valid — the game just has no prizes.
+            </p>
+            <div id="mb-rewards"></div>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <button class="btn btn-sm btn-secondary" onclick="addMbReward()">+ Add Reward</button>
+                <span class="text-muted text-sm" id="mb-reward-sum"></span>
+            </div>
+        </div>
+
+        <!-- 6 · SPAWN SETTINGS -->
+        <div class="card mb-section">
+            <div class="mb-section-head">
+                <span class="mb-step-no">6</span>
+                <div class="card-title">Spawn Settings</div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label">Category</label>
+                    <select class="form-input" id="mb-category" onchange="onSpawnInput()"></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Target channel</label>
+                    <select class="nero-channel-picker form-input" id="mb-channel" onchange="onSpawnInput()"></select>
+                    <div class="form-hint">Defaults to the guild spawn channel — pick another to override</div>
+                </div>
+            </div>
+
+            <div class="mb-toggle-row">
+                <label class="toggle">
+                    <input type="checkbox" id="mb-enabled" onchange="onSpawnInput()">
+                    <span class="toggle-slider"></span>
+                </label>
+                <div class="mb-toggle-copy">
+                    <div class="mb-toggle-name">Enabled</div>
+                    <div class="mb-toggle-hint">"Allows this game to be used normally."</div>
+                </div>
+            </div>
+            <div class="mb-toggle-row">
+                <label class="toggle">
+                    <input type="checkbox" id="mb-autospawn" onchange="onSpawnInput()">
+                    <span class="toggle-slider"></span>
+                </label>
+                <div class="mb-toggle-copy">
+                    <div class="mb-toggle-name">Automatic Rotation</div>
+                    <div class="mb-toggle-hint">"Allows the automatic spawn system to select this game."</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ RIGHT: live preview (sticky) ═════════════════════════ -->
+    <div class="mb-preview-col" style="position:sticky;top:80px;">
+        <div class="card">
+            <div class="card-title">👁️ Live Preview</div>
+            <p class="text-muted text-sm" style="margin-bottom:10px;">
+                The exact Discord message the game will post — embed plus the
+                buttons the engine generates. The correct answer is never shown here.
+            </p>
+            <div class="eb-preview-box" id="mb-preview" style="min-height:140px;"></div>
+        </div>
+    </div>
+</div>
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/embed-composer.js') }}"></script>
+<script>
+'use strict';
+const EC = window.EmbedComposer;
+const TEMPLATE_ID = {{ template_id | default(none) | tojson }};
+const PRESET_CATEGORY = {{ category_id | default(none) | tojson }};
+
+const MB_TYPES = [
+    { id: 'quick_click', icon: '⚡', name: 'Quick Click',        desc: 'Buttons appear — first click wins' },
+    { id: 'wheel',       icon: '🎡', name: 'Wheel of Fortune',   desc: 'Players join, one winner is drawn' },
+    { id: 'math',        icon: '🧮', name: 'Math',               desc: 'Answer the question before time runs out' },
+    { id: 'colors',      icon: '🎨', name: 'Colors',             desc: 'Pick the color shown in the image' },
+    { id: 'emoji',       icon: '😀', name: 'Emoji Guess',        desc: 'Guess what the emoji means' },
+    { id: 'rps',         icon: '✊', name: 'Rock Paper Scissors', desc: 'Seated showdown, best play wins' },
+];
+const REWARD_TYPE_LABELS = {
+    xp: '⭐ XP', coins: '🪙 Coins', diamonds: '💎 Diamonds',
+    item: '📦 Item', role: '🏷️ Permanent Role', temp_role: '⏳ Temporary Role',
+};
+// Engine defaults (utils/minigame_engine) — pre-filled so the admin
+// tweaks instead of starting from scratch.
+const MB_TYPE_DEFAULTS = {
+    quick_click: { buttons: 4, reveal_min: 3, reveal_max: 8, wait_after: 10 },
+    wheel:       { join_seconds: 30 },
+    math:        { answers: ['', ''], correct: 0, seconds: 30 },
+    colors:      { answers: ['', ''], correct: 0, seconds: 30 },
+    emoji:       { answers: ['', ''], correct: 0, seconds: 30 },
+    rps:         { seating_seconds: 60, choice_seconds: 60 },
+};
+const MC_TYPES = ['math', 'colors', 'emoji'];
+
+const mbState = {
+    templateId: TEMPLATE_ID || null,
+    game_type: null,
+    config: {},
+    embed: EC.blankEmbed(),
+    rewards: [],
+    channel_id: '',
+    category_id: PRESET_CATEGORY || null,
+    enabled: true,
+    auto_spawn: true,
+    dirty: false,
+    saving: false,
+    rows: [],            // cached engine component rows
+    tree: [],
+    configRoot: null,
+    botIdentity: { name: 'Nero', avatar: null },
+};
+
+// ── helpers ────────────────────────────────────────────────────────
+function esc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function markDirty() {
+    if (!mbState.dirty) {
+        mbState.dirty = true;
+        document.getElementById('mb-dirty-pill').classList.add('mb-dirty-on');
+    }
+}
+function clearDirty() {
+    mbState.dirty = false;
+    document.getElementById('mb-dirty-pill').classList.remove('mb-dirty-on');
+}
+window.addEventListener('beforeunload', (e) => {
+    if (mbState.dirty) { e.preventDefault(); e.returnValue = ''; }
+});
+
+// ── live preview (debounced ~200ms, plan §12) ──────────────────────
+const previewBox = document.getElementById('mb-preview');
+let previewTimer = null, previewGen = 0;
+
+function schedulePreview(configChanged) {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => refreshPreview(configChanged), 200);
+}
+
+async function refreshPreview(configChanged) {
+    const gen = ++previewGen;
+    if (configChanged) {
+        // Ask the ENGINE for the component rows — same pure function
+        // the bot posts with, so preview and real message cannot
+        // diverge.
+        if (mbState.game_type) {
+            try {
+                const res = await fetch('/api/minigames/preview-rows', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ game_type: mbState.game_type, config: mbState.config }),
+                });
+                const data = await res.json();
+                if (data.rows) mbState.rows = data.rows;
+                else mbState.rows = [];
+            } catch (e) { /* keep last rows */ }
+        } else {
+            mbState.rows = [];
+        }
+    }
+    if (gen !== previewGen) return; // a newer preview superseded this one
+    EC.renderPreview(previewBox, {
+        content: '',
+        embeds: [mbState.embed],
+        components: mbState.rows,
+        botIdentity: mbState.botIdentity,
+        lookups: {},
+        emptyText: 'Pick a game type and fill in the fields — the exact Discord message appears here',
+    });
+}
+
+// ── game type cards ────────────────────────────────────────────────
+function renderTypeCards() {
+    const grid = document.getElementById('mb-type-grid');
+    grid.innerHTML = MB_TYPES.map(t => `
+        <button type="button" class="mb-type-card ${mbState.game_type === t.id ? 'mb-type-active' : ''}"
+            onclick="pickType('${t.id}')">
+            <span class="mb-type-icon">${t.icon}</span>
+            <span class="mb-type-name">${t.name}</span>
+            <span class="mb-type-desc">${t.desc}</span>
+        </button>`).join('');
+}
+
+function pickType(id) {
+    if (mbState.game_type === id) return;
+    mbState.game_type = id;
+    mbState.config = JSON.parse(JSON.stringify(MB_TYPE_DEFAULTS[id]));
+    renderTypeCards();
+    renderGameSettings();
+    markDirty();
+    schedulePreview(true);
+}
+
+// ── game settings (per-type fields, §11.2) ─────────────────────────
+function numInput(id, label, value, hint) {
+    return `
+    <div class="form-group">
+        <label class="form-label">${label}</label>
+        <input class="form-input" id="${id}" type="number" value="${esc(value)}" oninput="onConfigInput()">
+        ${hint ? `<div class="form-hint">${hint}</div>` : ''}
+    </div>`;
+}
+
+function renderGameSettings() {
+    const box = document.getElementById('mb-game-settings');
+    const t = mbState.game_type;
+    if (!t) { box.innerHTML = '<p class="text-muted text-sm">Choose a game type first.</p>'; return; }
+    const c = mbState.config;
+
+    if (t === 'quick_click') {
+        box.innerHTML = `<div class="form-row">
+            ${numInput('mb-qc-buttons', 'Button count', c.buttons, '2 to 6 buttons, posted disabled — the reveal enables one at random')}
+            ${numInput('mb-qc-rmin', 'Reveal delay min (s)', c.reveal_min, 'Random delay before the reveal, min')}
+            ${numInput('mb-qc-rmax', 'Reveal delay max (s)', c.reveal_max, 'Random delay before the reveal, max')}
+            ${numInput('mb-qc-wait', 'Wait after reveal (s)', c.wait_after, 'Grace window for the click')}
+        </div>`;
+        return;
+    }
+    if (t === 'wheel') {
+        box.innerHTML = `<div class="form-row">
+            ${numInput('mb-wheel-join', 'Join window (s)', c.join_seconds, 'How long players have to hit Join')}
+        </div>`;
+        return;
+    }
+    if (MC_TYPES.includes(t)) {
+        const isColors = t === 'colors';
+        let html = '';
+        if (isColors) {
+            html += `
+            <div class="form-group" style="margin-bottom:12px;">
+                <label class="form-label">Image URL <span style="color:var(--danger);">(required)</span></label>
+                <input class="form-input" id="mb-mc-image" value="${esc(mbState.embed.image)}"
+                    placeholder="https://… the players must identify a color in this image"
+                    oninput="onMcImageInput()">
+                <div class="form-hint">Stored as the embed image — it IS the puzzle</div>
+            </div>`;
+        } else if (t === 'emoji') {
+            html += `
+            <div class="form-group" style="margin-bottom:12px;">
+                <label class="form-label">Image URL (optional)</label>
+                <input class="form-input" id="mb-mc-image" value="${esc(mbState.embed.image)}"
+                    placeholder="https://… a hint image, if any" oninput="onMcImageInput()">
+            </div>`;
+        }
+        html += `
+        <div class="form-group" style="margin-bottom:12px;">
+            <label class="form-label">Question text ${t === 'colors' ? '(optional)' : '(required)'}</label>
+            <textarea class="form-input" id="mb-mc-question" rows="2"
+                placeholder="${t === 'math' ? 'e.g. What is 7 × 8?' : t === 'colors' ? 'e.g. Which color do you see in the middle?' : 'e.g. What does this emoji mean? 🎩'}"
+                oninput="onMcQuestionInput()">${esc(mbState.embed.description)}</textarea>
+            <div class="form-hint">Shown as the embed description</div>
+        </div>
+        <div class="form-group" style="margin-bottom:12px;">
+            <label class="form-label">Answer options (A–F) + correct answer</label>
+            <div id="mb-mc-answers"></div>
+            <button class="btn btn-sm btn-secondary" id="mb-mc-add-answer" onclick="addMbAnswer()">+ Add Option</button>
+            <div class="form-hint">2 to 6 options · the exact text you type is the button label · select which one is correct</div>
+        </div>
+        ${numInput('mb-mc-seconds', 'Answer time (s)', c.seconds, 'Players can change their pick until the timer ends')}`;
+        box.innerHTML = html;
+        renderMcAnswers();
+        return;
+    }
+    if (t === 'rps') {
+        box.innerHTML = `<div class="form-row">
+            ${numInput('mb-rps-seat', 'Seating timeout (s)', c.seating_seconds, 'Time to take a seat before the game starts')}
+            ${numInput('mb-rps-choose', 'Choice timeout (s)', c.choice_seconds, 'Time each player has to play rock / paper / scissors')}
+        </div>`;
+    }
+}
+
+function renderMcAnswers() {
+    const box = document.getElementById('mb-mc-answers');
+    if (!box) return;
+    const c = mbState.config;
+    box.innerHTML = (c.answers || []).map((a, i) => `
+        <div class="mb-answer-row">
+            <span class="mb-answer-key">${'ABCDEF'[i]}</span>
+            <input class="form-input" value="${esc(a)}" placeholder="Option ${'ABCDEF'[i]}"
+                maxlength="80" oninput="onMcAnswerInput(${i}, this)">
+            <button type="button" class="mb-correct-mark ${c.correct === i ? 'mb-correct-on' : ''}"
+                title="Mark as the correct answer" onclick="markMcCorrect(${i})">${c.correct === i ? '✓' : '○'}</button>
+        </div>`).join('');
+    document.getElementById('mb-mc-add-answer').style.display = (c.answers || []).length >= 6 ? 'none' : '';
+}
+
+function addMbAnswer() {
+    const c = mbState.config;
+    if ((c.answers || []).length >= 6) return;
+    c.answers.push('');
+    renderMcAnswers();
+    markDirty();
+    schedulePreview(true);
+}
+
+function onMcAnswerInput(i, el) {
+    mbState.config.answers[i] = el.value;
+    markDirty();
+    schedulePreview(true);
+}
+
+function markMcCorrect(i) {
+    mbState.config.correct = i;
+    renderMcAnswers();
+    markDirty();
+    schedulePreview(true);
+}
+
+function onMcQuestionInput() {
+    const el = document.getElementById('mb-mc-question');
+    mbState.embed.description = el.value;
+    // keep the composer's description field in sync (it edits the same object)
+    const descTa = document.querySelector('#mb-embed-editor [data-field="description"]');
+    if (descTa && document.activeElement !== descTa) descTa.value = el.value;
+    markDirty();
+    schedulePreview(false);
+}
+
+function onMcImageInput() {
+    const el = document.getElementById('mb-mc-image');
+    mbState.embed.image = el.value;
+    const imgIn = document.querySelector('#mb-embed-editor [data-field="image"]');
+    if (imgIn && document.activeElement !== imgIn) imgIn.value = el.value;
+    markDirty();
+    schedulePreview(false);
+}
+
+function onConfigInput() {
+    const t = mbState.game_type;
+    const c = mbState.config;
+    const num = (id) => {
+        const el = document.getElementById(id);
+        const v = el ? el.value : '';
+        return v === '' ? null : Number(v);
+    };
+    if (t === 'quick_click') {
+        if (num('mb-qc-buttons') !== null) c.buttons = num('mb-qc-buttons');
+        if (num('mb-qc-rmin') !== null) c.reveal_min = num('mb-qc-rmin');
+        if (num('mb-qc-rmax') !== null) c.reveal_max = num('mb-qc-rmax');
+        if (num('mb-qc-wait') !== null) c.wait_after = num('mb-qc-wait');
+    } else if (t === 'wheel') {
+        if (num('mb-wheel-join') !== null) c.join_seconds = num('mb-wheel-join');
+    } else if (MC_TYPES.includes(t)) {
+        if (num('mb-mc-seconds') !== null) c.seconds = num('mb-mc-seconds');
+    } else if (t === 'rps') {
+        if (num('mb-rps-seat') !== null) c.seating_seconds = num('mb-rps-seat');
+        if (num('mb-rps-choose') !== null) c.choice_seconds = num('mb-rps-choose');
+    }
+    markDirty();
+    schedulePreview(true);
+}
+
+// ── embed (shared composer, single embed per game) ─────────────────
+const editor = EC.mountEditor({
+    listEl: document.getElementById('mb-embed-editor'),
+    maxEmbeds: 1,
+    hideActions: true,
+    getEmbeds: () => [mbState.embed],
+    getActive: () => 0,
+    setActive: () => {},
+    onChange: () => {
+        // keep Game-Settings mirrors in sync (question text / image)
+        const q = document.getElementById('mb-mc-question');
+        if (q && document.activeElement !== q) q.value = mbState.embed.description;
+        const im = document.getElementById('mb-mc-image');
+        if (im && document.activeElement !== im) im.value = mbState.embed.image;
+        markDirty();
+        schedulePreview(false);
+    },
+});
+
+// ── rewards ────────────────────────────────────────────────────────
+function renderMbRewards() {
+    const c = document.getElementById('mb-rewards');
+    c.innerHTML = '';
+    mbState.rewards.forEach(r => addMbReward(r));
+    updateRewardSum();
+}
+
+function addMbReward(row) {
+    const c = document.getElementById('mb-rewards');
+    const div = document.createElement('div');
+    div.className = 'mb-reward-row';
+    div.innerHTML = `
+        <select class="form-input mb-rw-type" onchange="mbRewardRowChanged(this)">
+            ${Object.entries(REWARD_TYPE_LABELS).map(([k, v]) =>
+                `<option value="${k}" ${row && row.reward_type === k ? 'selected' : ''}>${v}</option>`).join('')}
+        </select>
+        <input class="form-input mb-rw-value" placeholder="Amount, item name, or role ID"
+            value="${esc(row ? row.reward_value : '')}" oninput="updateRewardSum()">
+        <input class="form-input mb-rw-weight" type="number" min="1" placeholder="Weight"
+            value="${row && row.weight ? row.weight : 1}" oninput="updateRewardSum()">
+        <input class="form-input mb-rw-dur" type="number" min="1" placeholder="Hours"
+            value="${row && row.duration_hours ? row.duration_hours : ''}"
+            style="${(row && (row.reward_type === 'temp_role' || row.reward_type === 'role')) ? '' : 'display:none;'}">
+        <button type="button" class="btn btn-sm btn-danger" onclick="removeMbReward(this)" title="Remove">✕</button>`;
+    c.appendChild(div);
+    mbRewardRowChanged(div.querySelector('.mb-rw-type'));
+    if (!row) { div.querySelector('.mb-rw-value').focus(); markDirty(); }
+    updateRewardSum();
+}
+
+function mbRewardRowChanged(sel) {
+    const row = sel.closest('.mb-reward-row');
+    row.querySelector('.mb-rw-dur').style.display =
+        (sel.value === 'temp_role' || sel.value === 'role') ? '' : 'none';
+    markDirty();
+    updateRewardSum();
+}
+
+function removeMbReward(btn) {
+    const rows = readMbRewards();
+    const idx = Array.from(document.getElementById('mb-rewards').children).indexOf(btn.closest('.mb-reward-row'));
+    mbState.rewards.splice(idx, 1);
+    renderMbRewards();
+    markDirty();
+}
+
+function readMbRewards() {
+    return Array.from(document.getElementById('mb-rewards').children).map(r => {
+        const out = {
+            reward_type: r.querySelector('.mb-rw-type').value,
+            reward_value: r.querySelector('.mb-rw-value').value.trim(),
+            weight: parseInt(r.querySelector('.mb-rw-weight').value) || 1,
+        };
+        const dur = r.querySelector('.mb-rw-dur').value;
+        if (dur) out.duration_hours = parseInt(dur);
+        return out;
+    });
+}
+
+function updateRewardSum() {
+    const rows = readMbRewards();
+    const sum = rows.reduce((s, r) => s + (parseInt(r.weight) || 1), 0);
+    document.getElementById('mb-reward-sum').textContent =
+        rows.length ? `${rows.length} reward${rows.length > 1 ? 's' : ''} · total weight ${sum}`
+                    : 'No pool — winners get nothing';
+}
+
+// ── spawn settings ─────────────────────────────────────────────────
+function renderCategorySelect() {
+    const sel = document.getElementById('mb-category');
+    let html = '<option value="">— pick a category —</option>';
+    (function walk(nodes, prefix) {
+        for (const n of nodes) {
+            html += `<option value="${n.id}">${prefix}${esc(n.emoji ? n.emoji + ' ' : '')}${esc(n.name)}</option>`;
+            walk(n.children || [], prefix + '　');
+        }
+    })(mbState.tree, '');
+    sel.innerHTML = html;
+    if (mbState.category_id) sel.value = String(mbState.category_id);
+}
+
+function onSpawnInput() {
+    mbState.category_id = document.getElementById('mb-category').value || null;
+    mbState.channel_id = $('#mb-channel').val() || '';
+    mbState.enabled = document.getElementById('mb-enabled').checked;
+    mbState.auto_spawn = document.getElementById('mb-autospawn').checked;
+    markDirty();
+}
+
+function onIdentityInput() {
+    markDirty();
+}
+
+// ── payload / validation ───────────────────────────────────────────
+function buildPayload() {
+    const clean = EC.cleanEmbedForPayload(mbState.embed);
+    return {
+        name: document.getElementById('mb-name').value.trim(),
+        category_id: mbState.category_id ? parseInt(mbState.category_id) : null,
+        game_type: mbState.game_type,
+        enabled: mbState.enabled,
+        auto_spawn: mbState.auto_spawn,
+        embed: clean,
+        config: mbState.config,
+        channel_id: mbState.channel_id ? parseInt(mbState.channel_id) : null,
+        rewards: readMbRewards().filter(r => r.reward_value),
+    };
+}
+
+function clientValidate() {
+    const p = buildPayload();
+    if (!p.name) return 'Give the game a name';
+    if (!p.category_id) return 'Pick a category';
+    if (!p.game_type) return 'Pick a game type';
+    // A reward row that picked a type but never got a value would be
+    // silently dropped by buildPayload — surface it instead.
+    const rawRewards = readMbRewards();
+    if (rawRewards.some(r => !r.reward_value))
+        return 'Every reward needs a value — fill it in or remove the row';
+    const c = mbState.config;
+    if (p.game_type === 'quick_click') {
+        if (c.buttons != null && (c.buttons < 2 || c.buttons > 6)) return 'Button count must be 2 to 6';
+        if (c.reveal_max != null && c.reveal_min != null && c.reveal_max < c.reveal_min)
+            return 'Reveal delay max must be >= min';
+    }
+    if (MC_TYPES.includes(p.game_type)) {
+        const ans = (c.answers || []).map(a => String(a || '').trim());
+        if (ans.length < 2 || ans.length > 6) return 'Add 2 to 6 answer options';
+        if (ans.some(a => !a)) return 'Every answer option needs text';
+        if (c.correct == null || c.correct < 0 || c.correct >= ans.length)
+            return 'Select which answer is correct';
+        if (p.game_type === 'math' && !mbState.embed.description.trim())
+            return 'Math games need a question (set it in Game Settings)';
+        if (p.game_type === 'emoji' && !mbState.embed.description.trim())
+            return 'Emoji games need a question (set it in Game Settings)';
+        if (p.game_type === 'colors') {
+            const img = mbState.embed.image || '';
+            if (!/^https?:\/\/\S+/.test(img))
+                return 'Colors games need a valid image URL (https://…)';
+        }
+    }
+    return null;
+}
+
+// ── save ───────────────────────────────────────────────────────────
+async function saveTemplate(btn) {
+    if (mbState.saving) return; // double-submission guard
+    const err = clientValidate();
+    if (err) { showToast(err, 'warning'); return; }
+    mbState.saving = true;
+    setLoading(btn, true, 'Saving…');
+    const isEdit = !!mbState.templateId;
+    try {
+        const res = await fetch(isEdit
+            ? `/api/minigames/templates/${mbState.templateId}`
+            : '/api/minigames/templates', {
+            method: isEdit ? 'PATCH' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildPayload()),
+        });
+        const data = await res.json();
+        if (data.success || data.ok) {
+            if (!isEdit) {
+                mbState.templateId = data.template.id;
+                // The URL now names the entity — a refresh lands back
+                // on THIS game (no duplication, no loss).
+                history.replaceState(null, '', `/minigames/builder?template_id=${mbState.templateId}`);
+                document.getElementById('mb-test-btn').disabled = false;
+            }
+            clearDirty();
+            showToast('Saved!', 'success');
+            // Re-sync from the server (canonical values, e.g. defaults filled in).
+            await loadTemplate(mbState.templateId, true);
+        } else {
+            showToast(data.error || 'Save failed', 'error');
+        }
+    } catch (e) {
+        showToast('Connection error', 'error');
+    } finally {
+        mbState.saving = false;
+        setLoading(btn, false);
+    }
+}
+
+// ── load existing template ─────────────────────────────────────────
+async function loadTemplate(id, silent) {
+    const res = await fetch(`/api/minigames/templates/${id}`);
+    const data = await res.json();
+    const t = data.template;
+    if (!t) {
+        if (!silent) showToast('Template not found — it may have been deleted', 'error');
+        return false;
+    }
+    mbState.templateId = t.id;
+    mbState.game_type = t.game_type;
+    mbState.config = JSON.parse(JSON.stringify(t.config || {}));
+    mbState.embed = EC.embedFromApi(t.embed || {});
+    mbState.rewards = (t.rewards || []).map(r => ({
+        reward_type: r.reward_type, reward_value: r.reward_value,
+        weight: r.weight, duration_hours: r.duration_hours,
+    }));
+    mbState.channel_id = t.channel_id ? String(t.channel_id) : '';
+    mbState.category_id = t.category_id;
+    mbState.enabled = !!t.enabled;
+    mbState.auto_spawn = !!t.auto_spawn;
+
+    document.getElementById('mb-name').value = t.name;
+    document.getElementById('mb-enabled').checked = mbState.enabled;
+    document.getElementById('mb-autospawn').checked = mbState.auto_spawn;
+    renderTypeCards();
+    renderGameSettings();
+    editor.render();
+    renderMbRewards();
+    setTimeout(() => {
+        const cp = document.getElementById('mb-channel');
+        if (cp) {
+            // Per-template override wins; else fall back to the guild
+            // spawn channel (never clear a picker the admin set).
+            const val = mbState.channel_id
+                || (mbState.configRoot && mbState.configRoot.channel_id ? String(mbState.configRoot.channel_id) : '');
+            if (val) $(cp).val(val).trigger('change.select2');
+        }
+        const cat = document.getElementById('mb-category');
+        if (cat && mbState.category_id) cat.value = String(mbState.category_id);
+    }, 800);
+    clearDirty();
+    schedulePreview(true);
+    return true;
+}
+
+// ── test spawn (only for saved games) ──────────────────────────────
+async function testSpawnFromBuilder(btn) {
+    if (!mbState.templateId) { showToast('Save the game first', 'warning'); return; }
+    if (mbState.dirty) { showToast('Save the game first — it has unsaved changes', 'warning'); return; }
+    showConfirm('Queue a TEST spawn? The game runs in its target channel exactly as players would see it.', async () => {
+        setLoading(btn, true, '…');
+        try {
+            const res = await fetch(`/api/minigames/templates/${mbState.templateId}/spawn`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: 'test' }),
+            });
+            const data = await res.json();
+            if (data.success) {
+                showToast(`Test spawn queued — “${data.template_name}” runs in a few seconds`, 'success');
+                pollTestDone();
+            } else {
+                showToast(data.error || 'Test spawn failed', 'error');
+            }
+        } catch (e) {
+            showToast('Connection error', 'error');
+        } finally {
+            setLoading(btn, false);
+        }
+    });
+}
+
+function pollTestDone() {
+    let tries = 0;
+    const timer = setInterval(async () => {
+        tries++;
+        try {
+            const res = await fetch('/api/minigames/spawn-requests');
+            const data = await res.json();
+            if ((data.requests || []).length === 0) {
+                clearInterval(timer);
+                showToast('Test spawn finished — open History to see the result', 'info');
+            }
+        } catch (e) { /* keep polling */ }
+        if (tries > 60) clearInterval(timer);
+    }, 2000);
+}
+
+// ── init ───────────────────────────────────────────────────────────
+async function loadConfigAndTree() {
+    const [cfgRes, catRes] = await Promise.all([
+        fetch('/api/minigames/config'), fetch('/api/minigames/categories'),
+    ]);
+    if (cfgRes.ok) mbState.configRoot = (await cfgRes.json()).config || {};
+    if (catRes.ok) mbState.tree = (await catRes.json()).tree || [];
+    renderCategorySelect();
+}
+
+async function loadBotIdentity() {
+    try {
+        const res = await fetch('/api/botprofile/config');
+        const data = await res.json();
+        const live = data.live || {};
+        const stored = data.stored || {};
+        mbState.botIdentity = {
+            name: stored.nickname || live.nick || live.username || 'Nero',
+            avatar: live.guild_avatar_url || stored.avatar_url || live.global_avatar_url || null,
+        };
+    } catch (e) { /* preview falls back to the default identity */ }
+}
+
+(async function init() {
+    await Promise.all([loadConfigAndTree(), loadBotIdentity()]);
+    // channel default: the guild spawn channel (per-template override allowed)
+    setTimeout(() => {
+        const cp = document.getElementById('mb-channel');
+        if (cp && !TEMPLATE_ID && mbState.configRoot && mbState.configRoot.channel_id) {
+            $(cp).val(String(mbState.configRoot.channel_id)).trigger('change.select2');
+            mbState.channel_id = String(mbState.configRoot.channel_id);
+        }
+    }, 800);
+    if (TEMPLATE_ID) {
+        await loadTemplate(TEMPLATE_ID, false);
+    }
+    renderTypeCards();
+    renderGameSettings();
+    editor.render();
+    renderMbRewards();
+    refreshPreview(true);
+})();
+</script>
+{% endblock %}
+{% endblock %}

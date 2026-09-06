@@ -3,91 +3,240 @@
 {% block content %}
 <span data-page-title="Commands"></span>
 
-<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+<div class="cmd-header-wrap">
     <div>
-        <h2 style="margin:0;font-size:18px;">🎮 Command Manager</h2>
-        <div class="text-muted text-sm">Toggle commands, or click Edit for aliases, cooldowns, and role/channel restrictions.</div>
+        <div class="cmd-page-title">
+            <h2>🎮 Commands Manager</h2>
+            <span class="badge badge-source">{{ stats.total }} commands</span>
+        </div>
+        <div class="text-muted text-sm">Configure slash commands, custom cooldowns, and role/channel permissions.</div>
+        <div class="cmd-alias-status" id="alias-status" hidden></div>
     </div>
-    <div style="display:flex;gap:8px;">
-        <button class="btn btn-secondary" onclick="bulkToggle(true)">Enable All</button>
-        <button class="btn btn-danger" onclick="bulkToggle(false)">Disable All</button>
+    <div class="cmd-header-actions">
+        <button type="button" class="btn btn-secondary" onclick="bulkToggle(true)">Enable All</button>
+        <button type="button" class="btn btn-danger" onclick="bulkToggle(false)">Disable All</button>
     </div>
 </div>
 
+<!-- Overview Stats -->
+<div class="stats-grid cmd-stats-grid">
+    <div class="stat-card stat-accent">
+        <div class="stat-label">Total Commands</div>
+        <div class="stat-value" id="stat-total-count">{{ stats.total }}</div>
+        <div class="stat-sub">{{ stats.categories }} categories</div>
+    </div>
+    <div class="stat-card stat-success">
+        <div class="stat-label">Enabled</div>
+        <div class="stat-value" id="stat-enabled-count">{{ stats.enabled }}</div>
+        <div class="stat-sub">Active in Discord</div>
+    </div>
+    <div class="stat-card stat-danger">
+        <div class="stat-label">Disabled</div>
+        <div class="stat-value" id="stat-disabled-count">{{ stats.disabled }}</div>
+        <div class="stat-sub">Blocked in Discord</div>
+    </div>
+    <div class="stat-card stat-warning">
+        <div class="stat-label">Restricted</div>
+        <div class="stat-value" id="stat-restricted-count">{{ stats.restricted }}</div>
+        <div class="stat-sub">Role / channel rules</div>
+    </div>
+</div>
+
+<!-- Search & Filter Controls -->
+<div class="card cmd-filter-card">
+    <div class="cmd-filter-bar">
+        <div class="cmd-search-box">
+            <span class="cmd-search-icon">🔍</span>
+            <input type="text" id="cmd-search-input" class="form-input"
+                   placeholder="Search commands, descriptions, or parameters (e.g. /ban, timeout, xp)..."
+                   oninput="filterCommands()">
+            <button type="button" id="cmd-search-clear" class="cmd-search-clear" onclick="clearSearch()" style="display:none;">✕</button>
+        </div>
+        <div class="cmd-filter-group">
+            <label class="form-label" style="margin:0 4px 0 0;font-size:12px;">Category:</label>
+            <select id="cmd-category-filter" class="form-select cmd-category-select" onchange="filterCommands()">
+                <option value="">All Categories ({{ stats.total }})</option>
+                {% for category, cmds in categories.items() %}
+                <option value="{{ category }}">{{ category }} ({{ cmds|length }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="cmd-status-filters">
+            <button type="button" class="btn btn-sm btn-secondary filter-pill active" data-filter="all" onclick="setStatusFilter('all')">All</button>
+            <button type="button" class="btn btn-sm btn-secondary filter-pill" data-filter="enabled" onclick="setStatusFilter('enabled')">Enabled</button>
+            <button type="button" class="btn btn-sm btn-secondary filter-pill" data-filter="disabled" onclick="setStatusFilter('disabled')">Disabled</button>
+            <button type="button" class="btn btn-sm btn-secondary filter-pill" data-filter="restricted" onclick="setStatusFilter('restricted')">Restricted</button>
+        </div>
+    </div>
+    <div id="cmd-active-filter-summary" class="cmd-filter-summary" style="display:none;"></div>
+</div>
+
+<!-- Empty search state -->
+<div id="cmd-empty-state" class="card cmd-empty-state" style="display:none;">
+    <div class="cmd-empty-icon">🔍</div>
+    <div class="cmd-empty-title">No commands found</div>
+    <div class="cmd-empty-desc text-muted">No commands match your current search or status filter.</div>
+    <button type="button" class="btn btn-sm btn-secondary" onclick="resetFilters()">Reset All Filters</button>
+</div>
+
+<!-- Categories & Command Rows -->
+<div id="cmd-categories-container">
 {% for category, cmds in categories.items() %}
-<div class="card" style="margin-bottom:16px;">
-    <div class="card-header">
-        <div class="card-title" style="margin:0;">{{ category }}</div>
-        <div style="display:flex;gap:6px;">
-            <button class="btn btn-sm btn-secondary" onclick="bulkCategory('{{ category }}', true)">Enable All</button>
-            <button class="btn btn-sm btn-danger" onclick="bulkCategory('{{ category }}', false)">Disable All</button>
-            <button class="btn btn-sm btn-secondary"
+<div class="card cmd-category-card" id="cat-card-{{ category|replace(' ', '-')|replace('&', 'and') }}" data-category="{{ category }}">
+    <div class="card-header cmd-category-header">
+        <div class="cmd-category-title-wrap">
+            <h3 class="cmd-category-title">{{ category }}</h3>
+            <span class="badge badge-source cat-cmd-count">{{ cmds|length }}</span>
+        </div>
+        <div class="cmd-category-actions">
+            <button type="button" class="btn btn-sm btn-secondary" onclick="bulkCategory('{{ category }}', true)">Enable All</button>
+            <button type="button" class="btn btn-sm btn-secondary" onclick="bulkCategory('{{ category }}', false)">Disable All</button>
+            <button type="button" class="btn btn-sm btn-secondary"
                     onclick="openCategoryRestrictModal('{{ category }}')"
-                    title="Apply the same role/channel restriction to every command in this category">
+                    title="Apply role/channel restrictions to all commands in {{ category }}">
                 🔐 Restrict Category
             </button>
         </div>
     </div>
+
     <div class="cmd-list">
         {% for cmd in cmds %}
         {% set t = toggles.get(cmd, {}) %}
         {% set enabled = t.get('enabled', 1) %}
-        {% set has_restrictions = t.get('enabled_roles') or t.get('disabled_roles') or t.get('enabled_channels') or t.get('disabled_channels') %}
-        {% set has_cooldown = t.get('cooldown') %}
-        <div class="cmd-row" id="cmd-{{ cmd }}" data-command="{{ cmd }}">
+        {% set meta = metadata.get(cmd, {}) %}
+        {% set has_restrictions = t.get('has_restrictions', false) %}
+        {% set cooldown_val = t.get('cooldown') %}
+
+        <div class="cmd-row {{ 'cmd-disabled-state' if not enabled else '' }}"
+             id="cmd-{{ cmd }}"
+             data-command="{{ cmd }}"
+             data-category="{{ category }}"
+             data-enabled="{{ 1 if enabled else 0 }}"
+             data-restricted="{{ 1 if has_restrictions else 0 }}"
+             data-search="{{ cmd }} {{ meta.desc|default('') }} {{ (meta.params|default([]))|join(' ') }}">
+
             <div class="cmd-row-header">
                 <div class="cmd-row-main">
-                    <span class="cmd-status-dot {{ 'cmd-status-on' if enabled else 'cmd-status-off' }}"></span>
-                    <span class="cmd-row-name">/{{ cmd }}</span>
-                    {% if has_cooldown %}<span class="cmd-chip">⏱ {{ t.cooldown }}s</span>{% endif %}
-                    {% if has_restrictions %}<span class="cmd-chip cmd-chip-accent">🔐 restricted</span>{% endif %}
+                    <span class="cmd-status-dot {{ 'cmd-status-on' if enabled else 'cmd-status-off' }}"
+                          title="{{ 'Command enabled' if enabled else 'Command disabled' }}"></span>
+                    <div class="cmd-meta-wrap">
+                        <div class="cmd-name-line">
+                            <span class="cmd-row-name">/{{ cmd }}</span>
+                            {% if meta.params %}
+                                {% for param in meta.params %}
+                                <span class="cmd-param-tag">[{{ param }}]</span>
+                                {% endfor %}
+                            {% endif %}
+                            <span class="cmd-chip cmd-chip-cooldown" id="chip-cooldown-{{ cmd }}"
+                                  style="{{ '' if cooldown_val else 'display:none;' }}">
+                                ⏱ <span class="cooldown-num">{{ cooldown_val or 0 }}</span>s
+                            </span>
+                            <span class="cmd-chip cmd-chip-accent cmd-chip-restricted" id="chip-restricted-{{ cmd }}"
+                                  style="{{ '' if has_restrictions else 'display:none;' }}">
+                                🔐 restricted
+                            </span>
+                        </div>
+                        {% if meta.desc %}
+                        <div class="cmd-description text-muted text-sm">{{ meta.desc }}</div>
+                        {% endif %}
+                        <div class="cmd-usage text-muted text-xs" id="usage-{{ cmd }}" style="margin-top:3px;"
+                             data-params="{{ meta.params|default([])|join(',') }}">
+                            <span class="cmd-usage-label">Usage:</span>
+                            <code>/{{ cmd }}{% for param in meta.params|default([]) %} [{{ param }}]{% endfor %}</code>
+                            <span class="cmd-usage-alias-hint" id="usage-alias-{{ cmd }}" style="display:none;">
+                                &nbsp;or&nbsp;<code>alias{% for param in meta.params|default([]) %} [{{ param }}]{% endfor %}</code>
+                            </span>
+                        </div>
+                    </div>
                 </div>
+
                 <div class="cmd-row-actions">
                     <button type="button" class="btn btn-sm btn-secondary cmd-edit-toggle"
                             id="edit-btn-{{ cmd }}" onclick="toggleEditPanel('{{ cmd }}')">
                         <span class="cmd-edit-chevron">›</span> Edit
                     </button>
                     <label class="toggle" title="{{ 'Disable' if enabled else 'Enable' }} /{{ cmd }}">
-                        <input type="checkbox" {% if enabled %}checked{% endif %}
+                        <input type="checkbox" id="toggle-input-{{ cmd }}" {% if enabled %}checked{% endif %}
                                onchange="toggleCmd('{{ cmd }}', this.checked, this)">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
             </div>
 
+            <!-- Edit Panel -->
             <div class="cmd-edit-panel" id="edit-panel-{{ cmd }}">
                 <div class="cmd-edit-panel-inner">
                     <div class="cmd-edit-panel-content">
                         <div class="cmd-edit-loading" id="edit-loading-{{ cmd }}">
-                            <span class="ns-spinner"></span> Loading…
+                            <span class="ns-spinner"></span> Loading settings…
                         </div>
                         <div class="cmd-edit-fields" id="edit-fields-{{ cmd }}" style="display:none;">
-                            <div class="cmd-edit-row">
-                                <input class="form-input" id="edit-aliases-{{ cmd }}" placeholder="Aliases, comma separated (cosmetic)">
-                                <input class="form-input" type="number" min="0" id="edit-cooldown-{{ cmd }}"
-                                       placeholder="Cooldown (seconds)" style="max-width:170px;">
+                            <div class="cmd-edit-grid-top">
+                                <div class="form-group" style="margin-bottom:0;">
+                                    <label class="form-label" for="edit-cooldown-{{ cmd }}">Cooldown (seconds)</label>
+                                    <input class="form-input" type="number" min="0" id="edit-cooldown-{{ cmd }}"
+                                           placeholder="0 (no cooldown)">
+                                    <div class="form-hint">Rate limit per user in seconds</div>
+                                </div>
+                                <div class="form-group" style="margin-bottom:0;">
+                                    <label class="form-label">Aliases</label>
+                                    <div class="alias-host" data-alias-input
+                                         data-alias-command="{{ cmd }}"
+                                         id="edit-aliases-host-{{ cmd }}">
+                                        <input type="hidden" name="aliases-{{ cmd }}"
+                                               id="edit-aliases-{{ cmd }}">
+                                    </div>
+                                    <div class="form-hint">
+                                        Type a word, press <kbd>Space</kbd> to add it. Members can then
+                                        type <code>alias [args]</code> — bare, no <code>!</code>
+                                        prefix — to run <code>/{{ cmd }}</code>. A single character is
+                                        fine, case does not matter, and it applies to this server only.
+                                    </div>
+                                </div>
                             </div>
+
                             <div class="cmd-edit-picker-grid">
                                 <div>
-                                    <label class="form-label">Enabled roles</label>
+                                    <label class="form-label">
+                                        <span class="badge-role-rule allowed-pill">Allowed Roles</span>
+                                        <span class="form-hint" style="display:inline;margin-left:4px;">(whitelist)</span>
+                                    </label>
                                     <select class="form-input cmd-multi" id="edit-enabled-roles-{{ cmd }}" multiple></select>
+                                    <div class="form-hint">Only these roles can use this command (leave empty for everyone)</div>
                                 </div>
                                 <div>
-                                    <label class="form-label">Disabled roles</label>
+                                    <label class="form-label">
+                                        <span class="badge-role-rule blocked-pill">Blocked Roles</span>
+                                        <span class="form-hint" style="display:inline;margin-left:4px;">(blacklist)</span>
+                                    </label>
                                     <select class="form-input cmd-multi" id="edit-disabled-roles-{{ cmd }}" multiple></select>
+                                    <div class="form-hint">These roles are blocked from using this command</div>
                                 </div>
                                 <div>
-                                    <label class="form-label">Enabled channels</label>
+                                    <label class="form-label">
+                                        <span class="badge-role-rule allowed-pill">Allowed Channels</span>
+                                        <span class="form-hint" style="display:inline;margin-left:4px;">(whitelist)</span>
+                                    </label>
                                     <select class="form-input cmd-multi" id="edit-enabled-channels-{{ cmd }}" multiple></select>
+                                    <div class="form-hint">Only runnable in these channels (leave empty for all channels)</div>
                                 </div>
                                 <div>
-                                    <label class="form-label">Disabled channels</label>
+                                    <label class="form-label">
+                                        <span class="badge-role-rule blocked-pill">Blocked Channels</span>
+                                        <span class="form-hint" style="display:inline;margin-left:4px;">(blacklist)</span>
+                                    </label>
                                     <select class="form-input cmd-multi" id="edit-disabled-channels-{{ cmd }}" multiple></select>
+                                    <div class="form-hint">Command is blocked in these channels</div>
                                 </div>
                             </div>
+
                             <div class="cmd-edit-actions">
-                                <button type="button" class="btn btn-sm btn-primary" onclick="saveCommandSettings('{{ cmd }}', this)">Save</button>
-                                <button type="button" class="btn btn-sm btn-secondary" onclick="toggleEditPanel('{{ cmd }}')">Cancel</button>
+                                <button type="button" class="btn btn-sm btn-primary" onclick="saveCommandSettings('{{ cmd }}', this)">
+                                    Save Changes
+                                </button>
+                                <button type="button" class="btn btn-sm btn-secondary" onclick="toggleEditPanel('{{ cmd }}')">
+                                    Cancel
+                                </button>
                                 <span class="cmd-edit-status" id="edit-status-{{ cmd }}"></span>
                             </div>
                         </div>
@@ -99,65 +248,286 @@
     </div>
 </div>
 {% endfor %}
+</div>
 
 <!-- Category-level bulk restriction modal -->
-<div id="cat-restrict-modal" class="modal-overlay" style="display:none;">
-    <div class="modal">
+<div id="cat-restrict-modal" class="modal-overlay" style="display:none;" onclick="handleModalOverlayClick(event)">
+    <div class="modal cmd-restrict-modal">
         <div class="modal-title">🔐 Restrict Category — <span id="cat-restrict-name" style="color:var(--accent);"></span></div>
         <div class="modal-body">
-            Applies these restrictions to every command in this category, replacing what each
-            command had configured individually. Leave a field empty to leave it untouched.
+            Apply role and channel permissions to all commands in this category at once.
+            Leave a section empty to leave those restrictions unchanged.
         </div>
         <div class="cmd-edit-picker-grid" style="margin-bottom:16px;">
             <div>
-                <label class="form-label">Enabled roles</label>
+                <label class="form-label">
+                    <span class="badge-role-rule allowed-pill">Allowed Roles</span> (whitelist)
+                </label>
                 <select class="form-input cmd-multi" id="cat-restrict-enabled-roles" multiple></select>
+                <div class="form-hint">Only these roles can use commands in this category</div>
             </div>
             <div>
-                <label class="form-label">Disabled roles</label>
+                <label class="form-label">
+                    <span class="badge-role-rule blocked-pill">Blocked Roles</span> (blacklist)
+                </label>
                 <select class="form-input cmd-multi" id="cat-restrict-disabled-roles" multiple></select>
+                <div class="form-hint">Members with these roles cannot use category commands</div>
             </div>
             <div>
-                <label class="form-label">Enabled channels</label>
+                <label class="form-label">
+                    <span class="badge-role-rule allowed-pill">Allowed Channels</span> (whitelist)
+                </label>
                 <select class="form-input cmd-multi" id="cat-restrict-enabled-channels" multiple></select>
+                <div class="form-hint">Commands only work in selected channels</div>
             </div>
             <div>
-                <label class="form-label">Disabled channels</label>
+                <label class="form-label">
+                    <span class="badge-role-rule blocked-pill">Blocked Channels</span> (blacklist)
+                </label>
                 <select class="form-input cmd-multi" id="cat-restrict-disabled-channels" multiple></select>
+                <div class="form-hint">Commands are disabled in selected channels</div>
             </div>
         </div>
         <div class="modal-actions">
-            <button class="btn btn-secondary" onclick="closeCategoryRestrictModal()">Cancel</button>
-            <button class="btn btn-primary" id="cat-restrict-apply-btn" onclick="applyCategoryRestrict()">Apply to Category</button>
+            <button type="button" class="btn btn-secondary" onclick="closeCategoryRestrictModal()">Cancel</button>
+            <button type="button" class="btn btn-primary" id="cat-restrict-apply-btn" onclick="applyCategoryRestrict()">Apply to Category</button>
         </div>
-        <div id="cat-restrict-status" style="margin-top:10px;font-size:13px;"></div>
+        <div id="cat-restrict-status" style="margin-top:10px;font-size:13px;font-weight:500;"></div>
     </div>
 </div>
 
 <style>
-/* ── Command rows — compact, single line collapsed ───────────────── */
-.cmd-list { display: flex; flex-direction: column; gap: 6px; }
+/* ── Page Header & Layout ────────────────────────────────────────── */
+.cmd-header-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+.cmd-page-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+}
+.cmd-page-title h2 { margin: 0; font-size: 20px; font-weight: 700; color: var(--text); }
+.cmd-header-actions { display: flex; gap: 8px; align-items: center; }
+
+/* ── Stats Grid ─────────────────────────────────────────────────── */
+.cmd-stats-grid { margin-bottom: 20px; }
+.cmd-stats-grid .stat-card { padding: 14px 16px; }
+.cmd-stats-grid .stat-value { font-size: 22px; font-weight: 700; line-height: 1.2; }
+
+/* ── Filter Bar ─────────────────────────────────────────────────── */
+.cmd-filter-card {
+    padding: 14px 18px;
+    margin-bottom: 20px;
+}
+.cmd-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.cmd-search-box {
+    position: relative;
+    flex: 1;
+    min-width: 240px;
+}
+.cmd-search-icon {
+    position: absolute;
+    left: 11px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 13px;
+    color: var(--text3);
+    pointer-events: none;
+}
+.cmd-search-box .form-input {
+    padding-left: 32px;
+    padding-right: 28px;
+    font-size: 13px;
+    height: 38px;
+}
+.cmd-search-clear {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: transparent;
+    border: none;
+    color: var(--text3);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 4px;
+}
+.cmd-search-clear:hover { color: var(--text); }
+
+.cmd-filter-group { display: flex; align-items: center; gap: 6px; }
+.cmd-category-select { height: 38px; min-width: 170px; font-size: 13px; }
+
+.cmd-status-filters {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+.filter-pill {
+    min-height: 32px;
+    padding: 4px 12px;
+    font-size: 12px;
+    border-radius: 6px;
+}
+.filter-pill.active {
+    background: var(--accent);
+    color: #ffffff;
+    border-color: var(--accent);
+}
+
+.cmd-filter-summary {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text3);
+}
+
+/* ── Category Cards & Headers ────────────────────────────────────── */
+.cmd-category-card {
+    padding: 18px 20px;
+    margin-bottom: 20px;
+}
+.cmd-category-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.cmd-category-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.cmd-category-title {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+}
+.cmd-category-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+/* ── Command Rows ───────────────────────────────────────────────── */
+.cmd-list { display: flex; flex-direction: column; gap: 8px; }
 
 .cmd-row {
     background: var(--bg3);
     border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
+    transition: border-color .15s, background .15s;
+}
+.cmd-row:hover { border-color: rgba(124, 92, 191, 0.4); }
+.cmd-row.cmd-disabled-state {
+    opacity: 0.72;
+    background: var(--bg2);
 }
 
 .cmd-row-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    padding: 10px 14px;
+    gap: 16px;
+    padding: 12px 16px;
 }
 
-.cmd-row-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.cmd-row-name { font-weight: 600; font-size: 13px; color: var(--text); }
+.cmd-row-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    min-width: 0;
+    flex: 1;
+}
+
+.cmd-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-top: 5px;
+}
+.cmd-status-on  { background: var(--success); box-shadow: 0 0 6px rgba(87,242,135,.4); }
+.cmd-status-off { background: var(--danger); }
+
+.cmd-meta-wrap { min-width: 0; flex: 1; }
+
+.cmd-name-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 2px;
+}
+.cmd-row-name {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--text);
+}
+
+.cmd-param-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text3);
+    background: var(--bg4);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+}
+
+.cmd-description {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text2);
+    margin-top: 2px;
+}
+.cmd-usage {
+    font-size: 11px;
+    line-height: 1.4;
+}
+.cmd-usage code {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    background: var(--bg4);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 4px;
+}
+.cmd-usage-label {
+    font-weight: 600;
+    color: var(--text3);
+    margin-right: 2px;
+}
+.cmd-usage-alias-hint {
+    color: var(--accent);
+}
+
+.cmd-alias-status {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text3);
+}
+.cmd-alias-status.is-warn { color: var(--warning); }
 
 .cmd-chip {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     color: var(--text3);
     background: var(--bg4);
@@ -166,20 +536,36 @@
     padding: 2px 8px;
     white-space: nowrap;
 }
-.cmd-chip-accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); background: rgba(124,92,191,.12); }
+.cmd-chip-accent {
+    color: var(--accent);
+    border-color: rgba(124,92,191,.4);
+    background: rgba(124,92,191,.12);
+}
 
-.cmd-status-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-.cmd-status-on  { background: var(--success); }
-.cmd-status-off { background: var(--danger); }
+.cmd-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+}
+.cmd-edit-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 32px;
+    padding: 4px 10px;
+    font-size: 12px;
+}
+.cmd-edit-chevron {
+    display: inline-block;
+    font-size: 13px;
+    transition: transform 200ms ease;
+}
+.cmd-row.cmd-row-expanded .cmd-edit-chevron {
+    transform: rotate(90deg);
+}
 
-.cmd-row-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-.cmd-edit-toggle { display: inline-flex; align-items: center; gap: 4px; }
-.cmd-edit-toggle:active { transform: scale(0.96); }
-.cmd-edit-chevron { display: inline-block; font-size: 13px; transition: transform 200ms ease; }
-.cmd-row.cmd-row-expanded .cmd-edit-chevron { transform: rotate(90deg); }
-
-/* ── Expand/collapse — one simple auto-height transition, no
-   decorative delay/translate dance. Practical, not fussy. ────────── */
+/* ── Edit Panel ─────────────────────────────────────────────────── */
 .cmd-edit-panel {
     display: grid;
     grid-template-rows: 0fr;
@@ -190,37 +576,68 @@
     border-top: 1px solid var(--border);
 }
 .cmd-edit-panel-inner { overflow: hidden; min-height: 0; }
-.cmd-edit-panel-content { padding: 14px; }
-
-.cmd-edit-loading {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 12px; color: var(--text3);
+.cmd-edit-panel-content {
+    padding: 16px 18px;
+    background: rgba(0, 0, 0, 0.08);
 }
 
-.cmd-edit-row { display: flex; gap: 10px; margin-bottom: 10px; }
-.cmd-edit-row .form-input { flex: 1; }
+.cmd-edit-loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text3);
+    padding: 8px 0;
+}
+
+.cmd-edit-grid-top {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 14px;
+    margin-bottom: 14px;
+}
+@media (max-width: 640px) {
+    .cmd-edit-grid-top { grid-template-columns: 1fr; }
+}
 
 .cmd-edit-picker-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
 }
-.cmd-edit-picker-grid .form-label { margin-bottom: 4px; font-size: 11px; }
+.badge-role-rule {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+.allowed-pill { background: rgba(87,242,135,.15); color: var(--success); }
+.blocked-pill { background: rgba(237,66,69,.15); color: var(--danger); }
 
 .cmd-edit-actions {
-    display: flex; align-items: center; gap: 10px;
-    margin-top: 12px; padding-top: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 14px;
+    padding-top: 14px;
     border-top: 1px solid var(--border);
 }
-.cmd-edit-status { font-size: 12px; font-weight: 500; }
+.cmd-edit-status { font-size: 12px; font-weight: 600; margin-left: 4px; }
 .cmd-edit-status.ok    { color: var(--success); }
 .cmd-edit-status.error { color: var(--danger); }
 
-.cmd-edit-fields .select2-container--focus .select2-selection,
-.cmd-edit-fields .select2-container--open .select2-selection {
-    border-color: var(--accent) !important;
-    box-shadow: 0 0 0 3px rgba(124,92,191,.18);
+/* ── Modals & Empty State ────────────────────────────────────────── */
+.cmd-restrict-modal { max-width: 620px; width: 90%; }
+.cmd-empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    margin-bottom: 20px;
 }
+.cmd-empty-icon { font-size: 32px; margin-bottom: 8px; }
+.cmd-empty-title { font-size: 16px; font-weight: 700; margin-bottom: 4px; color: var(--text); }
+.cmd-empty-desc { margin-bottom: 16px; }
 
 @media (prefers-reduced-motion: reduce) {
     .cmd-edit-panel { transition: none !important; }
@@ -230,59 +647,123 @@
 
 {% block scripts %}
 <script>
-// ── ENABLE/DISABLE toggle ────────────────────────────────────────────
+// ── STATE & CONSTANTS ───────────────────────────────────────────────
+const CATEGORY_COMMANDS = {
+    {% for category, cmds in categories.items() %}
+    "{{ category }}": [{% for cmd in cmds %}"{{ cmd }}"{% if not loop.last %}, {% endif %}{% endfor %}],
+    {% endfor %}
+};
+
+let _currentStatusFilter = 'all';
+const _cmdPanelLoaded = new Set();
+
+// ── TOGGLE SINGLE COMMAND ───────────────────────────────────────────
 async function toggleCmd(cmd, enable, checkboxEl) {
-    const res = await fetch('/api/commands/toggle', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({command: cmd, enabled: enable})
-    });
-    const data = await res.json();
-    if (data.success) {
-        showToast(`/${cmd} ${enable ? 'enabled' : 'disabled'}`, 'success');
-        const row = document.getElementById(`cmd-${cmd}`);
-        if (row) {
-            const dot = row.querySelector('.cmd-status-dot');
-            if (dot) { dot.classList.toggle('cmd-status-on', enable); dot.classList.toggle('cmd-status-off', !enable); }
+    try {
+        const res = await fetch('/api/commands/toggle', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({command: cmd, enabled: enable})
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(`/${cmd} ${enable ? 'enabled' : 'disabled'}`, 'success');
+            const row = document.getElementById(`cmd-${cmd}`);
+            if (row) {
+                row.dataset.enabled = enable ? '1' : '0';
+                row.classList.toggle('cmd-disabled-state', !enable);
+                const dot = row.querySelector('.cmd-status-dot');
+                if (dot) {
+                    dot.classList.toggle('cmd-status-on', enable);
+                    dot.classList.toggle('cmd-status-off', !enable);
+                }
+            }
+            updateStatsCounts();
+            filterCommands();
+        } else {
+            showToast(data.error || 'Failed to toggle command', 'error');
+            if (checkboxEl) checkboxEl.checked = !enable;
         }
-    } else {
-        showToast(data.error || 'Failed', 'error');
-        checkboxEl.checked = !enable;
+    } catch (err) {
+        console.error(`[commands] toggle error for /${cmd}:`, err);
+        showToast('Network error while toggling command', 'error');
+        if (checkboxEl) checkboxEl.checked = !enable;
     }
 }
 
+// ── BULK TOGGLES ────────────────────────────────────────────────────
 async function bulkToggle(enable) {
-    if (!confirm(`${enable ? 'Enable' : 'Disable'} ALL commands?`)) return;
-    const res = await fetch('/api/commands/bulk-toggle', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({enabled: enable})
-    });
-    const data = await res.json();
-    if (data.success) {
-        showToast(`${data.count} commands ${enable ? 'enabled' : 'disabled'}`, 'success');
-        setTimeout(() => location.reload(), 600);
-    } else {
-        showToast(data.error || 'Failed', 'error');
+    const action = enable ? 'Enable' : 'Disable';
+    if (!confirm(`${action} ALL commands across all categories?`)) return;
+    try {
+        const res = await fetch('/api/commands/bulk-toggle', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({enabled: enable})
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(`${data.count} commands ${enable ? 'enabled' : 'disabled'}`, 'success');
+            // Update all rows in place
+            document.querySelectorAll('.cmd-row').forEach(row => {
+                row.dataset.enabled = enable ? '1' : '0';
+                row.classList.toggle('cmd-disabled-state', !enable);
+                const dot = row.querySelector('.cmd-status-dot');
+                if (dot) {
+                    dot.classList.toggle('cmd-status-on', enable);
+                    dot.classList.toggle('cmd-status-off', !enable);
+                }
+                const cb = row.querySelector('.toggle input[type="checkbox"]');
+                if (cb) cb.checked = enable;
+            });
+            updateStatsCounts();
+            filterCommands();
+        } else {
+            showToast(data.error || 'Bulk toggle failed', 'error');
+        }
+    } catch (err) {
+        console.error('[commands] bulkToggle error:', err);
+        showToast('Network error during bulk toggle', 'error');
     }
 }
 
 async function bulkCategory(category, enable) {
-    const res = await fetch('/api/commands/bulk-toggle', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({category, enabled: enable})
-    });
-    const data = await res.json();
-    if (data.success) {
-        showToast(`${category}: ${data.count} commands ${enable ? 'enabled' : 'disabled'}`, 'success');
-        setTimeout(() => location.reload(), 600);
-    } else {
-        showToast(data.error || 'Failed', 'error');
+    try {
+        const res = await fetch('/api/commands/bulk-toggle', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({category: category, enabled: enable})
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(`${category}: ${data.count} commands ${enable ? 'enabled' : 'disabled'}`, 'success');
+            const cmds = CATEGORY_COMMANDS[category] || [];
+            cmds.forEach(cmd => {
+                const row = document.getElementById(`cmd-${cmd}`);
+                if (row) {
+                    row.dataset.enabled = enable ? '1' : '0';
+                    row.classList.toggle('cmd-disabled-state', !enable);
+                    const dot = row.querySelector('.cmd-status-dot');
+                    if (dot) {
+                        dot.classList.toggle('cmd-status-on', enable);
+                        dot.classList.toggle('cmd-status-off', !enable);
+                    }
+                    const cb = row.querySelector('.toggle input[type="checkbox"]');
+                    if (cb) cb.checked = enable;
+                }
+            });
+            updateStatsCounts();
+            filterCommands();
+        } else {
+            showToast(data.error || 'Category bulk toggle failed', 'error');
+        }
+    } catch (err) {
+        console.error(`[commands] bulkCategory error for ${category}:`, err);
+        showToast('Network error during category toggle', 'error');
     }
 }
 
-// ── EDIT PANEL ────────────────────────────────────────────────────────
-const _cmdPanelLoaded = new Set();
-
+// ── EDIT PANEL EXPAND & LOAD ────────────────────────────────────────
 function toggleEditPanel(cmd) {
     const row = document.getElementById(`cmd-${cmd}`);
     if (!row) return;
@@ -290,7 +771,9 @@ function toggleEditPanel(cmd) {
     row.classList.toggle('cmd-row-expanded', opening);
 
     const btn = document.getElementById(`edit-btn-${cmd}`);
-    if (btn) btn.innerHTML = `<span class="cmd-edit-chevron">›</span> ${opening ? 'Close' : 'Edit'}`;
+    if (btn) {
+        btn.innerHTML = `<span class="cmd-edit-chevron">›</span> ${opening ? 'Close' : 'Edit'}`;
+    }
 
     if (opening && !_cmdPanelLoaded.has(cmd)) {
         _cmdPanelLoaded.add(cmd);
@@ -298,14 +781,6 @@ function toggleEditPanel(cmd) {
     }
 }
 
-// FIX: the previous version awaited 4 picker inits via Promise.all with
-// no try/catch. If any single one rejected (e.g. select2 unavailable),
-// the whole function threw and the code that hides the spinner / shows
-// the fields (Save button included) never ran — panel stuck on
-// "Loading…" forever. This version wraps everything in try/finally and
-// uses Promise.allSettled, so the panel ALWAYS reveals its fields no
-// matter what fails, and failures are logged instead of silently
-// hanging the UI.
 async function loadCommandSettings(cmd) {
     const loadingEl = document.getElementById(`edit-loading-${cmd}`);
     const fieldsEl  = document.getElementById(`edit-fields-${cmd}`);
@@ -327,21 +802,69 @@ async function loadCommandSettings(cmd) {
 
         const aliasesEl  = document.getElementById(`edit-aliases-${cmd}`);
         const cooldownEl = document.getElementById(`edit-cooldown-${cmd}`);
-        if (aliasesEl)  aliasesEl.value  = parseArr(data.aliases).join(', ');
-        if (cooldownEl) cooldownEl.value = data.cooldown_seconds || '';
+        const aliasHost  = document.getElementById(`edit-aliases-host-${cmd}`);
+        if (window.NeroAlias) {
+            // The chip box owns the value; the hidden input it writes is the
+            // aliasesEl above, so the save path below needs no special case.
+            //
+            // Defensive init: if the host was never wired up (e.g. the user
+            // reached this panel via htmx navigation and NeroAlias.initAll
+            // for some reason didn't run, or the page-level DOMContentLoaded
+            // handler hadn't fired before the user clicked Edit), setValues
+            // would otherwise fall through to a plain `input.value = ...`
+            // write and the user would see an empty box instead of chips.
+            // initOne short-circuits via dataset.naInit so it's safe to
+            // call when the host is already initialised.
+            if (aliasHost) {
+                if (!aliasHost._neroAlias && window.NeroAlias.initOne) {
+                    window.NeroAlias.initOne(aliasHost);
+                }
+                window.NeroAlias.setValues(aliasHost, parseArr(data.aliases));
+            } else if (aliasesEl) {
+                aliasesEl.value = parseArr(data.aliases).join(', ');
+            }
+        } else if (aliasesEl) {
+            aliasesEl.value = parseArr(data.aliases).join(', ');
+        }
+        if (cooldownEl) cooldownEl.value = (data.cooldown_seconds !== null && data.cooldown_seconds !== undefined) ? data.cooldown_seconds : '';
+
+        // Update alias usage hint
+        const aliasHint = document.getElementById(`usage-alias-${cmd}`);
+        if (aliasHint) {
+            const aliases = parseArr(data.aliases);
+            if (aliases.length > 0) {
+                const firstAlias = aliases[0];
+                const usageEl = document.getElementById(`usage-${cmd}`);
+                const paramsStr = usageEl ? usageEl.dataset.params || '' : '';
+                const params = paramsStr ? paramsStr.split(',').map(p => ` [${p}]`).join('') : '';
+                aliasHint.innerHTML = `&nbsp;or&nbsp;<code>${firstAlias}${params}</code>`;
+                aliasHint.style.display = 'inline';
+            } else {
+                aliasHint.style.display = 'none';
+            }
+        }
 
         const pickers = [
-            [`edit-enabled-roles-${cmd}`,    'role',    parseArr(data.enabled_roles)],
+            [`edit-enabled-roles-${cmd}`,    'role',    parseArr(data.enabled_roles || data.allowed_roles)],
             [`edit-disabled-roles-${cmd}`,   'role',    parseArr(data.disabled_roles)],
-            [`edit-enabled-channels-${cmd}`, 'channel', parseArr(data.enabled_channels)],
+            [`edit-enabled-channels-${cmd}`, 'channel', parseArr(data.enabled_channels || data.allowed_channels)],
             [`edit-disabled-channels-${cmd}`,'channel', parseArr(data.disabled_channels)],
         ];
-        const results = await Promise.allSettled(
+
+        await Promise.allSettled(
             pickers.map(([id, kind, pre]) => NeroSelect.initMulti(document.getElementById(id), kind, pre))
         );
-        results.forEach((r, i) => {
-            if (r.status === 'rejected') console.error(`[commands] picker init failed: ${pickers[i][0]}`, r.reason);
-        });
+
+        // Mark all four role/channel pickers as "ready for save" — the save
+        // path below uses NeroSelect.isReady() to refuse to post empty role
+        // values when the user never got a chance to interact with a
+        // picker that failed to initialise. Without this, a select2/CDN
+        // failure would let getMultiValues() silently return [] and the
+        // next save would overwrite the user's saved roles with nothing.
+        for (const [id] of pickers) {
+            const el = document.getElementById(id);
+            if (el) el.dataset.nsReady = (el.dataset.nsInit === '1') ? '1' : '0';
+        }
     } catch (e) {
         console.error(`[commands] unexpected error loading /${cmd} settings`, e);
     } finally {
@@ -351,131 +874,380 @@ async function loadCommandSettings(cmd) {
 }
 
 async function saveCommandSettings(cmd, btn) {
-    const aliases = document.getElementById(`edit-aliases-${cmd}`).value
-        .split(',').map(a => a.trim()).filter(Boolean);
-    const cooldown = document.getElementById(`edit-cooldown-${cmd}`).value;
+    const aliasesInput = document.getElementById(`edit-aliases-${cmd}`);
+    const cooldownInput = document.getElementById(`edit-cooldown-${cmd}`);
+    const cb = document.getElementById(`toggle-input-${cmd}`);
+
+    let aliases = [];
+    if (window.NeroAlias) {
+        aliases = window.NeroAlias.getValues(
+            document.getElementById(`edit-aliases-host-${cmd}`));
+    }
+    if (!aliases.length && aliasesInput) {
+        aliases = aliasesInput.value.split(',').map(a => a.trim()).filter(Boolean);
+    }
+    const cooldownVal = cooldownInput && cooldownInput.value !== '' ? parseInt(cooldownInput.value) : null;
+    const isEnabled = cb ? cb.checked : true;
+
+    // Role / channel pickers must be initialised before we read their
+    // values. If any of the four failed to init (e.g. select2 didn't load
+    // because the CDN was blocked), NeroSelect.getMultiValues() returns []
+    // — and we would silently overwrite the user's saved roles/channels
+    // with an empty list. Catch that here and refuse to save.
+    const pickerIds = [
+        `edit-enabled-roles-${cmd}`,
+        `edit-disabled-roles-${cmd}`,
+        `edit-enabled-channels-${cmd}`,
+        `edit-disabled-channels-${cmd}`,
+    ];
+    const unready = pickerIds.filter(id => {
+        const el = document.getElementById(id);
+        return el && !NeroSelect.isReady(el);
+    });
+    if (unready.length) {
+        const labels = unready.map(id => id.replace(`edit-`, '').replace(`-${cmd}`, ''));
+        showToast(
+            `Role / channel pickers didn't load (${labels.join(', ')}). ` +
+            'Reload the page before saving to avoid losing your settings.',
+            'error', 7000);
+        const statusEl = document.getElementById(`edit-status-${cmd}`);
+        if (statusEl) {
+            statusEl.textContent = '❌ Pickers not ready — reload first';
+            statusEl.classList.add('error');
+        }
+        if (btn) setLoading(btn, false);
+        return;
+    }
+
+    const enabledRoles     = NeroSelect.getMultiValues(document.getElementById(`edit-enabled-roles-${cmd}`));
+    const disabledRoles    = NeroSelect.getMultiValues(document.getElementById(`edit-disabled-roles-${cmd}`));
+    const enabledChannels  = NeroSelect.getMultiValues(document.getElementById(`edit-enabled-channels-${cmd}`));
+    const disabledChannels = NeroSelect.getMultiValues(document.getElementById(`edit-disabled-channels-${cmd}`));
 
     const payload = {
-        aliases,
-        cooldown_seconds: cooldown ? parseInt(cooldown) : null,
-        enabled_roles:     NeroSelect.getMultiValues(document.getElementById(`edit-enabled-roles-${cmd}`)),
-        disabled_roles:    NeroSelect.getMultiValues(document.getElementById(`edit-disabled-roles-${cmd}`)),
-        enabled_channels:  NeroSelect.getMultiValues(document.getElementById(`edit-enabled-channels-${cmd}`)),
-        disabled_channels: NeroSelect.getMultiValues(document.getElementById(`edit-disabled-channels-${cmd}`)),
+        enabled:          isEnabled,
+        aliases:          aliases,
+        cooldown_seconds: (cooldownVal !== null && !isNaN(cooldownVal) && cooldownVal >= 0) ? cooldownVal : null,
+        enabled_roles:     enabledRoles,
+        disabled_roles:    disabledRoles,
+        enabled_channels:  enabledChannels,
+        disabled_channels: disabledChannels,
     };
 
     const statusEl = document.getElementById(`edit-status-${cmd}`);
-    statusEl.textContent = '';
-    statusEl.className = 'cmd-edit-status';
-
-    const data = await ajaxSave(`/api/commands/settings/${encodeURIComponent(cmd)}`, payload, btn, `/${cmd} saved`);
-    if (data && data.success) {
-        statusEl.textContent = '✅ Saved';
-        statusEl.classList.add('ok');
-        refreshRowChips(cmd, payload);
-    } else {
-        statusEl.textContent = '❌ ' + ((data && data.error) || 'Save failed');
-        statusEl.classList.add('error');
+    if (statusEl) {
+        statusEl.textContent = '';
+        statusEl.className = 'cmd-edit-status';
     }
-    setTimeout(() => { statusEl.textContent = ''; statusEl.className = 'cmd-edit-status'; }, 3000);
+
+    const data = await ajaxSave(`/api/commands/settings/${encodeURIComponent(cmd)}`, payload, btn, `/${cmd} settings saved`);
+    if (data && data.success) {
+        if (statusEl) {
+            statusEl.textContent = '✅ Saved';
+            statusEl.classList.add('ok');
+        }
+        refreshRowChips(cmd, payload);
+        updateStatsCounts();
+        filterCommands();
+        refreshAliasStatus();
+    } else {
+        if (statusEl) {
+            statusEl.textContent = '❌ ' + ((data && data.error) || 'Save failed');
+            statusEl.classList.add('error');
+        }
+    }
+    setTimeout(() => {
+        if (statusEl) { statusEl.textContent = ''; statusEl.className = 'cmd-edit-status'; }
+    }, 3500);
 }
+
+// ── ALIAS STATUS LINE ───────────────────────────────────────────
+// What the *bot* last registered, from bot_settings. Before this the sync
+// result was invisible: the cog could fail, or never have run at all, and the
+// page still looked saved. Advisory only — it never blocks an edit.
+async function refreshAliasStatus() {
+    const el = document.getElementById('alias-status');
+    if (!el) return;
+    try {
+        const res = await fetch('/api/commands/alias-registry');
+        if (!res.ok) return;
+        const reg = await res.json();
+        const words = Object.keys(reg.aliases || {}).length;
+        const sync = reg.last_sync || {};
+        const bits = [];
+        bits.push(words === 0
+            ? 'No aliases set in this server'
+            : `${words} alias word${words === 1 ? '' : 's'} in this server`);
+        if (reg.pending_resync) {
+            bits.push('bot will pick up the change within a few seconds');
+        } else if (sync.at) {
+            const when = new Date(sync.at * 1000).toLocaleTimeString();
+            bits.push(`bot has ${sync.registered != null ? sync.registered : words}`
+                      + ` registered · ${when}`);
+        } else {
+            bits.push('the bot has not reported a sync yet');
+        }
+        const shadowed = (reg.shadowed || []).length;
+        if (shadowed) bits.push(`\u26a0 ${shadowed} word${shadowed === 1 ? '' : 's'} claimed by two commands`);
+        if (sync.error) bits.push(`\u26a0 last sync: ${sync.error}`);
+        el.textContent = bits.join('  ·  ');
+        el.classList.toggle('is-warn', Boolean(sync.error || shadowed
+            || (!reg.pending_resync && !sync.at)));
+        el.hidden = false;
+    } catch (e) {
+        /* the page is perfectly usable without this */
+    }
+}
+
+document.addEventListener('DOMContentLoaded', refreshAliasStatus);
 
 function refreshRowChips(cmd, payload) {
     const row = document.getElementById(`cmd-${cmd}`);
     if (!row) return;
-    const main = row.querySelector('.cmd-row-main');
-    if (!main) return;
-    main.querySelectorAll('.cmd-chip').forEach(el => el.remove());
 
-    if (payload.cooldown_seconds) {
-        const chip = document.createElement('span');
-        chip.className = 'cmd-chip';
-        chip.textContent = `⏱ ${payload.cooldown_seconds}s`;
-        main.appendChild(chip);
+    const cooldownChip = document.getElementById(`chip-cooldown-${cmd}`);
+    if (cooldownChip) {
+        if (payload.cooldown_seconds && payload.cooldown_seconds > 0) {
+            const numSpan = cooldownChip.querySelector('.cooldown-num');
+            if (numSpan) numSpan.textContent = payload.cooldown_seconds;
+            cooldownChip.style.display = 'inline-flex';
+        } else {
+            cooldownChip.style.display = 'none';
+        }
     }
-    const restricted = (payload.enabled_roles || []).length || (payload.disabled_roles || []).length ||
-                        (payload.enabled_channels || []).length || (payload.disabled_channels || []).length;
-    if (restricted) {
-        const chip = document.createElement('span');
-        chip.className = 'cmd-chip cmd-chip-accent';
-        chip.textContent = '🔐 restricted';
-        main.appendChild(chip);
+
+    const hasRestr = (payload.enabled_roles && payload.enabled_roles.length > 0) ||
+                     (payload.disabled_roles && payload.disabled_roles.length > 0) ||
+                     (payload.enabled_channels && payload.enabled_channels.length > 0) ||
+                     (payload.disabled_channels && payload.disabled_channels.length > 0);
+
+    const restrChip = document.getElementById(`chip-restricted-${cmd}`);
+    if (restrChip) {
+        restrChip.style.display = hasRestr ? 'inline-flex' : 'none';
+    }
+    row.dataset.restricted = hasRestr ? '1' : '0';
+
+    // Update alias usage hint
+    const aliasHint = document.getElementById(`usage-alias-${cmd}`);
+    if (aliasHint) {
+        if (payload.aliases && payload.aliases.length > 0) {
+            // Show the first alias in the usage hint
+            const firstAlias = payload.aliases[0];
+            // Get params from the data attribute
+            const usageEl = document.getElementById(`usage-${cmd}`);
+            const paramsStr = usageEl ? usageEl.dataset.params || '' : '';
+            const params = paramsStr ? paramsStr.split(',').map(p => ` [${p}]`).join('') : '';
+            aliasHint.innerHTML = `&nbsp;or&nbsp;<code>${firstAlias}${params}</code>`;
+            aliasHint.style.display = 'inline';
+        } else {
+            aliasHint.style.display = 'none';
+        }
     }
 }
 
-// ── CATEGORY-LEVEL BULK RESTRICTION ──────────────────────────────────
+// ── CATEGORY RESTRICTION MODAL ──────────────────────────────────────
 let _catRestrictCategory = null;
-let _catRestrictInit = false;
+let _catRestrictInitialized = false;
 
 function openCategoryRestrictModal(category) {
     _catRestrictCategory = category;
     document.getElementById('cat-restrict-name').textContent = category;
-    document.getElementById('cat-restrict-status').textContent = '';
-    document.getElementById('cat-restrict-modal').style.display = 'flex';
+    const statusEl = document.getElementById('cat-restrict-status');
+    if (statusEl) { statusEl.textContent = ''; statusEl.style.color = ''; }
 
-    if (!_catRestrictInit) {
-        _catRestrictInit = true;
+    const modal = document.getElementById('cat-restrict-modal');
+    modal.style.display = 'flex';
+
+    if (!_catRestrictInitialized) {
+        _catRestrictInitialized = true;
         NeroSelect.initMulti(document.getElementById('cat-restrict-enabled-roles'), 'role', []);
         NeroSelect.initMulti(document.getElementById('cat-restrict-disabled-roles'), 'role', []);
         NeroSelect.initMulti(document.getElementById('cat-restrict-enabled-channels'), 'channel', []);
         NeroSelect.initMulti(document.getElementById('cat-restrict-disabled-channels'), 'channel', []);
+    } else {
+        // Clear pickers on subsequent opens
+        ['cat-restrict-enabled-roles', 'cat-restrict-disabled-roles',
+         'cat-restrict-enabled-channels', 'cat-restrict-disabled-channels'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) $(el).val(null).trigger('change.select2');
+        });
     }
 }
 
 function closeCategoryRestrictModal() {
-    document.getElementById('cat-restrict-modal').style.display = 'none';
+    const modal = document.getElementById('cat-restrict-modal');
+    if (modal) modal.style.display = 'none';
+    _catRestrictCategory = null;
+}
+
+function handleModalOverlayClick(e) {
+    if (e.target.id === 'cat-restrict-modal') {
+        closeCategoryRestrictModal();
+    }
 }
 
 async function applyCategoryRestrict() {
     if (!_catRestrictCategory) return;
-    const enabledRoles     = NeroSelect.getMultiValues(document.getElementById('cat-restrict-enabled-roles'));
-    const disabledRoles    = NeroSelect.getMultiValues(document.getElementById('cat-restrict-disabled-roles'));
-    const enabledChannels  = NeroSelect.getMultiValues(document.getElementById('cat-restrict-enabled-channels'));
-    const disabledChannels = NeroSelect.getMultiValues(document.getElementById('cat-restrict-disabled-channels'));
+    const enRolesEl   = document.getElementById('cat-restrict-enabled-roles');
+    const disRolesEl  = document.getElementById('cat-restrict-disabled-roles');
+    const enChansEl   = document.getElementById('cat-restrict-enabled-channels');
+    const disChansEl  = document.getElementById('cat-restrict-disabled-channels');
 
-    const commands = CATEGORY_COMMANDS[_catRestrictCategory] || [];
+    const enabledRoles     = NeroSelect.getMultiValues(enRolesEl);
+    const disabledRoles    = NeroSelect.getMultiValues(disRolesEl);
+    const enabledChannels  = NeroSelect.getMultiValues(enChansEl);
+    const disabledChannels = NeroSelect.getMultiValues(disChansEl);
+
+    // Build payload with only fields the user explicitly selected
+    const payload = { category: _catRestrictCategory };
+    if (enabledRoles.length > 0)     payload.enabled_roles = enabledRoles;
+    if (disabledRoles.length > 0)    payload.disabled_roles = disabledRoles;
+    if (enabledChannels.length > 0)  payload.enabled_channels = enabledChannels;
+    if (disabledChannels.length > 0) payload.disabled_channels = disabledChannels;
+
     const btn = document.getElementById('cat-restrict-apply-btn');
-    setLoading(btn, true, 'Applying…');
-
-    let okCount = 0;
-    for (const cmd of commands) {
-        try {
-            const res = await fetch(`/api/commands/settings/${encodeURIComponent(cmd)}`);
-            const existing = await res.json();
-            const payload = {
-                aliases: existing.aliases ? (typeof existing.aliases === 'string' ? JSON.parse(existing.aliases) : existing.aliases) : [],
-                cooldown_seconds: existing.cooldown_seconds || null,
-                enabled_roles: enabledRoles,
-                disabled_roles: disabledRoles,
-                enabled_channels: enabledChannels,
-                disabled_channels: disabledChannels,
-            };
-            const saveRes = await fetch(`/api/commands/settings/${encodeURIComponent(cmd)}`, {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(payload),
-            });
-            const saveData = await saveRes.json();
-            if (saveData.success) okCount++;
-        } catch (e) { /* keep going — one bad command shouldn't stop the rest */ }
-    }
-
-    setLoading(btn, false);
     const statusEl = document.getElementById('cat-restrict-status');
-    statusEl.textContent = `✅ Applied to ${okCount}/${commands.length} commands`;
-    statusEl.style.color = 'var(--success)';
-    showToast(`Restricted ${okCount} commands in ${_catRestrictCategory}`, 'success');
-    setTimeout(() => { closeCategoryRestrictModal(); location.reload(); }, 900);
+    if (btn) setLoading(btn, true, 'Applying…');
+
+    try {
+        const res = await fetch('/api/commands/bulk-restrict', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.success) {
+            if (statusEl) {
+                statusEl.textContent = `✅ Applied restrictions to ${data.count} commands`;
+                statusEl.style.color = 'var(--success)';
+            }
+            showToast(`Restrictions applied to ${_catRestrictCategory}`, 'success');
+            setTimeout(() => {
+                closeCategoryRestrictModal();
+                location.reload();
+            }, 800);
+        } else {
+            if (statusEl) {
+                statusEl.textContent = `❌ ${data.error || 'Failed to apply'}`;
+                statusEl.style.color = 'var(--danger)';
+            }
+            showToast(data.error || 'Failed to apply category restrictions', 'error');
+        }
+    } catch (e) {
+        console.error('[commands] bulk restrict error:', e);
+        if (statusEl) {
+            statusEl.textContent = '❌ Network error';
+            statusEl.style.color = 'var(--danger)';
+        }
+    } finally {
+        if (btn) setLoading(btn, false);
+    }
 }
 
-document.getElementById('cat-restrict-modal').addEventListener('click', function(e) {
-    if (e.target === this) closeCategoryRestrictModal();
-});
+// ── SEARCH & FILTERING ──────────────────────────────────────────────
+function filterCommands() {
+    const searchVal = (document.getElementById('cmd-search-input').value || '').trim().toLowerCase();
+    const catVal = (document.getElementById('cmd-category-filter').value || '').trim();
+    const clearBtn = document.getElementById('cmd-search-clear');
+    if (clearBtn) clearBtn.style.display = searchVal ? 'block' : 'none';
 
-const CATEGORY_COMMANDS = {
-    {% for category, cmds in categories.items() %}
-    "{{ category }}": [{% for cmd in cmds %}"{{ cmd }}"{% if not loop.last %}, {% endif %}{% endfor %}],
-    {% endfor %}
-};
+    let visibleCommands = 0;
+    const catCards = document.querySelectorAll('.cmd-category-card');
+
+    catCards.forEach(catCard => {
+        const catName = catCard.dataset.category || '';
+        let catHasVisibleCmds = false;
+
+        if (catVal && catName !== catVal) {
+            catCard.style.display = 'none';
+            return;
+        }
+
+        const rows = catCard.querySelectorAll('.cmd-row');
+        rows.forEach(row => {
+            const searchData = (row.dataset.search || '').toLowerCase();
+            const enabled = row.dataset.enabled === '1';
+            const restricted = row.dataset.restricted === '1';
+
+            // Text search match
+            const matchesSearch = !searchVal || searchData.includes(searchVal);
+
+            // Status filter match
+            let matchesStatus = true;
+            if (_currentStatusFilter === 'enabled')   matchesStatus = enabled;
+            if (_currentStatusFilter === 'disabled')  matchesStatus = !enabled;
+            if (_currentStatusFilter === 'restricted') matchesStatus = restricted;
+
+            if (matchesSearch && matchesStatus) {
+                row.style.display = 'block';
+                catHasVisibleCmds = true;
+                visibleCommands++;
+            } else {
+                row.style.display = 'none';
+            }
+        });
+
+        catCard.style.display = catHasVisibleCmds ? 'block' : 'none';
+    });
+
+    const emptyState = document.getElementById('cmd-empty-state');
+    if (emptyState) emptyState.style.display = (visibleCommands === 0) ? 'block' : 'none';
+
+    const summaryEl = document.getElementById('cmd-active-filter-summary');
+    if (summaryEl) {
+        if (searchVal || catVal || _currentStatusFilter !== 'all') {
+            summaryEl.style.display = 'block';
+            summaryEl.textContent = `Showing ${visibleCommands} matching commands`;
+        } else {
+            summaryEl.style.display = 'none';
+        }
+    }
+}
+
+function setStatusFilter(status) {
+    _currentStatusFilter = status;
+    document.querySelectorAll('.filter-pill').forEach(pill => {
+        pill.classList.toggle('active', pill.dataset.filter === status);
+    });
+    filterCommands();
+}
+
+function clearSearch() {
+    const input = document.getElementById('cmd-search-input');
+    if (input) input.value = '';
+    filterCommands();
+}
+
+function resetFilters() {
+    clearSearch();
+    const catSelect = document.getElementById('cmd-category-filter');
+    if (catSelect) catSelect.value = '';
+    setStatusFilter('all');
+}
+
+function updateStatsCounts() {
+    const allRows = document.querySelectorAll('.cmd-row');
+    let total = allRows.length;
+    let enabled = 0;
+    let disabled = 0;
+    let restricted = 0;
+
+    allRows.forEach(row => {
+        if (row.dataset.enabled === '1') enabled++;
+        else disabled++;
+        if (row.dataset.restricted === '1') restricted++;
+    });
+
+    const elTotal = document.getElementById('stat-total-count');
+    const elEnabled = document.getElementById('stat-enabled-count');
+    const elDisabled = document.getElementById('stat-disabled-count');
+    const elRestricted = document.getElementById('stat-restricted-count');
+
+    if (elTotal) elTotal.textContent = total;
+    if (elEnabled) elEnabled.textContent = enabled;
+    if (elDisabled) elDisabled.textContent = disabled;
+    if (elRestricted) elRestricted.textContent = restricted;
+}
 </script>
 {% endblock %}
 {% endblock %}

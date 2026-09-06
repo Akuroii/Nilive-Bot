@@ -23,7 +23,6 @@ from utils.economy_safe import (
 # matching the (guild_id, user_id) composite key every persisted
 # table in this project already uses (economy, levels, etc).
 _daily_cooldowns:  dict[tuple[int, int], datetime] = {}
-_work_cooldowns:   dict[tuple[int, int], datetime] = {}
 
 # MEMORY LEAK FIX (dark-fixes pass #11): these dicts previously grew
 # forever — a key was written on every /daily and /work claim and
@@ -168,55 +167,6 @@ class Economy(commands.Cog):
         embed = discord.Embed(
             title="🎁 Daily Reward!",
             description=(f"You received **{amount:,}** {currency}!\n"
-                         f"Balance: **{new_bal:,}** {currency}"),
-            color=0x57F287)
-        await interaction.response.send_message(embed=embed)
-
-    # ─── WORK ───────────────────────────────────────────
-    @app_commands.command(name="work",
-                          description="Work to earn coins")
-    async def work(self, interaction: discord.Interaction):
-        now      = datetime.utcnow()
-        # ISOLATION FIX: same guild-scoped key as /daily above.
-        key      = (interaction.guild.id, interaction.user.id)
-        cooldown = _work_cooldowns.get(key)
-        if cooldown and now < cooldown:
-            remaining = cooldown - now
-            minutes   = int(remaining.total_seconds() // 60)
-            await interaction.response.send_message(
-                f"You're tired! Rest for **{minutes}m** more.",
-                ephemeral=True)
-            return
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor   = await db.execute(
-                "SELECT value FROM bot_settings WHERE key = 'work_min'")
-            row      = await cursor.fetchone()
-            work_min = int(row[0]) if row else 20
-            cursor   = await db.execute(
-                "SELECT value FROM bot_settings WHERE key = 'work_max'")
-            row      = await cursor.fetchone()
-            work_max = int(row[0]) if row else 80
-
-        jobs = [
-            "wrote some code", "delivered packages",
-            "fixed a server", "designed a logo",
-            "taught a class", "drove a taxi",
-            "cooked meals", "streamed games",
-            "built furniture", "walked dogs",
-        ]
-        amount   = random.randint(work_min, work_max)
-        new_bal  = await add_balance(
-            interaction.guild.id, interaction.user.id, amount,
-            reason="Work reward", source="work")
-        currency = await get_currency_name(interaction.guild.id)
-        _work_cooldowns[key] = now + timedelta(hours=1)
-        _prune_expired(_work_cooldowns, now)
-
-        embed = discord.Embed(
-            title="💼 Work Complete!",
-            description=(f"You {random.choice(jobs)} and earned "
-                         f"**{amount:,}** {currency}!\n"
                          f"Balance: **{new_bal:,}** {currency}"),
             color=0x57F287)
         await interaction.response.send_message(embed=embed)
