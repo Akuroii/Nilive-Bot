@@ -157,6 +157,25 @@ class Economy(commands.Cog):
             daily_max = int(row[0]) if row else 300
 
         amount   = random.randint(daily_min, daily_max)
+        # Finalized Prestige: `/daily` is a genuine earn-time grant, so it
+        # is scaled by the user's effective Prestige coins multiplier.
+        # Admin grants (addcoins/adddiamonds), /give, /convert and shop
+        # spending are NOT scaled — they don't route through this line.
+        # Defensive: default to 1.0 on any lookup failure so /daily never
+        # breaks because of a prestige config error.
+        try:
+            from utils.prestige import get_prestige_earn_multiplier, is_booster
+            mult = await get_prestige_earn_multiplier(
+                interaction.guild.id, interaction.user.id, "balance",
+                is_booster=is_booster(interaction.user))
+        except Exception as e:
+            print(f"[PRESTIGE] daily multiplier lookup failed; "
+                  f"granting raw (guild={interaction.guild.id} "
+                  f"user={interaction.user.id}): {e}")
+            mult = 1.0
+        amount = int(round(amount * mult))
+        if amount <= 0:
+            amount = 1
         new_bal  = await add_balance(
             interaction.guild.id, interaction.user.id, amount,
             reason="Daily reward", source="daily")

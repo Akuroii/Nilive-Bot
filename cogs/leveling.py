@@ -9,12 +9,8 @@ from database import DB_PATH
 from utils.xp_calculator import (
     calculate_message_xp, calculate_voice_xp,
     xp_progress, get_leveling_config,
-    get_prestige_config, get_prestige_roles,
-    perform_prestige, PrestigeError,
     is_role_blacklisted,
 )
-from utils.formatters import snapshot_user
-from utils.permissions import check_bot_role_position
 
 
 # ─── Phase 5 / Leveling expansion — reset config helpers ────────────────
@@ -370,6 +366,15 @@ class Leveling(commands.Cog):
         lvl, current, needed = xp_progress(xp)
         prestige = prestige or 0
 
+        # Finalized Prestige: show the member's EFFECTIVE tier (VI for an
+        # active Booster) rather than only the permanent tier. Display only
+        # — the rank-count sort above still uses the permanent value.
+        from utils.prestige import (
+            get_effective_prestige, is_booster, tier_label)
+        display_prestige = await get_effective_prestige(
+            interaction.guild.id, member.id, is_booster=is_booster(member))
+        display_prestige_label = tier_label(display_prestige)
+
         try:
             import aiohttp
             from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -444,8 +449,8 @@ class Leveling(commands.Cog):
 
             # Name
             name_display = member.display_name[:24]
-            if prestige > 0:
-                name_display = f"★{prestige} {name_display}"
+            if display_prestige > 0:
+                name_display = f"★{display_prestige_label} {name_display}"
             draw.text((text_x, 30),
                       name_display,
                       fill=(255, 255, 255), font=font_lg)
@@ -492,16 +497,16 @@ class Leveling(commands.Cog):
             bar_filled = int((current / needed) * 20) if needed else 20
             bar = "█" * bar_filled + "░" * (20 - bar_filled)
             title = f"Rank — {member.display_name}"
-            if prestige > 0:
-                title = f"Rank — ★{prestige} {member.display_name}"
+            if display_prestige > 0:
+                title = f"Rank — ★{display_prestige_label} {member.display_name}"
             embed = discord.Embed(title=title, color=0x7c5cbf)
             if member.display_avatar:
                 embed.set_thumbnail(url=member.display_avatar.url)
             embed.add_field(name="Rank",     value=f"#{rank}")
             embed.add_field(name="Level",    value=str(lvl))
             embed.add_field(name="Total XP", value=f"{xp:,}")
-            if prestige > 0:
-                embed.add_field(name="Prestige", value=f"★{prestige}")
+            if display_prestige > 0:
+                embed.add_field(name="Prestige", value=f"★{display_prestige_label}")
             embed.add_field(
                 name=f"Progress ({current:,}/{needed:,} XP)",
                 value=f"`{bar}`", inline=False)
@@ -532,13 +537,19 @@ class Leveling(commands.Cog):
         embed = discord.Embed(title="⭐ XP Leaderboard",
                               color=0x7c5cbf)
         medals = ["🥇", "🥈", "🥉"]
+        # Finalized Prestige: display each member's EFFECTIVE tier (VI for
+        # an active Booster). Sort order remains permanent prestige DESC,
+        # xp DESC. Display only — never the source of multipliers.
+        from utils.prestige import get_effective_prestige, is_booster, tier_label
         for i, (uid, xp, level, prestige) in enumerate(rows, 1):
             medal  = medals[i-1] if i <= 3 else f"#{i}"
             member = interaction.guild.get_member(uid)
             name   = member.display_name if member else f"User {uid}"
-            prestige = prestige or 0
-            if prestige > 0:
-                name = f"★{prestige} {name}"
+            eff    = await get_effective_prestige(
+                interaction.guild.id, uid,
+                is_booster=is_booster(member) if member else False)
+            if eff > 0:
+                name = f"★{tier_label(eff)} {name}"
             embed.add_field(
                 name=f"{medal} {name}",
                 value=f"Level {level} • {xp:,} XP",
@@ -614,77 +625,46 @@ class Leveling(commands.Cog):
         await interaction.followup.send(
             f"✅ Leaderboard reset — {count} member(s) archived and zeroed.")
 
-    # ─── PRESTIGE (Phase 5 / Prestige system) ───────────
-    # Validation + XP/level recompute lives in
-    # utils.xp_calculator.perform_prestige() (kept out of the cog so
-    # the dashboard or other future callers can reuse it without
-    # importing discord.py). This command's job is the Discord-facing
-    # side: call that helper, then do the tier role swap (remove the
-    # old prestige tier's role if configured, add the new tier's role)
-    # and announce it — the same division of labor
-    # check_and_award_level_rewards() already uses relative to
-    # give_reward()'s xp branch.
+    # ─── PRESTIGE STATE / READ-ONLY VIEW ─────────────────
+    # The old XP/level-gated "/prestige reset" command has been retired
+    # (the finalized Prestige system is Shop-purchased and never resets
+    # XP/Level). This read-only command shows the member's current
+    # Prestige: their permanent tier and their effective tier (which is
+    # VI while they are an active Discord Booster). It performs no writes
+    # and grants nothing.
     @app_commands.command(name="prestige",
-                          description="Prestige — reset past a level threshold for a permanent status tier")
+                          description="View your Prestige state")
     async def prestige(self, interaction: discord.Interaction):
+        from utils.prestige import (
+            get_permanent_prestige, get_effective_prestige,
+            is_booster, tier_label,
+        )
         await interaction.response.defer()
-
-        try:
-            result = await perform_prestige(
-                interaction.guild.id, interaction.user.id)
-        except PrestigeError as e:
-            await interaction.followup.send(str(e), ephemeral=True)
-            return
-
-        # Role-per-tier swap (STATUS.md decision #3): remove the role
-        # for the OLD tier (if one is configured and the member has
-        # it), add the role for the NEW tier. Missing role config for
-        # either tier is not an error — prestige still succeeds, just
-        # without a cosmetic role change for that tier.
-        tier_roles = await get_prestige_roles(interaction.guild.id)
-        role_by_tier = {r["tier"]: r["role_id"] for r in tier_roles}
-
-        old_role_id = role_by_tier.get(result["old_prestige"])
-        new_role_id = role_by_tier.get(result["new_prestige"])
-
-        if old_role_id:
-            old_role = interaction.guild.get_role(int(old_role_id))
-            if old_role and old_role in interaction.user.roles:
-                try:
-                    await interaction.user.remove_roles(
-                        old_role, reason="Prestige tier advanced")
-                except Exception as e:
-                    print(f"[PRESTIGE] Failed to remove old tier role: {e}")
-
-        role_warning = None
-        if new_role_id:
-            new_role = interaction.guild.get_role(int(new_role_id))
-            if new_role:
-                can_assign, warn = check_bot_role_position(
-                    interaction.guild, new_role)
-                if can_assign:
-                    try:
-                        await interaction.user.add_roles(
-                            new_role, reason="Prestige tier reached")
-                    except Exception as e:
-                        role_warning = f"Prestige succeeded but role grant failed: {e}"
-                else:
-                    role_warning = warn
+        permanent = await get_permanent_prestige(
+            interaction.guild.id, interaction.user.id)
+        booster = is_booster(interaction.user)
+        effective = await get_effective_prestige(
+            interaction.guild.id, interaction.user.id, is_booster=booster)
 
         embed = discord.Embed(
-            title="⭐ Prestige!",
-            description=(
-                f"{interaction.user.mention} prestiged from "
-                f"**★{result['old_prestige']}** to "
-                f"**★{result['new_prestige']}**!"),
+            title="⭐ Prestige",
             color=0xFFD700)
-        embed.add_field(name="Level before", value=str(result["old_level"]))
-        embed.add_field(name="Level after", value=str(result["new_level"]))
         embed.add_field(
-            name="XP carried over",
-            value=f"{result['new_xp']:,}", inline=False)
-        if role_warning:
-            embed.add_field(name="⚠️ Role Warning", value=role_warning, inline=False)
+            name="Permanent Prestige",
+            value=(f"**{tier_label(permanent)}**"
+                   if permanent else "None"),
+            inline=False)
+        embed.add_field(
+            name="Effective Prestige",
+            value=f"**{tier_label(effective)}**",
+            inline=False)
+        if booster:
+            embed.add_field(
+                name="Booster bonus",
+                value=("You're an active Discord Booster — you get "
+                       "effective Prestige VI. When the boost ends you "
+                       "return to your permanent Prestige."),
+                inline=False)
         await interaction.followup.send(embed=embed)
 
 
