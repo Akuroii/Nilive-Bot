@@ -270,6 +270,13 @@ def add_shop_item():
     if prestige_tier_val is not None and prestige_tier_val not in (1, 2, 3, 4, 5):
         return jsonify({"success": False,
                         "error": "Prestige tier must be 1–5"})
+    # Finalized Prestige: Prestige is Coins-only. The UI guards this, but the
+    # API must reject a `prestige` item carrying a diamond price server-side
+    # (the purchase path in cogs/shop.py also rejects it at buy time).
+    if (data.get("type") or "role") == "prestige" and price_diamonds_val:
+        return jsonify({"success": False,
+                        "error": "Prestige items are purchased with Coins and "
+                                 "cannot have a diamond price."})
 
     # Rank Card foundation: rarity is admin-set at creation time,
     # same place price/icon are already captured. Falls back to
