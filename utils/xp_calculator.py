@@ -172,21 +172,11 @@ def xp_for_level(level: int) -> int:
     return math.floor(100 * (level ** 1.5))
 
 
-# ─── Phase 5 / Prestige system ──────────────────────────────────────────
-#
-# xp_for_level(n) only ever returned the MARGINAL cost of a single
-# level (the XP needed to go from level n-1 to level n). Prestige's
-# "carry over excess" design (STATUS.md decision #1) needs the
-# CUMULATIVE XP required to reach a given level from 0 — i.e. the sum
-# of xp_for_level(1..level) — so the excess above that cumulative
-# threshold can be computed and carried into the member's post-
-# prestige XP total. This is a new function, not a reuse of
-# xp_for_level, precisely because that distinction matters here.
-def total_xp_for_level(level: int) -> int:
-    if level <= 0:
-        return 0
-    return sum(xp_for_level(l) for l in range(1, level + 1))
-
+# NOTE: the old XP/level-gated "Prestige reset" mechanic (and its
+# cumulative-XP helper total_xp_for_level) has been retired in favour of
+# the finalized Shop-purchased Prestige system in utils/prestige.py. The
+# helpers below (calculate_level_from_xp / xp_progress) remain because
+# they are still used by the rank card, setxp and the reward engine.
 
 def calculate_level_from_xp(total_xp: int) -> int:
     level = 0
@@ -204,118 +194,6 @@ def xp_progress(total_xp: int) -> tuple[int, int, int]:
         level += 1
     needed = xp_for_level(level + 1)
     return level, remaining, needed
-
-
-async def get_prestige_config(guild_id: int) -> dict:
-    """
-    Same pattern as get_leveling_config — falls back to the documented
-    default (enabled=1, min_level=50) when no row exists yet for this
-    guild, per STATUS.md decision #4.
-    """
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT enabled, min_level FROM prestige_config WHERE guild_id = ?
-        """, (guild_id,))
-        row = await cursor.fetchone()
-    if not row:
-        return {"guild_id": guild_id, "enabled": 1, "min_level": 50}
-    return {"guild_id": guild_id, "enabled": row[0], "min_level": row[1]}
-
-
-class PrestigeError(Exception):
-    pass
-
-
-async def perform_prestige(guild_id: int, user_id: int) -> dict:
-    """
-    Validates and executes a prestige for one member, per the locked
-    design in STATUS.md:
-      1. current level must be >= prestige_config.min_level (or the
-         default 50 if unconfigured) and prestige must be enabled.
-      2. excess XP = current total xp - total_xp_for_level(min_level).
-         The remainder becomes the member's new xp (level recalculated
-         from that remainder), NOT a hard reset to 0.
-      3. levels.prestige is incremented by 1.
-      4. leveling_rewards roles are NOT touched here (keep-all,
-         decision #2) — this function only updates the levels row.
-    Returns old/new level, old/new xp, old/new prestige tier for the
-    caller (cogs/leveling.py) to use for role swap + announcement.
-    Raises PrestigeError with a user-facing message on any validation
-    failure so the caller can just show it, rather than duplicating
-    the checks.
-
-    SECURITY / CONCURRENCY FIX (dark-fixes pass): the SELECT and the
-    subsequent UPDATE used to happen in two separate, unguarded
-    connections. Two /prestige invocations (or a /prestige racing a
-    dashboard XP edit) firing close together could both read the same
-    pre-prestige xp/level, both pass validation, and both write —
-    silently granting a member two prestige tiers for one qualifying
-    level, or clobbering a concurrent XP grant. This now runs as a
-    single BEGIN IMMEDIATE transaction spanning the read and the
-    write, same pattern already used by utils/economy_safe.py, so a
-    second concurrent call sees the already-updated row and is
-    validated (or rejected) against the correct, current state.
-    """
-    config = await get_prestige_config(guild_id)
-    if not config.get("enabled", 1):
-        raise PrestigeError("Prestige is not enabled on this server.")
-
-    min_level = int(config.get("min_level", 50))
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute("""
-                SELECT xp, level, prestige FROM levels
-                WHERE guild_id = ? AND user_id = ?
-            """, (guild_id, user_id))
-            row = await cursor.fetchone()
-
-            if not row:
-                await db.execute("ROLLBACK")
-                raise PrestigeError("You have no XP yet.")
-
-            old_xp, old_level, old_prestige = row
-            old_prestige = old_prestige or 0
-
-            if old_level < min_level:
-                await db.execute("ROLLBACK")
-                raise PrestigeError(
-                    f"You need to be Level {min_level} to prestige "
-                    f"(you're Level {old_level}).")
-
-            threshold = total_xp_for_level(min_level)
-            new_xp    = max(0, old_xp - threshold)
-            new_level = calculate_level_from_xp(new_xp)
-            new_prestige = old_prestige + 1
-
-            await db.execute("""
-                UPDATE levels SET xp = ?, level = ?, prestige = ?
-                WHERE guild_id = ? AND user_id = ?
-            """, (new_xp, new_level, new_prestige, guild_id, user_id))
-            await db.commit()
-        except PrestigeError:
-            raise
-        except Exception:
-            await db.execute("ROLLBACK")
-            raise
-
-    return {
-        "old_level": old_level, "new_level": new_level,
-        "old_xp": old_xp, "new_xp": new_xp,
-        "old_prestige": old_prestige, "new_prestige": new_prestige,
-        "min_level": min_level,
-    }
-
-
-async def get_prestige_roles(guild_id: int) -> list[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT id, tier, role_id FROM prestige_roles
-            WHERE guild_id = ? ORDER BY tier ASC
-        """, (guild_id,))
-        rows = await cursor.fetchall()
-    return [{"id": r[0], "tier": r[1], "role_id": r[2]} for r in rows]
 
 
 async def check_and_award_level_rewards(bot, member, guild_id: int,
@@ -408,9 +286,26 @@ async def check_and_award_level_currency_rewards(bot, member, guild_id: int,
         if not amount or amount <= 0:
             continue
         currency = currency if currency in ("balance", "diamonds") else "balance"
+        # Finalized Prestige: apply the earn-time multiplier based on the
+        # member's effective Prestige tier. member is already resolved so
+        # we pass is_booster directly (avoids a re-lookup). Level-up
+        # currency rewards are a genuine earn path, so they are scaled;
+        # XP/level/other state are not. Defensive: default to 1.0 on any
+        # lookup failure so a level-up reward never crashes.
+        try:
+            from utils.prestige import get_prestige_earn_multiplier, is_booster
+            mult = await get_prestige_earn_multiplier(
+                guild_id, member.id, currency, is_booster=is_booster(member))
+        except Exception as e:
+            print(f"[PRESTIGE] level reward multiplier lookup failed; "
+                  f"granting raw (guild={guild_id} user={member.id}): {e}")
+            mult = 1.0
+        final_amount = int(round(int(amount) * mult))
+        if final_amount == 0 and amount > 0:
+            final_amount = int(amount)
         try:
             await safe_credit(
-                guild_id, member.id, int(amount), currency=currency,
+                guild_id, member.id, final_amount, currency=currency,
                 reason=f"Level {reward_level} reward", source="leveling")
         except Exception as e:
             print(f"[LEVEL CURRENCY REWARD ERROR] level={reward_level} "

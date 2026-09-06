@@ -23,12 +23,17 @@ from dashboard.api import api_bp
 def leveling_leaderboard_partial():
     guild_id = get_session_guild_id()
 
+    # Finalized Prestige: legacy levels.prestige above the permanent max is
+    # treated as V for ranking/badge display (never rewritten).
+    from utils.prestige import MAX_PERMANENT_TIER
+
     async def fetch():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT user_id, xp, level, prestige FROM levels
-                WHERE guild_id = ? ORDER BY prestige DESC, xp DESC LIMIT 50
-            """, (guild_id,))
+                WHERE guild_id = ?
+                ORDER BY MIN(prestige, ?) DESC, xp DESC LIMIT 50
+            """, (guild_id, MAX_PERMANENT_TIER))
             return await cursor.fetchall()
 
     rows = run_async(fetch())
@@ -42,7 +47,7 @@ def leveling_leaderboard_partial():
     from dashboard.utils.user_identity import render_user_identity_html
     html = ""
     for i, r in enumerate(rows, 1):
-        prestige = r[3] or 0
+        prestige = min(r[3] or 0, MAX_PERMANENT_TIER)
         badge = f"<span class='badge badge-accent'>★{prestige}</span>" if prestige else ""
         u = user_map.get(r[0], {})
         identity_html = render_user_identity_html(
@@ -411,19 +416,19 @@ def delete_blacklist(entry_id: int):
     return jsonify({"success": True})
 
 
-# ── Prestige (Phase 5 / Prestige system) ────────────────────────────────────
+# ── Prestige (finalized Prestige system) ────────────────────────────────────
 #
 # Same LEVEL_ADMIN gate + guild-scoped CRUD shape as the leveling
-# reward/bonus-role/blacklist routes directly above. Grant-time
-# validation and the XP/level recompute live in
-# utils.xp_calculator.perform_prestige() / get_prestige_config() —
-# these routes are only the dashboard CRUD surface for prestige_config
-# (on/off + min_level) and prestige_roles (tier -> role_id mapping).
+# reward/bonus-role/blacklist routes directly above. All state and rule
+# enforcement (purchase, sequential progression, effective/booster VI,
+# multipliers) live in utils/prestige.py. These routes are only the
+# dashboard CRUD surface for prestige_config (enabled + per-tier
+# multipliers) and prestige_roles (tier -> role_id mapping).
 
 @api_bp.route("/leveling/prestige-config", methods=["GET"])
 @require_api_permission(LEVEL_ADMIN)
 def get_prestige_config_api():
-    from utils.xp_calculator import get_prestige_config as _get_prestige_config
+    from utils.prestige import get_prestige_config as _get_prestige_config
     guild_id = get_session_guild_id()
     return jsonify({"config": run_async(_get_prestige_config(guild_id))})
 
@@ -433,29 +438,40 @@ def get_prestige_config_api():
 def save_prestige_config_api():
     guild_id = get_session_guild_id()
     data     = request.json or {}
-    try:
-        min_level = int(data.get("min_level", 50))
-    except (TypeError, ValueError):
-        return jsonify({"success": False, "error": "min_level must be a number"})
-    if min_level <= 0:
-        return jsonify({"success": False, "error": "min_level must be positive"})
-    enabled = int(bool(data.get("enabled", True)))
+    enabled  = int(bool(data.get("enabled", True)))
+
+    # Optional per-tier multipliers, keyed by tier number (1..6). Each is
+    # {"coins": float, "diamonds": float}. Blank/invalid entries are skipped
+    # so a partial save never clobbers a tier with garbage.
+    tiers = None
+    raw_tiers = data.get("tiers")
+    if isinstance(raw_tiers, dict):
+        tiers = {}
+        for k, v in raw_tiers.items():
+            try:
+                tier = int(k)
+            except (TypeError, ValueError):
+                continue
+            if tier not in (1, 2, 3, 4, 5, 6):
+                continue
+            if not isinstance(v, dict):
+                continue
+            try:
+                tiers[tier] = {
+                    "coins": max(0.0, float(v.get("coins", 1.0))),
+                    "diamonds": max(0.0, float(v.get("diamonds", 1.0))),
+                }
+            except (TypeError, ValueError):
+                continue
+
+    from utils.prestige import set_prestige_multipliers
 
     async def save():
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO prestige_config (guild_id, enabled, min_level)
-                VALUES (?, ?, ?)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    enabled    = excluded.enabled,
-                    min_level  = excluded.min_level,
-                    updated_at = CURRENT_TIMESTAMP
-            """, (guild_id, enabled, min_level))
-            await db.commit()
+        await set_prestige_multipliers(guild_id, enabled=enabled, tiers=tiers)
 
     run_async(save())
     log_action(guild_id,
-               f"Updated prestige config: enabled={bool(enabled)} min_level={min_level}",
+               f"Updated prestige config: enabled={bool(enabled)}",
                "leveling")
     return jsonify({"success": True})
 
@@ -463,7 +479,7 @@ def save_prestige_config_api():
 @api_bp.route("/leveling/prestige-roles", methods=["GET"])
 @require_api_permission(LEVEL_ADMIN)
 def get_prestige_roles_api():
-    from utils.xp_calculator import get_prestige_roles as _get_prestige_roles
+    from utils.prestige import get_prestige_roles as _get_prestige_roles
     guild_id = get_session_guild_id()
     return jsonify({"roles": run_async(_get_prestige_roles(guild_id))})
 

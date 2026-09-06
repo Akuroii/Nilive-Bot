@@ -46,9 +46,34 @@ async def give_reward(bot: discord.Client,
         currency = "balance" if reward_type == "coins" else "diamonds"
         try:
             if amount >= 0:
-                await safe_credit(guild_id, user_id, amount,
+                # Finalized Prestige: apply the earn-time multiplier based on
+                # the user's EFFECTIVE Prestige tier. Only positive earnings
+                # are scaled; deductions are never multiplied. Prestige is
+                # disabled by default until configured (always 1.0 then).
+                # bot is passed so an active Booster resolves to effective VI.
+                # Defensive: if prestige lookup ever fails, grant the raw
+                # amount — a reward path must never crash on a config error.
+                try:
+                    from utils.prestige import get_prestige_earn_multiplier, is_booster
+                    booster = None
+                    if bot is not None:
+                        g = bot.get_guild(guild_id)
+                        m = g.get_member(user_id) if g else None
+                        if m is not None:
+                            booster = is_booster(m)
+                    mult = await get_prestige_earn_multiplier(
+                        guild_id, user_id, currency, is_booster=booster, bot=bot)
+                except Exception as e:
+                    print(f"[PRESTIGE] multiplier lookup failed; granting "
+                          f"raw (guild={guild_id} user={user_id}): {e}")
+                    mult = 1.0
+                final_amount = int(round(amount * mult))
+                if final_amount == 0 and amount > 0:
+                    final_amount = amount
+                await safe_credit(guild_id, user_id, final_amount,
                                    currency=currency, reason=reason, source=source)
             else:
+                final_amount = amount
                 await safe_deduct(guild_id, user_id, -amount,
                                    currency=currency, reason=reason, source=source)
         except InsufficientBalance:
@@ -61,7 +86,7 @@ async def give_reward(bot: discord.Client,
                 (guild_id, user_id))
             row = await cursor.fetchone()
         return {"success": True, "reward_type": reward_type,
-                "amount": amount, "new_balance": row[0] if row else 0}
+                "amount": final_amount, "new_balance": row[0] if row else 0}
 
     elif reward_type == "xp":
         if amount is None:
