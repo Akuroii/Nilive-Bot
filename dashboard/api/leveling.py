@@ -23,12 +23,17 @@ from dashboard.api import api_bp
 def leveling_leaderboard_partial():
     guild_id = get_session_guild_id()
 
+    # Finalized Prestige: legacy levels.prestige above the permanent max is
+    # treated as V for ranking/badge display (never rewritten).
+    from utils.prestige import MAX_PERMANENT_TIER
+
     async def fetch():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT user_id, xp, level, prestige FROM levels
-                WHERE guild_id = ? ORDER BY prestige DESC, xp DESC LIMIT 50
-            """, (guild_id,))
+                WHERE guild_id = ?
+                ORDER BY MIN(prestige, ?) DESC, xp DESC LIMIT 50
+            """, (guild_id, MAX_PERMANENT_TIER))
             return await cursor.fetchall()
 
     rows = run_async(fetch())
@@ -42,7 +47,7 @@ def leveling_leaderboard_partial():
     from dashboard.utils.user_identity import render_user_identity_html
     html = ""
     for i, r in enumerate(rows, 1):
-        prestige = r[3] or 0
+        prestige = min(r[3] or 0, MAX_PERMANENT_TIER)
         badge = f"<span class='badge badge-accent'>★{prestige}</span>" if prestige else ""
         u = user_map.get(r[0], {})
         identity_html = render_user_identity_html(

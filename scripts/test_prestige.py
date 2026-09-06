@@ -365,6 +365,109 @@ async def main():
     check(row and row[0][0] == 100, "non-booster diamonds 100 (1.0x)",
           str(row))
 
+    section("15) Legacy levels.prestige > 5 clamps for rank sort (Issue 1)")
+    # The rank-count/sort in utils/rank_card_data.py and cogs/leveling.py now
+    # runs `MIN(prestige, max)` + a clamped comparison so a legacy value above
+    # the permanent max ranks as V. A legacy-9 user must rank EXACTLY like a
+    # genuine V with equal XP, and the stored 9 must never be rewritten.
+    reset_user(level_xp=100, level=1, coins=0, diamonds=0, prestige_val=9)
+    U_LEGACY = U
+    U_V5 = 5002
+    U_V5_HIGHXP = 5003
+    for uid, xp, pv in ((U_V5, 100, 5), (U_V5_HIGHXP, 200, 5)):
+        sql_exec("DELETE FROM levels WHERE guild_id=? AND user_id=?", (G, uid))
+        sql_exec(
+            "INSERT INTO levels (guild_id,user_id,xp,level,prestige) "
+            "VALUES (?,?,?,?,?)", (G, uid, xp, 1, pv))
+
+    def _rank(raw):
+        def _run(sql, args):
+            return sql_query(sql, args)[0][0] + 1
+        xp_val = raw[0]
+        prestige = raw[1]
+        # pre-fix (raw) sort: legacy 9 would rank first
+        raw_rank = _run(
+            "SELECT COUNT(*) FROM levels WHERE guild_id=? AND "
+            "(prestige > ? OR (prestige = ? AND xp > ?))",
+            (G, prestige, prestige, xp_val))
+        # post-fix (clamped) sort
+        clamped = min(prestige, 5)
+        fix_rank = _run(
+            "SELECT COUNT(*) FROM levels WHERE guild_id=? AND "
+            "(MIN(prestige, ?) > ? OR (MIN(prestige, ?) = ? AND xp > ?))",
+            (G, 5, clamped, 5, clamped, xp_val))
+        return raw_rank, fix_rank
+
+    legacy = sql_query(
+        "SELECT xp, prestige FROM levels WHERE guild_id=? AND user_id=?",
+        (G, U_LEGACY))[0]
+    v5 = sql_query(
+        "SELECT xp, prestige FROM levels WHERE guild_id=? AND user_id=?",
+        (G, U_V5))[0]
+    v5_high = sql_query(
+        "SELECT xp, prestige FROM levels WHERE guild_id=? AND user_id=?",
+        (G, U_V5_HIGHXP))[0]
+
+    legacy_raw_rank, legacy_fix_rank = _rank(legacy)
+    v5_raw_rank, v5_fix_rank = _rank(v5)
+    _, v5_high_fix_rank = _rank(v5_high)
+
+    check(legacy_raw_rank == 1,
+          "raw (pre-fix) sort would let legacy-9 outrank everyone",
+          f"raw_rank={legacy_raw_rank}")
+    check(legacy_fix_rank == v5_fix_rank,
+          "clamped sort ranks legacy-9 the same as genuine V at equal XP",
+          f"legacy={legacy_fix_rank} v5={v5_fix_rank}")
+    check(v5_high_fix_rank == 1,
+          "higher-XP V ranks #1 within the clamped tier",
+          str(v5_high_fix_rank))
+
+    row = sql_query(
+        "SELECT prestige FROM levels WHERE guild_id=? AND user_id=?",
+        (G, U_LEGACY))[0]
+    check(row[0] == 9, "legacy stored value preserved (never rewritten)",
+          str(row[0]))
+
+    section("16) Un-cached Booster still gets effective VI / VI multiplier (Issue 2)")
+    # reward_engine resolves booster from the bot's member cache; when the
+    # member is NOT cached it must fall back to fetching the member from
+    # Discord (premium_since is the source of truth — never roles). Here the
+    # bot's guild returns None from get_member() but a booster from
+    # fetch_member().
+
+    class _NotCachedGuild:
+        def __init__(self, member):
+            self._member = member
+        def get_member(self, user_id):
+            return None  # not in the local cache
+        async def fetch_member(self, user_id):
+            return self._member
+
+    class _Bot:
+        def __init__(self, guild):
+            self._guild = guild
+        def get_guild(self, guild_id):
+            return self._guild
+
+    # get_effective_prestige must resolve VI via the fetch fallback.
+    reset_user(level_xp=20000, level=50, coins=0, diamonds=0, prestige_val=1)
+    bot = _Bot(_NotCachedGuild(FakeMember(premium_since="2026-01-01")))
+    eff = await get_effective_prestige(G, U, is_booster=None, bot=bot)
+    check(eff == BOOSTER_TIER,
+          "uncached booster resolves effective VI via fetch_member", str(eff))
+
+    # reward_engine coins/diamonds earn path must apply the VI multiplier.
+    await give_reward(bot, G, U, "coins", amount=100, reason="test",
+                      source="test")
+    await give_reward(bot, G, U, "diamonds", amount=100, reason="test",
+                      source="test")
+    row = sql_query(
+        "SELECT balance, diamonds FROM economy WHERE guild_id=? AND user_id=?",
+        (G, U))
+    check(row[0][0] == 110, "uncached booster coins 110 (1.1x)", str(row[0][0]))
+    check(row[0][1] == 120, "uncached booster diamonds 120 (1.2x)",
+          str(row[0][1]))
+
     print(f"\n{'='*50}")
     print(f"RESULTS: {PASS} passed, {FAIL} failed")
     if FAILURES:

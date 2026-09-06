@@ -345,6 +345,11 @@ class Leveling(commands.Cog):
         member = member or interaction.user
         await interaction.response.defer()
 
+        # Finalized Prestige: legacy levels.prestige values above the
+        # permanent max must rank as the max permanent tier (V) — clamped
+        # here for comparison only, never rewritten.
+        from utils.prestige import MAX_PERMANENT_TIER
+
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT xp, level, prestige FROM levels
@@ -356,11 +361,14 @@ class Leveling(commands.Cog):
                     f"{member.mention} has no XP yet.")
                 return
             xp, level, prestige = row
+            clamped = min(prestige or 0, MAX_PERMANENT_TIER)
             rank_cursor = await db.execute("""
                 SELECT COUNT(*) FROM levels
                 WHERE guild_id = ? AND
-                    (prestige > ? OR (prestige = ? AND xp > ?))
-            """, (interaction.guild.id, prestige or 0, prestige or 0, xp))
+                    (MIN(prestige, ?) > ? OR
+                     (MIN(prestige, ?) = ? AND xp > ?))
+            """, (interaction.guild.id, MAX_PERMANENT_TIER,
+                  clamped, MAX_PERMANENT_TIER, clamped, xp))
             rank = (await rank_cursor.fetchone())[0] + 1
 
         lvl, current, needed = xp_progress(xp)
@@ -368,7 +376,7 @@ class Leveling(commands.Cog):
 
         # Finalized Prestige: show the member's EFFECTIVE tier (VI for an
         # active Booster) rather than only the permanent tier. Display only
-        # — the rank-count sort above still uses the permanent value.
+        # — the rank-count sort above still uses the clamped permanent value.
         from utils.prestige import (
             get_effective_prestige, is_booster, tier_label)
         display_prestige = await get_effective_prestige(
@@ -521,12 +529,15 @@ class Leveling(commands.Cog):
     @app_commands.command(name="leaderboard",
                           description="View the XP leaderboard")
     async def leaderboard(self, interaction: discord.Interaction):
+        # Finalized Prestige: sort on the clamped permanent tier so a legacy
+        # levels.prestige above the max (old unbounded mechanic) ranks as V.
+        from utils.prestige import MAX_PERMANENT_TIER
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT user_id, xp, level, prestige FROM levels
                 WHERE guild_id = ?
-                ORDER BY prestige DESC, xp DESC LIMIT 10
-            """, (interaction.guild.id,))
+                ORDER BY MIN(prestige, ?) DESC, xp DESC LIMIT 10
+            """, (interaction.guild.id, MAX_PERMANENT_TIER))
             rows = await cursor.fetchall()
 
         if not rows:

@@ -62,13 +62,26 @@ def is_booster(member) -> bool:
 
 
 async def _resolve_booster(bot, guild_id: int, user_id: int) -> bool:
-    """Fall back to resolving booster status from the bot's member cache."""
+    """
+    Resolve booster status from the bot's member cache.
+
+    If the member is NOT currently cached (e.g. a scheduled/offline grant
+    where reward_engine.give_reward is invoked without a live Member), fetch
+    the authoritative Member from Discord so an active Booster still gets the
+    temporary Prestige VI entitlement / multiplier. Discord's premium_since
+    remains the source of truth — Discord roles are never consulted.
+    """
     if bot is None:
         return False
     guild = bot.get_guild(guild_id)
     if guild is None:
         return False
     member = guild.get_member(user_id)
+    if member is None and hasattr(guild, "fetch_member"):
+        try:
+            member = await guild.fetch_member(user_id)
+        except Exception:
+            member = None
     return is_booster(member)
 
 

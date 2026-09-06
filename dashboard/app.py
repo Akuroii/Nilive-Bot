@@ -1063,13 +1063,22 @@ def mvp():
 def leveling():
     guild_id = get_session_guild_id()
 
+    # Finalized Prestige: legacy levels.prestige above the permanent max is
+    # treated as V for ranking/badge display (never rewritten).
+    from utils.prestige import MAX_PERMANENT_TIER
+
     async def get_data():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT user_id, xp, level, prestige FROM levels
-                WHERE guild_id=? ORDER BY prestige DESC, xp DESC LIMIT 50
-            """, (guild_id,))
+                WHERE guild_id=?
+                ORDER BY MIN(prestige, ?) DESC, xp DESC LIMIT 50
+            """, (guild_id, MAX_PERMANENT_TIER))
             levels = await cursor.fetchall()
+            # Clamp the prestige column for rendering (sort above is already
+            # clamped; this makes the badge show V for a legacy >5 value).
+            levels = [(l[0], l[1], l[2], min(l[3] or 0, MAX_PERMANENT_TIER))
+                      for l in levels]
             rewards_cursor = await db.execute("""
                 SELECT id, level, role_id FROM leveling_rewards
                 WHERE guild_id=? ORDER BY level ASC
