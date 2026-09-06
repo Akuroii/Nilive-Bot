@@ -26,6 +26,16 @@
         <div class="stat-label">Diamonds</div>
         <div class="stat-value">{{ "{:,}".format(profile.diamonds) }}</div>
     </div>
+    <div class="stat-card stat-accent">
+        <div class="stat-label">Prestige</div>
+        <div class="stat-value">
+            {% if profile.prestige %}
+            ★ {{ ['I','II','III','IV','V'][profile.prestige-1] }}
+            {% else %}
+            —
+            {% endif %}
+        </div>
+    </div>
     <div class="stat-card stat-danger">
         <div class="stat-label">Warnings</div>
         <div class="stat-value">{{ profile.warnings | length }}</div>

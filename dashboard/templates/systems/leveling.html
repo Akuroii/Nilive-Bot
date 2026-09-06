@@ -319,15 +319,16 @@
     </div>
 </div>
 
-<!-- PRESTIGE TAB (Phase 5 / Prestige system) -->
+<!-- PRESTIGE TAB (finalized Prestige system) -->
 <div id="tab-content-prestige" class="tab-content" style="display:none;">
     <div class="card">
         <div class="card-title">🏵️ Prestige Settings</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Members who reach the minimum level can run <code>/prestige</code> to
-            reset past that threshold in exchange for a permanent ★ tier. XP above
-            the threshold carries over (not a hard reset to 0). Existing level-role
-            rewards are kept, not removed.
+            Prestige tiers I–V are purchased from the Shop with Coins (sequential, no
+            skipping). Purchasing resets the buyer's Coins to 0 and never touches
+            Level/XP/Diamonds. Tier VI is a temporary Booster entitlement — an active
+            Discord Booster has effective Prestige VI regardless of their permanent tier.
+            Multipliers below are applied at earn-time from the user's effective tier.
         </p>
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
             <label class="toggle">
@@ -336,10 +337,16 @@
             </label>
             <span style="font-size:13px;color:var(--text2);">Enable prestige</span>
         </div>
-        <div class="form-group" style="max-width:220px;">
-            <label class="form-label">Minimum level required</label>
-            <input class="form-input" id="prestige-min-level" type="number" min="1" value="50">
-        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">🎚️ Prestige Multipliers</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Coins / Diamonds multipliers per effective Prestige tier. Applied at
+            earn-time only; never applied to transfers, conversions, admin grants or
+            shop spending.
+        </p>
+        <div id="prestige-multipliers"><span class="text-muted text-sm">Loading…</span></div>
         <button class="btn btn-primary" onclick="savePrestigeConfig()">Save Settings</button>
         <div id="prestige-config-status" style="margin-top:10px;font-size:13px;"></div>
     </div>
@@ -347,9 +354,10 @@
     <div class="card">
         <div class="card-title">➕ Add Prestige Tier Role</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            One role per tier. On prestige, the member's previous tier role is removed
-            and the new tier's role is added — tiers without a configured role just
-            skip the cosmetic swap.
+            One role per tier. Roles are cosmetic representations only — they never
+            grant Prestige or its multiplier. On a tier change the previous tier's role
+            is removed and the new tier's role is added (if configured). Tier VI maps to
+            the temporary Booster role.
         </p>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
             <div class="form-group" style="margin-bottom:0;">
@@ -658,21 +666,56 @@ async function deleteBlacklist(id) {
     loadBlacklist();
 }
 
-// ── PRESTIGE (Phase 5 / Prestige system) ─────────────────────────
+// ── PRESTIGE (finalized Prestige system) ─────────────────────────
+const PRESTIGE_TIER_NAMES = {1:'I', 2:'II', 3:'III', 4:'IV', 5:'V', 6:'VI'};
+
+function renderPrestigeMultipliers(tiers) {
+    const wrap = document.getElementById('prestige-multipliers');
+    if (!wrap) return;
+    let html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">';
+    for (const t of [1,2,3,4,5,6]) {
+        const m = (tiers && tiers[t]) || {coins:1.0, diamonds:1.0};
+        const boosterNote = t === 6 ? ' (Booster)' : '';
+        html += `
+            <div style="border:1px solid var(--border);border-radius:8px;padding:12px;">
+                <div style="font-weight:600;margin-bottom:8px;">★ ${PRESTIGE_TIER_NAMES[t]}${boosterNote}</div>
+                <div class="form-group" style="margin-bottom:8px;">
+                    <label class="form-label">Coins ×</label>
+                    <input class="form-input prestige-mult" data-tier="${t}" data-cur="coins"
+                           type="number" step="0.1" min="0" value="${m.coins}">
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label class="form-label">Diamonds ×</label>
+                    <input class="form-input prestige-mult" data-tier="${t}" data-cur="diamonds"
+                           type="number" step="0.1" min="0" value="${m.diamonds}">
+                </div>
+            </div>`;
+    }
+    html += '</div>';
+    wrap.innerHTML = html;
+}
+
 async function loadPrestigeConfig() {
     const res  = await fetch('/api/leveling/prestige-config');
     if (!res.ok) return;
     const data = await res.json();
     const c    = data.config || {};
     document.getElementById('prestige-enabled').checked = c.enabled === undefined ? true : !!c.enabled;
-    document.getElementById('prestige-min-level').value = c.min_level || 50;
+    renderPrestigeMultipliers(c.tiers || {});
 }
 loadPrestigeConfig();
 
 async function savePrestigeConfig() {
+    const tiers = {};
+    document.querySelectorAll('.prestige-mult').forEach(inp => {
+        const t = parseInt(inp.dataset.tier);
+        const cur = inp.dataset.cur;
+        if (!(t in tiers)) tiers[t] = {};
+        tiers[t][cur] = parseFloat(inp.value) || 1.0;
+    });
     const payload = {
-        enabled:   document.getElementById('prestige-enabled').checked,
-        min_level: parseInt(document.getElementById('prestige-min-level').value) || 50,
+        enabled: document.getElementById('prestige-enabled').checked,
+        tiers:   tiers,
     };
     const res  = await fetch('/api/leveling/prestige-config', {
         method: 'POST', headers: {'Content-Type':'application/json'},
