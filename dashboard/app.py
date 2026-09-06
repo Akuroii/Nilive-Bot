@@ -136,6 +136,18 @@ def render(template, **ctx):
 # silently break every one of those previews with no visible error
 # beyond "the image just doesn't show up". Allowing any https: image
 # source keeps that intact while still blocking plain-http image loads.
+#
+# `blob:` is in img-src for exactly the reason that paragraph above
+# describes in the abstract: the Embed Builder previews files that were
+# never uploaded anywhere (browser-side File objects, shown via
+# URL.createObjectURL). Without `blob:` the <img> src resolves fine in
+# the DOM and *still* renders nothing — no failed request, no network
+# entry, one console line — which is indistinguishable from "the
+# attachment feature is broken" from the admin's seat. Same-origin blobs
+# carry no third-party read capability, so this doesn't widen the policy
+# in any meaningful way; the client side degrades to CSP-proof
+# `data:` URIs anyway if this is ever tightened again
+# (EmbedComposer.previewUrlFor / canRenderBlobUrls).
 @app.after_request
 def _set_security_headers(response):
     response.headers["X-Frame-Options"] = "DENY"
@@ -148,7 +160,7 @@ def _set_security_headers(response):
         "script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; "
         "font-src 'self' https://fonts.gstatic.com; "
-        "img-src 'self' data: https:; "
+        "img-src 'self' data: blob: https:; "
         "connect-src 'self'; "
         "frame-ancestors 'none'"
     )

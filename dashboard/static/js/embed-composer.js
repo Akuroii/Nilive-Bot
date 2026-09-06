@@ -96,6 +96,170 @@ window.EmbedComposer = (function () {
         return url;
     }
 
+    // ── Graceful degradation: can we actually DISPLAY a blob: URL? ──────
+    // A blob: src is only half the story. A Content-Security-Policy
+    // `img-src` that omits `blob:` lets the attribute set, the object URL
+    // stay alive, and the <img> render as an empty box — no network
+    // request, no failed request, just a console line the admin never sees.
+    // That is exactly how "attachments don't appear" gets reported as a
+    // broken upload feature when nothing about the upload ever failed.
+    //
+    // So we PROBE instead of assuming: load a 1×1 PNG from a throwaway
+    // blob URL into a detached <img> and watch which event fires. The
+    // result is cached for the whole document (probing per attachment
+    // would cost a decode each time), and a blocked CSP flips us to
+    // data: URIs, which are CSP-exempt under any sane img-src.
+    //
+    // The probe image below is a real, complete 1×1 transparent PNG.
+    const _PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ'
+        'AAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+    let _blobOk = null;      // null = not probed yet
+    let _blobProbe = null;   // in-flight promise
+
+    // Test/debug escape hatch: forget the cached verdict so a caller can
+    // re-probe (used by the harness to exercise both CSP outcomes).
+    function _resetBlobProbe() { _blobOk = null; _blobProbe = null; }
+
+    // Files small enough to inline as a data: URI. 25MB of image would be a
+    // ~33MB base64 string per attachment spliced into innerHTML — on a weak
+    // laptop that is a freeze, not a preview. Beyond this we show a clear
+    // "no preview" tile and say why, which beats a silently blank box.
+    const DATA_URL_MAX_BYTES = 5 * 1024 * 1024;
+
+    // Human-readable copy for every way a preview can legitimately be
+    // unavailable. A blank tile is never an acceptable answer — the whole
+    // point is that the admin can tell "no preview" from "broken feature".
+    const NO_PREVIEW_HINT = {
+        'too-large-for-preview': 'File is larger than the inline-preview limit — it will still be sent.',
+        'no-blob': 'No file data in this browser tab — re-add the file.',
+        'decode-failed': 'This browser could not read the file for previewing.',
+        'remote-url-missing': 'Attachment reference has no URL.',
+    };
+
+    function atobPolyfill(s) {
+        if (typeof atob === 'function') return atob(s);
+        if (typeof Buffer !== 'undefined') return Buffer.from(s, 'base64').toString('binary');
+        throw new Error('no base64 decoder available');
+    }
+    function base64ToBlob(b64, type) {
+        const bin = atobPolyfill(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i) & 0xff;
+        return new Blob([bytes], { type: type || 'image/png' });
+    }
+
+    function canRenderBlobUrls() {
+        if (_blobOk !== null) return Promise.resolve(_blobOk);
+        if (_blobProbe) return _blobProbe;
+        _blobProbe = new Promise((resolve) => {
+            let settled = false;
+            const done = (ok) => {
+                if (settled) return;
+                settled = true;
+                _blobOk = ok;
+                if (!ok) {
+                    console.warn('[embed-composer] blob: URLs are not renderable in this '
+                        + 'document (blocked by CSP img-src, or createObjectURL unavailable). '
+                        + 'Local attachment previews fall back to data: URIs — previews may '
+                        + 'use more memory and are skipped above '
+                        + (DATA_URL_MAX_BYTES / 1024 / 1024).toFixed(0) + 'MB.');
+                }
+                try { if (url) URL.revokeObjectURL(url); } catch (e) { /* fine */ }
+                _blobProbe = null;
+                resolve(ok);
+            };
+            let url = null;
+            try {
+                if (typeof URL === 'undefined' || !URL.createObjectURL || typeof Blob !== 'function'
+                    || typeof Image !== 'function' || typeof document === 'undefined') return done(false);
+                url = URL.createObjectURL(base64ToBlob(_PNG_1x1, 'image/png'));
+                const img = new Image();
+                img.onload = () => done(true);
+                img.onerror = () => done(false);
+                img.src = url;
+                // CSP violations surface as `error` in every current browser,
+                // but never depend on it: a blob that hasn't decoded inside
+                // this window is treated as unusable.
+                setTimeout(() => done(false), 1500);
+            } catch (e) {
+                done(false);
+            }
+        });
+        return _blobProbe;
+    }
+
+    function blobToDataUrl(blob) {
+        if (typeof FileReader === 'function' && blob) {
+            return new Promise((resolve, reject) => {
+                const fr = new FileReader();
+                fr.onload = () => resolve(fr.result);
+                fr.onerror = () => reject(fr.error || new Error('FileReader failed'));
+                fr.readAsDataURL(blob);
+            });
+        }
+        // No FileReader (old WebKit, exotic embedders): reject and let the
+        // caller degrade to a "no preview" tile rather than throw.
+        return Promise.reject(new Error('no FileReader in this environment'));
+    }
+
+    /**
+     * The ONE place that decides how a local attachment gets previewed.
+     * Order: cached → remote → blob: (if the document can render it) →
+     * data: (small files only). Never throws; `null` means "no preview,
+     * and here is why" — callers must show that reason, not a blank box.
+     *
+     * @param {object} a attachment record { name, type, size, blob, source?, url? }
+     * @param {object} [opts] { allowBlob?: boolean }
+     * @returns {Promise<{url: string|null, kind: string, reason: string}>}
+     */
+    function previewUrlFor(a, opts) {
+        opts = opts || {};
+        if (!a) return Promise.resolve({ url: null, kind: 'none', reason: 'no-attachment' });
+        if (a._previewUrl) return Promise.resolve({ url: a._previewUrl, kind: 'blob', reason: '' });
+        if (a._dataUrl) return Promise.resolve({ url: a._dataUrl, kind: 'data', reason: '' });
+        if (a.source === 'remote') {
+            return Promise.resolve(a.url
+                ? { url: a.url, kind: 'remote', reason: '' }
+                : { url: null, kind: 'none', reason: 'remote-url-missing' });
+        }
+        if (a.url) return Promise.resolve({ url: a.url, kind: 'remote', reason: '' });
+        if (!a.blob) return Promise.resolve({ url: null, kind: 'none', reason: 'no-blob' });
+        // One resolution per attachment. Without this guard, two renders that
+        // land before the probe settles would each mint an object URL and one
+        // of them would leak (and the loser's _previewUrl would be overwritten,
+        // leaving an orphan URL the revoke step can no longer see).
+        if (a._previewPromise) return a._previewPromise;
+        const allowBlob = opts.allowBlob !== false;
+        const run = Promise.resolve(allowBlob ? canRenderBlobUrls() : false).then((blobOk) => {
+            if (blobOk) {
+                try {
+                    const url = URL.createObjectURL(a.blob);
+                    a._previewUrl = url;
+                    return { url, kind: 'blob', reason: '' };
+                } catch (e) {
+                    console.error('[embed-composer] createObjectURL failed for', a.name, e);
+                    // fall through to data: — a throw here must not mean "no preview"
+                }
+            }
+            if (a.size > DATA_URL_MAX_BYTES) {
+                return { url: null, kind: 'none', reason: 'too-large-for-preview' };
+            }
+            return blobToDataUrl(a.blob).then(
+                (url) => { a._dataUrl = url; return { url, kind: 'data', reason: '' }; },
+                (e) => {
+                    console.error('[embed-composer] data: preview failed for', a.name, e);
+                    return { url: null, kind: 'none', reason: 'decode-failed' };
+                });
+        });
+        a._previewPromise = run;
+        // The promise is only a de-dupe key — drop it once settled so a
+        // later retry (the "no preview → retry" affordance) isn't short-
+        // circuited forever by a resolved promise.
+        run.then(() => { a._previewPromise = null; },
+                () => { a._previewPromise = null; });
+        return run;
+    }
+
     // ── Textarea insertion helpers ────────────────────────────────
     // (verbatim from the old page — the emoji/mention tooling on
     // both pages inserts through these.)
@@ -520,10 +684,23 @@ window.EmbedComposer = (function () {
             // same split the Embed Builder's own list does.
             const imgHtml = attachments.filter(a => a.type && a.type.startsWith('image/')).map(a => {
                 try {
-                    const url = resolveAttachmentPreviewUrl(a, data.attachmentPreviewUrl);
-                    return url
-                        ? `<img src="${attr(url)}" alt="${attr(a.name)}">`
-                        : `<span class="badge">📄 ${esc(a.name)}</span>`;
+                    // A page that owns its attachment lifecycle (Embed Builder)
+                    // hands us a resolver; nobody else should be minting URLs.
+                    const url = typeof data.attachmentPreviewUrl === 'function'
+                        ? data.attachmentPreviewUrl(a)
+                        : resolveAttachmentPreviewUrl(a, null);
+                    if (url) return `<img src="${attr(url)}" alt="${attr(a.name)}" loading="lazy" decoding="async">`;
+                    // No URL yet is NOT the same as "nothing to show": while an
+                    // async preview (data: fallback) is in flight we keep the
+                    // slot visible as a pending badge instead of dropping it,
+                    // and we surface the real reason once it is known.
+                    if (a._previewPending) {
+                        return `<span class="badge eb-pe-pending" data-preview-state="pending">⏳ ${esc(a.name)}</span>`;
+                    }
+                    if (a._previewError) {
+                        return `<span class="badge eb-pe-pending" data-preview-state="${attr(a._previewError)}" title="${attr(NO_PREVIEW_HINT[a._previewError] || '')}">🚫 ${esc(a.name)}</span>`;
+                    }
+                    return `<span class="badge">📄 ${esc(a.name)}</span>`;
                 } catch (e) {
                     // Never let one bad attachment abort the whole preview.
                     console.error('[embed-composer] preview failed for attachment', a && a.name, e);
@@ -625,6 +802,8 @@ window.EmbedComposer = (function () {
         insertAtCursor, wrapSelection,
         mountEditor,
         renderDiscordMarkup, renderPreview, componentRowsHtml,
+        canRenderBlobUrls, previewUrlFor, resolveAttachmentPreviewUrl, _resetBlobProbe,
+        NO_PREVIEW_HINT, DATA_URL_MAX_BYTES,
         cleanEmbedForPayload, cleanEmbedsForPayload,
         embedFromApi, embedsFromApi,
         fmtPreviewTime,

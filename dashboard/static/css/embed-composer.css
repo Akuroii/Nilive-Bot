@@ -48,6 +48,42 @@
 .eb-attach-thumb { width:100%; height:64px; object-fit:cover; display:block; background:var(--bg4); }
 .eb-attach-icon { width:100%; height:64px; display:flex; align-items:center; justify-content:center; font-size:24px; background:var(--bg4); }
 .eb-attach-name { padding:4px 6px; color:var(--text2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* ── Attachment preview states ───────────────────────────────────
+   A missing preview must LOOK different from a broken feature, and it
+   must say why. Three states, one rule each: pending (decoding), no
+   preview (too large / unreadable — still sendable), and the tiny hint
+   line under the filename. ──────────────────────────────────────── */
+.eb-attach-thumb--pending {
+    display:block; width:100%; height:64px; object-fit:cover;
+    background:var(--bg4); color:var(--text3); font-size:11px;
+    display:flex; align-items:center; justify-content:center;
+}
+.eb-attach-status {
+    width:100%; height:64px; display:flex; flex-direction:column; gap:2px;
+    align-items:center; justify-content:center; font-size:11px; text-align:center;
+    color:var(--text3); background:var(--bg4); padding:0 6px;
+}
+.eb-attach-hint { padding:0 6px 4px; font-size:10px; color:var(--text3); line-height:1.25; }
+.eb-attach-retry {
+    background:none; border:1px solid var(--border); border-radius:5px;
+    color:var(--accent); font-size:10px; padding:1px 6px; cursor:pointer;
+}
+.eb-attach-retry:hover { border-color:var(--accent); }
+.eb-pe-pending { opacity:.75; font-style:italic; }
+
+/* Long pages (Embed Builder's 10 embed cards, Commands' chip lists) skip
+   layout work for off-screen sections. Auto = no size guessing, so
+   content-visibility can't create scroll jump. */
+@supports (content-visibility: auto) {
+    .eb-embed-card:not(.eb-expanded), .eb-attach-item { content-visibility: auto; }
+}
+/* Weak device / motion sensitivity: the transitions are pleasant, not
+   load-bearing. 45 of them sit in this stylesheet alone. */
+@media (prefers-reduced-motion: reduce) {
+    .eb-tbtn, .eb-embed-head, .eb-emoji-cell, .eb-comp-btn, .nav-link,
+    .eb-dropzone, .eb-attach-remove { transition: none !important; }
+    .eb-emoji-cell:hover, .eb-emoji-cell:focus-visible { transform: none; }
+}
 .eb-attach-remove {
     position:absolute; top:3px; right:3px; width:18px; height:18px; border-radius:50%;
     background:rgba(0,0,0,.6); color:#fff; border:none; font-size:11px; cursor:pointer;

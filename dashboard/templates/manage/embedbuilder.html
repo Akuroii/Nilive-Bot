@@ -235,6 +235,9 @@ const saveDraft = debounce(async function() {
         attachments: attachments.map(a => ({
             id: a.id, name: a.name, type: a.type, size: a.size,
             blob: a.blob, source: a.source || 'local',
+            // _previewUrl / _dataUrl / *_pending|error flags are transient
+            // on purpose: a blob: URI dies with the tab, and a base64 copy
+            // would double the draft size for nothing.
         })),
         ts: Date.now(),
     });
@@ -250,7 +253,20 @@ async function restoreDraft() {
         // a page reload, so each attachment gets a fresh one lazily on its
         // next render (see getAttachmentPreviewUrl below). `source`
         // defaults to 'local' for drafts saved before that field existed.
-        attachments = draft.attachments.map(a => ({ ...a, source: a.source || 'local' }));
+        attachments = draft.attachments.map(a => {
+            const rec = { ...a, source: a.source || 'local' };
+            // Strip transient preview state defensively: a `_previewPending`
+            // that somehow survives (older build, manual storage edit) would
+            // otherwise pin the tile on "preview…" forever with no retry,
+            // because the resolver treats pending as "already in flight".
+            rec._previewUrl = null;
+            rec._dataUrl = null;
+            rec._previewPending = false;
+            rec._previewError = null;
+            rec._previewRefreshing = false;
+            rec._previewPromise = null;
+            return rec;
+        });
     }
 }
 
@@ -676,7 +692,9 @@ function addFiles(fileList) {
         totalBytes += f.size;
         attachments.push({
             id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-            name: f.name, type: f.type, size: f.size, blob: f,
+            name: f.name,
+            type: f.type || (IMAGE_EXT_RE.test(f.name) ? imageMimeFor(f.name) : ''),
+            size: f.size, blob: f,
             source: 'local', // local = an unsent File, uploaded fresh on Send.
                               // 'remote' (existing Discord attachment, kept
                               // as-is) is reserved for the future Edit flow —
@@ -706,25 +724,99 @@ function addFiles(fileList) {
 // The shared composer (EC.renderPreview) no longer mints URLs itself — this
 // page hands it getAttachmentPreviewUrl through `attachmentPreviewUrl`, so
 // the preview and the thumbnail grid always share ONE url per attachment.
-function getAttachmentPreviewUrl(a) {
-    if (a.source === 'remote') return a.url || null; // future Edit flow — not wired up yet
-    if (!a.blob) return null;
-    if (!a._previewUrl) {
-        try {
-            a._previewUrl = URL.createObjectURL(a.blob);
-        } catch (e) {
-            console.error('[embedbuilder] createObjectURL failed for', a.name, e);
-            return null;
-        }
+//
+// getAttachmentPreviewUrl stays SYNCHRONOUS (both renderers are sync HTML
+// builders), so it can only ever return something already cached. When
+// nothing is cached it kicks off the async resolution
+// (EC.previewUrlFor: blob: if the document can render blob: at all, else a
+// data: URI) and re-renders when the answer lands. That second render is
+// what used to be missing: blob: URLs are blocked unless CSP img-src lists
+// them, the <img> src is set, nothing loads, no request fails — and the
+// attachment simply "doesn't appear" while the file itself was fine the
+// whole time.
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|avif|bmp|ico|tiff?|heic|heif|apng|svg)$/i;
+const IMAGE_MIME_BY_EXT = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', avif: 'image/avif', bmp: 'image/bmp', ico: 'image/x-icon',
+    tif: 'image/tiff', tiff: 'image/tiff', heic: 'image/heic', heif: 'image/heif',
+    apng: 'image/apng', svg: 'image/svg+xml',
+};
+
+// Browsers leave File.type empty for a lot of real files (HEIC screenshots,
+// images dragged out of some chat apps, files restored from disk). Treating
+// `type` as the only truth made those files render as a 📄 badge forever —
+// the "it uploaded but nothing shows up" report — so sniff the extension.
+function looksLikeImage(a) {
+    if (!a) return false;
+    const t = String(a.type || '');
+    if (t.startsWith('image/')) return true;
+    if (t) return false;                      // a real, non-image MIME wins
+    return IMAGE_EXT_RE.test(String(a.name || ''));
+}
+function imageMimeFor(name) {
+    const m = /\.([a-z0-9]+)$/i.exec(String(name || ''));
+    return (m && IMAGE_MIME_BY_EXT[m[1].toLowerCase()]) || '';
+}
+
+function attachmentPreviewHint(a) {
+    const r = (EC.NO_PREVIEW_HINT && EC.NO_PREVIEW_HINT[a._previewError]) || '';
+    return r || (a.size > (EC.DATA_URL_MAX_BYTES || 0)
+        ? 'Too large to preview inline — it will still be sent.'
+        : 'No preview available — the file will still be sent.');
+}
+
+let _previewRefreshQueued = false;
+function _queuePreviewRefresh() {
+    if (_previewRefreshQueued) return;
+    _previewRefreshQueued = true;
+    Promise.resolve().then(() => {
+        _previewRefreshQueued = false;
+        renderAttachments();
+        renderPreview();
+    });
+}
+
+function refreshAttachmentPreview(a) {
+    if (!a || a._previewPending || a._previewUrl || a._dataUrl || a._previewRefreshing) return;
+    // A retry must clear the previous verdict first, or the sync resolver
+    // keeps handing back the stale error and nothing ever changes.
+    if (a._previewError) {
+        a._previewError = null;
+        a._previewRefreshing = true;
+        _queuePreviewRefresh();
+    } else {
+        a._previewPending = true;   // tells both renderers "in flight", not "absent"
+        _queuePreviewRefresh();
     }
-    return a._previewUrl;
+    EC.previewUrlFor(a).then((r) => {
+        a._previewPending = false;
+        a._previewRefreshing = false;
+        if (r && r.url) { a._previewError = null; }
+        else { a._previewError = (r && r.reason) || 'no-blob'; }
+        _queuePreviewRefresh();
+    });
+}
+
+function getAttachmentPreviewUrl(a) {
+    if (!a) return null;
+    if (a.source === 'remote') return a.url || null; // future Edit flow — not wired up yet
+    if (a._previewUrl) return a._previewUrl;
+    if (a._dataUrl) return a._dataUrl;
+    if (!a.blob || a._previewPending || a._previewError) return null;
+    refreshAttachmentPreview(a);
+    return null;
 }
 
 function revokeAttachmentPreview(a) {
-    if (a && a._previewUrl) {
+    if (!a) return;
+    if (a._previewUrl) {
         try { URL.revokeObjectURL(a._previewUrl); } catch (e) { /* already gone — fine */ }
-        a._previewUrl = null;
     }
+    a._previewUrl = null;
+    a._dataUrl = null;
+    a._previewError = null;
+    a._previewPending = false;
+    a._previewRefreshing = false;
 }
 
 function revokeAllAttachmentPreviews() {
@@ -758,15 +850,28 @@ function renderAttachments() {
     // list, which is the second half of the root-cause fix above.
     attachGrid.innerHTML = attachments.map(a => {
         try {
-            const isImg = a.type && a.type.startsWith('image/');
+            const isImg = looksLikeImage(a);
             const url = isImg ? getAttachmentPreviewUrl(a) : null;
-            const inner = (isImg && url)
-                ? `<img class="eb-attach-thumb" src="${url}" alt="">`
-                : `<div class="eb-attach-icon">${isImg ? '⚠️' : '📄'}</div>`;
+            let inner, hint = '';
+            if (isImg && url) {
+                inner = `<img class="eb-attach-thumb" src="${_ebAttr(url)}" alt="" loading="lazy" decoding="async">`;
+            } else if (isImg && a._previewPending) {
+                inner = `<div class="eb-attach-thumb--pending">⏳ preview…</div>`;
+            } else if (isImg) {
+                // No preview, stated plainly, with a retry — the file is in
+                // memory and WILL be sent either way. "Nothing appeared" is
+                // the bug; a quiet blank tile is how it got misread.
+                inner = `<div class="eb-attach-status">🖼️<span>no preview</span>`
+                      + `<button type="button" class="eb-attach-retry" data-retry="${a.id}">retry</button></div>`;
+                hint = `<div class="eb-attach-hint">${_ebEsc(attachmentPreviewHint(a))}</div>`;
+            } else {
+                inner = `<div class="eb-attach-icon">📄</div>`;
+            }
             return `<div class="eb-attach-item">
                 <button type="button" class="eb-attach-remove" data-id="${a.id}" aria-label="Remove ${_ebEsc(a.name)}">✕</button>
                 ${inner}
                 <div class="eb-attach-name" title="${_ebEsc(a.name)}">${_ebEsc(a.name)}</div>
+                ${hint}
             </div>`;
         } catch (e) {
             console.error('[embedbuilder] failed to render attachment', a && a.name, e);
@@ -780,6 +885,15 @@ function renderAttachments() {
 
     attachGrid.querySelectorAll('.eb-attach-remove').forEach(btn => {
         btn.addEventListener('click', () => removeAttachment(btn.dataset.id));
+    });
+    attachGrid.querySelectorAll('.eb-attach-retry').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const a = attachments.find(x => x.id === btn.dataset.retry);
+            if (!a) return;
+            a._previewError = null;
+            a._previewPending = false;
+            refreshAttachmentPreview(a);
+        });
     });
 }
 
