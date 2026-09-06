@@ -736,6 +736,27 @@ async def init_db():
             ON prestige_roles(guild_id)
         """)
 
+        # The finalized Prestige system (replaces the old XP/level-gated
+        # reset mechanic): the per-tier currency multipliers live here.
+        # One row per (guild, tier 1..6). Rows are seeded lazily to the
+        # locked defaults on first read (see utils/prestige.py), so a
+        # fresh install gets a complete, valid config without an admin
+        # having to touch the dashboard first. Purely additive; existing
+        # games/servers are unaffected.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS prestige_tiers (
+                guild_id           INTEGER NOT NULL,
+                tier               INTEGER NOT NULL,
+                coins_multiplier   REAL DEFAULT 1.0,
+                diamonds_multiplier REAL DEFAULT 1.0,
+                PRIMARY KEY (guild_id, tier)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_pt_guild
+            ON prestige_tiers(guild_id)
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS mvp_config (
                 guild_id            INTEGER PRIMARY KEY,
@@ -838,6 +859,21 @@ async def init_db():
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] shop_items.xp_boost_multiplier: {e}")
+
+        # Finalized Prestige system: shop items of type='prestige' carry
+        # the permanent tier (1..5) they grant. NULL for every other item
+        # type, so existing shop items are unchanged. Prestige is NOT an
+        # inventory item and is never delivered via the reward engine.
+        try:
+            cursor = await db.execute("PRAGMA table_info(shop_items)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "prestige_tier" not in cols:
+                await db.execute(
+                    "ALTER TABLE shop_items ADD COLUMN "
+                    "prestige_tier INTEGER DEFAULT NULL")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] shop_items.prestige_tier: {e}")
 
         # Rank Card foundation (item catalog / rarity / equip system,
         # pass 1 — schema + backend). shop_items gets two new,

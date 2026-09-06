@@ -153,7 +153,7 @@ def shop_items_partial():
             cursor = await db.execute("""
                 SELECT id, name, description, price, type,
                        role_id, duration_hours, featured, enabled,
-                       price_diamonds, icon_url, rarity
+                       price_diamonds, icon_url, rarity, prestige_tier
                 FROM shop_items WHERE guild_id = ?
                 ORDER BY featured DESC, created_at DESC
             """, (guild_id,))
@@ -183,6 +183,17 @@ def shop_items_partial():
             f"onerror=\"this.style.display='none';\">"
             if r[10] else ""
         )
+        # Prestige shop items carry a permanent tier (r[12]). The render
+        # uses the tier label solely for display; the source of Prestige
+        # state is levels.prestige + booster status, never the shop item.
+        type_display = _esc(r[4])
+        if (r[4] == "prestige" and r[12]):
+            try:
+                from utils.prestige import tier_label
+                type_display = f"Prestige {tier_label(r[12])}"
+            except Exception:
+                type_display = "Prestige"
+
         # r[1] (name) and r[2] (description) are admin-entered but
         # still free text — escaped so a mischievous/compromised admin
         # account can't plant stored XSS for the next admin to view.
@@ -192,7 +203,7 @@ def shop_items_partial():
             f"<span class='badge {rarity_class}'>{_esc(rarity.title())}</span></td>"
             f"<td class='text-muted'>{_esc(r[2]) if r[2] else '—'}</td>"
             f"<td>{price_str}</td>"
-            f"<td>{_esc(r[4])}</td>"
+            f"<td>{type_display}</td>"
             f"<td>{dur}</td>"
             f"<td><span class='badge {status}'>{label}</span></td>"
             f"<td><button class='btn btn-sm btn-danger' "
@@ -246,6 +257,27 @@ def add_shop_item():
     item_name = data.get("name")
     icon_url  = (data.get("icon_url") or "").strip() or None
 
+    # Finalized Prestige: a shop item of type='prestige' carries the
+    # permanent tier (1..5) it grants. Must be coins-priced; a diamond
+    # price is rejected by the backend at purchase time.
+    prestige_tier_val = data.get("prestige_tier")
+    try:
+        prestige_tier_val = (
+            int(prestige_tier_val)
+            if prestige_tier_val not in (None, "", 0, "0") else None)
+    except (TypeError, ValueError):
+        prestige_tier_val = None
+    if prestige_tier_val is not None and prestige_tier_val not in (1, 2, 3, 4, 5):
+        return jsonify({"success": False,
+                        "error": "Prestige tier must be 1–5"})
+    # Finalized Prestige: Prestige is Coins-only. The UI guards this, but the
+    # API must reject a `prestige` item carrying a diamond price server-side
+    # (the purchase path in cogs/shop.py also rejects it at buy time).
+    if (data.get("type") or "role") == "prestige" and price_diamonds_val:
+        return jsonify({"success": False,
+                        "error": "Prestige items are purchased with Coins and "
+                                 "cannot have a diamond price."})
+
     # Rank Card foundation: rarity is admin-set at creation time,
     # same place price/icon are already captured. Falls back to
     # 'common' on anything unrecognized rather than rejecting the
@@ -263,8 +295,8 @@ def add_shop_item():
                      role_id, duration_hours, featured,
                      required_level, required_role_id,
                      max_stock, current_stock, enabled, price_diamonds,
-                     icon_url, rarity)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                     icon_url, rarity, prestige_tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
             """, (
                 guild_id,
                 item_name,
@@ -281,6 +313,7 @@ def add_shop_item():
                 price_diamonds_val,
                 icon_url,
                 rarity,
+                prestige_tier_val,
             ))
             await db.commit()
 

@@ -35,13 +35,20 @@ async def get_rank_card_data(guild_id: int, user_id: int,
         level_row = await cursor.fetchone()
 
         xp_val       = level_row[0] if level_row else 0
-        prestige_val = (level_row[2] if level_row else 0) or 0
+        raw_prestige = (level_row[2] if level_row else 0) or 0
+
+        # Finalized Prestige: legacy levels.prestige above the permanent max
+        # is treated as the max tier (V) for ranking/display, never rewritten.
+        from utils.prestige import MAX_PERMANENT_TIER
+        prestige_val = min(raw_prestige, MAX_PERMANENT_TIER)
 
         rank_cursor = await db.execute("""
             SELECT COUNT(*) FROM levels
             WHERE guild_id=? AND
-                (prestige > ? OR (prestige = ? AND xp > ?))
-        """, (guild_id, prestige_val, prestige_val, xp_val))
+                (MIN(prestige, ?) > ? OR
+                 (MIN(prestige, ?) = ? AND xp > ?))
+        """, (guild_id, MAX_PERMANENT_TIER,
+              prestige_val, MAX_PERMANENT_TIER, prestige_val, xp_val))
         rank = (await rank_cursor.fetchone())[0] + 1
 
         totals_cursor = await db.execute("""

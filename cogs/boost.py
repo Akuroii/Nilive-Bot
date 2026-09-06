@@ -78,6 +78,17 @@ class Boost(commands.Cog):
         if boost_count >= 2:
             await self._give_role(guild, member, boost2_id)
 
+        # Finalized Prestige: an active Booster has effective Prestige VI.
+        # Roles are cosmetic only — entitlement derives from premium_since.
+        # Sync the configured tier-VI prestige role (if any) as a
+        # representation of that state. Never touches Coins/XP/Level.
+        try:
+            from utils.prestige import sync_prestige_roles, BOOSTER_TIER
+            await sync_prestige_roles(
+                self.bot, guild, member, effective_tier=BOOSTER_TIER)
+        except Exception as e:
+            print(f"[BOOST] Prestige VI role sync (new boost) failed: {e}")
+
         if channel_id:
             channel = guild.get_channel(int(channel_id))
             if channel:
@@ -133,6 +144,18 @@ class Boost(commands.Cog):
                     await member.remove_roles(role, reason="Boost ended")
                 except Exception:
                     pass
+
+        # Finalized Prestige: when the boost ends, effective Prestige
+        # returns to the permanent tier (never VI). Sync the configured
+        # prestige roles so the member wears their permanent tier's role
+        # (and loses the temporary VI role). Representation only; never
+        # touches Coins/XP/Level.
+        try:
+            from utils.prestige import sync_prestige_roles, get_permanent_prestige
+            perm = await get_permanent_prestige(guild.id, member.id)
+            await sync_prestige_roles(self.bot, guild, member, effective_tier=perm)
+        except Exception as e:
+            print(f"[BOOST] Prestige role sync (unboost) failed: {e}")
 
     async def _give_role(self, guild, member, role_id):
         if not role_id:

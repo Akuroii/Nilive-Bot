@@ -556,7 +556,7 @@ def member_profile(user_id: int):
     async def get_profile():
         async with aiosqlite.connect(DB_PATH) as db:
             lc        = await db.execute(
-                "SELECT xp, level FROM levels WHERE guild_id=? AND user_id=?",
+                "SELECT xp, level, prestige FROM levels WHERE guild_id=? AND user_id=?",
                 (guild_id, user_id))
             level_row = await lc.fetchone()
 
@@ -590,11 +590,16 @@ def member_profile(user_id: int):
             """, (guild_id, user_id))
             purchases = await pc.fetchall()
 
+        permanent_prestige = (int(level_row[2]) if level_row and level_row[2] else 0)
+        # Clamp legacy levels.prestige (old unbounded reset mechanic) to the
+        # max permanent tier of V for display only; the row is never rewritten.
+        permanent_prestige = int(min(max(permanent_prestige, 0), 5))
         return {
             "xp":       level_row[0] if level_row else 0,
             "level":    level_row[1] if level_row else 0,
             "coins":    econ_row[0]  if econ_row  else 0,
             "diamonds": econ_row[1]  if econ_row  else 0,
+            "prestige": permanent_prestige,
             "warnings": warnings,
             "mod_logs": mod_logs,
             "purchases": purchases,
@@ -1058,13 +1063,22 @@ def mvp():
 def leveling():
     guild_id = get_session_guild_id()
 
+    # Finalized Prestige: legacy levels.prestige above the permanent max is
+    # treated as V for ranking/badge display (never rewritten).
+    from utils.prestige import MAX_PERMANENT_TIER
+
     async def get_data():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT user_id, xp, level, prestige FROM levels
-                WHERE guild_id=? ORDER BY prestige DESC, xp DESC LIMIT 50
-            """, (guild_id,))
+                WHERE guild_id=?
+                ORDER BY MIN(prestige, ?) DESC, xp DESC LIMIT 50
+            """, (guild_id, MAX_PERMANENT_TIER))
             levels = await cursor.fetchall()
+            # Clamp the prestige column for rendering (sort above is already
+            # clamped; this makes the badge show V for a legacy >5 value).
+            levels = [(l[0], l[1], l[2], min(l[3] or 0, MAX_PERMANENT_TIER))
+                      for l in levels]
             rewards_cursor = await db.execute("""
                 SELECT id, level, role_id FROM leveling_rewards
                 WHERE guild_id=? ORDER BY level ASC
@@ -1685,7 +1699,7 @@ COMMAND_METADATA = {
     "setxp": {"desc": "Set XP for a member (admin)", "params": ["member", "xp"]},
     "resetxp": {"desc": "Reset a member's XP and level back to 0 (admin)", "params": ["member"]},
     "resetleaderboard": {"desc": "Force an immediate leaderboard reset for this server (admin)", "params": []},
-    "prestige": {"desc": "Prestige — reset past a level threshold for a permanent status tier", "params": []},
+    "prestige": {"desc": "View your Prestige state (permanent tier + effective tier)", "params": []},
     "minigames_setup": {"desc": "Configure the minigames spawn system (channel + weekly range)", "params": ["channel", "min_events", "max_events", "enabled"]},
     "minigames_spawn": {"desc": "Spawn a minigame right now (manual, admin). Omit the template to let the rotation pick.", "params": ["template_id"]},
     "minigames_stats": {"desc": "View this week's minigames progress", "params": []},

@@ -49,8 +49,23 @@
                     <option value="role">Permanent Role</option>
                     <option value="temp_role">Temporary Role</option>
                     <option value="xp_boost">⚡ XP Boost</option>
+                    <option value="prestige">⭐ Prestige</option>
                     <option value="custom">Custom</option>
                 </select>
+            </div>
+            <div class="form-group" id="item-prestige-tier-field" style="display:none;">
+                <label class="form-label">Prestige tier</label>
+                <select class="form-input" id="item-prestige-tier">
+                    <option value="1">I</option>
+                    <option value="2">II</option>
+                    <option value="3">III</option>
+                    <option value="4">IV</option>
+                    <option value="5">V</option>
+                </select>
+                <div class="form-hint">
+                    Purchasing resets the buyer's Coins to 0. Must be the next
+                    sequential tier. Level/XP/Diamonds untouched.
+                </div>
             </div>
             <div class="form-group" id="item-role-field">
                 <label class="form-label">Role ID</label>
@@ -267,17 +282,26 @@ function toggleItemTypeFields() {
     const type = document.getElementById('item-type').value;
     const roleField  = document.getElementById('item-role-field');
     const boostField = document.getElementById('item-boost-mult-field');
+    const prestigeField = document.getElementById('item-prestige-tier-field');
     const durLabel   = document.getElementById('item-duration-label');
     const durHint    = document.getElementById('item-duration-hint');
 
     if (type === 'xp_boost') {
         roleField.style.display = 'none';
         boostField.style.display = 'block';
+        prestigeField.style.display = 'none';
         durLabel.textContent = 'Duration hours (required)';
         durHint.textContent = 'How long the boost lasts once purchased';
+    } else if (type === 'prestige') {
+        roleField.style.display = 'none';
+        boostField.style.display = 'none';
+        prestigeField.style.display = 'block';
+        durLabel.textContent = 'Duration hours (0 = permanent)';
+        durHint.textContent = 'Prestige is permanent — leave as 0.';
     } else {
         roleField.style.display = 'block';
         boostField.style.display = 'none';
+        prestigeField.style.display = 'none';
         durLabel.textContent = 'Duration hours (0 = permanent)';
         durHint.textContent = '';
     }
@@ -292,15 +316,18 @@ async function addItem() {
         document.getElementById('item-price-diamonds').value) || 0;
     const boostMult = parseFloat(
         document.getElementById('item-boost-mult').value) || 0;
+    const prestigeTier = document.getElementById('item-prestige-tier');
     const payload = {
         name:          document.getElementById('item-name').value,
         price:         parseInt(
             document.getElementById('item-price').value) || 0,
         price_diamonds: priceDiamonds > 0 ? priceDiamonds : null,
         type:          type,
-        role_id:       type !== 'xp_boost'
+        role_id:       type !== 'xp_boost' && type !== 'prestige'
                        ? (document.getElementById('item-role').value || null)
                        : null,
+        prestige_tier: type === 'prestige' && prestigeTier
+                       ? parseInt(prestigeTier.value) : null,
         xp_boost_multiplier: type === 'xp_boost' && boostMult > 1
                        ? boostMult : null,
         duration_hours:parseInt(
@@ -322,6 +349,16 @@ async function addItem() {
     if (type === 'xp_boost' && (!payload.xp_boost_multiplier || !payload.duration_hours)) {
         showToast('XP Boost items need a multiplier > 1 and a duration', 'danger');
         return;
+    }
+    if (type === 'prestige') {
+        if (payload.price_diamonds) {
+            showToast('Prestige is purchased with Coins — do not set a diamond price', 'danger');
+            return;
+        }
+        if (!payload.price || payload.price <= 0) {
+            showToast('Prestige items need a coin price (the minimum Coins required)', 'danger');
+            return;
+        }
     }
     const res  = await fetch('/api/shop/item', {
         method:  'POST',

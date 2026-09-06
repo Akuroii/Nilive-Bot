@@ -91,7 +91,7 @@ async def process_purchase(interaction: discord.Interaction,
                    duration_hours, required_level,
                    required_role_id, enabled,
                    max_stock, current_stock, price_diamonds,
-                   xp_boost_multiplier
+                   xp_boost_multiplier, prestige_tier
             FROM shop_items
             WHERE id = ? AND guild_id = ? AND enabled = 1
         """, (item_id, guild_id))
@@ -104,7 +104,7 @@ async def process_purchase(interaction: discord.Interaction,
 
     (iid, name, price, itype, role_id, duration_hours,
      req_level, req_role_id, enabled, max_stock, curr_stock,
-     price_diamonds, xp_boost_multiplier) = item
+     price_diamonds, xp_boost_multiplier, prestige_tier) = item
 
     # Phase 5 / Economy v2: an item is diamond-priced when
     # price_diamonds is set (nullable column — see database.py
@@ -151,6 +151,66 @@ async def process_purchase(interaction: discord.Interaction,
                 "(missing duration). Ask an admin to fix it.",
                 ephemeral=True)
             return
+
+    # ── Finalized Prestige purchase (I–V) ──────────────────────────
+    # Prestige is not an inventory item and is never delivered through the
+    # reward engine. The shop item's coin `price` is the MINIMUM balance
+    # required; purchasing sets the Coins balance to 0 and never touches
+    # Level/XP/Diamonds. Sequential + no-rebuy enforcement lives on the
+    # backend in utils/prestige.purchase_prestige().
+    if itype == "prestige":
+        if price_diamonds:
+            await interaction.response.send_message(
+                "Prestige is purchased with Coins; this item can't have a "
+                "diamond price. Ask an admin to fix it.", ephemeral=True)
+            return
+        if not prestige_tier or int(prestige_tier) not in (1, 2, 3, 4, 5):
+            await interaction.response.send_message(
+                "This Prestige item isn't configured correctly (missing or "
+                "invalid tier). Ask an admin to fix it.", ephemeral=True)
+            return
+
+        from utils.prestige import (
+            purchase_prestige, PrestigeError, tier_label,
+            sync_prestige_roles,
+        )
+        try:
+            result = await purchase_prestige(
+                guild_id, user_id, int(prestige_tier), price,
+                item_name=name, item_id=iid,
+                display_name=interaction.user.display_name,
+            )
+        except PrestigeError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        # Sync the cosmetic roles to the member's TRUE effective tier
+        # (sync_prestige_roles computes it from permanent + booster status),
+        # so an active Booster keeps wearing their tier-VI role even after
+        # buying a permanent tier. Roles are representation only.
+        try:
+            await sync_prestige_roles(
+                interaction.client, interaction.guild, interaction.user)
+        except Exception as e:
+            print(f"[SHOP] Prestige role sync failed: {e}")
+
+        currency = await get_currency_name(guild_id)
+        embed = discord.Embed(
+            title="⭐ Prestige Unlocked!",
+            description=(
+                f"{interaction.user.mention} is now **Prestige "
+                f"{tier_label(result['new_tier'])}**!"),
+            color=0xFFD700)
+        embed.add_field(
+            name=f"Coins reset",
+            value=f"Your **{currency}** were reset to **0**.",
+            inline=False)
+        embed.add_field(
+            name="Level / XP / Diamonds",
+            value="**Untouched** — your level, XP and 💎 diamonds are safe.",
+            inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
 
     # P1 #11 FIX: previously stock and balance were checked with
     # plain SELECTs, then both decremented in separate UPDATEs
@@ -396,7 +456,7 @@ class Shop(commands.Cog):
                 SELECT id, name, description, price,
                        type, duration_hours, featured,
                        required_level, max_stock, current_stock,
-                       price_diamonds, xp_boost_multiplier
+                       price_diamonds, xp_boost_multiplier, prestige_tier
                 FROM shop_items
                 WHERE guild_id = ? AND enabled = 1
                 ORDER BY featured DESC, price ASC
@@ -415,13 +475,16 @@ class Shop(commands.Cog):
 
         for (iid, name, desc, price, itype,
              dur, featured, req_lvl, max_s, curr_s,
-             price_diamonds, boost_mult) in items:
+             price_diamonds, boost_mult, prestige_tier) in items:
             stock_info = ""
             if max_s:
                 stock_info = (f" • {curr_s or 0}/{max_s} left"
                               if curr_s else " • **Out of stock**")
             if itype == "xp_boost" and boost_mult:
                 dur_info = f" • {boost_mult}x XP for {dur}h" if dur else f" • {boost_mult}x XP"
+            elif itype == "prestige" and prestige_tier:
+                from utils.prestige import tier_label
+                dur_info = f" • Prestige {tier_label(prestige_tier)}"
             else:
                 dur_info = f" • {dur}h temp" if dur else ""
             lvl_info  = f" • Req. Level {req_lvl}" if req_lvl else ""
@@ -435,7 +498,7 @@ class Shop(commands.Cog):
         view = discord.ui.View()
         for (iid, name, desc, price, itype,
              dur, featured, req_lvl, max_s, curr_s,
-             price_diamonds, boost_mult) in items[:5]:
+             price_diamonds, boost_mult, prestige_tier) in items[:5]:
             if max_s and not curr_s:
                 continue
             btn = discord.ui.Button(
