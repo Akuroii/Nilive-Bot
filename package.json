@@ -1,0 +1,10 @@
+{
+  "name": "nilive-dashboard-tests",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Node test harnesses for the Nero dashboard frontend (no runtime deps, no build step — the dashboard ships plain ES5-compatible JS). `npm test` runs the whole JS suite; see scripts/run_js_tests.sh.",
+  "scripts": {
+    "test": "bash scripts/run_js_tests.sh",
+    "lint:js": "node --check dashboard/static/js/embed-composer.js && node --check dashboard/static/js/dashboard.js && node --check dashboard/static/js/nero-select.js && node --check dashboard/static/js/nero-alias-input.js"
+  }
+}

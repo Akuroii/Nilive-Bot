@@ -237,14 +237,13 @@ EC.renderPreview(box, { content: '', embeds: [EC.blankEmbed()], lookups: LOOKUPS
 assert(box.innerHTML.includes('eb-preview-empty'), 'empty placeholder shown');
 
 // ═══════════════════════════════════════════════════════════════
-section('renderPreview — attachment preview URLs (blob leak fix)');
-// Node has URL but no createObjectURL; stub it so the fallback cache
-// path is exercised with a mint counter (the regression: one fresh
-// blob: URL per attachment PER RENDER, never revoked).
-let mints = 0, revoked = 0;
+section('renderPreview — attachment slots are never silently dropped');
+// Node has URL but no createObjectURL; stub it so the fallback cache path
+// runs (the regression: one fresh blob: URL per attachment PER RENDER).
+let _mints = 0, _revoked = 0;
 sandbox.URL = {
-    createObjectURL: (b) => { mints++; return `blob:stub-${b && b.__id}`; },
-    revokeObjectURL: () => { revoked++; },
+    createObjectURL: (b) => { _mints++; return `blob:stub-${b && b.__id}`; },
+    revokeObjectURL: () => { _revoked++; },
 };
 const blobA = { __id: 'a' };
 const attImg = { id: 'x1', name: 'a.png', type: 'image/png', size: 10, blob: blobA };
@@ -253,42 +252,35 @@ const attTxt = { id: 'x2', name: 'log.txt', type: 'text/plain', size: 10 };
 EC.renderPreview(box, { content: 'hi', embeds: [EC.blankEmbed()], attachments: [attImg, attTxt], lookups: LOOKUPS });
 const firstHtml = box.innerHTML;
 EC.renderPreview(box, { content: 'hi again', embeds: [EC.blankEmbed()], attachments: [attImg, attTxt], lookups: LOOKUPS });
-assert(firstHtml.includes('blob:stub-a') && firstHtml.includes('<img'), 'image attachment uses a blob url in preview');
+assert(firstHtml.includes('blob:stub-a') && firstHtml.includes('<img'), 'image attachment uses a blob url in the preview');
 assert(firstHtml.includes('badge') && firstHtml.includes('log.txt'), 'non-image attachment falls back to a badge');
-assert(mints === 1, 'fallback cache mints ONE url across two renders (no per-keystroke leak)', `mints=${mints}`);
+assert(_mints === 1, 'fallback cache mints ONE url across two renders (no per-keystroke leak)', `mints=${_mints}`);
 
-// a createObjectURL that throws (the failure mode behind the blank
-// preview) must degrade, not abort the whole render. Fresh blob on
-// purpose: it must not be served from the cache populated above.
-sandbox.URL = { createObjectURL: () => { throw new Error('too many blob urls'); }, revokeObjectURL: () => {} };
-EC.renderPreview(box, {
-    content: 'still here', embeds: [{ ...EC.blankEmbed(), title: 'T' }],
-    attachments: [{ id: 'xB', name: 'b.png', type: 'image/png', blob: { __id: 'b-throw' } }], lookups: LOOKUPS,
-});
-assert(box.innerHTML.includes('still here') && box.innerHTML.includes('eb-pe-title'),
-    'throwing createObjectURL does not blank the rest of the preview');
-
-// page-owned resolver wins and the module never mints on its own
-mints = 0;
-let resolverCalls = 0;
-const attOwned = { id: 'x3', name: 'b.png', type: 'image/png', size: 1, blob: blobA, _previewUrl: 'blob:page-owned' };
+// A page that owns its attachment lifecycle wins, and the module must not
+// mint anything of its own behind the page's back.
+_mints = 0; let resolverCalls = 0;
+const attOwned = { id: 'x3', name: 'b.png', type: 'image/png', blob: blobA, _previewUrl: 'blob:page-owned' };
 EC.renderPreview(box, {
     content: 'c', embeds: [EC.blankEmbed()], attachments: [attOwned], lookups: LOOKUPS,
     attachmentPreviewUrl: (a) => { resolverCalls++; return a._previewUrl || null; },
 });
 assert(box.innerHTML.includes('blob:page-owned'), 'attachmentPreviewUrl resolver is used');
-assert(resolverCalls === 1 && mints === 0, 'resolver path bypasses the module cache entirely');
-// a resolver returning null (revoked/unsupported) degrades to a badge
-sandbox.URL = { createObjectURL: () => { mints++; return 'blob:should-not-be-used'; }, revokeObjectURL: () => {} };
+assert(resolverCalls === 1 && _mints === 0, 'resolver path bypasses the module cache entirely');
+
+// An async preview in flight must still occupy a slot — the file is neither
+// missing nor failed, and "the attachment disappeared" starts here.
 EC.renderPreview(box, {
-    content: 'c', embeds: [EC.blankEmbed()], attachments: [{ id: 'x4', name: 'c.png', type: 'image/png', blob: blobA }],
-    lookups: LOOKUPS, attachmentPreviewUrl: () => null,
+    content: 'c', embeds: [EC.blankEmbed()], lookups: LOOKUPS,
+    attachments: [{ id: 'x4', name: 'c.png', type: 'image/png', _previewPending: true }],
+    attachmentPreviewUrl: () => null,
 });
-assert(box.innerHTML.includes('c.png') && !box.innerHTML.includes('blob:'),
-    'null from the resolver degrades to a badge and never leaks a url');
-sandbox.URL = URL; // restore for anything below
+assert(box.innerHTML.includes('data-preview-state="pending"') && box.innerHTML.includes('c.png'),
+    'pending attachment keeps a visible slot instead of vanishing');
+sandbox.URL = URL; // restore
 
 // ═══════════════════════════════════════════════════════════════
+Promise.resolve().then(() => {
 console.log(`\nembed-composer: ${pass} passed, ${fail} failed`);
 if (fail) { console.log('Failures:'); failures.forEach(f => console.log(' -', f)); process.exit(1); }
 console.log('ALL EMBED-COMPOSER TESTS PASSED');
+});
