@@ -232,7 +232,10 @@ const saveDraft = debounce(async function() {
     await idbSet('composer', {
         content: state.content,
         embeds: state.embeds,
-        attachments: attachments.map(a => ({ id:a.id, name:a.name, type:a.type, size:a.size, blob:a.blob })),
+        attachments: attachments.map(a => ({
+            id: a.id, name: a.name, type: a.type, size: a.size,
+            blob: a.blob, source: a.source || 'local',
+        })),
         ts: Date.now(),
     });
 }, 500);
@@ -243,7 +246,11 @@ async function restoreDraft() {
     if (draft.content) state.content = draft.content;
     if (draft.embeds && draft.embeds.length) state.embeds = draft.embeds;
     if (draft.attachments && draft.attachments.length) {
-        attachments = draft.attachments.map(a => ({ ...a }));
+        // _previewUrl deliberately NOT restored — blob: URLs never survive
+        // a page reload, so each attachment gets a fresh one lazily on its
+        // next render (see getAttachmentPreviewUrl below). `source`
+        // defaults to 'local' for drafts saved before that field existed.
+        attachments = draft.attachments.map(a => ({ ...a, source: a.source || 'local' }));
     }
 }
 
@@ -670,6 +677,10 @@ function addFiles(fileList) {
         attachments.push({
             id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
             name: f.name, type: f.type, size: f.size, blob: f,
+            source: 'local', // local = an unsent File, uploaded fresh on Send.
+                              // 'remote' (existing Discord attachment, kept
+                              // as-is) is reserved for the future Edit flow —
+                              // deliberately not built here.
         });
     }
     renderAttachments();
@@ -677,7 +688,52 @@ function addFiles(fileList) {
     saveDraft();
 }
 
+// ── Attachment preview-URL cache ─────────────────────────────────────────
+// ROOT CAUSE FIX: renderAttachments()/renderPreview() used to call
+// URL.createObjectURL() fresh on EVERY render (every keystroke, every
+// embed edit) with no matching revokeObjectURL() anywhere — an unbounded
+// per-keystroke leak of blob: URLs. Once enough piled up in a session,
+// createObjectURL() could start throwing, which aborted whichever render
+// function hit it first mid-loop — silently skipping the rest of THAT
+// render (list and/or preview going blank) while the `attachments` array
+// itself (what Send actually reads) stayed completely intact, which is
+// exactly why Discord could still receive a file the UI wasn't showing.
+//
+// Fix: mint exactly ONE object URL per local image attachment, cache it
+// on the attachment object, and only revoke+drop it when that attachment
+// is actually removed/cleared or the message is sent.
+//
+// The shared composer (EC.renderPreview) no longer mints URLs itself — this
+// page hands it getAttachmentPreviewUrl through `attachmentPreviewUrl`, so
+// the preview and the thumbnail grid always share ONE url per attachment.
+function getAttachmentPreviewUrl(a) {
+    if (a.source === 'remote') return a.url || null; // future Edit flow — not wired up yet
+    if (!a.blob) return null;
+    if (!a._previewUrl) {
+        try {
+            a._previewUrl = URL.createObjectURL(a.blob);
+        } catch (e) {
+            console.error('[embedbuilder] createObjectURL failed for', a.name, e);
+            return null;
+        }
+    }
+    return a._previewUrl;
+}
+
+function revokeAttachmentPreview(a) {
+    if (a && a._previewUrl) {
+        try { URL.revokeObjectURL(a._previewUrl); } catch (e) { /* already gone — fine */ }
+        a._previewUrl = null;
+    }
+}
+
+function revokeAllAttachmentPreviews() {
+    attachments.forEach(revokeAttachmentPreview);
+}
+
 function removeAttachment(id) {
+    const target = attachments.find(a => a.id === id);
+    revokeAttachmentPreview(target);
     attachments = attachments.filter(a => a.id !== id);
     renderAttachments();
     renderPreview();
@@ -695,17 +751,31 @@ function renderAttachments() {
     attachCounter.textContent = `${attachments.length} / ${MAX_ATTACHMENTS} · ${fmtBytes(totalBytes)} / 25MB`;
     attachCounter.classList.toggle('eb-counter-warn', totalBytes > MAX_ATTACH_TOTAL_BYTES * 0.8);
 
+    // Each attachment is rendered inside its own try/catch — one bad item
+    // (e.g. a Blob that didn't survive an IndexedDB round-trip cleanly in
+    // a browser with weak Blob-storage support) now degrades to a fallback
+    // icon for just that item instead of throwing and blanking the whole
+    // list, which is the second half of the root-cause fix above.
     attachGrid.innerHTML = attachments.map(a => {
-        const isImg = a.type && a.type.startsWith('image/');
-        const url = URL.createObjectURL(a.blob);
-        const inner = isImg
-            ? `<img class="eb-attach-thumb" src="${url}" alt="">`
-            : `<div class="eb-attach-icon">📄</div>`;
-        return `<div class="eb-attach-item">
-            <button type="button" class="eb-attach-remove" data-id="${a.id}" aria-label="Remove ${_ebEsc(a.name)}">✕</button>
-            ${inner}
-            <div class="eb-attach-name" title="${_ebEsc(a.name)}">${_ebEsc(a.name)}</div>
-        </div>`;
+        try {
+            const isImg = a.type && a.type.startsWith('image/');
+            const url = isImg ? getAttachmentPreviewUrl(a) : null;
+            const inner = (isImg && url)
+                ? `<img class="eb-attach-thumb" src="${url}" alt="">`
+                : `<div class="eb-attach-icon">${isImg ? '⚠️' : '📄'}</div>`;
+            return `<div class="eb-attach-item">
+                <button type="button" class="eb-attach-remove" data-id="${a.id}" aria-label="Remove ${_ebEsc(a.name)}">✕</button>
+                ${inner}
+                <div class="eb-attach-name" title="${_ebEsc(a.name)}">${_ebEsc(a.name)}</div>
+            </div>`;
+        } catch (e) {
+            console.error('[embedbuilder] failed to render attachment', a && a.name, e);
+            return `<div class="eb-attach-item">
+                <button type="button" class="eb-attach-remove" data-id="${a && a.id}" aria-label="Remove">✕</button>
+                <div class="eb-attach-icon">⚠️</div>
+                <div class="eb-attach-name">${_ebEsc((a && a.name) || 'attachment')}</div>
+            </div>`;
+        }
     }).join('');
 
     attachGrid.querySelectorAll('.eb-attach-remove').forEach(btn => {
@@ -817,6 +887,11 @@ function renderPreview() {
         embeds: state.embeds,
         attachments: attachments,
         botIdentity: botIdentity,
+        // The composer must NOT mint its own blob: URLs — this page owns
+        // the attachment lifecycle (one cached URL per attachment, revoked
+        // on remove/send/clear). Passing the resolver is what keeps the
+        // preview and the thumbnail grid on the exact same URL.
+        attachmentPreviewUrl: getAttachmentPreviewUrl,
         lookups: {
             roles: roleMap,
             channels: channelMap,
@@ -855,7 +930,11 @@ document.getElementById('eb-send-btn').addEventListener('click', async () => {
             const fd = new FormData();
             fd.append('channel_id', channelId);
             fd.append('payload_json', JSON.stringify({ content: state.content || undefined, embeds }));
-            attachments.forEach(a => fd.append('files', a.blob, a.name));
+            // Only local (not-yet-uploaded) attachments get sent as real
+            // multipart files here — 'remote' is reserved for the future
+            // Edit flow (an existing Discord attachment kept as-is), which
+            // isn't wired up yet, but the guard is correct either way.
+            attachments.filter(a => a.source !== 'remote').forEach(a => fd.append('files', a.blob, a.name));
 
             const res = await fetch('/api/embedbuilder/send', {
                 method: 'POST',
@@ -866,6 +945,16 @@ document.getElementById('eb-send-btn').addEventListener('click', async () => {
             if (data.success) {
                 setStatus('✅ Sent!', true);
                 showToast('Message sent!');
+                // Attachments are one-shot — the Files just got uploaded and
+                // consumed. Clearing them (and revoking their cached preview
+                // URLs) here is what keeps the in-memory state, the visible
+                // list/preview, and the persisted draft all in agreement
+                // after a send, instead of quietly drifting out of sync.
+                revokeAllAttachmentPreviews();
+                attachments = [];
+                renderAttachments();
+                renderPreview();
+                saveDraft();
             } else {
                 setStatus('❌ ' + (data.error || 'Send failed'), false);
                 showToast(data.error || 'Send failed', 'error');
@@ -933,6 +1022,7 @@ document.getElementById('eb-delete-template-btn').addEventListener('click', () =
 
 document.getElementById('eb-clear-btn').addEventListener('click', () => {
     showConfirm('Clear the entire composer — content, all embeds, and attachments? This cannot be undone.', async () => {
+        revokeAllAttachmentPreviews();
         state = { content: '', embeds: [blankEmbed()] };
         attachments = [];
         activeEmbed = 0;

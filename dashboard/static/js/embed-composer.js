@@ -9,8 +9,10 @@
 // its payload/normalization shapes are ported verbatim here; the
 // only additions are the optional `components` rows (the engine's
 // JSON, rendered as Discord action rows so the preview can never
-// diverge from the real game message) and the pluggable lookups
-// the mention renderer needs.
+// diverge from the real game message), the pluggable lookups
+// the mention renderer needs, and the optional
+// `attachmentPreviewUrl` hook that lets a page own its Blob-URL
+// lifecycle so previews never leak object URLs (see below).
 //
 // Consumed by:
 //   * manage/embedbuilder.html   — multi-embed composer (unchanged
@@ -48,6 +50,50 @@ window.EmbedComposer = (function () {
     function embedHasContent(e) {
         return !!(e.title || e.description || e.author || e.footer ||
                   e.image || e.thumbnail || (e.fields && e.fields.length));
+    }
+
+    // ── Attachment preview URLs ───────────────────────────────────
+    // The old inline renderer called URL.createObjectURL() fresh on EVERY
+    // render (every keystroke, every embed edit) and never revoked anything
+    // — an unbounded per-keystroke leak of blob: URLs. Once enough piled
+    // up, createObjectURL() could start throwing and abort the render
+    // mid-loop, blanking the list/preview while `attachments` (what Send
+    // actually reads) stayed intact — i.e. Discord could receive a file
+    // the UI wasn't showing.
+    //
+    // So: mint at most ONE object URL per Blob and reuse it.
+    //   * Pages that OWN their attachment lifecycle (Embed Builder — it
+    //     caches on the attachment object, revokes on remove/send/clear)
+    //     pass `data.attachmentPreviewUrl` and are fully in control.
+    //   * Pages that don't (minigame builder) fall back to this WeakMap
+    //     cache, which is at least bounded by the number of Blobs created
+    //     in the session instead of by the number of renders. Entries are
+    //     dropped with the Blob itself; we deliberately never revoke those
+    //     (revoking something a still-mounted <img> points at is worse than
+    //     leaking until unload).
+    const _blobUrlCache = (typeof WeakMap === 'function') ? new WeakMap() : null;
+
+    function resolveAttachmentPreviewUrl(a, resolver) {
+        if (!a) return null;
+        if (typeof resolver === 'function') return resolver(a);
+        if (a.source === 'remote') return a.url || null; // existing Discord attachment
+        if (a.url) return a.url;
+        if (!a.blob || typeof URL === 'undefined' || !URL.createObjectURL) return null;
+        if (_blobUrlCache) {
+            const hit = _blobUrlCache.get(a.blob);
+            if (hit) return hit;
+        }
+        let url = null;
+        try {
+            url = URL.createObjectURL(a.blob);
+        } catch (e) {
+            console.error('[embed-composer] createObjectURL failed for', a.name, e);
+            return null;
+        }
+        if (_blobUrlCache) {
+            try { _blobUrlCache.set(a.blob, url); } catch (e) { /* non-extensible blob */ }
+        }
+        return url;
     }
 
     // ── Textarea insertion helpers ────────────────────────────────
@@ -470,8 +516,21 @@ window.EmbedComposer = (function () {
 
         if (attachments.length) {
             html += `<div class="eb-preview-attachments">`;
-            html += attachments.filter(a => a.type && a.type.startsWith('image/')).map(a =>
-                `<img src="${URL.createObjectURL(a.blob)}" alt="${attr(a.name)}">`).join('');
+            // Images first (in insertion order), then non-images as badges —
+            // same split the Embed Builder's own list does.
+            const imgHtml = attachments.filter(a => a.type && a.type.startsWith('image/')).map(a => {
+                try {
+                    const url = resolveAttachmentPreviewUrl(a, data.attachmentPreviewUrl);
+                    return url
+                        ? `<img src="${attr(url)}" alt="${attr(a.name)}">`
+                        : `<span class="badge">📄 ${esc(a.name)}</span>`;
+                } catch (e) {
+                    // Never let one bad attachment abort the whole preview.
+                    console.error('[embed-composer] preview failed for attachment', a && a.name, e);
+                    return '';
+                }
+            }).join('');
+            html += imgHtml;
             const nonImg = attachments.filter(a => !a.type || !a.type.startsWith('image/'));
             if (nonImg.length) html += nonImg.map(a => `<span class="badge">📄 ${esc(a.name)}</span>`).join('');
             html += `</div>`;
