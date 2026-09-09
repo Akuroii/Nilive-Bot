@@ -3,7 +3,6 @@ from discord.ext import commands
 from discord import app_commands
 import aiosqlite
 import random
-from datetime import datetime, timedelta
 from database import DB_PATH
 from utils.economy_safe import (
     safe_transfer, safe_credit, safe_admin_deduct, safe_convert,
@@ -11,44 +10,16 @@ from utils.economy_safe import (
 )
 
 
-# SECURITY / ISOLATION FIX (dark-fixes pass #7): these cooldown dicts
-# used to be keyed by user_id ALONE. This project's isolation rule
-# (STATUS.md, project rules) is that every table AND every runtime
-# state keyed by a member must be scoped per-guild — but a member
-# present in two of Dark's controlled servers shared a single
-# /daily and /work cooldown across both. Claiming /daily in Guild A
-# silently put that same user on cooldown in Guild B (and vice
-# versa), which is a real cross-guild leak even though it never
-# touched the database. Keys are now (guild_id, user_id) tuples,
-# matching the (guild_id, user_id) composite key every persisted
-# table in this project already uses (economy, levels, etc).
-_daily_cooldowns:  dict[tuple[int, int], datetime] = {}
-
-# MEMORY LEAK FIX (dark-fixes pass #11): these dicts previously grew
-# forever — a key was written on every /daily and /work claim and
-# NOTHING ever removed old entries, so a bot running across many
-# guilds/users for months would slowly accumulate one permanent
-# (guild_id, user_id) entry per member who ever used either command,
-# even long after their cooldown expired. Flagged as "low priority,
-# slow leak" across several prior passes and deliberately left alone
-# each time since nothing higher-priority was blocking on it.
-#
-# Fix: the stored value IS already the cooldown's expiry timestamp
-# (see `_daily_cooldowns[key] = now + timedelta(hours=24)` below), so
-# pruning is just "drop anything whose expiry has already passed."
-# Runs opportunistically — only when a dict has grown past
-# _COOLDOWN_PRUNE_THRESHOLD — so normal-traffic bots pay zero extra
-# cost per command; only a dict that's actually accumulated a lot of
-# stale entries pays a one-time O(n) sweep to shrink back down.
-_COOLDOWN_PRUNE_THRESHOLD = 2000
-
-
-def _prune_expired(cooldowns: dict, now: datetime) -> None:
-    if len(cooldowns) < _COOLDOWN_PRUNE_THRESHOLD:
-        return
-    expired_keys = [k for k, expires_at in cooldowns.items() if expires_at <= now]
-    for k in expired_keys:
-        del cooldowns[k]
+# Daily/Streak state (claim date + streak count) now lives in the
+# daily_claims table, checked and written atomically by
+# utils/daily_engine.claim_daily_streak() — see that module for the
+# full reasoning. This replaces the module-level _daily_cooldowns
+# dict that used to live here: that dict didn't survive a bot
+# restart (silently letting everyone re-claim after any redeploy),
+# had no concept of a streak, and needed its own separate
+# memory-leak-prevention sweep (_prune_expired) purely because it was
+# an ever-growing in-memory structure — a problem class that doesn't
+# exist once the state is a normal DB table.
 
 
 async def get_balance(guild_id: int, user_id: int) -> int:
@@ -122,27 +93,34 @@ class Economy(commands.Cog):
         embed.add_field(name="💎 Diamonds", value=f"**{gems:,}**")
         await interaction.response.send_message(embed=embed)
 
-    # ─── DAILY ──────────────────────────────────────────
+    # ─── DAILY / STREAK ─────────────────────────────────
     @app_commands.command(name="daily",
                           description="Claim your daily coins")
     async def daily(self, interaction: discord.Interaction):
-        now      = datetime.utcnow()
-        # ISOLATION FIX: cooldown key now includes guild_id — see the
-        # comment on _daily_cooldowns above. Previously this was
-        # user_id alone, so claiming /daily in one server put the
-        # member on cooldown in every other server they shared with
-        # this bot.
-        key      = (interaction.guild.id, interaction.user.id)
-        cooldown = _daily_cooldowns.get(key)
-        if cooldown and now < cooldown:
-            remaining = cooldown - now
-            hours     = int(remaining.total_seconds() // 3600)
-            minutes   = int((remaining.total_seconds() % 3600) // 60)
+        from utils.daily_engine import (
+            claim_daily_streak, get_streak_bonus, DailyAlreadyClaimed,
+            STREAK_BONUS_CAP_DAYS,
+        )
+
+        # Atomic claim-check-and-write happens FIRST, before any
+        # reward math or crediting. A double-click or two concurrent
+        # /daily invocations both reach this call; only one can win —
+        # the second sees the first's already-committed row (via
+        # BEGIN IMMEDIATE inside claim_daily_streak) and is rejected
+        # here, before either has touched the member's balance.
+        try:
+            result = await claim_daily_streak(
+                interaction.guild.id, interaction.user.id)
+        except DailyAlreadyClaimed as e:
+            hours   = e.seconds_remaining // 3600
+            minutes = (e.seconds_remaining % 3600) // 60
             await interaction.response.send_message(
-                f"Daily already claimed! Try again in "
-                f"**{hours}h {minutes}m**.",
+                f"Daily already claimed for today! Resets at **00:00 UTC** "
+                f"— try again in **{hours}h {minutes}m**.",
                 ephemeral=True)
             return
+
+        streak = result["streak"]
 
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
@@ -156,13 +134,20 @@ class Economy(commands.Cog):
             row       = await cursor.fetchone()
             daily_max = int(row[0]) if row else 300
 
-        amount   = random.randint(daily_min, daily_max)
-        # Finalized Prestige: `/daily` is a genuine earn-time grant, so it
-        # is scaled by the user's effective Prestige coins multiplier.
-        # Admin grants (addcoins/adddiamonds), /give, /convert and shop
-        # spending are NOT scaled — they don't route through this line.
-        # Defensive: default to 1.0 on any lookup failure so /daily never
-        # breaks because of a prestige config error.
+        base = random.randint(daily_min, daily_max)
+        # Streak bonus scales with consecutive days, capped at day 7's
+        # value — the streak COUNT itself (`streak`, shown below) keeps
+        # climbing past 7 indefinitely; only the bonus derived from it
+        # stops increasing.
+        streak_bonus = await get_streak_bonus(interaction.guild.id, streak)
+
+        # Finalized Prestige: applied to the COMBINED (base + streak
+        # bonus) total, per the locked reward formula — not to the
+        # base alone. Admin grants (addcoins/adddiamonds), /give,
+        # /convert and shop spending are still NOT scaled — they
+        # don't route through this line. Defensive: default to 1.0 on
+        # any lookup failure so /daily never breaks because of a
+        # prestige config error.
         try:
             from utils.prestige import get_prestige_earn_multiplier, is_booster
             mult = await get_prestige_earn_multiplier(
@@ -173,21 +158,32 @@ class Economy(commands.Cog):
                   f"granting raw (guild={interaction.guild.id} "
                   f"user={interaction.user.id}): {e}")
             mult = 1.0
-        amount = int(round(amount * mult))
+
+        amount = int(round((base + streak_bonus) * mult))
         if amount <= 0:
             amount = 1
+
         new_bal  = await add_balance(
             interaction.guild.id, interaction.user.id, amount,
-            reason="Daily reward", source="daily")
+            reason=f"Daily reward (streak day {streak})", source="daily")
         currency = await get_currency_name(interaction.guild.id)
-        _daily_cooldowns[key] = now + timedelta(hours=24)
-        _prune_expired(_daily_cooldowns, now)
 
         embed = discord.Embed(
             title="🎁 Daily Reward!",
-            description=(f"You received **{amount:,}** {currency}!\n"
-                         f"Balance: **{new_bal:,}** {currency}"),
+            description=f"You received **{amount:,}** {currency}!\n"
+                        f"Balance: **{new_bal:,}** {currency}",
             color=0x57F287)
+        streak_note = (" (bonus capped)"
+                       if streak > STREAK_BONUS_CAP_DAYS else "")
+        embed.add_field(
+            name="🔥 Streak",
+            value=f"Day **{streak}**{streak_note}",
+            inline=True)
+        if streak_bonus > 0:
+            embed.add_field(
+                name="Streak Bonus",
+                value=f"+**{streak_bonus:,}** {currency}",
+                inline=True)
         await interaction.response.send_message(embed=embed)
 
     # ─── GIVE ───────────────────────────────────────────

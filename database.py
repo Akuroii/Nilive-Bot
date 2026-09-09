@@ -683,6 +683,29 @@ async def init_db():
             ON leveling_active_boosts(expires_at)
         """)
 
+        # Daily / Streak (persisted): replaces the old in-memory
+        # _daily_cooldowns dict in cogs/economy.py, which did not
+        # survive a bot restart and had no concept of a streak at
+        # all. last_claim_date is stored as a UTC calendar date
+        # string ('YYYY-MM-DD') rather than a timestamp specifically
+        # so "same day / previous day / missed a day" is a plain
+        # string comparison in utils/daily_engine.py, with zero
+        # timezone ambiguity. One row per (guild_id, user_id); the
+        # claim-check-and-write against this table runs inside a
+        # single BEGIN IMMEDIATE transaction (see daily_engine.py) so
+        # a double-click or two concurrent /daily invocations can't
+        # both succeed.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS daily_claims (
+                guild_id        INTEGER NOT NULL,
+                user_id         INTEGER NOT NULL,
+                last_claim_date TEXT NOT NULL,
+                streak_count    INTEGER NOT NULL DEFAULT 1,
+                last_claimed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_bonus_roles (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
