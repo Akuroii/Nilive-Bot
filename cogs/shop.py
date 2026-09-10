@@ -134,6 +134,27 @@ async def process_purchase(interaction: discord.Interaction,
                 ephemeral=True)
             return
 
+    # Wallet pass: a potion carries the SAME effect parameters an
+    # xp_boost item does (multiplier + duration) — the difference is
+    # only that the effect is stored in inventory and fired on use
+    # instead of at purchase. Validated up front with the same
+    # strictness, and for the same reason: an unusable potion sitting
+    # in someone's bag is worse than a refused purchase, because the
+    # member only discovers it's broken after they've paid.
+    if itype == "potion":
+        if not xp_boost_multiplier or xp_boost_multiplier <= 1.0:
+            await interaction.response.send_message(
+                "This potion isn't configured correctly "
+                "(missing or invalid effect multiplier). Ask an admin to fix it.",
+                ephemeral=True)
+            return
+        if not duration_hours or duration_hours <= 0:
+            await interaction.response.send_message(
+                "This potion isn't configured correctly "
+                "(missing effect duration). Ask an admin to fix it.",
+                ephemeral=True)
+            return
+
     # Phase 5 / Leveling expansion: an xp_boost item must have both a
     # multiplier and a duration configured — without both there's
     # nothing meaningful to grant. Checked before any balance/stock
@@ -312,6 +333,43 @@ async def process_purchase(interaction: discord.Interaction,
                 duration_hours, source="shop")
         except Exception as e:
             print(f"[SHOP] XP boost grant error: {e}")
+    elif itype == "potion":
+        # Wallet pass: delivered into inventory as a consumable rather
+        # than applied now. The effect parameters ride along in the
+        # inventory row's existing `metadata` JSON column (the same
+        # column role items already use for {"role_id":...}), so the
+        # potion stays usable even if the shop listing is later edited
+        # or deleted — matching how inventory_items already references
+        # items purely by name. Routed through the Reward Engine's
+        # 'item' type so it's sourced/logged like every other grant.
+        from utils.reward_engine import give_reward
+        from utils.potion_engine import (
+            POTION_ITEM_TYPE, EFFECT_XP_BOOST, build_metadata,
+        )
+        result = await give_reward(
+            interaction.client, guild_id, user_id, "item",
+            amount=1, item_name=name, item_type=POTION_ITEM_TYPE,
+            item_metadata=build_metadata(
+                EFFECT_XP_BOOST, xp_boost_multiplier, duration_hours),
+            reason=f"Shop purchase: {name}", source="shop",
+        )
+        if not result.get("success"):
+            print(f"[SHOP] Potion give error: {result.get('error')}")
+    elif itype == "title":
+        # Wallet pass: a title is a cosmetic, DB-only label — no
+        # Discord role is created or assigned (that's the whole point
+        # of the Title slot being independent from the Role slot).
+        # quantity is left to accumulate naturally like any other item;
+        # owning two copies is harmless since only one can be equipped.
+        from utils.reward_engine import give_reward
+        from utils.title_engine import TITLE_ITEM_TYPE
+        result = await give_reward(
+            interaction.client, guild_id, user_id, "item",
+            amount=1, item_name=name, item_type=TITLE_ITEM_TYPE,
+            reason=f"Shop purchase: {name}", source="shop",
+        )
+        if not result.get("success"):
+            print(f"[SHOP] Title give error: {result.get('error')}")
     elif itype not in ("role", "temp_role"):
         # Phase 3 / E4: anything that isn't a role/temp_role/xp_boost
         # (i.e. the shop's "Custom" item type) is delivered into the
@@ -341,6 +399,20 @@ async def process_purchase(interaction: discord.Interaction,
         embed.add_field(
             name="⚡ XP Boost Active",
             value=f"{xp_boost_multiplier}x XP for the next {duration_hours} hours")
+    elif itype == "potion":
+        # A potion's duration_hours describes its EFFECT once used, not
+        # an expiry on the item itself — without this branch it would
+        # have fallen into the "This role expires in Nh" footer below
+        # and told the buyer their potion was about to vanish.
+        embed.add_field(
+            name="🧪 Added to your bag",
+            value=(f"Use it from `/wallet` → Inventory → Potions "
+                   f"to activate **{xp_boost_multiplier:g}× XP for "
+                   f"{duration_hours}h**."))
+    elif itype == "title":
+        embed.add_field(
+            name="🏷️ Title unlocked",
+            value="Equip it from `/wallet` → Inventory → Titles.")
     elif duration_hours:
         embed.set_footer(
             text=f"This role expires in {duration_hours} hours")

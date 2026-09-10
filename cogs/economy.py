@@ -2,7 +2,6 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import aiosqlite
-import random
 from database import DB_PATH
 from utils.economy_safe import (
     safe_transfer, safe_credit, safe_admin_deduct, safe_convert,
@@ -93,98 +92,25 @@ class Economy(commands.Cog):
         embed.add_field(name="💎 Diamonds", value=f"**{gems:,}**")
         await interaction.response.send_message(embed=embed)
 
-    # ─── DAILY / STREAK ─────────────────────────────────
+    # ─── DAILY (compatibility alias for /streak) ────────
+    # Wallet pass: /streak (cogs/wallet.py) is the canonical command.
+    # This alias is kept ONLY so members with muscle memory for /daily
+    # keep working, and it is a genuinely thin alias — it holds no
+    # reward math, no cooldown logic and no embed of its own, it just
+    # calls the exact same body /streak runs. That matters because the
+    # claim guard lives in one place (daily_claims, via
+    # utils.daily_engine.claim_daily_streak): claiming with /daily and
+    # then /streak, or either one and then the Wallet button, is
+    # correctly rejected as an already-claimed day. The previous
+    # inline implementation that lived here was MOVED into
+    # utils/daily_engine.perform_streak_claim() unchanged, not
+    # rewritten — the economy behaviour is still under review.
     @app_commands.command(name="daily",
-                          description="Claim your daily coins")
+                          description="Claim your daily streak reward "
+                                      "(alias of /streak)")
     async def daily(self, interaction: discord.Interaction):
-        from utils.daily_engine import (
-            claim_daily_streak, get_streak_bonus, DailyAlreadyClaimed,
-            STREAK_BONUS_CAP_DAYS,
-        )
-
-        # Atomic claim-check-and-write happens FIRST, before any
-        # reward math or crediting. A double-click or two concurrent
-        # /daily invocations both reach this call; only one can win —
-        # the second sees the first's already-committed row (via
-        # BEGIN IMMEDIATE inside claim_daily_streak) and is rejected
-        # here, before either has touched the member's balance.
-        try:
-            result = await claim_daily_streak(
-                interaction.guild.id, interaction.user.id)
-        except DailyAlreadyClaimed as e:
-            hours   = e.seconds_remaining // 3600
-            minutes = (e.seconds_remaining % 3600) // 60
-            await interaction.response.send_message(
-                f"Daily already claimed for today! Resets at **00:00 UTC** "
-                f"— try again in **{hours}h {minutes}m**.",
-                ephemeral=True)
-            return
-
-        streak = result["streak"]
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT value FROM bot_settings WHERE key = 'daily_min'
-            """)
-            row      = await cursor.fetchone()
-            daily_min = int(row[0]) if row else 100
-            cursor    = await db.execute("""
-                SELECT value FROM bot_settings WHERE key = 'daily_max'
-            """)
-            row       = await cursor.fetchone()
-            daily_max = int(row[0]) if row else 300
-
-        base = random.randint(daily_min, daily_max)
-        # Streak bonus scales with consecutive days, capped at day 7's
-        # value — the streak COUNT itself (`streak`, shown below) keeps
-        # climbing past 7 indefinitely; only the bonus derived from it
-        # stops increasing.
-        streak_bonus = await get_streak_bonus(interaction.guild.id, streak)
-
-        # Finalized Prestige: applied to the COMBINED (base + streak
-        # bonus) total, per the locked reward formula — not to the
-        # base alone. Admin grants (addcoins/adddiamonds), /give,
-        # /convert and shop spending are still NOT scaled — they
-        # don't route through this line. Defensive: default to 1.0 on
-        # any lookup failure so /daily never breaks because of a
-        # prestige config error.
-        try:
-            from utils.prestige import get_prestige_earn_multiplier, is_booster
-            mult = await get_prestige_earn_multiplier(
-                interaction.guild.id, interaction.user.id, "balance",
-                is_booster=is_booster(interaction.user))
-        except Exception as e:
-            print(f"[PRESTIGE] daily multiplier lookup failed; "
-                  f"granting raw (guild={interaction.guild.id} "
-                  f"user={interaction.user.id}): {e}")
-            mult = 1.0
-
-        amount = int(round((base + streak_bonus) * mult))
-        if amount <= 0:
-            amount = 1
-
-        new_bal  = await add_balance(
-            interaction.guild.id, interaction.user.id, amount,
-            reason=f"Daily reward (streak day {streak})", source="daily")
-        currency = await get_currency_name(interaction.guild.id)
-
-        embed = discord.Embed(
-            title="🎁 Daily Reward!",
-            description=f"You received **{amount:,}** {currency}!\n"
-                        f"Balance: **{new_bal:,}** {currency}",
-            color=0x57F287)
-        streak_note = (" (bonus capped)"
-                       if streak > STREAK_BONUS_CAP_DAYS else "")
-        embed.add_field(
-            name="🔥 Streak",
-            value=f"Day **{streak}**{streak_note}",
-            inline=True)
-        if streak_bonus > 0:
-            embed.add_field(
-                name="Streak Bonus",
-                value=f"+**{streak_bonus:,}** {currency}",
-                inline=True)
-        await interaction.response.send_message(embed=embed)
+        from cogs.wallet import run_streak_command
+        await run_streak_command(interaction)
 
     # ─── GIVE ───────────────────────────────────────────
     @app_commands.command(name="give",

@@ -1617,7 +1617,7 @@ COMMAND_CATEGORIES = {
         "massban", "lockdown", "unlockdown",
     ],
     "Economy": [
-        "balance", "daily", "give", "convert", "richest",
+        "wallet", "streak", "balance", "daily", "give", "convert", "richest",
         "addcoins", "removecoins", "adddiamonds", "removediamonds",
     ],
     "Leveling": [
@@ -1678,7 +1678,9 @@ COMMAND_METADATA = {
     "boostcolor": {"desc": "Pick your boost color role", "params": ["color"]},
     "botprofile_view": {"desc": "View this server's configured bot profile", "params": []},
     "balance": {"desc": "Check your coin and diamond balance", "params": ["member"]},
-    "daily": {"desc": "Claim your daily coins", "params": []},
+    "wallet": {"desc": "Open your private wallet — balances, streak, inventory and receipts", "params": []},
+    "streak": {"desc": "Claim your daily streak reward", "params": []},
+    "daily": {"desc": "Claim your daily streak reward (alias of /streak)", "params": []},
     "give": {"desc": "Give coins to another member", "params": ["member", "amount"]},
     "convert": {"desc": "Convert coins into diamonds", "params": ["coins"]},
     "richest": {"desc": "View the richest members", "params": []},

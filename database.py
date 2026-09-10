@@ -978,6 +978,39 @@ async def init_db():
             )
         """)
 
+        # Wallet pass: equipped_titles is the Title equip slot. It is a
+        # SEPARATE table from equipped_roles on purpose — the locked
+        # project decision is that the Title slot is independent from
+        # the Discord Role slot (a member wears one of each, and
+        # equipping a title must never disturb an equipped role).
+        # equipped_roles couldn't have carried it: its PK is
+        # (guild_id, user_id) with a NOT NULL role_id, so a title would
+        # have had to fake a role_id or force that constraint to be
+        # relaxed, weakening the single-role invariant it exists to
+        # protect. Same shape (one row per member = at most one
+        # equipped title), zero impact on existing rows. Ownership
+        # still lives in inventory_items (item_type='title'); this
+        # table only records WHICH owned title is worn — see
+        # utils/title_engine.py.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS equipped_titles (
+                guild_id    INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,
+                item_name   TEXT NOT NULL,
+                equipped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+
+        # Wallet pass: a shop item of type='potion' is a CONSUMABLE that
+        # lands in the buyer's inventory and applies its effect only
+        # when used, unlike type='xp_boost' which fires immediately at
+        # purchase and never reaches inventory. It reuses the existing
+        # xp_boost_multiplier + duration_hours columns for its effect
+        # parameters, so no new columns were needed at all — this
+        # comment exists to record that reuse rather than to document a
+        # migration. type='title' likewise needs no new column: a title
+        # is name + icon + rarity, all of which shop_items already has.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS purchase_history (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,

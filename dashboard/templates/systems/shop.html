@@ -50,6 +50,8 @@
                     <option value="temp_role">Temporary Role</option>
                     <option value="xp_boost">⚡ XP Boost</option>
                     <option value="prestige">⭐ Prestige</option>
+                    <option value="potion">🧪 Potion (consumable)</option>
+                    <option value="title">🏷️ Title</option>
                     <option value="custom">Custom</option>
                 </select>
             </div>
@@ -73,7 +75,7 @@
                        placeholder="Right click role → Copy ID">
             </div>
             <div class="form-group" id="item-boost-mult-field" style="display:none;">
-                <label class="form-label">XP Multiplier</label>
+                <label class="form-label" id="item-boost-mult-label">XP Multiplier</label>
                 <input class="form-input" id="item-boost-mult"
                        type="number" min="1.1" step="0.1" placeholder="e.g. 2">
                 <div class="form-hint">e.g. 2 = double XP while active</div>
@@ -298,6 +300,18 @@ function toggleItemTypeFields() {
         prestigeField.style.display = 'block';
         durLabel.textContent = 'Duration hours (0 = permanent)';
         durHint.textContent = 'Prestige is permanent — leave as 0.';
+    } else if (type === 'potion') {
+        roleField.style.display = 'none';
+        boostField.style.display = 'block';
+        prestigeField.style.display = 'none';
+        durLabel.textContent = 'Effect duration hours (required)';
+        durHint.textContent = 'How long the XP effect lasts once the potion is used';
+    } else if (type === 'title') {
+        roleField.style.display = 'none';
+        boostField.style.display = 'none';
+        prestigeField.style.display = 'none';
+        durLabel.textContent = 'Duration hours (0 = permanent)';
+        durHint.textContent = 'Titles are cosmetic and permanent — leave as 0.';
     } else {
         roleField.style.display = 'block';
         boostField.style.display = 'none';
@@ -323,12 +337,12 @@ async function addItem() {
             document.getElementById('item-price').value) || 0,
         price_diamonds: priceDiamonds > 0 ? priceDiamonds : null,
         type:          type,
-        role_id:       type !== 'xp_boost' && type !== 'prestige'
+        role_id:       ['xp_boost', 'prestige', 'potion', 'title'].indexOf(type) === -1
                        ? (document.getElementById('item-role').value || null)
                        : null,
         prestige_tier: type === 'prestige' && prestigeTier
                        ? parseInt(prestigeTier.value) : null,
-        xp_boost_multiplier: type === 'xp_boost' && boostMult > 1
+        xp_boost_multiplier: (type === 'xp_boost' || type === 'potion') && boostMult > 1
                        ? boostMult : null,
         duration_hours:parseInt(
             document.getElementById('item-duration').value) || null,
@@ -348,6 +362,13 @@ async function addItem() {
     }
     if (type === 'xp_boost' && (!payload.xp_boost_multiplier || !payload.duration_hours)) {
         showToast('XP Boost items need a multiplier > 1 and a duration', 'danger');
+        return;
+    }
+    // A potion carries the same effect parameters as an XP Boost — the
+    // difference is only that it is stored in the buyer's inventory and
+    // fired when they use it, not applied at purchase.
+    if (type === 'potion' && (!payload.xp_boost_multiplier || !payload.duration_hours)) {
+        showToast('Potions need an effect multiplier > 1 and a duration', 'danger');
         return;
     }
     if (type === 'prestige') {
