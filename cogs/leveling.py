@@ -226,7 +226,7 @@ class Leveling(commands.Cog):
         else:
             embed = discord.Embed(
                 description=(f"🎉 {message.author.mention} reached "
-                             f"**Level {new_level}**!"),
+                             f"**Level {new_level}**."),
                 color=0x7c5cbf)
             await channel.send(embed=embed)
 

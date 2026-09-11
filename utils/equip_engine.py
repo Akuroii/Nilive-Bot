@@ -120,6 +120,50 @@ async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
             "role_id": role_id, "role_name": role.name}
 
 
+async def unequip_role(bot: discord.Client, guild_id: int, user_id: int,
+                       item_name: str | None = None) -> dict:
+    """
+    Remove the currently equipped role (or the one matching item_name
+    if specified) from both Discord and the equipped_roles bookkeeping
+    table. Returns {success: True/False, error: ...} like equip_role
+    does, so Wallet callers never need to handle exceptions.
+
+    Scoped by item_name to mirror unequip_title: a stale button that
+    says "Unequip Flame" must not clear a *different* role the member
+    equipped between renders.
+    """
+    current = await get_equipped(guild_id, user_id)
+    if not current:
+        return {"success": False, "error": "You do not have a role equipped."}
+    if item_name is not None and current["item_name"] != item_name:
+        return {"success": False,
+                "error": "That is not the currently equipped role."}
+
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return {"success": False, "error": "Bot is not in that guild."}
+    member = guild.get_member(user_id)
+    role_id = int(current["role_id"])
+    removed_name = current["item_name"]
+
+    if member is not None:
+        old_role = guild.get_role(role_id)
+        if old_role and old_role in member.roles:
+            try:
+                await member.remove_roles(old_role, reason="Unequipped from wallet")
+            except Exception as e:
+                return {"success": False,
+                        "error": f"Discord error removing role: {e}"}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id))
+        await db.commit()
+
+    return {"success": True, "item_name": removed_name, "role_id": role_id}
+
+
 async def cleanup_expired_role_item(guild_id: int, user_id: int, role_id: int):
     """
     Called by cogs/shop.py's temp_role_cleanup right after it has

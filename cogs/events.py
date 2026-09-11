@@ -8,16 +8,7 @@ import random
 from datetime import datetime, timezone, timedelta
 from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
-
-
-async def get_currency_name(guild_id: int) -> str:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT currency_name FROM guild_settings
-            WHERE guild_id = ?
-        """, (guild_id,))
-        row = await cursor.fetchone()
-    return row[0] if row and row[0] else "Coins"
+from utils.currency import get_currency_config, coin_name
 
 
 async def give_reward(bot: discord.Client,
@@ -84,18 +75,18 @@ class ButtonRaceView(discord.ui.View):
         self.winners:  list[int] = []
         self.finished: bool      = False
 
-    @discord.ui.button(label="🏁 Claim Reward!",
+    @discord.ui.button(label="🏁 Claim Reward",
                        style=discord.ButtonStyle.green,
                        custom_id="event_claim")
     async def claim(self, interaction: discord.Interaction,
                     button: discord.ui.Button):
         if self.finished:
             await interaction.response.send_message(
-                "This event has ended!", ephemeral=True)
+                "This event has ended.", ephemeral=True)
             return
         if interaction.user.id in self.winners:
             await interaction.response.send_message(
-                "You already claimed this reward!",
+                "You already claimed this reward.",
                 ephemeral=True)
             return
 
@@ -121,12 +112,13 @@ class ButtonRaceView(discord.ui.View):
             self.reward_value,
             self.reward_duration)
 
-        currency = await get_currency_name(interaction.guild.id)
+        cur = await get_currency_config(interaction.guild.id)
+        cc, cd = cur["coins"], cur["diamonds"]
         if self.reward_type == "coins":
             reward_str = (f"**{int(self.reward_value):,}** "
-                          f"{currency}")
+                          f"{cc['emoji']} {cc['name']}")
         elif self.reward_type == "diamonds":
-            reward_str = f"**{int(self.reward_value):,}** 💎 Diamonds"
+            reward_str = f"**{int(self.reward_value):,}** {cd['emoji']} {cd['name']}"
         elif self.reward_type == "xp":
             reward_str = f"**{int(self.reward_value):,}** XP"
         elif self.reward_type == "item":
@@ -135,7 +127,7 @@ class ButtonRaceView(discord.ui.View):
             reward_str = "your reward"
 
         await interaction.response.send_message(
-            f"🎉 You won {reward_str}! "
+            f"🎉 You won {reward_str} "
             f"({len(self.winners)}/{self.max_winners})",
             ephemeral=True)
 
@@ -145,7 +137,7 @@ class ButtonRaceView(discord.ui.View):
                 item.disabled = True
             await interaction.message.edit(view=self)
             await interaction.channel.send(
-                "🏁 Event ended! All winners have claimed "
+                "🏁 Event ended. All winners have claimed "
                 "their rewards.")
 
 
@@ -238,16 +230,21 @@ class Events(commands.Cog):
 
             embed = discord.Embed(
                 title=f"🎯 {title}",
-                description=desc or "Click the button to win!",
+                description=desc or "Click the button to win.",
                 color=color_int)
             embed.add_field(name="Winners", value=str(max_winners))
 
+            cur = None
+            if reward_type in ("coins", "diamonds"):
+                cur = await get_currency_config(interaction.guild.id if interaction.guild else 0)
             if reward_type == "coins":
+                cc = cur["coins"] if cur else {"emoji": "🪙", "name": "Coins"}
                 embed.add_field(name="Reward",
-                                value=f"🪙 {int(reward_value):,} coins")
+                                value=f"{cc['emoji']} {int(reward_value):,} {cc['name']}")
             elif reward_type == "diamonds":
+                cd = cur["diamonds"] if cur else {"emoji": "💎", "name": "Diamonds"}
                 embed.add_field(name="Reward",
-                                value=f"💎 {int(reward_value):,} Diamonds")
+                                value=f"{cd['emoji']} {int(reward_value):,} {cd['name']}")
             elif reward_type == "xp":
                 embed.add_field(name="Reward",
                                 value=f"⭐ {int(reward_value):,} XP")
@@ -283,7 +280,7 @@ class Events(commands.Cog):
             reward_type: str,
             reward_value: str,
             max_winners: int = 3,
-            description: str = "Click the button to win!",
+            description: str = "Click the button to win.",
             channel: discord.TextChannel = None,
             duration_hours: int = None):
         target = channel or interaction.channel
@@ -324,7 +321,7 @@ class Events(commands.Cog):
             duration_hours, max_winners, None)
 
         await interaction.response.send_message(
-            f"Event launched in {target.mention}!",
+            f"Event launched in {target.mention}.",
             ephemeral=True)
 
     @app_commands.command(name="event_list",

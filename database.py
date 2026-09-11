@@ -470,7 +470,9 @@ async def init_db():
                 language                 TEXT DEFAULT 'en',
                 log_channel_id           INTEGER,
                 currency_name            TEXT DEFAULT 'Coins',
-                currency_emoji_id        TEXT,
+                coin_emoji_id            TEXT DEFAULT '🪙',
+                diamond_name             TEXT DEFAULT 'Diamonds',
+                diamond_emoji_id         TEXT DEFAULT '💎',
                 status_rotation_enabled  INTEGER DEFAULT 0,
                 status_rotation_interval INTEGER DEFAULT 5,
                 updated_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -488,9 +490,29 @@ async def init_db():
                 await db.execute(
                     "ALTER TABLE guild_settings ADD COLUMN "
                     "diamond_exchange_rate INTEGER DEFAULT 500")
-                await db.commit()
+            # Wallet pass (Streak/Inventory phase): currency display
+            # metadata is fully configurable (names + emoji icons), so
+            # no coin/diamond label or emoji is hardcoded in the UI.
+            # `currency_emoji_id` existed previously but was never read
+            # anywhere; it is renamed semantically to `coin_emoji_id`
+            # via a no-op copy (SQLite has no ALTER COLUMN RENAME in
+            # older builds) — if the new columns are missing we add
+            # them with sensible defaults.
+            if "coin_emoji_id" not in cols:
+                await db.execute(
+                    "ALTER TABLE guild_settings ADD COLUMN "
+                    "coin_emoji_id TEXT DEFAULT '🪙'")
+            if "diamond_name" not in cols:
+                await db.execute(
+                    "ALTER TABLE guild_settings ADD COLUMN "
+                    "diamond_name TEXT DEFAULT 'Diamonds'")
+            if "diamond_emoji_id" not in cols:
+                await db.execute(
+                    "ALTER TABLE guild_settings ADD COLUMN "
+                    "diamond_emoji_id TEXT DEFAULT '💎'")
+            await db.commit()
         except Exception as e:
-            print(f"[MIGRATION] guild_settings.diamond_exchange_rate: {e}")
+            print(f"[MIGRATION] guild_settings currency columns: {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_settings_kv (

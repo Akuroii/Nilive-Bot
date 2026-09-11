@@ -93,8 +93,8 @@ class Boost(commands.Cog):
             channel = guild.get_channel(int(channel_id))
             if channel:
                 embed = discord.Embed(
-                    title="💜 New Booster!",
-                    description=f"{member.mention} just boosted the server! Thank you!",
+                    title="💜 New Booster.",
+                    description=f"{member.mention} just boosted the server! Thank you.",
                     color=0xf47fff)
                 if member.display_avatar:
                     embed.set_thumbnail(url=member.display_avatar.url)
@@ -356,7 +356,7 @@ class Boost(commands.Cog):
             return
 
         await interaction.response.send_message(
-            f"🎨 You're now wearing {role.mention}!", ephemeral=True)
+            f"🎨 You're now wearing {role.mention}.", ephemeral=True)
 
 
 async def setup(bot):

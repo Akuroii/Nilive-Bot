@@ -8,6 +8,7 @@ from utils.trade_engine import (
 )
 from utils.inventory import has_item, get_inventory
 from utils.economy_safe import get_balance
+from utils.currency import get_currency_config, coin_name, coin_emoji, diamond_name, diamond_emoji
 
 TRADE_TIMEOUT_SECONDS = 600  # 10 minutes
 
@@ -16,19 +17,6 @@ TRADE_TIMEOUT_SECONDS = 600  # 10 minutes
 # state in memory rather than the DB (the DB only ever sees the final
 # completed trade, via trade_history).
 _active_trades: dict[tuple[int, frozenset], "TradeSession"] = {}
-
-
-def _currency_name_sync_default() -> str:
-    return "Coins"
-
-
-async def get_currency_name(guild_id: int) -> str:
-    import aiosqlite
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT currency_name FROM guild_settings WHERE guild_id = ?", (guild_id,))
-        row = await cursor.fetchone()
-    return row[0] if row and row[0] else "Coins"
 
 
 class TradeSession:
@@ -53,19 +41,20 @@ class TradeSession:
     def reset_ready(self):
         self.ready.clear()
 
-    async def build_embed(self, currency_name: str) -> discord.Embed:
+    async def build_embed(self, cur: dict) -> discord.Embed:
         embed = discord.Embed(
             title="🤝 Trade Offer",
-            description="Both sides add what they're offering, then click **Ready**. "
+            description="Both sides add what they are offering, then click **Ready**. "
                         "Changing your offer clears both Ready states.",
             color=0x57F287 if len(self.ready) == 2 else 0x7c5cbf)
+        cc, cd = cur["coins"], cur["diamonds"]
         for user in (self.user_a, self.user_b):
             offer = self.offers[user.id]
             lines = []
             if offer["coins"]:
-                lines.append(f"🪙 {offer['coins']:,} {currency_name}")
+                lines.append(f"{cc['emoji']} {offer['coins']:,} {cc['name']}")
             if offer["diamonds"]:
-                lines.append(f"💎 {offer['diamonds']:,} Diamonds")
+                lines.append(f"{cd['emoji']} {offer['diamonds']:,} {cd['name']}")
             for name, qty in offer["items"].items():
                 lines.append(f"🎁 {name} ×{qty}")
             if not lines:
@@ -91,12 +80,15 @@ class AddCoinsModal(discord.ui.Modal, title="Offer Coins"):
             await interaction.response.send_message("Enter a whole number.", ephemeral=True)
             return
         if amt < 0:
-            await interaction.response.send_message("Amount can't be negative.", ephemeral=True)
+            await interaction.response.send_message("Amount cannot be negative.", ephemeral=True)
             return
         bal = await get_balance(self.view_ref.session.guild_id, interaction.user.id, currency="balance")
         if amt > bal:
+            cur = self.view_ref.cur
+            cc = cur["coins"]
             await interaction.response.send_message(
-                f"You only have {bal:,} — can't offer {amt:,}.", ephemeral=True)
+                f"You only have {bal:,} {cc['emoji']} — cannot offer {amt:,}.",
+                ephemeral=True)
             return
         self.view_ref.session.offers[interaction.user.id]["coins"] = amt
         self.view_ref.session.reset_ready()
@@ -117,12 +109,15 @@ class AddDiamondsModal(discord.ui.Modal, title="Offer Diamonds"):
             await interaction.response.send_message("Enter a whole number.", ephemeral=True)
             return
         if amt < 0:
-            await interaction.response.send_message("Amount can't be negative.", ephemeral=True)
+            await interaction.response.send_message("Amount cannot be negative.", ephemeral=True)
             return
         gems = await get_balance(self.view_ref.session.guild_id, interaction.user.id, currency="diamonds")
         if amt > gems:
+            cur = self.view_ref.cur
+            cd = cur["diamonds"]
             await interaction.response.send_message(
-                f"You only have {gems:,} 💎 — can't offer {amt:,}.", ephemeral=True)
+                f"You only have {gems:,} {cd['emoji']} — cannot offer {amt:,}.",
+                ephemeral=True)
             return
         self.view_ref.session.offers[interaction.user.id]["diamonds"] = amt
         self.view_ref.session.reset_ready()
@@ -254,15 +249,15 @@ class AddItemModal(discord.ui.Modal, title="Offer an Item"):
 
 
 class TradeView(discord.ui.View):
-    def __init__(self, session: TradeSession, currency_name: str):
+    def __init__(self, session: TradeSession, cur: dict):
         super().__init__(timeout=TRADE_TIMEOUT_SECONDS)
         self.session = session
-        self.currency_name = currency_name
+        self.cur = cur
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id not in (self.session.user_a.id, self.session.user_b.id):
             await interaction.response.send_message(
-                "This isn't your trade.", ephemeral=True)
+                "This is not your trade.", ephemeral=True)
             return False
         if self.session.finished:
             await interaction.response.send_message(
@@ -271,7 +266,7 @@ class TradeView(discord.ui.View):
         return True
 
     async def refresh(self, interaction: discord.Interaction):
-        embed = await self.session.build_embed(self.currency_name)
+        embed = await self.session.build_embed(self.cur)
         if interaction.response.is_done():
             await interaction.edit_original_response(embed=embed, view=self)
         else:
@@ -344,14 +339,14 @@ class TradeView(discord.ui.View):
 
         if not result.get("success"):
             embed = discord.Embed(
-                title="❌ Trade Failed",
+                title="❌ Trade failed",
                 description=result.get("error", "Something changed — trade could not complete."),
                 color=0xED4245)
             await interaction.response.edit_message(embed=embed, view=self)
             return
 
-        embed = await self.session.build_embed(self.currency_name)
-        embed.title = "✅ Trade Complete!"
+        embed = await self.session.build_embed(self.cur)
+        embed.title = "✅ Trade complete"
         embed.color = 0x57F287
         embed.set_footer(text=f"Trade #{result['trade_id']}")
         await interaction.response.edit_message(embed=embed, view=self)
@@ -378,25 +373,25 @@ class Trade(commands.Cog):
     @app_commands.command(name="trade", description="Start a trade with another member")
     async def trade(self, interaction: discord.Interaction, member: discord.Member):
         if member.id == interaction.user.id:
-            await interaction.response.send_message("You can't trade with yourself.", ephemeral=True)
+            await interaction.response.send_message("You cannot trade with yourself.", ephemeral=True)
             return
         if member.bot:
-            await interaction.response.send_message("You can't trade with a bot.", ephemeral=True)
+            await interaction.response.send_message("You cannot trade with a bot.", ephemeral=True)
             return
 
         guild_id = interaction.guild.id
         key = (guild_id, frozenset({interaction.user.id, member.id}))
         if key in _active_trades:
             await interaction.response.send_message(
-                "There's already an open trade between you two. Finish or let it time out first.",
+                "There is already an open trade between you two. Finish or let it time out first.",
                 ephemeral=True)
             return
 
         session = TradeSession(guild_id, interaction.user, member)
         _active_trades[key] = session
-        currency_name = await get_currency_name(guild_id)
-        view = TradeView(session, currency_name)
-        embed = await session.build_embed(currency_name)
+        cur = await get_currency_config(guild_id)
+        view = TradeView(session, cur)
+        embed = await session.build_embed(cur)
 
         await interaction.response.send_message(
             content=f"{interaction.user.mention} 🤝 {member.mention}",
