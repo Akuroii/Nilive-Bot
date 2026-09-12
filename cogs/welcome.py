@@ -122,7 +122,7 @@ class RulesView(discord.ui.View):
 
         if role in interaction.user.roles:
             await interaction.response.send_message(
-                "You already accepted the rules!", ephemeral=True)
+                "You already accepted the rules.", ephemeral=True)
             return
 
         await interaction.user.add_roles(
@@ -175,7 +175,7 @@ class Welcome(commands.Cog):
         if not messages:
             # Default embed
             embed = discord.Embed(
-                title=f"Welcome to {member.guild.name}!",
+                title=f"Welcome to {member.guild.name}.",
                 description=(f"Hey {member.mention}, welcome! "
                              f"You are member #{member.guild.member_count}."),
                 color=0x7c5cbf)

@@ -198,11 +198,11 @@ class MVP(commands.Cog):
                     channel = guild.get_channel(int(channel_id))
                     if channel:
                         embed = discord.Embed(
-                            title="🏆 New MVP!",
+                            title="🏆 New MVP.",
                             description=(
                                 f"{mvp_member.mention} is the MVP "
                                 f"of this cycle with "
-                                f"**{int(mvp_score):,}** points!"),
+                                f"**{int(mvp_score):,}** points."),
                             color=0xFFD700)
                         if mvp_member.display_avatar:
                             embed.set_thumbnail(
