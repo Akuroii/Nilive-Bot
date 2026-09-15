@@ -65,10 +65,6 @@ def save_settings_general():
     data     = request.get_json() or {}
 
     async def save():
-        # Normalize legacy UTC / Asia/Cairo to canonical Africa/Cairo
-        from utils.timezone import normalize_timezone
-        tz = normalize_timezone(data.get("timezone", "Africa/Cairo"))
-        data["timezone"] = tz
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO guild_settings
@@ -89,7 +85,7 @@ def save_settings_general():
             """, (
                 guild_id,
                 data.get("prefix", "/"),
-                data.get("timezone", "Africa/Cairo"),
+                data.get("timezone", "UTC"),
                 data.get("language", "en"),
                 data.get("log_channel_id") or None,
                 data.get("currency_name", "Coins"),
@@ -111,10 +107,6 @@ def save_settings_welcome():
     data     = request.get_json() or {}
 
     async def save():
-        # Normalize legacy UTC / Asia/Cairo to canonical Africa/Cairo
-        from utils.timezone import normalize_timezone
-        tz = normalize_timezone(data.get("timezone", "Africa/Cairo"))
-        data["timezone"] = tz
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO welcome_config
@@ -161,10 +153,6 @@ def save_settings_boost():
     data     = request.get_json() or {}
 
     async def save():
-        # Normalize legacy UTC / Asia/Cairo to canonical Africa/Cairo
-        from utils.timezone import normalize_timezone
-        tz = normalize_timezone(data.get("timezone", "Africa/Cairo"))
-        data["timezone"] = tz
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO boost_config

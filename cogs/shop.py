@@ -7,9 +7,16 @@ from datetime import datetime, timezone, timedelta
 from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
 from utils.economy_safe import safe_deduct, safe_decrement_stock, InsufficientBalance
-from utils.currency import get_currency_config, for_currency
 
-SHOP_COLOR = 0x7c5cbf
+
+async def get_currency_name(guild_id: int) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT currency_name FROM guild_settings
+            WHERE guild_id = ?
+        """, (guild_id,))
+        row = await cursor.fetchone()
+    return row[0] if row and row[0] else "Coins"
 
 
 class BuyView(discord.ui.View):
@@ -57,11 +64,11 @@ class InventoryEquipSelect(discord.ui.Select):
             interaction.client, self.guild_id, self.user_id, self.values[0])
         if result.get("success"):
             await interaction.response.send_message(
-                f"Equipped role: **{result['role_name']}**",
+                f"✅ Equipped Role: **{result['role_name']}**",
                 ephemeral=True)
         else:
             await interaction.response.send_message(
-                f"Could not equip that role — {result.get('error', 'something went wrong.')}",
+                f"❌ {result.get('error', 'Something went wrong.')}",
                 ephemeral=True)
 
 
@@ -127,27 +134,6 @@ async def process_purchase(interaction: discord.Interaction,
                 ephemeral=True)
             return
 
-    # Wallet pass: a potion carries the SAME effect parameters an
-    # xp_boost item does (multiplier + duration) — the difference is
-    # only that the effect is stored in inventory and fired on use
-    # instead of at purchase. Validated up front with the same
-    # strictness, and for the same reason: an unusable potion sitting
-    # in someone's bag is worse than a refused purchase, because the
-    # member only discovers it's broken after they've paid.
-    if itype == "potion":
-        if not xp_boost_multiplier or xp_boost_multiplier <= 1.0:
-            await interaction.response.send_message(
-                "This potion isn't configured correctly "
-                "(missing or invalid effect multiplier). Ask an admin to fix it.",
-                ephemeral=True)
-            return
-        if not duration_hours or duration_hours <= 0:
-            await interaction.response.send_message(
-                "This potion isn't configured correctly "
-                "(missing effect duration). Ask an admin to fix it.",
-                ephemeral=True)
-            return
-
     # Phase 5 / Leveling expansion: an xp_boost item must have both a
     # multiplier and a duration configured — without both there's
     # nothing meaningful to grant. Checked before any balance/stock
@@ -208,22 +194,20 @@ async def process_purchase(interaction: discord.Interaction,
         except Exception as e:
             print(f"[SHOP] Prestige role sync failed: {e}")
 
-        cur = await get_currency_config(guild_id)
-        cc = cur["coins"]
+        currency = await get_currency_name(guild_id)
         embed = discord.Embed(
-            title="⭐ Prestige Unlocked",
+            title="⭐ Prestige Unlocked!",
             description=(
                 f"{interaction.user.mention} is now **Prestige "
-                f"{tier_label(result['new_tier'])}**."),
+                f"{tier_label(result['new_tier'])}**!"),
             color=0xFFD700)
         embed.add_field(
-            name=f"{cc['name']} reset",
-            value=f"Your {cc['emoji']} **{cc['name']}** were reset to **0**.",
+            name=f"Coins reset",
+            value=f"Your **{currency}** were reset to **0**.",
             inline=False)
         embed.add_field(
             name="Level / XP / Diamonds",
-            value=(f"**Untouched** — your level, XP and "
-                   f"{cur['diamonds']['emoji']} {cur['diamonds']['name']} are safe."),
+            value="**Untouched** — your level, XP and 💎 diamonds are safe.",
             inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
@@ -239,7 +223,7 @@ async def process_purchase(interaction: discord.Interaction,
     stock_ok = await safe_decrement_stock(iid)
     if not stock_ok:
         await interaction.response.send_message(
-            "This item is out of stock.", ephemeral=True)
+            "This item is out of stock!", ephemeral=True)
         return
 
     try:
@@ -259,11 +243,15 @@ async def process_purchase(interaction: discord.Interaction,
                 (guild_id, user_id))
             row = await cursor.fetchone()
         bal = row[0] if row else 0
-        cur = await get_currency_config(guild_id)
-        cinfo = for_currency(cur, pay_currency)
-        await interaction.response.send_message(
-            f"You need {pay_amount:,} {cinfo['emoji']} but only have {bal:,}.",
-            ephemeral=True)
+        if pay_currency == "diamonds":
+            await interaction.response.send_message(
+                f"You need {pay_amount:,} 💎 but only have {bal:,}.",
+                ephemeral=True)
+        else:
+            currency = await get_currency_name(guild_id)
+            await interaction.response.send_message(
+                f"You need {pay_amount:,} {currency} but only have {bal:,}.",
+                ephemeral=True)
         return
 
     snap       = snapshot_user(interaction.user)
@@ -324,43 +312,6 @@ async def process_purchase(interaction: discord.Interaction,
                 duration_hours, source="shop")
         except Exception as e:
             print(f"[SHOP] XP boost grant error: {e}")
-    elif itype == "potion":
-        # Wallet pass: delivered into inventory as a consumable rather
-        # than applied now. The effect parameters ride along in the
-        # inventory row's existing `metadata` JSON column (the same
-        # column role items already use for {"role_id":...}), so the
-        # potion stays usable even if the shop listing is later edited
-        # or deleted — matching how inventory_items already references
-        # items purely by name. Routed through the Reward Engine's
-        # 'item' type so it's sourced/logged like every other grant.
-        from utils.reward_engine import give_reward
-        from utils.potion_engine import (
-            POTION_ITEM_TYPE, EFFECT_XP_BOOST, build_metadata,
-        )
-        result = await give_reward(
-            interaction.client, guild_id, user_id, "item",
-            amount=1, item_name=name, item_type=POTION_ITEM_TYPE,
-            item_metadata=build_metadata(
-                EFFECT_XP_BOOST, xp_boost_multiplier, duration_hours),
-            reason=f"Shop purchase: {name}", source="shop",
-        )
-        if not result.get("success"):
-            print(f"[SHOP] Potion give error: {result.get('error')}")
-    elif itype == "title":
-        # Wallet pass: a title is a cosmetic, DB-only label — no
-        # Discord role is created or assigned (that's the whole point
-        # of the Title slot being independent from the Role slot).
-        # quantity is left to accumulate naturally like any other item;
-        # owning two copies is harmless since only one can be equipped.
-        from utils.reward_engine import give_reward
-        from utils.title_engine import TITLE_ITEM_TYPE
-        result = await give_reward(
-            interaction.client, guild_id, user_id, "item",
-            amount=1, item_name=name, item_type=TITLE_ITEM_TYPE,
-            reason=f"Shop purchase: {name}", source="shop",
-        )
-        if not result.get("success"):
-            print(f"[SHOP] Title give error: {result.get('error')}")
     elif itype not in ("role", "temp_role"):
         # Phase 3 / E4: anything that isn't a role/temp_role/xp_boost
         # (i.e. the shop's "Custom" item type) is delivered into the
@@ -380,30 +331,16 @@ async def process_purchase(interaction: discord.Interaction,
         if not result.get("success"):
             print(f"[SHOP] Item give error: {result.get('error')}")
 
-    cur = await get_currency_config(guild_id)
-    cinfo = for_currency(cur, pay_currency)
     embed = discord.Embed(
-        title="✅ Purchase successful",
+        title="✅ Purchase Successful!",
         description=(
             f"You bought **{name}** for **{pay_amount:,}** "
-            f"{cinfo['emoji']} {cinfo['name']}."),
+            f"{'💎' if pay_currency == 'diamonds' else await get_currency_name(guild_id)}!"),
         color=0x57F287)
     if itype == "xp_boost" and boost_expires_at:
         embed.add_field(
-            name="⚡ XP boost active",
-            value=f"{xp_boost_multiplier:g}× XP for the next {duration_hours} hours")
-    elif itype == "potion":
-        # A potion's duration_hours describes its EFFECT once used,
-        # not an expiry on the item itself.
-        embed.add_field(
-            name="🧪 Added to your bag",
-            value=(f"Activate it from `/wallet` → Inventory → Potions "
-                   f"to get **{xp_boost_multiplier:g}× XP for "
-                   f"{duration_hours}h**."))
-    elif itype == "title":
-        embed.add_field(
-            name="🏷️ Title unlocked",
-            value="Equip it from `/wallet` → Inventory → Titles.")
+            name="⚡ XP Boost Active",
+            value=f"{xp_boost_multiplier}x XP for the next {duration_hours} hours")
     elif duration_hours:
         embed.set_footer(
             text=f"This role expires in {duration_hours} hours")
@@ -531,11 +468,10 @@ class Shop(commands.Cog):
                 "The shop is empty right now.", ephemeral=True)
             return
 
-        cur = await get_currency_config(interaction.guild.id)
-        cc, cd = cur["coins"], cur["diamonds"]
+        currency = await get_currency_name(interaction.guild.id)
         embed    = discord.Embed(
             title=f"🛒 {interaction.guild.name} Shop",
-            color=SHOP_COLOR)
+            color=0x7c5cbf)
 
         for (iid, name, desc, price, itype,
              dur, featured, req_lvl, max_s, curr_s,
@@ -545,15 +481,15 @@ class Shop(commands.Cog):
                 stock_info = (f" • {curr_s or 0}/{max_s} left"
                               if curr_s else " • **Out of stock**")
             if itype == "xp_boost" and boost_mult:
-                dur_info = f" • {boost_mult:g}× XP for {dur}h" if dur else f" • {boost_mult:g}× XP"
+                dur_info = f" • {boost_mult}x XP for {dur}h" if dur else f" • {boost_mult}x XP"
             elif itype == "prestige" and prestige_tier:
                 from utils.prestige import tier_label
                 dur_info = f" • Prestige {tier_label(prestige_tier)}"
             else:
                 dur_info = f" • {dur}h temp" if dur else ""
             lvl_info  = f" • Req. Level {req_lvl}" if req_lvl else ""
-            price_str = (f"{price_diamonds:,} {cd['emoji']}" if price_diamonds
-                         else f"{price:,} {cc['emoji']} {cc['name']}")
+            price_str = (f"{price_diamonds:,} 💎" if price_diamonds
+                         else f"{price:,} {currency}")
             embed.add_field(
                 name=f"{'⭐ ' if featured else ''}{name} — {price_str}",
                 value=(f"{desc or ''}{dur_info}{lvl_info}{stock_info}"),
@@ -585,18 +521,106 @@ class Shop(commands.Cog):
 
     # ─── INVENTORY ──────────────────────────────────────
     @app_commands.command(name="inventory",
-                          description="Open your inventory (inside your wallet)")
+                          description="View your purchased items")
     async def inventory(self, interaction: discord.Interaction):
-        # /inventory now opens the wallet hub with the inventory
-        # ready. The old verbose purchase-history dump is gone —
-        # receipts live under Wallet → Receipts, and inventory is the
-        # clean tabs view from cogs/wallet.py. This keeps one source
-        # of truth for inventory rendering and removes the
-        # "Paid/Bought/Expires" debug-style output entirely.
-        from cogs.wallet import render_hub
-        await render_hub(
-            interaction, interaction.guild.id, interaction.user.id,
-            first=True)
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT item_name, price_paid, purchased_at, expires_at
+                FROM purchase_history
+                WHERE guild_id = ? AND user_id = ?
+                ORDER BY purchased_at DESC LIMIT 15
+            """, (interaction.guild.id, interaction.user.id))
+            rows = await cursor.fetchall()
+
+        # Phase 3 / E4: purchase_history is a receipt log (what was
+        # bought, when, for how much) — it was never a live "what do
+        # they currently hold" view, and had no concept of quantity
+        # or of items granted outside a purchase (events, missions).
+        # This pulls that live view from the Inventory module and
+        # shows it alongside the existing purchase history, rather
+        # than replacing it.
+        from utils.inventory import get_inventory
+        held_items = await get_inventory(
+            interaction.guild.id, interaction.user.id)
+
+        # Rank Card foundation / Equip system: role/temp_role items
+        # now also land in inventory_items (see
+        # utils/reward_engine.py) so they can be equipped from here —
+        # shown in their own section + the equip picker below rather
+        # than mixed into "Held Items", since only one can ever be
+        # worn at a time.
+        role_items = [it for it in held_items
+                      if it["item_type"] in ("role", "temp_role")]
+        non_role_items = [it for it in held_items
+                          if it["item_type"] not in ("role", "temp_role")]
+
+        from utils.equip_engine import get_equipped
+        equipped = await get_equipped(
+            interaction.guild.id, interaction.user.id)
+        equipped_name = equipped["item_name"] if equipped else None
+
+        # Phase 5 / Leveling expansion: show any currently active XP
+        # boosts alongside held items — same "what do I actually have
+        # right now" purpose, just a different table.
+        from utils.xp_calculator import get_active_boost_multiplier
+        active_boost = await get_active_boost_multiplier(
+            interaction.guild.id, interaction.user.id)
+
+        if not rows and not held_items and active_boost == 1.0:
+            await interaction.response.send_message(
+                "Your inventory is empty.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"🎒 {interaction.user.display_name}'s Inventory",
+            color=0x7c5cbf)
+
+        if active_boost > 1.0:
+            embed.add_field(
+                name="⚡ Active XP Boost",
+                value=f"{active_boost}x XP", inline=False)
+
+        if equipped_name:
+            embed.add_field(
+                name="🎭 Equipped Role",
+                value=f"**{equipped_name}**", inline=False)
+        elif role_items:
+            embed.add_field(
+                name="🎭 Equipped Role",
+                value="*(none — pick one below)*", inline=False)
+
+        if role_items:
+            role_text = "\n".join(
+                f"{'✅ ' if it['item_name'] == equipped_name else ''}"
+                f"**{it['item_name']}**"
+                for it in role_items[:10])
+            embed.add_field(name="Owned Roles", value=role_text, inline=False)
+
+        if non_role_items:
+            items_text = "\n".join(
+                f"**{it['item_name']}** ×{it['quantity']}"
+                for it in non_role_items[:15])
+            embed.add_field(name="Held Items", value=items_text, inline=False)
+
+        for name, price, bought_at, expires_at in rows[:10]:
+            exp_str = ""
+            if expires_at:
+                exp_str = f"\nExpires: {expires_at[:10]}"
+            embed.add_field(
+                name=name,
+                value=(f"Paid: {price:,} coins\n"
+                       f"Bought: {bought_at[:10] if bought_at else '?'}"
+                       f"{exp_str}"),
+                inline=True)
+
+        view = None
+        if role_items:
+            view = InventoryEquipView(
+                interaction.guild.id, interaction.user.id,
+                role_items, equipped_name)
+
+        await interaction.response.send_message(
+            embed=embed, view=view, ephemeral=True)
 
 
 async def setup(bot):

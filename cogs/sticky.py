@@ -69,7 +69,7 @@ class Sticky(commands.Cog):
             """, (interaction.guild.id, channel.id, content, msg.id))
             await db.commit()
         await interaction.response.send_message(
-            f"Sticky message set in {channel.mention}.", ephemeral=True)
+            f"Sticky message set in {channel.mention}!", ephemeral=True)
 
     @app_commands.command(name="sticky_remove", description="Remove the sticky message from a channel")
     @app_commands.checks.has_permissions(manage_messages=True)
@@ -91,7 +91,7 @@ class Sticky(commands.Cog):
                 (interaction.guild.id, channel.id))
             await db.commit()
         await interaction.response.send_message(
-            f"Sticky message removed from {channel.mention}.", ephemeral=True)
+            f"Sticky message removed from {channel.mention}!", ephemeral=True)
 
     @app_commands.command(name="sticky_list", description="List all sticky messages in the server")
     @app_commands.checks.has_permissions(manage_messages=True)
@@ -103,7 +103,7 @@ class Sticky(commands.Cog):
                 (interaction.guild.id,))
             rows = await cursor.fetchall()
         if not rows:
-            await interaction.response.send_message("No sticky messages set.", ephemeral=True)
+            await interaction.response.send_message("No sticky messages set!", ephemeral=True)
             return
         embed = discord.Embed(title="Sticky Messages", color=discord.Color.yellow())
         for ch_id, content in rows:

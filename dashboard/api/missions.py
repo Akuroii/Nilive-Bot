@@ -8,11 +8,9 @@ from dashboard.api import api_bp
 # ── Missions (Phase 6, built ahead of the Trade-live-verification gate
 # per Dark's explicit override — see utils/mission_engine.py header) ───
 #
-# Same shape as dashboard/api/minigames.py: reuse utils.mission_engine
-# rather than re-declaring schema/query logic here. Since v2 that also
-# includes create_definition()/delete_definition() — validation and
-# writes live in the engine once, shared with the /mission_create
-# slash command, so the two surfaces can't drift apart.
+# Same shape as dashboard/api/minigames.py: reuse
+# utils.mission_engine's own ensure_tables()/get_definitions() rather
+# than re-declaring schema/query logic here.
 
 
 @api_bp.route("/missions/list", methods=["GET"])
@@ -25,51 +23,67 @@ def get_missions_list_api():
         await ensure_tables()
         return await get_definitions(guild_id, enabled_only=False)
 
-    # Snowflake safety: channel_id travels to the client as a STRING —
-    # channel IDs exceed JS's 2^53 safe-integer range, and a JSON
-    # number would silently corrupt the trailing digits (breaking both
-    # the table's channel-name lookup and the map key match against
-    # /api/guild/channels' string ids). Same discipline as the user_id
-    # stringification in /api/missions/completions below.
-    missions = run_async(fetch())
-    for m in missions:
-        if m.get("channel_id") is not None:
-            m["channel_id"] = str(m["channel_id"])
-    return jsonify({"missions": missions})
+    return jsonify({"missions": run_async(fetch())})
 
 
 @api_bp.route("/missions/definition", methods=["POST"])
 @require_api_permission(LEVEL_ADMIN)
 def add_mission_definition_api():
+    from utils.mission_engine import VALID_TYPES, VALID_PERIODS, VALID_REWARD_TYPES
     guild_id = get_session_guild_id()
     data     = request.json or {}
 
-    async def save():
-        from utils.mission_engine import ensure_tables, create_definition
-        await ensure_tables()
-        # All validation (type/period/reward shape, target, channel id)
-        # lives in create_definition — a ValueError here is a member-
-        # facing message, mapped to a 400 below rather than a 500.
-        return await create_definition(
-            guild_id,
-            name=data.get("name"),
-            mtype=data.get("type"),
-            target=data.get("target"),
-            period=data.get("period") or "daily",
-            reward_type=data.get("reward_type"),
-            reward_value=data.get("reward_value"),
-            description=data.get("description"),
-            reward_duration_hours=data.get("reward_duration_hours"),
-            channel_id=data.get("channel_id"),
-        )
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "name is required"})
+
+    mtype = (data.get("type") or "").lower().strip()
+    if mtype not in VALID_TYPES:
+        return jsonify({"success": False, "error": f"type must be one of: {', '.join(VALID_TYPES)}"})
+
+    period = (data.get("period") or "daily").lower().strip()
+    if period not in VALID_PERIODS:
+        return jsonify({"success": False, "error": f"period must be one of: {', '.join(VALID_PERIODS)}"})
+
+    reward_type = data.get("reward_type")
+    if reward_type not in VALID_REWARD_TYPES:
+        return jsonify({"success": False,
+                        "error": f"reward_type must be one of: {', '.join(VALID_REWARD_TYPES)}"})
+
+    reward_value = data.get("reward_value")
+    if not reward_value:
+        return jsonify({"success": False, "error": "reward_value is required"})
 
     try:
-        run_async(save())
-    except ValueError as e:
-        return jsonify({"success": False, "error": str(e)}), 400
+        target = int(data.get("target"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "target must be a number"})
+    if target <= 0:
+        return jsonify({"success": False, "error": "target must be positive"})
 
-    log_action(guild_id, f"Added mission: {(data.get('name') or '').strip()} "
-                         f"({(data.get('type') or '').strip()})", "missions")
+    duration_hours = data.get("reward_duration_hours")
+    try:
+        duration_hours = int(duration_hours) if duration_hours else None
+    except (TypeError, ValueError):
+        duration_hours = None
+
+    async def save():
+        import aiosqlite
+        from database import DB_PATH
+        from utils.mission_engine import ensure_tables
+        await ensure_tables()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO missions_definitions
+                    (guild_id, name, description, type, target, period,
+                     reward_type, reward_value, reward_duration_hours)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (guild_id, name, data.get("description"), mtype, target,
+                  period, reward_type, str(reward_value), duration_hours))
+            await db.commit()
+
+    run_async(save())
+    log_action(guild_id, f"Added mission: {name} ({mtype})", "missions")
     return jsonify({"success": True})
 
 
@@ -79,13 +93,15 @@ def delete_mission_definition_api(mission_id: int):
     guild_id = get_session_guild_id()
 
     async def delete():
-        from utils.mission_engine import ensure_tables, delete_definition
-        await ensure_tables()
-        return await delete_definition(guild_id, mission_id)
+        import aiosqlite
+        from database import DB_PATH
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM missions_definitions WHERE id=? AND guild_id=?",
+                (mission_id, guild_id))
+            await db.commit()
 
-    if not run_async(delete()):
-        return jsonify({"success": False,
-                        "error": "Mission not found"}), 404
+    run_async(delete())
     log_action(guild_id, f"Removed mission #{mission_id}", "missions")
     return jsonify({"success": True})
 
@@ -94,16 +110,18 @@ def delete_mission_definition_api(mission_id: int):
 @require_api_permission(LEVEL_ADMIN)
 def toggle_mission_definition_api(mission_id: int):
     guild_id = get_session_guild_id()
-    enabled  = bool((request.json or {}).get("enabled", True))
+    enabled  = int(bool((request.json or {}).get("enabled", True)))
 
     async def toggle():
-        from utils.mission_engine import ensure_tables, set_definition_enabled
-        await ensure_tables()
-        return await set_definition_enabled(guild_id, mission_id, enabled)
+        import aiosqlite
+        from database import DB_PATH
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE missions_definitions SET enabled=? WHERE id=? AND guild_id=?",
+                (enabled, mission_id, guild_id))
+            await db.commit()
 
-    if not run_async(toggle()):
-        return jsonify({"success": False,
-                        "error": "Mission not found"}), 404
+    run_async(toggle())
     return jsonify({"success": True})
 
 
@@ -111,12 +129,7 @@ def toggle_mission_definition_api(mission_id: int):
 @require_api_permission(LEVEL_ADMIN)
 def get_mission_completions_api():
     guild_id = get_session_guild_id()
-    # Guarded parse: ?limit=abc used to raise a bare 500.
-    try:
-        limit = int(request.args.get("limit", 50))
-    except (TypeError, ValueError):
-        limit = 50
-    limit = max(1, min(limit, 200))
+    limit    = min(int(request.args.get("limit", 50)), 200)
 
     async def fetch():
         from utils.mission_engine import ensure_tables, get_recent_completions
@@ -130,16 +143,6 @@ def get_mission_completions_api():
     # which would corrupt trailing digits and break loadMissionLog()'s
     # userMap lookup).
     rows = [{**c, "user_id": str(c["user_id"])} for c in rows]
-
-    # Presentation timestamp ('2026-09-14 · 12:51') built server-side
-    # from the same stored UTC instant — storage stays untouched, this
-    # is purely how it's shown (spec: don't migrate data for display).
-    from utils.formatters import format_timestamp
-    rows = [{**c,
-             "completed_at_display":
-                 format_timestamp(c["completed_at"], "%Y-%m-%d · %H:%M")
-                 if c["completed_at"] else None}
-            for c in rows]
 
     # dark-fixes pass #18 (username resolver rollout): one batched
     # resolve_users() call covering every user on the page. The map

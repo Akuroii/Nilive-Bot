@@ -64,69 +64,6 @@ async def get_user_ledger(guild_id: int, user_id: int,
     } for r in rows]
 
 
-async def count_user_ledger(guild_id: int, user_id: int,
-                             currency: str = None) -> int:
-    """
-    Total ledger rows for one member, for Wallet → Receipts pagination
-    (knowing the page count up front is what lets the Forward button be
-    disabled on the last page instead of paging into an empty list).
-    """
-    query = ("SELECT COUNT(*) FROM transaction_ledger "
-             "WHERE guild_id = ? AND user_id = ?")
-    params: list = [guild_id, user_id]
-    if currency:
-        query += " AND currency = ?"
-        params.append(currency)
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(query, params)
-        row = await cursor.fetchone()
-    return int(row[0]) if row else 0
-
-
-async def get_user_ledger_page(guild_id: int, user_id: int,
-                                currency: str = None,
-                                offset: int = 0,
-                                limit: int = 8) -> list[dict]:
-    """
-    One page of a member's transactions, newest first.
-
-    Separate from get_user_ledger() rather than bolting an offset onto
-    it: that function is already used by the dashboard with its own
-    limit semantics, and adding a parameter with a default is exactly
-    how a shared helper quietly changes behaviour for an existing
-    caller. Ordering adds `id DESC` as a tiebreaker because created_at
-    is a second-resolution CURRENT_TIMESTAMP — several rows from one
-    action (a convert writes convert_out + convert_in) share the same
-    timestamp, and without the tiebreaker SQLite's row order between
-    them is unspecified, which can duplicate or skip a row across a
-    page boundary.
-    """
-    query = """
-        SELECT id, user_id, currency, amount, balance_after, type, reason,
-               source, related_user_id, reversed, reversed_at, created_at
-        FROM transaction_ledger
-        WHERE guild_id = ? AND user_id = ?
-    """
-    params: list = [guild_id, user_id]
-    if currency:
-        query += " AND currency = ?"
-        params.append(currency)
-    query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
-    params.extend([max(1, int(limit)), max(0, int(offset))])
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(query, params)
-        rows = await cursor.fetchall()
-
-    return [{
-        "id": r[0], "user_id": r[1], "currency": r[2], "amount": r[3],
-        "balance_after": r[4], "type": r[5], "reason": r[6],
-        "source": r[7], "related_user_id": r[8],
-        "reversed": bool(r[9]), "reversed_at": r[10], "created_at": r[11],
-    } for r in rows]
-
-
 async def get_guild_ledger(guild_id: int, limit: int = 100,
                             currency: str = None,
                             source: str = None) -> list[dict]:

@@ -107,41 +107,6 @@ async def set_quantity(guild_id: int, user_id: int, item_name: str,
     return quantity
 
 
-async def drop_item(guild_id: int, user_id: int, item_name: str) -> dict:
-    """
-    Remove ALL copies of an owned item, regardless of quantity. Used
-    by Wallet → Item → Drop after the user has confirmed. Returns the
-    quantity that was removed, or {"success": False, ...} if the item
-    isn't owned. Does NOT touch Discord roles or equipped_* tables —
-    the Wallet layer is responsible for that cleanup (equip_engine /
-    title_engine / potion_engine) so this helper stays type-agnostic.
-    """
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute("""
-                SELECT quantity, item_type FROM inventory_items
-                WHERE guild_id=? AND user_id=? AND item_name=?
-            """, (guild_id, user_id, item_name))
-            row = await cursor.fetchone()
-            if not row or (row[0] or 0) <= 0:
-                await db.execute("ROLLBACK")
-                return {"success": False,
-                        "error": f"You do not own **{item_name}**."}
-            dropped_qty = int(row[0] or 0)
-            dropped_type = row[1]
-            await db.execute("""
-                DELETE FROM inventory_items
-                WHERE guild_id=? AND user_id=? AND item_name=?
-            """, (guild_id, user_id, item_name))
-            await db.commit()
-            return {"success": True, "item_name": item_name,
-                    "quantity": dropped_qty, "item_type": dropped_type}
-        except Exception:
-            await db.execute("ROLLBACK")
-            raise
-
-
 async def has_item(guild_id: int, user_id: int, item_name: str,
                     quantity: int = 1) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:

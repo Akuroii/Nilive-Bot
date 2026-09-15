@@ -11,7 +11,6 @@ from discord import app_commands
 from database import DB_PATH
 from utils import minigame_store as store
 from utils import minigame_engine as engine
-from utils.timezone import get_cairo_daily_key, get_cairo_weekly_key, CAIRO_TZ
 
 # ═══════════════════════════════════════════════════════════════════════
 # MINIGAMES v2 — the Discord surface (Phase 3 of the approved
@@ -53,17 +52,16 @@ STARTUP_SWEEP_GRACE_MINUTES = 5
 
 
 def _monday_of(d) -> str:
-    # Legacy name kept for import compat; now returns Cairo Saturday
-    return get_cairo_weekly_key(d)
-
-def _saturday_of_cairo(d) -> str:
-    return get_cairo_weekly_key(d)
+    monday = d.date() if hasattr(d, "date") else d
+    from datetime import timedelta as _td
+    monday = monday - _td(days=monday.weekday())
+    return monday.isoformat()
 
 
 def compute_daily_probability(events_so_far: int, weekday: int,
                                min_target: int, max_target: int) -> tuple[float, bool]:
     """
-    weekday: 0=Saturday ... 6=Friday for Cairo week (transformed from datetime.weekday()).
+    weekday: 0=Monday ... 6=Sunday (datetime.weekday()).
     Returns (probability, force_fire).
 
     - Already at/above weekly max -> 0% (no bonus firing past the cap).
@@ -354,8 +352,8 @@ class Minigames(commands.Cog):
         """The pacing iteration (extracted so tests can drive one pass
         without waiting 30 minutes — the loop body is unchanged)."""
         now   = datetime.now(timezone.utc)
-        today = get_cairo_daily_key(now)
-        monday = get_cairo_weekly_key(now)
+        today = now.date().isoformat()
+        monday = _monday_of(now)
 
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
@@ -386,10 +384,10 @@ class Minigames(commands.Cog):
                 min_target = int(config.get("min_events_per_week") or 5)
                 max_target = int(config.get("max_events_per_week") or 10)
                 events_so_far = int(config.get("events_this_week") or 0)
-                # Cairo week: Saturday=0..Friday=6 -> reuse same remaining formula
-                cairo_weekday = (now.astimezone(CAIRO_TZ).weekday() - 5) % 7
+                weekday = now.weekday()
+
                 prob, force = compute_daily_probability(
-                    events_so_far, cairo_weekday, min_target, max_target)
+                    events_so_far, weekday, min_target, max_target)
 
                 roll_success = force or (random.random() < prob)
 
@@ -550,9 +548,7 @@ class Minigames(commands.Cog):
     async def minigames_stats(self, interaction: discord.Interaction):
         config = await store.get_config(interaction.guild.id)
         now = datetime.now(timezone.utc)
-        # Cairo week: Saturday start
-        cairo_weekday = (now.astimezone(CAIRO_TZ).weekday() - 5) % 7
-        weekday = cairo_weekday
+        weekday = now.weekday()
         remaining_days = 7 - weekday
         min_t = int(config.get("min_events_per_week") or 5)
         max_t = int(config.get("max_events_per_week") or 10)

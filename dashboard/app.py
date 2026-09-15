@@ -1020,9 +1020,9 @@ def custom_commands():
 @app.route("/mvp")
 @require_page("mvp")
 def mvp():
-    from utils.timezone import get_cairo_daily_key
+    from datetime import date
     guild_id = get_session_guild_id()
-    today    = get_cairo_daily_key()
+    today    = date.today().isoformat()
 
     async def get_data():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1420,12 +1420,6 @@ def config_general():
         return {}
 
     async def save_settings(data: dict):
-        # Normalize legacy timezone values to canonical Africa/Cairo on save
-        try:
-            from utils.timezone import normalize_timezone
-            data["timezone"] = normalize_timezone(data.get("timezone", "Africa/Cairo"))
-        except Exception:
-            pass
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO guild_settings
@@ -1446,7 +1440,7 @@ def config_general():
             """, (
                 guild_id,
                 data.get("prefix", "/"),
-                data.get("timezone", "Africa/Cairo"),
+                data.get("timezone", "UTC"),
                 data.get("language", "en"),
                 data.get("log_channel_id") or None,
                 data.get("currency_name", "Coins"),
@@ -1623,7 +1617,7 @@ COMMAND_CATEGORIES = {
         "massban", "lockdown", "unlockdown",
     ],
     "Economy": [
-        "wallet", "streak", "balance", "daily", "give", "convert", "richest",
+        "balance", "daily", "give", "convert", "richest",
         "addcoins", "removecoins", "adddiamonds", "removediamonds",
     ],
     "Leveling": [
@@ -1684,9 +1678,7 @@ COMMAND_METADATA = {
     "boostcolor": {"desc": "Pick your boost color role", "params": ["color"]},
     "botprofile_view": {"desc": "View this server's configured bot profile", "params": []},
     "balance": {"desc": "Check your coin and diamond balance", "params": ["member"]},
-    "wallet": {"desc": "Open your private wallet — balances, streak, inventory and receipts", "params": []},
-    "streak": {"desc": "Claim your daily streak reward", "params": []},
-    "daily": {"desc": "Claim your daily streak reward (alias of /streak)", "params": []},
+    "daily": {"desc": "Claim your daily coins", "params": []},
     "give": {"desc": "Give coins to another member", "params": ["member", "amount"]},
     "convert": {"desc": "Convert coins into diamonds", "params": ["coins"]},
     "richest": {"desc": "View the richest members", "params": []},
@@ -1712,7 +1704,7 @@ COMMAND_METADATA = {
     "minigames_spawn": {"desc": "Spawn a minigame right now (manual, admin). Omit the template to let the rotation pick.", "params": ["template_id"]},
     "minigames_stats": {"desc": "View this week's minigames progress", "params": []},
     "missions": {"desc": "View your active missions and progress", "params": []},
-    "mission_create": {"desc": "Create a mission (admin)", "params": ["name", "type", "target", "reward_type", "reward_value", "period", "description", "duration_hours", "channel"]},
+    "mission_create": {"desc": "Create a mission (admin)", "params": ["name", "type", "target", "reward_type", "reward_value", "period", "description", "duration_hours"]},
     "mission_list": {"desc": "List configured missions (admin)", "params": []},
     "mission_remove": {"desc": "Remove a mission by ID (admin)", "params": ["mission_id"]},
     "kick": {"desc": "Kick a member from the server", "params": ["member", "reason"]},
@@ -1740,7 +1732,7 @@ COMMAND_METADATA = {
     "reactionrole_list": {"desc": "List all reaction role messages in the server", "params": []},
     "report_setup": {"desc": "Configure the user report system", "params": ["report_channel", "staff_role", "enabled"]},
     "report_list": {"desc": "View recent reports (staff only)", "params": ["status"]},
-    "schedule_message": {"desc": "Schedule a message to be sent later (Africa/Cairo)", "params": ["channel", "message", "when", "repeat", "repeat_interval"]},
+    "schedule_message": {"desc": "Schedule a message to be sent later (UTC times)", "params": ["channel", "message", "when", "repeat", "repeat_interval"]},
     "schedule_list": {"desc": "List this server's scheduled messages", "params": []},
     "schedule_cancel": {"desc": "Cancel a scheduled message by ID", "params": ["message_id"]},
     "shop": {"desc": "View the server shop items", "params": []},

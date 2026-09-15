@@ -278,37 +278,6 @@ def add_shop_item():
                         "error": "Prestige items are purchased with Coins and "
                                  "cannot have a diamond price."})
 
-    # Wallet pass: a potion is delivered into the buyer's inventory and
-    # applies its effect only when used, so an unusable one is worse
-    # than a refused save — the member discovers it's broken only after
-    # paying. It reuses xp_boost_multiplier + duration_hours (no new
-    # columns), and both are required here, mirroring the same check
-    # cogs/shop.py performs at purchase time. Titles need no extra
-    # validation: name + icon + rarity is the whole item.
-    item_type_val = (data.get("type") or "role")
-    try:
-        xp_boost_multiplier_val = (
-            float(data.get("xp_boost_multiplier"))
-            if data.get("xp_boost_multiplier") not in (None, "", 0, "0")
-            else None)
-    except (TypeError, ValueError):
-        xp_boost_multiplier_val = None
-
-    if item_type_val == "potion":
-        potion_mult = xp_boost_multiplier_val or 0.0
-        try:
-            potion_hours = int(data.get("duration_hours") or 0)
-        except (TypeError, ValueError):
-            potion_hours = 0
-        if potion_mult <= 1.0:
-            return jsonify({"success": False,
-                            "error": "Potions need an effect multiplier "
-                                     "greater than 1."})
-        if potion_hours <= 0:
-            return jsonify({"success": False,
-                            "error": "Potions need an effect duration in "
-                                     "hours."})
-
     # Rank Card foundation: rarity is admin-set at creation time,
     # same place price/icon are already captured. Falls back to
     # 'common' on anything unrecognized rather than rejecting the
@@ -326,8 +295,8 @@ def add_shop_item():
                      role_id, duration_hours, featured,
                      required_level, required_role_id,
                      max_stock, current_stock, enabled, price_diamonds,
-                     icon_url, rarity, prestige_tier, xp_boost_multiplier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                     icon_url, rarity, prestige_tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
             """, (
                 guild_id,
                 item_name,
@@ -345,16 +314,6 @@ def add_shop_item():
                 icon_url,
                 rarity,
                 prestige_tier_val,
-                # PRE-EXISTING BUG FIX (found during the Wallet pass):
-                # this column was in the form, in the JS payload, and
-                # read back by cogs/shop.py's purchase path — but was
-                # never actually part of this INSERT, so it always
-                # persisted as NULL. Every XP Boost item created from
-                # the dashboard was therefore permanently unbuyable
-                # ("isn't configured correctly (missing or invalid
-                # multiplier)"). Potions reuse the same column, so this
-                # had to be corrected rather than worked around.
-                xp_boost_multiplier_val,
             ))
             await db.commit()
 
