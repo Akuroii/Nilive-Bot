@@ -22,18 +22,21 @@
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Reward is granted automatically the instant a member crosses the target —
             no separate claim step. Daily/weekly missions reset on their own each period.
+            A mission with a channel only counts activity in that channel
+            (threads included); leave Channel empty to count activity anywhere.
         </p>
         <div class="form-row">
             <div class="form-group">
                 <label class="form-label">Name</label>
-                <input class="form-input" id="ms-name" placeholder="e.g. Chatterbox">
+                <input class="form-input" id="ms-name" maxlength="100" placeholder="e.g. Chatterbox">
             </div>
             <div class="form-group">
                 <label class="form-label">Type</label>
-                <select class="form-input" id="ms-type">
+                <select class="form-input" id="ms-type" onchange="toggleMsChannelField()">
                     <option value="messages">Messages sent</option>
                     <option value="words">Words typed</option>
                     <option value="voice_minutes">Minutes in voice</option>
+                    <option value="daily_completions">Daily missions completed</option>
                 </select>
             </div>
             <div class="form-group">
@@ -67,13 +70,17 @@
                 <label class="form-label">Duration hours (temp_role only)</label>
                 <input class="form-input" id="ms-duration" type="number" min="1">
             </div>
+            <div class="form-group" id="ms-channel-group">
+                <label class="form-label">Channel (optional)</label>
+                <select class="nero-channel-picker form-input" id="ms-channel" data-value=""></select>
+            </div>
             <div class="form-group" style="grid-column:1/-1;">
                 <label class="form-label">Description (optional)</label>
-                <input class="form-input" id="ms-desc" placeholder="Shown to members in /missions">
+                <input class="form-input" id="ms-desc" maxlength="200"
+                       placeholder="Shown to members in /missions — the target and channel are added automatically">
             </div>
         </div>
         <button class="btn btn-primary" onclick="addMission()">Add Mission</button>
-        <div id="ms-status" style="margin-top:10px;font-size:13px;"></div>
     </div>
 
     <div class="card">
@@ -81,10 +88,10 @@
         <div class="table-wrap">
             <table class="table">
                 <thead>
-                    <tr><th>Name</th><th>Type</th><th>Target</th><th>Period</th><th>Reward</th><th>Status</th><th></th></tr>
+                    <tr><th>Name</th><th>Type</th><th>Target</th><th>Period</th><th>Channel</th><th>Reward</th><th>Status</th><th></th></tr>
                 </thead>
                 <tbody id="ms-tbody">
-                    <tr><td colspan="7" class="empty">Loading…</td></tr>
+                    <tr><td colspan="8" class="empty">Loading…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -98,7 +105,7 @@
         <div class="table-wrap">
             <table class="table">
                 <thead>
-                    <tr><th>User ID</th><th>Mission</th><th>Reward</th><th>Period</th><th>Completed</th></tr>
+                    <tr><th>User</th><th>Mission</th><th>Reward</th><th>Period</th><th>Completed (UTC)</th></tr>
                 </thead>
                 <tbody id="ms-log-tbody">
                     <tr><td colspan="5" class="empty">Loading…</td></tr>
@@ -110,8 +117,33 @@
 
 {% block scripts %}
 <script>
-const MS_TYPE_LABEL = {messages:'Messages', words:'Words', voice_minutes:'Voice min'};
+const MS_TYPE_LABEL = {messages:'Messages', words:'Words', voice_minutes:'Voice min', daily_completions:'Daily missions'};
 const MS_PERIOD_LABEL = {daily:'Daily', weekly:'Weekly', once:'One-time'};
+const MS_COLS = 8;   // columns in the Configured Missions table
+const MS_LOG_COLS = 5;
+
+// Channel names for the table, fetched once and cached — the picker
+// fetches the same list separately (select2 wraps its own <select>),
+// so this is one extra GET per page load, never per row.
+let msChannelMap = null;
+
+function msEsc(str) {
+    // Mission names/descriptions are admin-entered text inserted via
+    // innerHTML AND into HTML attributes — escape everything both
+    // contexts need (same shape as minigames.html's esc(), as one
+    // pure function instead of a DOM round-trip).
+    return String(str == null ? '' : str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function confirmDeleteMission(id, btn) {
+    // The name travels in a data-name attribute (HTML-decoded by the
+    // parser when read) instead of inside the onclick JS string — a
+    // mission name containing ' or " can't break out of either
+    // context this way.
+    showConfirm(`Delete mission "${btn.dataset.name}"?`, () => deleteMission(id));
+}
 
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
@@ -123,7 +155,11 @@ function switchTab(name) {
     const active = document.getElementById('tab-' + name);
     active.style.borderBottomColor = 'var(--accent)';
     active.style.color = 'var(--text)';
+    // The completions log is only fetched the first time its tab is
+    // opened — no request (and no resolver batch) while it's hidden.
+    if (name === 'log' && !msLogLoaded) { msLogLoaded = true; loadMissionLog(); }
 }
+let msLogLoaded = false;
 switchTab('missions');
 
 function toggleMsDurationField() {
@@ -137,33 +173,77 @@ function toggleMsDurationField() {
 }
 toggleMsDurationField();
 
-async function loadMissions() {
-    const res = await fetch('/api/missions/list');
-    if (!res.ok) return;
-    const data = await res.json();
-    const tbody = document.getElementById('ms-tbody');
-    if (!data.missions || !data.missions.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="empty">No missions configured yet.</td></tr>';
-        return;
+function toggleMsChannelField() {
+    // A 'Daily missions completed' mission isn't tied to a channel —
+    // hide the picker so the form can't suggest otherwise.
+    const type = document.getElementById('ms-type').value;
+    document.getElementById('ms-channel-group').style.display =
+        type === 'daily_completions' ? 'none' : 'block';
+}
+toggleMsChannelField();
+
+async function msLoadChannelMap() {
+    if (msChannelMap) return msChannelMap;
+    try {
+        const res = await fetch('/api/guild/channels');
+        const data = await res.json();
+        msChannelMap = {};
+        (data.results || []).forEach(c => { msChannelMap[c.id] = c.text; });
+    } catch (e) {
+        msChannelMap = {};  // fall back to raw IDs below
     }
-    tbody.innerHTML = data.missions.map(m => `
+    return msChannelMap;
+}
+
+function msChannelCell(id) {
+    if (!id) return '<span class="text-muted">Any channel</span>';
+    const name = msChannelMap ? msChannelMap[id] : null;
+    return name ? `#${msEsc(name)}` : `<code>${msEsc(id)}</code>`;
+}
+
+function msRowError(cols, message, retryFn) {
+    return `<tr><td colspan="${cols}" class="empty">${msEsc(message)} — <a href="javascript:${retryFn}()">retry</a></td></tr>`;
+}
+
+async function loadMissions() {
+    const tbody = document.getElementById('ms-tbody');
+    try {
+        const [listRes] = await Promise.all([
+            fetch('/api/missions/list'),
+            msLoadChannelMap(),
+        ]);
+        if (!listRes.ok) {
+            tbody.innerHTML = msRowError(MS_COLS, 'Failed to load missions', 'loadMissions');
+            return;
+        }
+        const data = await listRes.json();
+        if (!data.missions || !data.missions.length) {
+            tbody.innerHTML = `<tr><td colspan="${MS_COLS}" class="empty">No missions configured yet.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = data.missions.map(m => `
         <tr>
-            <td><strong>${m.name}</strong>${m.description ? `<div class="text-muted text-sm">${m.description}</div>` : ''}</td>
-            <td>${MS_TYPE_LABEL[m.type] || m.type}</td>
-            <td>${m.target}</td>
-            <td>${MS_PERIOD_LABEL[m.period] || m.period}</td>
-            <td>${m.reward_type}: <code>${m.reward_value}</code>${m.reward_duration_hours ? ` (${m.reward_duration_hours}h)` : ''}</td>
+            <td><strong>${msEsc(m.name)}</strong>${m.description ? `<div class="text-muted text-sm">${msEsc(m.description)}</div>` : ''}</td>
+            <td>${MS_TYPE_LABEL[m.type] || msEsc(m.type)}</td>
+            <td>${parseInt(m.target, 10).toLocaleString()}</td>
+            <td>${MS_PERIOD_LABEL[m.period] || msEsc(m.period)}</td>
+            <td>${msChannelCell(m.channel_id)}</td>
+            <td>${msEsc(m.reward_type)}: <code>${msEsc(m.reward_value)}</code>${m.reward_duration_hours ? ` (${m.reward_duration_hours}h)` : ''}</td>
             <td><span class="badge ${m.enabled ? 'badge-success' : 'badge-danger'}">${m.enabled ? 'Active' : 'Disabled'}</span></td>
             <td style="display:flex;gap:6px;">
                 <button class="btn btn-sm btn-secondary" onclick="toggleMission(${m.id}, ${m.enabled ? 0 : 1})">
                     ${m.enabled ? 'Disable' : 'Enable'}
                 </button>
                 <button class="btn btn-sm btn-danger"
-                    onclick="showConfirm('Delete mission &quot;${m.name}&quot;?', () => deleteMission(${m.id}))">
+                    data-name="${msEsc(m.name)}"
+                    onclick="confirmDeleteMission(${m.id}, this)">
                     Delete
                 </button>
             </td>
         </tr>`).join('');
+    } catch (err) {
+        tbody.innerHTML = msRowError(MS_COLS, 'Failed to load missions', 'loadMissions');
+    }
 }
 loadMissions();
 
@@ -171,34 +251,49 @@ async function addMission() {
     const type = document.getElementById('ms-reward-type').value;
     const value = document.getElementById('ms-reward-value').value.trim();
     const name = document.getElementById('ms-name').value.trim();
+    const target = parseInt(document.getElementById('ms-target').value, 10);
     if (!name) { showToast('Enter a mission name', 'warning'); return; }
     if (!value) { showToast('Enter a reward value', 'warning'); return; }
+    if (!target || target < 1) { showToast('Enter a valid target', 'warning'); return; }
+    const mtype = document.getElementById('ms-type').value;
     const payload = {
         name,
         description: document.getElementById('ms-desc').value.trim() || null,
-        type: document.getElementById('ms-type').value,
-        target: parseInt(document.getElementById('ms-target').value),
+        type: mtype,
+        target,
         period: document.getElementById('ms-period').value,
         reward_type: type,
         reward_value: value,
         reward_duration_hours: type === 'temp_role'
-            ? (parseInt(document.getElementById('ms-duration').value) || null)
+            ? (parseInt(document.getElementById('ms-duration').value, 10) || null)
             : null,
+        // RAW STRING, never parseInt: channel snowflakes exceed JS's
+        // 2^53 safe-integer range — parseInt corrupts the trailing
+        // digits and the mission would restrict to a channel that
+        // doesn't exist. The engine int()s it exactly server-side
+        // (same reason tagmissions sends $('#tm-channel').val() raw).
+        channel_id: mtype === 'daily_completions'
+            ? null
+            : (document.getElementById('ms-channel').value || null),
     };
-    const res  = await fetch('/api/missions/definition', {
-        method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (data.success) {
-        showToast('Mission added!');
-        document.getElementById('ms-name').value = '';
-        document.getElementById('ms-target').value = '';
-        document.getElementById('ms-reward-value').value = '';
-        document.getElementById('ms-desc').value = '';
-        loadMissions();
-    } else {
-        showToast(data.error || 'Error adding mission', 'error');
+    try {
+        const res  = await fetch('/api/missions/definition', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast('Mission added!');
+            document.getElementById('ms-name').value = '';
+            document.getElementById('ms-target').value = '';
+            document.getElementById('ms-reward-value').value = '';
+            document.getElementById('ms-desc').value = '';
+            loadMissions();
+        } else {
+            showToast(data.error || 'Error adding mission', 'error');
+        }
+    } catch (err) {
+        showToast('Connection error', 'error');
     }
 }
 
@@ -211,40 +306,52 @@ async function toggleMission(id, enabled) {
 }
 
 async function deleteMission(id) {
-    const res  = await fetch(`/api/missions/definition/${id}`, { method: 'DELETE' });
-    const data = await res.json();
-    if (data.success) { showToast('Mission removed', 'info'); loadMissions(); }
-    else showToast('Error', 'error');
+    try {
+        const res  = await fetch(`/api/missions/definition/${id}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (data.success) { showToast('Mission removed', 'info'); loadMissions(); }
+        else showToast(data.error || 'Error', 'error');
+    } catch (err) {
+        showToast('Connection error', 'error');
+    }
 }
 
 async function loadMissionLog() {
-    const res = await fetch('/api/missions/completions');
-    if (!res.ok) return;
-    const data = await res.json();
     const tbody = document.getElementById('ms-log-tbody');
-    if (!data.completions || !data.completions.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">No completions yet</td></tr>';
-        return;
-    }
-    // dark-fixes pass #18 (username resolver rollout): data.user_map is
-    // keyed by user_id and c.user_id travels as a STRING (snowflakes
-    // exceed JS's 2^53 number precision — see /api/trade/history);
-    // userIdentityHtml() is the JS twin of
-    // dashboard/utils/user_identity.py (same pattern as trade.html).
-    const userMap = data.user_map || {};
-    tbody.innerHTML = data.completions.map(c => {
-        const u = userMap[c.user_id] || {};
-        return `
+    try {
+        const res = await fetch('/api/missions/completions');
+        if (!res.ok) {
+            tbody.innerHTML = msRowError(MS_LOG_COLS, 'Failed to load completions', 'loadMissionLog');
+            return;
+        }
+        const data = await res.json();
+        if (!data.completions || !data.completions.length) {
+            tbody.innerHTML = `<tr><td colspan="${MS_LOG_COLS}" class="empty">No completions yet</td></tr>`;
+            return;
+        }
+        // dark-fixes pass #18 (username resolver rollout): data.user_map is
+        // keyed by user_id and c.user_id travels as a STRING (snowflakes
+        // exceed JS's 2^53 number precision — see /api/trade/history);
+        // userIdentityHtml() is the JS twin of
+        // dashboard/utils/user_identity.py (same pattern as trade.html).
+        const userMap = data.user_map || {};
+        tbody.innerHTML = data.completions.map(c => {
+            const u = userMap[c.user_id] || {};
+            const when = c.completed_at_display
+                || (c.completed_at ? c.completed_at.slice(0, 16) : '—');
+            return `
         <tr>
             <td>${userIdentityHtml(c.user_id, u.display_name || u.username, u.avatar_url)}</td>
-            <td>${c.mission_name}</td>
-            <td>${c.reward_type}: <code>${c.reward_value}</code></td>
-            <td class="text-muted">${c.period_key}</td>
-            <td class="text-muted">${c.completed_at ? c.completed_at.slice(0,16) : '—'}</td>
+            <td>${msEsc(c.mission_name)}</td>
+            <td>${msEsc(c.reward_type)}: <code>${msEsc(c.reward_value)}</code></td>
+            <td class="text-muted">${msEsc(c.period_key)}</td>
+            <td class="text-muted">${msEsc(when)}</td>
         </tr>`;
-    }).join('');
+        }).join('');
+    } catch (err) {
+        tbody.innerHTML = msRowError(MS_LOG_COLS, 'Failed to load completions', 'loadMissionLog');
+    }
 }
-loadMissionLog();
 </script>
 {% endblock %}
 {% endblock %}

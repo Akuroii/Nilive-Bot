@@ -1706,7 +1706,7 @@ COMMAND_METADATA = {
     "minigames_spawn": {"desc": "Spawn a minigame right now (manual, admin). Omit the template to let the rotation pick.", "params": ["template_id"]},
     "minigames_stats": {"desc": "View this week's minigames progress", "params": []},
     "missions": {"desc": "View your active missions and progress", "params": []},
-    "mission_create": {"desc": "Create a mission (admin)", "params": ["name", "type", "target", "reward_type", "reward_value", "period", "description", "duration_hours"]},
+    "mission_create": {"desc": "Create a mission (admin)", "params": ["name", "type", "target", "reward_type", "reward_value", "period", "description", "duration_hours", "channel"]},
     "mission_list": {"desc": "List configured missions (admin)", "params": []},
     "mission_remove": {"desc": "Remove a mission by ID (admin)", "params": ["mission_id"]},
     "kick": {"desc": "Kick a member from the server", "params": ["member", "reason"]},

@@ -112,11 +112,17 @@ class ActivityEngine(commands.Cog):
                                 """, (guild.id, member.id, today))
                                 await db.commit()
 
+                            # channel_id rides along so channel-restricted
+                            # missions can check WHERE the minute was spent,
+                            # without changing the listener signature the
+                            # other on_activity_voice_tick consumers
+                            # (leveling, mvp) already bind to.
                             flags = {
                                 "self_mute": bool(member.voice.self_mute),
                                 "mute":      bool(member.voice.mute),
                                 "self_deaf": bool(member.voice.self_deaf),
                                 "deaf":      bool(member.voice.deaf),
+                                "channel_id": channel.id,
                             }
                             self.bot.dispatch(
                                 "activity_voice_tick", guild, member, flags)
