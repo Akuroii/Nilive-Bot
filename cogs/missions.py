@@ -53,8 +53,6 @@ PERIOD_HEADING = {
     "once": "One-time Missions",
 }
 PERIOD_FOOTER = {
-    "daily": "Resets daily at 00:00 UTC",
-    "weekly": "Resets weekly on Monday at 00:00 UTC",
     "once": "No reset — completes once, forever",
 }
 
@@ -65,6 +63,7 @@ VIEW_TIMEOUT = 1800  # same as the Wallet panels
 # The emoji itself is uploaded through the Discord Developer Portal; if
 # it's ever re-uploaded, only this constant changes.
 DIAMOND_EMOJI = "<a:diamond:1532745018324815982>"
+CHECKMARK_EMOJI = "✅"
 
 # Refresh button emoji — the server's custom emoji (locked by Dark).
 # Static server emoji, so the plain <:name:id> form. Same
@@ -75,7 +74,7 @@ DIAMOND_EMOJI = "<a:diamond:1532745018324815982>"
 # the meaning, the emoji is decoration.
 REFRESH_EMOJI = "<:imagePhotoroom17:1549206183498481714>"
 
-PROGRESS_NODES = 7      # nodes in the glyph bar — nothing renders this hardcoded
+PROGRESS_NODES = 6      # v3: 6 nodes — a full bar means completed
 NODE_FILLED = "⬤"
 NODE_EMPTY = "◯"
 NODE_JOIN = "──"
@@ -84,13 +83,14 @@ EMBED_DESC_LIMIT = 3900  # safety margin under Discord's 4096 cap
 
 def progress_bar(pct: float, nodes: int = PROGRESS_NODES) -> str:
     """Glyph bar — a node lights up once progress crosses into its
-    share of the bar (62% of 7 nodes = 4.34 → 5 lit, 20% → 2 lit, so a
+    share of the bar (62% of 6 nodes = 3.72 → 4 lit, 20% → 2 lit, so a
     bar never reads as emptier than the mission actually is). Pure
     percentage→glyph mapping; the CALLER decides what percentage to
     feed it — _mission_block reserves a completely full bar for the
     completed state, so a full bar always means 'reward claimed'."""
     pct = max(0.0, min(100.0, pct))
-    filled = math.ceil(pct / 100 * nodes) if pct > 0 else 0
+    # Tiny epsilon avoids floating error where 83.333...*6/100=5.000000000000001 ceil->6
+    filled = math.ceil(pct / 100 * nodes - 1e-9) if pct > 0 else 0
     filled = max(0, min(nodes, filled))
     return NODE_JOIN.join([NODE_FILLED] * filled + [NODE_EMPTY] * (nodes - filled))
 
@@ -117,45 +117,66 @@ def _auto_description(m: dict) -> str:
 
 
 def _mission_description(m: dict, guild) -> str:
-    """The `-#` subtext line. An admin-provided description wins; a
-    channel-restricted mission appends WHERE it counts (the live
-    mention when the channel still exists, an honest 'deleted channel'
-    note when it doesn't); an unrestricted mission never implies a
-    channel requirement it doesn't have."""
+    """The `-#` subtext line. Channel restrictions are enforced
+    internally but never surfaced to members — no 'counts in #channel'
+    text is ever appended."""
     desc = (m.get("description") or "").strip() or _auto_description(m)
     desc = desc.rstrip(".")
-    if m.get("channel_id") and m["type"] != "daily_completions":
-        ch = guild.get_channel(m["channel_id"]) if guild else None
-        where = ch.mention if ch else "a deleted channel"
-        desc += f" — counts in {where}"
     return desc + "."
 
 
-def _mission_block(m: dict, guild) -> str:
+def _reward_display_sync(m: dict, cur: dict | None) -> str:
+    """Format the actual reward for the completed line, using currency source of truth."""
+    rt = m.get("reward_type")
+    rv = m.get("reward_value")
+    if rt == "coins":
+        emoji = (cur["coins"]["emoji"] if cur and "coins" in cur else "🪙")
+        return f"{rv} {emoji}"
+    if rt == "diamonds":
+        emoji = (cur["diamonds"]["emoji"] if cur and "diamonds" in cur else "💎")
+        return f"{rv} {emoji}"
+    if rt == "xp":
+        return f"{rv} XP"
+    if rt in ("role", "temp_role"):
+        # Role IDs are rendered as mentions when possible
+        try:
+            return f"<@&{int(rv)}>"
+        except Exception:
+            return str(rv)
+    if rt == "item":
+        return str(rv)
+    return str(rv) if rv is not None else ""
+
+
+def _mission_block(m: dict, guild, cur: dict | None = None) -> str:
     target = int(m["target"] or 0)
     progress = min(int(m["progress"] or 0), target)
     pct = (progress / target * 100) if target > 0 else 100.0
     if m["completed"]:
         pct_display = 100
         bar = progress_bar(100)
-        status = f"⤷ Reward claimed {DIAMOND_EMOJI}"
+        reward_str = _reward_display_sync(m, cur)
+        # Dynamic currency, checkmark; no hardcoded DIAMOND for non-diamond rewards
+        status = f"⤷ `reward claimed` {reward_str} {CHECKMARK_EMOJI}".strip()
     else:
         # Never claim 100% before the mission is actually complete
         # (e.g. 199/200 rounding up) — and never RENDER a full bar
         # either: both the number and the glyphs come from the same
         # progress/target value, capped just short of full.
+        # v3: 6 nodes, incomplete max 5 filled. Cap by nodes, not just pct, to avoid float edge.
         pct_display = min(99, round(pct))
-        bar = progress_bar(min(pct, _INCOMPLETE_BAR_CAP))
+        # Compute filled then cap to PROGRESS_NODES-1 for incomplete
+        raw_filled = math.ceil(pct / 100 * PROGRESS_NODES - 1e-9) if pct > 0 else 0
+        capped_filled = min(raw_filled, PROGRESS_NODES - 1)
+        bar = NODE_JOIN.join([NODE_FILLED] * capped_filled + [NODE_EMPTY] * (PROGRESS_NODES - capped_filled))
         unit = UNIT_LABEL.get(m["type"], "points")
         status = f"`Progress: {progress} / {target} {unit}`"
     return (
         f"**{m['name']}**\n"
         f"-# {_mission_description(m, guild)}\n"
-        f"{bar}⁀જ➣ *`{pct_display}%`**ˎˊ˗\n"
+        f"{bar}⁀જ➣ **`{pct_display}%`**ˎˊ˗\n"
         f"{status}"
     )
-
-
 def _bot_display_name(bot, guild) -> str:
     """The bot's name as this server sees it — the per-guild nickname
     when one is configured (Bot Profile system), else the global
@@ -180,6 +201,14 @@ async def build_mission_display(bot, guild, user_id: int):
     if not progress:
         return None
 
+    # Currency source of truth for completed-reward display
+    cur = None
+    try:
+        from utils.currency import get_currency_config
+        cur = await get_currency_config(guild.id)
+    except Exception:
+        cur = None
+
     sections: dict[str, list] = {}
     for m in progress:
         sections.setdefault(m["period"], []).append(m)
@@ -190,7 +219,7 @@ async def build_mission_display(bot, guild, user_id: int):
         if not missions:
             continue
         done = sum(1 for m in missions if m["completed"])
-        blocks = [_mission_block(m, guild) for m in missions]
+        blocks = [_mission_block(m, guild, cur) for m in missions]
         if period == "daily":
             blocks.append(f"**Next mission:** "
                           f"`{format_reset_countdown(seconds_until_daily_reset())}`")
@@ -282,8 +311,8 @@ class MissionsView(discord.ui.View):
                 # here is cosmetic and must never raise into the loop.
                 pass
 
-    @discord.ui.button(label="Refresh", emoji=REFRESH_EMOJI,
-                       style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="ʀᴇꜰʀᴇꜱʜ", emoji=REFRESH_EMOJI,
+                       style=discord.ButtonStyle.primary)
     async def refresh_button(self, interaction: discord.Interaction,
                              button: discord.ui.Button):
         guild = self.bot.get_guild(self.guild_id)

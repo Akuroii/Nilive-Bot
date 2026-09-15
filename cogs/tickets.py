@@ -4,7 +4,7 @@ from discord import app_commands
 import aiosqlite
 import json
 from database import DB_PATH
-from datetime import datetime
+from datetime import datetime, timezone
 
 class TicketCategory(discord.ui.Select):
     def __init__(self, categories):
@@ -309,7 +309,7 @@ async def create_ticket(interaction: discord.Interaction, category: str):
             INSERT INTO tickets (guild_id, channel_id, user_id, staff_role_id, status, category, created_at)
             VALUES (?, ?, ?, ?, 'open', ?, ?)
         """, (guild.id, channel.id, interaction.user.id, staff_role_id, category,
-              datetime.utcnow().isoformat()))
+              datetime.now(timezone.utc).isoformat()))
         await db.commit()
 
     # TASK 4 upgrade: embed customization now supports the same
@@ -434,7 +434,13 @@ async def close_ticket(interaction: discord.Interaction):
 async def save_transcript(channel: discord.TextChannel, guild: discord.Guild):
     messages = []
     async for msg in channel.history(limit=500, oldest_first=True):
-        messages.append(f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author.display_name}: {msg.content}")
+        # Transcript timestamps in Cairo for user-facing consistency
+        try:
+            from utils.timezone import CAIRO_TZ
+            _cairo_ts = msg.created_at.astimezone(CAIRO_TZ).strftime("%Y-%m-%d %H:%M") if msg.created_at.tzinfo else msg.created_at.replace(tzinfo=__import__("datetime", fromlist=["timezone"]).timezone.utc).astimezone(CAIRO_TZ).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            _cairo_ts = msg.created_at.strftime("%Y-%m-%d %H:%M")
+        messages.append(f"[{_cairo_ts}] {msg.author.display_name}: {msg.content}")
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT transcript_channel_id, save_transcripts FROM ticket_settings WHERE guild_id=?", (guild.id,))

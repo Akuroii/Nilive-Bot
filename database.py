@@ -466,7 +466,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id                 INTEGER PRIMARY KEY,
                 prefix                   TEXT DEFAULT '/',
-                timezone                 TEXT DEFAULT 'UTC',
+                timezone                 TEXT DEFAULT 'Africa/Cairo',
                 language                 TEXT DEFAULT 'en',
                 log_channel_id           INTEGER,
                 currency_name            TEXT DEFAULT 'Coins',
@@ -513,6 +513,14 @@ async def init_db():
             await db.commit()
         except Exception as e:
             print(f"[MIGRATION] guild_settings currency columns: {e}")
+
+        # Cairo canonical: normalize legacy UTC / Asia/Cairo to Africa/Cairo
+        try:
+            await db.execute("UPDATE guild_settings SET timezone='Africa/Cairo' WHERE timezone IN ('UTC','Etc/UTC','Asia/Cairo')")
+            await db.execute("UPDATE guild_settings SET timezone='Africa/Cairo' WHERE timezone IS NULL OR trim(timezone)=''")
+            await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] timezone normalization: {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_settings_kv (
@@ -708,11 +716,11 @@ async def init_db():
         # Daily / Streak (persisted): replaces the old in-memory
         # _daily_cooldowns dict in cogs/economy.py, which did not
         # survive a bot restart and had no concept of a streak at
-        # all. last_claim_date is stored as a UTC calendar date
-        # string ('YYYY-MM-DD') rather than a timestamp specifically
-        # so "same day / previous day / missed a day" is a plain
-        # string comparison in utils/daily_engine.py, with zero
-        # timezone ambiguity. One row per (guild_id, user_id); the
+        # all. last_claim_date is stored as a Cairo calendar date
+        # string ('YYYY-MM-DD', Africa/Cairo) rather than a timestamp
+        # specifically so "same day / previous day / missed a day" is a
+        # plain string comparison in utils/daily_engine.py, with zero
+        # timezone ambiguity. Storage is Cairo date, not UTC. One row per (guild_id, user_id); the
         # claim-check-and-write against this table runs inside a
         # single BEGIN IMMEDIATE transaction (see daily_engine.py) so
         # a double-click or two concurrent /daily invocations can't

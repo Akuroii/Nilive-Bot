@@ -174,14 +174,16 @@ async def main():
 
     section("5. Streak continuation and reset")
     await reset_user()
-    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    from utils.timezone import CAIRO_TZ, get_cairo_daily_key
+    cairo_today = datetime.now(timezone.utc).astimezone(CAIRO_TZ).date()
+    yesterday = (cairo_today - timedelta(days=1)).isoformat()
     await set_claim_date(yesterday, 4)
     r = await perform_streak_claim(None, GUILD, USER)
     check("claiming the day after continues the streak", r["streak"] == 5,
           str(r["streak"]))
 
     await reset_user()
-    old = (datetime.now(timezone.utc).date() - timedelta(days=3)).isoformat()
+    old = (cairo_today - timedelta(days=3)).isoformat()
     await set_claim_date(old, 9)
     r = await perform_streak_claim(None, GUILD, USER)
     check("claiming after a gap resets to day 1", r["streak"] == 1,

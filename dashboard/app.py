@@ -1020,9 +1020,9 @@ def custom_commands():
 @app.route("/mvp")
 @require_page("mvp")
 def mvp():
-    from datetime import date
+    from utils.timezone import get_cairo_daily_key
     guild_id = get_session_guild_id()
-    today    = date.today().isoformat()
+    today    = get_cairo_daily_key()
 
     async def get_data():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -1420,6 +1420,12 @@ def config_general():
         return {}
 
     async def save_settings(data: dict):
+        # Normalize legacy timezone values to canonical Africa/Cairo on save
+        try:
+            from utils.timezone import normalize_timezone
+            data["timezone"] = normalize_timezone(data.get("timezone", "Africa/Cairo"))
+        except Exception:
+            pass
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO guild_settings
@@ -1440,7 +1446,7 @@ def config_general():
             """, (
                 guild_id,
                 data.get("prefix", "/"),
-                data.get("timezone", "UTC"),
+                data.get("timezone", "Africa/Cairo"),
                 data.get("language", "en"),
                 data.get("log_channel_id") or None,
                 data.get("currency_name", "Coins"),
@@ -1734,7 +1740,7 @@ COMMAND_METADATA = {
     "reactionrole_list": {"desc": "List all reaction role messages in the server", "params": []},
     "report_setup": {"desc": "Configure the user report system", "params": ["report_channel", "staff_role", "enabled"]},
     "report_list": {"desc": "View recent reports (staff only)", "params": ["status"]},
-    "schedule_message": {"desc": "Schedule a message to be sent later (UTC times)", "params": ["channel", "message", "when", "repeat", "repeat_interval"]},
+    "schedule_message": {"desc": "Schedule a message to be sent later (Africa/Cairo)", "params": ["channel", "message", "when", "repeat", "repeat_interval"]},
     "schedule_list": {"desc": "List this server's scheduled messages", "params": []},
     "schedule_cancel": {"desc": "Cancel a scheduled message by ID", "params": ["message_id"]},
     "shop": {"desc": "View the server shop items", "params": []},
