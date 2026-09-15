@@ -1,6 +1,11 @@
 import aiosqlite
 from datetime import datetime, timezone, timedelta
 from database import DB_PATH
+from utils.timezone import (
+    get_cairo_daily_key, get_cairo_weekly_key,
+    seconds_until_cairo_midnight, seconds_until_cairo_saturday,
+    format_cairo_countdown, CAIRO_TZ,
+)
 
 # ═══════════════════════════════════════════════════════════════════════
 # MISSIONS (Phase 6) — v2
@@ -140,56 +145,39 @@ async def ensure_tables():
         await db.commit()
 
 
-def _monday_of(d) -> str:
-    day = d.date() if hasattr(d, "date") else d
-    return (day - timedelta(days=day.weekday())).isoformat()
+def _saturday_of_cairo(dt: datetime) -> str:
+    """Saturday starting the Cairo week containing dt."""
+    return get_cairo_weekly_key(dt)
 
 
 def get_period_key(period: str, now: datetime = None) -> str:
+    # Calendar boundaries are Cairo (bot-wide canonical).
+    # Storage stays UTC, but period keys are Cairo dates.
     now = now or datetime.now(timezone.utc)
     if period == "weekly":
-        return _monday_of(now)
+        return get_cairo_weekly_key(now)
     if period == "once":
         return "once"
-    return now.date().isoformat()  # daily (also the fallback default)
+    return get_cairo_daily_key(now)
 
 
 # ── Reset countdowns (display-only) ────────────────────────────────────
 # The reset itself is the period_key rollover above; these helpers just
 # answer "how long until the current period ends" for the member-facing
-# display. Everything is UTC, matching every other timestamp in this
-# system — no separate Mission timezone exists.
+# display. Boundaries are Cairo (daily 00:00 Africa/Cairo, weekly
+# Saturday 00:00 Africa/Cairo). Storage stays UTC.
 
 def seconds_until_daily_reset(now: datetime = None) -> int:
-    now = now or datetime.now(timezone.utc)
-    next_midnight = datetime(
-        now.year, now.month, now.day, tzinfo=timezone.utc) + timedelta(days=1)
-    return max(0, int((next_midnight - now).total_seconds()))
+    return seconds_until_cairo_midnight(now)
 
 
 def seconds_until_weekly_reset(now: datetime = None) -> int:
-    now = now or datetime.now(timezone.utc)
-    this_monday = now.date() - timedelta(days=now.date().weekday())
-    next_monday = datetime(
-        this_monday.year, this_monday.month, this_monday.day,
-        tzinfo=timezone.utc) + timedelta(days=7)
-    return max(0, int((next_monday - now).total_seconds()))
+    return seconds_until_cairo_saturday(now)
 
 
 def format_reset_countdown(seconds: int) -> str:
-    """'7 hours' / '3 days' / '45 minutes' — coarse on purpose, the
-    exact second would be a lie within a minute of rendering anyway.
-    Never returns '0 minutes' (rounds up to 1) so a member looking at
-    the last minute of a period still sees a countdown, not a zero."""
-    seconds = max(0, int(seconds))
-    days, rem = divmod(seconds, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes = max(1, rem // 60)
-    if days:
-        return f"{days} day{'s' if days != 1 else ''}"
-    if hours:
-        return f"{hours} hour{'s' if hours != 1 else ''}"
-    return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    """H:MMH — e.g. '1:12H', '0:05H', '24:00H'. Never 0:00H while time remains."""
+    return format_cairo_countdown(seconds)
 
 
 # ── Definitions CRUD (single validation + write path — the cog's slash

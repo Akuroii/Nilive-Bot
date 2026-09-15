@@ -2,6 +2,7 @@ import random
 import aiosqlite
 from datetime import datetime, timezone, timedelta
 from database import DB_PATH
+from utils.timezone import get_cairo_daily_key, seconds_until_cairo_midnight, CAIRO_TZ
 
 # ═══════════════════════════════════════════════════════════════════════
 # DAILY / STREAK ENGINE
@@ -10,7 +11,7 @@ from database import DB_PATH
 # (module-level, wiped on every restart, no streak concept at all) with
 # persisted, per-(guild_id, user_id) state in the daily_claims table.
 #
-# Day boundary is UTC calendar day, not a rolling 24h window:
+# Day boundary is Cairo calendar day (Africa/Cairo), not a rolling 24h window:
 #   - last_claim_date == today            -> already claimed, rejected
 #   - last_claim_date == yesterday        -> streak continues (+1)
 #   - anything older, or no prior claim   -> streak resets to 1
@@ -46,18 +47,15 @@ DEFAULT_STREAK_BONUS_PER_DAY = 20
 
 
 class DailyAlreadyClaimed(Exception):
-    """Raised when the member has already claimed for the current UTC day."""
+    """Raised when the member has already claimed for the current Cairo day."""
     def __init__(self, seconds_remaining: int):
         self.seconds_remaining = max(0, int(seconds_remaining))
-        super().__init__("Already claimed for the current UTC day")
+        super().__init__("Already claimed for the current Cairo day")
 
 
 def _seconds_until_next_utc_midnight(now: datetime) -> int:
-    today = now.date()
-    next_midnight = datetime(
-        today.year, today.month, today.day, tzinfo=timezone.utc
-    ) + timedelta(days=1)
-    return int((next_midnight - now).total_seconds())
+    # Kept for backwards-compat alias; new code uses Cairo midnight
+    return seconds_until_cairo_midnight(now)
 
 
 async def claim_daily_streak(guild_id: int, user_id: int) -> dict:
@@ -65,12 +63,14 @@ async def claim_daily_streak(guild_id: int, user_id: int) -> dict:
     Atomically checks and updates daily-claim/streak state.
     Returns {"streak": new_streak_count} on success.
     Raises DailyAlreadyClaimed(seconds_remaining) if already claimed
-    for the current UTC calendar day. Never leaves a partial write —
+    for the current Cairo calendar day. Never leaves a partial write —
     every rejection path rolls back before raising.
     """
     now = datetime.now(timezone.utc)
-    today_str = now.date().isoformat()
-    yesterday_str = (now.date() - timedelta(days=1)).isoformat()
+    today_str = get_cairo_daily_key(now)
+    # Cairo yesterday = today -1 day in Cairo calendar
+    cairo_today = now.astimezone(CAIRO_TZ).date()
+    yesterday_str = (cairo_today - timedelta(days=1)).isoformat()
 
     new_streak = None
     async with aiosqlite.connect(DB_PATH) as db:
@@ -90,7 +90,7 @@ async def claim_daily_streak(guild_id: int, user_id: int) -> dict:
                 new_streak = int(row[1]) + 1
             else:
                 # No prior row (first-ever claim) or the gap is more
-                # than one day (missed a full UTC day) -> restart at 1.
+                # than one day (missed a full Cairo day) -> restart at 1.
                 new_streak = 1
 
             await db.execute("""
@@ -184,14 +184,12 @@ async def get_streak_state(guild_id: int, user_id: int) -> dict:
     the cooldown message — never mutates anything.
 
     `streak` is the CURRENT effective streak: the stored count if the
-    last claim was today or yesterday, otherwise 0, because a stored
-    count whose chain was already broken is history, not a live streak.
-    Showing the raw stored number would tell a member "Day 7" right
-    before their next claim silently restarts them at Day 1.
+    last claim was today or yesterday (Cairo calendar), otherwise 0.
     """
     now = datetime.now(timezone.utc)
-    today_str = now.date().isoformat()
-    yesterday_str = (now.date() - timedelta(days=1)).isoformat()
+    today_str = get_cairo_daily_key(now)
+    cairo_today = now.astimezone(CAIRO_TZ).date()
+    yesterday_str = (cairo_today - timedelta(days=1)).isoformat()
 
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
@@ -250,7 +248,7 @@ async def perform_streak_claim(bot, guild_id: int, user_id: int,
     Wallet button.
 
     Raises DailyAlreadyClaimed (with seconds_remaining) when the member
-    has already claimed for the current UTC day — callers turn that
+    has already claimed for the current Cairo day — callers turn that
     into their own cooldown message. On success returns everything a
     caller needs to render a result, so no caller has to re-query.
 

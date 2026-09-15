@@ -219,8 +219,17 @@ class Boost(commands.Cog):
             await interaction.response.send_message("No boosters yet.", ephemeral=True)
             return
         embed = discord.Embed(title=f"💜 Server Boosters ({len(boosters)})", color=0xf47fff)
+        # Display boost start date in Cairo (user-facing)
+        from utils.timezone import CAIRO_TZ
+        def _cairo_date(dt):
+            try:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=__import__("datetime", fromlist=["timezone"]).timezone.utc)
+                return dt.astimezone(CAIRO_TZ).strftime("%Y-%m-%d")
+            except Exception:
+                return dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)
         embed.description = "\n".join(
-            f"• {m.mention} — since {m.premium_since.strftime('%Y-%m-%d')}" for m in boosters)
+            f"• {m.mention} — since {_cairo_date(m.premium_since)}" for m in boosters)
         await interaction.response.send_message(embed=embed)
 
     # ── boost_color_roles feature ────────────────────────────────────

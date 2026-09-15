@@ -3,10 +3,11 @@ from discord.ext import commands, tasks
 import aiosqlite
 from datetime import datetime, timezone
 from database import DB_PATH
+from utils.timezone import get_cairo_daily_key
 
 
 async def get_today_activity(guild_id: int, user_id: int) -> dict:
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = get_cairo_daily_key()
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT messages_count, words_count, voice_minutes, forum_posts_count
@@ -37,7 +38,7 @@ class ActivityEngine(commands.Cog):
             return
 
         word_count = len(message.content.split())
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = get_cairo_daily_key()
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -67,7 +68,7 @@ class ActivityEngine(commands.Cog):
         except Exception:
             pass
 
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = get_cairo_daily_key()
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO activity_stats
@@ -82,7 +83,7 @@ class ActivityEngine(commands.Cog):
 
     @tasks.loop(seconds=60)
     async def voice_tick_task(self):
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = get_cairo_daily_key()
         for guild in self.bot.guilds:
             try:
                 afk_channel_id = guild.afk_channel.id if guild.afk_channel else None

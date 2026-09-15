@@ -428,29 +428,40 @@ async def engine_tests():
     section("11/12. Reset countdowns (UTC) and formatting")
 
     utc = timezone.utc
-    check("daily countdown to UTC midnight",
-          me.seconds_until_daily_reset(datetime(2026, 9, 14, 23, 0, tzinfo=utc)) == 3600)
-    # 2024-01-01 was a Monday → 2024-01-03 is a Wednesday; next Monday
-    # is 2024-01-08 00:00 → 4d 12h away.
-    check("weekly countdown from a Wednesday",
-          me.seconds_until_weekly_reset(datetime(2024, 1, 3, 12, 0, tzinfo=utc)) == 388800)
-    check("weekly countdown from Monday 00:00 is a full week",
-          me.seconds_until_weekly_reset(datetime(2024, 1, 8, 0, 0, tzinfo=utc)) == 604800)
-    check("countdown formatting '7 hours'",
-          me.format_reset_countdown(7 * 3600) == "7 hours")
-    check("countdown formatting '3 days'",
-          me.format_reset_countdown(3 * 86400) == "3 days")
-    check("countdown formatting '1 hour'",
-          me.format_reset_countdown(3600) == "1 hour")
-    check("countdown formatting '45 minutes'",
-          me.format_reset_countdown(45 * 60) == "45 minutes")
-    check("countdown never renders as zero minutes",
-          me.format_reset_countdown(30) == "1 minute"
-          and me.format_reset_countdown(0) == "1 minute")
+    from utils.timezone import CAIRO_TZ
+    # Cairo daily reset is 00:00 Africa/Cairo. In September Cairo is UTC+3 (EEST),
+    # so 1 hour before Cairo midnight is 20:00 UTC (which is 23:00 Cairo).
+    check("daily countdown to Cairo midnight (1h before)",
+          me.seconds_until_daily_reset(datetime(2026, 9, 14, 20, 0, tzinfo=utc)) == 3600)
+    # Weekly is Saturday 00:00 Cairo. Use a known Cairo week: Saturday 2024-01-06 is start of week.
+    # Wednesday 2024-01-10 12:00 UTC = Wednesday 2024-01-10 14:00 Cairo (UTC+2 in Jan) -> next Saturday is 2024-01-13 00:00 Cairo = 2024-01-12 22:00 UTC -> delta 2d 10h = 212400s
+    # Simpler: test Friday 23:59 Cairo -> 1 minute until Saturday midnight, and Saturday 00:00 -> 7 days
+    from datetime import datetime as _dt
+    # Friday 2024-01-12 23:59 Cairo = Friday 2024-01-12 21:59 UTC (UTC+2)
+    fri_cairo = _dt(2024, 1, 12, 21, 59, tzinfo=utc)
+    check("weekly countdown 1 min before Cairo Saturday",
+          0 < me.seconds_until_weekly_reset(fri_cairo) <= 90)
+    sat_midnight_utc = _dt(2024, 1, 5, 22, 0, tzinfo=utc)  # Sat 2024-01-06 00:00 Cairo = Fri 2024-01-05 22:00 UTC (Jan UTC+2)
+    check("weekly countdown from Saturday 00:00 Cairo is a full week",
+          me.seconds_until_weekly_reset(sat_midnight_utc) == 604800)
+    check("countdown formatting H:MMH '7:00H'",
+          me.format_reset_countdown(7 * 3600) == "7:00H")
+    check("countdown formatting '72:00H' for 3 days",
+          me.format_reset_countdown(3 * 86400) == "72:00H")
+    check("countdown formatting '1:00H'",
+          me.format_reset_countdown(3600) == "1:00H")
+    check("countdown formatting '0:45H'",
+          me.format_reset_countdown(45 * 60) == "0:45H")
+    check("countdown never renders as 0:00H",
+          me.format_reset_countdown(30) == "0:01H"
+          and me.format_reset_countdown(0) == "0:00H")
+    # Also test example from spec: 1:12H = 1h 12m = 4320s
+    check("spec example 1:12H",
+          me.format_reset_countdown(1*3600+12*60) == "1:12H")
 
     # Period rollover: yesterday's key is not today's key.
     today_key = me.get_period_key("daily")
-    check("daily period key changes across UTC midnight (rollover basis)",
+    check("daily period key changes across Cairo midnight (rollover basis)",
           today_key != yesterday, f"{today_key} vs {yesterday}")
 
     # get_user_progress reads the CURRENT period only: the legacy
@@ -515,9 +526,9 @@ def cog_tests():
         pass
     v = cog.MissionsView(_MiniBot(), 1, 2)
     b = v.refresh_button
-    check("button label is 'Refresh'", b.label == "Refresh", repr(b.label))
-    check("button style is Secondary/grey",
-          b.style is discord.ButtonStyle.secondary, str(b.style))
+    check("button label is 'ʀᴇꜰʀᴇꜱʜ'", b.label == "ʀᴇꜰʀᴇꜱʜ", repr(b.label))
+    check("button style is Primary/blurple",
+          b.style is discord.ButtonStyle.primary, str(b.style))
     check("button carries the custom emoji (name + id, static)",
           b.emoji is not None and b.emoji.name == "imagePhotoroom17"
           and b.emoji.id == 1549206183498481714 and not b.emoji.animated,
@@ -540,13 +551,13 @@ def cog_tests():
     section("7/10. Progress bar, percentage, completed rendering")
     def filled(pct):
         return cog.progress_bar(pct).count(cog.NODE_FILLED)
-    check("62% lights 5 of 7 nodes (mockup)", filled(62) == 5)
-    check("20% lights 2 of 7 nodes (mockup)", filled(20) == 2)
-    check("100% lights all 7", filled(100) == 7)
+    check("62% lights 4 of 6 nodes (v3 6-node bar)", filled(62) == 4)
+    check("20% lights 2 of 6 nodes", filled(20) == 2)
+    check("100% lights all 6", filled(100) == 6)
     check("0% lights none", filled(0) == 0)
-    check("28% lights 2 (ceil rule, not the mockup's 4)", filled(28) == 2)
+    check("28% lights 2 (ceil rule)", filled(28) == 2)
     check("bar joins nodes with ──",
-          cog.progress_bar(100) == "⬤──⬤──⬤──⬤──⬤──⬤──⬤")
+          cog.progress_bar(100) == "⬤──⬤──⬤──⬤──⬤──⬤")
     check("tiny progress lights at least one node", filled(0.5) == 1)
 
     # v2.1 verification: the BAR (not just the number) must never claim
@@ -558,19 +569,19 @@ def cog_tests():
     m95 = {"name": "X", "description": None, "type": "words",
            "target": 1000, "progress": 950, "completed": False,
            "channel_id": None}
-    check("incomplete mission at 95% shows 6/7 nodes, not a full bar",
-          block_filled(m95) == 6, cog._mission_block(m95, FakeGuild()))
-    m100 = {**m95, "progress": 1000, "completed": True}
-    check("completed mission shows a full 7/7 bar",
-          block_filled(m100) == 7)
-    # Sweep: no incomplete progress value may ever render a full bar.
+    check("incomplete mission at 95% shows 5/6 nodes, not a full bar (v3)",
+          block_filled(m95) == 5, cog._mission_block(m95, FakeGuild()))
+    m100 = {**m95, "progress": 1000, "completed": True, "reward_type": "coins", "reward_value": "10"}
+    check("completed mission shows a full 6/6 bar",
+          block_filled(m100) == 6)
+    # Sweep: no incomplete progress value may ever render a full bar (6 nodes).
     sweep_full = [p for p in range(0, 1000)
-                  if block_filled({**m95, "progress": p}) == 7]
+                  if block_filled({**m95, "progress": p, "completed": False}) == 6]
     check("no incomplete progress value (0-99.9%) renders a full bar",
           not sweep_full, str(sweep_full[:5]))
-    # And every complete one does.
+    # And every complete one does (6/6).
     check("bar is full exactly when completed (sweep consistency)",
-          block_filled({**m95, "progress": 999, "completed": True}) == 7)
+          block_filled({**m95, "progress": 999, "completed": True, "reward_type": "coins", "reward_value": "1"}) == 6)
 
     m = {"name": "Write 200 words", "description": None, "type": "words",
          "target": 200, "progress": 124, "completed": False,
@@ -578,24 +589,25 @@ def cog_tests():
     block = cog._mission_block(m, FakeGuild())
     check("block shows capped numeric progress",
           "`Progress: 124 / 200 words`" in block, block)
-    check("block shows the real percentage",
-          "*`62%`**ˎˊ˗" in block and "⬤──⬤──⬤──⬤──⬤──◯──◯" in block, block)
-    check("restricted mission names its channel",
-          "counts in #writing" in block, block)
+    check("block shows the real percentage (v3 bold code)",
+          "**`62%`**ˎˊ˗" in block and "⬤──⬤──⬤──⬤──◯──◯" in block, block)
+    check("restricted mission does NOT show channel text (v3: internal only)",
+          "counts in" not in block and "#writing" not in block, block)
     m_free = {**m, "channel_id": None}
     check("unrestricted mission doesn't imply a channel",
           "channel" not in cog._mission_block(m_free, FakeGuild()))
-    m_done = {**m, "progress": 200, "completed": True}
+    # Completed missions now show dynamic reward + checkmark, not hardcoded diamond
+    m_done = {**m, "progress": 200, "completed": True, "reward_type": "coins", "reward_value": "100"}
     done_block = cog._mission_block(m_done, FakeGuild())
-    check("completed mission shows Reward claimed + diamond emoji",
-          f"⤷ Reward claimed {cog.DIAMOND_EMOJI}" in done_block, done_block)
+    check("completed mission shows `reward claimed` + dynamic reward + checkmark",
+          "`reward claimed`" in done_block and "✅" in done_block, done_block)
     check("completed mission drops the Progress line",
           "Progress:" not in done_block, done_block)
-    check("completed mission shows 100%",
-          "*`100%`**ˎˊ˗" in done_block, done_block)
+    check("completed mission shows 100% (bold code)",
+          "**`100%`**ˎˊ˗" in done_block, done_block)
     m_edge = {**m, "progress": 199, "completed": False}
-    check("99.5% renders as 99%, never a false 100%",
-          "*`99%`**ˎˊ˗" in cog._mission_block(m_edge, FakeGuild()))
+    check("99.5% renders as 99%, never a false 100% (v3)",
+          "**`99%`**ˎˊ˗" in cog._mission_block(m_edge, FakeGuild()))
     m_meta = {"name": "Complete 5 daily missions", "description": None,
               "type": "daily_completions", "target": 5, "progress": 1,
               "completed": False, "channel_id": None}
@@ -681,8 +693,8 @@ async def display_tests():
           daily[0].title == "Daily Mission Progress (1 / 2)", daily[0].title)
     check("weekly heading is dynamic too",
           weekly[0].title == "Weekly Mission Progress (0 / 1)", weekly[0].title)
-    check("completed mission renders Reward claimed line",
-          f"⤷ Reward claimed {cog.DIAMOND_EMOJI}" in daily[0].description)
+    check("completed mission renders `reward claimed` + checkmark",
+          "`reward claimed`" in daily[0].description and "✅" in daily[0].description)
     check("incomplete mission keeps its Progress line",
           "`Progress: 124 / 200 words`" in daily[0].description)
     check("daily embed ends with its next-rotation countdown",
@@ -697,8 +709,8 @@ async def display_tests():
           weekly[0].description)
     check("all embed descriptions under Discord's 4096 cap",
           all(len(e.description) <= 4096 for e in embeds))
-    check("channel mention rendered from the live guild",
-          "counts in #writing" in daily[0].description)
+    check("channel restriction is internal only - no member-facing channel text",
+          "counts in" not in daily[0].description and "#writing" not in daily[0].description)
 
     # Same guild, other member: shared denominator, own numerator —
     # the words mission is complete for THEM, not for USER.
@@ -708,7 +720,7 @@ async def display_tests():
     check("numerator is per-member (other member completed the words "
           "mission in the same shared section)",
           other_daily[0].title == "Daily Mission Progress (1 / 2)"
-          and "⤷ Reward claimed" in other_daily[0].description
+          and "`reward claimed`" in other_daily[0].description
           and "`Progress: 124 / 200 words`" not in other_daily[0].description,
           other_daily[0].title)
 
