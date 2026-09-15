@@ -100,7 +100,7 @@ def build_twitch_live_embed(username: str, stream: dict) -> discord.Embed:
     twitch_url = f"https://twitch.tv/{username}"
 
     embed = discord.Embed(
-        title=title or f"{username} is live!", url=twitch_url, color=TWITCH_COLOR)
+        title=title or f"{username} is live.", url=twitch_url, color=TWITCH_COLOR)
     embed.add_field(name="Game", value=game or "Unknown")
     embed.add_field(name="Viewers", value=f"{viewers:,}")
     thumbnail = stream.get("thumbnail_url", "")
@@ -128,7 +128,7 @@ def _build_content(mention: str, custom_msg: str | None, username: str,
                 .replace("{game}", game)
                 .replace("{url}", url))
     else:
-        text = f"🔴 **{username}** is now LIVE!"
+        text = f"🔴 **{username}** is now LIVE."
     return f"{mention} {text}".strip() if mention else text
 
 

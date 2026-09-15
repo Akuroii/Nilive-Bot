@@ -21,9 +21,9 @@ from dashboard.api import api_bp
 @api_bp.route("/mvp/scores")
 @require_api_permission(LEVEL_ADMIN)
 def mvp_scores_partial():
-    from datetime import date
+    from utils.timezone import get_cairo_daily_key
     guild_id = get_session_guild_id()
-    today    = date.today().isoformat()
+    today    = get_cairo_daily_key()
 
     async def fetch():
         async with aiosqlite.connect(DB_PATH) as db:

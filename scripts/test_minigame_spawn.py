@@ -953,8 +953,9 @@ async def test_pacing_iteration():
         # week reset + one roll + successful auto spawn
         await cog._daily_check_iteration()
         cfg = await store.get_config(G)
-        today = datetime.now(timezone.utc).date().isoformat()
-        monday = cog_mod._monday_of(datetime.now(timezone.utc))
+        from utils.timezone import get_cairo_daily_key, get_cairo_weekly_key
+        today = get_cairo_daily_key()
+        monday = get_cairo_weekly_key(datetime.now(timezone.utc))
         check("G1: first pass — roll recorded today + spawn happened",
               cfg["last_check_date"] == today and cfg["week_start_date"] == monday
               and int(cfg["events_this_week"]) == 1,

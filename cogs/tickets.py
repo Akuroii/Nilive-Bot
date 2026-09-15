@@ -4,7 +4,7 @@ from discord import app_commands
 import aiosqlite
 import json
 from database import DB_PATH
-from datetime import datetime
+from datetime import datetime, timezone
 
 class TicketCategory(discord.ui.Select):
     def __init__(self, categories):
@@ -83,7 +83,7 @@ class TicketControlView(discord.ui.View):
         if row and row[0]:
             staff_role = interaction.guild.get_role(row[0])
             if staff_role and staff_role not in interaction.user.roles:
-                await interaction.response.send_message("Only staff can claim tickets!", ephemeral=True)
+                await interaction.response.send_message("Only staff can claim tickets.", ephemeral=True)
                 return
         elif not interaction.user.guild_permissions.manage_channels:
             # SECURITY FIX (dark-fixes pass #8): `row and row[0]` above
@@ -95,7 +95,7 @@ class TicketControlView(discord.ui.View):
             # is set; this brings claim in line with that same
             # established fallback instead of defaulting to open access.
             await interaction.response.send_message(
-                "Only staff can claim tickets!", ephemeral=True)
+                "Only staff can claim tickets.", ephemeral=True)
             return
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -118,7 +118,7 @@ class TicketControlView(discord.ui.View):
         if row and row[0]:
             staff_role = interaction.guild.get_role(row[0])
             if staff_role and staff_role not in interaction.user.roles:
-                await interaction.response.send_message("Only staff can add members!", ephemeral=True)
+                await interaction.response.send_message("Only staff can add members.", ephemeral=True)
                 return
         await interaction.response.send_message(
             "Reply with `/ticket_add @member` to add someone to this ticket.", ephemeral=True)
@@ -135,7 +135,7 @@ class ClosedTicketView(discord.ui.View):
                 (interaction.channel.id,))
             row = await cursor.fetchone()
         if not row:
-            await interaction.response.send_message("Ticket data not found!", ephemeral=True)
+            await interaction.response.send_message("Ticket data not found.", ephemeral=True)
             return
         user_id, staff_role_id, category = row
 
@@ -208,7 +208,7 @@ class ClosedTicketView(discord.ui.View):
         if row and row[0]:
             staff_role = interaction.guild.get_role(row[0])
             if staff_role and staff_role not in interaction.user.roles:
-                await interaction.response.send_message("Only staff can delete tickets!", ephemeral=True)
+                await interaction.response.send_message("Only staff can delete tickets.", ephemeral=True)
                 return
         elif not interaction.user.guild_permissions.manage_channels:
             # SECURITY FIX (dark-fixes pass #8): same open-access gap as
@@ -218,7 +218,7 @@ class ClosedTicketView(discord.ui.View):
             # back to manage_channels, matching close_ticket's existing
             # is_admin fallback.
             await interaction.response.send_message(
-                "Only staff can delete tickets!", ephemeral=True)
+                "Only staff can delete tickets.", ephemeral=True)
             return
         await save_transcript(interaction.channel, interaction.guild)
         await interaction.channel.delete()
@@ -309,7 +309,7 @@ async def create_ticket(interaction: discord.Interaction, category: str):
             INSERT INTO tickets (guild_id, channel_id, user_id, staff_role_id, status, category, created_at)
             VALUES (?, ?, ?, ?, 'open', ?, ?)
         """, (guild.id, channel.id, interaction.user.id, staff_role_id, category,
-              datetime.utcnow().isoformat()))
+              datetime.now(timezone.utc).isoformat()))
         await db.commit()
 
     # TASK 4 upgrade: embed customization now supports the same
@@ -376,7 +376,7 @@ async def close_ticket(interaction: discord.Interaction):
             (interaction.channel.id,))
         row = await cursor.fetchone()
     if not row:
-        await interaction.response.send_message("This is not an open ticket!", ephemeral=True)
+        await interaction.response.send_message("This is not an open ticket.", ephemeral=True)
         return
     user_id, staff_role_id, category = row
 
@@ -434,7 +434,13 @@ async def close_ticket(interaction: discord.Interaction):
 async def save_transcript(channel: discord.TextChannel, guild: discord.Guild):
     messages = []
     async for msg in channel.history(limit=500, oldest_first=True):
-        messages.append(f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author.display_name}: {msg.content}")
+        # Transcript timestamps in Cairo for user-facing consistency
+        try:
+            from utils.timezone import CAIRO_TZ
+            _cairo_ts = msg.created_at.astimezone(CAIRO_TZ).strftime("%Y-%m-%d %H:%M") if msg.created_at.tzinfo else msg.created_at.replace(tzinfo=__import__("datetime", fromlist=["timezone"]).timezone.utc).astimezone(CAIRO_TZ).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            _cairo_ts = msg.created_at.strftime("%Y-%m-%d %H:%M")
+        messages.append(f"[{_cairo_ts}] {msg.author.display_name}: {msg.content}")
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT transcript_channel_id, save_transcripts FROM ticket_settings WHERE guild_id=?", (guild.id,))
@@ -498,7 +504,7 @@ class Tickets(commands.Cog):
 
         embed = discord.Embed(
             title="Ticket System",
-            description="Click the button below to open a support ticket!",
+            description="Click the button below to open a support ticket.",
             color=discord.Color.blurple())
         embed.set_footer(text="One ticket per user at a time")
         await channel.send(embed=embed, view=TicketOpenButton())
@@ -511,13 +517,13 @@ class Tickets(commands.Cog):
     async def ticket_add(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.channel.set_permissions(
             member, view_channel=True, send_messages=True, read_message_history=True)
-        await interaction.response.send_message(f"Added {member.mention} to the ticket!")
+        await interaction.response.send_message(f"Added {member.mention} to the ticket.")
 
     @app_commands.command(name="ticket_remove", description="Remove a member from the current ticket")
     @app_commands.checks.has_permissions(manage_channels=True)
     async def ticket_remove(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.channel.set_permissions(member, view_channel=False)
-        await interaction.response.send_message(f"Removed {member.mention} from the ticket!")
+        await interaction.response.send_message(f"Removed {member.mention} from the ticket.")
 
     @app_commands.command(name="ticket_close", description="Close the current ticket")
     async def ticket_close(self, interaction: discord.Interaction):
