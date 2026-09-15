@@ -252,7 +252,7 @@ class ReactionRoles(commands.Cog):
             title=title,
             description=description,
             color=discord.Color.blurple())
-        embed.set_footer(text="Click a button to get or remove a role.")
+        embed.set_footer(text="Click a button to get or remove a role!")
         view = discord.ui.View(timeout=None)
         msg = await channel.send(embed=embed, view=view)
         async with aiosqlite.connect(DB_PATH) as db:
@@ -344,7 +344,7 @@ class ReactionRoles(commands.Cog):
                 return
             except:
                 continue
-        await interaction.response.send_message("Message not found.", ephemeral=True)
+        await interaction.response.send_message("Message not found!", ephemeral=True)
 
     @app_commands.command(name="reactionrole_remove", description="Remove a role button from a reaction role message")
     @app_commands.checks.has_permissions(administrator=True)
@@ -376,7 +376,7 @@ class ReactionRoles(commands.Cog):
                 return
             except:
                 continue
-        await interaction.response.send_message("Message not found.", ephemeral=True)
+        await interaction.response.send_message("Message not found!", ephemeral=True)
 
     @app_commands.command(name="reactionrole_list", description="List all reaction role messages")
     @app_commands.checks.has_permissions(administrator=True)
@@ -391,7 +391,7 @@ class ReactionRoles(commands.Cog):
             rows = await cursor.fetchall()
         if not rows:
             await interaction.response.send_message(
-                "No reaction role messages found.", ephemeral=True)
+                "No reaction role messages found!", ephemeral=True)
             return
         embed = discord.Embed(
             title="Reaction Role Messages",
@@ -429,7 +429,7 @@ class RoleButton(discord.ui.Button):
 
         if not role:
             await interaction.response.send_message(
-                "Role not found.", ephemeral=True)
+                "Role not found!", ephemeral=True)
             return
 
         if self.booster_only and not member.premium_since:
@@ -442,7 +442,7 @@ class RoleButton(discord.ui.Button):
             required = guild.get_role(self.required_role_id)
             if required and required not in member.roles:
                 await interaction.response.send_message(
-                    f"You need the **{required.name}** role to get this.",
+                    f"You need the **{required.name}** role to get this!",
                     ephemeral=True)
                 return
 
@@ -465,12 +465,12 @@ class RoleButton(discord.ui.Button):
                 return
             await member.remove_roles(role)
             await interaction.response.send_message(
-                f"Removed **{role.name}**.", ephemeral=True)
+                f"Removed **{role.name}**!", ephemeral=True)
             return
 
         if self.max_roles > 0 and len(current_panel_roles) >= self.max_roles:
             await interaction.response.send_message(
-                f"You can only have **{self.max_roles}** role(s) from this panel.",
+                f"You can only have **{self.max_roles}** role(s) from this panel!",
                 ephemeral=True)
             return
 
@@ -509,7 +509,7 @@ class RoleButton(discord.ui.Button):
                 """, (guild.id, member.id, self.role_id, self.message_id, expiry[0]))
                 await db.commit()
 
-        msg = f"Gave you **{role.name}**."
+        msg = f"Gave you **{role.name}**!"
         if self.exclusive and current_panel_roles:
             removed = ", ".join(r.name for r in current_panel_roles)
             msg += f"\nRemoved: {removed}"
@@ -531,20 +531,20 @@ class ConfirmView(discord.ui.View):
         if self.action == "remove":
             await member.remove_roles(self.role)
             await interaction.response.edit_message(
-                content=f"Removed **{self.role.name}**.", view=None)
+                content=f"Removed **{self.role.name}**!", view=None)
         else:
             if self.exclusive:
                 for r in self.current_roles:
                     await member.remove_roles(r)
             await member.add_roles(self.role)
             await interaction.response.edit_message(
-                content=f"Gave you **{self.role.name}**.", view=None)
+                content=f"Gave you **{self.role.name}**!", view=None)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction,
                      button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="Cancelled.", view=None)
+            content="Cancelled!", view=None)
 
 
 async def setup(bot):

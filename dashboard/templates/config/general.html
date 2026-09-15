@@ -21,8 +21,8 @@
             <div class="form-group">
                 <label class="form-label">Timezone</label>
                 <select class="form-input" name="timezone">
-                    {% for tz in ['Africa/Cairo','US/Eastern','US/Pacific','Europe/London','Europe/Paris','Asia/Dubai','Asia/Riyadh'] %}
-                    <option value="{{ tz }}" {% if settings.get('timezone') == tz or (tz == 'Africa/Cairo' and settings.get('timezone') in ['UTC', 'Asia/Cairo', 'Etc/UTC']) %}selected{% endif %}>{{ tz }}</option>
+                    {% for tz in ['UTC','US/Eastern','US/Pacific','Europe/London','Europe/Paris','Asia/Dubai','Asia/Riyadh','Asia/Cairo'] %}
+                    <option value="{{ tz }}" {% if settings.get('timezone') == tz %}selected{% endif %}>{{ tz }}</option>
                     {% endfor %}
                 </select>
             </div>

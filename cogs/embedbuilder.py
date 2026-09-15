@@ -108,7 +108,7 @@ class EmbedBuilder(commands.Cog):
                 "footer": footer, "image": image, "thumbnail": thumbnail, "author": author}
         embed = self.build_embed(data)
         if not title and not description:
-            await interaction.response.send_message("You need at least a title or description.", ephemeral=True)
+            await interaction.response.send_message("You need at least a title or description!", ephemeral=True)
             return
         msg = await channel.send(embed=embed)
         if save_as:
@@ -132,16 +132,16 @@ class EmbedBuilder(commands.Cog):
             try:
                 msg = await ch.fetch_message(msg_id)
                 if not msg.embeds:
-                    await interaction.response.send_message("No embed found on that message.", ephemeral=True)
+                    await interaction.response.send_message("No embed found on that message!", ephemeral=True)
                     return
                 embed = msg.embeds[0]
                 embed.add_field(name=field_name, value=field_value, inline=inline)
                 await msg.edit(embed=embed)
-                await interaction.response.send_message("Field added.", ephemeral=True)
+                await interaction.response.send_message("Field added!", ephemeral=True)
                 return
             except:
                 continue
-        await interaction.response.send_message("Message not found.", ephemeral=True)
+        await interaction.response.send_message("Message not found!", ephemeral=True)
 
     @app_commands.command(name="embed_edit", description="Edit an existing embed sent by the bot")
     @app_commands.checks.has_permissions(manage_messages=True)
@@ -153,7 +153,7 @@ class EmbedBuilder(commands.Cog):
             try:
                 msg = await ch.fetch_message(msg_id)
                 if not msg.embeds:
-                    await interaction.response.send_message("No embed found.", ephemeral=True)
+                    await interaction.response.send_message("No embed found!", ephemeral=True)
                     return
                 embed = msg.embeds[0].copy()
                 if title: embed.title = title
@@ -163,11 +163,11 @@ class EmbedBuilder(commands.Cog):
                 if image: embed.set_image(url=image)
                 if thumbnail: embed.set_thumbnail(url=thumbnail)
                 await msg.edit(embed=embed)
-                await interaction.response.send_message("Embed updated.", ephemeral=True)
+                await interaction.response.send_message("Embed updated!", ephemeral=True)
                 return
             except:
                 continue
-        await interaction.response.send_message("Message not found.", ephemeral=True)
+        await interaction.response.send_message("Message not found!", ephemeral=True)
 
     @app_commands.command(name="embed_send", description="Send a saved embed template to a channel")
     @app_commands.checks.has_permissions(manage_messages=True)
@@ -179,7 +179,7 @@ class EmbedBuilder(commands.Cog):
                 (interaction.guild.id, name.lower()))
             row = await cursor.fetchone()
         if not row:
-            await interaction.response.send_message(f"No template found with name `{name}`.", ephemeral=True)
+            await interaction.response.send_message(f"No template found with name `{name}`!", ephemeral=True)
             return
 
         content, embeds = self._doc_to_content_and_embeds(row[0])
@@ -194,7 +194,7 @@ class EmbedBuilder(commands.Cog):
         embeds = embeds[:10]
 
         await channel.send(content=content, embeds=embeds or None)
-        await interaction.response.send_message(f"Template `{name}` sent to {channel.mention}.", ephemeral=True)
+        await interaction.response.send_message(f"Template `{name}` sent to {channel.mention}!", ephemeral=True)
 
     @app_commands.command(name="embed_list", description="List all saved embed templates")
     @app_commands.checks.has_permissions(manage_messages=True)
@@ -204,7 +204,7 @@ class EmbedBuilder(commands.Cog):
             cursor = await db.execute("SELECT name FROM embed_templates WHERE guild_id=?", (interaction.guild.id,))
             rows = await cursor.fetchall()
         if not rows:
-            await interaction.response.send_message("No saved templates yet.", ephemeral=True)
+            await interaction.response.send_message("No saved templates yet!", ephemeral=True)
             return
         embed = discord.Embed(title="Saved Embed Templates", color=discord.Color.blurple())
         embed.description = "\n".join(f"• `{row[0]}`" for row in rows)
@@ -218,7 +218,7 @@ class EmbedBuilder(commands.Cog):
             await db.execute("DELETE FROM embed_templates WHERE guild_id=? AND name=?",
                             (interaction.guild.id, name.lower()))
             await db.commit()
-        await interaction.response.send_message(f"Template `{name}` deleted.", ephemeral=True)
+        await interaction.response.send_message(f"Template `{name}` deleted!", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(EmbedBuilder(bot))

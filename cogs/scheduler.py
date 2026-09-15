@@ -2,8 +2,6 @@ import re
 import json
 import discord
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-from utils.timezone import CAIRO_TZ
 from discord.ext import commands, tasks
 from discord import app_commands
 import aiosqlite
@@ -15,8 +13,8 @@ from database import DB_PATH
 # once a minute, sends them, and either disables one-off messages or
 # rolls repeating ones forward to their next occurrence.
 #
-# Stored timestamps remain UTC; human-entered wall-clock times are interpreted as Africa/Cairo.
-# Command output reflects Cairo where appropriate to avoid the classic
+# All times are UTC — every timestamp stored and compared here is UTC,
+# and command output says so explicitly to avoid the classic
 # "why did my 9am message send at 2am" support ticket.
 
 WHEN_RELATIVE_RE = re.compile(r"^(\d+)\s*([mhd])$", re.IGNORECASE)
@@ -26,8 +24,7 @@ REPEAT_TYPES = ("none", "hourly", "daily", "weekly")
 def parse_when(when: str) -> datetime | None:
     """
     Accepts either a relative shorthand ("30m", "2h", "3d") or an
-    absolute "YYYY-MM-DD HH:MM" string, absolute is interpreted as
-    Africa/Cairo wall-clock then converted to UTC for storage.
+    absolute "YYYY-MM-DD HH:MM" string, both interpreted as UTC.
     Returns None if it can't parse — callers turn that into a user
     facing error rather than guessing.
     """
@@ -42,10 +39,7 @@ def parse_when(when: str) -> datetime | None:
 
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
         try:
-            naive = datetime.strptime(when, fmt)
-            # Interpret as Cairo wall time
-            cairo_dt = naive.replace(tzinfo=CAIRO_TZ)
-            return cairo_dt.astimezone(timezone.utc)
+            return datetime.strptime(when, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
     return None
@@ -158,11 +152,11 @@ class Scheduler(commands.Cog):
     # ── admin commands ───────────────────────────────────────────────
 
     @app_commands.command(name="schedule_message",
-                          description="Schedule a message to be sent later (Cairo time)")
+                          description="Schedule a message to be sent later (UTC times)")
     @app_commands.describe(
         channel="Where to send it",
         message="The message text",
-        when="Relative (\"30m\", \"2h\", \"3d\") or absolute Cairo \"YYYY-MM-DD HH:MM\" (Africa/Cairo)",
+        when="Relative (\"30m\", \"2h\", \"3d\") or absolute UTC \"YYYY-MM-DD HH:MM\"",
         repeat="Repeat this message? Default: no",
         repeat_interval="Repeat every N hours/days/weeks (matches 'repeat'), default 1")
     @app_commands.choices(repeat=[
@@ -180,7 +174,7 @@ class Scheduler(commands.Cog):
         if send_at is None:
             await interaction.response.send_message(
                 "Couldn't parse that time. Use relative shorthand like `30m`, `2h`, `3d`, "
-                "or an absolute Cairo time like `2026-07-20 14:00` (Africa/Cairo).", ephemeral=True)
+                "or an absolute UTC time like `2026-07-20 14:00`.", ephemeral=True)
             return
 
         repeat_type = repeat.value if repeat else "none"
@@ -200,11 +194,9 @@ class Scheduler(commands.Cog):
 
         repeat_note = "" if repeat_type == "none" else \
             f" (repeating every {repeat_interval} {repeat_type.replace('ly', '')}{'s' if repeat_interval != 1 else ''})"
-        # Show Cairo time to user, stored as UTC
-        cairo_display = send_at.astimezone(CAIRO_TZ).strftime('%Y-%m-%d %H:%M')
         await interaction.response.send_message(
             f"✅ Scheduled for {channel.mention} at "
-            f"`{cairo_display} Africa/Cairo`{repeat_note}.", ephemeral=True)
+            f"`{send_at.strftime('%Y-%m-%d %H:%M UTC')}`{repeat_note}.", ephemeral=True)
 
     @app_commands.command(name="schedule_list",
                           description="List this server's scheduled messages")
@@ -233,15 +225,9 @@ class Scheduler(commands.Cog):
             status = "🟢 active" if enabled else "⚪ done / disabled"
             repeat_label = "one-off" if rtype == "none" else f"every {rinterval} {rtype.replace('ly','')}(s)"
             preview = (text[:60] + "…") if text and len(text) > 60 else (text or "(embed only)")
-            # send_at stored as UTC string; display as Cairo
-            try:
-                _dt = datetime.strptime(send_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).astimezone(CAIRO_TZ)
-                send_display = _dt.strftime("%Y-%m-%d %H:%M Africa/Cairo")
-            except Exception:
-                send_display = f"{send_at} UTC"
             embed.add_field(
                 name=f"#{row_id} — {status}",
-                value=f"{chan_label} · `{send_display}` · {repeat_label}\n{preview}",
+                value=f"{chan_label} · `{send_at} UTC` · {repeat_label}\n{preview}",
                 inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 

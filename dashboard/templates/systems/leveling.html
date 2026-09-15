@@ -473,7 +473,7 @@ async function loadResetConfig() {
     document.getElementById('reset-period').value = c.period || 'weekly';
     const info = document.getElementById('reset-last-info');
     info.textContent = c.last_reset
-        ? `Last reset: ${c.last_reset.slice(0, 16).replace('T', ' ')}`
+        ? `Last reset: ${c.last_reset.slice(0, 16).replace('T', ' ')} UTC`
         : 'No reset has run yet.';
 }
 loadResetConfig();

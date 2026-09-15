@@ -505,7 +505,7 @@ class QuickClickEngine(MinigameEngine):
         self._participant(info)
         await self.resolve([info], status="completed",
                            result_text="🏆 **%s** hit the green button "
-                                        "first." % info["name"])
+                                        "first!" % info["name"])
 
 
 # ── WHEEL (plan §6.2) ───────────────────────────────────────────────────
@@ -555,9 +555,9 @@ class WheelEngine(MinigameEngine):
             if not already:
                 self._participant(info)
         if already:
-            await _safe_ephemeral(interaction, "You are already in.")
+            await _safe_ephemeral(interaction, "You're already in!")
         else:
-            await _safe_ephemeral(interaction, "You are in.")
+            await _safe_ephemeral(interaction, "You're in!")
 
 
 # ── MULTIPLE CHOICE — math / colors / emoji (plan §6.3) ─────────────────
@@ -735,7 +735,7 @@ class RpsEngine(MinigameEngine):
                         "you press. "
                         + ("Waiting for a second player…" if waiting
                            else "Both players are seated — pick before time "
-                              "runs out."))
+                              "runs out!"))
                 msg = await _safe_ephemeral(interaction, text, view=view)
                 self._choice_views[seat["id"]] = (view, msg)
 
@@ -804,7 +804,7 @@ class RpsEngine(MinigameEngine):
             await self._resolve_rps()
             return
         await _safe_ephemeral(interaction,
-                              f"{self.EMOJI[choice]} Choice locked.")
+                              f"{self.EMOJI[choice]} Choice locked!")
 
     async def _resolve_rps(self):
         p1, p2 = self.seats
@@ -824,7 +824,7 @@ class RpsEngine(MinigameEngine):
         await self.resolve([winner], status="completed",
                            result_text=detail + "\n🏆 **"
                                               + winner["display_name"]
-                                              + "** wins.")
+                                              + "** wins!")
 
 
 # ── REGISTRY ────────────────────────────────────────────────────────────
