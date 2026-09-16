@@ -152,8 +152,12 @@ def format_number(n: int | float) -> str:
     return f"{int(n):,}"
 
 
-def format_coins(n: int, currency_name: str = "Coins") -> str:
-    return f"{format_number(n)} {currency_name}"
+# NOTE: a `format_coins(n, currency_name="Coins")` helper used to live here.
+# It was never called from anywhere, and its hardcoded "Coins" default made
+# it a second, competing source of truth for how a currency amount is
+# rendered. Currency display now goes through utils/currency.py's
+# currency_amount() / currency_label(), which resolve the configured name
+# and emoji per guild. Use format_number() for a bare number.
 
 
 def format_duration(minutes: int | None) -> str:

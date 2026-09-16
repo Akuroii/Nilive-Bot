@@ -8,7 +8,9 @@ from utils.trade_engine import (
 )
 from utils.inventory import has_item, get_inventory
 from utils.economy_safe import get_balance
-from utils.currency import get_currency_config, coin_name, coin_emoji, diamond_name, diamond_emoji
+from utils.currency import (
+    get_currency_config, currency_label, currency_amount,
+)
 
 TRADE_TIMEOUT_SECONDS = 600  # 10 minutes
 

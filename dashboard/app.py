@@ -1131,6 +1131,30 @@ def economy():
 
     balances, diamonds, exchange_rate = run_async(get_data())
 
+    # Currency display config is rendered server-side so the page never
+    # flashes the default 🪙/💎 before the fetch below fills in the real
+    # values — and so this page reads from the same resolver every other
+    # surface uses, rather than keeping its own copy of the names.
+    async def get_currency():
+        from utils.currency import (
+            get_currency_config, get_currency_config_raw,
+            DEFAULT_COIN_NAME, DEFAULT_COIN_EMOJI,
+            DEFAULT_DIAMOND_NAME, DEFAULT_DIAMOND_EMOJI,
+        )
+        return {
+            "resolved": await get_currency_config(guild_id),
+            "raw": await get_currency_config_raw(guild_id),
+            "defaults": {
+                "coin_name": DEFAULT_COIN_NAME,
+                "coin_emoji": DEFAULT_COIN_EMOJI,
+                "diamond_name": DEFAULT_DIAMOND_NAME,
+                "diamond_emoji": DEFAULT_DIAMOND_EMOJI,
+            },
+        }
+
+    _cur = run_async(get_currency())
+    currency = _cur["resolved"]
+
     async def resolve():
         from utils.discord_user_cache import resolve_users
         ids = {r[0] for r in balances} | {r[0] for r in diamonds}
@@ -1142,7 +1166,11 @@ def economy():
     ctx = get_current_user_context()
     return render("systems/economy.html",
                   balances=balances, diamonds=diamonds,
-                  exchange_rate=exchange_rate, user_map=user_map, **ctx)
+                  exchange_rate=exchange_rate,
+                  currency=currency,
+                  currency_raw=_cur["raw"],
+                  currency_defaults=_cur["defaults"],
+                  user_map=user_map, **ctx)
 
 
 # ── Shop ───────────────────────────────────────────────────────────────────────
@@ -1427,19 +1455,24 @@ def config_general():
         except Exception:
             pass
         async with aiosqlite.connect(DB_PATH) as db:
+            # Currency name/emoji are deliberately absent: Economy owns the
+            # currency DISPLAY configuration (utils/currency.py ->
+            # /api/economy/currency). Writing them from General Settings
+            # would let a prefix/timezone save clobber the owner's currency
+            # setup. The old statement named `currency_emoji_id`, a column
+            # dropped by the Wallet-pass migration, which made this whole
+            # form raise OperationalError on any fresh database.
             await db.execute("""
                 INSERT INTO guild_settings
                     (guild_id, prefix, timezone, language,
-                     log_channel_id, currency_name, currency_emoji_id,
-                     status_rotation_enabled, status_rotation_interval)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                     log_channel_id, status_rotation_enabled,
+                     status_rotation_interval)
+                VALUES (?,?,?,?,?,?,?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                     prefix                   = excluded.prefix,
                     timezone                 = excluded.timezone,
                     language                 = excluded.language,
                     log_channel_id           = excluded.log_channel_id,
-                    currency_name            = excluded.currency_name,
-                    currency_emoji_id        = excluded.currency_emoji_id,
                     status_rotation_enabled  = excluded.status_rotation_enabled,
                     status_rotation_interval = excluded.status_rotation_interval,
                     updated_at               = CURRENT_TIMESTAMP
@@ -1449,8 +1482,6 @@ def config_general():
                 data.get("timezone", "Africa/Cairo"),
                 data.get("language", "en"),
                 data.get("log_channel_id") or None,
-                data.get("currency_name", "Coins"),
-                data.get("currency_emoji_id") or None,
                 int(bool(data.get("status_rotation_enabled"))),
                 int(data.get("status_rotation_interval", 5)),
             ))

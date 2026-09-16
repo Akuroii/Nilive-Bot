@@ -6,7 +6,10 @@
 
 <div style="display:flex;gap:4px;margin-bottom:20px;
             border-bottom:1px solid var(--border);padding-bottom:0;">
-    {% for tab, label in [('coins','🪙 Coins'),('diamonds','💎 Diamonds'),('exchange','💱 Exchange Rate')] %}
+    {% for tab, label in [('coins', currency.coins.emoji ~ ' ' ~ currency.coins.name),
+                          ('diamonds', currency.diamonds.emoji ~ ' ' ~ currency.diamonds.name),
+                          ('currency','🎨 Currency'),
+                          ('exchange','💱 Exchange Rate')] %}
     <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
         style="padding:10px 18px;border:none;background:transparent;
                color:var(--text2);font-size:13px;font-weight:500;
@@ -19,7 +22,7 @@
 <!-- COINS TAB -->
 <div id="tab-content-coins" class="tab-content">
     <div class="card">
-        <div class="card-title">🪙 Richest Members</div>
+        <div class="card-title">{{ currency.coins.emoji }} Richest {{ currency.coins.name }} Holders</div>
         <div class="table-wrap">
             <table class="table">
                 <thead>
@@ -35,7 +38,7 @@
                             </div>
                         </td>
                         <td>{{ user_identity(b[0], u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
-                        <td><strong style="color:var(--gold);">🪙 {{ "{:,}".format(b[1]) }}</strong></td>
+                        <td><strong style="color:var(--gold);">{{ currency.coins.emoji }} {{ "{:,}".format(b[1]) }}</strong></td>
                     </tr>
                     {% else %}
                     <tr><td colspan="3" class="empty">No economy data yet</td></tr>
@@ -49,16 +52,16 @@
 <!-- DIAMONDS TAB -->
 <div id="tab-content-diamonds" class="tab-content" style="display:none;">
     <div class="card">
-        <div class="card-title">💎 Diamond Holders</div>
+        <div class="card-title">{{ currency.diamonds.emoji }} {{ currency.diamonds.name }} Holders</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Diamonds are a convertible currency — members earn them from special
-            events (bonus, no conversion needed) or by converting coins with
-            <code>/convert</code> at this server's exchange rate.
+            {{ currency.diamonds.name }} are a convertible currency — members earn them from
+            special events (bonus, no conversion needed) or by converting
+            {{ currency.coins.name }} with <code>/convert</code> at this server's exchange rate.
         </p>
         <div class="table-wrap">
             <table class="table">
                 <thead>
-                    <tr><th>Rank</th><th>Member</th><th>Diamonds</th></tr>
+                    <tr><th>Rank</th><th>Member</th><th>{{ currency.diamonds.name }}</th></tr>
                 </thead>
                 <tbody hx-get="/api/economy/leaderboard-diamonds" hx-trigger="load" hx-swap="innerHTML">
                     {% for d in diamonds %}
@@ -70,10 +73,10 @@
                             </div>
                         </td>
                         <td>{{ user_identity(d[0], u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
-                        <td><strong style="color:var(--accent);">💎 {{ "{:,}".format(d[1]) }}</strong></td>
+                        <td><strong style="color:var(--accent);">{{ currency.diamonds.emoji }} {{ "{:,}".format(d[1]) }}</strong></td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="3" class="empty">No diamonds held yet</td></tr>
+                    <tr><td colspan="3" class="empty">No {{ currency.diamonds.name }} held yet</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
@@ -81,18 +84,102 @@
     </div>
 </div>
 
+<!-- CURRENCY TAB -->
+<div id="tab-content-currency" class="tab-content" style="display:none;">
+    <div class="card">
+        <div class="card-title">{{ currency.coins.emoji }} Currency Names &amp; Icons</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Rename either currency and pick its icon — these names and emojis are used
+            everywhere the bot shows a currency: wallet, shop, inventory, trade,
+            minigames, missions and their rewards, daily rewards, events, leaderboards,
+            receipts, transaction history and every dashboard table.
+            <br><br>
+            <strong>Both fields are optional.</strong> Leave a name or icon blank to use
+            the default. Any name works, including non-English text.
+        </p>
+
+        <form id="currency-form" style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+            <div class="card" style="margin:0;">
+                <div class="card-title">Primary Currency</div>
+                <div class="form-group">
+                    <label class="form-label">Name</label>
+                    <input class="form-input" id="cur-coin-name" maxlength="32"
+                           placeholder="{{ currency_defaults.coin_name }}"
+                           value="{{ currency_raw.currency_name }}">
+                    <div class="form-hint">Blank = {{ currency_defaults.coin_name }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Emoji / Emoji ID</label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input class="form-input" id="cur-coin-emoji" style="flex:1;"
+                               placeholder="{{ currency_defaults.coin_emoji }}"
+                               value="{{ currency_raw.coin_emoji_id }}">
+                        <span class="nero-emoji-preview" id="cur-coin-preview"
+                              style="font-size:22px;min-width:28px;text-align:center;"></span>
+                    </div>
+                    <div class="form-hint">
+                        Unicode emoji ({{ currency_defaults.coin_emoji }}), a custom emoji ID,
+                        or the whole <code>&lt;:name:id&gt;</code> token.
+                    </div>
+                </div>
+            </div>
+
+            <div class="card" style="margin:0;">
+                <div class="card-title">Diamond</div>
+                <div class="form-group">
+                    <label class="form-label">Name</label>
+                    <input class="form-input" id="cur-diamond-name" maxlength="32"
+                           placeholder="{{ currency_defaults.diamond_name }}"
+                           value="{{ currency_raw.diamond_name }}">
+                    <div class="form-hint">Blank = {{ currency_defaults.diamond_name }}</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Emoji / Emoji ID</label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input class="form-input" id="cur-diamond-emoji" style="flex:1;"
+                               placeholder="{{ currency_defaults.diamond_emoji }}"
+                               value="{{ currency_raw.diamond_emoji_id }}">
+                        <span class="nero-emoji-preview" id="cur-diamond-preview"
+                              style="font-size:22px;min-width:28px;text-align:center;"></span>
+                    </div>
+                    <div class="form-hint">
+                        Unicode emoji ({{ currency_defaults.diamond_emoji }}), a custom emoji ID,
+                        or the whole <code>&lt;:name:id&gt;</code> token.
+                    </div>
+                </div>
+            </div>
+
+            <div style="grid-column:1/-1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                <button type="button" class="btn btn-primary" id="cur-save"
+                        onclick="saveCurrency(this)">Save Currency</button>
+                <button type="button" class="btn btn-secondary"
+                        onclick="resetCurrency()">Reset to Defaults</button>
+                <span id="cur-status" style="font-size:13px;"></span>
+            </div>
+
+            <div style="grid-column:1/-1;">
+                <div class="form-hint">
+                    Live preview: members see
+                    <strong id="cur-preview-text"></strong>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
 <!-- EXCHANGE RATE TAB -->
 <div id="tab-content-exchange" class="tab-content" style="display:none;">
     <div class="card">
-        <div class="card-title">💱 Coins ↔ Diamonds Exchange Rate</div>
+        <div class="card-title">💱 {{ currency.coins.name }} ↔ {{ currency.diamonds.name }} Exchange Rate</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Members convert coins into diamonds in Discord with <code>/convert</code>,
-            using this rate. Diamonds earned from events are separate and never
-            need conversion. Changing this rate only affects future conversions.
+            Members convert {{ currency.coins.name }} into {{ currency.diamonds.name }} in
+            Discord with <code>/convert</code>, using this rate.
+            {{ currency.diamonds.name }} earned from events are separate and never need
+            conversion. Changing this rate only affects future conversions.
         </p>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
             <div class="form-group" style="margin-bottom:0;">
-                <label class="form-label">Coins per 1 💎 Diamond</label>
+                <label class="form-label">{{ currency.coins.name }} per 1 {{ currency.diamonds.emoji }} {{ currency.diamonds.name }}</label>
                 <input class="form-input" id="exchange-rate-input"
                        type="number" min="1" value="{{ exchange_rate }}"
                        style="width:180px;">
@@ -129,6 +216,117 @@ async function saveExchangeRate() {
     if (data.success) showToast(`Rate set to ${rate.toLocaleString()}:1`);
     else showToast(data.error || 'Error saving rate', 'error');
 }
+
+// ── Currency tab ──────────────────────────────────────────────────────
+// The four fields map 1:1 onto the four stored values. Blank always means
+// "use the default" — that resolution happens server-side in
+// utils/currency.py, so nothing here needs to know what the defaults are
+// beyond displaying them as placeholders.
+const CUR_DEFAULTS = {
+    coin_name:    {{ currency_defaults.coin_name|tojson }},
+    coin_emoji:   {{ currency_defaults.coin_emoji|tojson }},
+    diamond_name: {{ currency_defaults.diamond_name|tojson }},
+    diamond_emoji:{{ currency_defaults.diamond_emoji|tojson }},
+};
+
+// Renders one emoji field's preview. A custom emoji cannot be shown as
+// text in HTML — `<:name:id>` is Discord *message* markup, not HTML — so
+// custom emoji are previewed as the CDN image, which Discord serves
+// publicly by ID. Unicode emoji are shown as-is.
+function renderCurrencyPreview(inputId, previewId, defaultEmoji) {
+    const raw = (document.getElementById(inputId).value || '').trim();
+    const box = document.getElementById(previewId);
+    if (!raw) { box.textContent = defaultEmoji; return; }
+    const m = raw.match(/^<(a?):\w+:(\d+)>$/);
+    if (m) {
+        const img = document.createElement('img');
+        img.src = `https://cdn.discordapp.com/emojis/${m[2]}.${m[1] === 'a' ? 'gif' : 'png'}`;
+        img.style.cssText = 'width:22px;height:22px;object-fit:contain;vertical-align:middle;';
+        img.alt = '';
+        box.textContent = '';
+        box.appendChild(img);
+        return;
+    }
+    if (/^\d+$/.test(raw)) {
+        const img = document.createElement('img');
+        img.src = `https://cdn.discordapp.com/emojis/${raw}.png`;
+        img.style.cssText = 'width:22px;height:22px;object-fit:contain;vertical-align:middle;';
+        img.alt = '';
+        img.onerror = () => { box.textContent = '❓'; };
+        box.textContent = '';
+        box.appendChild(img);
+        return;
+    }
+    box.textContent = raw;
+}
+
+function updateCurrencyPreviewText() {
+    const coinNameEl    = document.getElementById('cur-coin-name');
+    const diamondNameEl = document.getElementById('cur-diamond-name');
+    const coinName    = (coinNameEl.value || '').trim()    || CUR_DEFAULTS.coin_name;
+    const diamondName = (diamondNameEl.value || '').trim() || CUR_DEFAULTS.diamond_name;
+    const coinEmoji    = (document.getElementById('cur-coin-emoji').value || '').trim()
+                         || CUR_DEFAULTS.coin_emoji;
+    const diamondEmoji = (document.getElementById('cur-diamond-emoji').value || '').trim()
+                         || CUR_DEFAULTS.diamond_emoji;
+    // Custom-emoji tokens are shown as their bare name in this text
+    // preview — it is plain HTML, so the token itself would just be
+    // noise next to the icon preview above.
+    const plain = (e) => /^<a?:\w+:\d+>$/.test(e) ? '' : e + ' ';
+    document.getElementById('cur-preview-text').textContent =
+        `${plain(coinEmoji)}1,250 ${coinName}  ·  ${plain(diamondEmoji)}12 ${diamondName}`;
+}
+
+['cur-coin-name','cur-diamond-name'].forEach(id => {
+    document.getElementById(id).addEventListener('input', updateCurrencyPreviewText);
+});
+['cur-coin-emoji','cur-diamond-emoji'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => {
+        renderCurrencyPreview('cur-coin-emoji', 'cur-coin-preview', CUR_DEFAULTS.coin_emoji);
+        renderCurrencyPreview('cur-diamond-emoji', 'cur-diamond-preview', CUR_DEFAULTS.diamond_emoji);
+        updateCurrencyPreviewText();
+    });
+});
+
+function currentCurrencyPayload() {
+    // Sent verbatim, blanks included: a blank means "revert to default",
+    // which is different from omitting the key ("leave unchanged").
+    return {
+        currency_name:     document.getElementById('cur-coin-name').value,
+        coin_emoji_id:     document.getElementById('cur-coin-emoji').value,
+        diamond_name:      document.getElementById('cur-diamond-name').value,
+        diamond_emoji_id:  document.getElementById('cur-diamond-emoji').value,
+    };
+}
+
+async function saveCurrency(btn) {
+    // ajaxSave owns the button's loading state and the success/error
+    // toast, so this only has to re-render the preview from what the
+    // server actually stored: a blank field resolves to the default,
+    // which can differ from what the box was left showing.
+    const res = await ajaxSave('/api/economy/currency', currentCurrencyPayload(),
+                               btn, 'Currency saved!');
+    const r = res && res.resolved;
+    if (r) {
+        document.getElementById('cur-preview-text').textContent =
+            `1,250 ${r.coins.name}  ·  12 ${r.diamonds.name}`;
+    }
+}
+
+function resetCurrency() {
+    // Local only until Save is pressed — nothing is written by clearing
+    // the boxes, so an accidental click is harmless.
+    ['cur-coin-name','cur-coin-emoji','cur-diamond-name','cur-diamond-emoji']
+        .forEach(id => { document.getElementById(id).value = ''; });
+    renderCurrencyPreview('cur-coin-emoji', 'cur-coin-preview', CUR_DEFAULTS.coin_emoji);
+    renderCurrencyPreview('cur-diamond-emoji', 'cur-diamond-preview', CUR_DEFAULTS.diamond_emoji);
+    updateCurrencyPreviewText();
+    showToast('Cleared — press Save Currency to apply the defaults', 'warning');
+}
+
+renderCurrencyPreview('cur-coin-emoji', 'cur-coin-preview', CUR_DEFAULTS.coin_emoji);
+renderCurrencyPreview('cur-diamond-emoji', 'cur-diamond-preview', CUR_DEFAULTS.diamond_emoji);
+updateCurrencyPreviewText();
 </script>
 {% endblock %}
 {% endblock %}

@@ -8,7 +8,7 @@ import random
 from datetime import datetime, timezone, timedelta
 from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
-from utils.currency import get_currency_config, coin_name
+from utils.currency import get_currency_config, currency_amount
 
 
 async def give_reward(bot: discord.Client,
@@ -198,7 +198,7 @@ class Events(commands.Cog):
                     continue
 
                 await self._launch_event(
-                    channel, eid, title, desc,
+                    guild_id, channel, eid, title, desc,
                     reward_type, reward_value,
                     reward_dur, max_winners, embed_data_str)
 
@@ -213,10 +213,17 @@ class Events(commands.Cog):
                 print(f"[EVENTS] scheduled_events_task error for "
                       f"event {ev[0] if ev else '?'}: {e}")
 
-    async def _launch_event(self, channel, event_id, title,
+    async def _launch_event(self, guild_id, channel, event_id, title,
                              desc, reward_type, reward_value,
                              reward_dur, max_winners,
                              embed_data_str):
+        # guild_id is an explicit parameter. The reward-embed branch below
+        # used to read `interaction.guild.id` — but this method has no
+        # `interaction` (it is called from both the scheduled-events task
+        # and /event_create), so every coin/diamond event raised NameError
+        # and was swallowed by the except below: the event silently never
+        # posted. Passing the guild through removes the reference entirely.
+        # See CURRENCY_AUDIT.md C5.
         try:
             color_int = 0x7c5cbf
             if embed_data_str:
@@ -236,13 +243,13 @@ class Events(commands.Cog):
 
             cur = None
             if reward_type in ("coins", "diamonds"):
-                cur = await get_currency_config(interaction.guild.id if interaction.guild else 0)
+                cur = await get_currency_config(guild_id)
             if reward_type == "coins":
-                cc = cur["coins"] if cur else {"emoji": "🪙", "name": "Coins"}
+                cc = cur["coins"]
                 embed.add_field(name="Reward",
                                 value=f"{cc['emoji']} {int(reward_value):,} {cc['name']}")
             elif reward_type == "diamonds":
-                cd = cur["diamonds"] if cur else {"emoji": "💎", "name": "Diamonds"}
+                cd = cur["diamonds"]
                 embed.add_field(name="Reward",
                                 value=f"{cd['emoji']} {int(reward_value):,} {cd['name']}")
             elif reward_type == "xp":
@@ -316,7 +323,7 @@ class Events(commands.Cog):
             event_id = cursor.lastrowid
 
         await self._launch_event(
-            target, event_id, title, description,
+            interaction.guild.id, target, event_id, title, description,
             reward_type, reward_value,
             duration_hours, max_winners, None)
 

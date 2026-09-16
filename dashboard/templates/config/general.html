@@ -35,22 +35,14 @@
             </div>
         </div>
 
-        <div class="card">
-            <div class="card-title">🪙 Currency</div>
-            <div class="form-group">
-                <label class="form-label">Currency name</label>
-                <input class="form-input" name="currency_name"
-                       value="{{ settings.get('currency_name', 'Coins') }}"
-                       placeholder="Coins">
-                <div class="form-hint">Shown in economy commands and shop</div>
-            </div>
-            <div class="form-group">
-                <label class="form-label">Currency emoji ID (static emoji only)</label>
-                <input class="form-input" name="currency_emoji_id"
-                       value="{{ settings.get('currency_emoji_id', '') }}"
-                       placeholder="Leave empty for default 🪙">
-            </div>
-        </div>
+        <!-- Currency name/emoji were configured here. They now live under
+             Economy → Currency (currency is economy configuration, and
+             Economy is its single source of truth). Do not re-add inputs
+             for currency_name / coin_emoji_id / diamond_name /
+             diamond_emoji_id to this form — /api/settings/general and
+             this route no longer write those columns at all, so any
+             control added here would appear to save and silently do
+             nothing. See CURRENCY_AUDIT.md §6. -->
 
         <div class="card" style="grid-column:1/-1;">
             <div class="card-title">🔄 Status Rotation</div>
