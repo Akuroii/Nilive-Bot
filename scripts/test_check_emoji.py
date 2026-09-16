@@ -48,6 +48,12 @@ Covered here:
        stay driven by the Economy config, that rewards are still stored
        under the stable coins/diamonds keys, and that no hardcoded
        currency literal was introduced.
+  10c. The reward is fully dynamic — a matrix of amounts (1, 25, 7, 1250,
+       1000000, "50") × currency keys (coins, diamonds) × three Economy
+       configurations (defaults, custom Arabic names + unicode emoji,
+       custom names + custom Discord emoji tokens), each asserted against
+       the locked order, plus an AST scan proving the renderer holds no
+       hardcoded amount, currency name or currency emoji.
   11.  Unrelated ✅ checkmarks in the codebase are untouched (the welcome
        rules button keeps its own literal).
   12.  The dashboard's HTML twin resolves the same id off Discord's CDN
@@ -784,7 +790,9 @@ async def mission_render_tests():
           big_line)
 
     # Requirement: name + emoji resolve from the Economy config — custom
-    # when configured, default otherwise.
+    # when configured, default otherwise. The mission was created AND
+    # completed BEFORE this rename, so the rename must reach it with no
+    # edit to the mission row.
     await set_currency_config(GUILD, currency_name="صدفة", coin_emoji_id="✨")
     custom = await get_currency_config(GUILD)
     check("the Economy config now carries the custom coin name/emoji",
@@ -807,14 +815,18 @@ async def mission_render_tests():
               {**m, "reward_type": "xp", "reward_value": "50"}, FakeGuild())))
 
     # Requirement: rewards are still keyed by the stable 'coins'/'diamonds'
-    # keys in the DB — never by a display name.
+    # keys in the DB — never by a display name — and a currency rename
+    # after creation needs NO edit to the mission row.
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT reward_type, reward_value FROM missions_definitions "
+            "SELECT name, reward_type, reward_value FROM missions_definitions "
             "WHERE id=?", (mid,))
         row = await cursor.fetchone()
-    check("the stored reward is still the stable key 'coins', not 'صدفة'",
-          row == ("coins", "5"), str(row))
+    check("after the rename the mission row is untouched: stable key 'coins', "
+          "amount 5, no display name stored",
+          row == ("Say hello", "coins", "5"), str(row))
+    check("the renamed currency reached the already-completed mission with no "
+          "edit to it", f"5 صدفة ✨" in cust_desc, str(cust_lines))
 
     # Requirement: the emoji fix introduced no hardcoded currency literal.
     import ast
@@ -842,6 +854,105 @@ async def mission_render_tests():
     reset_state()
     check("reward grant was patched, not the real economy",
           len(reward_calls) >= 1, str(reward_calls))
+
+
+def reward_matrix_tests():
+    """Reward amount × currency configuration matrix.
+
+    The completion line's `1 Diamonds 💎` is an EXAMPLE, not a target: the
+    amount comes from the mission's stored reward_value, and the name and
+    emoji come from the guild's Economy configuration (defaults when
+    nothing is configured). Every combination is asserted against the
+    locked order `⤷ → label → check → amount → name → emoji`.
+    """
+    section("10c. Reward amount × Economy config matrix (nothing hardcoded)")
+    from cogs import missions as cog
+
+    CONFIGS = {
+        "defaults (nothing configured)": {
+            "coins": {"name": "Coins", "emoji": "🪙"},
+            "diamonds": {"name": "Diamonds", "emoji": "💎"}},
+        "custom Arabic names + unicode emoji": {
+            "coins": {"name": "قمر", "emoji": "✨"},
+            "diamonds": {"name": "جوهرة", "emoji": "🌙"}},
+        "custom names + custom DISCORD emoji tokens": {
+            "coins": {"name": "Moon", "emoji": "<a:moon:1549000000000000000>"},
+            "diamonds": {"name": "Gem", "emoji": "<:gem:1549111111111111111>"}},
+    }
+    AMOUNTS = [(1, "1"), (25, "25"), (7, "7"), (1250, "1,250"),
+               (1000000, "1,000,000"), ("50", "50")]
+
+    def line_for(key, amount, cfg):
+        m = {"name": "X", "description": None, "type": "messages",
+             "target": 1, "progress": 1, "completed": True,
+             "channel_id": None, "reward_type": key,
+             "reward_value": amount}
+        return completion_line(cog._mission_block(m, FakeGuild(), cfg,
+                                                  CHECK_EMOJI))
+
+    total = 0
+    for cfg_label, cfg in CONFIGS.items():
+        bad = []
+        for key in ("coins", "diamonds"):
+            for amount, shown in AMOUNTS:
+                total += 1
+                got = line_for(key, amount, cfg)
+                want = (f"⤷ `reward claimed` {CHECK_EMOJI} {shown} "
+                        f"{cfg[key]['name']} {cfg[key]['emoji']}")
+                if got != want:
+                    bad.append(f"{key}/{amount}: {got!r} != {want!r}")
+        check(f"{cfg_label}: all {len(AMOUNTS) * 2} amount×currency "
+              f"combinations render in the locked order", not bad, str(bad[:2]))
+
+    check("matrix covered every requested combination",
+          total == len(CONFIGS) * 2 * len(AMOUNTS), str(total))
+    check("the spec's example reproduces exactly (diamonds, amount 1, defaults)",
+          line_for("diamonds", 1, CONFIGS["defaults (nothing configured)"]) ==
+          f"⤷ `reward claimed` {CHECK_EMOJI} 1 Diamonds 💎",
+          line_for("diamonds", 1, CONFIGS["defaults (nothing configured)"]))
+    check("a coins reward of 25 with a custom name+emoji renders from config",
+          line_for("coins", 25, CONFIGS["custom names + custom DISCORD emoji "
+                                        "tokens"]) ==
+          f"⤷ `reward claimed` {CHECK_EMOJI} 25 Moon "
+          f"<a:moon:1549000000000000000>",
+          line_for("coins", 25, CONFIGS["custom names + custom DISCORD emoji "
+                                        "tokens"]))
+    check("two missions differing only in reward_value render differently "
+          "(the amount is read, not fixed)",
+          line_for("coins", 1, CONFIGS["defaults (nothing configured)"]) !=
+          line_for("coins", 25, CONFIGS["defaults (nothing configured)"]))
+    check("the check emoji is identical in every combination",
+          all(CHECK_EMOJI in line_for(k, a, c)
+              for c in CONFIGS.values() for k in ("coins", "diamonds")
+              for a, _ in AMOUNTS))
+    check("no combination ever falls back to the unicode ✅",
+          not any(CHECK_EMOJI_FALLBACK in line_for(k, a, c)
+                  for c in CONFIGS.values() for k in ("coins", "diamonds")
+                  for a, _ in AMOUNTS))
+
+    # The renderer itself must contain no hardcoded amount, currency name
+    # or currency emoji (stable keys 'coins'/'diamonds' are required and
+    # are NOT display strings, so they are allowed).
+    import ast
+    src_path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "cogs", "missions.py")
+    with open(src_path, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    forbidden = {"1", "25", "1250", "Coins", "Diamonds", "🪙", "💎"}
+    offenders = []
+    for fn in tree.body:
+        if isinstance(fn, ast.FunctionDef) and fn.name in (
+                "_mission_block", "_reward_display_sync"):
+            doc = ast.get_docstring(fn, clean=False)
+            for node in ast.walk(fn):
+                if (isinstance(node, ast.Constant)
+                        and isinstance(node.value, str)
+                        and node.value != doc
+                        and (node.value in forbidden
+                             or any(t in node.value for t in forbidden))):
+                    offenders.append(f"{fn.name}: {node.value!r}")
+    check("no hardcoded amount / currency name / currency emoji in the "
+          "completion renderer", not offenders, str(offenders))
 
 
 def unrelated_checkmark_tests():
@@ -899,6 +1010,7 @@ def main():
     inconclusive_tests()
     throttle_tests()
     asyncio.run(mission_render_tests())
+    reward_matrix_tests()
     unrelated_checkmark_tests()
     dashboard_tests()
     reset_state()
