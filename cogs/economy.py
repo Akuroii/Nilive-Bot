@@ -2,53 +2,18 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import aiosqlite
-import random
-from datetime import datetime, timedelta
 from database import DB_PATH
 from utils.economy_safe import (
     safe_transfer, safe_credit, safe_admin_deduct, safe_convert,
     get_guild_exchange_rate, InsufficientBalance,
 )
+from utils.currency import get_currency_config
 
 
-# SECURITY / ISOLATION FIX (dark-fixes pass #7): these cooldown dicts
-# used to be keyed by user_id ALONE. This project's isolation rule
-# (STATUS.md, project rules) is that every table AND every runtime
-# state keyed by a member must be scoped per-guild — but a member
-# present in two of Dark's controlled servers shared a single
-# /daily and /work cooldown across both. Claiming /daily in Guild A
-# silently put that same user on cooldown in Guild B (and vice
-# versa), which is a real cross-guild leak even though it never
-# touched the database. Keys are now (guild_id, user_id) tuples,
-# matching the (guild_id, user_id) composite key every persisted
-# table in this project already uses (economy, levels, etc).
-_daily_cooldowns:  dict[tuple[int, int], datetime] = {}
-
-# MEMORY LEAK FIX (dark-fixes pass #11): these dicts previously grew
-# forever — a key was written on every /daily and /work claim and
-# NOTHING ever removed old entries, so a bot running across many
-# guilds/users for months would slowly accumulate one permanent
-# (guild_id, user_id) entry per member who ever used either command,
-# even long after their cooldown expired. Flagged as "low priority,
-# slow leak" across several prior passes and deliberately left alone
-# each time since nothing higher-priority was blocking on it.
-#
-# Fix: the stored value IS already the cooldown's expiry timestamp
-# (see `_daily_cooldowns[key] = now + timedelta(hours=24)` below), so
-# pruning is just "drop anything whose expiry has already passed."
-# Runs opportunistically — only when a dict has grown past
-# _COOLDOWN_PRUNE_THRESHOLD — so normal-traffic bots pay zero extra
-# cost per command; only a dict that's actually accumulated a lot of
-# stale entries pays a one-time O(n) sweep to shrink back down.
-_COOLDOWN_PRUNE_THRESHOLD = 2000
-
-
-def _prune_expired(cooldowns: dict, now: datetime) -> None:
-    if len(cooldowns) < _COOLDOWN_PRUNE_THRESHOLD:
-        return
-    expired_keys = [k for k, expires_at in cooldowns.items() if expires_at <= now]
-    for k in expired_keys:
-        del cooldowns[k]
+# Daily/Streak state lives entirely in utils/daily_engine.py. The
+# /daily command was removed — /streak is now the single public entry
+# point (cogs/wallet.py), and the Wallet 🔥 Streak button opens the
+# same panel. There is no alias or duplicate claim path here.
 
 
 async def get_balance(guild_id: int, user_id: int) -> int:
@@ -74,30 +39,15 @@ async def get_diamonds(guild_id: int, user_id: int) -> int:
 async def add_balance(guild_id: int, user_id: int,
                       amount: int, reason: str = "Balance credit",
                       source: str = "system") -> int:
-    # P1 #11 FIX: routed through safe_credit (atomic upsert) instead
-    # of a raw INSERT..ON CONFLICT here. Functionally the same for a
-    # single credit, but keeps every write path going through one
-    # audited helper instead of two separate implementations that
-    # could drift apart.
-    # Phase 3 / E3: safe_credit now writes a ledger entry itself, so
+    # Routed through safe_credit (atomic upsert) instead of a raw
+    # INSERT..ON CONFLICT here. Functionally the same for a single
+    # credit, but keeps every write path going through one audited
+    # helper instead of two separate implementations that could
+    # drift apart. safe_credit writes a ledger entry itself, so
     # every path that calls add_balance() (daily, work, addcoins) is
     # automatically ledgered with no extra code here.
     await safe_credit(guild_id, user_id, amount, reason=reason, source=source)
     return await get_balance(guild_id, user_id)
-
-
-async def get_currency_name(guild_id: int) -> str:
-    """
-    Reads currency name from guild_settings.
-    Falls back to 'Coins' if not configured.
-    """
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT currency_name FROM guild_settings
-            WHERE guild_id = ?
-        """, (guild_id,))
-        row = await cursor.fetchone()
-    return row[0] if row and row[0] else "Coins"
 
 
 class Economy(commands.Cog):
@@ -106,88 +56,33 @@ class Economy(commands.Cog):
 
     # ─── BALANCE ────────────────────────────────────────
     @app_commands.command(name="balance",
-                          description="Check your coin and diamond balance")
+                          description="Check your coin and diamond balance (opens your wallet)")
     async def balance(self, interaction: discord.Interaction,
                       member: discord.Member = None):
-        member   = member or interaction.user
-        bal      = await get_balance(
-            interaction.guild.id, member.id)
-        gems     = await get_diamonds(
-            interaction.guild.id, member.id)
-        currency = await get_currency_name(interaction.guild.id)
-        embed    = discord.Embed(
-            title=f"💰 {member.display_name}'s Balance",
-            color=0xFFD700)
-        embed.add_field(name=currency, value=f"**{bal:,}**")
-        embed.add_field(name="💎 Diamonds", value=f"**{gems:,}**")
-        await interaction.response.send_message(embed=embed)
-
-    # ─── DAILY ──────────────────────────────────────────
-    @app_commands.command(name="daily",
-                          description="Claim your daily coins")
-    async def daily(self, interaction: discord.Interaction):
-        now      = datetime.utcnow()
-        # ISOLATION FIX: cooldown key now includes guild_id — see the
-        # comment on _daily_cooldowns above. Previously this was
-        # user_id alone, so claiming /daily in one server put the
-        # member on cooldown in every other server they shared with
-        # this bot.
-        key      = (interaction.guild.id, interaction.user.id)
-        cooldown = _daily_cooldowns.get(key)
-        if cooldown and now < cooldown:
-            remaining = cooldown - now
-            hours     = int(remaining.total_seconds() // 3600)
-            minutes   = int((remaining.total_seconds() % 3600) // 60)
-            await interaction.response.send_message(
-                f"Daily already claimed! Try again in "
-                f"**{hours}h {minutes}m**.",
-                ephemeral=True)
+        # Wallet is the primary hub. For muscle memory, `/balance`
+        # without arguments opens the caller's own wallet; viewing
+        # another member's balance still shows a lightweight public
+        # embed (only the numbers, no inventory/receipts controls,
+        # since those are private to the owner).
+        if member is None or member.id == interaction.user.id:
+            from cogs.wallet import render_hub
+            await render_hub(
+                interaction, interaction.guild.id, interaction.user.id,
+                first=True)
             return
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT value FROM bot_settings WHERE key = 'daily_min'
-            """)
-            row      = await cursor.fetchone()
-            daily_min = int(row[0]) if row else 100
-            cursor    = await db.execute("""
-                SELECT value FROM bot_settings WHERE key = 'daily_max'
-            """)
-            row       = await cursor.fetchone()
-            daily_max = int(row[0]) if row else 300
-
-        amount   = random.randint(daily_min, daily_max)
-        # Finalized Prestige: `/daily` is a genuine earn-time grant, so it
-        # is scaled by the user's effective Prestige coins multiplier.
-        # Admin grants (addcoins/adddiamonds), /give, /convert and shop
-        # spending are NOT scaled — they don't route through this line.
-        # Defensive: default to 1.0 on any lookup failure so /daily never
-        # breaks because of a prestige config error.
-        try:
-            from utils.prestige import get_prestige_earn_multiplier, is_booster
-            mult = await get_prestige_earn_multiplier(
-                interaction.guild.id, interaction.user.id, "balance",
-                is_booster=is_booster(interaction.user))
-        except Exception as e:
-            print(f"[PRESTIGE] daily multiplier lookup failed; "
-                  f"granting raw (guild={interaction.guild.id} "
-                  f"user={interaction.user.id}): {e}")
-            mult = 1.0
-        amount = int(round(amount * mult))
-        if amount <= 0:
-            amount = 1
-        new_bal  = await add_balance(
-            interaction.guild.id, interaction.user.id, amount,
-            reason="Daily reward", source="daily")
-        currency = await get_currency_name(interaction.guild.id)
-        _daily_cooldowns[key] = now + timedelta(hours=24)
-        _prune_expired(_daily_cooldowns, now)
-
+        bal = await get_balance(interaction.guild.id, member.id)
+        gems = await get_diamonds(interaction.guild.id, member.id)
+        cur = await get_currency_config(interaction.guild.id)
+        cc, cd = cur["coins"], cur["diamonds"]
         embed = discord.Embed(
-            title="🎁 Daily Reward!",
-            description=(f"You received **{amount:,}** {currency}!\n"
-                         f"Balance: **{new_bal:,}** {currency}"),
-            color=0x57F287)
+            title=f"Balance — {member.display_name}",
+            color=WALLET_ECHO_COLOR)
+        embed.add_field(name=f"{cc['emoji']} {cc['name']}",
+                        value=f"**{bal:,}**")
+        embed.add_field(name=f"{cd['emoji']} {cd['name']}",
+                        value=f"**{gems:,}**")
+        embed.set_footer(text="Use /wallet to manage your own items and receipts")
         await interaction.response.send_message(embed=embed)
 
     # ─── GIVE ───────────────────────────────────────────
@@ -196,8 +91,9 @@ class Economy(commands.Cog):
     async def give(self, interaction: discord.Interaction,
                    member: discord.Member, amount: int):
         if member.id == interaction.user.id:
+            cur = await get_currency_config(interaction.guild.id)
             await interaction.response.send_message(
-                "You can't give coins to yourself!",
+                f"You cannot give {cur['coins']['name']} to yourself.",
                 ephemeral=True)
             return
         if amount <= 0:
@@ -207,17 +103,11 @@ class Economy(commands.Cog):
 
         guild_id = interaction.guild.id
 
-        # P1 #11 FIX: previously this read the sender's balance,
-        # checked it, then ran two separate UPDATE statements
-        # outside any shared transaction. Two /give calls fired
-        # close together could both pass the balance check before
-        # either deduction landed, letting a user spend the same
-        # coins twice (overdraft into negative balance). safe_transfer
-        # wraps the check-and-deduct in a single BEGIN IMMEDIATE
-        # transaction so the second call sees the already-reduced
-        # balance and correctly fails instead of racing.
-        # Phase 3 / E3: safe_transfer now logs both legs of the
-        # transfer to the ledger automatically, cross-referenced via
+        # safe_transfer wraps check-and-deduct in a single
+        # BEGIN IMMEDIATE transaction so two /give calls fired close
+        # together cannot both pass the balance check and let a user
+        # spend the same coins twice. safe_transfer logs both legs to
+        # the ledger automatically, cross-referenced via
         # related_user_id.
         try:
             await safe_transfer(
@@ -225,20 +115,22 @@ class Economy(commands.Cog):
                 reason="Player-to-player transfer", source="give")
         except InsufficientBalance:
             bal = await get_balance(guild_id, interaction.user.id)
+            cur = await get_currency_config(guild_id)
             await interaction.response.send_message(
-                f"You only have {bal:,} coins!", ephemeral=True)
+                f"You only have {bal:,} {cur['coins']['name']}.",
+                ephemeral=True)
             return
 
-        currency = await get_currency_name(guild_id)
+        cur = await get_currency_config(guild_id)
+        cc = cur["coins"]
         await interaction.response.send_message(
-            f"Gave **{amount:,}** {currency} to {member.mention}!")
+            f"Gave **{amount:,}** {cc['name']} to {member.mention}.")
 
     # ─── CONVERT (Phase 5 / Economy v2) ─────────────────
     # Converts coins into diamonds at this guild's configured rate
     # (default 500:1, set via the Economy dashboard page or left at
     # default). Rounds down to the nearest full diamond — leftover
-    # coins that don't divide evenly stay in the user's balance
-    # rather than being lost.
+    # coins that do not divide evenly stay in the user's balance.
     @app_commands.command(name="convert",
                           description="Convert coins into diamonds")
     async def convert(self, interaction: discord.Interaction, coins: int):
@@ -248,8 +140,9 @@ class Economy(commands.Cog):
             return
 
         guild_id = interaction.guild.id
-        rate     = await get_guild_exchange_rate(guild_id)
-        currency = await get_currency_name(guild_id)
+        rate = await get_guild_exchange_rate(guild_id)
+        cur = await get_currency_config(guild_id)
+        cc, cd = cur["coins"], cur["diamonds"]
 
         try:
             result = await safe_convert(
@@ -258,21 +151,21 @@ class Economy(commands.Cog):
         except InsufficientBalance:
             bal = await get_balance(guild_id, interaction.user.id)
             await interaction.response.send_message(
-                f"You only have {bal:,} {currency}!", ephemeral=True)
+                f"You only have {bal:,} {cc['name']}.", ephemeral=True)
             return
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
             return
 
         embed = discord.Embed(
-            title="💱 Converted!",
+            title="💱 Converted",
             description=(
-                f"Spent **{result['coins_spent']:,}** {currency} → "
-                f"got **{result['diamonds_gained']:,}** 💎 Diamonds\n"
-                f"New balance: **{result['new_balance']:,}** {currency} · "
-                f"**{result['new_diamonds']:,}** 💎"),
+                f"Spent **{result['coins_spent']:,}** {cc['name']} → "
+                f"got **{result['diamonds_gained']:,}** {cd['emoji']} {cd['name']}\n"
+                f"New balance: **{result['new_balance']:,}** {cc['name']} · "
+                f"**{result['new_diamonds']:,}** {cd['emoji']}"),
             color=0x57F287)
-        embed.set_footer(text=f"Rate: {rate:,} {currency} = 1 💎")
+        embed.set_footer(text=f"Rate: {rate:,} {cc['name']} = 1 {cd['emoji']}")
         await interaction.response.send_message(embed=embed)
 
     # ─── RICHEST ────────────────────────────────────────
@@ -292,18 +185,19 @@ class Economy(commands.Cog):
                 "No economy data yet.", ephemeral=True)
             return
 
-        currency = await get_currency_name(interaction.guild.id)
-        embed    = discord.Embed(
-            title=f"💰 Richest Members",
+        cur = await get_currency_config(interaction.guild.id)
+        cc = cur["coins"]
+        embed = discord.Embed(
+            title=f"Richest Members",
             color=0xFFD700)
         medals = ["🥇", "🥈", "🥉"]
         for i, (uid, bal) in enumerate(rows, 1):
-            medal  = medals[i-1] if i <= 3 else f"#{i}"
+            medal = medals[i-1] if i <= 3 else f"#{i}"
             member = interaction.guild.get_member(uid)
-            name   = member.display_name if member else f"User {uid}"
+            name = member.display_name if member else f"User {uid}"
             embed.add_field(
                 name=f"{medal} {name}",
-                value=f"{bal:,} {currency}",
+                value=f"{bal:,} {cc['name']}",
                 inline=False)
         await interaction.response.send_message(embed=embed)
 
@@ -313,13 +207,14 @@ class Economy(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def addcoins(self, interaction: discord.Interaction,
                        member: discord.Member, amount: int):
-        new_bal  = await add_balance(
+        new_bal = await add_balance(
             interaction.guild.id, member.id, amount,
             reason=f"Admin grant by {interaction.user.display_name}",
             source="admin")
-        currency = await get_currency_name(interaction.guild.id)
+        cur = await get_currency_config(interaction.guild.id)
+        cc = cur["coins"]
         await interaction.response.send_message(
-            f"Added **{amount:,}** {currency} to {member.mention}. "
+            f"Added **{amount:,}** {cc['name']} to {member.mention}. "
             f"New balance: **{new_bal:,}**.",
             ephemeral=True)
 
@@ -329,30 +224,21 @@ class Economy(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def removecoins(self, interaction: discord.Interaction,
                           member: discord.Member, amount: int):
-        # Phase 3 / E3 FIX: this previously ran a raw
-        # `UPDATE economy SET balance = MAX(0, balance - ?)` with no
-        # transaction guard and no ledger record at all — an admin
-        # deduction was completely invisible to the Transaction
-        # Ledger, and two concurrent removecoins calls could race the
-        # same way /give used to before P1 #11. Now routed through
-        # safe_admin_deduct(), which is atomic (BEGIN IMMEDIATE),
-        # clamps to zero like the old behavior, and logs the actual
-        # amount removed to the ledger.
+        # Routed through safe_admin_deduct(), which is atomic
+        # (BEGIN IMMEDIATE), clamps to zero like the old behavior, and
+        # logs the actual amount removed to the ledger.
         new_bal = await safe_admin_deduct(
             interaction.guild.id, member.id, amount,
             reason=f"Admin removal by {interaction.user.display_name}",
             source="admin")
-        currency = await get_currency_name(interaction.guild.id)
+        cur = await get_currency_config(interaction.guild.id)
+        cc = cur["coins"]
         await interaction.response.send_message(
-            f"Removed **{amount:,}** {currency} from {member.mention}. "
+            f"Removed **{amount:,}** {cc['name']} from {member.mention}. "
             f"New balance: **{new_bal:,}**.",
             ephemeral=True)
 
     # ─── ADD DIAMONDS (admin, Phase 5 / Economy v2) ─────
-    # Mirrors addcoins but on the diamonds currency column — used for
-    # "special events, bonus, no conversion needed" diamond grants per
-    # Dark's spec. Routed through safe_credit(currency="diamonds") so
-    # it's ledgered identically to every other reward path.
     @app_commands.command(name="adddiamonds",
                           description="Add diamonds to a member (admin)")
     @app_commands.checks.has_permissions(administrator=True)
@@ -367,9 +253,11 @@ class Economy(commands.Cog):
             reason=f"Admin grant by {interaction.user.display_name}",
             source="admin")
         new_gems = await get_diamonds(interaction.guild.id, member.id)
+        cur = await get_currency_config(interaction.guild.id)
+        cd = cur["diamonds"]
         await interaction.response.send_message(
-            f"Added **{amount:,}** 💎 to {member.mention}. "
-            f"New diamond balance: **{new_gems:,}**.",
+            f"Added **{amount:,}** {cd['emoji']} to {member.mention}. "
+            f"New {cd['name'].lower()} balance: **{new_gems:,}**.",
             ephemeral=True)
 
     # ─── REMOVE DIAMONDS (admin, Phase 5 / Economy v2) ──
@@ -386,10 +274,19 @@ class Economy(commands.Cog):
             interaction.guild.id, member.id, amount, currency="diamonds",
             reason=f"Admin removal by {interaction.user.display_name}",
             source="admin")
+        cur = await get_currency_config(interaction.guild.id)
+        cd = cur["diamonds"]
         await interaction.response.send_message(
-            f"Removed **{amount:,}** 💎 from {member.mention}. "
-            f"New diamond balance: **{new_gems:,}**.",
+            f"Removed **{amount:,}** {cd['emoji']} from {member.mention}. "
+            f"New {cd['name'].lower()} balance: **{new_gems:,}**.",
             ephemeral=True)
+
+
+# Color used for the public `/balance @user` echo embed (private view
+# is always the wallet hub). Kept local here so we don't import from
+# cogs/wallet (which would create a circular import at load time if
+# wallet later imports economy).
+WALLET_ECHO_COLOR = 0x7c5cbf
 
 
 async def setup(bot):

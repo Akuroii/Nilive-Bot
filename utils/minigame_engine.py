@@ -8,6 +8,7 @@ import discord
 from utils import minigame_store as store
 from utils.formatters import snapshot_user
 from utils.reward_engine import give_reward
+from utils.emoji import CHECK_EMOJI
 
 # ═══════════════════════════════════════════════════════════════════════
 # MINIGAMES v2 — GAME ENGINES (Phase 2 of the approved v2 plan)
@@ -505,7 +506,7 @@ class QuickClickEngine(MinigameEngine):
         self._participant(info)
         await self.resolve([info], status="completed",
                            result_text="🏆 **%s** hit the green button "
-                                        "first!" % info["name"])
+                                        "first." % info["name"])
 
 
 # ── WHEEL (plan §6.2) ───────────────────────────────────────────────────
@@ -555,9 +556,9 @@ class WheelEngine(MinigameEngine):
             if not already:
                 self._participant(info)
         if already:
-            await _safe_ephemeral(interaction, "You're already in!")
+            await _safe_ephemeral(interaction, "You are already in.")
         else:
-            await _safe_ephemeral(interaction, "You're in!")
+            await _safe_ephemeral(interaction, "You are in.")
 
 
 # ── MULTIPLE CHOICE — math / colors / emoji (plan §6.3) ─────────────────
@@ -614,12 +615,12 @@ class MultipleChoiceEngine(MinigameEngine):
                                for w in winners)
             plural = "s" if len(winners) != 1 else ""
             await self.resolve(winners, status="completed",
-                               result_text=(f"✅ **Correct answer: "
+                               result_text=(f"{CHECK_EMOJI} **Correct answer: "
                                             f"{self.answers[self.correct]}**\n"
                                             f"🏆 Winner{plural}: "
                                             f"{names}"))
         else:
-            reveal = (f"✅ **Correct answer: {self.answers[self.correct]}**\n"
+            reveal = (f"{CHECK_EMOJI} **Correct answer: {self.answers[self.correct]}**\n"
                       f"❌ **No one got it right.**") if self.correct >= 0 else \
                      "❌ **Game ended — no valid correct answer configured.**"
             await self.resolve([], status="no_winner", result_text=reveal)
@@ -637,8 +638,8 @@ class MultipleChoiceEngine(MinigameEngine):
             self.selections[info["id"]] = idx  # last answer wins
             self._participant(info)
         await _safe_ephemeral(
-            interaction, "✅ Answer set — you can change it until time "
-                         "runs out.")
+            interaction, f"{CHECK_EMOJI} Answer set — you can change it until "
+                         "time runs out.")
 
 
 # ── ROCK PAPER SCISSORS (plan §6.4) ─────────────────────────────────────
@@ -735,7 +736,7 @@ class RpsEngine(MinigameEngine):
                         "you press. "
                         + ("Waiting for a second player…" if waiting
                            else "Both players are seated — pick before time "
-                              "runs out!"))
+                              "runs out."))
                 msg = await _safe_ephemeral(interaction, text, view=view)
                 self._choice_views[seat["id"]] = (view, msg)
 
@@ -804,7 +805,7 @@ class RpsEngine(MinigameEngine):
             await self._resolve_rps()
             return
         await _safe_ephemeral(interaction,
-                              f"{self.EMOJI[choice]} Choice locked!")
+                              f"{self.EMOJI[choice]} Choice locked.")
 
     async def _resolve_rps(self):
         p1, p2 = self.seats
@@ -824,7 +825,7 @@ class RpsEngine(MinigameEngine):
         await self.resolve([winner], status="completed",
                            result_text=detail + "\n🏆 **"
                                               + winner["display_name"]
-                                              + "** wins!")
+                                              + "** wins.")
 
 
 # ── REGISTRY ────────────────────────────────────────────────────────────

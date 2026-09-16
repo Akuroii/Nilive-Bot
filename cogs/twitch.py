@@ -6,6 +6,7 @@ import aiohttp
 from database import DB_PATH
 from utils.permissions import check_bot_role_position
 from utils import creator_notify_engine as engine
+from utils.emoji import CHECK_EMOJI
 
 # ═══════════════════════════════════════════════════════════════════════
 # TWITCH INTEGRATION
@@ -100,7 +101,7 @@ def build_twitch_live_embed(username: str, stream: dict) -> discord.Embed:
     twitch_url = f"https://twitch.tv/{username}"
 
     embed = discord.Embed(
-        title=title or f"{username} is live!", url=twitch_url, color=TWITCH_COLOR)
+        title=title or f"{username} is live.", url=twitch_url, color=TWITCH_COLOR)
     embed.add_field(name="Game", value=game or "Unknown")
     embed.add_field(name="Viewers", value=f"{viewers:,}")
     thumbnail = stream.get("thumbnail_url", "")
@@ -128,7 +129,7 @@ def _build_content(mention: str, custom_msg: str | None, username: str,
                 .replace("{game}", game)
                 .replace("{url}", url))
     else:
-        text = f"🔴 **{username}** is now LIVE!"
+        text = f"🔴 **{username}** is now LIVE."
     return f"{mention} {text}".strip() if mention else text
 
 
@@ -396,7 +397,7 @@ class Twitch(commands.Cog):
         embed = discord.Embed(title="Twitch Configs", color=TWITCH_COLOR)
         for (cid, username, dch, is_live, enabled) in rows:
             status = "🔴 LIVE" if is_live else "⚫ Offline"
-            active = "✅" if enabled else "❌"
+            active = CHECK_EMOJI if enabled else "❌"
             embed.add_field(name=f"#{cid} {active} — {username}", value=f"{status} → <#{dch}>", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 

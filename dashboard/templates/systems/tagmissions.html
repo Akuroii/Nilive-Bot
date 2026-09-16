@@ -32,8 +32,8 @@
         <div class="form-group">
             <label class="form-label">Reward type</label>
             <select class="form-input" id="tm-reward-type" onchange="tmUpdateRewardFields()">
-                <option value="coins">Coins</option>
-                <option value="diamonds">Diamonds</option>
+                <option value="coins">{{ currency_icon_text(currency.coins.emoji) }} {{ currency.coins.name }}</option>
+                <option value="diamonds">{{ currency_icon_text(currency.diamonds.emoji) }} {{ currency.diamonds.name }}</option>
                 <option value="xp">XP</option>
                 <option value="role">Role (permanent)</option>
                 <option value="temp_role">Role (temporary)</option>
@@ -161,7 +161,7 @@ async function tmLoad() {
         return `
         <tr>
             <td><strong>${r.title}</strong><br>
-                <span class="text-muted text-sm">${r.reward_type}${r.reward_amount ? ' × ' + r.reward_amount : ''}</span></td>
+                <span class="text-muted text-sm">${currencyNameFor(r.reward_type)}${r.reward_amount ? ' × ' + r.reward_amount : ''}</span></td>
             <td>${tmStatusBadge(r.status)}</td>
             <td class="text-sm text-muted">${(r.starts_at || '').slice(0,16)} → ${(r.ends_at || '').slice(0,16)}</td>
             <td class="text-sm">${r.participant_count} confirmed

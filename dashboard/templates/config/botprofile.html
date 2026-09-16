@@ -383,7 +383,10 @@ async function saveBotProfile(btn) {
     const errorKeys = Object.keys(errors);
 
     if (applied.length && !errorKeys.length) {
-        status.textContent = `✅ Applied live: ${applied.join(', ')}`;
+        // innerHTML: the check is server-rendered HTML (an <img> when the
+        // configured emoji is a custom one). Only the constant is markup —
+        // the applied keys are interpolated as text by the browser.
+        status.innerHTML = checkIconHtml() + ` Applied live: ${applied.join(', ')}`;
         status.style.color = 'var(--success)';
         showToast('Bot profile updated!');
     } else if (applied.length && errorKeys.length) {

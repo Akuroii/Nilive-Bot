@@ -55,6 +55,24 @@
      dashboard.js's fetch()/htmx patch can attach it to every state-changing
      request automatically. Never write this into a URL or log it. -->
 <script>window.__CSRF_TOKEN__ = {{ session.get('csrf_token', '') | tojson }};</script>
+<!-- Currency display config (name + icon) for client-side rendering, from
+     the same server-side resolver every Jinja block uses — see
+     dashboard/utils/currency_ctx.py. JS that builds currency labels for
+     rows fetched via fetch() (ledger, members, rewards) reads this instead
+     of hardcoding a name or emoji. Economy owns these values; this page
+     only mirrors them. -->
+<script>window.__CURRENCY__ = {{ (currency if currency is defined else None) | tojson }};</script>
+<!-- The success/check indicator as HTML (Discord's `<a:check:id>` markup is
+     a message feature — a browser needs the CDN image). Rendered server-side
+     from the one resolver in utils/emoji.py so client-side status lines and
+     toasts show the same check as the Discord-side replies. -->
+<script>window.__CHECK_ICON__ = {{ check_icon | tojson }};</script>
+{{ check_icon_css }}
+<!-- Baseline alignment for configured currency icons rendered as CDN
+     images (dashboard/utils/currency_ctx.py:icon_css). A browser cannot
+     render `<:name:id>` / `<a:name:id>` markup, so a custom currency icon
+     is an <img> exactly like the check icon above. -->
+{{ currency_icon_css }}
 <button class="hamburger" onclick="toggleSidebar()"
     style="display:none;position:fixed;top:14px;left:14px;z-index:200;
            background:var(--bg2);border:1px solid var(--border);
@@ -471,7 +489,7 @@
             <input class="form-input" id="edit-xp" type="number" min="0">
         </div>
         <div class="form-group">
-            <label class="form-label">Coins</label>
+            <label class="form-label">{{ currency.coins.name }}</label>
             <input class="form-input" id="edit-coins" type="number" min="0">
         </div>
         <div class="modal-actions">

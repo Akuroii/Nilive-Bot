@@ -49,7 +49,12 @@ def _now_utc() -> datetime:
 
 
 def _today_iso() -> str:
-    return _now_utc().date().isoformat()
+    # Calendar date in Cairo for display/logging consistency
+    try:
+        from utils.timezone import get_cairo_daily_key
+        return get_cairo_daily_key()
+    except Exception:
+        return _now_utc().date().isoformat()
 
 
 def _now_iso() -> str:

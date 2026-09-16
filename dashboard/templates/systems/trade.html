@@ -13,7 +13,7 @@
     </div>
     <p class="text-muted text-sm" style="margin-bottom:16px;">
         Read-only log of completed trades between members. Every trade is a fully atomic
-        two-way swap of coins, diamonds, and items — balances and inventory were re-verified
+        two-way swap of {{ currency.coins.name }}, {{ currency.diamonds.name }}, and items — balances and inventory were re-verified
         live at the moment of execution, not just when the offer was built. Trades can only
         be created through the <code>/trade</code> Discord command; there is nothing to
         edit or reverse here.
@@ -34,8 +34,8 @@
 <script>
 function summarizeOffer(offer) {
     const parts = [];
-    if (offer.coins) parts.push(`🪙 ${offer.coins.toLocaleString()}`);
-    if (offer.diamonds) parts.push(`💎 ${offer.diamonds.toLocaleString()}`);
+    if (offer.coins) parts.push(currencyAmount('coins', offer.coins));
+    if (offer.diamonds) parts.push(currencyAmount('diamonds', offer.diamonds));
     if (offer.items) {
         for (const [name, qty] of Object.entries(offer.items)) {
             parts.push(`🎁 ${name} ×${qty}`);

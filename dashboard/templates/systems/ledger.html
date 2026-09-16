@@ -11,15 +11,15 @@
             <input class="form-input" id="ledger-user" placeholder="Filter by User ID..." style="max-width:200px;">
             <select class="form-input" id="ledger-currency" style="width:130px;">
                 <option value="">All Currencies</option>
-                <option value="balance">Coins</option>
-                <option value="diamonds">Diamonds</option>
+                <option value="balance">{{ currency_icon_text(currency.coins.emoji) }} {{ currency.coins.name }}</option>
+                <option value="diamonds">{{ currency_icon_text(currency.diamonds.emoji) }} {{ currency.diamonds.name }}</option>
                 <option value="xp">XP</option>
             </select>
             <button class="btn btn-secondary" onclick="loadLedger()">🔄 Refresh</button>
         </div>
     </div>
     <p class="text-muted text-sm" style="margin-bottom:16px;">
-        Read-only audit trail of every coin, diamond, and XP movement in this server. Reversing an
+        Read-only audit trail of every {{ currency.coins.name }}, {{ currency.diamonds.name }}, and XP movement in this server. Reversing an
         entry (owner only) credits/deducts the opposite amount and marks the row as reversed.
     </p>
     <div class="table-wrap">
@@ -36,7 +36,9 @@
                 {% set u = user_map.get(e.user_id, {}) %}
                 <tr id="ledger-row-{{ e.id }}">
                     <td>{{ user_identity(e.user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
-                    <td><span class="badge badge-accent">{{ e.currency }}</span></td>
+                    <td><span class="badge badge-accent">{{ (currency.coins.name if e.currency == 'balance'
+                        else currency.diamonds.name if e.currency == 'diamonds'
+                        else e.currency) }}</span></td>
                     <td style="color:{% if e.amount >= 0 %}var(--success){% else %}var(--danger){% endif %};font-weight:600;">
                         {{ "+" if e.amount >= 0 else "" }}{{ "{:,}".format(e.amount) }}
                     </td>
@@ -100,7 +102,7 @@ async function loadLedger() {
         return `
         <tr id="ledger-row-${e.id}">
             <td>${userIdentityHtml(e.user_id, u.display_name || u.username, u.avatar_url)}</td>
-            <td><span class="badge badge-accent">${e.currency}</span></td>
+            <td><span class="badge badge-accent">${currencyNameFor(e.currency)}</span></td>
             <td style="color:${e.amount >= 0 ? 'var(--success)' : 'var(--danger)'};font-weight:600;">
                 ${e.amount >= 0 ? '+' : ''}${e.amount.toLocaleString()}
             </td>

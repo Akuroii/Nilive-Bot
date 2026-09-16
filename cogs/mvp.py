@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from discord.ext import tasks
 from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
+from utils.timezone import get_cairo_daily_key
+from utils.emoji import CHECK_EMOJI
 
 
 async def get_mvp_config(guild_id: int) -> dict:
@@ -48,7 +50,7 @@ class MVP(commands.Cog):
 
         weight = float(config.get("chat_word_weight", 1.0))
         score  = word_count * weight
-        today  = datetime.now(timezone.utc).date().isoformat()
+        today  = get_cairo_daily_key()
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -86,7 +88,7 @@ class MVP(commands.Cog):
 
             weight = float(config.get("voice_minute_weight", 2.0))
             score  = 1 * weight  # one tick == one minute
-            today  = datetime.now(timezone.utc).date().isoformat()
+            today  = get_cairo_daily_key()
 
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("""
@@ -118,7 +120,7 @@ class MVP(commands.Cog):
 
                 cycle_hours = int(config.get("cycle_hours", 6))
                 now         = datetime.now(timezone.utc)
-                today       = now.date().isoformat()
+                today       = get_cairo_daily_key(now)
 
                 # Find top scorer today
                 async with aiosqlite.connect(DB_PATH) as db:
@@ -154,8 +156,10 @@ class MVP(commands.Cog):
                     continue
 
                 snap = snapshot_user(mvp_member)
-                cycle_start = now.replace(
-                    hour=0, minute=0, second=0, microsecond=0)
+                # cycle_start anchored to Cairo midnight but stored as UTC ISO
+                from utils.timezone import CAIRO_TZ
+                _cairo_today = now.astimezone(CAIRO_TZ).date()
+                cycle_start = datetime(_cairo_today.year, _cairo_today.month, _cairo_today.day, tzinfo=CAIRO_TZ).astimezone(timezone.utc)
 
                 # Save to history
                 async with aiosqlite.connect(DB_PATH) as db:
@@ -198,11 +202,11 @@ class MVP(commands.Cog):
                     channel = guild.get_channel(int(channel_id))
                     if channel:
                         embed = discord.Embed(
-                            title="🏆 New MVP!",
+                            title="🏆 New MVP.",
                             description=(
                                 f"{mvp_member.mention} is the MVP "
                                 f"of this cycle with "
-                                f"**{int(mvp_score):,}** points!"),
+                                f"**{int(mvp_score):,}** points."),
                             color=0xFFD700)
                         if mvp_member.display_avatar:
                             embed.set_thumbnail(
@@ -225,7 +229,7 @@ class MVP(commands.Cog):
     @app_commands.command(name="mvp_scores",
                           description="View today's MVP scores")
     async def mvp_scores(self, interaction: discord.Interaction):
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = get_cairo_daily_key()
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT user_id, message_score, voice_minutes, total_score
@@ -304,7 +308,7 @@ class MVP(commands.Cog):
     async def mvp_force(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         config = await get_mvp_config(interaction.guild.id)
-        today  = datetime.now(timezone.utc).date().isoformat()
+        today  = get_cairo_daily_key()
 
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
@@ -326,6 +330,9 @@ class MVP(commands.Cog):
 
         snap = snapshot_user(member)
         now  = datetime.now(timezone.utc)
+        from utils.timezone import CAIRO_TZ
+        cairo_today = now.astimezone(CAIRO_TZ).date()
+        cycle_start_cairo = __import__('datetime', fromlist=['datetime']).datetime(cairo_today.year, cairo_today.month, cairo_today.day, tzinfo=CAIRO_TZ).astimezone(timezone.utc)
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
@@ -335,13 +342,12 @@ class MVP(commands.Cog):
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (interaction.guild.id, uid,
                   snap["display_name"],
-                  now.replace(hour=0, minute=0,
-                              second=0, microsecond=0).isoformat(),
+                  cycle_start_cairo.isoformat(),
                   now.isoformat(), int(score)))
             await db.commit()
 
         await interaction.followup.send(
-            f"✅ Forced MVP: {member.mention} with {int(score):,} pts")
+            f"{CHECK_EMOJI} Forced MVP: {member.mention} with {int(score):,} pts")
 
 
 async def setup(bot):

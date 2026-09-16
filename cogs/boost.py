@@ -5,6 +5,7 @@ import aiosqlite
 from database import DB_PATH
 from utils.permissions import check_bot_role_position
 from utils.formatters import now_iso
+from utils.emoji import CHECK_EMOJI
 
 
 async def get_boost_config(guild_id: int) -> dict:
@@ -93,8 +94,8 @@ class Boost(commands.Cog):
             channel = guild.get_channel(int(channel_id))
             if channel:
                 embed = discord.Embed(
-                    title="💜 New Booster!",
-                    description=f"{member.mention} just boosted the server! Thank you!",
+                    title="💜 New Booster.",
+                    description=f"{member.mention} just boosted the server! Thank you.",
                     color=0xf47fff)
                 if member.display_avatar:
                     embed.set_thumbnail(url=member.display_avatar.url)
@@ -219,8 +220,17 @@ class Boost(commands.Cog):
             await interaction.response.send_message("No boosters yet.", ephemeral=True)
             return
         embed = discord.Embed(title=f"💜 Server Boosters ({len(boosters)})", color=0xf47fff)
+        # Display boost start date in Cairo (user-facing)
+        from utils.timezone import CAIRO_TZ
+        def _cairo_date(dt):
+            try:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=__import__("datetime", fromlist=["timezone"]).timezone.utc)
+                return dt.astimezone(CAIRO_TZ).strftime("%Y-%m-%d")
+            except Exception:
+                return dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)
         embed.description = "\n".join(
-            f"• {m.mention} — since {m.premium_since.strftime('%Y-%m-%d')}" for m in boosters)
+            f"• {m.mention} — since {_cairo_date(m.premium_since)}" for m in boosters)
         await interaction.response.send_message(embed=embed)
 
     # ── boost_color_roles feature ────────────────────────────────────
@@ -249,7 +259,7 @@ class Boost(commands.Cog):
             """, (interaction.guild.id, role.id, role.name, requires_boost_level))
             await db.commit()
         await interaction.response.send_message(
-            f"✅ Added {role.mention} as a boost color option "
+            f"{CHECK_EMOJI} Added {role.mention} as a boost color option "
             f"(requires {requires_boost_level} boost{'s' if requires_boost_level != 1 else ''}).",
             ephemeral=True)
 
@@ -356,7 +366,7 @@ class Boost(commands.Cog):
             return
 
         await interaction.response.send_message(
-            f"🎨 You're now wearing {role.mention}!", ephemeral=True)
+            f"🎨 You're now wearing {role.mention}.", ephemeral=True)
 
 
 async def setup(bot):

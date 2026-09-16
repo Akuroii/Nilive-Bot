@@ -65,31 +65,42 @@ def save_settings_general():
     data     = request.get_json() or {}
 
     async def save():
+        # Normalize legacy UTC / Asia/Cairo to canonical Africa/Cairo
+        from utils.timezone import normalize_timezone
+        tz = normalize_timezone(data.get("timezone", "Africa/Cairo"))
+        data["timezone"] = tz
         async with aiosqlite.connect(DB_PATH) as db:
+            # Currency name/emoji are NOT written here any more. They are
+            # owned by the Economy page (see utils/currency.py's
+            # set_currency_config and /api/economy/currency): Economy is
+            # the single source of truth for currency DISPLAY, and this
+            # general-settings upsert must never touch those columns —
+            # otherwise saving the prefix/timezone would silently
+            # overwrite whatever the owner configured under Economy.
+            #
+            # (This INSERT previously named `currency_emoji_id`, a column
+            # that no longer exists after the Wallet-pass schema change —
+            # so the WHOLE form 500'd on any fresh database, prefix and
+            # timezone included. See CURRENCY_AUDIT.md C1.)
             await db.execute("""
                 INSERT INTO guild_settings
                     (guild_id, prefix, timezone, language, log_channel_id,
-                     currency_name, currency_emoji_id,
                      status_rotation_enabled, status_rotation_interval)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                     prefix                   = excluded.prefix,
                     timezone                 = excluded.timezone,
                     language                 = excluded.language,
                     log_channel_id           = excluded.log_channel_id,
-                    currency_name            = excluded.currency_name,
-                    currency_emoji_id        = excluded.currency_emoji_id,
                     status_rotation_enabled  = excluded.status_rotation_enabled,
                     status_rotation_interval = excluded.status_rotation_interval,
                     updated_at               = CURRENT_TIMESTAMP
             """, (
                 guild_id,
                 data.get("prefix", "/"),
-                data.get("timezone", "UTC"),
+                data.get("timezone", "Africa/Cairo"),
                 data.get("language", "en"),
                 data.get("log_channel_id") or None,
-                data.get("currency_name", "Coins"),
-                data.get("currency_emoji_id") or None,
                 int(bool(data.get("status_rotation_enabled"))),
                 int(data.get("status_rotation_interval", 5)),
             ))
@@ -107,6 +118,10 @@ def save_settings_welcome():
     data     = request.get_json() or {}
 
     async def save():
+        # Normalize legacy UTC / Asia/Cairo to canonical Africa/Cairo
+        from utils.timezone import normalize_timezone
+        tz = normalize_timezone(data.get("timezone", "Africa/Cairo"))
+        data["timezone"] = tz
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO welcome_config
@@ -153,6 +168,10 @@ def save_settings_boost():
     data     = request.get_json() or {}
 
     async def save():
+        # Normalize legacy UTC / Asia/Cairo to canonical Africa/Cairo
+        from utils.timezone import normalize_timezone
+        tz = normalize_timezone(data.get("timezone", "Africa/Cairo"))
+        data["timezone"] = tz
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO boost_config

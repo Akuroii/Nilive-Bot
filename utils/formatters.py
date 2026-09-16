@@ -1,5 +1,13 @@
 from datetime import datetime, timezone
 import re
+from zoneinfo import ZoneInfo
+try:
+    from utils.timezone import CAIRO_TZ
+    _CAIRO = CAIRO_TZ
+    _HAS_CAIRO = True
+except Exception:
+    _CAIRO = timezone.utc
+    _HAS_CAIRO = False
 
 # Duration parsing: accepts strings like "30m", "2h", "3d"
 # Returns total seconds as an integer, or raises ValueError for invalid input.
@@ -82,11 +90,18 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def format_timestamp(ts: str | None, fmt: str = "%Y-%m-%d %H:%M UTC") -> str:
+def format_timestamp(ts: str | None, fmt: str = "%Y-%m-%d %H:%M") -> str:
     if not ts:
         return "Unknown"
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        # User-facing display in Cairo where appropriate
+        try:
+            dt = dt.astimezone(_CAIRO)
+        except Exception:
+            pass
         return dt.strftime(fmt)
     except Exception:
         return ts[:16] if len(ts) >= 16 else ts
@@ -97,6 +112,12 @@ def format_date_only(ts: str | None) -> str:
         return "Unknown"
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            dt = dt.astimezone(_CAIRO)
+        except Exception:
+            pass
         return dt.strftime("%Y-%m-%d")
     except Exception:
         return ts[:10] if len(ts) >= 10 else ts
@@ -131,8 +152,12 @@ def format_number(n: int | float) -> str:
     return f"{int(n):,}"
 
 
-def format_coins(n: int, currency_name: str = "Coins") -> str:
-    return f"{format_number(n)} {currency_name}"
+# NOTE: a `format_coins(n, currency_name="Coins")` helper used to live here.
+# It was never called from anywhere, and its hardcoded "Coins" default made
+# it a second, competing source of truth for how a currency amount is
+# rendered. Currency display now goes through utils/currency.py's
+# currency_amount() / currency_label(), which resolve the configured name
+# and emoji per guild. Use format_number() for a bare number.
 
 
 def format_duration(minutes: int | None) -> str:

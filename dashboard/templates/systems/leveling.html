@@ -161,7 +161,7 @@
                 <p class="text-muted text-sm" style="margin-bottom:16px;">
                     On a schedule, archives the full current leaderboard (visible after
                     reset as a completed cycle) then zeroes everyone's XP/level for
-                    this server. Level rewards already earned (roles, coins, diamonds)
+                    this server. Level rewards already earned (roles, {{ currency.coins.name }}, {{ currency.diamonds.name }})
                     are NOT taken back.
                 </p>
                 <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
@@ -241,7 +241,7 @@
 
     <!-- Phase 5 / Leveling expansion — currency rewards -->
     <div class="card">
-        <div class="card-title">🪙 Add Level Reward — Coins / Diamonds</div>
+        <div class="card-title">{{ currency_icon(currency.coins.emoji) }} Add Level Reward — {{ currency.coins.name }} / {{ currency.diamonds.name }}</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Granted automatically on level-up via the Reward Engine, atomically and
             logged to the Transaction Ledger (source: leveling). A level can have a
@@ -256,8 +256,8 @@
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Currency</label>
                 <select class="form-input" id="currency-reward-currency" style="width:140px;">
-                    <option value="balance">🪙 Coins</option>
-                    <option value="diamonds">💎 Diamonds</option>
+                    <option value="balance">{{ currency_icon_text(currency.coins.emoji) }} {{ currency.coins.name }}</option>
+                    <option value="diamonds">{{ currency_icon_text(currency.diamonds.emoji) }} {{ currency.diamonds.name }}</option>
                 </select>
             </div>
             <div class="form-group" style="margin-bottom:0;">
@@ -324,9 +324,9 @@
     <div class="card">
         <div class="card-title">🏵️ Prestige Settings</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Prestige tiers I–V are purchased from the Shop with Coins (sequential, no
-            skipping). Purchasing resets the buyer's Coins to 0 and never touches
-            Level/XP/Diamonds. Tier VI is a temporary Booster entitlement — an active
+            Prestige tiers I–V are purchased from the Shop with {{ currency.coins.name }} (sequential, no
+            skipping). Purchasing resets the buyer's {{ currency.coins.name }} to 0 and never touches
+            Level/XP/{{ currency.diamonds.name }}. Tier VI is a temporary Booster entitlement — an active
             Discord Booster has effective Prestige VI regardless of their permanent tier.
             Multipliers below are applied at earn-time from the user's effective tier.
         </p>
@@ -342,7 +342,7 @@
     <div class="card">
         <div class="card-title">🎚️ Prestige Multipliers</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Coins / Diamonds multipliers per effective Prestige tier. Applied at
+            {{ currency.coins.name }} / {{ currency.diamonds.name }} multipliers per effective Prestige tier. Applied at
             earn-time only; never applied to transfers, conversions, admin grants or
             shop spending.
         </p>
@@ -473,7 +473,7 @@ async function loadResetConfig() {
     document.getElementById('reset-period').value = c.period || 'weekly';
     const info = document.getElementById('reset-last-info');
     info.textContent = c.last_reset
-        ? `Last reset: ${c.last_reset.slice(0, 16).replace('T', ' ')} UTC`
+        ? `Last reset: ${c.last_reset.slice(0, 16).replace('T', ' ')}`
         : 'No reset has run yet.';
 }
 loadResetConfig();
@@ -544,7 +544,7 @@ async function loadCurrencyRewards() {
     tbody.innerHTML = data.rewards.map(r => `
         <tr>
             <td><span class="badge badge-accent">Level ${r.level}</span></td>
-            <td>${r.currency === 'diamonds' ? '💎 Diamonds' : '🪙 Coins'}</td>
+            <td>${currencyLabel(r.currency)}</td>
             <td>${r.amount.toLocaleString()}</td>
             <td>
                 <button class="btn btn-sm btn-danger"
@@ -680,12 +680,12 @@ function renderPrestigeMultipliers(tiers) {
             <div style="border:1px solid var(--border);border-radius:8px;padding:12px;">
                 <div style="font-weight:600;margin-bottom:8px;">★ ${PRESTIGE_TIER_NAMES[t]}${boosterNote}</div>
                 <div class="form-group" style="margin-bottom:8px;">
-                    <label class="form-label">Coins ×</label>
+                    <label class="form-label">${currencyNameFor('coins')} ×</label>
                     <input class="form-input prestige-mult" data-tier="${t}" data-cur="coins"
                            type="number" step="0.1" min="0" value="${m.coins}">
                 </div>
                 <div class="form-group" style="margin-bottom:0;">
-                    <label class="form-label">Diamonds ×</label>
+                    <label class="form-label">${currencyNameFor('diamonds')} ×</label>
                     <input class="form-input prestige-mult" data-tier="${t}" data-cur="diamonds"
                            type="number" step="0.1" min="0" value="${m.diamonds}">
                 </div>
@@ -724,7 +724,8 @@ async function savePrestigeConfig() {
     const data = await res.json();
     const status = document.getElementById('prestige-config-status');
     if (data.success) {
-        status.textContent = '✅ Saved!'; status.style.color = 'var(--success)';
+        status.innerHTML = checkIconHtml() + ' Saved!';
+        status.style.color = 'var(--success)';
         showToast('Prestige settings saved!');
     } else {
         status.textContent = '❌ ' + (data.error || 'Error');

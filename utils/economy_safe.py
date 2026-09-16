@@ -227,8 +227,13 @@ async def safe_convert(guild_id: int, user_id: int, coin_amount: int,
 
     diamonds_gained = coin_amount // rate
     if diamonds_gained <= 0:
+        # Message names the guild's OWN currencies (they may be renamed),
+        # so it is built from the display config rather than literals.
+        from utils.currency import get_currency_config, currency_name_for
+        cur = await get_currency_config(guild_id)
         raise ValueError(
-            f"Need at least {rate} coins to convert 1 diamond "
+            f"Need at least {rate:,} {currency_name_for(cur, 'coins')} "
+            f"to convert 1 {currency_name_for(cur, 'diamonds')} "
             f"(current rate: {rate}:1)")
 
     coins_spent = diamonds_gained * rate

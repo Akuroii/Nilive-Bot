@@ -50,6 +50,12 @@ def economy_leaderboard_partial():
     user_map = run_async(resolve()) if rows else {}
 
     from dashboard.utils.user_identity import render_user_identity_html
+    from dashboard.utils.currency_ctx import resolved as _currency, icon_html
+    _cc = _currency(guild_id)["coins"]
+    # A configured custom emoji is Discord message markup, not HTML, so it
+    # is rendered as a CDN <img> (see currency_ctx.icon_html) — dropped
+    # straight into this f-string it would be swallowed as an <a> tag.
+    _cc_icon = icon_html(_cc["emoji"])
     html = ""
     for i, r in enumerate(rows, 1):
         u = user_map.get(r[0], {})
@@ -58,7 +64,7 @@ def economy_leaderboard_partial():
         html += (
             f"<tr><td>#{i}</td>"
             f"<td>{identity_html}</td>"
-            f"<td><strong>🪙 {r[1]:,}</strong></td></tr>"
+            f"<td><strong>{_cc_icon} {r[1]:,}</strong></td></tr>"
         )
     return html or "<tr><td colspan='3' class='empty'>No data yet</td></tr>"
 
@@ -86,6 +92,9 @@ def economy_leaderboard_diamonds_partial():
     user_map = run_async(resolve()) if rows else {}
 
     from dashboard.utils.user_identity import render_user_identity_html
+    from dashboard.utils.currency_ctx import resolved as _currency, icon_html
+    _cd = _currency(guild_id)["diamonds"]
+    _cd_icon = icon_html(_cd["emoji"])
     html = ""
     for i, r in enumerate(rows, 1):
         u = user_map.get(r[0], {})
@@ -94,9 +103,147 @@ def economy_leaderboard_diamonds_partial():
         html += (
             f"<tr><td>#{i}</td>"
             f"<td>{identity_html}</td>"
-            f"<td><strong>💎 {r[1]:,}</strong></td></tr>"
+            f"<td><strong>{_cd_icon} {r[1]:,}</strong></td></tr>"
         )
-    return html or "<tr><td colspan='3' class='empty'>No diamonds held yet</td></tr>"
+    return html or f"<tr><td colspan='3' class='empty'>No {_cd['name']} held yet</td></tr>"
+
+
+# ── Currency display configuration ─────────────────────────────────────
+# Economy owns the currency configuration; the rest of the project consumes
+# it via utils/currency.py. These two routes are the ONLY way the four
+# display columns are written from any UI — the General Settings form used
+# to write them too, and that is exactly what let the two surfaces drift.
+#
+# Both fields per currency are independent and optional: leaving a name
+# blank keeps (or restores) the default name, leaving the emoji blank keeps
+# the default emoji. Nothing here requires both.
+
+def _known_emojis_for_currency_form(guild_id: int) -> list[dict]:
+    """Every custom emoji the bot can name, so a pasted BARE ID can be
+    normalised into a proper `<:name:id>` token instead of the anonymous
+    `<:_:id>` placeholder.
+
+    Sources, cheapest first, and all of them already existed:
+      * the bot's own application emojis (utils/app_emoji_cache — these
+        render in EVERY guild, which is the only place a currency icon is
+        guaranteed to work),
+      * the current guild's emoji list (the same Discord endpoint
+        /api/guild/emojis already uses for the Embed Builder picker).
+
+    Best-effort by design: any failure just means a pasted bare ID keeps
+    the placeholder name, which still renders. Nothing here may block a
+    save.
+    """
+    known: list[dict] = []
+    try:
+        from utils import app_emoji_cache
+
+        async def _app():
+            await app_emoji_cache.ensure_table()
+            return await app_emoji_cache.list_all()
+
+        # Already {id, name, animated} — the exact shape this helper wants.
+        known.extend(run_async(_app()) or [])
+    except Exception:
+        pass
+
+    try:
+        token = os.getenv("DISCORD_TOKEN", "")
+        if token:
+            resp = _req.get(
+                f"https://discord.com/api/v10/guilds/{guild_id}/emojis",
+                headers={"Authorization": f"Bot {token}"}, timeout=8)
+            if resp.status_code == 200:
+                for e in resp.json():
+                    if e.get("id") and e.get("name"):
+                        known.append({"id": str(e["id"]), "name": e["name"],
+                                      "animated": bool(e.get("animated"))})
+    except Exception:
+        pass
+
+    return [k for k in known if k["id"]]
+
+
+@api_bp.route("/economy/currency", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_currency_config_api():
+    """Prefill payload for the Economy → Currency tab.
+
+    Returns the STORED values (`stored`, blank when the owner has never set
+    a field, so the "leave blank for the default" affordance is truthful)
+    alongside the RESOLVED values (`resolved`, what is actually rendered
+    everywhere today) and the defaults, so the tab can show a real preview
+    without client-side guessing.
+    """
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        from utils.currency import (
+            get_currency_config, get_currency_config_raw,
+            DEFAULT_COIN_NAME, DEFAULT_COIN_EMOJI,
+            DEFAULT_DIAMOND_NAME, DEFAULT_DIAMOND_EMOJI,
+        )
+        return {
+            "stored": await get_currency_config_raw(guild_id),
+            "resolved": await get_currency_config(guild_id),
+            "defaults": {
+                "coin_name": DEFAULT_COIN_NAME,
+                "coin_emoji": DEFAULT_COIN_EMOJI,
+                "diamond_name": DEFAULT_DIAMOND_NAME,
+                "diamond_emoji": DEFAULT_DIAMOND_EMOJI,
+            },
+        }
+
+    return jsonify(run_async(fetch()))
+
+
+@api_bp.route("/economy/currency", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def save_currency_config_api():
+    guild_id = get_session_guild_id()
+    data = request.json or {}
+
+    from utils.currency import set_currency_config
+    from utils.emoji import normalize_currency_emoji
+
+    known = _known_emojis_for_currency_form(guild_id)
+
+    # An absent key means "leave this field alone"; a present-but-blank key
+    # means "revert to the default". that distinction is what lets the form
+    # submit a partial payload without blanking fields it did not render.
+    #
+    # Emoji normalisation applies to the EMOJI fields only. A name is free
+    # text — routing it through normalize_currency_emoji() turned a purely
+    # numeric name ("2024") into the Discord token `<:_:2024>`, because a
+    # bare digit string is exactly the form that helper resolves as an
+    # emoji ID. Names are stored as typed.
+    def field(key):
+        if key not in data:
+            return None
+        if key in ("coin_emoji_id", "diamond_emoji_id"):
+            return normalize_currency_emoji(data.get(key), known)
+        return str(data.get(key) or "").strip()
+
+    async def save():
+        return await set_currency_config(
+            guild_id,
+            currency_name=field("currency_name"),
+            coin_emoji_id=field("coin_emoji_id"),
+            diamond_name=field("diamond_name"),
+            diamond_emoji_id=field("diamond_emoji_id"),
+        )
+
+    resolved = run_async(save())
+
+    # Audit log records the RESOLVED labels, because "which name is live
+    # now" is the question anyone reading the log actually has.
+    log_action(
+        guild_id,
+        f"Updated currency: primary = {resolved['coins']['name']} "
+        f"{resolved['coins']['emoji']}, diamonds = "
+        f"{resolved['diamonds']['name']} {resolved['diamonds']['emoji']}",
+        "economy")
+    return jsonify({"success": True, "resolved": resolved})
 
 
 @api_bp.route("/economy/exchange-rate", methods=["GET"])
@@ -168,13 +315,24 @@ def shop_items_partial():
         "legendary": "badge-warning", "mythical": "badge-danger",
         "secret": "badge-danger",
     }
+    from dashboard.utils.currency_ctx import (
+        resolved as _currency, icon_html as _currency_icon_html,
+    )
+    _cur = _currency(guild_id)
+    # Aliased on import: `icon_html` is already taken below by the shop
+    # item's own icon image.
+    _coin_icon = _currency_icon_html(_cur['coins']['emoji'])
+    _gem_icon = _currency_icon_html(_cur['diamonds']['emoji'])
     html = ""
     for r in rows:
         status = "badge-success" if r[8] else "badge-danger"
         label  = "Active" if r[8] else "Disabled"
         dur    = f"{r[6]}h" if r[6] else "Permanent"
         price_diamonds = r[9]
-        price_str = f"💎 {price_diamonds:,}" if price_diamonds else f"🪙 {r[3]:,}"
+        # Price badge uses the guild's configured icon for whichever
+        # currency the item is priced in.
+        price_str = (f"{_gem_icon} {price_diamonds:,}"
+                     if price_diamonds else f"{_coin_icon} {r[3]:,}")
         rarity = r[11] or "common"
         rarity_class = RARITY_BADGE.get(rarity, "badge")
         icon_html = (
@@ -278,6 +436,37 @@ def add_shop_item():
                         "error": "Prestige items are purchased with Coins and "
                                  "cannot have a diamond price."})
 
+    # Wallet pass: a potion is delivered into the buyer's inventory and
+    # applies its effect only when used, so an unusable one is worse
+    # than a refused save — the member discovers it's broken only after
+    # paying. It reuses xp_boost_multiplier + duration_hours (no new
+    # columns), and both are required here, mirroring the same check
+    # cogs/shop.py performs at purchase time. Titles need no extra
+    # validation: name + icon + rarity is the whole item.
+    item_type_val = (data.get("type") or "role")
+    try:
+        xp_boost_multiplier_val = (
+            float(data.get("xp_boost_multiplier"))
+            if data.get("xp_boost_multiplier") not in (None, "", 0, "0")
+            else None)
+    except (TypeError, ValueError):
+        xp_boost_multiplier_val = None
+
+    if item_type_val == "potion":
+        potion_mult = xp_boost_multiplier_val or 0.0
+        try:
+            potion_hours = int(data.get("duration_hours") or 0)
+        except (TypeError, ValueError):
+            potion_hours = 0
+        if potion_mult <= 1.0:
+            return jsonify({"success": False,
+                            "error": "Potions need an effect multiplier "
+                                     "greater than 1."})
+        if potion_hours <= 0:
+            return jsonify({"success": False,
+                            "error": "Potions need an effect duration in "
+                                     "hours."})
+
     # Rank Card foundation: rarity is admin-set at creation time,
     # same place price/icon are already captured. Falls back to
     # 'common' on anything unrecognized rather than rejecting the
@@ -295,8 +484,8 @@ def add_shop_item():
                      role_id, duration_hours, featured,
                      required_level, required_role_id,
                      max_stock, current_stock, enabled, price_diamonds,
-                     icon_url, rarity, prestige_tier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                     icon_url, rarity, prestige_tier, xp_boost_multiplier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
             """, (
                 guild_id,
                 item_name,
@@ -314,6 +503,16 @@ def add_shop_item():
                 icon_url,
                 rarity,
                 prestige_tier_val,
+                # PRE-EXISTING BUG FIX (found during the Wallet pass):
+                # this column was in the form, in the JS payload, and
+                # read back by cogs/shop.py's purchase path — but was
+                # never actually part of this INSERT, so it always
+                # persisted as NULL. Every XP Boost item created from
+                # the dashboard was therefore permanently unbuyable
+                # ("isn't configured correctly (missing or invalid
+                # multiplier)"). Potions reuse the same column, so this
+                # had to be corrected rather than worked around.
+                xp_boost_multiplier_val,
             ))
             await db.commit()
 
@@ -346,10 +545,20 @@ def shop_purchase_history():
             return await cursor.fetchall()
 
     rows = run_async(fetch())
+    from dashboard.utils.currency_ctx import (
+        resolved as _currency, icon_html as _currency_icon_html,
+    )
+    _cur = _currency(guild_id)
+    _coin_icon = _currency_icon_html(_cur['coins']['emoji'])
+    _gem_icon = _currency_icon_html(_cur['diamonds']['emoji'])
     html = ""
     for r in rows:
         exp   = r[4][:10] if r[4] else "Permanent"
-        currency_icon = "💎" if (len(r) > 5 and r[5] == "diamonds") else "🪙"
+        # 'currency_paid' stores the stable key; the glyph comes from the
+        # guild's configured icon for that key.
+        currency_icon = (_gem_icon
+                         if (len(r) > 5 and r[5] == "diamonds")
+                         else _coin_icon)
         # r[0] (user_display_name — a Discord nickname) and r[1]
         # (item_name — admin-entered but still free text) are both
         # escaped below; same stored-XSS class as moderation_logs_partial.

@@ -7,6 +7,7 @@ import random
 from database import DB_PATH
 from utils.permissions import check_bot_role_position
 from utils.formatters import snapshot_user
+from utils.emoji import CHECK_EMOJI
 
 
 async def get_welcome_config(guild_id: int) -> dict:
@@ -122,13 +123,13 @@ class RulesView(discord.ui.View):
 
         if role in interaction.user.roles:
             await interaction.response.send_message(
-                "You already accepted the rules!", ephemeral=True)
+                "You already accepted the rules.", ephemeral=True)
             return
 
         await interaction.user.add_roles(
             role, reason="Accepted rules")
         await interaction.response.send_message(
-            f"✅ Welcome! You've been given the {role.name} role.",
+            f"{CHECK_EMOJI} Welcome! You've been given the {role.name} role.",
             ephemeral=True)
 
 
@@ -175,7 +176,7 @@ class Welcome(commands.Cog):
         if not messages:
             # Default embed
             embed = discord.Embed(
-                title=f"Welcome to {member.guild.name}!",
+                title=f"Welcome to {member.guild.name}.",
                 description=(f"Hey {member.mention}, welcome! "
                              f"You are member #{member.guild.member_count}."),
                 color=0x7c5cbf)

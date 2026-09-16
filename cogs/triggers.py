@@ -7,6 +7,7 @@ import random
 import time
 from database import DB_PATH
 from utils.message_router import Route, get_router
+from utils.emoji import CHECK_EMOJI
 
 try:
     from thefuzz import fuzz
@@ -321,7 +322,7 @@ class Triggers(commands.Cog):
             return
         embed = discord.Embed(title="Active Triggers", color=0x7c5cbf)
         for r in rows:
-            status = "✅" if r[5] else "❌"
+            status = CHECK_EMOJI if r[5] else "❌"
             embed.add_field(
                 name=f"#{r[0]} {status} — {r[2]} ({r[3]})",
                 value=f"`{r[1][:60]}` — {r[4]}% chance",

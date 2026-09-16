@@ -65,6 +65,14 @@ async def get_rank_card_data(guild_id: int, user_id: int,
 
     equipped = await get_equipped(guild_id, user_id)
 
+    # Wallet pass: the equipped TITLE is exposed here too, so the future
+    # card renderer can read it from the same single aggregation call
+    # instead of learning about a second table. Read-only — nothing in
+    # this module decides how (or whether) a title is drawn. Independent
+    # from equipped_role above by design: a member can wear one of each.
+    from utils.title_engine import get_equipped_title
+    equipped_title = await get_equipped_title(guild_id, user_id)
+
     items = await get_inventory(guild_id, user_id, include_empty=False)
     grid_candidates = []
     for it in items:
@@ -96,5 +104,6 @@ async def get_rank_card_data(guild_id: int, user_id: int,
         "voice_minutes": totals[1] if totals else 0,
         "minigame_wins": win_count,
         "equipped_role": equipped,
+        "equipped_title": equipped_title,
         "inventory_grid": grid_items,
     }
