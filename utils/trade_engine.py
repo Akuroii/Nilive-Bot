@@ -158,6 +158,14 @@ async def execute_trade(guild_id: int, user_a: int, offer_a: dict,
     if user_a == user_b:
         raise TradeError("Cannot trade with yourself.")
 
+    # Resolved up-front (before the write transaction) so the "no longer
+    # has enough X" errors below can name this guild's currencies instead
+    # of the defaults.
+    from utils.currency import get_currency_config, currency_name_for
+    _cur = await get_currency_config(guild_id)
+    coin_name = currency_name_for(_cur, "coins")
+    gem_name = currency_name_for(_cur, "diamonds")
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
@@ -168,10 +176,10 @@ async def execute_trade(guild_id: int, user_a: int, offer_a: dict,
 
             if a_bal < offer_a.get("coins", 0):
                 await db.execute("ROLLBACK")
-                return {"success": False, "error": f"<@{user_a}> no longer has enough coins."}
+                return {"success": False, "error": f"<@{user_a}> no longer has enough {coin_name}."}
             if a_gems < offer_a.get("diamonds", 0):
                 await db.execute("ROLLBACK")
-                return {"success": False, "error": f"<@{user_a}> no longer has enough diamonds."}
+                return {"success": False, "error": f"<@{user_a}> no longer has enough {gem_name}."}
             for name, qty in offer_a.get("items", {}).items():
                 if a_items.get(name, 0) < qty:
                     await db.execute("ROLLBACK")
@@ -179,10 +187,10 @@ async def execute_trade(guild_id: int, user_a: int, offer_a: dict,
 
             if b_bal < offer_b.get("coins", 0):
                 await db.execute("ROLLBACK")
-                return {"success": False, "error": f"<@{user_b}> no longer has enough coins."}
+                return {"success": False, "error": f"<@{user_b}> no longer has enough {coin_name}."}
             if b_gems < offer_b.get("diamonds", 0):
                 await db.execute("ROLLBACK")
-                return {"success": False, "error": f"<@{user_b}> no longer has enough diamonds."}
+                return {"success": False, "error": f"<@{user_b}> no longer has enough {gem_name}."}
             for name, qty in offer_b.get("items", {}).items():
                 if b_items.get(name, 0) < qty:
                     await db.execute("ROLLBACK")

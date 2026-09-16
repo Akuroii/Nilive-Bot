@@ -12,6 +12,12 @@ from utils.mission_engine import (
     seconds_until_daily_reset, seconds_until_weekly_reset,
     format_reset_countdown,
 )
+from utils.currency import (
+    get_currency_config, currency_amount,
+    DEFAULT_COIN_NAME, DEFAULT_COIN_EMOJI,
+    DEFAULT_DIAMOND_NAME, DEFAULT_DIAMOND_EMOJI,
+)
+from utils.emoji import CHECK_EMOJI, CHECK_EMOJI_FALLBACK, resolve_check_emoji
 
 # ═══════════════════════════════════════════════════════════════════════
 # MISSIONS — v2 display
@@ -59,19 +65,17 @@ PERIOD_FOOTER = {
 MISSION_COLOR = 0x7c5cbf
 VIEW_TIMEOUT = 1800  # same as the Wallet panels
 
-# Single source of truth for the animated reward emoji (locked spec).
-# The emoji itself is uploaded through the Discord Developer Portal; if
-# it's ever re-uploaded, only this constant changes.
-DIAMOND_EMOJI = "<a:diamond:1532745018324815982>"
-CHECKMARK_EMOJI = "✅"
+# The reward/check emoji is NOT declared here any more. It used to be a
+# DIAMOND_EMOJI constant in this module — a currency-specific emoji
+# hardcoded inside Missions, which is exactly what the currency
+# source-of-truth rule forbids (and it became dead once reward lines moved
+# to the configured currency emoji). The success indicator now lives in
+# utils/emoji.py as CHECK_EMOJI — one source for every surface.
 
 # Refresh button emoji — the server's custom emoji (locked by Dark).
-# Static server emoji, so the plain <:name:id> form. Same
-# single-source-of-truth rule as DIAMOND_EMOJI above: if the emoji is
-# ever re-uploaded, only this constant changes. Note: this is a GUILD
-# emoji — if it's ever deleted from the server, the button silently
-# falls back to no glyph (still fully functional); the label carries
-# the meaning, the emoji is decoration.
+# Note: this is a GUILD emoji, so if it is ever deleted from the server the
+# button silently falls back to no glyph (still fully functional); the
+# label carries the meaning, the emoji is decoration.
 REFRESH_EMOJI = "<:imagePhotoroom17:1549206183498481714>"
 
 PROGRESS_NODES = 6      # v3: 6 nodes — a full bar means completed
@@ -126,15 +130,31 @@ def _mission_description(m: dict, guild) -> str:
 
 
 def _reward_display_sync(m: dict, cur: dict | None) -> str:
-    """Format the actual reward for the completed line, using currency source of truth."""
+    """Format a mission's reward using the guild's Economy currency config.
+
+    Missions never store a currency name or emoji — only the stable
+    `reward_type` key ('coins' / 'diamonds'). The label is composed here at
+    RENDER time, which is what makes renaming a currency a config-only
+    change: an already-completed mission row is untouched and simply
+    renders with the new name on the next view.
+
+    `cur` is the resolved config from utils.currency.get_currency_config,
+    which always supplies a name and emoji. The only fallback needed is for
+    a caller that passes None (a unit test, or a config read that raised) —
+    and even then it is the shared default constant rather than a literal
+    repeated here, so there is still exactly one place defaults live.
+    """
     rt = m.get("reward_type")
     rv = m.get("reward_value")
-    if rt == "coins":
-        emoji = (cur["coins"]["emoji"] if cur and "coins" in cur else "🪙")
-        return f"{rv} {emoji}"
-    if rt == "diamonds":
-        emoji = (cur["diamonds"]["emoji"] if cur and "diamonds" in cur else "💎")
-        return f"{rv} {emoji}"
+    if rt in ("coins", "diamonds"):
+        if cur is None:
+            cur = {
+                "coins": {"name": DEFAULT_COIN_NAME,
+                          "emoji": DEFAULT_COIN_EMOJI},
+                "diamonds": {"name": DEFAULT_DIAMOND_NAME,
+                             "emoji": DEFAULT_DIAMOND_EMOJI},
+            }
+        return currency_amount(cur, rt, rv)
     if rt == "xp":
         return f"{rv} XP"
     if rt in ("role", "temp_role"):
@@ -148,7 +168,41 @@ def _reward_display_sync(m: dict, cur: dict | None) -> str:
     return str(rv) if rv is not None else ""
 
 
-def _mission_block(m: dict, guild, cur: dict | None = None) -> str:
+def reward_summary(reward_type: str, reward_value, cur: dict | None = None,
+                   duration_hours=None) -> str:
+    """One human-readable description of a mission reward, for the admin
+    surfaces (/mission_create confirmation, /mission_list).
+
+    Admin views used to print the raw stored key — literally
+    `coins: 500` — which told an owner who had renamed their currency to
+    "Moon" nothing, and made the admin output inconsistent with what
+    members see. This resolves the same way the member display does, so
+    both surfaces agree and both follow the Economy configuration.
+
+    Unlike the member-facing line this is a *definition*, not a claim, so
+    role rewards are shown as a mention (the admin configured the ID and
+    needs to see which role it is) rather than hidden behind an emoji.
+    """
+    if reward_type in ("coins", "diamonds"):
+        return currency_amount(cur, reward_type, reward_value)
+    if reward_type == "xp":
+        return f"{reward_value} XP"
+    if reward_type in ("role", "temp_role"):
+        label = "Role" if reward_type == "role" else "Temp role"
+        try:
+            ref = f"<@&{int(reward_value)}>"
+        except (TypeError, ValueError):
+            ref = str(reward_value)
+        if reward_type == "temp_role" and duration_hours:
+            return f"{label} {ref} ({duration_hours}h)"
+        return f"{label} {ref}"
+    if reward_type == "item":
+        return f"Item {reward_value}"
+    return f"{reward_type}: {reward_value}"
+
+
+def _mission_block(m: dict, guild, cur: dict | None = None,
+                   check_emoji: str = CHECK_EMOJI) -> str:
     target = int(m["target"] or 0)
     progress = min(int(m["progress"] or 0), target)
     pct = (progress / target * 100) if target > 0 else 100.0
@@ -157,7 +211,7 @@ def _mission_block(m: dict, guild, cur: dict | None = None) -> str:
         bar = progress_bar(100)
         reward_str = _reward_display_sync(m, cur)
         # Dynamic currency, checkmark; no hardcoded DIAMOND for non-diamond rewards
-        status = f"⤷ `reward claimed` {reward_str} {CHECKMARK_EMOJI}".strip()
+        status = f"⤷ `reward claimed` {reward_str} {check_emoji}".strip()
     else:
         # Never claim 100% before the mission is actually complete
         # (e.g. 199/200 rounding up) — and never RENDER a full bar
@@ -201,13 +255,23 @@ async def build_mission_display(bot, guild, user_id: int):
     if not progress:
         return None
 
-    # Currency source of truth for completed-reward display
+    # Currency source of truth for completed-reward display. A config read
+    # failure must never blank the panel — get_currency_config already
+    # returns defaults for an unconfigured guild, so the except is only for
+    # a genuine database error, and _reward_display_sync falls back to the
+    # shared default constants in that case.
     cur = None
     try:
-        from utils.currency import get_currency_config
         cur = await get_currency_config(guild.id)
-    except Exception:
-        cur = None
+    except Exception as e:
+        print(f"[MISSIONS] currency config read failed for guild "
+              f"{guild.id}: {e}")
+
+    # Graceful degradation for the check glyph: the emoji is a custom one,
+    # so it only renders if this bot can actually use it. resolve_check_emoji
+    # returns a plain ✅ when it cannot, which beats showing members the raw
+    # `<a:check:...>` token.
+    check_emoji = resolve_check_emoji(bot)
 
     sections: dict[str, list] = {}
     for m in progress:
@@ -219,7 +283,7 @@ async def build_mission_display(bot, guild, user_id: int):
         if not missions:
             continue
         done = sum(1 for m in missions if m["completed"])
-        blocks = [_mission_block(m, guild, cur) for m in missions]
+        blocks = [_mission_block(m, guild, cur, check_emoji) for m in missions]
         if period == "daily":
             blocks.append(f"**Next mission:** "
                           f"`{format_reset_countdown(seconds_until_daily_reset())}`")
@@ -311,8 +375,11 @@ class MissionsView(discord.ui.View):
                 # here is cosmetic and must never raise into the loop.
                 pass
 
+    # Secondary = Discord's neutral gray. The refresh control is a utility
+    # action, not a call to action, so it must not compete visually with
+    # the panel's real content (it was ButtonStyle.primary / blurple).
     @discord.ui.button(label="ʀᴇꜰʀᴇꜱʜ", emoji=REFRESH_EMOJI,
-                       style=discord.ButtonStyle.primary)
+                       style=discord.ButtonStyle.secondary)
     async def refresh_button(self, interaction: discord.Interaction,
                              button: discord.ui.Button):
         guild = self.bot.get_guild(self.guild_id)
@@ -351,6 +418,18 @@ class Missions(commands.Cog):
 
     async def cog_load(self):
         await ensure_tables()
+        # One-time reachability probe for the check emoji. It is a custom
+        # emoji, so if this bot can neither own it as an application emoji
+        # nor see it in a guild it is in, every success line would show the
+        # literal `<a:check:...>` token to members. Rendering already
+        # degrades to a plain ✅ per call (resolve_check_emoji); this makes
+        # the cause visible in the console instead of only on screen.
+        available = resolve_check_emoji(self.bot) == CHECK_EMOJI
+        if not available:
+            print(f"[MISSIONS] check emoji {CHECK_EMOJI} is not reachable by "
+                  f"this bot — falling back to '{CHECK_EMOJI_FALLBACK}'. "
+                  f"Import it as an application emoji (see "
+                  f"utils/app_emoji_cache.py) to restore the custom glyph.")
 
     # ─── PROGRESS HOOKS (same events cogs/mvp.py and cogs/leveling.py
     # already listen to — no new tracking wired anywhere else) ──────
@@ -435,11 +514,13 @@ class Missions(commands.Cog):
             return
         where = (f" in {channel.mention}"
                  if channel and mtype != "daily_completions" else "")
+        cur = await get_currency_config(interaction.guild.id)
         await interaction.response.send_message(
-            f"✅ Created mission **{name}** — {target} "
+            f"{CHECK_EMOJI} Created mission **{name}** — {target} "
             f"{TYPE_LABEL.get(mtype, mtype)} "
             f"({PERIOD_LABEL.get(period, period)}){where} → "
-            f"{reward_type}: {reward_value}", ephemeral=True)
+            f"{reward_summary(reward_type, reward_value, cur, duration_hours)}",
+            ephemeral=True)
 
     @app_commands.command(name="mission_list",
                           description="List configured missions (admin)")
@@ -455,6 +536,7 @@ class Missions(commands.Cog):
         # daily+weekly missions would crash the command at mission #26.
         # Page into multiple embeds of 20 (same shape the member
         # display's "(part n)" split already uses).
+        cur = await get_currency_config(interaction.guild.id)
         embeds = []
         pages = (len(defs) + 19) // 20
         for i in range(0, len(defs), 20):
@@ -464,13 +546,13 @@ class Missions(commands.Cog):
                 title += f" ({i // 20 + 1}/{pages})"
             embed = discord.Embed(title=title, color=MISSION_COLOR)
             for d in page:
-                status = "✅" if d["enabled"] else "❌"
+                status = CHECK_EMOJI if d["enabled"] else "❌"
                 where = f" · <#{d['channel_id']}>" if d.get("channel_id") else ""
                 embed.add_field(
                     name=f"#{d['id']} {status} {d['name']}",
                     value=(f"{d['target']} {TYPE_LABEL.get(d['type'], d['type'])} "
                            f"({PERIOD_LABEL.get(d['period'], d['period'])}){where} → "
-                           f"{d['reward_type']}: {d['reward_value']}"),
+                           f"{reward_summary(d['reward_type'], d['reward_value'], cur, d.get('reward_duration_hours'))}"),
                     inline=False)
             embeds.append(embed)
         await interaction.response.send_message(

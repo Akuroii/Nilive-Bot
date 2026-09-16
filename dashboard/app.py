@@ -223,6 +223,42 @@ def inject_environment():
     }
 
 
+# Currency display config for EVERY template render, not just /economy.
+#
+# Economy owns the currency configuration; the dashboard consumes it. A
+# context processor (rather than passing `currency` from each of the ~20
+# admin page routes) is what makes "configure once, applied everywhere" true
+# by construction — no page can forget the guild's currency, and no page
+# can invent its own default name. Values passed explicitly by a route win
+# (Flask re-applies the view context last), so routes that already pass
+# `currency`/`currency_defaults` keep working unchanged.
+#
+# Safe with no session (login, server-select): the helper falls back to the
+# shipped defaults from utils.currency and never raises.
+# The success/check indicator, server-rendered. Same treatment as the
+# currency config above: one resolver (utils/emoji.py owns the id), and a
+# global helper so no template has to know how a Discord emoji becomes
+# HTML. See dashboard/utils/check_icon.py.
+@app.context_processor
+def inject_check_icon():
+    from dashboard.utils.check_icon import check_icon_html, check_icon_css
+    return {
+        "check_icon": check_icon_html(),
+        "check_icon_css": check_icon_css(),
+    }
+
+
+@app.context_processor
+def inject_currency():
+    from dashboard.permissions import get_session_guild_id
+    from dashboard.utils.currency_ctx import context as _currency_context
+    try:
+        guild_id = get_session_guild_id()
+    except Exception:
+        guild_id = None
+    return _currency_context(guild_id)
+
+
 # ── Error handlers ─────────────────────────────────────────────────────────────
 
 @app.errorhandler(403)
@@ -1131,6 +1167,24 @@ def economy():
 
     balances, diamonds, exchange_rate = run_async(get_data())
 
+    # Currency display config is rendered server-side so the page never
+    # flashes the default 🪙/💎 before the fetch below fills in the real
+    # values — and so this page reads from the same resolver every other
+    # surface uses, rather than keeping its own copy of the names.
+    async def get_currency():
+        from utils.currency import (
+            get_currency_config, get_currency_config_raw,
+        )
+        from dashboard.utils.currency_ctx import defaults_flat
+        return {
+            "resolved": await get_currency_config(guild_id),
+            "raw": await get_currency_config_raw(guild_id),
+            "defaults": defaults_flat(),
+        }
+
+    _cur = run_async(get_currency())
+    currency = _cur["resolved"]
+
     async def resolve():
         from utils.discord_user_cache import resolve_users
         ids = {r[0] for r in balances} | {r[0] for r in diamonds}
@@ -1142,7 +1196,11 @@ def economy():
     ctx = get_current_user_context()
     return render("systems/economy.html",
                   balances=balances, diamonds=diamonds,
-                  exchange_rate=exchange_rate, user_map=user_map, **ctx)
+                  exchange_rate=exchange_rate,
+                  currency=currency,
+                  currency_raw=_cur["raw"],
+                  currency_defaults=_cur["defaults"],
+                  user_map=user_map, **ctx)
 
 
 # ── Shop ───────────────────────────────────────────────────────────────────────
@@ -1427,19 +1485,24 @@ def config_general():
         except Exception:
             pass
         async with aiosqlite.connect(DB_PATH) as db:
+            # Currency name/emoji are deliberately absent: Economy owns the
+            # currency DISPLAY configuration (utils/currency.py ->
+            # /api/economy/currency). Writing them from General Settings
+            # would let a prefix/timezone save clobber the owner's currency
+            # setup. The old statement named `currency_emoji_id`, a column
+            # dropped by the Wallet-pass migration, which made this whole
+            # form raise OperationalError on any fresh database.
             await db.execute("""
                 INSERT INTO guild_settings
                     (guild_id, prefix, timezone, language,
-                     log_channel_id, currency_name, currency_emoji_id,
-                     status_rotation_enabled, status_rotation_interval)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                     log_channel_id, status_rotation_enabled,
+                     status_rotation_interval)
+                VALUES (?,?,?,?,?,?,?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                     prefix                   = excluded.prefix,
                     timezone                 = excluded.timezone,
                     language                 = excluded.language,
                     log_channel_id           = excluded.log_channel_id,
-                    currency_name            = excluded.currency_name,
-                    currency_emoji_id        = excluded.currency_emoji_id,
                     status_rotation_enabled  = excluded.status_rotation_enabled,
                     status_rotation_interval = excluded.status_rotation_interval,
                     updated_at               = CURRENT_TIMESTAMP
@@ -1449,8 +1512,6 @@ def config_general():
                 data.get("timezone", "Africa/Cairo"),
                 data.get("language", "en"),
                 data.get("log_channel_id") or None,
-                data.get("currency_name", "Coins"),
-                data.get("currency_emoji_id") or None,
                 int(bool(data.get("status_rotation_enabled"))),
                 int(data.get("status_rotation_interval", 5)),
             ))

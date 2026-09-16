@@ -11,6 +11,7 @@ from utils.xp_calculator import (
     xp_progress, get_leveling_config,
     is_role_blacklisted,
 )
+from utils.emoji import CHECK_EMOJI
 
 
 # ─── Phase 5 / Leveling expansion — reset config helpers ────────────────
@@ -634,7 +635,8 @@ class Leveling(commands.Cog):
         period = reset_config.get("period") or "weekly"
         count = await perform_leaderboard_reset(interaction.guild.id, period)
         await interaction.followup.send(
-            f"✅ Leaderboard reset — {count} member(s) archived and zeroed.")
+            f"{CHECK_EMOJI} Leaderboard reset — {count} member(s) archived "
+            f"and zeroed.")
 
     # ─── PRESTIGE STATE / READ-ONLY VIEW ─────────────────
     # The old XP/level-gated "/prestige reset" command has been retired

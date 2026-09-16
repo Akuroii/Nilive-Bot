@@ -33,6 +33,68 @@ document.addEventListener('htmx:configRequest', function(evt) {
     evt.detail.headers['X-CSRF-Token'] = window.__CSRF_TOKEN__ || '';
 });
 
+// ── CHECK INDICATOR ───────────────────────────────────────────
+// Server-rendered from utils/emoji.py (see base.html / check_icon.py).
+// Returned as HTML so callers must use it in innerHTML — it is either an
+// <img> pointing at Discord's emoji CDN or a plain unicode check. Constant,
+// never user data.
+function checkIconHtml() {
+    return window.__CHECK_ICON__ || '';
+}
+
+// ── CURRENCY (name + icon) ────────────────────────────────────
+// window.__CURRENCY__ is written by base.html from the server-side
+// resolver (utils/currency.py via dashboard/utils/currency_ctx.py), so
+// client-side labels use the SAME configured names/icons as the Jinja
+// markup. Economy owns these values; nothing here defaults them — if the
+// global is missing, callers get an empty label and must render the amount
+// without a currency word rather than inventing one.
+function currencyInfo(key) {
+    const cur = window.__CURRENCY__ || {};
+    const info = cur[key] || {};
+    return { name: info.name || '', emoji: info.emoji || '' };
+}
+
+// Stored rows carry an internal key, not a display name:
+// transaction_ledger.currency, purchase_history.currency_paid and reward
+// rows use 'balance' (the primary currency) / 'diamonds' / 'xp'. The map
+// below is what makes 'balance' and 'coins' answer the same thing, and what
+// lets a NON-currency key ('xp', 'role', 'item') fall through untouched —
+// it must never be labelled with a currency name.
+const CURRENCY_KEY_MAP = {
+    balance: 'coins', coins: 'coins', diamonds: 'diamonds',
+};
+
+function currencyInfoByKey(key) {
+    const bucket = CURRENCY_KEY_MAP[key];
+    return bucket ? currencyInfo(bucket) : { name: '', emoji: '' };
+}
+
+// '🌙 Moon' — the inline currency label used in tables and toasts. A
+// non-currency key is returned as-is.
+function currencyLabel(key) {
+    const info = currencyInfoByKey(key);
+    return `${info.emoji} ${info.name}`.trim() || key;
+}
+
+// The configured display name for a stored currency key; anything that is
+// not a currency key ('xp', 'role'…) keeps its own key as the label.
+function currencyNameFor(key) {
+    return currencyInfoByKey(key).name || key;
+}
+
+// '🌙 1,250 Moon' — amount + label, the format
+// utils/currency.currency_amount produces server-side. Pass
+// labelFirst=true for 'Moon 1,250' (prose/titles).
+function currencyAmount(key, amount, labelFirst) {
+    const info = currencyInfoByKey(key);
+    const name = info.name || key;
+    const shown = Number(amount || 0).toLocaleString();
+    return labelFirst
+        ? `${name} ${shown}`.trim()
+        : `${info.emoji} ${shown} ${name}`.trim();
+}
+
 // ── THEME TOGGLE ──────────────────────────────────────────────
 function toggleTheme() {
     const html = document.documentElement;
@@ -57,7 +119,7 @@ function toggleSidebar() {
 
 // ── TOAST SYSTEM (4 types) ────────────────────────────────────
 const TOAST_CONFIG = {
-    success: { icon: '✅', bg: 'var(--success)',  fg: '#000', dur: 3000 },
+    success: { icon: checkIconHtml(), bg: 'var(--success)',  fg: '#000', dur: 3000 },
     error:   { icon: '❌', bg: 'var(--danger)',   fg: '#fff', dur: 5000 },
     warning: { icon: '⚠️', bg: 'var(--warning)',  fg: '#000', dur: 4000 },
     info:    { icon: 'ℹ️', bg: 'var(--accent)',   fg: '#fff', dur: 3000 },

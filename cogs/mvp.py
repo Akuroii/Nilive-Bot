@@ -7,6 +7,7 @@ from discord.ext import tasks
 from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
 from utils.timezone import get_cairo_daily_key
+from utils.emoji import CHECK_EMOJI
 
 
 async def get_mvp_config(guild_id: int) -> dict:
@@ -346,7 +347,7 @@ class MVP(commands.Cog):
             await db.commit()
 
         await interaction.followup.send(
-            f"✅ Forced MVP: {member.mention} with {int(score):,} pts")
+            f"{CHECK_EMOJI} Forced MVP: {member.mention} with {int(score):,} pts")
 
 
 async def setup(bot):

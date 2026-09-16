@@ -469,10 +469,16 @@ async def init_db():
                 timezone                 TEXT DEFAULT 'Africa/Cairo',
                 language                 TEXT DEFAULT 'en',
                 log_channel_id           INTEGER,
-                currency_name            TEXT DEFAULT 'Coins',
-                coin_emoji_id            TEXT DEFAULT '🪙',
-                diamond_name             TEXT DEFAULT 'Diamonds',
-                diamond_emoji_id         TEXT DEFAULT '💎',
+                -- Currency DISPLAY config (name + emoji per currency).
+                -- Deliberately NULL by default: utils/currency.py is the
+                -- one place that decides what a blank value resolves to,
+                -- so the defaults live there and nowhere else. See that
+                -- module's header — these columns are owned by the
+                -- Economy page, and no other file may read or write them.
+                currency_name            TEXT,
+                coin_emoji_id            TEXT,
+                diamond_name             TEXT,
+                diamond_emoji_id         TEXT,
                 status_rotation_enabled  INTEGER DEFAULT 0,
                 status_rotation_interval INTEGER DEFAULT 5,
                 updated_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -493,24 +499,74 @@ async def init_db():
             # Wallet pass (Streak/Inventory phase): currency display
             # metadata is fully configurable (names + emoji icons), so
             # no coin/diamond label or emoji is hardcoded in the UI.
-            # `currency_emoji_id` existed previously but was never read
-            # anywhere; it is renamed semantically to `coin_emoji_id`
-            # via a no-op copy (SQLite has no ALTER COLUMN RENAME in
-            # older builds) — if the new columns are missing we add
-            # them with sensible defaults.
-            if "coin_emoji_id" not in cols:
+            # `currency_emoji_id` was the pre-Wallet primary-currency icon
+            # column; it was superseded by `coin_emoji_id`. These four
+            # columns are read and written ONLY through utils/currency.py —
+            # see that module's header for why currency display config
+            # lives here but is owned by the Economy page.
+            # These ALTERs deliberately add the columns with NO DEFAULT.
+            # "Unset" must be NULL, not a copy of the default string:
+            # utils/currency.py is the single source of truth for what a
+            # blank value resolves to (its DEFAULT_* constants), and it
+            # already treats NULL/'' as unset. Baking 'Coins'/'🪙' into a
+            # column default would (a) put the defaults in a second place
+            # that can drift from the resolver, and (b) make "never
+            # configured" indistinguishable from "configured to the
+            # default" — which is exactly what the carry-over below needs
+            # to tell apart. `currency_name` is added here too so an older
+            # database missing that column self-heals the same way the
+            # other three already did.
+            added_coin_emoji = "coin_emoji_id" not in cols
+            if "currency_name" not in cols:
                 await db.execute(
                     "ALTER TABLE guild_settings ADD COLUMN "
-                    "coin_emoji_id TEXT DEFAULT '🪙'")
+                    "currency_name TEXT")
+            if added_coin_emoji:
+                await db.execute(
+                    "ALTER TABLE guild_settings ADD COLUMN "
+                    "coin_emoji_id TEXT")
             if "diamond_name" not in cols:
                 await db.execute(
                     "ALTER TABLE guild_settings ADD COLUMN "
-                    "diamond_name TEXT DEFAULT 'Diamonds'")
+                    "diamond_name TEXT")
             if "diamond_emoji_id" not in cols:
                 await db.execute(
                     "ALTER TABLE guild_settings ADD COLUMN "
-                    "diamond_emoji_id TEXT DEFAULT '💎'")
+                    "diamond_emoji_id TEXT")
             await db.commit()
+
+            # One-time carry-over for guilds that configured a primary
+            # currency icon BEFORE the column split. On those databases
+            # `currency_emoji_id` holds the only icon the owner ever set,
+            # and the freshly-added `coin_emoji_id` is NULL for every
+            # existing row. Copy the value across so the admin's icon
+            # survives instead of silently reverting to the default.
+            #
+            # The copy is gated on `added_coin_emoji`, so it runs only on
+            # the one init_db() that actually creates the column — it can
+            # never re-fire later and overwrite an icon an admin set
+            # deliberately through the Economy page (including deliberately
+            # choosing the default). The NULL-only WHERE is a second
+            # belt-and-braces guard for the same thing.
+            #
+            # The legacy column is deliberately NOT dropped — this
+            # project's established rule is never to DROP a column on an
+            # already-deployed SQLite file (see the ticket_config /
+            # voice_sessions cleanup notes earlier in this file).
+            if added_coin_emoji and "currency_emoji_id" in cols:
+                cursor = await db.execute("""
+                    UPDATE guild_settings
+                       SET coin_emoji_id = currency_emoji_id
+                     WHERE currency_emoji_id IS NOT NULL
+                       AND trim(currency_emoji_id) <> ''
+                       AND (coin_emoji_id IS NULL
+                            OR trim(coin_emoji_id) = '')
+                """)
+                await db.commit()
+                if cursor.rowcount:
+                    print(f"[MIGRATION] carried over legacy currency icon "
+                          f"for {cursor.rowcount} guild(s) "
+                          f"(currency_emoji_id -> coin_emoji_id)")
         except Exception as e:
             print(f"[MIGRATION] guild_settings currency columns: {e}")
 

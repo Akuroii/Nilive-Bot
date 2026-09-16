@@ -6,6 +6,7 @@ import aiohttp
 from database import DB_PATH
 from utils.permissions import check_bot_role_position
 from utils import creator_notify_engine as engine
+from utils.emoji import CHECK_EMOJI
 
 # ═══════════════════════════════════════════════════════════════════════
 # TWITCH INTEGRATION
@@ -396,7 +397,7 @@ class Twitch(commands.Cog):
         embed = discord.Embed(title="Twitch Configs", color=TWITCH_COLOR)
         for (cid, username, dch, is_live, enabled) in rows:
             status = "🔴 LIVE" if is_live else "⚫ Offline"
-            active = "✅" if enabled else "❌"
+            active = CHECK_EMOJI if enabled else "❌"
             embed.add_field(name=f"#{cid} {active} — {username}", value=f"{status} → <#{dch}>", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 

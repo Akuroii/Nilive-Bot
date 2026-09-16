@@ -7,6 +7,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import aiosqlite
 from database import DB_PATH
+from utils.emoji import CHECK_EMOJI
 
 # FEATURE (dark-fixes pass #2): backup_log had a schema (database.py)
 # with zero implementation anywhere — no backup mechanism existed at
@@ -156,10 +157,10 @@ class Backup(commands.Cog):
             result = await _do_backup()
             sec_note = ""
             if SECONDARY_BACKUP_DIR:
-                sec_note = (" · secondary copy ✅" if result.get("secondary_ok")
+                sec_note = (f" · secondary copy {CHECK_EMOJI}" if result.get("secondary_ok")
                             else " · ⚠️ secondary copy FAILED (check logs)")
             await interaction.followup.send(
-                f"✅ Backup created: `{result['filename']}` "
+                f"{CHECK_EMOJI} Backup created: `{result['filename']}` "
                 f"({result['size_bytes']:,} bytes){sec_note}", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ Backup failed: {e}", ephemeral=True)

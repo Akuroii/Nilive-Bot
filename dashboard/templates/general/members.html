@@ -18,8 +18,8 @@
                     <th>User ID</th>
                     <th>Level</th>
                     <th>XP</th>
-                    <th>Coins</th>
-                    <th>Diamonds</th>
+                    <th>{{ currency.coins.emoji }} {{ currency.coins.name }}</th>
+                    <th>{{ currency.diamonds.emoji }} {{ currency.diamonds.name }}</th>
                     {% if is_admin %}<th>Actions</th>{% endif %}
                 </tr>
             </thead>
@@ -30,8 +30,8 @@
                     <td>{{ user_identity(m.user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
                     <td><span class="badge badge-accent">Level {{ m.level }}</span></td>
                     <td>{{ "{:,}".format(m.xp) }} XP</td>
-                    <td>🪙 {{ "{:,}".format(m.coins) }}</td>
-                    <td>💎 {{ "{:,}".format(m.diamonds) }}</td>
+                    <td>{{ currency.coins.emoji }} {{ "{:,}".format(m.coins) }}</td>
+                    <td>{{ currency.diamonds.emoji }} {{ "{:,}".format(m.diamonds) }}</td>
                     {% if is_admin %}
                     <td>
                         <button class="btn btn-sm btn-secondary"

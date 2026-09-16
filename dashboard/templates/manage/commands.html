@@ -943,7 +943,8 @@ async function saveCommandSettings(cmd, btn) {
     const data = await ajaxSave(`/api/commands/settings/${encodeURIComponent(cmd)}`, payload, btn, `/${cmd} settings saved`);
     if (data && data.success) {
         if (statusEl) {
-            statusEl.textContent = '✅ Saved';
+            // innerHTML: checkIconHtml() is server-rendered constant HTML.
+            statusEl.innerHTML = checkIconHtml() + ' Saved';
             statusEl.classList.add('ok');
         }
         refreshRowChips(cmd, payload);
@@ -1118,7 +1119,7 @@ async function applyCategoryRestrict() {
         const data = await res.json();
         if (data.success) {
             if (statusEl) {
-                statusEl.textContent = `✅ Applied restrictions to ${data.count} commands`;
+                statusEl.innerHTML = checkIconHtml() + ` Applied restrictions to ${data.count} commands`;
                 statusEl.style.color = 'var(--success)';
             }
             showToast(`Restrictions applied to ${_catRestrictCategory}`, 'success');

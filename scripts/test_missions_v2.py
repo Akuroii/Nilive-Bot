@@ -20,7 +20,8 @@ Covers the agreed v2 validation list:
    7.  Progress bar reflects the real percentage.
    8.  Progress reaches 100% exactly once (idempotent re-completion).
    9.  Reward granted automatically exactly once.
-  10.  Completed missions render "⤷ Reward claimed <a:diamond:…>".
+  10.  Completed missions render "⨽ `reward claimed` <configured currency
+       amount> <check emoji>" — resolved from the Economy currency config.
   11/12. Daily / weekly reset countdown math (UTC).
   13.  Refresh edits the existing message, never sends a new one.
   14.  Deleted / disabled missions stop counting; honest not-found.
@@ -57,6 +58,7 @@ import aiosqlite  # noqa: E402
 from database import DB_PATH, init_db  # noqa: E402
 import utils.mission_engine as me  # noqa: E402
 import utils.reward_engine  # noqa: E402
+from utils.emoji import CHECK_EMOJI  # noqa: E402
 
 GUILD = 1100
 
@@ -527,14 +529,23 @@ def cog_tests():
     v = cog.MissionsView(_MiniBot(), 1, 2)
     b = v.refresh_button
     check("button label is 'ʀᴇꜰʀᴇꜱʜ'", b.label == "ʀᴇꜰʀᴇꜱʜ", repr(b.label))
-    check("button style is Primary/blurple",
-          b.style is discord.ButtonStyle.primary, str(b.style))
+    # Gray/neutral appearance, per the locked UI spec — not blurple.
+    check("button style is Secondary/neutral gray",
+          b.style is discord.ButtonStyle.secondary, str(b.style))
     check("button carries the custom emoji (name + id, static)",
           b.emoji is not None and b.emoji.name == "imagePhotoroom17"
           and b.emoji.id == 1549206183498481714 and not b.emoji.animated,
           f"{b.emoji!r}")
-    check("diamond emoji constant unchanged",
-          cog.DIAMOND_EMOJI == "<a:diamond:1532745018324815982>")
+
+    # The per-currency reward emoji is no longer a Missions constant.
+    # Missions must resolve currency display from the Economy config, and
+    # the success glyph must come from utils/emoji.py — asserting either
+    # one locally would re-create the hardcode this replaced.
+    check("no DIAMOND_EMOJI currency constant in Missions",
+          not hasattr(cog, "DIAMOND_EMOJI"))
+    check("no CHECKMARK_EMOJI constant in Missions (moved to utils.emoji)",
+          not hasattr(cog, "CHECKMARK_EMOJI"))
+    check("check glyph comes from utils.emoji", CHECK_EMOJI.startswith("<a:"))
 
     section("4. Threads count as their parent channel")
 
@@ -600,7 +611,8 @@ def cog_tests():
     m_done = {**m, "progress": 200, "completed": True, "reward_type": "coins", "reward_value": "100"}
     done_block = cog._mission_block(m_done, FakeGuild())
     check("completed mission shows `reward claimed` + dynamic reward + checkmark",
-          "`reward claimed`" in done_block and "✅" in done_block, done_block)
+          "`reward claimed`" in done_block and CHECK_EMOJI in done_block
+          and "Coins" in done_block, done_block)
     check("completed mission drops the Progress line",
           "Progress:" not in done_block, done_block)
     check("completed mission shows 100% (bold code)",
@@ -694,7 +706,8 @@ async def display_tests():
     check("weekly heading is dynamic too",
           weekly[0].title == "Weekly Mission Progress (0 / 1)", weekly[0].title)
     check("completed mission renders `reward claimed` + checkmark",
-          "`reward claimed`" in daily[0].description and "✅" in daily[0].description)
+          "`reward claimed`" in daily[0].description
+          and CHECK_EMOJI in daily[0].description)
     check("incomplete mission keeps its Progress line",
           "`Progress: 124 / 200 words`" in daily[0].description)
     check("daily embed ends with its next-rotation countdown",

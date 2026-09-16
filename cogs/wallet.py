@@ -8,6 +8,7 @@ from utils.daily_engine import (
 )
 from utils.economy_safe import get_balance
 from utils.currency import get_currency_config, for_currency
+from utils.emoji import as_partial_emoji
 from utils.inventory import get_inventory, drop_item
 from utils.equip_engine import get_equipped, equip_role, unequip_role
 from utils.title_engine import (
@@ -1005,6 +1006,16 @@ class ReceiptsView(WalletBaseView):
             "diamonds", active=(currency_key == "diamonds")))
         self.add_item(ReceiptsBackButton())
 
+    def apply_currency_config(self, cur_cfg: dict):
+        """Label the currency tabs from this guild's configured currency
+        names/icons. Called immediately after construction, because the
+        view is built before the config is awaited."""
+        for child in self.children:
+            if isinstance(child, CurrencyTabButton):
+                info = for_currency(cur_cfg, child.currency_key)
+                child.label = info["name"]
+                child.emoji = as_partial_emoji(info["emoji"])
+
     @discord.ui.button(label="Previous", emoji="◀",
                        style=discord.ButtonStyle.secondary, row=0)
     async def prev_page(self, interaction: discord.Interaction,
@@ -1024,18 +1035,15 @@ class ReceiptsView(WalletBaseView):
 
 class CurrencyTabButton(discord.ui.Button):
     def __init__(self, currency_key: str, active: bool):
-        # Build the label lazily at click-time via the view — but the
-        # emoji/label are fixed for the render, so look them up from
-        # config via a synchronous default too (we do not have guild
-        # config in __init__; use the emoji defaults + key names that
-        # match the eventual config — the open_receipts_panel always
-        # re-renders with a fresh view so labels are refreshed from
-        # config each time).
-        label_map = {"balance": "Coins", "diamonds": "Diamonds"}
-        emoji_map = {"balance": "🪙", "diamonds": "💎"}
+        # The label/emoji are placeholders — open_receipts_panel() always
+        # replaces them with the guild's resolved currency config right
+        # after the view is constructed (see the loop over view.children
+        # there), so this __init__ must NOT carry its own copy of the
+        # default names or icons. It used to, which was a second source of
+        # truth for the defaults that could drift from utils/currency.py.
         super().__init__(
-            label=label_map[currency_key],
-            emoji=emoji_map[currency_key], row=1,
+            label="…",
+            row=1,
             style=(discord.ButtonStyle.primary if active
                    else discord.ButtonStyle.secondary),
             disabled=active)
@@ -1070,14 +1078,8 @@ async def open_receipts_panel(interaction: discord.Interaction,
         offset=page * RECEIPTS_PER_PAGE, limit=RECEIPTS_PER_PAGE)
     cur_cfg = await get_currency_config(guild_id)
 
-    # Refresh CurrencyTabButton labels/emoji to reflect live config
-    # (they may have been built from defaults in __init__).
     view = ReceiptsView(guild_id, user_id, currency_key, page, total)
-    for child in view.children:
-        if isinstance(child, CurrencyTabButton):
-            info = for_currency(cur_cfg, child.currency_key)
-            child.label = info["name"]
-            child.emoji = info["emoji"]
+    view.apply_currency_config(cur_cfg)
 
     await interaction.response.edit_message(
         embed=build_receipts_embed(

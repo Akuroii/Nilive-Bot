@@ -13,6 +13,7 @@ from dashboard.permissions import (
 )
 from dashboard.api import api_bp
 from utils import app_emoji_cache
+from utils.emoji import parse_emoji_input
 
 # ── Embed Builder v2 — Composer (Content + multi-Embed + Attachments) ──────
 #
@@ -249,20 +250,14 @@ def api_embedbuilder_delete_template(name: str):
 # ═══════════════════════════════════════════════════════════════════════
 
 MAX_APP_EMOJI_BYTES = 256 * 1024
-_EMOJI_TOKEN_RE = re.compile(r"<(a?):(\w+):(\d+)>")
 _VALID_NAME_RE = re.compile(r"[^a-zA-Z0-9_]")
 
 
-def _parse_emoji_input(raw: str) -> tuple[str, str, bool] | None:
-    """Accepts a raw ID, or a full <:name:id> / <a:name:id> token. Returns
-    (source_id, source_name, animated) or None if nothing usable was found."""
-    raw = (raw or "").strip()
-    m = _EMOJI_TOKEN_RE.match(raw)
-    if m:
-        return m.group(3), m.group(2), bool(m.group(1))
-    if raw.isdigit():
-        return raw, f"emoji_{raw}", False
-    return None
+# The raw-ID / <:name:id> / <a:name:id> parser used to live here. It moved
+# to utils/emoji.py so the Economy currency fields can accept exactly the
+# same formats without a second implementation; this alias keeps every
+# existing call site working unchanged.
+_parse_emoji_input = parse_emoji_input
 
 
 def _sanitize_emoji_name(name: str) -> str:
