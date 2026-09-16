@@ -11,7 +11,7 @@ from utils.economy_safe import get_balance
 from utils.currency import (
     get_currency_config, for_currency, currency_label, currency_amount,
 )
-from utils.emoji import as_partial_emoji as _as_button_emoji
+from utils.emoji import CHECK_EMOJI, as_partial_emoji as _as_button_emoji
 
 TRADE_TIMEOUT_SECONDS = 600  # 10 minutes
 
@@ -65,7 +65,7 @@ class TradeSession:
                 lines.append(f"🎁 {name} ×{qty}")
             if not lines:
                 lines.append("*(nothing offered yet)*")
-            ready_mark = " ✅" if user.id in self.ready else ""
+            ready_mark = f" {CHECK_EMOJI}" if user.id in self.ready else ""
             embed.add_field(
                 name=f"{user.display_name}'s offer{ready_mark}",
                 value="\n".join(lines), inline=True)
@@ -340,7 +340,8 @@ class TradeView(discord.ui.View):
         self.session.reset_ready()
         await self.refresh(interaction)
 
-    @discord.ui.button(label="Ready", emoji="✅", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Ready", emoji=CHECK_EMOJI,
+                       style=discord.ButtonStyle.success)
     async def ready(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.session.ready.add(interaction.user.id)
 
@@ -372,7 +373,7 @@ class TradeView(discord.ui.View):
             return
 
         embed = await self.session.build_embed(self.cur)
-        embed.title = "✅ Trade complete"
+        embed.title = f"{CHECK_EMOJI} Trade complete"
         embed.color = 0x57F287
         embed.set_footer(text=f"Trade #{result['trade_id']}")
         await interaction.response.edit_message(embed=embed, view=self)

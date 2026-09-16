@@ -8,6 +8,7 @@ import discord
 from utils import minigame_store as store
 from utils.formatters import snapshot_user
 from utils.reward_engine import give_reward
+from utils.emoji import CHECK_EMOJI
 
 # ═══════════════════════════════════════════════════════════════════════
 # MINIGAMES v2 — GAME ENGINES (Phase 2 of the approved v2 plan)
@@ -614,12 +615,12 @@ class MultipleChoiceEngine(MinigameEngine):
                                for w in winners)
             plural = "s" if len(winners) != 1 else ""
             await self.resolve(winners, status="completed",
-                               result_text=(f"✅ **Correct answer: "
+                               result_text=(f"{CHECK_EMOJI} **Correct answer: "
                                             f"{self.answers[self.correct]}**\n"
                                             f"🏆 Winner{plural}: "
                                             f"{names}"))
         else:
-            reveal = (f"✅ **Correct answer: {self.answers[self.correct]}**\n"
+            reveal = (f"{CHECK_EMOJI} **Correct answer: {self.answers[self.correct]}**\n"
                       f"❌ **No one got it right.**") if self.correct >= 0 else \
                      "❌ **Game ended — no valid correct answer configured.**"
             await self.resolve([], status="no_winner", result_text=reveal)
@@ -637,8 +638,8 @@ class MultipleChoiceEngine(MinigameEngine):
             self.selections[info["id"]] = idx  # last answer wins
             self._participant(info)
         await _safe_ephemeral(
-            interaction, "✅ Answer set — you can change it until time "
-                         "runs out.")
+            interaction, f"{CHECK_EMOJI} Answer set — you can change it until "
+                         "time runs out.")
 
 
 # ── ROCK PAPER SCISSORS (plan §6.4) ─────────────────────────────────────

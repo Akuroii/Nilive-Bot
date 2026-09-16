@@ -86,7 +86,7 @@ async function tpLoad() {
             <td><strong>${r.partner_label || 'Unlabeled'}</strong><br>
                 <span class="text-muted text-sm"><code>${r.partner_guild_id}</code></span></td>
             <td>${currencyNameFor(r.reward_type)}${r.reward_amount ? ' × ' + r.reward_amount : ''}</td>
-            <td>${r.enabled ? '✅' : '⛔'}</td>
+            <td>${r.enabled ? checkIconHtml() : '⛔'}</td>
             <td><button class="btn btn-sm btn-danger" onclick="tpDelete(${r.id})">Delete</button></td>
         </tr>
     `).join('');

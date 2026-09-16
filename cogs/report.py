@@ -5,6 +5,7 @@ import aiosqlite
 from datetime import datetime, timezone
 from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
+from utils.emoji import CHECK_EMOJI
 
 
 async def get_report_config(guild_id: int) -> dict:
@@ -111,7 +112,7 @@ class ReportReasonModal(discord.ui.Modal, title="Report Message"):
             await db.commit()
 
         await interaction.response.send_message(
-            "✅ Thanks — your report has been sent to the staff team.",
+            f"{CHECK_EMOJI} Thanks — your report has been sent to the staff team.",
             ephemeral=True)
 
 
@@ -161,7 +162,7 @@ class ReportActionView(discord.ui.View):
             item.disabled = True
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="Resolve", emoji="✅",
+    @discord.ui.button(label="Resolve", emoji=CHECK_EMOJI,
                        style=discord.ButtonStyle.success,
                        custom_id="report_resolve")
     async def resolve(self, interaction: discord.Interaction,

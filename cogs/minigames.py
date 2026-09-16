@@ -12,6 +12,7 @@ from database import DB_PATH
 from utils import minigame_store as store
 from utils import minigame_engine as engine
 from utils.timezone import get_cairo_daily_key, get_cairo_weekly_key, CAIRO_TZ
+from utils.emoji import CHECK_EMOJI
 
 # ═══════════════════════════════════════════════════════════════════════
 # MINIGAMES v2 — the Discord surface (Phase 3 of the approved
@@ -542,7 +543,7 @@ class Minigames(commands.Cog):
             guild.id, tpl["id"], "manual", requested_by=requester)
         if err:
             return False, f"❌ {err}."
-        return True, f"✅ Queued **{tpl['name']}** — it will appear in a " \
+        return True, f"{CHECK_EMOJI} Queued **{tpl['name']}** — it will appear in a " \
                      "moment."
 
     @app_commands.command(name="minigames_stats",

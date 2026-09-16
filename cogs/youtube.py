@@ -7,6 +7,7 @@ import json
 import os
 from database import DB_PATH
 from utils import creator_notify_engine as engine
+from utils.emoji import CHECK_EMOJI
 
 
 RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
@@ -566,7 +567,7 @@ class YouTube(commands.Cog):
                               color=0xFF0000)
         for (cid, url, dch, enabled, live_enabled,
              live_video_id, shorts_enabled) in rows:
-            status = "✅" if enabled else "❌"
+            status = CHECK_EMOJI if enabled else "❌"
             extras = []
             if live_enabled:
                 extras.append("🔴 LIVE" if live_video_id else "Live: armed")

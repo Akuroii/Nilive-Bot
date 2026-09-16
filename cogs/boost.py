@@ -5,6 +5,7 @@ import aiosqlite
 from database import DB_PATH
 from utils.permissions import check_bot_role_position
 from utils.formatters import now_iso
+from utils.emoji import CHECK_EMOJI
 
 
 async def get_boost_config(guild_id: int) -> dict:
@@ -258,7 +259,7 @@ class Boost(commands.Cog):
             """, (interaction.guild.id, role.id, role.name, requires_boost_level))
             await db.commit()
         await interaction.response.send_message(
-            f"✅ Added {role.mention} as a boost color option "
+            f"{CHECK_EMOJI} Added {role.mention} as a boost color option "
             f"(requires {requires_boost_level} boost{'s' if requires_boost_level != 1 else ''}).",
             ephemeral=True)
 

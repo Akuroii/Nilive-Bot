@@ -33,6 +33,15 @@ document.addEventListener('htmx:configRequest', function(evt) {
     evt.detail.headers['X-CSRF-Token'] = window.__CSRF_TOKEN__ || '';
 });
 
+// ── CHECK INDICATOR ───────────────────────────────────────────
+// Server-rendered from utils/emoji.py (see base.html / check_icon.py).
+// Returned as HTML so callers must use it in innerHTML — it is either an
+// <img> pointing at Discord's emoji CDN or a plain unicode check. Constant,
+// never user data.
+function checkIconHtml() {
+    return window.__CHECK_ICON__ || '';
+}
+
 // ── CURRENCY (name + icon) ────────────────────────────────────
 // window.__CURRENCY__ is written by base.html from the server-side
 // resolver (utils/currency.py via dashboard/utils/currency_ctx.py), so
@@ -110,7 +119,7 @@ function toggleSidebar() {
 
 // ── TOAST SYSTEM (4 types) ────────────────────────────────────
 const TOAST_CONFIG = {
-    success: { icon: '✅', bg: 'var(--success)',  fg: '#000', dur: 3000 },
+    success: { icon: checkIconHtml(), bg: 'var(--success)',  fg: '#000', dur: 3000 },
     error:   { icon: '❌', bg: 'var(--danger)',   fg: '#fff', dur: 5000 },
     warning: { icon: '⚠️', bg: 'var(--warning)',  fg: '#000', dur: 4000 },
     info:    { icon: 'ℹ️', bg: 'var(--accent)',   fg: '#fff', dur: 3000 },

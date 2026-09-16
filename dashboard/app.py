@@ -235,6 +235,19 @@ def inject_environment():
 #
 # Safe with no session (login, server-select): the helper falls back to the
 # shipped defaults from utils.currency and never raises.
+# The success/check indicator, server-rendered. Same treatment as the
+# currency config above: one resolver (utils/emoji.py owns the id), and a
+# global helper so no template has to know how a Discord emoji becomes
+# HTML. See dashboard/utils/check_icon.py.
+@app.context_processor
+def inject_check_icon():
+    from dashboard.utils.check_icon import check_icon_html, check_icon_css
+    return {
+        "check_icon": check_icon_html(),
+        "check_icon_css": check_icon_css(),
+    }
+
+
 @app.context_processor
 def inject_currency():
     from dashboard.permissions import get_session_guild_id

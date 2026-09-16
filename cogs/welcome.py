@@ -7,6 +7,7 @@ import random
 from database import DB_PATH
 from utils.permissions import check_bot_role_position
 from utils.formatters import snapshot_user
+from utils.emoji import CHECK_EMOJI
 
 
 async def get_welcome_config(guild_id: int) -> dict:
@@ -128,7 +129,7 @@ class RulesView(discord.ui.View):
         await interaction.user.add_roles(
             role, reason="Accepted rules")
         await interaction.response.send_message(
-            f"✅ Welcome! You've been given the {role.name} role.",
+            f"{CHECK_EMOJI} Welcome! You've been given the {role.name} role.",
             ephemeral=True)
 
 

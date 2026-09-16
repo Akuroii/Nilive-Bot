@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
 from utils.currency import get_currency_config, currency_amount
+from utils.emoji import CHECK_EMOJI
 
 
 async def give_reward(bot: discord.Client,
@@ -353,7 +354,7 @@ class Events(commands.Cog):
         embed = discord.Embed(title="🎯 Events", color=0x7c5cbf)
         for (eid, title, rtype, rval,
              winners, enabled, ts) in rows:
-            status = "✅ Active" if enabled else "⚫ Ended"
+            status = f"{CHECK_EMOJI} Active" if enabled else "⚫ Ended"
             embed.add_field(
                 name=f"#{eid} — {title}",
                 value=(f"{status} | {rtype}: {rval} | "

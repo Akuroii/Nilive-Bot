@@ -98,7 +98,7 @@
         </div>
         {% else %}
         <div class="empty-state">
-            <div class="empty-icon">✅</div>
+            <div class="empty-icon">{{ check_icon }}</div>
             <div class="empty-text">No warnings</div>
         </div>
         {% endif %}
@@ -130,7 +130,7 @@
         </div>
         {% else %}
         <div class="empty-state">
-            <div class="empty-icon">✅</div>
+            <div class="empty-icon">{{ check_icon }}</div>
             <div class="empty-text">No moderation history</div>
         </div>
         {% endif %}
@@ -181,7 +181,9 @@ async function saveProfile() {
     const data = await res.json();
     const status = document.getElementById('profile-status');
     if (data.success) {
-        status.textContent = '✅ Saved!';
+        // innerHTML, not textContent: the check indicator is an <img>
+        // (see dashboard.js checkIconHtml). Constant, never user data.
+        status.innerHTML = checkIconHtml() + ' Saved!';
         status.style.color = 'var(--success)';
         showToast('Profile updated!');
     } else {

@@ -8,6 +8,7 @@ from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
 from utils.economy_safe import safe_deduct, safe_decrement_stock, InsufficientBalance
 from utils.currency import get_currency_config, for_currency
+from utils.emoji import CHECK_EMOJI
 
 SHOP_COLOR = 0x7c5cbf
 
@@ -37,10 +38,17 @@ class InventoryEquipSelect(discord.ui.Select):
         options = []
         for it in role_items[:25]:
             label = it["item_name"]
+            # The "equipped" marker goes in the option's emoji field, not in
+            # its label: select-option labels are plain text, so a custom
+            # emoji token there would render as the literal text
+            # <a:check:id> instead of the glyph.
+            equipped_emoji = None
             if it["item_name"] == equipped_name:
-                label = f"✅ {label} (equipped)"
+                label = f"{label} (equipped)"
+                equipped_emoji = CHECK_EMOJI
             options.append(discord.SelectOption(
-                label=label[:100], value=it["item_name"][:100]))
+                label=label[:100], value=it["item_name"][:100],
+                emoji=equipped_emoji))
         super().__init__(
             placeholder="Equip a role...", options=options,
             custom_id="inventory_equip_select")
@@ -388,7 +396,7 @@ async def process_purchase(interaction: discord.Interaction,
     cur = await get_currency_config(guild_id)
     cinfo = for_currency(cur, pay_currency)
     embed = discord.Embed(
-        title="✅ Purchase successful",
+        title=f"{CHECK_EMOJI} Purchase successful",
         description=(
             f"You bought **{name}** for **{pay_amount:,}** "
             f"{cinfo['emoji']} {cinfo['name']}."),

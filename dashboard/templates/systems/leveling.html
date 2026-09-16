@@ -724,7 +724,8 @@ async function savePrestigeConfig() {
     const data = await res.json();
     const status = document.getElementById('prestige-config-status');
     if (data.success) {
-        status.textContent = '✅ Saved!'; status.style.color = 'var(--success)';
+        status.innerHTML = checkIconHtml() + ' Saved!';
+        status.style.color = 'var(--success)';
         showToast('Prestige settings saved!');
     } else {
         status.textContent = '❌ ' + (data.error || 'Error');

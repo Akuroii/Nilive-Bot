@@ -8,6 +8,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import aiosqlite
 from database import DB_PATH
+from utils.emoji import CHECK_EMOJI
 
 # FEATURE (dark-fixes pass #2): scheduled_messages had a schema
 # (database.py) with zero implementation anywhere. This cog is the
@@ -203,7 +204,7 @@ class Scheduler(commands.Cog):
         # Show Cairo time to user, stored as UTC
         cairo_display = send_at.astimezone(CAIRO_TZ).strftime('%Y-%m-%d %H:%M')
         await interaction.response.send_message(
-            f"✅ Scheduled for {channel.mention} at "
+            f"{CHECK_EMOJI} Scheduled for {channel.mention} at "
             f"`{cairo_display} Africa/Cairo`{repeat_note}.", ephemeral=True)
 
     @app_commands.command(name="schedule_list",
