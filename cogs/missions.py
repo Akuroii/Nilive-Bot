@@ -57,7 +57,7 @@ class Missions(commands.Cog):
 
         embed = discord.Embed(title="🗺️ Your Missions", color=0x7c5cbf)
         for m in progress:
-            status = "<a:Check:1549831102078787744> Complete" if m["completed"] else f"{m['progress']}/{m['target']}"
+            status = "✅ Complete" if m["completed"] else f"{m['progress']}/{m['target']}"
             embed.add_field(
                 name=f"{m['name']} ({PERIOD_LABEL.get(m['period'], m['period'])})",
                 value=(f"{m['description'] or TYPE_LABEL.get(m['type'], m['type'])}\n"
@@ -115,7 +115,7 @@ class Missions(commands.Cog):
             await db.commit()
 
         await interaction.response.send_message(
-            f"<a:Check:1549831102078787744> Created mission **{name}** — {target} {TYPE_LABEL.get(type, type)} "
+            f"✅ Created mission **{name}** — {target} {TYPE_LABEL.get(type, type)} "
             f"({PERIOD_LABEL.get(period, period)}) → {reward_type}: {reward_value}",
             ephemeral=True)
 
@@ -130,7 +130,7 @@ class Missions(commands.Cog):
             return
         embed = discord.Embed(title="🗺️ Configured Missions", color=0x7c5cbf)
         for d in defs:
-            status = "<a:Check:1549831102078787744>" if d["enabled"] else "❌"
+            status = "✅" if d["enabled"] else "❌"
             embed.add_field(
                 name=f"#{d['id']} {status} {d['name']}",
                 value=(f"{d['target']} {TYPE_LABEL.get(d['type'], d['type'])} "
