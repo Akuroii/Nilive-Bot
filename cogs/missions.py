@@ -33,9 +33,10 @@ from utils.emoji import (
 #   * one block per mission: name, -# description line, glyph progress
 #     bar + percentage, then either `Progress: x / y unit` or — because
 #     rewards are granted automatically the instant the target is
-#     crossed, with no claim step — `⤷ reward claimed <reward> <check>`,
+#     crossed, with no claim step — `⤷ reward claimed <check> <reward>`,
 #     where <check> is the bot's APPLICATION emoji `<a:check:…>` (it is
 #     owned by the application, not by any server — see utils/emoji.py)
+#     and <reward> is `amount name emoji` from the Economy config
 #   * the period's next-rotation countdown, computed at render time
 #     from the same UTC period math the engine keys progress by (there
 #     is no timer job to duplicate — the reset is the period_key
@@ -146,6 +147,11 @@ def _mission_description(m: dict, guild) -> str:
 def _reward_display_sync(m: dict, cur: dict | None) -> str:
     """Format a mission's reward using the guild's Economy currency config.
 
+    Member-facing only (the `⤷ reward claimed` completion line), which
+    renders a currency reward as `amount name emoji` — e.g. `1 Diamonds 💎`.
+    The admin surfaces use reward_summary() instead and keep the shared
+    wallet/shop `emoji amount name` order.
+
     Missions never store a currency name or emoji — only the stable
     `reward_type` key ('coins' / 'diamonds'). The label is composed here at
     RENDER time, which is what makes renaming a currency a config-only
@@ -168,7 +174,10 @@ def _reward_display_sync(m: dict, cur: dict | None) -> str:
                 "diamonds": {"name": DEFAULT_DIAMOND_NAME,
                              "emoji": DEFAULT_DIAMOND_EMOJI},
             }
-        return currency_amount(cur, rt, rv)
+        # `amount name emoji` — the locked order of the completion line,
+        # composed by the shared currency helper so the thousands
+        # separator and the configured name/emoji stay in one place.
+        return currency_amount(cur, rt, rv, emoji_last=True)
     if rt == "xp":
         return f"{rv} XP"
     if rt in ("role", "temp_role"):
@@ -224,8 +233,10 @@ def _mission_block(m: dict, guild, cur: dict | None = None,
         pct_display = 100
         bar = progress_bar(100)
         reward_str = _reward_display_sync(m, cur)
-        # Dynamic currency, checkmark; no hardcoded DIAMOND for non-diamond rewards
-        status = f"⤷ `reward claimed` {reward_str} {check_emoji}".strip()
+        # Locked completion-line order: `⤷` → label → check glyph → reward
+        # amount → currency name → currency emoji. Currency and checkmark
+        # are both dynamic; no hardcoded DIAMOND for non-diamond rewards.
+        status = f"⤷ `reward claimed` {check_emoji} {reward_str}".strip()
     else:
         # Never claim 100% before the mission is actually complete
         # (e.g. 199/200 rounding up) — and never RENDER a full bar

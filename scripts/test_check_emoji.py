@@ -2,10 +2,11 @@
 """
 Application-emoji check glyph — verification suite.
 
-The Missions completion line (`⤷ `reward claimed` <reward> <check>`) and
-every other success surface render CHECK_EMOJI, which is an APPLICATION
-emoji: `<a:check:1549593658867712090>`, added in Developer Portal →
-Application → Emoji and owned by the bot application, not by any server.
+The Missions completion line
+(`⤷ `reward claimed` <check> <amount> <name> <currency emoji>`) and every
+other success surface render CHECK_EMOJI, which is an APPLICATION emoji:
+`<a:check:1549593658867712090>`, added in Developer Portal → Application →
+Emoji and owned by the bot application, not by any server.
 
 The bug this suite locks down: reachability was probed with
 `bot.application_emojis()` (an API discord.py 2.x does not have) and
@@ -38,6 +39,15 @@ Covered here:
        including with a bot that has no guild emoji match — plus
        Missions.on_ready's startup log, which used to announce "check
        emoji is not reachable" on every single boot.
+  10b. The locked completion-line order — `⤷` → `reward claimed` → check
+       emoji → amount → currency name → currency emoji — and that nothing
+       else in the block moved (name, description, progress bar,
+       percentage, colour, headings, Refresh button, the incomplete
+       mission's Progress line), that /missions and Refresh render the
+       identical line, that the amount stays dynamic and the name/emoji
+       stay driven by the Economy config, that rewards are still stored
+       under the stable coins/diamonds keys, and that no hardcoded
+       currency literal was introduced.
   11.  Unrelated ✅ checkmarks in the codebase are untouched (the welcome
        rules button keeps its own literal).
   12.  The dashboard's HTML twin resolves the same id off Discord's CDN
@@ -65,7 +75,8 @@ os.environ["OWNER_ID"] = "999999999"
 os.environ.setdefault("SECRET_KEY", "testsecretkey0123456789abcdef0123456789")
 
 import discord  # noqa: E402
-from database import init_db  # noqa: E402
+import aiosqlite  # noqa: E402
+from database import DB_PATH, init_db  # noqa: E402
 import utils.mission_engine as me  # noqa: E402
 import utils.reward_engine  # noqa: E402
 import utils.emoji as E  # noqa: E402
@@ -105,6 +116,14 @@ def reset_state():
     E._check_state["token"] = CHECK_EMOJI
     E._check_state["detail"] = "not probed yet"
     E._check_state["probed_at"] = 0.0
+
+
+def completion_line(text: str) -> str:
+    """The `⤷ reward claimed …` line out of a block or embed description."""
+    for line in (text or "").splitlines():
+        if "reward claimed" in line:
+            return line.strip()
+    return ""
 
 
 # ── fakes ──────────────────────────────────────────────────────────────
@@ -579,9 +598,15 @@ async def mission_render_tests():
           CHECK_EMOJI in block, block)
     check("completed block carries no unicode ✅",
           CHECK_EMOJI_FALLBACK not in block, block)
-    check("completion line reads `⤷ `reward claimed` <reward> <check>`",
-          f"⤷ `reward claimed`" in block and block.rstrip().endswith(CHECK_EMOJI),
-          block.splitlines()[-1])
+    check("completion line order is ⤷ → label → check → amount → name → "
+          "currency emoji",
+          completion_line(block) ==
+          f"⤷ `reward claimed` {CHECK_EMOJI} 5 Coins 🪙",
+          completion_line(block))
+    check("the check glyph sits directly after the label",
+          f"⤷ `reward claimed` {CHECK_EMOJI} " in block, completion_line(block))
+    check("the currency emoji is last on the line",
+          completion_line(block).endswith("🪙"), completion_line(block))
 
     # End-to-end /missions with a bot whose guild caches know nothing
     # about the emoji — the reported production shape.
@@ -669,6 +694,150 @@ async def mission_render_tests():
     check("on_ready does NOT report 'not reachable' when it merely could "
           "not verify", "unverified" in log and "no unicode downgrade" in log
           and "not reachable" not in log, log)
+
+    # ── 10b. The locked completion-line order, and everything around it
+    # that must NOT have moved ─────────────────────────────────────────
+    section("10b. Locked order: ⤷ → label → check → amount → name → emoji")
+    from utils.currency import get_currency_config, set_currency_config
+
+    _c, cmd_embeds = await cog.build_mission_display(app_bot, FakeGuild(), USER)
+    cmd_desc = "\n".join(e.description or "" for e in cmd_embeds)
+    cmd_line = completion_line(cmd_desc)
+    check("the exact /missions completion line",
+          cmd_line == f"⤷ `reward claimed` {CHECK_EMOJI} 5 Coins 🪙", cmd_line)
+
+    lines = [l for l in block.splitlines() if l]
+    check("the block is still 4 lines (name / -# desc / bar+pct / status)",
+          len(lines) == 4, str(lines))
+    check("line 1 is still the bold mission name",
+          lines[0] == "**Say hello**", lines[0])
+    check("line 2 is still the -# description line",
+          lines[1].startswith("-# "), lines[1])
+    check("line 3 is still the untouched 6-node bar + bold percentage",
+          lines[2] == "⬤──⬤──⬤──⬤──⬤──⬤⁀જ➣ **`100%`**ˎˊ˗", lines[2])
+    check("bar glyphs / joiner / node count unchanged",
+          cog.NODE_FILLED == "⬤" and cog.NODE_EMPTY == "◯"
+          and cog.NODE_JOIN == "──" and cog.PROGRESS_NODES == 6)
+    check("embed colour, headings and footers unchanged",
+          cog.MISSION_COLOR == 0x7c5cbf
+          and cog.PERIOD_HEADING["daily"] == "Daily Mission Progress"
+          and cog.PERIOD_FOOTER == {"once": "No reset — completes once, forever"})
+
+    incomplete = cog._mission_block({**m, "completed": False, "progress": 0},
+                                    FakeGuild())
+    check("an incomplete mission still renders its Progress line, with no "
+          "check glyph at all",
+          "`Progress: 0 / 1 messages`" in incomplete
+          and CHECK_EMOJI not in incomplete
+          and CHECK_EMOJI_FALLBACK not in incomplete,
+          incomplete.splitlines()[-1])
+
+    # Requirement: /missions and the Refresh button share ONE renderer, so
+    # the completion line is identical and Refresh still edits in place.
+    class FakeResponse:
+        def __init__(self):
+            self.calls = []
+
+        async def edit_message(self, *a, **k):
+            self.calls.append(("edit", k))
+
+        async def send_message(self, *a, **k):
+            self.calls.append(("send", k))
+
+    class FakeInteraction:
+        def __init__(self, user_id):
+            self.user = type("U", (), {"id": user_id})()
+            self.response = FakeResponse()
+
+    reset_state()
+    view = cog.MissionsView(app_bot, GUILD, USER)
+    check("the Refresh button is unchanged (label, guild emoji, gray style)",
+          view.refresh_button.label == "ʀᴇꜰʀᴇꜱʜ"
+          and view.refresh_button.style is discord.ButtonStyle.secondary
+          and view.refresh_button.emoji.id == 1549206183498481714
+          and view.refresh_button.emoji.animated is False,
+          repr(view.refresh_button.emoji))
+    inter = FakeInteraction(USER)
+    await view.refresh_button.callback(inter)
+    check("Refresh still EDITS the existing message (no duplicate send)",
+          [c[0] for c in inter.response.calls] == ["edit"],
+          str([c[0] for c in inter.response.calls]))
+    refresh_desc = "\n".join(
+        e.description or ""
+        for e in (inter.response.calls[0][1].get("embeds") or []))
+    check("Refresh renders the IDENTICAL completion line as /missions",
+          completion_line(refresh_desc) == cmd_line,
+          f"{completion_line(refresh_desc)!r} vs {cmd_line!r}")
+    check("Refresh keeps the same live view object",
+          inter.response.calls[0][1].get("view") is view)
+
+    # Requirement: the amount stays dynamic (and thousands-separated).
+    big = await me.create_definition(
+        GUILD, name="Big reward", mtype="messages", target=1,
+        reward_type="diamonds", reward_value="1250")
+    await me.record_activity(None, GUILD, USER, "messages", 1)
+    m_big = [x for x in await me.get_user_progress(GUILD, USER)
+             if x["id"] == big][0]
+    big_line = completion_line(cog._mission_block(m_big, FakeGuild()))
+    check("the reward amount is dynamic and still thousands-separated",
+          big_line == f"⤷ `reward claimed` {CHECK_EMOJI} 1,250 Diamonds 💎",
+          big_line)
+
+    # Requirement: name + emoji resolve from the Economy config — custom
+    # when configured, default otherwise.
+    await set_currency_config(GUILD, currency_name="صدفة", coin_emoji_id="✨")
+    custom = await get_currency_config(GUILD)
+    check("the Economy config now carries the custom coin name/emoji",
+          custom["coins"]["name"] == "صدفة"
+          and custom["coins"]["emoji"] == "✨", str(custom["coins"]))
+    _c, cust_embeds = await cog.build_mission_display(app_bot, FakeGuild(), USER)
+    cust_desc = "\n".join(e.description or "" for e in cust_embeds)
+    cust_lines = [l for l in cust_desc.splitlines() if "reward claimed" in l]
+    check("a configured currency renders in the same order, same check emoji",
+          f"⤷ `reward claimed` {CHECK_EMOJI} 5 صدفة ✨" in cust_lines,
+          str(cust_lines))
+    check("the unconfigured diamond currency still uses its defaults",
+          f"⤷ `reward claimed` {CHECK_EMOJI} 1,250 Diamonds 💎" in cust_lines,
+          str(cust_lines))
+    check("non-currency rewards keep their own text (no currency emoji)",
+          completion_line(cog._mission_block(
+              {**m, "reward_type": "xp", "reward_value": "50"}, FakeGuild()))
+          == f"⤷ `reward claimed` {CHECK_EMOJI} 50 XP",
+          completion_line(cog._mission_block(
+              {**m, "reward_type": "xp", "reward_value": "50"}, FakeGuild())))
+
+    # Requirement: rewards are still keyed by the stable 'coins'/'diamonds'
+    # keys in the DB — never by a display name.
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT reward_type, reward_value FROM missions_definitions "
+            "WHERE id=?", (mid,))
+        row = await cursor.fetchone()
+    check("the stored reward is still the stable key 'coins', not 'صدفة'",
+          row == ("coins", "5"), str(row))
+
+    # Requirement: the emoji fix introduced no hardcoded currency literal.
+    import ast
+    src_path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "cogs", "missions.py")
+    with open(src_path, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            doc = ast.get_docstring(node, clean=False)
+            if doc:
+                docstrings.add(doc)
+    hardcoded = [n.value for n in ast.walk(tree)
+                 if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                 and n.value not in docstrings
+                 and any(t in n.value for t in ("Coins", "Diamonds", "🪙", "💎"))]
+    check("no hardcoded currency name/emoji literal in Missions code",
+          not hardcoded, str(hardcoded))
+    check("Missions still imports the shared currency defaults, not copies",
+          "DEFAULT_COIN_NAME" in ast.dump(tree)
+          and "DEFAULT_DIAMOND_EMOJI" in ast.dump(tree))
 
     reset_state()
     check("reward grant was patched, not the real economy",
