@@ -20,8 +20,9 @@ Covers the agreed v2 validation list:
    7.  Progress bar reflects the real percentage.
    8.  Progress reaches 100% exactly once (idempotent re-completion).
    9.  Reward granted automatically exactly once.
-  10.  Completed missions render "⨽ `reward claimed` <configured currency
-       amount> <check emoji>" — resolved from the Economy currency config.
+  10.  Completed missions render "⨽ `reward claimed` <check emoji>
+       <configured currency amount>" — resolved from the Economy currency
+       config.
   11/12. Daily / weekly reset countdown math (UTC).
   13.  Refresh edits the existing message, never sends a new one.
   14.  Deleted / disabled missions stop counting; honest not-found.

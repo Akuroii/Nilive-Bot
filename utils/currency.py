@@ -258,11 +258,14 @@ def currency_label(config: dict, currency: str) -> str:
 
 
 def currency_amount(config: dict, currency: str, amount, *,
-                    label_first: bool = False) -> str:
+                    label_first: bool = False,
+                    emoji_last: bool = False) -> str:
     """A formatted amount with its currency name and emoji.
 
     Default order is `emoji 1,250 Name` (the wallet/shop/receipt look);
-    label_first=True gives `Name 1,250` for prose and titles. Amounts are
+    label_first=True gives `Name 1,250` for prose and titles;
+    emoji_last=True gives `1,250 Name emoji` (the Missions completion
+    line, where the currency glyph trails the amount). Amounts are
     thousands-separated here so no caller re-implements the format.
 
     `amount` may be int-like or already-formatted text; anything that
@@ -276,4 +279,6 @@ def currency_amount(config: dict, currency: str, amount, *,
         shown = str(amount)
     if label_first:
         return f"{info['name']} {shown}"
+    if emoji_last:
+        return f"{shown} {info['name']} {info['emoji']}"
     return f"{info['emoji']} {shown} {info['name']}"
