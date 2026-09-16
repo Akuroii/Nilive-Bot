@@ -1,0 +1,17 @@
+--- a/dashboard/templates/systems/economy.html	2026-09-16 22:17:03.204612662 +0000
++++ b/dashboard/templates/systems/economy.html	2026-09-16 22:17:03.205763821 +0000
+@@ -310,6 +310,14 @@
+     if (r) {
+         document.getElementById('cur-preview-text').textContent =
+             `1,250 ${r.coins.name}  ·  12 ${r.diamonds.name}`;
++        // A saved currency icon/name touches far more than this form:
++        // window.__CURRENCY__ (read by every currencyLabel/currencyAmount
++        // JS call), the tab labels and card titles (Jinja-rendered once at
++        // page load via currency_icon()), and the htmx leaderboards
++        // (hx-trigger="load" fires only once). Reloading is the smallest
++        // correct way to repaint all of those from the new config, same
++        // pattern already used after an /api/edit-member currency change.
++        setTimeout(() => location.reload(), 600);
+     }
+ }
+ 
