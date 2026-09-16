@@ -278,6 +278,13 @@ async def purchase_prestige(guild_id: int, user_id: int, target_tier: int,
     if target_tier not in (1, 2, 3, 4, 5):
         raise PrestigeError("Invalid Prestige tier.")
 
+    # Resolved BEFORE the write transaction opens: the display name comes
+    # from the guild's currency config, and reading it on a second
+    # connection while this one holds a write lock is avoidable.
+    from utils.currency import get_currency_config, currency_name_for
+    balance_name = currency_name_for(
+        await get_currency_config(guild_id), "coins")
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
@@ -327,9 +334,9 @@ async def purchase_prestige(guild_id: int, user_id: int, target_tier: int,
             if balance < min_coins:
                 await db.execute("ROLLBACK")
                 raise PrestigeError(
-                    f"You need at least {min_coins:,} Coins to purchase "
-                    f"Prestige {tier_label(target_tier)} (you have "
-                    f"{balance:,}).")
+                    f"You need at least {min_coins:,} {balance_name} to "
+                    f"purchase Prestige {tier_label(target_tier)} (you "
+                    f"have {balance:,}).")
 
             old_balance = balance
 

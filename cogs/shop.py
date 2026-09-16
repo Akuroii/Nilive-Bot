@@ -174,9 +174,14 @@ async def process_purchase(interaction: discord.Interaction,
     # backend in utils/prestige.purchase_prestige().
     if itype == "prestige":
         if price_diamonds:
+            # Only reached on a misconfigured item, so the config read
+            # stays on this error path instead of costing every purchase.
+            cur_cfg = await get_currency_config(guild_id)
             await interaction.response.send_message(
-                "Prestige is purchased with Coins; this item can't have a "
-                "diamond price. Ask an admin to fix it.", ephemeral=True)
+                f"Prestige is purchased with {cur_cfg['coins']['name']}; "
+                f"this item can't have a {cur_cfg['diamonds']['name']} "
+                f"price. Ask an admin to fix it.",
+                ephemeral=True)
             return
         if not prestige_tier or int(prestige_tier) not in (1, 2, 3, 4, 5):
             await interaction.response.send_message(
@@ -221,7 +226,7 @@ async def process_purchase(interaction: discord.Interaction,
             value=f"Your {cc['emoji']} **{cc['name']}** were reset to **0**.",
             inline=False)
         embed.add_field(
-            name="Level / XP / Diamonds",
+            name=f"Level / XP / {cur['diamonds']['name']}",
             value=(f"**Untouched** — your level, XP and "
                    f"{cur['diamonds']['emoji']} {cur['diamonds']['name']} are safe."),
             inline=False)

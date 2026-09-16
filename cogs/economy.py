@@ -91,8 +91,9 @@ class Economy(commands.Cog):
     async def give(self, interaction: discord.Interaction,
                    member: discord.Member, amount: int):
         if member.id == interaction.user.id:
+            cur = await get_currency_config(interaction.guild.id)
             await interaction.response.send_message(
-                "You cannot give coins to yourself.",
+                f"You cannot give {cur['coins']['name']} to yourself.",
                 ephemeral=True)
             return
         if amount <= 0:

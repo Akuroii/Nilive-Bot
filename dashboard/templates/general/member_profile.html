@@ -19,11 +19,11 @@
         <div class="stat-sub">{{ "{:,}".format(profile.xp) }} XP</div>
     </div>
     <div class="stat-card stat-success">
-        <div class="stat-label">Coins</div>
+        <div class="stat-label">{{ currency.coins.emoji }} {{ currency.coins.name }}</div>
         <div class="stat-value">{{ "{:,}".format(profile.coins) }}</div>
     </div>
     <div class="stat-card stat-warning">
-        <div class="stat-label">Diamonds</div>
+        <div class="stat-label">{{ currency.diamonds.emoji }} {{ currency.diamonds.name }}</div>
         <div class="stat-value">{{ "{:,}".format(profile.diamonds) }}</div>
     </div>
     <div class="stat-card stat-accent">
@@ -57,13 +57,13 @@
                    style="width:160px;">
         </div>
         <div class="form-group" style="margin-bottom:0;">
-            <label class="form-label">Coins</label>
+            <label class="form-label">{{ currency.coins.name }}</label>
             <input class="form-input" id="edit-coins"
                    value="{{ profile.coins }}" type="number" min="0"
                    style="width:160px;">
         </div>
         <div class="form-group" style="margin-bottom:0;">
-            <label class="form-label">Diamonds</label>
+            <label class="form-label">{{ currency.diamonds.name }}</label>
             <input class="form-input" id="edit-diamonds"
                    value="{{ profile.diamonds }}" type="number" min="0"
                    style="width:160px;">
@@ -148,7 +148,7 @@
                     {% for p in profile.purchases %}
                     <tr>
                         <td><strong>{{ p[0] }}</strong></td>
-                        <td>🪙 {{ "{:,}".format(p[1]) }}</td>
+                        <td>{{ currency.coins.emoji }} {{ "{:,}".format(p[1]) }}</td>
                         <td class="text-muted">{{ p[2][:10] if p[2] else '—' }}</td>
                     </tr>
                     {% endfor %}

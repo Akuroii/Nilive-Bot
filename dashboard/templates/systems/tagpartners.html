@@ -23,8 +23,8 @@
         <div class="form-group">
             <label class="form-label">Reward type</label>
             <select class="form-input" id="tp-reward-type" onchange="tpUpdateRewardFields()">
-                <option value="coins">Coins</option>
-                <option value="diamonds">Diamonds</option>
+                <option value="coins">{{ currency.coins.emoji }} {{ currency.coins.name }}</option>
+                <option value="diamonds">{{ currency.diamonds.emoji }} {{ currency.diamonds.name }}</option>
                 <option value="xp">XP</option>
                 <option value="role">Role</option>
             </select>
@@ -85,7 +85,7 @@ async function tpLoad() {
         <tr>
             <td><strong>${r.partner_label || 'Unlabeled'}</strong><br>
                 <span class="text-muted text-sm"><code>${r.partner_guild_id}</code></span></td>
-            <td>${r.reward_type}${r.reward_amount ? ' × ' + r.reward_amount : ''}</td>
+            <td>${currencyNameFor(r.reward_type)}${r.reward_amount ? ' × ' + r.reward_amount : ''}</td>
             <td>${r.enabled ? '✅' : '⛔'}</td>
             <td><button class="btn btn-sm btn-danger" onclick="tpDelete(${r.id})">Delete</button></td>
         </tr>

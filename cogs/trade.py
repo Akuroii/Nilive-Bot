@@ -9,8 +9,9 @@ from utils.trade_engine import (
 from utils.inventory import has_item, get_inventory
 from utils.economy_safe import get_balance
 from utils.currency import (
-    get_currency_config, currency_label, currency_amount,
+    get_currency_config, for_currency, currency_label, currency_amount,
 )
+from utils.emoji import as_partial_emoji as _as_button_emoji
 
 TRADE_TIMEOUT_SECONDS = 600  # 10 minutes
 
@@ -50,6 +51,9 @@ class TradeSession:
                         "Changing your offer clears both Ready states.",
             color=0x57F287 if len(self.ready) == 2 else 0x7c5cbf)
         cc, cd = cur["coins"], cur["diamonds"]
+        # Offer lines resolve name + emoji from the same config the buttons
+        # and the dashboard use, so a renamed currency reads identically
+        # everywhere in this panel.
         for user in (self.user_a, self.user_b):
             offer = self.offers[user.id]
             lines = []
@@ -68,11 +72,16 @@ class TradeSession:
         return embed
 
 
-class AddCoinsModal(discord.ui.Modal, title="Offer Coins"):
+class AddCoinsModal(discord.ui.Modal):
     amount = discord.ui.TextInput(label="Amount", placeholder="e.g. 500", required=True)
 
     def __init__(self, view: "TradeView"):
-        super().__init__()
+        # Title carries the configured currency name. `discord.ui.Modal`'s
+        # title is a normal instance attribute, so it can be set per-open —
+        # the decorator form cannot, because it is evaluated once at class
+        # definition and would freeze the default name server-wide.
+        info = for_currency(view.cur, "coins")
+        super().__init__(title=f"Offer {info['name']}")
         self.view_ref = view
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -97,11 +106,12 @@ class AddCoinsModal(discord.ui.Modal, title="Offer Coins"):
         await self.view_ref.refresh(interaction)
 
 
-class AddDiamondsModal(discord.ui.Modal, title="Offer Diamonds"):
+class AddDiamondsModal(discord.ui.Modal):
     amount = discord.ui.TextInput(label="Amount", placeholder="e.g. 10", required=True)
 
     def __init__(self, view: "TradeView"):
-        super().__init__()
+        info = for_currency(view.cur, "diamonds")
+        super().__init__(title=f"Offer {info['name']}")
         self.view_ref = view
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -255,6 +265,16 @@ class TradeView(discord.ui.View):
         super().__init__(timeout=TRADE_TIMEOUT_SECONDS)
         self.session = session
         self.cur = cur
+        # Apply the guild's configured currency names to the two offer
+        # buttons. Discord requires a button's emoji to be a real,
+        # bot-usable emoji — an emoji the bot cannot reach renders as the
+        # literal token text — so a unicode/plain name falls back to no
+        # glyph rather than showing something broken.
+        for button, key in ((self.offer_coins, "coins"),
+                            (self.offer_diamonds, "diamonds")):
+            info = for_currency(cur, key)
+            button.label = f"Offer {info['name']}"
+            button.emoji = _as_button_emoji(info["emoji"])
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id not in (self.session.user_a.id, self.session.user_b.id):
@@ -286,11 +306,15 @@ class TradeView(discord.ui.View):
             except Exception:
                 pass
 
-    @discord.ui.button(label="Offer Coins", emoji="🪙", style=discord.ButtonStyle.secondary)
+    # Labels/emoji here are PLACEHOLDERS: `discord.ui.button` arguments are
+    # evaluated once, at class-definition time, so they cannot hold a
+    # per-guild currency name. __init__ overwrites both from the resolved
+    # config on every render (same pattern as the Wallet's currency tabs).
+    @discord.ui.button(label="Offer", style=discord.ButtonStyle.secondary)
     async def offer_coins(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddCoinsModal(self))
 
-    @discord.ui.button(label="Offer Diamonds", emoji="💎", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Offer", style=discord.ButtonStyle.secondary)
     async def offer_diamonds(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddDiamondsModal(self))
 
@@ -410,17 +434,23 @@ class Trade(commands.Cog):
                 f"No trade history for {target.mention}.", ephemeral=True)
             return
 
+        cur = await get_currency_config(interaction.guild.id)
         embed = discord.Embed(title=f"📜 Trade History — {target.display_name}", color=0x7c5cbf)
         for r in rows:
             a_id, b_id = r["user_a"], r["user_b"]
             offer_a, offer_b = r["offer_a"], r["offer_b"]
 
             def summarize(offer):
+                # Historical rows store only the stable keys ('coins' /
+                # 'diamonds') plus amounts — never a currency name — so a
+                # past trade re-labels itself with whatever the guild's
+                # currency is called NOW. Renaming never invalidates
+                # history.
                 parts = []
                 if offer.get("coins"):
-                    parts.append(f"🪙{offer['coins']:,}")
+                    parts.append(currency_amount(cur, "coins", offer["coins"]))
                 if offer.get("diamonds"):
-                    parts.append(f"💎{offer['diamonds']:,}")
+                    parts.append(currency_amount(cur, "diamonds", offer["diamonds"]))
                 for name, qty in offer.get("items", {}).items():
                     parts.append(f"{name}×{qty}")
                 return ", ".join(parts) or "nothing"

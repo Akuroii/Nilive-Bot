@@ -259,6 +259,8 @@ def members_search():
     user_map = run_async(resolve()) if rows else {}
 
     from dashboard.utils.user_identity import render_user_identity_html
+    from dashboard.utils.currency_ctx import resolved as _currency
+    _coin_emoji = _currency(guild_id)["coins"]["emoji"]
     html = ""
     for r in rows:
         # r[0] (user_id) is still interpolated raw into the inline
@@ -273,7 +275,7 @@ def members_search():
             f"<td>{identity_html}</td>"
             f"<td><span class='badge badge-accent'>Level {r[2]}</span></td>"
             f"<td>{r[1]:,} XP</td>"
-            f"<td>🪙 {r[3]:,}</td>"
+            f"<td>{_coin_emoji} {r[3]:,}</td>"
             f"<td><button class='btn btn-sm btn-secondary' "
             f"onclick=\"openEditModal('{r[0]}', {r[1]}, {r[3]})\">Edit</button></td>"
             f"</tr>"

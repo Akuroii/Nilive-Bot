@@ -163,8 +163,11 @@ const MG_TYPES = {
     emoji:       { icon: '😀', name: 'Emoji Guess' },
     rps:         { icon: '✊', name: 'Rock Paper Scissors' },
 };
+// coins/diamonds labels come from the guild's currency config
+// (window.__CURRENCY__, written by base.html) — never hardcoded here, so a
+// renamed currency shows up in reward lists with no code change.
 const REWARD_TYPE_LABELS = {
-    xp: '⭐ XP', coins: '🪙 Coins', diamonds: '💎 Diamonds',
+    xp: '⭐ XP', coins: currencyLabel('coins'), diamonds: currencyLabel('diamonds'),
     item: '📦 Item', role: '🏷️ Permanent Role', temp_role: '⏳ Temporary Role',
 };
 const MG_STATUS_LABELS = {

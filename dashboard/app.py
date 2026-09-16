@@ -223,6 +223,29 @@ def inject_environment():
     }
 
 
+# Currency display config for EVERY template render, not just /economy.
+#
+# Economy owns the currency configuration; the dashboard consumes it. A
+# context processor (rather than passing `currency` from each of the ~20
+# admin page routes) is what makes "configure once, applied everywhere" true
+# by construction — no page can forget the guild's currency, and no page
+# can invent its own default name. Values passed explicitly by a route win
+# (Flask re-applies the view context last), so routes that already pass
+# `currency`/`currency_defaults` keep working unchanged.
+#
+# Safe with no session (login, server-select): the helper falls back to the
+# shipped defaults from utils.currency and never raises.
+@app.context_processor
+def inject_currency():
+    from dashboard.permissions import get_session_guild_id
+    from dashboard.utils.currency_ctx import context as _currency_context
+    try:
+        guild_id = get_session_guild_id()
+    except Exception:
+        guild_id = None
+    return _currency_context(guild_id)
+
+
 # ── Error handlers ─────────────────────────────────────────────────────────────
 
 @app.errorhandler(403)
@@ -1138,18 +1161,12 @@ def economy():
     async def get_currency():
         from utils.currency import (
             get_currency_config, get_currency_config_raw,
-            DEFAULT_COIN_NAME, DEFAULT_COIN_EMOJI,
-            DEFAULT_DIAMOND_NAME, DEFAULT_DIAMOND_EMOJI,
         )
+        from dashboard.utils.currency_ctx import defaults_flat
         return {
             "resolved": await get_currency_config(guild_id),
             "raw": await get_currency_config_raw(guild_id),
-            "defaults": {
-                "coin_name": DEFAULT_COIN_NAME,
-                "coin_emoji": DEFAULT_COIN_EMOJI,
-                "diamond_name": DEFAULT_DIAMOND_NAME,
-                "diamond_emoji": DEFAULT_DIAMOND_EMOJI,
-            },
+            "defaults": defaults_flat(),
         }
 
     _cur = run_async(get_currency())

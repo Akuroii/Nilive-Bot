@@ -161,7 +161,7 @@ async function tmLoad() {
         return `
         <tr>
             <td><strong>${r.title}</strong><br>
-                <span class="text-muted text-sm">${r.reward_type}${r.reward_amount ? ' × ' + r.reward_amount : ''}</span></td>
+                <span class="text-muted text-sm">${currencyNameFor(r.reward_type)}${r.reward_amount ? ' × ' + r.reward_amount : ''}</span></td>
             <td>${tmStatusBadge(r.status)}</td>
             <td class="text-sm text-muted">${(r.starts_at || '').slice(0,16)} → ${(r.ends_at || '').slice(0,16)}</td>
             <td class="text-sm">${r.participant_count} confirmed

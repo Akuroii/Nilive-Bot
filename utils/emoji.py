@@ -140,6 +140,37 @@ def build_custom_emoji(emoji_id, name: str, animated: bool = False) -> str:
     return f"<{prefix}:{name}:{emoji_id}>"
 
 
+def as_partial_emoji(value: str):
+    """Convert a configured emoji string into a `discord.PartialEmoji` for
+    a component (button) — or None when it cannot be one.
+
+    Components are stricter than message content: a button's emoji must be
+    a real emoji, so a currency whose configured icon is literal text, or
+    an empty string, gets no glyph instead of an invalid component that
+    Discord rejects outright (which would break the whole view).
+
+    Returns None rather than raising for every unusable input, because
+    this runs inside view construction — a bad icon must not be able to
+    take a panel down.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        # Imported here, not at module scope: this module is also imported
+        # by the dashboard, which has no Discord client and must not need
+        # discord.py to render a label.
+        import discord
+        pe = discord.PartialEmoji.from_str(raw)
+    except Exception:
+        return None
+    # A bare word or digits parses into a "name" with no id and is not a
+    # usable emoji; a unicode emoji parses into a single character.
+    if pe.id is None and len(pe.name or "") > 2:
+        return None
+    return pe if (pe.id is not None or pe.name) else None
+
+
 def normalize_currency_emoji(raw: str, known_emojis=None) -> str:
     """Turn anything an admin might type into something Discord can render.
 
