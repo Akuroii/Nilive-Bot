@@ -17,7 +17,12 @@ from utils.currency import (
     DEFAULT_COIN_NAME, DEFAULT_COIN_EMOJI,
     DEFAULT_DIAMOND_NAME, DEFAULT_DIAMOND_EMOJI,
 )
-from utils.emoji import CHECK_EMOJI, CHECK_EMOJI_FALLBACK, resolve_check_emoji
+from utils.emoji import (
+    CHECK_EMOJI, CHECK_EMOJI_FALLBACK, CHECK_EMOJI_ID,
+    CHECK_REPROBE_SECONDS, CHECK_STATE_CONFIRMED, CHECK_STATE_MISSING,
+    check_emoji_detail, check_emoji_state,
+    resolve_check_emoji, verify_check_emoji,
+)
 
 # ═══════════════════════════════════════════════════════════════════════
 # MISSIONS — v2 display
@@ -28,7 +33,9 @@ from utils.emoji import CHECK_EMOJI, CHECK_EMOJI_FALLBACK, resolve_check_emoji
 #   * one block per mission: name, -# description line, glyph progress
 #     bar + percentage, then either `Progress: x / y unit` or — because
 #     rewards are granted automatically the instant the target is
-#     crossed, with no claim step — `⤷ Reward claimed 💎`
+#     crossed, with no claim step — `⤷ reward claimed <reward> <check>`,
+#     where <check> is the bot's APPLICATION emoji `<a:check:…>` (it is
+#     owned by the application, not by any server — see utils/emoji.py)
 #   * the period's next-rotation countdown, computed at render time
 #     from the same UTC period math the engine keys progress by (there
 #     is no timer job to duplicate — the reset is the period_key
@@ -71,6 +78,13 @@ VIEW_TIMEOUT = 1800  # same as the Wallet panels
 # source-of-truth rule forbids (and it became dead once reward lines moved
 # to the configured currency emoji). The success indicator now lives in
 # utils/emoji.py as CHECK_EMOJI — one source for every surface.
+#
+# CHECK_EMOJI is an APPLICATION emoji (Developer Portal → Application →
+# Emoji), not a guild emoji: it belongs to the bot application and renders
+# in every server. Nothing here may look for it in a server's emoji list,
+# and "this server doesn't have that emoji" is never a reason to render
+# something else. Reachability is established once against Discord's
+# application-emoji API — see Missions.on_ready below.
 
 # Refresh button emoji — the server's custom emoji (locked by Dark).
 # Note: this is a GUILD emoji, so if it is ever deleted from the server the
@@ -267,10 +281,25 @@ async def build_mission_display(bot, guild, user_id: int):
         print(f"[MISSIONS] currency config read failed for guild "
               f"{guild.id}: {e}")
 
-    # Graceful degradation for the check glyph: the emoji is a custom one,
-    # so it only renders if this bot can actually use it. resolve_check_emoji
-    # returns a plain ✅ when it cannot, which beats showing members the raw
-    # `<a:check:...>` token.
+    # The check glyph is the bot's APPLICATION emoji `<a:check:…>` — added
+    # in Developer Portal → Application → Emoji, owned by the application,
+    # so it renders in every server with no guild emoji lookup and no
+    # per-server setup.
+    #
+    # verify_check_emoji() is the only authoritative reachability check
+    # (it asks Discord's own application-emoji endpoint — guild caches
+    # cannot see application emojis at all) and it self-throttles to one
+    # request per CHECK_REPROBE_SECONDS, so calling it on the render path
+    # costs nothing after the first probe. The 1s cap keeps that rare
+    # probe from eating the interaction's ~3s acknowledgement budget
+    # (/missions renders before it responds); an abandoned probe is
+    # inconclusive, and inconclusive keeps the application emoji.
+    # resolve_check_emoji() then returns the token; it degrades to a plain
+    # ✅ ONLY when Discord positively says the application no longer owns
+    # that id — never merely because this server (or every server) has no
+    # such GUILD emoji, which is the normal, expected state for an
+    # application emoji.
+    await verify_check_emoji(bot, timeout=1.0)
     check_emoji = resolve_check_emoji(bot)
 
     sections: dict[str, list] = {}
@@ -415,21 +444,58 @@ class MissionsView(discord.ui.View):
 class Missions(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # Latched once Discord has positively confirmed the check emoji as
+        # an application emoji. on_ready re-fires on every reconnect; there
+        # is no reason to ask the same question again after a "yes".
+        self._check_emoji_confirmed = False
 
     async def cog_load(self):
         await ensure_tables()
-        # One-time reachability probe for the check emoji. It is a custom
-        # emoji, so if this bot can neither own it as an application emoji
-        # nor see it in a guild it is in, every success line would show the
-        # literal `<a:check:...>` token to members. Rendering already
-        # degrades to a plain ✅ per call (resolve_check_emoji); this makes
-        # the cause visible in the console instead of only on screen.
-        available = resolve_check_emoji(self.bot) == CHECK_EMOJI
-        if not available:
-            print(f"[MISSIONS] check emoji {CHECK_EMOJI} is not reachable by "
-                  f"this bot — falling back to '{CHECK_EMOJI_FALLBACK}'. "
-                  f"Import it as an application emoji (see "
-                  f"utils/app_emoji_cache.py) to restore the custom glyph.")
+        # NO emoji probe here, on purpose. main.py loads cogs BEFORE
+        # bot.start(), so at cog_load() time the client holds neither a
+        # token nor an application_id — every application-emoji lookup
+        # could only fail, and that failure would say nothing about
+        # reachability (it used to be reported as "emoji not reachable",
+        # which is how the Missions panel ended up downgraded to a unicode
+        # ✅). The real probe runs in on_ready below, and re-runs throttled
+        # on the render path (build_mission_display).
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Confirm the check emoji against Discord's application-emoji API.
+
+        `<a:check:…>` is an APPLICATION emoji — added in Developer Portal →
+        Application → Emoji, owned by the bot application (which can hold
+        ~2,000 of them), rendering in every server with no guild membership
+        and no permission check. It is therefore invisible to
+        `bot.emojis` / `bot.get_emoji()` by design, and the only honest
+        reachability check is the application-emoji endpoint: one cheap GET
+        per process, cached by utils/emoji.py.
+        """
+        if self._check_emoji_confirmed:
+            return
+        await verify_check_emoji(self.bot)
+        state = check_emoji_state()
+        if state == CHECK_STATE_CONFIRMED:
+            self._check_emoji_confirmed = True
+            print(f"[MISSIONS] check emoji confirmed as an APPLICATION emoji: "
+                  f"{resolve_check_emoji(self.bot)} (id {CHECK_EMOJI_ID}) — "
+                  f"renders in every server, no guild emoji required.")
+        elif state == CHECK_STATE_MISSING:
+            print(f"[MISSIONS] check emoji {CHECK_EMOJI} (id {CHECK_EMOJI_ID}) "
+                  f"is NOT owned by this application: {check_emoji_detail()}. "
+                  f"Success lines render '{CHECK_EMOJI_FALLBACK}' until it is "
+                  f"re-added in Developer Portal → Application → Emoji; the "
+                  f"bot re-checks by itself within "
+                  f"{int(CHECK_REPROBE_SECONDS)}s of the next /missions.")
+        else:
+            # Inconclusive (not logged in, HTTP hiccup, older discord.py):
+            # keep the application emoji. Downgrading here is exactly the
+            # silent ✅ regression this probe exists to prevent.
+            print(f"[MISSIONS] check emoji reachability unverified "
+                  f"({check_emoji_detail()}) — keeping the application emoji "
+                  f"{CHECK_EMOJI}; it renders wherever an application emoji "
+                  f"does, so no unicode downgrade.")
 
     # ─── PROGRESS HOOKS (same events cogs/mvp.py and cogs/leveling.py
     # already listen to — no new tracking wired anywhere else) ──────

@@ -27,12 +27,37 @@ in this module silently depends on guild membership: a custom emoji the bot
 cannot reach renders as its literal `<:name:id>` text, so callers that need
 a hard guarantee should point at an application emoji.
 
+The two kinds are also *looked up* differently, and that difference is the
+trap `CHECK_EMOJI` resolution is built around:
+
+  * guild emojis live in the gateway cache — `bot.emojis` /
+    `bot.get_emoji(id)`. discord.py's own docstring for `Client.emojis`
+    says "This does not include the emojis that are owned by the
+    application", so a probe that only looks there can NEVER find an
+    application emoji — no matter how many the application owns;
+  * application emojis have no cache in discord.py 2.x at all. The only
+    way to see them is the HTTP API: `await bot.fetch_application_emoji(id)`
+    or `await bot.fetch_application_emojis()` (2.5+), both of which need a
+    logged-in client (token + application_id).
+
+So "can the bot reach this emoji?" is an ASYNC question, while rendering is
+SYNC. `verify_check_emoji()` answers it (once, then cached — see the state
+machine by CHECK_EMOJI); `resolve_check_emoji()` just reads that answer at
+render time. An inconclusive answer — client not logged in yet, HTTP
+hiccup, rate limit, a discord.py without the API — keeps the custom token,
+because an application emoji renders in every guild by definition and
+downgrading it to unicode on a *guess* is a silent visual regression. Only
+a positive 404 from Discord's own application-emoji endpoint (the emoji was
+really deleted from the application) degrades to `CHECK_EMOJI_FALLBACK`.
+
 Unicode emoji (🪙, 💎, 🌙, and any letter/script such as Arabic) have none
 of these constraints and always render.
 """
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 
 # ═══════════════════════════════════════════════════════════════════════
 # The bot's own fixed emoji
@@ -45,15 +70,293 @@ import re
 # Animated application-style emoji, so the plain `<a:name:id>` token is
 # correct for both message content and buttons.
 #
-# ACCESSIBILITY CAVEAT (see module header): this ID must be reachable by
-# the bot — either an application emoji (best: renders in every guild) or
-# a guild emoji in a guild the bot is in. If it is neither, every site
-# that uses this constant renders the literal token text. resolve_check_
-# emoji() below exists so callers that can check (they have a Client)
-# degrade to a plain unicode check instead of showing that text.
+# THIS IS AN APPLICATION EMOJI: it was added in Developer Portal →
+# Application → Emoji, so it belongs to the bot application (which owns up
+# to ~2,000 of them) and NOT to any server. Consequences, all of them
+# deliberate:
+#
+#   * it renders in every guild the bot is in, with no guild membership,
+#     no USE_EXTERNAL_EMOJIS and no per-server setup;
+#   * it must NEVER be looked up in a guild emoji list — `bot.emojis` /
+#     `bot.get_emoji()` cannot see application emojis by design (see the
+#     module header), so treating "not in this server's emoji list" as
+#     "unavailable" is simply wrong and is what used to downgrade this to
+#     a unicode ✅ on the Missions panel;
+#   * the only authoritative check is the application-emoji HTTP endpoint,
+#     which `verify_check_emoji()` below calls.
 CHECK_EMOJI = "<a:check:1549593658867712090>"
 CHECK_EMOJI_ID = 1549593658867712090
+# Last-resort glyph, used ONLY when Discord itself answers that this ID is
+# not one of the application's emojis (see CHECK_STATE_MISSING). An
+# inconclusive probe must never land here.
 CHECK_EMOJI_FALLBACK = "✅"
+
+# ── CHECK_EMOJI reachability state ───────────────────────────────────────
+# One module-level answer shared by every renderer, because the question
+# ("does the application own this emoji?") has nothing to do with which
+# guild, channel or member is being rendered.
+CHECK_STATE_UNKNOWN = "unknown"      # not probed yet, or the probe couldn't answer
+CHECK_STATE_CONFIRMED = "confirmed"  # Discord: ours, application-owned → use the token
+CHECK_STATE_MISSING = "missing"      # Discord: 404, not ours → unicode fallback
+
+# How long a NEGATIVE or inconclusive answer is trusted before the next
+# probe. Confirmed is terminal for the process (an application emoji can
+# only stop existing by being deleted, which is a deliberate act followed
+# in practice by a restart); `force=True` re-asks regardless. Five minutes
+# is short enough that adding the emoji in the Portal self-heals without a
+# redeploy, and long enough that a render path can never turn into an HTTP
+# call storm.
+CHECK_REPROBE_SECONDS = 300.0
+
+_check_state: dict = {
+    "state": CHECK_STATE_UNKNOWN,
+    "token": CHECK_EMOJI,
+    "detail": "not probed yet",
+    "probed_at": 0.0,
+}
+
+
+def check_emoji_state() -> str:
+    """Current reachability verdict for CHECK_EMOJI (see CHECK_STATE_*)."""
+    return _check_state["state"]
+
+
+def check_emoji_detail() -> str:
+    """Human-readable reason behind `check_emoji_state()` — for logs."""
+    return _check_state["detail"]
+
+
+def _set_check_state(state: str, detail: str, token: str | None = None) -> None:
+    _check_state["state"] = state
+    _check_state["detail"] = detail
+    if token:
+        _check_state["token"] = token
+
+
+def _is_check_emoji(obj) -> bool:
+    """True when `obj` is an emoji object carrying CHECK_EMOJI_ID."""
+    if obj is None:
+        return False
+    try:
+        return int(getattr(obj, "id", 0) or 0) == CHECK_EMOJI_ID
+    except (TypeError, ValueError):
+        return False
+
+
+def _token_for(emoji) -> str:
+    """The canonical `<a:name:id>` token for an emoji object, falling back
+    to the constant. discord.py builds `str(Emoji)` as exactly that token,
+    and taking the name from Discord keeps it correct even if the emoji is
+    ever renamed in the Portal (the ID is what renders; the name is
+    cosmetic). Anything unexpected keeps the constant rather than risking
+    a malformed token."""
+    try:
+        candidate = str(emoji)
+    except Exception:
+        return CHECK_EMOJI
+    if is_custom_emoji_token(candidate) and str(CHECK_EMOJI_ID) in candidate:
+        return candidate
+    return CHECK_EMOJI
+
+
+def _confirm(emoji, detail: str) -> bool:
+    _set_check_state(CHECK_STATE_CONFIRMED, detail, token=_token_for(emoji))
+    return True
+
+
+def _is_not_found(exc) -> bool:
+    """Discord's 404 — the one answer that legitimately means 'the
+    application does not own this emoji'. Matched by status first (works
+    for any HTTPException shape) and by class name second, so this module
+    still behaves when it is imported somewhere discord.py isn't."""
+    status = getattr(exc, "status", None)
+    if isinstance(status, int):
+        return status == 404
+    return type(exc).__name__ == "NotFound"
+
+
+def _probe_sync(bot) -> bool:
+    """Confirm from whatever the client already has in memory. Never
+    disproves anything — absence from these caches says nothing about
+    application ownership (that is the whole bug this guards against), and
+    an exception here (a bot double without the attributes, say) leaves the
+    current verdict untouched rather than erasing it."""
+    try:
+        # A cache of application emojis, if this discord.py (or a fork)
+        # ever keeps one. 2.x does not; the attribute check keeps us
+        # working with one that does.
+        app_emojis = getattr(bot, "application_emojis", None)
+        if callable(app_emojis):
+            for e in (app_emojis() or ()):
+                if _is_check_emoji(e):
+                    return _confirm(e, "found in the client's application-emoji cache")
+        # Guild-emoji cache. Checked for completeness — if the same ID
+        # happens to exist as a guild emoji the bot can see, that is also
+        # a reachable emoji — but it is NOT where an application emoji
+        # lives, so a miss here means nothing.
+        emoji = bot.get_emoji(CHECK_EMOJI_ID)
+        if _is_check_emoji(emoji):
+            return _confirm(emoji, "found in the client's emoji cache")
+    except Exception:
+        # A capability probe must never break rendering, and never rewrite
+        # a verdict it has no information about.
+        return False
+    return False
+
+
+async def _fetch_application_emoji(bot) -> tuple[str, object]:
+    """Ask Discord's application-emoji endpoint about CHECK_EMOJI_ID.
+
+    Returns `(state, payload)` where payload is the Emoji object for
+    CONFIRMED and a reason string otherwise.
+
+    A 404 on the single-emoji GET *probably* means "the application does
+    not own this id", but nothing user-visible downgrades on one answer
+    alone: the full list is consulted as a second opinion, because a
+    single odd 404 shouldn't cost the panel its glyph and the extra
+    request costs nothing. Any ERROR — as opposed to a clean 404 — leaves
+    the state inconclusive, which keeps the token.
+    """
+    fetch_one = getattr(bot, "fetch_application_emoji", None)
+    fetch_all = getattr(bot, "fetch_application_emojis", None)
+    if not callable(fetch_one) and not callable(fetch_all):
+        return (CHECK_STATE_UNKNOWN,
+                "this discord.py exposes no application-emoji API (needs 2.5+)")
+    # Not logged in yet (cogs load BEFORE bot.start() in main.py, so there
+    # is neither a token nor an application_id at that point): the call
+    # could only fail, and its failure would mean nothing.
+    if getattr(bot, "application_id", None) is None:
+        return (CHECK_STATE_UNKNOWN,
+                "client is not logged in yet (no application_id)")
+
+    # Set when the single-emoji GET answered 404. (Not the exception
+    # object itself — Python unbinds `except … as exc` names at the end of
+    # the handler.)
+    single_not_found: str | None = None
+
+    if callable(fetch_one):
+        try:
+            emoji = await fetch_one(CHECK_EMOJI_ID)
+        except Exception as exc:
+            if not _is_not_found(exc):
+                return (CHECK_STATE_UNKNOWN,
+                        f"application-emoji lookup failed: "
+                        f"{type(exc).__name__}: {exc}")
+            single_not_found = (f"{type(exc).__name__} (404) from "
+                                f"GET /applications/@me/emojis/{CHECK_EMOJI_ID}")
+        else:
+            if _is_check_emoji(emoji):
+                return (CHECK_STATE_CONFIRMED, emoji)
+            return (CHECK_STATE_UNKNOWN,
+                    f"application-emoji endpoint returned a different id "
+                    f"({getattr(emoji, 'id', '?')!r})")
+
+    if not callable(fetch_all):
+        return (CHECK_STATE_MISSING,
+                single_not_found or
+                "the application does not own this emoji id")
+
+    # Either the single GET 404'd (this is the second opinion), or this
+    # client only exposes the list API.
+    try:
+        listing = await fetch_all()
+    except Exception as exc:
+        detail = (f"application-emoji list failed: "
+                  f"{type(exc).__name__}: {exc}")
+        if single_not_found:
+            detail = (f"{single_not_found}, and the second-opinion list "
+                      f"lookup also failed ({type(exc).__name__}) — "
+                      f"inconclusive, keeping the custom token")
+        return (CHECK_STATE_UNKNOWN, detail)
+
+    items = listing.get("items") if isinstance(listing, dict) else listing
+    items = list(items or ())
+    for e in items:
+        if _is_check_emoji(e):
+            return (CHECK_STATE_CONFIRMED, e)
+    return (CHECK_STATE_MISSING,
+            f"not among the application's {len(items)} emoji "
+            f"(Developer Portal → Application → Emoji)"
+            + (f"; {single_not_found}" if single_not_found else ""))
+
+
+async def verify_check_emoji(bot, *, force: bool = False,
+                             timeout: float | None = None) -> str:
+    """Answer "can this bot render CHECK_EMOJI?" and cache the answer.
+
+    Call it once the client is logged in (`on_ready`), or let a renderer
+    call it — it is cheap and self-throttling: after the first probe, an
+    inconclusive or negative verdict is reused for
+    `CHECK_REPROBE_SECONDS` and a confirmed one for the life of the
+    process, so a busy render path never becomes an HTTP call per render.
+
+    `timeout` caps how long the probe may take, for callers that are on a
+    Discord clock (an interaction has ~3s to acknowledge, and /missions
+    renders before it responds): a probe that runs long is abandoned and
+    recorded as inconclusive, which keeps the custom token instead of
+    delaying the member's panel. None (the default, used from on_ready)
+    waits as long as discord.py itself would.
+
+    Returns the string to render. Never raises: a probe that cannot run
+    leaves the state inconclusive, and inconclusive means "keep the custom
+    token" — an application emoji renders everywhere, so guessing 'no' is
+    the only way this could visibly break the UI.
+    """
+    if bot is None:
+        return resolve_check_emoji(None)
+
+    now = time.monotonic()
+    state = _check_state["state"]
+    if not force:
+        if state == CHECK_STATE_CONFIRMED:
+            return _check_state["token"]
+        if _check_state["probed_at"] and \
+                (now - _check_state["probed_at"]) < CHECK_REPROBE_SECONDS:
+            return resolve_check_emoji(bot)
+    # Claim the probe slot BEFORE awaiting: concurrent renders arriving
+    # while the GET is in flight then read the cached verdict instead of
+    # each firing their own request. (No asyncio.Lock on purpose — this
+    # module is imported by the dashboard too, whose coroutines run on a
+    # different loop, and a lock bound to one loop breaks the other. The
+    # call is an idempotent read, so the worst case is a rare duplicate.)
+    _check_state["probed_at"] = now
+
+    if _probe_sync(bot):
+        return _check_state["token"]
+
+    try:
+        if timeout:
+            outcome, payload = await asyncio.wait_for(
+                _fetch_application_emoji(bot), timeout=timeout)
+        else:
+            outcome, payload = await _fetch_application_emoji(bot)
+    except asyncio.TimeoutError:
+        outcome, payload = (CHECK_STATE_UNKNOWN,
+                            f"probe abandoned after {timeout}s — keeping the "
+                            f"custom token rather than delaying the render")
+    except Exception as exc:                       # absolutely never raise
+        outcome, payload = (CHECK_STATE_UNKNOWN,
+                            f"probe raised: {type(exc).__name__}: {exc}")
+
+    if outcome == CHECK_STATE_CONFIRMED:
+        _confirm(payload, "confirmed via the application-emoji endpoint "
+                          "(owned by the bot application — renders in every server)")
+    elif outcome == CHECK_STATE_MISSING:
+        _set_check_state(CHECK_STATE_MISSING, str(payload))
+    elif _check_state["state"] == CHECK_STATE_MISSING:
+        # Already known-bad, and this re-probe couldn't answer: keep the
+        # verdict instead of resurrecting a token Discord has said isn't
+        # ours (which would render as literal text).
+        _set_check_state(CHECK_STATE_MISSING,
+                         f"{_check_state['detail']}; re-probe inconclusive "
+                         f"({payload})")
+    else:
+        # Inconclusive: keep the token we already had; only the reason
+        # changes. An application emoji renders everywhere, so "couldn't
+        # verify" must never become "downgrade to unicode".
+        _set_check_state(CHECK_STATE_UNKNOWN, str(payload))
+    return resolve_check_emoji(bot)
+
 
 # Discord's public emoji CDN. Serves any emoji image by ID with no auth
 # and no bot membership, which is what makes it the right primitive for
@@ -70,33 +373,25 @@ def emoji_cdn_url(emoji_id, animated: bool = False) -> str:
 
 
 def resolve_check_emoji(bot=None) -> str:
-    """CHECK_EMOJI when the bot can actually use it, else a unicode check.
+    """The check glyph to render right now — sync, render-path safe.
 
-    `bot` is a discord.Client/commands.Bot (or anything with `.get_emoji`
-    and `.emojis`). Passing it is optional: with no bot, or when the bot
-    has no opinion, the constant is returned unchanged — a caller that
-    can't verify shouldn't silently downgrade how things look.
+    This is the application emoji `<a:check:…>` unless Discord has
+    positively said the application no longer owns that ID
+    (`check_emoji_state() == "missing"`), in which case the unicode ✅ is
+    returned so members never see raw `<a:check:…>` token text.
 
-    Resolution order mirrors how Discord itself decides reachability:
-      1. the bot's application emojis (`bot.application_emojis()`, 2.4+)
-      2. the bot's own emoji cache (guild emojis it can see)
+    Crucially it does NOT require the emoji to be a guild emoji: being
+    absent from this server's (or every server's) emoji list is normal and
+    expected for an application emoji, and must not downgrade the render.
+    Pass `bot` to also allow the free in-memory confirmation
+    (`_probe_sync`); the authoritative check is `await verify_check_emoji(bot)`,
+    which a caller with an event loop should have run at least once.
     """
-    if bot is None:
-        return CHECK_EMOJI
-    try:
-        app_emojis = getattr(bot, "application_emojis", None)
-        if callable(app_emojis):
-            for e in app_emojis():
-                if getattr(e, "id", None) == CHECK_EMOJI_ID:
-                    return str(e)
-        emoji = bot.get_emoji(CHECK_EMOJI_ID)
-        if emoji is not None:
-            return str(emoji)
-    except Exception:
-        # A capability probe must never break rendering — fall through to
-        # the constant and let Discord show whatever it shows.
-        return CHECK_EMOJI
-    return CHECK_EMOJI_FALLBACK
+    if bot is not None and _check_state["state"] != CHECK_STATE_CONFIRMED:
+        _probe_sync(bot)
+    if _check_state["state"] == CHECK_STATE_MISSING:
+        return CHECK_EMOJI_FALLBACK
+    return _check_state["token"] or CHECK_EMOJI
 
 
 # ═══════════════════════════════════════════════════════════════════════
