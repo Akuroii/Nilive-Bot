@@ -19,11 +19,11 @@
         <div class="stat-sub">{{ "{:,}".format(profile.xp) }} XP</div>
     </div>
     <div class="stat-card stat-success">
-        <div class="stat-label">{{ currency.coins.emoji }} {{ currency.coins.name }}</div>
+        <div class="stat-label">{{ currency_icon(currency.coins.emoji) }} {{ currency.coins.name }}</div>
         <div class="stat-value">{{ "{:,}".format(profile.coins) }}</div>
     </div>
     <div class="stat-card stat-warning">
-        <div class="stat-label">{{ currency.diamonds.emoji }} {{ currency.diamonds.name }}</div>
+        <div class="stat-label">{{ currency_icon(currency.diamonds.emoji) }} {{ currency.diamonds.name }}</div>
         <div class="stat-value">{{ "{:,}".format(profile.diamonds) }}</div>
     </div>
     <div class="stat-card stat-accent">
@@ -148,7 +148,7 @@
                     {% for p in profile.purchases %}
                     <tr>
                         <td><strong>{{ p[0] }}</strong></td>
-                        <td>{{ currency.coins.emoji }} {{ "{:,}".format(p[1]) }}</td>
+                        <td>{{ currency_icon(currency.coins.emoji) }} {{ "{:,}".format(p[1]) }}</td>
                         <td class="text-muted">{{ p[2][:10] if p[2] else '—' }}</td>
                     </tr>
                     {% endfor %}

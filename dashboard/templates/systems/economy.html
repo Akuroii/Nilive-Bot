@@ -6,8 +6,8 @@
 
 <div style="display:flex;gap:4px;margin-bottom:20px;
             border-bottom:1px solid var(--border);padding-bottom:0;">
-    {% for tab, label in [('coins', currency.coins.emoji ~ ' ' ~ currency.coins.name),
-                          ('diamonds', currency.diamonds.emoji ~ ' ' ~ currency.diamonds.name),
+    {% for tab, label in [('coins', currency_icon(currency.coins.emoji) ~ ' ' ~ currency.coins.name),
+                          ('diamonds', currency_icon(currency.diamonds.emoji) ~ ' ' ~ currency.diamonds.name),
                           ('currency','🎨 Currency'),
                           ('exchange','💱 Exchange Rate')] %}
     <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
@@ -22,7 +22,7 @@
 <!-- COINS TAB -->
 <div id="tab-content-coins" class="tab-content">
     <div class="card">
-        <div class="card-title">{{ currency.coins.emoji }} Richest {{ currency.coins.name }} Holders</div>
+        <div class="card-title">{{ currency_icon(currency.coins.emoji) }} Richest {{ currency.coins.name }} Holders</div>
         <div class="table-wrap">
             <table class="table">
                 <thead>
@@ -38,7 +38,7 @@
                             </div>
                         </td>
                         <td>{{ user_identity(b[0], u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
-                        <td><strong style="color:var(--gold);">{{ currency.coins.emoji }} {{ "{:,}".format(b[1]) }}</strong></td>
+                        <td><strong style="color:var(--gold);">{{ currency_icon(currency.coins.emoji) }} {{ "{:,}".format(b[1]) }}</strong></td>
                     </tr>
                     {% else %}
                     <tr><td colspan="3" class="empty">No economy data yet</td></tr>
@@ -52,7 +52,7 @@
 <!-- DIAMONDS TAB -->
 <div id="tab-content-diamonds" class="tab-content" style="display:none;">
     <div class="card">
-        <div class="card-title">{{ currency.diamonds.emoji }} {{ currency.diamonds.name }} Holders</div>
+        <div class="card-title">{{ currency_icon(currency.diamonds.emoji) }} {{ currency.diamonds.name }} Holders</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             {{ currency.diamonds.name }} are a convertible currency — members earn them from
             special events (bonus, no conversion needed) or by converting
@@ -73,7 +73,7 @@
                             </div>
                         </td>
                         <td>{{ user_identity(d[0], u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
-                        <td><strong style="color:var(--accent);">{{ currency.diamonds.emoji }} {{ "{:,}".format(d[1]) }}</strong></td>
+                        <td><strong style="color:var(--accent);">{{ currency_icon(currency.diamonds.emoji) }} {{ "{:,}".format(d[1]) }}</strong></td>
                     </tr>
                     {% else %}
                     <tr><td colspan="3" class="empty">No {{ currency.diamonds.name }} held yet</td></tr>
@@ -87,7 +87,7 @@
 <!-- CURRENCY TAB -->
 <div id="tab-content-currency" class="tab-content" style="display:none;">
     <div class="card">
-        <div class="card-title">{{ currency.coins.emoji }} Currency Names &amp; Icons</div>
+        <div class="card-title">{{ currency_icon(currency.coins.emoji) }} Currency Names &amp; Icons</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Rename either currency and pick its icon — these names and emojis are used
             everywhere the bot shows a currency: wallet, shop, inventory, trade,
@@ -179,7 +179,7 @@
         </p>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
             <div class="form-group" style="margin-bottom:0;">
-                <label class="form-label">{{ currency.coins.name }} per 1 {{ currency.diamonds.emoji }} {{ currency.diamonds.name }}</label>
+                <label class="form-label">{{ currency.coins.name }} per 1 {{ currency_icon(currency.diamonds.emoji) }} {{ currency.diamonds.name }}</label>
                 <input class="form-input" id="exchange-rate-input"
                        type="number" min="1" value="{{ exchange_rate }}"
                        style="width:180px;">

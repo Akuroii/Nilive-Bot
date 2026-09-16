@@ -166,8 +166,11 @@ const MG_TYPES = {
 // coins/diamonds labels come from the guild's currency config
 // (window.__CURRENCY__, written by base.html) — never hardcoded here, so a
 // renamed currency shows up in reward lists with no code change.
+// The TEXT variant, not currencyLabel(): these labels land in the reward
+// type <select> below, and an <option> may only contain text — a custom
+// currency icon has to degrade to its emoji name there.
 const REWARD_TYPE_LABELS = {
-    xp: '⭐ XP', coins: currencyLabel('coins'), diamonds: currencyLabel('diamonds'),
+    xp: '⭐ XP', coins: currencyLabelText('coins'), diamonds: currencyLabelText('diamonds'),
     item: '📦 Item', role: '🏷️ Permanent Role', temp_role: '⏳ Temporary Role',
 };
 const MG_STATUS_LABELS = {

@@ -68,6 +68,11 @@
      toasts show the same check as the Discord-side replies. -->
 <script>window.__CHECK_ICON__ = {{ check_icon | tojson }};</script>
 {{ check_icon_css }}
+<!-- Baseline alignment for configured currency icons rendered as CDN
+     images (dashboard/utils/currency_ctx.py:icon_css). A browser cannot
+     render `<:name:id>` / `<a:name:id>` markup, so a custom currency icon
+     is an <img> exactly like the check icon above. -->
+{{ currency_icon_css }}
 <button class="hamburger" onclick="toggleSidebar()"
     style="display:none;position:fixed;top:14px;left:14px;z-index:200;
            background:var(--bg2);border:1px solid var(--border);

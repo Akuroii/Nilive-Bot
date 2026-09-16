@@ -50,8 +50,12 @@ def economy_leaderboard_partial():
     user_map = run_async(resolve()) if rows else {}
 
     from dashboard.utils.user_identity import render_user_identity_html
-    from dashboard.utils.currency_ctx import resolved as _currency
+    from dashboard.utils.currency_ctx import resolved as _currency, icon_html
     _cc = _currency(guild_id)["coins"]
+    # A configured custom emoji is Discord message markup, not HTML, so it
+    # is rendered as a CDN <img> (see currency_ctx.icon_html) — dropped
+    # straight into this f-string it would be swallowed as an <a> tag.
+    _cc_icon = icon_html(_cc["emoji"])
     html = ""
     for i, r in enumerate(rows, 1):
         u = user_map.get(r[0], {})
@@ -60,7 +64,7 @@ def economy_leaderboard_partial():
         html += (
             f"<tr><td>#{i}</td>"
             f"<td>{identity_html}</td>"
-            f"<td><strong>{_cc['emoji']} {r[1]:,}</strong></td></tr>"
+            f"<td><strong>{_cc_icon} {r[1]:,}</strong></td></tr>"
         )
     return html or "<tr><td colspan='3' class='empty'>No data yet</td></tr>"
 
@@ -88,8 +92,9 @@ def economy_leaderboard_diamonds_partial():
     user_map = run_async(resolve()) if rows else {}
 
     from dashboard.utils.user_identity import render_user_identity_html
-    from dashboard.utils.currency_ctx import resolved as _currency
+    from dashboard.utils.currency_ctx import resolved as _currency, icon_html
     _cd = _currency(guild_id)["diamonds"]
+    _cd_icon = icon_html(_cd["emoji"])
     html = ""
     for i, r in enumerate(rows, 1):
         u = user_map.get(r[0], {})
@@ -98,7 +103,7 @@ def economy_leaderboard_diamonds_partial():
         html += (
             f"<tr><td>#{i}</td>"
             f"<td>{identity_html}</td>"
-            f"<td><strong>{_cd['emoji']} {r[1]:,}</strong></td></tr>"
+            f"<td><strong>{_cd_icon} {r[1]:,}</strong></td></tr>"
         )
     return html or f"<tr><td colspan='3' class='empty'>No {_cd['name']} held yet</td></tr>"
 
@@ -206,10 +211,18 @@ def save_currency_config_api():
     # An absent key means "leave this field alone"; a present-but-blank key
     # means "revert to the default". that distinction is what lets the form
     # submit a partial payload without blanking fields it did not render.
+    #
+    # Emoji normalisation applies to the EMOJI fields only. A name is free
+    # text — routing it through normalize_currency_emoji() turned a purely
+    # numeric name ("2024") into the Discord token `<:_:2024>`, because a
+    # bare digit string is exactly the form that helper resolves as an
+    # emoji ID. Names are stored as typed.
     def field(key):
         if key not in data:
             return None
-        return normalize_currency_emoji(data.get(key), known)
+        if key in ("coin_emoji_id", "diamond_emoji_id"):
+            return normalize_currency_emoji(data.get(key), known)
+        return str(data.get(key) or "").strip()
 
     async def save():
         return await set_currency_config(
@@ -302,8 +315,14 @@ def shop_items_partial():
         "legendary": "badge-warning", "mythical": "badge-danger",
         "secret": "badge-danger",
     }
-    from dashboard.utils.currency_ctx import resolved as _currency
+    from dashboard.utils.currency_ctx import (
+        resolved as _currency, icon_html as _currency_icon_html,
+    )
     _cur = _currency(guild_id)
+    # Aliased on import: `icon_html` is already taken below by the shop
+    # item's own icon image.
+    _coin_icon = _currency_icon_html(_cur['coins']['emoji'])
+    _gem_icon = _currency_icon_html(_cur['diamonds']['emoji'])
     html = ""
     for r in rows:
         status = "badge-success" if r[8] else "badge-danger"
@@ -312,8 +331,8 @@ def shop_items_partial():
         price_diamonds = r[9]
         # Price badge uses the guild's configured icon for whichever
         # currency the item is priced in.
-        price_str = (f"{_cur['diamonds']['emoji']} {price_diamonds:,}"
-                     if price_diamonds else f"{_cur['coins']['emoji']} {r[3]:,}")
+        price_str = (f"{_gem_icon} {price_diamonds:,}"
+                     if price_diamonds else f"{_coin_icon} {r[3]:,}")
         rarity = r[11] or "common"
         rarity_class = RARITY_BADGE.get(rarity, "badge")
         icon_html = (
@@ -526,16 +545,20 @@ def shop_purchase_history():
             return await cursor.fetchall()
 
     rows = run_async(fetch())
-    from dashboard.utils.currency_ctx import resolved as _currency
+    from dashboard.utils.currency_ctx import (
+        resolved as _currency, icon_html as _currency_icon_html,
+    )
     _cur = _currency(guild_id)
+    _coin_icon = _currency_icon_html(_cur['coins']['emoji'])
+    _gem_icon = _currency_icon_html(_cur['diamonds']['emoji'])
     html = ""
     for r in rows:
         exp   = r[4][:10] if r[4] else "Permanent"
         # 'currency_paid' stores the stable key; the glyph comes from the
         # guild's configured icon for that key.
-        currency_icon = (_cur['diamonds']['emoji']
+        currency_icon = (_gem_icon
                          if (len(r) > 5 and r[5] == "diamonds")
-                         else _cur['coins']['emoji'])
+                         else _coin_icon)
         # r[0] (user_display_name — a Discord nickname) and r[1]
         # (item_name — admin-entered but still free text) are both
         # escaped below; same stored-XSS class as moderation_logs_partial.

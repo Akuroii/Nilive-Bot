@@ -241,7 +241,7 @@
 
     <!-- Phase 5 / Leveling expansion — currency rewards -->
     <div class="card">
-        <div class="card-title">{{ currency.coins.emoji }} Add Level Reward — {{ currency.coins.name }} / {{ currency.diamonds.name }}</div>
+        <div class="card-title">{{ currency_icon(currency.coins.emoji) }} Add Level Reward — {{ currency.coins.name }} / {{ currency.diamonds.name }}</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Granted automatically on level-up via the Reward Engine, atomically and
             logged to the Transaction Ledger (source: leveling). A level can have a
@@ -256,8 +256,8 @@
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Currency</label>
                 <select class="form-input" id="currency-reward-currency" style="width:140px;">
-                    <option value="balance">{{ currency.coins.emoji }} {{ currency.coins.name }}</option>
-                    <option value="diamonds">{{ currency.diamonds.emoji }} {{ currency.diamonds.name }}</option>
+                    <option value="balance">{{ currency_icon_text(currency.coins.emoji) }} {{ currency.coins.name }}</option>
+                    <option value="diamonds">{{ currency_icon_text(currency.diamonds.emoji) }} {{ currency.diamonds.name }}</option>
                 </select>
             </div>
             <div class="form-group" style="margin-bottom:0;">
