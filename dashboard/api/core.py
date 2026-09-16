@@ -259,8 +259,10 @@ def members_search():
     user_map = run_async(resolve()) if rows else {}
 
     from dashboard.utils.user_identity import render_user_identity_html
-    from dashboard.utils.currency_ctx import resolved as _currency
-    _coin_emoji = _currency(guild_id)["coins"]["emoji"]
+    from dashboard.utils.currency_ctx import resolved as _currency, icon_html
+    # Rendered as a CDN <img>, not interpolated raw: a configured custom
+    # emoji is Discord message markup and an HTML parser would swallow it.
+    _coin_emoji = icon_html(_currency(guild_id)["coins"]["emoji"])
     html = ""
     for r in rows:
         # r[0] (user_id) is still interpolated raw into the inline

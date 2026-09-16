@@ -84,8 +84,8 @@ import time
 #     a unicode ✅ on the Missions panel;
 #   * the only authoritative check is the application-emoji HTTP endpoint,
 #     which `verify_check_emoji()` below calls.
-CHECK_EMOJI = "<a:check:1549593658867712090>"
-CHECK_EMOJI_ID = 1549593658867712090
+CHECK_EMOJI = "<a:Check:1549831102078787744>"
+CHECK_EMOJI_ID = 1549831102078787744
 # Last-resort glyph, used ONLY when Discord itself answers that this ID is
 # not one of the application's emojis (see CHECK_STATE_MISSING). An
 # inconclusive probe must never land here.

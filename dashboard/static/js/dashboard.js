@@ -70,11 +70,56 @@ function currencyInfoByKey(key) {
     return bucket ? currencyInfo(bucket) : { name: '', emoji: '' };
 }
 
+// A configured currency icon as HTML.
+//
+// `<:name:id>` / `<a:name:id>` is Discord *message* markup — dropped into
+// innerHTML a browser parses it as the start of an <a> tag and the icon
+// silently disappears, so a custom icon becomes the image Discord's public
+// emoji CDN serves by ID (animated → .gif, static → .png, so animated
+// custom emoji animate here too). A unicode emoji is plain text a browser
+// renders natively and passes through escaped.
+//
+// JS twin of dashboard/utils/currency_ctx.py:icon_html — the two must stay
+// in step. Returns HTML: callers already interpolate these labels into
+// innerHTML.
+function currencyEmojiHtml(emoji) {
+    const raw = (emoji || '').trim();
+    if (!raw) return '';
+    const m = raw.match(/^<(a?):(\w+):(\d+)>$/);
+    if (!m) return _escapeHtml(raw);
+    const ext = m[1] === 'a' ? 'gif' : 'png';
+    return `<img src="https://cdn.discordapp.com/emojis/${m[3]}.${ext}" `
+         + `class="nero-currency-icon" alt="" width="18" height="18" `
+         + `loading="lazy" onerror="this.remove()">`;
+}
+
+// The same icon as PLAIN TEXT, for the few places HTML cannot help with —
+// an `<option>` may contain text only, and a browser drops an `<img>`
+// inside one, leaving the row with no icon at all. A custom emoji yields
+// its NAME (never the raw token); the `_` placeholder name used for an
+// ID-only emoji reads as "no icon". Twin of currency_ctx.py:icon_text.
+function currencyEmojiText(emoji) {
+    const raw = (emoji || '').trim();
+    if (!raw) return '';
+    const m = raw.match(/^<(a?):(\w+):(\d+)>$/);
+    if (!m) return raw;
+    return m[2] === '_' ? '' : m[2];
+}
+
 // '🌙 Moon' — the inline currency label used in tables and toasts. A
-// non-currency key is returned as-is.
+// non-currency key is returned as-is. Returns HTML (the icon may be an
+// <img>), so use it where innerHTML is assigned. For an `<option>`, or
+// anywhere else that takes text, use currencyLabelText().
 function currencyLabel(key) {
     const info = currencyInfoByKey(key);
-    return `${info.emoji} ${info.name}`.trim() || key;
+    return `${currencyEmojiHtml(info.emoji)} ${info.name}`.trim() || key;
+}
+
+// Text-only twin of currencyLabel(), for `<option>` elements and any
+// other text sink. Safe to assign to textContent.
+function currencyLabelText(key) {
+    const info = currencyInfoByKey(key);
+    return `${currencyEmojiText(info.emoji)} ${info.name}`.trim() || key;
 }
 
 // The configured display name for a stored currency key; anything that is
@@ -85,14 +130,15 @@ function currencyNameFor(key) {
 
 // '🌙 1,250 Moon' — amount + label, the format
 // utils/currency.currency_amount produces server-side. Pass
-// labelFirst=true for 'Moon 1,250' (prose/titles).
+// labelFirst=true for 'Moon 1,250' (prose/titles). The icon may be an
+// <img>, so the result is HTML — assign it via innerHTML.
 function currencyAmount(key, amount, labelFirst) {
     const info = currencyInfoByKey(key);
     const name = info.name || key;
     const shown = Number(amount || 0).toLocaleString();
     return labelFirst
         ? `${name} ${shown}`.trim()
-        : `${info.emoji} ${shown} ${name}`.trim();
+        : `${currencyEmojiHtml(info.emoji)} ${shown} ${name}`.trim();
 }
 
 // ── THEME TOGGLE ──────────────────────────────────────────────

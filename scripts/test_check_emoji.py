@@ -5,7 +5,7 @@ Application-emoji check glyph — verification suite.
 The Missions completion line
 (`⤷ `reward claimed` <check> <amount> <name> <currency emoji>`) and every
 other success surface render CHECK_EMOJI, which is an APPLICATION emoji:
-`<a:check:1549593658867712090>`, added in Developer Portal → Application →
+`<a:Check:1549831102078787744>`, added in Developer Portal → Application →
 Emoji and owned by the bot application, not by any server.
 
 The bug this suite locks down: reachability was probed with
@@ -133,7 +133,7 @@ def completion_line(text: str) -> str:
 
 
 # ── fakes ──────────────────────────────────────────────────────────────
-def app_emoji(name="check", animated=True, emoji_id=CHECK_EMOJI_ID):
+def app_emoji(name="Check", animated=True, emoji_id=CHECK_EMOJI_ID):
     """Exactly what discord.py builds for an application emoji:
     `Emoji(guild=Object(0), state=…, data=payload)` — no guild, no roles."""
     return discord.Emoji(guild=discord.Object(0), state=None, data={
@@ -210,13 +210,13 @@ class FakeBot:
 def constant_tests():
     section("1. The constant IS the application emoji")
     check("CHECK_EMOJI is the locked application emoji token",
-          CHECK_EMOJI == "<a:check:1549593658867712090>", CHECK_EMOJI)
+          CHECK_EMOJI == "<a:Check:1549831102078787744>", CHECK_EMOJI)
     check("CHECK_EMOJI_ID matches the token's id",
-          str(CHECK_EMOJI_ID) == "1549593658867712090")
+          str(CHECK_EMOJI_ID) == "1549831102078787744")
     parsed = E.parse_emoji_input(CHECK_EMOJI)
     check("token parses as an animated custom emoji",
           parsed is not None and parsed[0] == str(CHECK_EMOJI_ID)
-          and parsed[1] == "check" and parsed[2] is True, str(parsed))
+          and parsed[1] == "Check" and parsed[2] is True, str(parsed))
     check("the unicode fallback is still ✅ (last resort only)",
           CHECK_EMOJI_FALLBACK == "✅")
 
@@ -314,7 +314,7 @@ def endpoint_tests():
                       app_list=None, drop_list=True)
     check("a renamed application emoji resolves to Discord's own token",
           asyncio.run(verify_check_emoji(renamed)) ==
-          "<a:check_mark:1549593658867712090>",
+          "<a:check_mark:1549831102078787744>",
           asyncio.run(verify_check_emoji(renamed)))
 
     # A static (non-animated) application emoji must lose the `a:` prefix.
@@ -323,7 +323,7 @@ def endpoint_tests():
                      drop_list=True)
     check("a static application emoji renders with <:name:id>",
           asyncio.run(verify_check_emoji(static)) ==
-          f"<:check:{CHECK_EMOJI_ID}>", asyncio.run(verify_check_emoji(static)))
+          f"<:Check:{CHECK_EMOJI_ID}>", asyncio.run(verify_check_emoji(static)))
 
     # List-only client (older/fork API surface), incl. the raw payload.
     reset_state()
@@ -972,7 +972,7 @@ def unrelated_checkmark_tests():
           "resolve_check_emoji" in missions_src
           and "verify_check_emoji" in missions_src)
     check("Missions never re-declares the emoji token itself",
-          "1549593658867712090" not in missions_src.replace(
+          "1549831102078787744" not in missions_src.replace(
               "CHECK_EMOJI_ID", ""))
 
 

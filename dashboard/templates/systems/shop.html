@@ -38,7 +38,7 @@
                 <div class="form-hint">Ignored if a {{ currency.diamonds.name }} price is set below</div>
             </div>
             <div class="form-group">
-                <label class="form-label">Price ({{ currency.diamonds.emoji }} {{ currency.diamonds.name }}, optional)</label>
+                <label class="form-label">Price ({{ currency_icon(currency.diamonds.emoji) }} {{ currency.diamonds.name }}, optional)</label>
                 <input class="form-input" id="item-price-diamonds"
                        type="number" min="1" placeholder="e.g. 10">
                 <div class="form-hint">If set, this item is charged in {{ currency.diamonds.name }} instead of {{ currency.coins.name }}</div>
@@ -159,9 +159,9 @@
                         </td>
                         <td>
                             {% if item[9] %}
-                            {{ currency.diamonds.emoji }} {{ "{:,}".format(item[9]) }}
+                            {{ currency_icon(currency.diamonds.emoji) }} {{ "{:,}".format(item[9]) }}
                             {% else %}
-                            {{ currency.coins.emoji }} {{ "{:,}".format(item[3]) }}
+                            {{ currency_icon(currency.coins.emoji) }} {{ "{:,}".format(item[3]) }}
                             {% endif %}
                         </td>
                         <td>

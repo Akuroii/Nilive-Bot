@@ -11,8 +11,8 @@
             <input class="form-input" id="ledger-user" placeholder="Filter by User ID..." style="max-width:200px;">
             <select class="form-input" id="ledger-currency" style="width:130px;">
                 <option value="">All Currencies</option>
-                <option value="balance">{{ currency.coins.emoji }} {{ currency.coins.name }}</option>
-                <option value="diamonds">{{ currency.diamonds.emoji }} {{ currency.diamonds.name }}</option>
+                <option value="balance">{{ currency_icon_text(currency.coins.emoji) }} {{ currency.coins.name }}</option>
+                <option value="diamonds">{{ currency_icon_text(currency.diamonds.emoji) }} {{ currency.diamonds.name }}</option>
                 <option value="xp">XP</option>
             </select>
             <button class="btn btn-secondary" onclick="loadLedger()">🔄 Refresh</button>
