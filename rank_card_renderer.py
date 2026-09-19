@@ -38,17 +38,28 @@ _ASSET_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
                             "assets", "rank_card")
 _FONT_DIR = os.path.join(_ASSET_ROOT, "fonts")
 
-MAILBOX_PNG_PATH = os.path.join(_ASSET_ROOT, "mailbox.png")
+# The checkout keeps the fonts / mailbox at the repository root; the
+# assets/rank_card layout is the deployed one. Prefer the asset root,
+# fall back to the repo root so the renderer works in both layouts.
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _asset_path(asset_sub: str, root_fallback: str) -> str:
+    p = os.path.join(_ASSET_ROOT, asset_sub)
+    return p if os.path.isfile(p) else os.path.join(_REPO_ROOT, root_fallback)
+
+
+MAILBOX_PNG_PATH = _asset_path("mailbox.png", "mailbox_trimmed.png")
 
 FONT_PATHS = {
-    "cinzel": os.path.join(_FONT_DIR, "Cinzel-Variable.ttf"),
-    "zilla_bold": os.path.join(_FONT_DIR, "ZillaSlab-Bold.ttf"),
-    "outfit": os.path.join(_FONT_DIR, "Outfit-Variable.ttf"),
-    "amiri_regular": os.path.join(_FONT_DIR, "Amiri-Regular.ttf"),
-    "amiri_bold": os.path.join(_FONT_DIR, "Amiri-Bold.ttf"),
-    "tajawal_regular": os.path.join(_FONT_DIR, "Tajawal-Regular.ttf"),
-    "tajawal_medium": os.path.join(_FONT_DIR, "Tajawal-Medium.ttf"),
-    "tajawal_bold": os.path.join(_FONT_DIR, "Tajawal-Bold.ttf"),
+    "cinzel": _asset_path(os.path.join("fonts", "Cinzel-Variable.ttf"), "Cinzel-Variable.ttf"),
+    "zilla_bold": _asset_path(os.path.join("fonts", "ZillaSlab-Bold.ttf"), "ZillaSlab-Bold.ttf"),
+    "outfit": _asset_path(os.path.join("fonts", "Outfit-Variable.ttf"), "Outfit-Variable.ttf"),
+    "amiri_regular": _asset_path(os.path.join("fonts", "Amiri-Regular.ttf"), "Amiri-Regular.ttf"),
+    "amiri_bold": _asset_path(os.path.join("fonts", "Amiri-Bold.ttf"), "Amiri-Bold.ttf"),
+    "tajawal_regular": _asset_path(os.path.join("fonts", "Tajawal-Regular.ttf"), "Tajawal-Regular.ttf"),
+    "tajawal_medium": _asset_path(os.path.join("fonts", "Tajawal-Medium.ttf"), "Tajawal-Medium.ttf"),
+    "tajawal_bold": _asset_path(os.path.join("fonts", "Tajawal-Bold.ttf"), "Tajawal-Bold.ttf"),
 }
 
 TWEMOJI_BASE = "https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/"
@@ -58,25 +69,32 @@ TWEMOJI_BASE = "https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/
 # ─────────────────────────────────────────────────────────────────────────
 
 COLORS = {
+    # Pass 4: sampled off the reference (1024x682) instead of invented.
     "bg_top": (11, 6, 20),
     "bg_bottom": (23, 11, 36),
     "nebula_a": (78, 26, 122),
     "nebula_b": (120, 52, 168),
-    "panel": (21, 13, 33, 165),
-    "panel_border": (150, 100, 210, 70),
-    "panel_glow": (130, 80, 190, 40),
+    "panel": (22, 12, 44, 80),          # reference panels barely lift the bg
+    "panel_border": (150, 100, 210, 34),  # reference borders are a ~+15 lift
+    "panel_glow": (130, 80, 190, 16),
     "purple_glow": (170, 100, 235),
-    "text_primary": (240, 235, 250),
-    "text_muted": (150, 134, 178),      # muted label tone (e.g. "TOP", "/2,000 XP")
-    "text_bright": (216, 178, 255),     # brighter tone for emphasized values
-    "accent": (196, 140, 255),
-    "pip_filled": (196, 110, 255),
-    "pip_empty": (68, 54, 88),
-    "xp_bar_bg": (38, 25, 56),
-    "xp_bar_fill_a": (140, 80, 230),    # gradient start (left)
-    "xp_bar_fill_b": (230, 110, 220),   # gradient end (right)
-    "ring": (176, 120, 235),
+    "text_primary": (232, 226, 242),
+    "text_muted": (128, 112, 158),      # muted label tone (e.g. "TOP", "/2,000 XP")
+    "text_bright": (196, 178, 226),     # brighter tone for emphasized values
+    "accent": (176, 120, 235),
+    "pip_filled": (214, 120, 240),
+    "pip_empty": (88, 66, 118),
+    "xp_bar_bg": (26, 14, 70),
+    "xp_bar_fill_a": (109, 21, 214),    # gradient start (left)  -- sampled
+    "xp_bar_fill_b": (219, 77, 225),    # gradient end (right)   -- sampled
+    "ring": (150, 90, 207),
     "line_icon": (178, 126, 226),       # purple line-art icon stroke
+    "name_text": (215, 191, 232),       # SHADOW lettering -- sampled
+    "rank_number_a": (198, 161, 234),   # #3 gradient top     -- sampled
+    "rank_number_b": (146, 78, 232),    # #3 gradient bottom  -- sampled
+    "xp_value": (186, 120, 232),        # "1,450" purple      -- sampled
+    "label_purple": (140, 100, 180),    # INVENTORY / TOTAL XP headers
+    "gold_label": (168, 142, 116),      # reference's COINS label tint
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -86,39 +104,43 @@ COLORS = {
 CANVAS_W, CANVAS_H = 1280, 853
 
 LAYOUT = {
-    "avatar": (41, 63, 247, 247),
+    # Pass 4: re-measured off the reference at 1024x682 and scaled x1.25.
+    "avatar": (47, 71, 243, 243),
     "avatar_level_badge_r": 30,
+    "avatar_badge_center": (199, 232),   # relative to avatar origin
 
-    "name": (327, 97, 600, 63),
-    "title_pill": (327, 202, 250, 34),
-    "member_since": (327, 275, 500, 28),
+    "name": (333, 98, 600, 63),
+    "title_pill": (327, 196, 245, 41),
+    "member_since": (334, 270, 500, 26),
 
-    "rank_prestige_panel": (706, 56, 213, 256),
+    "rank_prestige_panel": (706, 57, 215, 258),
 
-    "level_panel": (40, 375, 179, 175),
-    "xp_totalxp_panel": (225, 375, 475, 175),
-    "xp_section_frac": 0.62,
+    "level_panel": (39, 366, 183, 185),
+    "xp_totalxp_panel": (225, 390, 461, 146),
+    "xp_divider_x": 275,                 # offset inside the xp panel (=500 abs)
 
-    "stats_row_y": 575,
-    "stats_row_h": 165,
+    "stats_row_y": 589,
+    "stats_row_h": 148,
     "stats_card_w": 116,
-    "stats_gap": 16,
-    "stats_start_x": 40,
+    "stats_gap": 17,
+    "stats_start_x": 39,
 
     # 3 columns x 4 rows (reference-confirmed), tall right column.
-    "inventory_panel": (706, 322, 294, 418),
-    "inventory_grid_origin": (733, 372),
-    "inventory_slot": (62, 60),
-    "inventory_slot_gap_x": 16,
-    "inventory_slot_gap_y": 14,
+    "inventory_panel": (710, 314, 308, 422),
+    "inventory_grid_origin": (731, 388),
+    "inventory_slot": (76, 76),
+    "inventory_slot_gap_x": 8,
+    "inventory_slot_gap_y": 8,
     "inventory_cols": 3,
     "inventory_rows": 4,
 
-    "mailbox_column_x": (1030, 1280),
-    "mailbox_bottom_y": 830,
-    "mailbox_top_min_y": 60,
+    # Visible-art bounds of the mailbox in the reference (x1.25): the art
+    # runs from near the top-right down to the canvas bottom edge.
+    "mailbox_right_x": 1278,
+    "mailbox_bottom_y": 851,
+    "mailbox_art_h": 755,
 
-    "footer_y": 812,
+    "footer_y": 762,
 }
 
 
@@ -218,6 +240,192 @@ def _draw_dropcap_heading(draw, xy, text, font_family, big_size, small_size,
     return cursor - x
 
 
+def _text_size(draw, text, font, tracking=0):
+    if tracking <= 0:
+        b = draw.textbbox((0, 0), text, font=font)
+        return b[2] - b[0], b[3] - b[1]
+    w = sum(draw.textbbox((0, 0), ch, font=font)[2] for ch in text) + tracking * (len(text) - 1)
+    b = draw.textbbox((0, 0), text, font=font)
+    return w, b[3] - b[1]
+
+
+def _draw_glow_layer(img, painter, blur=6, offset=(0, 0)):
+    """Run painter(draw) on a transparent layer, blur it, composite under
+    nothing -- caller composites. Used for the reference's soft blooms."""
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    painter(ImageDraw.Draw(layer))
+    layer = layer.filter(ImageFilter.GaussianBlur(blur))
+    img.alpha_composite(layer, offset)
+    return layer
+
+
+def _draw_condensed(img, xy, painter, ratio=1.0, glow=None, blur=6,
+                    glow_alpha=0.55):
+    """The reference's numerals/labels are narrower than the bundled fonts'
+    natural advance (AI-rendered condensed look). Render to a scratch
+    layer, squeeze horizontally, composite -- reproduces the reference
+    glyph proportions without swapping fonts. glow tints a soft bloom of
+    the SAME scaled crop behind it."""
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    painter(ImageDraw.Draw(layer))
+    bb = layer.getbbox()
+    if not bb:
+        return (0, 0)
+    crop = layer.crop(bb)
+    if ratio != 1.0:
+        crop = crop.resize((max(1, int(round(crop.width * ratio))), crop.height),
+                           Image.LANCZOS)
+    if glow:
+        gl = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        gl.paste(crop, (int(xy[0]), int(xy[1])), crop)
+        # tint the bloom
+        tint = Image.new("RGBA", img.size, (*glow, 255))
+        gl = Image.composite(tint, Image.new("RGBA", img.size, (0, 0, 0, 0)),
+                             gl.split()[3])
+        gl.putalpha(gl.split()[3].point(lambda a: int(a * glow_alpha)))
+        gl = gl.filter(ImageFilter.GaussianBlur(blur))
+        img.alpha_composite(gl)
+    img.alpha_composite(crop, (int(xy[0]), int(xy[1])))
+    return crop.size
+
+
+def _draw_stencil_number(img, draw, xy, text, font, fill, cut_color=(16, 8, 30),
+                         glow=None):
+    """The reference renders its big slab numerals (Level 84, badge 84) with
+    thin vertical stencil notches cut out of the top/bottom of each glyph
+    stem. We draw the number, optionally bloom it, then cut a narrow
+    vertical slot per glyph at the top and bottom -- matching the
+    reference's distinctive cut-stencil treatment without needing a
+    stencil font."""
+    x, y = xy
+    if glow:
+        _draw_glow_layer(img, lambda d: d.text((x, y), text, font=font, fill=(*glow, 110)),
+                         blur=6)
+    # Glyphs on a scratch layer so the stencil notches only erase ink,
+    # never painting dark ticks into the glow/background.
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+    ld.text((x, y), text, font=font, fill=(*fill, 255))
+    cursor = x
+    ascent, descent = font.getmetrics()
+    cap_h = int((ascent) * 0.72)
+    cut_w = max(2, int(cap_h * 0.055))
+    cut_d = int(cap_h * 0.24)
+    for ch in text:
+        if ch.isdigit():
+            adv = ld.textbbox((0, 0), ch, font=font)[2]
+            cx = cursor + adv / 2
+            top_y = y + (ascent - cap_h)
+            ld.rectangle((cx - cut_w / 2, top_y, cx + cut_w / 2, top_y + cut_d),
+                         fill=(0, 0, 0, 0))
+            ld.rectangle((cx - cut_w / 2, y + ascent - cut_d, cx + cut_w / 2, y + ascent),
+                         fill=(0, 0, 0, 0))
+        cursor += ld.textbbox((0, 0), ch, font=font)[2]
+    img.alpha_composite(layer)
+
+
+def _draw_gradient_text(img, draw, xy, text, font, color_top, color_bottom,
+                        tracking=0, glow=None, ratio=1.0):
+    """Vertical two-tone fill (the reference's #3 brightens toward the top)
+    plus an optional soft bloom behind it; ratio<1 reproduces the
+    reference's condensed glyph proportions."""
+    x, y = xy
+    tmp = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    td = ImageDraw.Draw(tmp)
+    _draw_tracked_text(td, (x, y), text, font, (255, 255, 255, 255), tracking=tracking)
+    bb = tmp.getbbox()
+    if not bb:
+        return
+    grad = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    y0, y1 = bb[1], bb[3]
+    for yy in range(y0, y1 + 1):
+        t = (yy - y0) / max(y1 - y0, 1)
+        col = tuple(int(color_top[c] + (color_bottom[c] - color_top[c]) * t) for c in range(3))
+        ImageDraw.Draw(grad).line([(bb[0], yy), (bb[2], yy)], fill=(*col, 255))
+    mask = tmp.split()[3]
+    grad.putalpha(mask)
+    crop = grad.crop(bb)
+    if ratio != 1.0:
+        crop = crop.resize((max(1, int(round(crop.width * ratio))), crop.height),
+                           Image.LANCZOS)
+    if glow:
+        gl = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        gl.paste(crop, (x, y), crop)
+        gl.putalpha(gl.split()[3].point(lambda a: int(a * 0.45)))
+        gl = gl.filter(ImageFilter.GaussianBlur(5))
+        img.alpha_composite(gl)
+    img.alpha_composite(crop, (x, y))
+
+
+def _draw_sparkle_star(img, draw, cx, cy, r, color, glow=True):
+    """The reference's 4-point sparkle (pips, footer stars, ring accents)."""
+    if glow:
+        _draw_glow_layer(img, lambda d: d.polygon(
+            [(cx, cy - r * 1.5), (cx + r * 0.5, cy), (cx, cy + r * 1.5), (cx - r * 0.5, cy),
+             ], fill=(*color, 110)), blur=3)
+    pts = [
+        (cx, cy - r), (cx + r * 0.32, cy - r * 0.32), (cx + r, cy),
+        (cx + r * 0.32, cy + r * 0.32), (cx, cy + r), (cx - r * 0.32, cy + r * 0.32),
+        (cx - r, cy), (cx - r * 0.32, cy - r * 0.32),
+    ]
+    draw.polygon(pts, fill=(*color, 255))
+
+
+def _draw_five_point_star(draw, cx, cy, r, color, rot=0):
+    pts = []
+    for i in range(10):
+        rr = r if i % 2 == 0 else r * 0.45
+        a = math.radians(-90 + rot + i * 36)
+        pts.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
+    draw.polygon(pts, fill=(*color, 255))
+
+
+def _draw_potion_icon(img, size=27):
+    """The little XP potion flask the reference shows next to TOTAL XP --
+    hand-drawn (round flask, cork, purple liquid, soft bloom)."""
+    s = size
+    im = Image.new("RGBA", (s, int(s * 1.25)), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    w, h = im.size
+    cx = w / 2
+    # bloom
+    bloom = Image.new("RGBA", im.size, (0, 0, 0, 0))
+    ImageDraw.Draw(bloom).ellipse((w * 0.12, h * 0.38, w * 0.88, h * 0.98), fill=(160, 80, 220, 120))
+    bloom = bloom.filter(ImageFilter.GaussianBlur(3))
+    im = Image.alpha_composite(im, bloom)
+    d = ImageDraw.Draw(im)
+    # cork
+    d.rounded_rectangle((cx - w * 0.10, 0, cx + w * 0.10, h * 0.16), radius=1,
+                        fill=(196, 156, 120))
+    # neck
+    d.rectangle((cx - w * 0.13, h * 0.14, cx + w * 0.13, h * 0.34), fill=(150, 130, 190, 200))
+    # round body
+    d.ellipse((w * 0.10, h * 0.30, w * 0.90, h * 0.96), outline=(190, 170, 230, 230), width=2)
+    # liquid
+    d.pieslice((w * 0.14, h * 0.34, w * 0.86, h * 0.92), start=0, end=180,
+               fill=(168, 84, 224))
+    d.ellipse((w * 0.14, h * 0.56, w * 0.86, h * 0.92), fill=(168, 84, 224))
+    # highlight
+    d.ellipse((w * 0.24, h * 0.42, w * 0.40, h * 0.55), fill=(240, 220, 255, 150))
+    return im
+
+
+def _draw_paw_icon(size=40):
+    """The pink paw the reference footer tag shows next to MAILBOX."""
+    s = size
+    im = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    cream = (247, 216, 216)
+    pink = (240, 178, 190)
+    # main pad
+    d.ellipse((s * 0.26, s * 0.46, s * 0.74, s * 0.92), fill=cream)
+    # toes
+    for cx, cy, r in [(0.18, 0.34, 0.13), (0.40, 0.20, 0.14), (0.62, 0.20, 0.14),
+                      (0.84, 0.34, 0.13)]:
+        d.ellipse((s * cx - s * r, s * cy - s * r, s * cx + s * r, s * cy + s * r), fill=pink)
+    return im
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # BACKGROUND
 # ─────────────────────────────────────────────────────────────────────────
@@ -254,7 +462,7 @@ def _draw_background() -> Image.Image:
     return img
 
 
-def _rounded_panel(img, draw, box, radius=20, fill=None, outline=None, width=2, glow=True):
+def _rounded_panel(img, draw, box, radius=20, fill=None, outline=None, width=2, glow=False):
     fill = fill or COLORS["panel"]
     outline = outline or COLORS["panel_border"]
     if glow:
@@ -325,18 +533,15 @@ def _line_icon_games(size):
 
 
 def _line_icon_inventory(size):
+    # The reference header glyph is a FILLED purple cube, not line art.
     im, d = _icon_canvas(size)
     s = size
-    w = max(2, int(s * 0.06))
-    d.line((s*0.5, s*0.08, s*0.90, s*0.28), fill=COLORS["line_icon"], width=w)
-    d.line((s*0.5, s*0.08, s*0.10, s*0.28), fill=COLORS["line_icon"], width=w)
-    d.line((s*0.10, s*0.28, s*0.5, s*0.48), fill=COLORS["line_icon"], width=w)
-    d.line((s*0.90, s*0.28, s*0.5, s*0.48), fill=COLORS["line_icon"], width=w)
-    d.line((s*0.10, s*0.28, s*0.10, s*0.70), fill=COLORS["line_icon"], width=w)
-    d.line((s*0.90, s*0.28, s*0.90, s*0.70), fill=COLORS["line_icon"], width=w)
-    d.line((s*0.5, s*0.48, s*0.5, s*0.90), fill=COLORS["line_icon"], width=w)
-    d.line((s*0.10, s*0.70, s*0.5, s*0.90), fill=COLORS["line_icon"], width=w)
-    d.line((s*0.90, s*0.70, s*0.5, s*0.90), fill=COLORS["line_icon"], width=w)
+    d.polygon([(s*0.5, s*0.06), (s*0.92, s*0.27), (s*0.5, s*0.48), (s*0.08, s*0.27)],
+              fill=(150, 90, 220))
+    d.polygon([(s*0.08, s*0.27), (s*0.5, s*0.48), (s*0.5, s*0.94), (s*0.08, s*0.72)],
+              fill=(105, 50, 170))
+    d.polygon([(s*0.92, s*0.27), (s*0.5, s*0.48), (s*0.5, s*0.94), (s*0.92, s*0.72)],
+              fill=(78, 34, 138))
     return im
 
 
@@ -481,8 +686,13 @@ async def render_rank_card(data: dict) -> io.BytesIO:
     img = _draw_background()
     draw = ImageDraw.Draw(img)
 
-    line_icons_30 = _build_line_icons(30)
-    line_icons_16 = _build_line_icons(16)
+    line_icons_30 = _build_line_icons(68)
+    line_icons_16 = _build_line_icons(68)
+
+    grid = data.get("inventory_grid") or []
+
+    async def _no_icon():
+        return None
 
     async with aiohttp.ClientSession() as session:
         avatar_im, coin_icon_im, diamond_icon_im = await asyncio.gather(
@@ -490,6 +700,10 @@ async def render_rank_card(data: dict) -> io.BytesIO:
             _resolve_currency_icon(session, data["currency"]["coins"]["emoji"], 32),
             _resolve_currency_icon(session, data["currency"]["diamonds"]["emoji"], 32),
         )
+        item_icons = list(await asyncio.gather(*[
+            _fetch_image(session, it["icon_url"]) if it.get("icon_url") else _no_icon()
+            for it in grid
+        ]))
     mailbox_im = await _load_mailbox()
 
     _draw_avatar_and_level(img, draw, data)
@@ -497,10 +711,10 @@ async def render_rank_card(data: dict) -> io.BytesIO:
     _draw_rank_prestige_panel(img, draw, data, line_icons_16)
     _draw_level_xp_panels(img, draw, data)
     _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, line_icons_30)
-    _draw_inventory(img, draw, data, line_icons_16)
+    _draw_inventory(img, draw, data, line_icons_16, item_icons)
     if mailbox_im is not None:
         _draw_mailbox(img, mailbox_im)
-    _draw_footer(draw)
+    _draw_footer(img, draw)
 
     # avatar pasted after background/glow but the placeholder/fetch needs
     # to happen before drawing -- done inline in _draw_avatar_and_level
@@ -565,9 +779,9 @@ def _draw_avatar_and_level(img, draw, data):
 
     glow = Image.new("RGBA", img.size, (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow)
-    gd.ellipse((cx - r - 16, cy - r - 16, cx + r + 16, cy + r + 16),
-              fill=(*COLORS["ring"], 55))
-    glow = glow.filter(ImageFilter.GaussianBlur(18))
+    gd.ellipse((cx - r - 14, cy - r - 14, cx + r + 14, cy + r + 14),
+              fill=(*COLORS["ring"], 22))
+    glow = glow.filter(ImageFilter.GaussianBlur(12))
     img.alpha_composite(glow)
 
 
@@ -579,57 +793,84 @@ def _paste_avatar(img, data, avatar_im):
 
     _circle_mask_paste(img, avatar_im, (int(ax), int(ay), int(aw), int(ah)))
 
-    draw.ellipse((cx - r - 9, cy - r - 9, cx + r + 9, cy + r + 9),
-                 outline=COLORS["ring"], width=6)
-    draw.ellipse((cx - r - 9, cy - r - 9, cx + r + 9, cy + r + 9),
-                 outline=COLORS["accent"], width=1)
+    # The reference ring is painterly: a dim base ring with bright arcs at
+    # the top and lower-left, not a uniform neon circle.
+    ring_box = (cx - r - 4, cy - r - 4, cx + r + 4, cy + r + 4)
+    draw.ellipse(ring_box, outline=(150, 90, 207, 235), width=5)
 
-    # Star ornaments -- one larger star at 12 o'clock, four smaller ones
-    # spaced around, echoing the reference's "crown of stars" without
-    # trying to replicate every one of its irregular accent shapes.
-    positions = [(-90, 12), (-18, 7), (54, 7), (126, 7), (198, 7), (270, 7)]
-    ring_r = r + 9
-    for angle, star_r in positions:
-        sx, sy = _star_point(cx, cy, ring_r, angle)
-        _draw_small_star(draw, sx, sy, star_r, COLORS["accent"])
+    # Ornaments measured off the reference (offsets from avatar origin).
+    acc = (186, 120, 240)
+    _draw_five_point_star(draw, ax + 128, ay + 6, 24, acc)
+    for ox, oy, rot in ((84, 20, -30), (168, 20, 30)):
+        pts = [(ox, ay + oy - 14), (ox + 7, ay + oy), (ox, ay + oy + 14), (ox - 7, ay + oy)]
+        draw.polygon([(ax + p[0], p[1]) for p in pts], fill=(*acc, 235))
+    for ox, oy, sr in ((13, 41, 9), (231, 48, 9), (-8, 88, 6), (243, 139, 6)):
+        _draw_sparkle_star(img, draw, ax + ox, ay + oy, sr, acc)
+    for ox, oy, sr in ((5, 144, 10), (238, 144, 10), (122, 251, 10)):
+        _draw_sparkle_star(img, draw, ax + ox, ay + oy, sr, acc, glow=False)
+    # diagonal accent streaks (upper-right / lower-left of the ring)
+    for p0, p1 in [((203, 23), (247, 60)), ((9, 198), (65, 248))]:
+        draw.line((ax + p0[0], ay + p0[1], ax + p1[0], ay + p1[1]),
+                  fill=(*acc, 200), width=4)
 
+    # Level badge -- attached to the avatar's lower right, stencil numerals
+    # like the reference.
     badge_r = LAYOUT["avatar_level_badge_r"]
-    bx = ax + aw * 0.78
-    by = ay + ah * 0.97
+    bx = ax + LAYOUT["avatar_badge_center"][0]
+    by = ay + LAYOUT["avatar_badge_center"][1]
     draw.ellipse((bx - badge_r, by - badge_r, bx + badge_r, by + badge_r),
-                 fill=(16, 9, 26, 235), outline=COLORS["accent"], width=3)
-    lvl_font = zilla_bold(24)
+                 fill=(14, 8, 22, 235), outline=(170, 130, 220, 200), width=2)
     lvl_text = str(data["level"])
+    lvl_font = zilla_bold(44)
     bbox = draw.textbbox((0, 0), lvl_text, font=lvl_font)
-    draw.text((bx - (bbox[2] - bbox[0]) / 2, by - (bbox[3] - bbox[1]) / 2 - bbox[1]),
-              lvl_text, font=lvl_font, fill=COLORS["text_primary"])
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    _draw_stencil_number(img, draw, (bx - tw / 2 - bbox[0], by - th / 2 - bbox[1]),
+                         lvl_text, lvl_font, (230, 220, 240), cut_color=(14, 8, 22))
 
 
 def _draw_name_block(img, draw, data, icons16):
     x, y, w, h = LAYOUT["name"]
     username = data.get("username") or f"User {data['user_id']}"
-    if username.isascii() and username.isupper() is False and username.replace(" ", "").isalpha():
+    if username.isascii() and username.replace(" ", "").isalpha():
         # Reference drop-cap treatment: oversized first letter + smaller
-        # caps for the rest -- applied only to plain-alphabetic Latin
-        # names, matching what the reference actually demonstrates.
-        _draw_dropcap_heading(draw, (x, y), username.upper(), "cinzel", 52, 38,
-                              COLORS["text_primary"])
+        # caps for the rest, condensed to the reference's ~234px width, on
+        # a subtle blurred dark plate (both measured off the reference).
+        text = username.upper()
+        plate = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        ImageDraw.Draw(plate).rounded_rectangle(
+            (x - 11, y - 14, x + 250, y + 67), radius=10, fill=(6, 3, 14, 90))
+        plate = plate.filter(ImageFilter.GaussianBlur(6))
+        img.alpha_composite(plate)
+
+        def _name_painter(d):
+            _draw_dropcap_heading(d, (20, 20), text, "cinzel", 72, 52,
+                                  COLORS["name_text"], tracking=2, weight="Bold")
+        _draw_condensed(img, (x, y + 2), _name_painter, ratio=0.835,
+                        glow=(140, 85, 200), blur=5, glow_alpha=0.9)
     else:
-        name_font = cinzel_bold(46) if username.isascii() else tajawal(40, "bold")
-        _draw_tracked_text(draw, (x, y), username, name_font, COLORS["text_primary"], tracking=1)
+        name_font = cinzel_bold(56) if username.isascii() else tajawal(48, "bold")
+        _draw_tracked_text(draw, (x, y), username, name_font, COLORS["name_text"], tracking=1)
 
     title = data.get("equipped_title")
     if title:
         px, py, pw, ph = LAYOUT["title_pill"]
-        _rounded_panel(img, draw, (px, py, px + pw, py + ph), radius=ph // 2)
-        icon_x = px + 14
+        # outer pill: dark fill + faint border; inner pill hugs the content
+        draw.rounded_rectangle((px, py, px + pw, py + ph), radius=ph // 2,
+                               fill=(10, 5, 26, 230), outline=(90, 60, 140, 70), width=1)
+        label = title["item_name"].upper()
+        tf = outfit(17, "SemiBold")
+        tl_w = _text_size(draw, label, tf, tracking=3)[0]
+        icon_w = 16
+        inner_x0 = px + 15
+        inner_x1 = min(px + pw - 6, inner_x0 + 10 + icon_w + 6 + tl_w + 12)
+        draw.rounded_rectangle((inner_x0, py + 7, inner_x1, py + ph - 7),
+                               radius=(ph - 14) // 2, fill=(26, 20, 40, 210))
         if icons16.get("crown") is not None:
-            img.paste(icons16["crown"], (icon_x, int(py + (ph - 16) / 2)), icons16["crown"])
-            text_x = icon_x + 20
-        else:
-            text_x = icon_x
-        _draw_tracked_text(draw, (text_x, py + ph / 2 - 7), title["item_name"],
-                           outfit(13, "SemiBold"), COLORS["accent"], tracking=1)
+            cr = icons16["crown"].resize((icon_w, icon_w))
+            img.paste(cr, (int(inner_x0 + 10), int(py + ph / 2 - icon_w / 2)), cr)
+        text_x = inner_x0 + 10 + icon_w + 6
+        _draw_tracked_text(draw, (text_x, py + ph / 2), label, tf,
+                           (150, 100, 190), tracking=3, anchor="lm")
 
     ms_x, ms_y, _, _ = LAYOUT["member_since"]
     member_since = data.get("member_since")
@@ -637,74 +878,92 @@ def _draw_name_block(img, draw, data, icons16):
         date_str = member_since.strftime("%b %d, %Y")
         text_x = ms_x
         if icons16.get("calendar") is not None:
-            img.paste(icons16["calendar"], (ms_x, ms_y), icons16["calendar"])
-            text_x = ms_x + 22
-        draw.text((text_x, ms_y), "Member since  ·  ", font=outfit(17), fill=COLORS["text_muted"])
-        w0 = draw.textbbox((0, 0), "Member since  ·  ", font=outfit(17))[2]
-        draw.text((text_x + w0, ms_y), date_str, font=outfit(17), fill=COLORS["text_bright"])
+            ic = icons16["calendar"].resize((19, 19))
+            img.paste(ic, (ms_x, ms_y + 2), ic)
+            text_x = ms_x + 26
+        mf = outfit(22)
+        draw.text((text_x, ms_y), "Member since  ·  ", font=mf, fill=(125, 112, 158))
+        w0 = draw.textbbox((0, 0), "Member since  ·  ", font=mf)[2]
+        draw.text((text_x + w0, ms_y), date_str, font=mf, fill=(196, 186, 220))
 
 
 def _draw_rank_prestige_panel(img, draw, data, icons16):
     x, y, w, h = LAYOUT["rank_prestige_panel"]
-    _rounded_panel(img, draw, (x, y, x + w, y + h), radius=18)
+    _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
 
-    _draw_tracked_text(draw, (x + 18, y + 18), "RANK", outfit(14, "SemiBold"),
-                       COLORS["text_muted"], tracking=2)
-    draw.text((x + 16, y + 40), f"#{data['rank']}", font=zilla_bold(46),
-              fill=COLORS["text_primary"])
+    _draw_tracked_text(draw, (x + 28, y + 20), "RANK", outfit(21, "SemiBold"),
+                       COLORS["text_muted"], tracking=3)
+    # The reference's rank number is big, bold and purple (gradient +
+    # bloom) -- part of the accent hierarchy, not white text.
+    _draw_gradient_text(img, draw, (x + 28, y + 40), f"#{data['rank']}",
+                        outfit(76, "ExtraBold"), COLORS["rank_number_a"],
+                        COLORS["rank_number_b"], glow=(150, 80, 230), ratio=0.78)
 
     # Two-tone: "TOP" muted, the percentage itself brighter -- matches the
     # reference's emphasis treatment.
-    ty = y + 102
-    draw.text((x + 18, ty), "TOP ", font=outfit(14, "Medium"), fill=COLORS["text_muted"])
-    tw = draw.textbbox((0, 0), "TOP ", font=outfit(14, "Medium"))[2]
-    draw.text((x + 18 + tw, ty), f"{data['percentile']:.2f}%",
-              font=outfit(14, "SemiBold"), fill=COLORS["text_bright"])
+    ty = y + 114
+    draw.text((x + 28, ty), "TOP ", font=outfit(18, "Medium"), fill=COLORS["text_muted"])
+    tw = draw.textbbox((0, 0), "TOP ", font=outfit(18, "Medium"))[2]
+    draw.text((x + 28 + tw, ty), f"{data['percentile']:.2f}%",
+              font=outfit(18, "SemiBold"), fill=(170, 140, 210))
 
-    draw.line((x + 18, y + 132, x + w - 18, y + 132), fill=(*COLORS["accent"], 45), width=1)
+    draw.line((x + 28, y + 142, x + w - 28, y + 142), fill=(*COLORS["accent"], 40), width=1)
+    draw.ellipse((x + 30, y + 140, x + 34, y + 144), fill=(*COLORS["accent"], 120))
+    draw.ellipse((x + w - 34, y + 140, x + w - 30, y + 144), fill=(*COLORS["accent"], 120))
 
     tier = data["effective_prestige"]
     roman = ["0", "I", "II", "III", "IV", "V", "VI"][tier] if 0 <= tier <= 6 else str(tier)
     label = f"PRESTIGE {roman}" if tier else "PRESTIGE"
-    big_font = cinzel_semibold(20)
-    small_font = cinzel_semibold(15)
+    big_font = _font("cinzel", 32, "SemiBold")
+    small_font = _font("cinzel", 23, "SemiBold")
     first_w = draw.textbbox((0, 0), label[0], font=big_font)[2]
-    rest_w = sum(draw.textbbox((0, 0), ch, font=small_font)[2] + 1 for ch in label[1:])
-    total_w = first_w + 1 + rest_w
-    lx = x + w / 2 - total_w / 2
-    ly = y + 146
-    _draw_dropcap_heading(draw, (lx, ly), label, "cinzel", 20, 15, COLORS["accent"])
+    rest_w = sum(draw.textbbox((0, 0), ch, font=small_font)[2] + 2 for ch in label[1:])
+    natural_w = first_w + 2 + rest_w
+    target_w = 119
+    ratio = min(1.0, target_w / natural_w)
 
-    pip_r = 10
-    gap = 9
+    def _prestige_painter(d):
+        _draw_dropcap_heading(d, (20, 20), label, "cinzel", 32, 23, (169, 140, 207),
+                              tracking=2, weight="SemiBold")
+    _draw_condensed(img, (x + w / 2 - natural_w * ratio / 2, y + 163),
+                    _prestige_painter, ratio=ratio)
+
+    # Pips: glowing 4-point sparkles when filled, plain outline diamonds
+    # when empty -- as in the reference.
+    pip_r = 11
+    pitch = 29
     total_pips = 6
-    row_w = total_pips * (pip_r * 2) + (total_pips - 1) * gap
-    start_x = x + w / 2 - row_w / 2 + pip_r
-    pip_y = y + 182
+    start_x = x + w / 2 - (total_pips - 1) * pitch / 2
+    pip_y = y + 205
     for i in range(total_pips):
-        cx = start_x + i * (pip_r * 2 + gap)
+        cx = start_x + i * pitch
         filled = i < tier
-        color = COLORS["pip_filled"] if filled else COLORS["pip_empty"]
-        _draw_diamond_pip(draw, cx, pip_y, pip_r, color, filled)
+        if filled:
+            _draw_sparkle_star(img, draw, cx, pip_y, pip_r, COLORS["pip_filled"])
+        else:
+            _draw_diamond_pip(draw, cx, pip_y, pip_r, COLORS["pip_empty"], filled)
 
-    if data.get("is_booster"):
-        by = y + 206
-        bw = w - 36
-        bx = x + 18
-        _rounded_panel(img, draw, (bx, by, bx + bw, by + 22), radius=11,
-                       fill=(88, 30, 128, 190), outline=COLORS["accent"], glow=False)
+    if int(data.get("effective_prestige") or 0) == 6:
+        by = y + 218
+        bw = 150
+        bh = 23
+        bx = x + w / 2 - bw / 2
+        pts = [(bx + 7, by), (bx + bw - 7, by), (bx + bw, by + bh / 2),
+               (bx + bw - 7, by + bh), (bx + 7, by + bh), (bx, by + bh / 2)]
+        draw.polygon(pts, fill=(60, 20, 90, 200))
+        draw.line(pts + [pts[0]], fill=(150, 90, 210, 150), width=1)
         icon = icons16.get("crown")
-        lf2 = outfit(10, "SemiBold")
+        lf2 = outfit(11, "SemiBold")
         label2 = "BOOSTER PRESTIGE"
-        lbbox = draw.textbbox((0, 0), label2, font=lf2)
-        lw = lbbox[2] - lbbox[0]
-        icon_w = 20 if icon is not None else 0
-        block_w = icon_w + lw
+        lw = _text_size(draw, label2, lf2, tracking=2)[0]
+        icon_w = 15 if icon is not None else 0
+        block_w = icon_w + (4 if icon_w else 0) + lw
         start = bx + (bw - block_w) / 2
         if icon is not None:
-            img.paste(icon, (int(start), int(by + 3)), icon)
-        draw.text((start + icon_w, by + 11), label2, font=lf2,
-                  fill=COLORS["text_primary"], anchor="lm")
+            ic = icon.resize((15, 15))
+            img.paste(ic, (int(start), int(by + 4)), ic)
+        _draw_tracked_text(draw, (start + icon_w + (4 if icon_w else 0), by + bh / 2),
+                           label2, lf2, (200, 180, 220), tracking=2, anchor="lm")
 
 
 def _draw_diamond_pip(draw, cx, cy, r, color, filled):
@@ -717,51 +976,82 @@ def _draw_diamond_pip(draw, cx, cy, r, color, filled):
 
 def _draw_level_xp_panels(img, draw, data):
     x, y, w, h = LAYOUT["level_panel"]
-    _rounded_panel(img, draw, (x, y, x + w, y + h), radius=18)
-    _draw_tracked_text(draw, (x + 18, y + 16), "LEVEL", outfit(14, "SemiBold"),
-                       COLORS["text_muted"], tracking=2)
-    draw.text((x + 18, y + 44), str(data["level"]), font=zilla_bold(58),
-              fill=COLORS["text_primary"])
+    _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
+    # LEVEL is a small drop-cap serif heading in the reference, not a
+    # tracked sans label.
+    bf = _font("cinzel", 32, "Bold")
+    sf = _font("cinzel", 25, "Bold")
+    nat_w = draw.textbbox((0, 0), "L", font=bf)[2] + 1 + sum(
+        draw.textbbox((0, 0), ch, font=sf)[2] + 1 for ch in "EVEL")
+    ratio = min(1.0, 81 / nat_w)
+
+    def _level_painter(d):
+        _draw_dropcap_heading(d, (20, 20), "LEVEL", "cinzel", 32, 25,
+                              (200, 190, 215), tracking=1, weight="Bold")
+    _draw_condensed(img, (x + 31, y + 22), _level_painter, ratio=ratio)
+
+    # Big stencil-slab number with the reference's purple bloom.
+    lvl_font = zilla_bold(98)
+    a, _d = lvl_font.getmetrics()
+    digit_h = int(98 * 0.67)
+    ty = y + 69 - (a - digit_h)
+    _draw_stencil_number(img, draw, (x + 30, ty), str(data["level"]), lvl_font,
+                         (224, 208, 230), cut_color=(16, 8, 30),
+                         glow=(150, 80, 220))
 
     x, y, w, h = LAYOUT["xp_totalxp_panel"]
-    _rounded_panel(img, draw, (x, y, x + w, y + h), radius=18)
-    xp_w = int(w * LAYOUT["xp_section_frac"])
+    _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
 
-    _draw_tracked_text(draw, (x + 20, y + 16), "XP PROGRESS", outfit(14, "SemiBold"),
+    _draw_tracked_text(draw, (x + 14, y + 29), "XP PROGRESS", outfit(19, "SemiBold"),
                        COLORS["text_muted"], tracking=2)
     cur, needed = data["xp_current"], max(data["xp_needed"], 1)
-    # Two-tone: current XP bright/emphasized, "/ needed XP" muted.
+    # Two-tone: current XP purple/emphasized (condensed, as measured off
+    # the reference), "/ needed XP" muted.
     cur_txt = f"{cur:,}"
-    vf = zilla_bold(22)
-    draw.text((x + 20, y + 38), cur_txt, font=vf, fill=COLORS["text_bright"])
+    vf = zilla_bold(45)
     cur_w = draw.textbbox((0, 0), cur_txt, font=vf)[2]
-    draw.text((x + 24 + cur_w, y + 42), f"/ {needed:,} XP", font=outfit(16),
+
+    def _xpval_painter(d):
+        d.text((20, 20), cur_txt, font=vf, fill=COLORS["xp_value"])
+    cw, _ = _draw_condensed(img, (x + 14, y + 50), _xpval_painter, ratio=0.64,
+                            glow=(150, 70, 210), blur=4)
+    draw.text((x + 20 + cw, y + 58), f"/ {needed:,} XP", font=outfit(22),
               fill=COLORS["text_muted"])
 
-    bar_x, bar_y, bar_w, bar_h = x + 20, y + 78, xp_w - 40, 14
+    div_x = x + LAYOUT["xp_divider_x"]
+    draw.line((div_x, y + 14, div_x, y + h - 14), fill=(*COLORS["accent"], 30), width=1)
+
+    bar_x, bar_y, bar_w, bar_h = x + 8, y + 86, w - 20, 21
     draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
                            radius=bar_h // 2, fill=COLORS["xp_bar_bg"])
     frac = min(cur / needed, 1.0)
     if frac > 0:
         fill_w = bar_w * frac
+        # soft bloom around the filled portion only
+        _draw_glow_layer(img, lambda d: d.rounded_rectangle(
+            (bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=bar_h // 2,
+            fill=(150, 60, 220, 80)), blur=4)
         _draw_gradient_bar(img, bar_x, bar_y, fill_w, bar_h,
                            COLORS["xp_bar_fill_a"], COLORS["xp_bar_fill_b"])
         # Subtle highlight at the leading edge of the FILL itself (not the
-        # bar's outer end) -- per the reference's fidelity note. Kept to a
-        # small soft dot, no extra ornamentation.
+        # bar's outer end) -- per the reference. Small soft dot, nothing more.
         if 4 < fill_w < bar_w - 2:
-            hx, hy = bar_x + fill_w - 3, bar_y + bar_h / 2
-            _draw_soft_dot(img, hx, hy, 4, (255, 255, 255, 165))
-    draw.text((bar_x, bar_y + bar_h + 8), f"{frac * 100:.1f}% to next level",
-              font=outfit(13), fill=COLORS["text_muted"])
+            hx, hy = bar_x + fill_w - 4, bar_y + bar_h / 2
+            _draw_soft_dot(img, hx, hy, 5, (255, 235, 250, 200))
+    draw.text((bar_x + 6, bar_y + bar_h + 6), f"{frac * 100:.1f}% to next level",
+              font=outfit(19), fill=COLORS["text_muted"])
 
-    div_x = x + xp_w
-    draw.line((div_x, y + 16, div_x, y + h - 16), fill=(*COLORS["accent"], 40), width=1)
-    tx = div_x + 20
-    _draw_tracked_text(draw, (tx, y + 16), "TOTAL XP", outfit(14, "SemiBold"),
-                       COLORS["text_muted"], tracking=3)
-    draw.text((tx, y + 46), f"{data['xp_total']:,}", font=zilla_bold(26),
-              fill=COLORS["text_primary"])
+    tx = div_x + 22
+    _draw_tracked_text(draw, (tx, y + 25), "TOTAL XP", outfit(20, "SemiBold"),
+                       COLORS["label_purple"], tracking=2)
+    potion = _draw_potion_icon(27)
+    img.paste(potion, (int(div_x + 19), int(y + 42)), potion)
+    total_txt = f"{data['xp_total']:,}"
+    tf2 = zilla_bold(38)
+
+    def _total_painter(d):
+        d.text((20, 20), total_txt, font=tf2, fill=(205, 200, 215))
+    _draw_condensed(img, (div_x + 52, y + 44), _total_painter, ratio=0.80)
 
 
 def _draw_gradient_bar(img, x, y, w, h, color_a, color_b):
@@ -789,12 +1079,22 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
     coins_cfg = data["currency"]["coins"]
     diamonds_cfg = data["currency"]["diamonds"]
 
+    # The reference tints the default coin label warm/gold while every
+    # other label stays muted lavender.
+    coin_label_color = (COLORS["gold_label"] if coins_cfg["emoji"] == "🪙"
+                        else COLORS["text_muted"])
+
     cards = [
-        (icons30.get("messages"), "MESSAGES", f"{data['messages_count']:,}"),
-        (icons30.get("voice"), "VOICE TIME", _fmt_minutes(data["voice_minutes"])),
-        (coin_icon_im, coins_cfg["name"].upper(), f"{data['balance']:,}"),
-        (diamond_icon_im, diamonds_cfg["name"].upper(), f"{data['diamonds']:,}"),
-        (icons30.get("games"), "GAMES WON", f"{data['minigame_wins']:,}"),
+        (icons30.get("messages"), "MESSAGES", f"{data['messages_count']:,}",
+         COLORS["text_muted"]),
+        (icons30.get("voice"), "VOICE TIME", _fmt_minutes(data["voice_minutes"]),
+         COLORS["text_muted"]),
+        (coin_icon_im, coins_cfg["name"].upper(), f"{data['balance']:,}",
+         coin_label_color),
+        (diamond_icon_im, diamonds_cfg["name"].upper(), f"{data['diamonds']:,}",
+         COLORS["text_muted"]),
+        (icons30.get("games"), "GAMES WON", f"{data['minigame_wins']:,}",
+         COLORS["text_muted"]),
     ]
 
     y = LAYOUT["stats_row_y"]
@@ -803,108 +1103,170 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
     gap = LAYOUT["stats_gap"]
     x0 = LAYOUT["stats_start_x"]
 
-    for i, (icon_im, label, value) in enumerate(cards):
+    for i, (icon_im, label, value, label_color) in enumerate(cards):
         x = x0 + i * (w + gap)
-        _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
+        _rounded_panel(img, draw, (x, y, x + w, y + h), radius=14)
         if icon_im is not None:
-            img.paste(icon_im, (int(x + w / 2 - icon_im.width / 2), y + 18), icon_im)
-        vf = zilla_bold(21)
+            ic = icon_im if icon_im.width == 34 else icon_im.resize((34, 34))
+            # reference icons carry a soft bloom
+            gl = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            gl.paste(ic, (int(x + w / 2 - 17), y + 23), ic)
+            gl.putalpha(gl.split()[3].point(lambda a: int(a * 0.75)))
+            gl = gl.filter(ImageFilter.GaussianBlur(3))
+            img.alpha_composite(gl)
+            img.paste(ic, (int(x + w / 2 - 17), y + 23), ic)
+        vf = zilla_bold(32)
         vb = draw.textbbox((0, 0), value, font=vf)
-        draw.text((x + w / 2 - (vb[2] - vb[0]) / 2, y + h - 56), value,
-                  font=vf, fill=COLORS["text_primary"])
-        lf = outfit(10, "Medium")
-        _draw_tracked_text(draw, (x + w / 2, y + h - 24), label, lf, COLORS["text_muted"],
-                           tracking=1, anchor="mm")
+        nat_w = vb[2] - vb[0]
+
+        def _val_painter(d, _v=value, _f=vf):
+            d.text((20, 20), _v, font=_f, fill=(215, 215, 222))
+        _draw_condensed(img, (x + w / 2 - nat_w * 0.72 / 2, y + 82), _val_painter,
+                        ratio=0.72)
+        lf = outfit(21, "Medium")
+        lw_nat = _text_size(draw, label, lf, tracking=2)[0]
+
+        def _lab_painter(d, _l=label, _f=lf, _c=label_color):
+            _draw_tracked_text(d, (20, 20), _l, _f, _c, tracking=2)
+        _draw_condensed(img, (x + w / 2 - lw_nat * 0.66 / 2, y + 116), _lab_painter,
+                        ratio=0.66)
 
 
-def _fmt_minutes(total_minutes: int) -> str:
+def _fmt_minutes(total_minutes) -> str:
+    total_minutes = int(total_minutes or 0)
     h = total_minutes // 60
     return f"{h}h" if h else f"{total_minutes}m"
 
 
-def _draw_inventory(img, draw, data, icons16):
+def _draw_inventory(img, draw, data, icons16, item_icons=None):
     x, y, w, h = LAYOUT["inventory_panel"]
-    _rounded_panel(img, draw, (x, y, x + w, y + h), radius=18)
-    label_x = x + 20
+    _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
+    label_x = x + 30
     if icons16.get("inventory") is not None:
-        img.paste(icons16["inventory"], (label_x, y + 18), icons16["inventory"])
-        label_x += 22
-    _draw_tracked_text(draw, (label_x, y + 18), "INVENTORY", outfit(15, "SemiBold"),
-                       COLORS["text_muted"], tracking=2)
-    draw.line((x + 18, y + 48, x + w - 18, y + 48), fill=(*COLORS["accent"], 35), width=1)
+        ic = icons16["inventory"].resize((25, 25))
+        img.paste(ic, (label_x, y + 21), ic)
+        label_x += 35
+    _draw_tracked_text(draw, (label_x, y + 24), "INVENTORY", outfit(21, "SemiBold"),
+                       COLORS["label_purple"], tracking=3)
+    # "owned / catalog total" at the right of the header, as in the
+    # reference (12 / 48): owned bright, the rest muted.
+    owned = data.get("owned_count")
+    total = data.get("inventory_total")
+    if owned is not None and total is not None:
+        f_c = outfit(18, "SemiBold")
+        t1, t2 = f"{owned}", f" / {total}"
+        w1 = draw.textbbox((0, 0), t1, font=f_c)[2]
+        w2 = draw.textbbox((0, 0), t2, font=f_c)[2]
+        sx = x + w - 20 - (w1 + w2)
+        draw.text((sx, y + 24), t1, font=f_c, fill=(200, 195, 215))
+        draw.text((sx + w1, y + 24), t2, font=f_c, fill=COLORS["text_muted"])
 
     ox, oy = LAYOUT["inventory_grid_origin"]
     sw, sh = LAYOUT["inventory_slot"]
     gx, gy = LAYOUT["inventory_slot_gap_x"], LAYOUT["inventory_slot_gap_y"]
     cols, rows = LAYOUT["inventory_cols"], LAYOUT["inventory_rows"]
     items = data.get("inventory_grid") or []
+    item_icons = item_icons or []
 
     for i in range(cols * rows):
         col, row = i % cols, i // cols
         sx = ox + col * (sw + gx)
         sy = oy + row * (sh + gy)
-        draw.rounded_rectangle((sx, sy, sx + sw, sy + sh), radius=10,
-                               fill=(30, 20, 46, 140), outline=(*COLORS["accent"], 55), width=1)
+        draw.rounded_rectangle((sx, sy, sx + sw, sy + sh), radius=12,
+                               fill=(30, 24, 46, 170), outline=(*COLORS["accent"], 22), width=1)
         if i < len(items):
-            _draw_inventory_item(draw, sx, sy, sw, sh, items[i])
+            icon_im = item_icons[i] if i < len(item_icons) else None
+            _draw_inventory_item(img, draw, sx, sy, sw, sh, items[i], icon_im)
 
 
-def _draw_inventory_item(draw, sx, sy, sw, sh, item):
-    """Item art itself would come from utils.item_catalog icon_url (a
-    remote asset, fetched the same way currency icons are) -- left as a
-    neutral placeholder tile here since per-item icon fetching is outside
-    this fidelity pass's scope. Only the REAL owned quantity is ever
+def _draw_inventory_item(img, draw, sx, sy, sw, sh, item, icon_im=None):
+    """Item art comes from utils.item_catalog icon_url (a remote asset,
+    fetched the same way currency icons are); without one, a neutral
+    placeholder tile stands in. Only the REAL owned quantity is ever
     shown, and only when it's actually more than 1 -- never a placeholder
     or invented number."""
-    draw.rounded_rectangle((sx + 6, sy + 6, sx + sw - 6, sy + sh - 6), radius=6,
-                           fill=(58, 38, 88, 190))
+    if icon_im is not None:
+        ic = ImageOps.fit(icon_im, (56, 56), Image.LANCZOS)
+        img.paste(ic, (int(sx + sw / 2 - 28), int(sy + sh / 2 - 28)), ic)
+    else:
+        draw.rounded_rectangle((sx + 7, sy + 7, sx + sw - 7, sy + sh - 7), radius=8,
+                               fill=(58, 38, 88, 190))
     qty = item.get("quantity", 1)
     if qty and qty > 1:
         draw.text((sx + sw - 7, sy + sh - 7), f"x{qty}",
-                  font=outfit(11, "Bold"), fill=COLORS["text_primary"], anchor="rs")
+                  font=outfit(13, "Bold"), fill=COLORS["text_primary"], anchor="rs")
 
 
 def _draw_mailbox(img, mailbox_im):
-    x0, x1 = LAYOUT["mailbox_column_x"]
+    """The reference's mailbox artwork runs from near the top-right edge
+    (flag tip ~y90) down to the canvas bottom (~y851), right-aligned. The
+    source PNG's transparent margins must not shrink it: scale by the
+    measured visible-art height instead."""
     bottom_y = LAYOUT["mailbox_bottom_y"]
-    top_min_y = LAYOUT["mailbox_top_min_y"]
+    right_x = LAYOUT["mailbox_right_x"]
+    art_h = LAYOUT["mailbox_art_h"]
 
-    col_w = (x1 - x0) - 20
-    max_h_by_height = bottom_y - top_min_y
     aspect = mailbox_im.height / mailbox_im.width
-
-    h_if_width_bound = col_w * aspect
-    if h_if_width_bound <= max_h_by_height:
-        new_w, new_h = col_w, int(h_if_width_bound)
-    else:
-        new_h = max_h_by_height
-        new_w = int(new_h / aspect)
+    new_h = art_h
+    new_w = int(new_h / aspect)
 
     mb = mailbox_im.resize((new_w, new_h), Image.LANCZOS)
-    center_x = (x0 + x1) / 2
-    left = int(center_x - new_w / 2)
+    left = right_x - new_w
     top = bottom_y - new_h
 
     glow = Image.new("RGBA", img.size, (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow)
     gr = new_w // 2
-    gd.ellipse((center_x - gr, bottom_y - gr // 4, center_x + gr, bottom_y + gr // 4),
-              fill=(*COLORS["purple_glow"], 75))
+    cx = left + new_w / 2
+    gd.ellipse((cx - gr, bottom_y - gr // 4, cx + gr, bottom_y + gr // 4),
+               fill=(*COLORS["purple_glow"], 45))
     glow = glow.filter(ImageFilter.GaussianBlur(26))
     img.alpha_composite(glow)
-
-    reflection = ImageOps.flip(mb).copy()
-    r_alpha = reflection.split()[3].point(lambda p: int(p * 0.16))
-    reflection.putalpha(r_alpha)
-    img.alpha_composite(reflection, (left, bottom_y))
 
     img.alpha_composite(mb, (left, top))
 
 
-def _draw_footer(draw):
-    text = "✦  عالمنا صغير، ولكن الإلهام فيه بلا حدود  ✦"
-    f = amiri(19)
+def _draw_footer(img, draw):
+    fy = LAYOUT["footer_y"]
+    # Left tag: paw + tracked MAILBOX, pointed right end -- as in the
+    # reference's lower-left corner.
+    tag = [(62, fy), (250, fy), (270, fy + 22), (250, fy + 44), (62, fy + 44),
+           (40, fy + 22)]
+    draw.polygon(tag, fill=(12, 6, 26, 200))
+    draw.line(tag + [tag[0]], fill=(60, 40, 90, 70), width=1)
+    paw = _draw_paw_icon(40)
+    img.paste(paw, (46, fy + 3), paw)
+    _draw_tracked_text(draw, (100, fy + 22), "MAILBOX", outfit(16, "SemiBold"),
+                       (120, 95, 150), tracking=6, anchor="lm")
+
+    # Centered arabic line flanked by 4-point sparkles (the reference has
+    # no tofu boxes -- the stars are drawn, not typed). Pillow has no
+    # arabic shaping of its own; reshape + bidi give correct joined
+    # visual-order text when the (pure-python) libs are installed, and we
+    # fall back to the raw string otherwise.
+    text = "عالمنا صغير، ولكن الإلهام فيه بلا حدود"
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+        text = get_display(arabic_reshaper.reshape(text))
+    except Exception:
+        pass
+    f = amiri(30)
+    cx = 602
     bbox = draw.textbbox((0, 0), text, font=f)
     tw = bbox[2] - bbox[0]
-    x = (CANVAS_W - tw) / 2
-    draw.text((x, LAYOUT["footer_y"]), text, font=f, fill=COLORS["text_muted"])
+    fplate = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(fplate).rounded_rectangle(
+        (cx - tw / 2 - 48, fy - 2, cx + tw / 2 + 48, fy + 44), radius=10,
+        fill=(6, 3, 14, 90))
+    fplate = fplate.filter(ImageFilter.GaussianBlur(6))
+    img.alpha_composite(fplate)
+    fglow = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(fglow).text((cx - tw / 2, fy + 6), text, font=f,
+                               fill=(150, 100, 220, 255))
+    fglow.putalpha(fglow.split()[3].point(lambda a: int(a * 0.75)))
+    fglow = fglow.filter(ImageFilter.GaussianBlur(4))
+    img.alpha_composite(fglow)
+    draw.text((cx - tw / 2, fy + 6), text, font=f, fill=(170, 150, 210))
+    _draw_sparkle_star(img, draw, cx - tw / 2 - 32, fy + 22, 12, (200, 170, 230))
+    _draw_sparkle_star(img, draw, cx + tw / 2 + 32, fy + 22, 12, (200, 170, 230))

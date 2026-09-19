@@ -49,6 +49,8 @@ from utils.prestige import (          # noqa: E402
     set_prestige_multipliers,
     get_prestige_earn_multiplier,
     purchase_prestige,
+    activate_booster_prestige,
+    has_vi_activation,
     PrestigeError,
     BOOSTER_TIER,
 )
@@ -182,24 +184,34 @@ async def main():
     dm = await get_prestige_earn_multiplier(G, U, "diamonds", is_booster=False)
     check(abs(dm - 1.0) < 1e-9, "V diamonds multiplier 1.0x", str(dm))
 
-    section("7) Booster at any permanent tier gets effective VI")
+    section("7) Booster-only VI: boost alone no longer grants VI")
     reset_user(level_xp=20000, level=50, coins=100, diamonds=1, prestige_val=1)
+    sql_exec("DELETE FROM prestige_vi_activations WHERE guild_id=? AND user_id=?", (G, U))
     eff = await get_effective_prestige(G, U, is_booster=True)
-    check(eff == BOOSTER_TIER, "permanent I + booster → effective VI", str(eff))
+    check(eff == 1, "booster WITHOUT shop activation → permanent I", str(eff))
+    check(not await has_vi_activation(G, U), "no activation row present")
 
-    section("8) VI gives 1.1x Coins + 1.2x Diamonds")
+    section("8) Activated booster gets VI: 1.1x Coins + 1.2x Diamonds")
     reset_user(level_xp=20000, level=50, coins=100, diamonds=1, prestige_val=0)
+    act = await activate_booster_prestige(G, U, 0, is_booster=True)
+    check(act.get("success"), "free (no configured price) VI activation succeeds")
+    check(await has_vi_activation(G, U), "activation row recorded")
+    eff = await get_effective_prestige(G, U, is_booster=True)
+    check(eff == BOOSTER_TIER, "activated booster → effective VI", str(eff))
     mult_c = await get_prestige_earn_multiplier(G, U, "balance", is_booster=True)
     mult_d = await get_prestige_earn_multiplier(G, U, "diamonds", is_booster=True)
     check(abs(mult_c - 1.1) < 1e-9, "VI coins multiplier 1.1x", str(mult_c))
     check(abs(mult_d - 1.2) < 1e-9, "VI diamonds multiplier 1.2x", str(mult_d))
 
     section("9) Losing Booster returns effective to permanent tier")
+    # activation from section 8 persists on the same user
     reset_user(level_xp=20000, level=50, coins=100, diamonds=1, prestige_val=3)
     eff_b = await get_effective_prestige(G, U, is_booster=True)
     eff_nb = await get_effective_prestige(G, U, is_booster=False)
-    check(eff_b == BOOSTER_TIER, "boosting → VI")
+    check(eff_b == BOOSTER_TIER, "boosting + activation → VI")
     check(eff_nb == 3, "no longer boosting → permanent III", str(eff_nb))
+    eff_re = await get_effective_prestige(G, U, is_booster=True)
+    check(eff_re == BOOSTER_TIER, "re-boosting restores VI without re-buy")
 
     section("10) Manual role assignment does NOT grant Prestige/multiplier")
     # Insert a pointless prestige_roles entry: the multiplier MUST ignore it.
@@ -343,9 +355,20 @@ async def main():
     check(row and row[0][0] == 110, "coins balance actually 110",
           str(row))
 
-    # Permanent I, booster → effective VI → 1.1x coins + 1.2x diamonds.
+    # Booster WITHOUT activation → raw amounts (no VI multiplier).
     reset_user(level_xp=20000, level=50, coins=0, diamonds=0, prestige_val=1)
+    sql_exec("DELETE FROM prestige_vi_activations WHERE guild_id=? AND user_id=?", (G, U))
     bot = FakeBot(FakeMember(premium_since="2026-01-01"))
+    await give_reward(bot, G, U, "coins", amount=100, reason="test",
+                      source="test")
+    row = sql_query(
+        "SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (G, U))
+    check(row and row[0][0] == 100, "booster w/o activation coins 100 (1.0x)",
+          str(row))
+
+    # Permanent I, booster + VI activation → 1.1x coins + 1.2x diamonds.
+    reset_user(level_xp=20000, level=50, coins=0, diamonds=0, prestige_val=1)
+    await activate_booster_prestige(G, U, 0, is_booster=True)
     await give_reward(bot, G, U, "coins", amount=100, reason="test",
                       source="test")
     await give_reward(bot, G, U, "diamonds", amount=100, reason="test",
@@ -449,7 +472,8 @@ async def main():
         def get_guild(self, guild_id):
             return self._guild
 
-    # get_effective_prestige must resolve VI via the fetch fallback.
+    # get_effective_prestige must resolve VI via the fetch fallback
+    # (booster status) — activation already exists from section 14.
     reset_user(level_xp=20000, level=50, coins=0, diamonds=0, prestige_val=1)
     bot = _Bot(_NotCachedGuild(FakeMember(premium_since="2026-01-01")))
     eff = await get_effective_prestige(G, U, is_booster=None, bot=bot)
@@ -467,6 +491,72 @@ async def main():
     check(row[0][0] == 110, "uncached booster coins 110 (1.1x)", str(row[0][0]))
     check(row[0][1] == 120, "uncached booster diamonds 120 (1.2x)",
           str(row[0][1]))
+
+    section("17) Booster-only VI shop activation backend rules")
+    U3 = 5006
+
+    def reset_u3(coins, prestige_val):
+        sql_exec("DELETE FROM levels WHERE guild_id=? AND user_id=?", (G, U3))
+        sql_exec("DELETE FROM economy WHERE guild_id=? AND user_id=?", (G, U3))
+        sql_exec("DELETE FROM prestige_vi_activations "
+                 "WHERE guild_id=? AND user_id=?", (G, U3))
+        sql_exec("INSERT INTO levels (guild_id,user_id,xp,level,prestige) "
+                 "VALUES (?,?,?,?,?)", (G, U3, 20000, 50, prestige_val))
+        sql_exec("INSERT INTO economy (guild_id,user_id,balance,diamonds) "
+                 "VALUES (?,?,?,?)", (G, U3, coins, 0))
+
+    # 17a) non-booster attempt → rejected, nothing deducted, nothing changed
+    reset_u3(coins=9000, prestige_val=2)
+    try:
+        await activate_booster_prestige(G, U3, 2500, is_booster=False)
+        check(False, "non-booster VI activation rejected")
+    except PrestigeError:
+        check(True, "non-booster VI activation rejected")
+    row = sql_query("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                    (G, U3))
+    check(row[0][0] == 9000, "non-booster: no currency deducted", str(row[0][0]))
+    check(not await has_vi_activation(G, U3), "non-booster: no activation row")
+    perm = await get_permanent_prestige(G, U3)
+    check(perm == 2, "non-booster: permanent prestige unchanged", str(perm))
+
+    # 17b) booster with configured price → success, balance reset to 0
+    await activate_booster_prestige(G, U3, 2500, is_booster=True)
+    row = sql_query("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                    (G, U3))
+    check(row[0][0] == 0, "booster: configured price applied (balance → 0)",
+          str(row[0][0]))
+    check(await has_vi_activation(G, U3), "booster: activation recorded")
+    perm = await get_permanent_prestige(G, U3)
+    check(perm == 2, "VI never written to levels.prestige", str(perm))
+    hist = sql_query(
+        "SELECT item_name, price_paid FROM purchase_history "
+        "WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 1", (G, U3))
+    check(hist and hist[0][1] == 9000, "purchase_history receipt written",
+          str(hist))
+
+    # 17c) double activation rejected
+    try:
+        await activate_booster_prestige(G, U3, 2500, is_booster=True)
+        check(False, "double VI activation rejected")
+    except PrestigeError:
+        check(True, "double VI activation rejected")
+
+    # 17d) insufficient balance rejected, no activation
+    reset_u3(coins=100, prestige_val=0)
+    try:
+        await activate_booster_prestige(G, U3, 2500, is_booster=True)
+        check(False, "insufficient balance rejected")
+    except PrestigeError:
+        check(True, "insufficient balance rejected")
+    check(not await has_vi_activation(G, U3), "insufficient: no activation row")
+
+    # 17e) no configured price (0) → free, balance untouched
+    reset_u3(coins=777, prestige_val=0)
+    await activate_booster_prestige(G, U3, 0, is_booster=True)
+    row = sql_query("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                    (G, U3))
+    check(row[0][0] == 777, "free activation leaves balance untouched",
+          str(row[0][0]))
 
     print(f"\n{'='*50}")
     print(f"RESULTS: {PASS} passed, {FAIL} failed")

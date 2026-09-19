@@ -346,6 +346,113 @@ class Leveling(commands.Cog):
         member = member or interaction.user
         await interaction.response.defer()
 
+        # Cheap existence guard: distinguish "never earned XP" from "0 XP"
+        # without pulling the full rank-card payload first.
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM levels WHERE guild_id=? AND user_id=?",
+                (interaction.guild.id, member.id))
+            if not await cursor.fetchone():
+                await interaction.followup.send(
+                    f"{member.mention} has no XP yet.")
+                return
+
+        # The real rank-card pipeline (same code path the fidelity
+        # previews use): aggregated payload -> 1280x853 Pillow render.
+        from utils.rank_card_data import get_rank_card_data
+        from utils.rank_card_renderer import render_rank_card
+
+        try:
+            data = await get_rank_card_data(
+                interaction.guild.id, member.id, member=member)
+            buf = await render_rank_card(data)
+            file = discord.File(buf, filename="rank.png")
+            await interaction.followup.send(file=file)
+        except Exception as e:
+            print(f"[RANK CARD] render failed for {member.id}: {e}")
+            # Fallback: a plain embed so the command still answers if the
+            # renderer (fonts/assets/network) fails for any reason.
+            from utils.prestige import tier_label
+            data = await get_rank_card_data(
+                interaction.guild.id, member.id, member=member)
+            embed = discord.Embed(
+                title=f"Rank — {member.display_name}", color=0x7c5cbf)
+            if member.display_avatar:
+                embed.set_thumbnail(url=member.display_avatar.url)
+            embed.add_field(name="Rank", value=f"#{data['rank']}")
+            embed.add_field(name="Level", value=str(data["level"]))
+            embed.add_field(name="Total XP", value=f"{data['xp_total']:,}")
+            if data["effective_prestige"] > 0:
+                embed.add_field(name="Prestige",
+                                value=f"★{tier_label(data['effective_prestige'])}")
+            embed.add_field(
+                name=f"Progress ({data['xp_current']:,}/{data['xp_needed']:,} XP)",
+                value="", inline=False)
+            await interaction.followup.send(embed=embed)
+
+    # ─── LEADERBOARD RESET TASK (Phase 5 / Leveling expansion) ─────
+    # Mirrors cogs/mvp.py's mvp_cycle_task pattern: poll every 30
+    # minutes, compare elapsed time against a stored last_reset per
+    # guild, only act once the configured period has actually passed.
+    # Each guild is isolated in its own try/except so one bad row
+    # can't stop the loop from checking the rest — same defensive
+    # pattern used throughout (shop temp_role_cleanup,
+    # reactionroles expiry_check, moderation scheduled_unban_check).
+    @tasks.loop(minutes=30)
+    async def leaderboard_reset_task(self):
+        now = datetime.now(timezone.utc)
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT guild_id, period, last_reset
+                FROM leveling_reset_config WHERE enabled = 1
+            """)
+            configs = await cursor.fetchall()
+
+        for guild_id, period, last_reset in configs:
+            try:
+                if last_reset:
+                    last_dt = datetime.fromisoformat(last_reset)
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    elapsed_hours = (now - last_dt).total_seconds() / 3600
+                    if elapsed_hours < _period_hours(period):
+                        continue
+
+                count = await perform_leaderboard_reset(guild_id, period)
+                print(f"[LEVELING RESET] guild={guild_id} period={period} "
+                      f"reset {count} members")
+
+                guild = self.bot.get_guild(guild_id)
+                config = await get_leveling_config(guild_id)
+                channel_id = config.get("levelup_channel_id")
+                if guild and channel_id:
+                    channel = guild.get_channel(int(channel_id))
+                    if channel:
+                        embed = discord.Embed(
+                            title="🔄 Leaderboard Reset",
+                            description=(f"The {period} leaderboard has reset! "
+                                         f"Last cycle's standings are archived — "
+                                         f"everyone starts fresh."),
+                            color=0x7c5cbf)
+                        try:
+                            await channel.send(embed=embed)
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[LEVELING RESET] Error for guild {guild_id}: {e}")
+
+    @leaderboard_reset_task.before_loop
+    async def before_reset_task(self):
+        await self.bot.wait_until_ready()
+
+    # ─── RANK COMMAND (Pillow Image Card) ───────────────
+    @app_commands.command(name="rank",
+                          description="View your rank card")
+    async def rank(self, interaction: discord.Interaction,
+                   member: discord.Member = None):
+        member = member or interaction.user
+        await interaction.response.defer()
+
         # Finalized Prestige: legacy levels.prestige values above the
         # permanent max must rank as the max permanent tier (V) — clamped
         # here for comparison only, never rewritten.
