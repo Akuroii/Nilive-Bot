@@ -866,6 +866,19 @@ async def init_db():
             ON prestige_tiers(guild_id)
         """)
 
+        # Booster-only Prestige VI shop activation. Permanent prestige
+        # stays I-V on levels.prestige; this table only records that the
+        # member activated the VI shop entry. Effective VI additionally
+        # requires an active boost at read time (utils/prestige.py).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS prestige_vi_activations (
+                guild_id   INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS mvp_config (
                 guild_id            INTEGER PRIMARY KEY,

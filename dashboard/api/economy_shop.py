@@ -425,9 +425,9 @@ def add_shop_item():
             if prestige_tier_val not in (None, "", 0, "0") else None)
     except (TypeError, ValueError):
         prestige_tier_val = None
-    if prestige_tier_val is not None and prestige_tier_val not in (1, 2, 3, 4, 5):
+    if prestige_tier_val is not None and prestige_tier_val not in (1, 2, 3, 4, 5, 6):
         return jsonify({"success": False,
-                        "error": "Prestige tier must be 1–5"})
+                        "error": "Prestige tier must be 1–6"})
     # Finalized Prestige: Prestige is Coins-only. The UI guards this, but the
     # API must reject a `prestige` item carrying a diamond price server-side
     # (the purchase path in cogs/shop.py also rejects it at buy time).
