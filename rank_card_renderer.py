@@ -3,18 +3,17 @@ RANK CARD RENDERER — draws the payload from utils/rank_card_data.py onto a
 fixed 1280x853 PNG.
 
 Deliberately kept discord.py-free: it only reads the plain dict that
-get_rank_card_data() already resolved (username/avatar_url/member_since/
-is_booster are plain values, not a live discord.Member). That means this
-module is reusable from a non-bot context later (e.g. a dashboard preview)
-without dragging discord.py along.
+get_rank_card_data() already resolved. Reusable from a non-bot context
+later without dragging discord.py along.
 
-Layout is data (see LAYOUT below), drawing is code. Moving/resizing a
-region means editing LAYOUT, not the draw functions.
+Layout is data (see LAYOUT below), drawing is code.
 
 LAYOUT was measured directly off the approved reference design (grid-
-overlaid at 50px, reference canvas 1024x682, scaled x1.25 to this
-module's 1280x853 canvas) rather than eyeballed, so panel groupings and
-proportions track the reference deliberately.
+overlaid at 20px, reference canvas 1024x682, scaled x1.25 to this
+module's 1280x853 canvas) -- re-measured in the Pass 3 fidelity pass
+after the reference's own 3-column x 4-row inventory grid, two-tone
+label coloring, and line-art (not color-emoji) UI icon style were
+confirmed by close inspection of the reference file.
 """
 from __future__ import annotations
 
@@ -39,10 +38,6 @@ _ASSET_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
                             "assets", "rank_card")
 _FONT_DIR = os.path.join(_ASSET_ROOT, "fonts")
 
-# The exact transparent mailbox PNG the user supplies -- untouched (only
-# ever cropped to its own content bbox at install time, never redrawn or
-# recolored), never regenerated. If it isn't present yet, the mailbox
-# region is skipped (logged once) rather than substituted with anything.
 MAILBOX_PNG_PATH = os.path.join(_ASSET_ROOT, "mailbox.png")
 
 FONT_PATHS = {
@@ -67,18 +62,21 @@ COLORS = {
     "bg_bottom": (23, 11, 36),
     "nebula_a": (78, 26, 122),
     "nebula_b": (120, 52, 168),
-    "panel": (21, 13, 33, 165),          # softer fill, less opaque than before
-    "panel_border": (150, 100, 210, 70), # softer, lower-alpha border (was 120)
-    "panel_glow": (130, 80, 190, 40),    # faint outer glow behind each panel
+    "panel": (21, 13, 33, 165),
+    "panel_border": (150, 100, 210, 70),
+    "panel_glow": (130, 80, 190, 40),
     "purple_glow": (170, 100, 235),
     "text_primary": (240, 235, 250),
-    "text_muted": (168, 152, 194),
+    "text_muted": (150, 134, 178),      # muted label tone (e.g. "TOP", "/2,000 XP")
+    "text_bright": (216, 178, 255),     # brighter tone for emphasized values
     "accent": (196, 140, 255),
     "pip_filled": (196, 110, 255),
     "pip_empty": (68, 54, 88),
     "xp_bar_bg": (38, 25, 56),
-    "xp_bar_fill": (185, 100, 240),
+    "xp_bar_fill_a": (140, 80, 230),    # gradient start (left)
+    "xp_bar_fill_b": (230, 110, 220),   # gradient end (right)
     "ring": (176, 120, 235),
+    "line_icon": (178, 126, 226),       # purple line-art icon stroke
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -88,21 +86,15 @@ COLORS = {
 CANVAS_W, CANVAS_H = 1280, 853
 
 LAYOUT = {
-    "avatar": (44, 54, 240, 240),
+    "avatar": (41, 63, 247, 247),
     "avatar_level_badge_r": 30,
-    "avatar_ring_pips": 5,          # small star ornaments around the ring
 
-    "name": (327, 90, 600, 60),
-    "title_pill": (327, 197, 250, 43),
-    "member_since": (327, 272, 500, 28),
+    "name": (327, 97, 600, 63),
+    "title_pill": (327, 202, 250, 34),
+    "member_since": (327, 275, 500, 28),
 
-    # Rank + Prestige: ONE merged panel, Rank on top, Prestige below.
     "rank_prestige_panel": (706, 56, 213, 256),
-    "rank_section_h": 128,          # top portion of the merged panel
-    # (bottom portion = rank_prestige_panel height - rank_section_h)
 
-    # Level: its own panel. XP Progress + Total XP: one merged panel to
-    # its right (XP progress ~62%, Total XP ~38% of that panel's width).
     "level_panel": (40, 375, 179, 175),
     "xp_totalxp_panel": (225, 375, 475, 175),
     "xp_section_frac": 0.62,
@@ -113,21 +105,18 @@ LAYOUT = {
     "stats_gap": 16,
     "stats_start_x": 40,
 
-    # Tall right-side column, same left edge as the Rank/Prestige panel
-    # above it, ending at the same bottom edge as the stats row.
-    "inventory_panel": (706, 322, 281, 418),
-    "inventory_grid_origin": (730, 366),
-    "inventory_slot": (56, 56),
-    "inventory_slot_gap": 12,
-    "inventory_cols": 4,
-    "inventory_rows": 3,
+    # 3 columns x 4 rows (reference-confirmed), tall right column.
+    "inventory_panel": (706, 322, 294, 418),
+    "inventory_grid_origin": (733, 372),
+    "inventory_slot": (62, 60),
+    "inventory_slot_gap_x": 16,
+    "inventory_slot_gap_y": 14,
+    "inventory_cols": 3,
+    "inventory_rows": 4,
 
-    # Mailbox column: clear of the Inventory panel's right edge (987) with
-    # a margin, anchored to the bottom, height derives from the real
-    # asset's own aspect ratio at render time (see _draw_mailbox).
-    "mailbox_column_x": (1007, 1280),
+    "mailbox_column_x": (1030, 1280),
     "mailbox_bottom_y": 830,
-    "mailbox_top_min_y": 60,        # won't be pushed higher than this
+    "mailbox_top_min_y": 60,
 
     "footer_y": 812,
 }
@@ -178,9 +167,8 @@ def tajawal(size, weight="regular"):
 
 def _draw_tracked_text(draw, xy, text, font, fill, tracking=0, anchor=None):
     """draw.text() has no letter-spacing support. When tracking>0, draws
-    character-by-character with extra spacing between glyphs -- used for
-    the reference's wider-tracked small-caps labels (RANK, LEVEL, stat
-    labels). Returns the total rendered width."""
+    character-by-character with extra spacing -- used for the reference's
+    wider-tracked small-caps labels. Returns the total rendered width."""
     if tracking <= 0:
         draw.text(xy, text, font=font, fill=fill, anchor=anchor)
         bbox = draw.textbbox((0, 0), text, font=font)
@@ -202,9 +190,36 @@ def _draw_tracked_text(draw, xy, text, font, fill, tracking=0, anchor=None):
     return cursor - x
 
 
+def _draw_dropcap_heading(draw, xy, text, font_family, big_size, small_size,
+                          fill, tracking=1, weight="Bold"):
+    """The reference renders certain display headers (SHADOW, PRESTIGE VI)
+    with an oversized first letter followed by smaller caps -- true
+    OpenType small-caps isn't available through Pillow's basic text API,
+    so this fakes it: first char at big_size, the rest at small_size,
+    baseline-aligned. Returns total rendered width."""
+    x, y = xy
+    big_font = _font(font_family, big_size, weight)
+    small_font = _font(font_family, small_size, weight)
+
+    first, rest = text[0], text[1:]
+    big_bbox = draw.textbbox((0, 0), first, font=big_font)
+    small_bbox = draw.textbbox((0, 0), "H", font=small_font)
+    # Baseline-align: both sit on the same bottom line.
+    big_bottom = y + big_bbox[3]
+    small_y = big_bottom - small_bbox[3]
+
+    draw.text((x, y), first, font=big_font, fill=fill)
+    cursor = x + big_bbox[2] + tracking
+
+    for ch in rest:
+        draw.text((cursor, small_y), ch, font=small_font, fill=fill)
+        w = draw.textbbox((0, 0), ch, font=small_font)[2]
+        cursor += w + tracking
+    return cursor - x
+
+
 # ─────────────────────────────────────────────────────────────────────────
-# BACKGROUND — code/vector nebula, kept subtle/concentrated (not a galaxy
-# scene) per direction: fewer, softer blobs than the previous pass.
+# BACKGROUND
 # ─────────────────────────────────────────────────────────────────────────
 
 def _draw_background() -> Image.Image:
@@ -217,8 +232,6 @@ def _draw_background() -> Image.Image:
 
     nebula = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
     nd = ImageDraw.Draw(nebula)
-    # Fewer, more concentrated blobs than the previous pass (was 3 bright
-    # blobs at 40-55 alpha); kept subtle so the mood stays dark/controlled.
     blobs = [
         (int(CANVAS_W * 0.12), int(CANVAS_H * 0.12), 360, COLORS["nebula_a"], 34),
         (int(CANVAS_W * 0.88), int(CANVAS_H * 0.20), 400, COLORS["nebula_b"], 28),
@@ -232,7 +245,7 @@ def _draw_background() -> Image.Image:
     rnd = random.Random(1337)
     sparkle = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
     sd = ImageDraw.Draw(sparkle)
-    for _ in range(80):  # fewer stars -- concentrated, not a galaxy scene
+    for _ in range(80):
         x, y = rnd.randint(0, CANVAS_W), rnd.randint(0, CANVAS_H)
         r = rnd.choice([1, 1, 1, 2])
         a = rnd.randint(30, 100)
@@ -242,9 +255,6 @@ def _draw_background() -> Image.Image:
 
 
 def _rounded_panel(img, draw, box, radius=20, fill=None, outline=None, width=2, glow=True):
-    """Softer, more atmospheric panel: lower-alpha fill/border plus an
-    optional faint blurred glow behind it, instead of a flat bright
-    outline."""
     fill = fill or COLORS["panel"]
     outline = outline or COLORS["panel_border"]
     if glow:
@@ -260,7 +270,141 @@ def _rounded_panel(img, draw, box, radius=20, fill=None, outline=None, width=2, 
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# NETWORK ASSET FETCH (avatar / emoji) — graceful fallback on any failure
+# LINE-ART UI ICONS — the reference uses thin purple outline icons for all
+# fixed UI chrome (messages/voice/games/inventory/calendar/crown) and for
+# the DEFAULT unconfigured currency glyphs, not color emoji. These are
+# hand-drawn to match that style directly; no network fetch, no risk of
+# a blank icon. A genuinely custom emoji (a configured Discord emoji, or
+# any non-default unicode emoji an admin picks) is never redrawn -- that
+# still goes through the real fetch path below.
+# ─────────────────────────────────────────────────────────────────────────
+
+def _icon_canvas(size):
+    im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    return im, ImageDraw.Draw(im)
+
+
+def _line_icon_messages(size):
+    im, d = _icon_canvas(size)
+    s = size
+    d.rounded_rectangle((s*0.12, s*0.18, s*0.88, s*0.68), radius=s*0.16,
+                        outline=COLORS["line_icon"], width=max(2, int(s*0.06)))
+    d.polygon([(s*0.30, s*0.66), (s*0.30, s*0.86), (s*0.48, s*0.66)],
+              fill=COLORS["line_icon"])
+    for cx in (0.34, 0.5, 0.66):
+        r = s * 0.035
+        d.ellipse((s*cx - r, s*0.40 - r, s*cx + r, s*0.40 + r), fill=COLORS["line_icon"])
+    return im
+
+
+def _line_icon_voice(size):
+    im, d = _icon_canvas(size)
+    s = size
+    w = max(2, int(s * 0.06))
+    d.rounded_rectangle((s*0.38, s*0.10, s*0.62, s*0.55), radius=s*0.12,
+                        outline=COLORS["line_icon"], width=w)
+    d.arc((s*0.22, s*0.28, s*0.78, s*0.72), start=20, end=160,
+          fill=COLORS["line_icon"], width=w)
+    d.line((s*0.5, s*0.68, s*0.5, s*0.86), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.36, s*0.86, s*0.64, s*0.86), fill=COLORS["line_icon"], width=w)
+    return im
+
+
+def _line_icon_games(size):
+    im, d = _icon_canvas(size)
+    s = size
+    w = max(2, int(s * 0.06))
+    d.rounded_rectangle((s*0.10, s*0.32, s*0.90, s*0.72), radius=s*0.20,
+                        outline=COLORS["line_icon"], width=w)
+    d.line((s*0.26, s*0.52, s*0.38, s*0.52), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.32, s*0.46, s*0.32, s*0.58), fill=COLORS["line_icon"], width=w)
+    for cx in (0.64, 0.76):
+        r = s * 0.045
+        d.ellipse((s*cx - r, s*0.48 - r, s*cx + r, s*0.48 + r), outline=COLORS["line_icon"], width=w)
+    return im
+
+
+def _line_icon_inventory(size):
+    im, d = _icon_canvas(size)
+    s = size
+    w = max(2, int(s * 0.06))
+    d.line((s*0.5, s*0.08, s*0.90, s*0.28), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.5, s*0.08, s*0.10, s*0.28), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.10, s*0.28, s*0.5, s*0.48), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.90, s*0.28, s*0.5, s*0.48), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.10, s*0.28, s*0.10, s*0.70), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.90, s*0.28, s*0.90, s*0.70), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.5, s*0.48, s*0.5, s*0.90), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.10, s*0.70, s*0.5, s*0.90), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.90, s*0.70, s*0.5, s*0.90), fill=COLORS["line_icon"], width=w)
+    return im
+
+
+def _line_icon_calendar(size):
+    im, d = _icon_canvas(size)
+    s = size
+    w = max(1, int(s * 0.09))
+    d.rounded_rectangle((s*0.10, s*0.18, s*0.90, s*0.88), radius=s*0.12,
+                        outline=COLORS["line_icon"], width=w)
+    d.line((s*0.10, s*0.38, s*0.90, s*0.38), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.30, s*0.08, s*0.30, s*0.26), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.70, s*0.08, s*0.70, s*0.26), fill=COLORS["line_icon"], width=w)
+    return im
+
+
+def _line_icon_crown(size):
+    im, d = _icon_canvas(size)
+    s = size
+    pts = [(s*0.08, s*0.75), (s*0.08, s*0.35), (s*0.30, s*0.55),
+           (s*0.5, s*0.15), (s*0.70, s*0.55), (s*0.92, s*0.35),
+           (s*0.92, s*0.75)]
+    d.polygon(pts, fill=COLORS["line_icon"])
+    d.rectangle((s*0.08, s*0.75, s*0.92, s*0.85), fill=COLORS["line_icon"])
+    return im
+
+
+def _line_icon_coin_stack(size):
+    im, d = _icon_canvas(size)
+    s = size
+    w = max(2, int(s * 0.06))
+    for i, cy in enumerate((0.30, 0.48, 0.66)):
+        d.ellipse((s*0.20, s*cy, s*0.80, s*cy + s*0.20),
+                  outline=COLORS["line_icon"], width=w)
+    return im
+
+
+def _line_icon_diamond(size):
+    im, d = _icon_canvas(size)
+    s = size
+    w = max(2, int(s * 0.06))
+    pts = [(s*0.5, s*0.10), (s*0.85, s*0.38), (s*0.5, s*0.90), (s*0.15, s*0.38)]
+    d.polygon(pts, outline=COLORS["line_icon"], width=w)
+    d.line((s*0.15, s*0.38, s*0.85, s*0.38), fill=COLORS["line_icon"], width=w)
+    d.line((s*0.5, s*0.10, s*0.5, s*0.90), fill=COLORS["line_icon"], width=1)
+    return im
+
+
+LINE_ICON_BUILDERS = {
+    "messages": _line_icon_messages,
+    "voice": _line_icon_voice,
+    "games": _line_icon_games,
+    "inventory": _line_icon_inventory,
+    "calendar": _line_icon_calendar,
+    "crown": _line_icon_crown,
+}
+
+_DEFAULT_CURRENCY_ICON_BUILDERS = {
+    "🪙": _line_icon_coin_stack,
+    "💎": _line_icon_diamond,
+}
+
+
+def _build_line_icons(size: int) -> dict:
+    return {name: fn(size) for name, fn in LINE_ICON_BUILDERS.items()}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# NETWORK ASSET FETCH (avatar / genuinely-custom emoji only)
 # ─────────────────────────────────────────────────────────────────────────
 
 async def _fetch_image(session: aiohttp.ClientSession, url: str) -> Image.Image | None:
@@ -277,26 +421,22 @@ async def _fetch_image(session: aiohttp.ClientSession, url: str) -> Image.Image 
         return None
 
 
-_UNICODE_TWEMOJI_OVERRIDES = {
-    "🪙": "1fa99",
-    "💎": "1f48e",
-}
-
-
 def _twemoji_filename(emoji_str: str) -> str:
-    if emoji_str in _UNICODE_TWEMOJI_OVERRIDES:
-        return _UNICODE_TWEMOJI_OVERRIDES[emoji_str] + ".png"
     codepoints = "-".join(f"{ord(c):x}" for c in emoji_str if ord(c) != 0xFE0F)
     return f"{codepoints}.png"
 
 
 async def _resolve_currency_icon(session: aiohttp.ClientSession, emoji_str: str,
                                   size: int) -> Image.Image | None:
-    """emoji_str is whatever utils.currency.get_currency_config() returned
-    for that currency: either a raw `<:name:id>` / `<a:name:id>` token, or
-    a plain unicode emoji."""
+    """emoji_str is whatever utils.currency.get_currency_config() returned.
+    The two DEFAULT glyphs (🪙/💎, unconfigured) render as the reference's
+    hand-drawn purple line icons -- everything else (a real configured
+    Discord emoji, or any other unicode emoji an admin picked) is fetched
+    as the actual asset, never redrawn."""
     if not emoji_str:
         return None
+    if emoji_str in _DEFAULT_CURRENCY_ICON_BUILDERS:
+        return _DEFAULT_CURRENCY_ICON_BUILDERS[emoji_str](size)
     if is_custom_emoji_token(emoji_str):
         parsed = parse_emoji_input(emoji_str)
         if not parsed:
@@ -310,29 +450,11 @@ async def _resolve_currency_icon(session: aiohttp.ClientSession, emoji_str: str,
             im.seek(0)
             im = im.convert("RGBA")
         return im.resize((size, size), Image.LANCZOS)
-    return await _fetch_unicode_emoji(session, emoji_str, size)
-
-
-async def _fetch_unicode_emoji(session: aiohttp.ClientSession, emoji_str: str,
-                                size: int) -> Image.Image | None:
     url = TWEMOJI_BASE + _twemoji_filename(emoji_str)
     im = await _fetch_image(session, url)
     if im is None:
         return None
     return im.resize((size, size), Image.LANCZOS)
-
-
-UI_ICONS = {
-    "messages": "💬", "voice": "🎙️", "games": "🎮",
-    "inventory": "📦", "calendar": "📅", "crown": "👑",
-}
-
-
-async def _fetch_ui_icons(session: aiohttp.ClientSession, size: int) -> dict:
-    results = await asyncio.gather(
-        *[_fetch_unicode_emoji(session, glyph, size) for glyph in UI_ICONS.values()]
-    )
-    return dict(zip(UI_ICONS.keys(), results))
 
 
 def _circle_mask_paste(base: Image.Image, im: Image.Image, box):
@@ -359,26 +481,31 @@ async def render_rank_card(data: dict) -> io.BytesIO:
     img = _draw_background()
     draw = ImageDraw.Draw(img)
 
-    async with aiohttp.ClientSession() as session:
-        avatar_im, coin_icon_im, diamond_icon_im, mailbox_im, ui_icons_28, ui_icons_16 = \
-            await asyncio.gather(
-                _fetch_avatar(session, data.get("avatar_url")),
-                _resolve_currency_icon(session, data["currency"]["coins"]["emoji"], 32),
-                _resolve_currency_icon(session, data["currency"]["diamonds"]["emoji"], 32),
-                _load_mailbox(),
-                _fetch_ui_icons(session, 30),
-                _fetch_ui_icons(session, 16),
-            )
+    line_icons_30 = _build_line_icons(30)
+    line_icons_16 = _build_line_icons(16)
 
-    _draw_avatar_and_level(img, draw, data, avatar_im)
-    _draw_name_block(img, draw, data, ui_icons_16)
-    _draw_rank_prestige_panel(img, draw, data, ui_icons_16)
+    async with aiohttp.ClientSession() as session:
+        avatar_im, coin_icon_im, diamond_icon_im = await asyncio.gather(
+            _fetch_avatar(session, data.get("avatar_url")),
+            _resolve_currency_icon(session, data["currency"]["coins"]["emoji"], 32),
+            _resolve_currency_icon(session, data["currency"]["diamonds"]["emoji"], 32),
+        )
+    mailbox_im = await _load_mailbox()
+
+    _draw_avatar_and_level(img, draw, data)
+    _draw_name_block(img, draw, data, line_icons_16)
+    _draw_rank_prestige_panel(img, draw, data, line_icons_16)
     _draw_level_xp_panels(img, draw, data)
-    _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, ui_icons_28)
-    _draw_inventory(img, draw, data, ui_icons_16)
+    _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, line_icons_30)
+    _draw_inventory(img, draw, data, line_icons_16)
     if mailbox_im is not None:
         _draw_mailbox(img, mailbox_im)
     _draw_footer(draw)
+
+    # avatar pasted after background/glow but the placeholder/fetch needs
+    # to happen before drawing -- done inline in _draw_avatar_and_level
+    # via the resolved avatar_im captured above.
+    _paste_avatar(img, data, avatar_im)
 
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="PNG")
@@ -419,9 +546,6 @@ def _star_point(cx, cy, r, angle_deg):
 
 
 def _draw_small_star(draw, cx, cy, r, color):
-    """A compact 4-point star/sparkle glyph -- the ring ornaments, kept
-    simple and controlled (not a new decorative motif, just the star
-    shape already used for the pip diamonds, at a smaller scale)."""
     pts = [
         _star_point(cx, cy, r, 0), _star_point(cx, cy, r * 0.35, 45),
         _star_point(cx, cy, r, 90), _star_point(cx, cy, r * 0.35, 135),
@@ -431,12 +555,14 @@ def _draw_small_star(draw, cx, cy, r, color):
     draw.polygon(pts, fill=color)
 
 
-def _draw_avatar_and_level(img, draw, data, avatar_im):
+def _draw_avatar_and_level(img, draw, data):
+    """Ring, glow, star ornaments and the level badge -- everything except
+    the actual avatar photo, which is pasted in _paste_avatar() after all
+    panels are drawn so the ring's glow doesn't get painted over it."""
     ax, ay, aw, ah = LAYOUT["avatar"]
     cx, cy = ax + aw / 2, ay + ah / 2
     r = aw / 2
 
-    # Soft glow behind the ring
     glow = Image.new("RGBA", img.size, (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow)
     gd.ellipse((cx - r - 16, cy - r - 16, cx + r + 16, cy + r + 16),
@@ -444,30 +570,34 @@ def _draw_avatar_and_level(img, draw, data, avatar_im):
     glow = glow.filter(ImageFilter.GaussianBlur(18))
     img.alpha_composite(glow)
 
-    # Double ring (outer thin + inner slightly thicker), closer to the
-    # reference's layered ring treatment than a single flat stroke.
-    draw.ellipse((cx - r - 10, cy - r - 10, cx + r + 10, cy + r + 10),
-                 outline=COLORS["ring"], width=2)
-    draw.ellipse((cx - r - 4, cy - r - 4, cx + r + 4, cy + r + 4),
-                 outline=COLORS["accent"], width=3)
+
+def _paste_avatar(img, data, avatar_im):
+    draw = ImageDraw.Draw(img)
+    ax, ay, aw, ah = LAYOUT["avatar"]
+    cx, cy = ax + aw / 2, ay + ah / 2
+    r = aw / 2
 
     _circle_mask_paste(img, avatar_im, (int(ax), int(ay), int(aw), int(ah)))
 
-    # Star ornaments spaced around the ring, echoing the reference's
-    # "crown of stars" treatment -- kept to small, evenly spaced points,
-    # no extra motifs.
-    n = LAYOUT["avatar_ring_pips"]
-    ring_r = r + 10
-    for i in range(n):
-        angle = -90 + i * (360 / n)
+    draw.ellipse((cx - r - 9, cy - r - 9, cx + r + 9, cy + r + 9),
+                 outline=COLORS["ring"], width=6)
+    draw.ellipse((cx - r - 9, cy - r - 9, cx + r + 9, cy + r + 9),
+                 outline=COLORS["accent"], width=1)
+
+    # Star ornaments -- one larger star at 12 o'clock, four smaller ones
+    # spaced around, echoing the reference's "crown of stars" without
+    # trying to replicate every one of its irregular accent shapes.
+    positions = [(-90, 12), (-18, 7), (54, 7), (126, 7), (198, 7), (270, 7)]
+    ring_r = r + 9
+    for angle, star_r in positions:
         sx, sy = _star_point(cx, cy, ring_r, angle)
-        star_r = 11 if i == 0 else 7  # slightly larger star at the top
         _draw_small_star(draw, sx, sy, star_r, COLORS["accent"])
 
     badge_r = LAYOUT["avatar_level_badge_r"]
-    bx, by = ax + aw - badge_r * 0.7, ay + ah - badge_r * 0.7
+    bx = ax + aw * 0.78
+    by = ay + ah * 0.97
     draw.ellipse((bx - badge_r, by - badge_r, bx + badge_r, by + badge_r),
-                 fill=(16, 9, 26, 255), outline=COLORS["accent"], width=3)
+                 fill=(16, 9, 26, 235), outline=COLORS["accent"], width=3)
     lvl_font = zilla_bold(24)
     lvl_text = str(data["level"])
     bbox = draw.textbbox((0, 0), lvl_text, font=lvl_font)
@@ -478,21 +608,28 @@ def _draw_avatar_and_level(img, draw, data, avatar_im):
 def _draw_name_block(img, draw, data, icons16):
     x, y, w, h = LAYOUT["name"]
     username = data.get("username") or f"User {data['user_id']}"
-    name_font = cinzel_bold(48) if username.isascii() else tajawal(42, "bold")
-    _draw_tracked_text(draw, (x, y), username, name_font, COLORS["text_primary"], tracking=1)
+    if username.isascii() and username.isupper() is False and username.replace(" ", "").isalpha():
+        # Reference drop-cap treatment: oversized first letter + smaller
+        # caps for the rest -- applied only to plain-alphabetic Latin
+        # names, matching what the reference actually demonstrates.
+        _draw_dropcap_heading(draw, (x, y), username.upper(), "cinzel", 52, 38,
+                              COLORS["text_primary"])
+    else:
+        name_font = cinzel_bold(46) if username.isascii() else tajawal(40, "bold")
+        _draw_tracked_text(draw, (x, y), username, name_font, COLORS["text_primary"], tracking=1)
 
     title = data.get("equipped_title")
     if title:
         px, py, pw, ph = LAYOUT["title_pill"]
         _rounded_panel(img, draw, (px, py, px + pw, py + ph), radius=ph // 2)
-        icon_x = px + 16
+        icon_x = px + 14
         if icons16.get("crown") is not None:
             img.paste(icons16["crown"], (icon_x, int(py + (ph - 16) / 2)), icons16["crown"])
-            text_x = icon_x + 22
+            text_x = icon_x + 20
         else:
             text_x = icon_x
-        _draw_tracked_text(draw, (text_x, py + ph / 2 - 8), title["item_name"],
-                           outfit(15, "SemiBold"), COLORS["accent"], tracking=1)
+        _draw_tracked_text(draw, (text_x, py + ph / 2 - 7), title["item_name"],
+                           outfit(13, "SemiBold"), COLORS["accent"], tracking=1)
 
     ms_x, ms_y, _, _ = LAYOUT["member_since"]
     member_since = data.get("member_since")
@@ -502,43 +639,48 @@ def _draw_name_block(img, draw, data, icons16):
         if icons16.get("calendar") is not None:
             img.paste(icons16["calendar"], (ms_x, ms_y), icons16["calendar"])
             text_x = ms_x + 22
-        draw.text((text_x, ms_y), f"Member since  ·  {date_str}",
-                  font=outfit(17), fill=COLORS["text_muted"])
+        draw.text((text_x, ms_y), "Member since  ·  ", font=outfit(17), fill=COLORS["text_muted"])
+        w0 = draw.textbbox((0, 0), "Member since  ·  ", font=outfit(17))[2]
+        draw.text((text_x + w0, ms_y), date_str, font=outfit(17), fill=COLORS["text_bright"])
 
 
 def _draw_rank_prestige_panel(img, draw, data, icons16):
     x, y, w, h = LAYOUT["rank_prestige_panel"]
-    rank_h = LAYOUT["rank_section_h"]
     _rounded_panel(img, draw, (x, y, x + w, y + h), radius=18)
 
-    # -- Rank section (top) --
-    _draw_tracked_text(draw, (x + 18, y + 14), "RANK", outfit(14, "SemiBold"),
+    _draw_tracked_text(draw, (x + 18, y + 18), "RANK", outfit(14, "SemiBold"),
                        COLORS["text_muted"], tracking=2)
-    draw.text((x + 18, y + 34), f"#{data['rank']}", font=zilla_bold(42),
+    draw.text((x + 16, y + 40), f"#{data['rank']}", font=zilla_bold(46),
               fill=COLORS["text_primary"])
-    draw.text((x + 18, y + rank_h - 26), f"TOP {data['percentile']:.2f}%",
-              font=outfit(14, "Medium"), fill=COLORS["accent"])
 
-    # Faint divider between the two sections of the merged panel
-    draw.line((x + 18, y + rank_h, x + w - 18, y + rank_h),
-              fill=(*COLORS["accent"], 40), width=1)
+    # Two-tone: "TOP" muted, the percentage itself brighter -- matches the
+    # reference's emphasis treatment.
+    ty = y + 102
+    draw.text((x + 18, ty), "TOP ", font=outfit(14, "Medium"), fill=COLORS["text_muted"])
+    tw = draw.textbbox((0, 0), "TOP ", font=outfit(14, "Medium"))[2]
+    draw.text((x + 18 + tw, ty), f"{data['percentile']:.2f}%",
+              font=outfit(14, "SemiBold"), fill=COLORS["text_bright"])
 
-    # -- Prestige section (bottom) --
-    py0 = y + rank_h + 10
+    draw.line((x + 18, y + 132, x + w - 18, y + 132), fill=(*COLORS["accent"], 45), width=1)
+
     tier = data["effective_prestige"]
     roman = ["0", "I", "II", "III", "IV", "V", "VI"][tier] if 0 <= tier <= 6 else str(tier)
     label = f"PRESTIGE {roman}" if tier else "PRESTIGE"
-    lf = cinzel_semibold(15)
-    lb = draw.textbbox((0, 0), label, font=lf)
-    _draw_tracked_text(draw, (x + w / 2 - (lb[2] - lb[0]) / 2, py0), label, lf,
-                       COLORS["accent"], tracking=1)
+    big_font = cinzel_semibold(20)
+    small_font = cinzel_semibold(15)
+    first_w = draw.textbbox((0, 0), label[0], font=big_font)[2]
+    rest_w = sum(draw.textbbox((0, 0), ch, font=small_font)[2] + 1 for ch in label[1:])
+    total_w = first_w + 1 + rest_w
+    lx = x + w / 2 - total_w / 2
+    ly = y + 146
+    _draw_dropcap_heading(draw, (lx, ly), label, "cinzel", 20, 15, COLORS["accent"])
 
     pip_r = 10
     gap = 9
     total_pips = 6
     row_w = total_pips * (pip_r * 2) + (total_pips - 1) * gap
     start_x = x + w / 2 - row_w / 2 + pip_r
-    pip_y = py0 + 36
+    pip_y = y + 182
     for i in range(total_pips):
         cx = start_x + i * (pip_r * 2 + gap)
         filled = i < tier
@@ -546,22 +688,22 @@ def _draw_rank_prestige_panel(img, draw, data, icons16):
         _draw_diamond_pip(draw, cx, pip_y, pip_r, color, filled)
 
     if data.get("is_booster"):
-        by = py0 + 58
+        by = y + 206
         bw = w - 36
         bx = x + 18
-        _rounded_panel(img, draw, (bx, by, bx + bw, by + 24), radius=12,
+        _rounded_panel(img, draw, (bx, by, bx + bw, by + 22), radius=11,
                        fill=(88, 30, 128, 190), outline=COLORS["accent"], glow=False)
         icon = icons16.get("crown")
-        lf2 = outfit(11, "SemiBold")
+        lf2 = outfit(10, "SemiBold")
         label2 = "BOOSTER PRESTIGE"
         lbbox = draw.textbbox((0, 0), label2, font=lf2)
         lw = lbbox[2] - lbbox[0]
-        icon_w = 16 if icon is not None else 0
+        icon_w = 20 if icon is not None else 0
         block_w = icon_w + lw
         start = bx + (bw - block_w) / 2
         if icon is not None:
-            img.paste(icon, (int(start), int(by + 4)), icon)
-        draw.text((start + icon_w, by + 12), label2, font=lf2,
+            img.paste(icon, (int(start), int(by + 3)), icon)
+        draw.text((start + icon_w, by + 11), label2, font=lf2,
                   fill=COLORS["text_primary"], anchor="lm")
 
 
@@ -585,42 +727,74 @@ def _draw_level_xp_panels(img, draw, data):
     _rounded_panel(img, draw, (x, y, x + w, y + h), radius=18)
     xp_w = int(w * LAYOUT["xp_section_frac"])
 
-    # XP Progress (left section of the merged panel)
     _draw_tracked_text(draw, (x + 20, y + 16), "XP PROGRESS", outfit(14, "SemiBold"),
                        COLORS["text_muted"], tracking=2)
     cur, needed = data["xp_current"], max(data["xp_needed"], 1)
-    draw.text((x + 20, y + 38), f"{cur:,} / {needed:,} XP",
-              font=zilla_bold(22), fill=COLORS["text_primary"])
+    # Two-tone: current XP bright/emphasized, "/ needed XP" muted.
+    cur_txt = f"{cur:,}"
+    vf = zilla_bold(22)
+    draw.text((x + 20, y + 38), cur_txt, font=vf, fill=COLORS["text_bright"])
+    cur_w = draw.textbbox((0, 0), cur_txt, font=vf)[2]
+    draw.text((x + 24 + cur_w, y + 42), f"/ {needed:,} XP", font=outfit(16),
+              fill=COLORS["text_muted"])
+
     bar_x, bar_y, bar_w, bar_h = x + 20, y + 78, xp_w - 40, 14
     draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
                            radius=bar_h // 2, fill=COLORS["xp_bar_bg"])
     frac = min(cur / needed, 1.0)
     if frac > 0:
-        draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w * frac, bar_y + bar_h),
-                               radius=bar_h // 2, fill=COLORS["xp_bar_fill"])
+        fill_w = bar_w * frac
+        _draw_gradient_bar(img, bar_x, bar_y, fill_w, bar_h,
+                           COLORS["xp_bar_fill_a"], COLORS["xp_bar_fill_b"])
+        # Subtle highlight at the leading edge of the FILL itself (not the
+        # bar's outer end) -- per the reference's fidelity note. Kept to a
+        # small soft dot, no extra ornamentation.
+        if 4 < fill_w < bar_w - 2:
+            hx, hy = bar_x + fill_w - 3, bar_y + bar_h / 2
+            _draw_soft_dot(img, hx, hy, 4, (255, 255, 255, 165))
     draw.text((bar_x, bar_y + bar_h + 8), f"{frac * 100:.1f}% to next level",
               font=outfit(13), fill=COLORS["text_muted"])
 
-    # Divider, then Total XP (right section, same merged panel)
     div_x = x + xp_w
     draw.line((div_x, y + 16, div_x, y + h - 16), fill=(*COLORS["accent"], 40), width=1)
     tx = div_x + 20
     _draw_tracked_text(draw, (tx, y + 16), "TOTAL XP", outfit(14, "SemiBold"),
-                       COLORS["text_muted"], tracking=2)
+                       COLORS["text_muted"], tracking=3)
     draw.text((tx, y + 46), f"{data['xp_total']:,}", font=zilla_bold(26),
               fill=COLORS["text_primary"])
 
 
-def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons28):
+def _draw_gradient_bar(img, x, y, w, h, color_a, color_b):
+    if w <= 0:
+        return
+    w = int(w)
+    grad = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    for i in range(w):
+        t = i / max(w - 1, 1)
+        col = tuple(int(color_a[c] + (color_b[c] - color_a[c]) * t) for c in range(3))
+        ImageDraw.Draw(grad).line([(i, 0), (i, h)], fill=(*col, 255))
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w, h), radius=h // 2, fill=255)
+    img.paste(grad, (int(x), int(y)), mask)
+
+
+def _draw_soft_dot(img, cx, cy, r, color):
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).ellipse((cx - r, cy - r, cx + r, cy + r), fill=color)
+    layer = layer.filter(ImageFilter.GaussianBlur(2))
+    img.alpha_composite(layer)
+
+
+def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
     coins_cfg = data["currency"]["coins"]
     diamonds_cfg = data["currency"]["diamonds"]
 
     cards = [
-        (icons28.get("messages"), "MESSAGES", f"{data['messages_count']:,}"),
-        (icons28.get("voice"), "VOICE TIME", _fmt_minutes(data["voice_minutes"])),
+        (icons30.get("messages"), "MESSAGES", f"{data['messages_count']:,}"),
+        (icons30.get("voice"), "VOICE TIME", _fmt_minutes(data["voice_minutes"])),
         (coin_icon_im, coins_cfg["name"].upper(), f"{data['balance']:,}"),
         (diamond_icon_im, diamonds_cfg["name"].upper(), f"{data['diamonds']:,}"),
-        (icons28.get("games"), "GAMES WON", f"{data['minigame_wins']:,}"),
+        (icons30.get("games"), "GAMES WON", f"{data['minigame_wins']:,}"),
     ]
 
     y = LAYOUT["stats_row_y"]
@@ -633,7 +807,7 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons28):
         x = x0 + i * (w + gap)
         _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
         if icon_im is not None:
-            img.paste(icon_im, (int(x + w / 2 - icon_im.width / 2), y + 16), icon_im)
+            img.paste(icon_im, (int(x + w / 2 - icon_im.width / 2), y + 18), icon_im)
         vf = zilla_bold(21)
         vb = draw.textbbox((0, 0), value, font=vf)
         draw.text((x + w / 2 - (vb[2] - vb[0]) / 2, y + h - 56), value,
@@ -657,48 +831,48 @@ def _draw_inventory(img, draw, data, icons16):
         label_x += 22
     _draw_tracked_text(draw, (label_x, y + 18), "INVENTORY", outfit(15, "SemiBold"),
                        COLORS["text_muted"], tracking=2)
+    draw.line((x + 18, y + 48, x + w - 18, y + 48), fill=(*COLORS["accent"], 35), width=1)
 
     ox, oy = LAYOUT["inventory_grid_origin"]
     sw, sh = LAYOUT["inventory_slot"]
-    gap = LAYOUT["inventory_slot_gap"]
+    gx, gy = LAYOUT["inventory_slot_gap_x"], LAYOUT["inventory_slot_gap_y"]
     cols, rows = LAYOUT["inventory_cols"], LAYOUT["inventory_rows"]
     items = data.get("inventory_grid") or []
 
     for i in range(cols * rows):
         col, row = i % cols, i // cols
-        sx = ox + col * (sw + gap)
-        sy = oy + row * (sh + gap)
+        sx = ox + col * (sw + gx)
+        sy = oy + row * (sh + gy)
         draw.rounded_rectangle((sx, sy, sx + sw, sy + sh), radius=10,
-                               fill=(30, 20, 46, 140), outline=(*COLORS["accent"], 60), width=1)
+                               fill=(30, 20, 46, 140), outline=(*COLORS["accent"], 55), width=1)
         if i < len(items):
-            _draw_inventory_icon_placeholder(draw, sx, sy, sw, sh, items[i])
+            _draw_inventory_item(draw, sx, sy, sw, sh, items[i])
 
 
-def _draw_inventory_icon_placeholder(draw, sx, sy, sw, sh, item):
-    # Item icons are remote URLs (utils.item_catalog icon_url) -- fetched
-    # the same way currency icons are; left as a labelled placeholder here
-    # since item-art fetching is outside this fix's scope.
+def _draw_inventory_item(draw, sx, sy, sw, sh, item):
+    """Item art itself would come from utils.item_catalog icon_url (a
+    remote asset, fetched the same way currency icons are) -- left as a
+    neutral placeholder tile here since per-item icon fetching is outside
+    this fidelity pass's scope. Only the REAL owned quantity is ever
+    shown, and only when it's actually more than 1 -- never a placeholder
+    or invented number."""
     draw.rounded_rectangle((sx + 6, sy + 6, sx + sw - 6, sy + sh - 6), radius=6,
                            fill=(58, 38, 88, 190))
     qty = item.get("quantity", 1)
     if qty and qty > 1:
-        draw.text((sx + sw - 8, sy + sh - 8), f"x{qty}",
+        draw.text((sx + sw - 7, sy + sh - 7), f"x{qty}",
                   font=outfit(11, "Bold"), fill=COLORS["text_primary"], anchor="rs")
 
 
 def _draw_mailbox(img, mailbox_im):
-    """img is the RGBA card canvas. The mailbox art is only ever resized
-    (uniform scale, aspect-ratio preserved) -- never recolored, redrawn,
-    or recomposited beyond a plain resize."""
     x0, x1 = LAYOUT["mailbox_column_x"]
     bottom_y = LAYOUT["mailbox_bottom_y"]
     top_min_y = LAYOUT["mailbox_top_min_y"]
 
-    col_w = (x1 - x0) - 20  # small side margin
+    col_w = (x1 - x0) - 20
     max_h_by_height = bottom_y - top_min_y
-    aspect = mailbox_im.height / mailbox_im.width  # h/w, tall asset so >1
+    aspect = mailbox_im.height / mailbox_im.width
 
-    # Fit by whichever dimension is the binding constraint.
     h_if_width_bound = col_w * aspect
     if h_if_width_bound <= max_h_by_height:
         new_w, new_h = col_w, int(h_if_width_bound)
@@ -711,18 +885,16 @@ def _draw_mailbox(img, mailbox_im):
     left = int(center_x - new_w / 2)
     top = bottom_y - new_h
 
-    # Soft purple glow beneath the mailbox base
     glow = Image.new("RGBA", img.size, (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow)
     gr = new_w // 2
     gd.ellipse((center_x - gr, bottom_y - gr // 4, center_x + gr, bottom_y + gr // 4),
-              fill=(*COLORS["purple_glow"], 80))
+              fill=(*COLORS["purple_glow"], 75))
     glow = glow.filter(ImageFilter.GaussianBlur(26))
     img.alpha_composite(glow)
 
-    # Faint reflection: flipped, heavily faded copy just below the base
     reflection = ImageOps.flip(mb).copy()
-    r_alpha = reflection.split()[3].point(lambda p: int(p * 0.18))
+    r_alpha = reflection.split()[3].point(lambda p: int(p * 0.16))
     reflection.putalpha(r_alpha)
     img.alpha_composite(reflection, (left, bottom_y))
 
