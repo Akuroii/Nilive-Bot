@@ -8,3 +8,5 @@ requests==2.31.0
 Pillow==10.2.0
 thefuzz==0.22.1
 python-Levenshtein==0.25.0
+arabic-reshaper==3.0.1
+python-bidi==0.6.11

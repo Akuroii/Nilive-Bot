@@ -191,10 +191,54 @@ async def process_purchase(interaction: discord.Interaction,
                 f"price. Ask an admin to fix it.",
                 ephemeral=True)
             return
-        if not prestige_tier or int(prestige_tier) not in (1, 2, 3, 4, 5):
+        if not prestige_tier or int(prestige_tier) not in (1, 2, 3, 4, 5, 6):
             await interaction.response.send_message(
                 "This Prestige item isn't configured correctly (missing or "
                 "invalid tier). Ask an admin to fix it.", ephemeral=True)
+            return
+
+        # ── Prestige VI: Booster-only shop tier ────────────────────
+        # Never written to levels.prestige; activation lives in
+        # prestige_vi_activations and is only effective while boosting.
+        # Server-side gate: the disabled button for non-boosters is UX,
+        # this check is the actual enforcement.
+        if int(prestige_tier) == 6:
+            from utils.prestige import (
+                activate_booster_prestige, PrestigeError, tier_label,
+                sync_prestige_roles, is_booster,
+            )
+            if not is_booster(interaction.user):
+                await interaction.response.send_message(
+                    "Prestige VI is a Booster-only tier.", ephemeral=True)
+                return
+            try:
+                result = await activate_booster_prestige(
+                    guild_id, user_id, price,
+                    item_name=name, item_id=iid,
+                    display_name=interaction.user.display_name,
+                    is_booster=True,
+                )
+            except PrestigeError as e:
+                await interaction.response.send_message(str(e), ephemeral=True)
+                return
+            try:
+                await sync_prestige_roles(
+                    interaction.client, interaction.guild, interaction.user)
+            except Exception as e:
+                print(f"[SHOP] Prestige VI role sync failed: {e}")
+            embed = discord.Embed(
+                title="⭐ Prestige VI Active",
+                description=(
+                    f"{interaction.user.mention} activated **Prestige "
+                    f"{tier_label(6)}** (Booster)."),
+                color=0xFFD700)
+            embed.add_field(
+                name="While boosting",
+                value="Prestige VI stays active as long as your Server "
+                      "Boost lasts; when it ends you return to your "
+                      "permanent Prestige.",
+                inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         from utils.prestige import (
@@ -562,6 +606,8 @@ class Shop(commands.Cog):
             elif itype == "prestige" and prestige_tier:
                 from utils.prestige import tier_label
                 dur_info = f" • Prestige {tier_label(prestige_tier)}"
+                if int(prestige_tier) == 6:
+                    dur_info += " • Booster only"
             else:
                 dur_info = f" • {dur}h temp" if dur else ""
             lvl_info  = f" • Req. Level {req_lvl}" if req_lvl else ""
@@ -582,6 +628,13 @@ class Shop(commands.Cog):
                 label=f"Buy {name}",
                 style=discord.ButtonStyle.green,
                 custom_id=f"shop_buy_{iid}")
+            if (itype == "prestige" and prestige_tier
+                    and int(prestige_tier) == 6):
+                from utils.prestige import is_booster
+                if not is_booster(interaction.user):
+                    btn.disabled = True
+                    btn.style = discord.ButtonStyle.gray
+                    btn.label = f"{name} — Booster only"
             view.add_item(btn)
 
         await interaction.response.send_message(

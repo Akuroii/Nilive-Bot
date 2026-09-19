@@ -15,11 +15,15 @@ Design rules (locked with product):
     clamped to 0..5). It is never an Inventory item and is never duplicated.
   * I–V are purchased through the Shop using Coins. Purchasing resets the
     user's Coins balance to 0; Level, XP and Diamonds are untouched.
-  * VI is a TEMPORARY Booster entitlement. It is never written to
-    levels.prestige. An active Discord Booster has effective Prestige VI
-    regardless of permanent tier; when the boost ends effective Prestige
-    returns to the permanent tier. Gaining/losing VI never touches
-    Coins/XP/Level/Diamonds.
+  * VI is a BOOSTER-ONLY Shop tier. It is never written to
+    levels.prestige: the shop activation is recorded in
+    prestige_vi_activations and the effective tier is VI only while the
+    member both holds the activation AND is actively boosting. When the
+    boost ends effective Prestige returns to the permanent tier (the
+    activation persists, so re-boosting restores VI without buying it
+    again). VI never touches Level/XP/Diamonds; its Coins cost is the
+    shop item's configured price (free activation when the guild
+    configured no price), following the same economy as I-V.
   * Discord roles are cosmetic/representational only and are NEVER the
     source of Prestige or its multiplier.
 
@@ -199,17 +203,30 @@ async def get_permanent_prestige(guild_id: int, user_id: int) -> int:
     return int(min(max(prestige, 0), MAX_PERMANENT_TIER))
 
 
+async def has_vi_activation(guild_id: int, user_id: int) -> bool:
+    """True once the member activated the Booster-only Prestige VI shop
+    entry. Persistent; effective VI additionally requires an active boost."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute(
+            "SELECT 1 FROM prestige_vi_activations "
+            "WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )).fetchone()
+    return row is not None
+
+
 async def get_effective_prestige(guild_id: int, user_id: int,
                                   is_booster=None, bot=None) -> int:
     """
-    Effective Prestige VI for an active booster, otherwise the permanent tier.
+    Effective Prestige VI for a booster who activated the VI shop entry,
+    otherwise the permanent tier.
     is_booster (bool) lets a caller that already has the Member avoid a
     guild/member lookup; when omitted, bot is used to resolve booster status.
     """
     permanent = await get_permanent_prestige(guild_id, user_id)
     if is_booster is None:
         is_booster = await _resolve_booster(bot, guild_id, user_id)
-    if is_booster:
+    if is_booster and await has_vi_activation(guild_id, user_id):
         return BOOSTER_TIER
     return permanent
 
@@ -400,6 +417,133 @@ async def purchase_prestige(guild_id: int, user_id: int, target_tier: int,
         "new_tier": target_tier,
         "old_balance": old_balance,
         "new_balance": 0,
+        "item_name": item_name,
+    }
+
+
+# ── Booster-only Prestige VI (Shop activation) ───────────────────────────
+
+async def activate_booster_prestige(guild_id: int, user_id: int,
+                                     min_coins: int, *,
+                                     item_name: str = "Prestige VI",
+                                     item_id=None,
+                                     display_name: str | None = None,
+                                     is_booster=None, bot=None) -> dict:
+    """
+    Activate the Booster-only Prestige VI shop entry.
+
+    Enforced on the backend (never trusted to the UI):
+      * the member must currently be an active Discord Booster;
+      * Prestige must be enabled;
+      * VI must not already be activated (no re-buy).
+
+    Coins cost follows the existing Prestige economy: ``min_coins`` is the
+    shop item's configured coin price and acts as the minimum required
+    balance; when a price is configured the balance is reset to 0 exactly
+    like I-V purchases. When the guild configured no price (0), the
+    activation is free and the balance is left untouched. Level/XP/
+    Diamonds are never touched, and levels.prestige is NEVER written --
+    VI stays temporary: effective only while the boost is active.
+    """
+    if is_booster is None:
+        is_booster = await _resolve_booster(bot, guild_id, user_id)
+    if not is_booster:
+        raise PrestigeError("Prestige VI is a Booster-only tier.")
+
+    from utils.currency import get_currency_config, currency_name_for
+    balance_name = currency_name_for(
+        await get_currency_config(guild_id), "coins")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cfg_row = await (
+                await db.execute(
+                    "SELECT enabled FROM prestige_config WHERE guild_id = ?",
+                    (guild_id,),
+                )
+            ).fetchone()
+            enabled = cfg_row[0] if cfg_row and cfg_row[0] is not None else 1
+            if not enabled:
+                await db.execute("ROLLBACK")
+                raise PrestigeError("Prestige is not enabled on this server.")
+
+            act_row = await (
+                await db.execute(
+                    "SELECT 1 FROM prestige_vi_activations "
+                    "WHERE guild_id = ? AND user_id = ?",
+                    (guild_id, user_id),
+                )
+            ).fetchone()
+            if act_row:
+                await db.execute("ROLLBACK")
+                raise PrestigeError(
+                    "Prestige VI is already active on your account.")
+
+            min_coins = int(min_coins or 0)
+            old_balance = 0
+            if min_coins > 0:
+                bal_row = await (
+                    await db.execute(
+                        "SELECT balance FROM economy "
+                        "WHERE guild_id = ? AND user_id = ?",
+                        (guild_id, user_id),
+                    )
+                ).fetchone()
+                old_balance = bal_row[0] if bal_row and bal_row[0] else 0
+                if old_balance < min_coins:
+                    await db.execute("ROLLBACK")
+                    raise PrestigeError(
+                        f"You need at least {min_coins:,} {balance_name} to "
+                        f"activate Prestige VI (you have {old_balance:,}).")
+                await db.execute(
+                    "UPDATE economy SET balance = 0 "
+                    "WHERE guild_id = ? AND user_id = ?",
+                    (guild_id, user_id),
+                )
+
+            await db.execute(
+                "INSERT OR IGNORE INTO prestige_vi_activations "
+                "(guild_id, user_id) VALUES (?, ?)",
+                (guild_id, user_id),
+            )
+
+            if item_id is None:
+                item_id = 0
+            await db.execute(
+                """
+                INSERT INTO purchase_history
+                    (guild_id, user_id, user_display_name,
+                     item_id, item_name, price_paid, currency_paid)
+                VALUES (?, ?, ?, ?, ?, ?, 'balance')
+                """,
+                (guild_id, user_id, display_name or "",
+                 item_id, item_name, old_balance),
+            )
+            await db.commit()
+        except PrestigeError:
+            raise
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+
+    if old_balance:
+        try:
+            from utils.ledger import log_transaction
+            await log_transaction(
+                guild_id, user_id, "balance", -old_balance, 0,
+                type="deduct",
+                reason="Prestige purchase: VI",
+                source="shop",
+            )
+        except Exception as e:
+            print(f"[PRESTIGE] Ledger write failed for VI activation: {e}")
+
+    return {
+        "success": True,
+        "new_tier": BOOSTER_TIER,
+        "old_balance": old_balance,
+        "new_balance": 0 if old_balance else None,
         "item_name": item_name,
     }
 

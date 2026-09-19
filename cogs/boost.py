@@ -79,16 +79,16 @@ class Boost(commands.Cog):
         if boost_count >= 2:
             await self._give_role(guild, member, boost2_id)
 
-        # Finalized Prestige: an active Booster has effective Prestige VI.
-        # Roles are cosmetic only — entitlement derives from premium_since.
-        # Sync the configured tier-VI prestige role (if any) as a
-        # representation of that state. Never touches Coins/XP/Level.
+        # Booster-only Prestige VI: a new boost makes the member
+        # ELIGIBLE for the VI shop entry; effective VI (and the cosmetic
+        # tier-VI role) additionally requires the shop activation, so let
+        # sync_prestige_roles compute the true effective tier instead of
+        # assuming VI. Never touches Coins/XP/Level.
         try:
-            from utils.prestige import sync_prestige_roles, BOOSTER_TIER
-            await sync_prestige_roles(
-                self.bot, guild, member, effective_tier=BOOSTER_TIER)
+            from utils.prestige import sync_prestige_roles
+            await sync_prestige_roles(self.bot, guild, member)
         except Exception as e:
-            print(f"[BOOST] Prestige VI role sync (new boost) failed: {e}")
+            print(f"[BOOST] Prestige role sync (new boost) failed: {e}")
 
         if channel_id:
             channel = guild.get_channel(int(channel_id))

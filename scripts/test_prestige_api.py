@@ -122,6 +122,25 @@ r = api(A, "POST", "/api/shop/item", {
 }).get_json()
 check(r.get("success") is True, "non-prestige diamond role item still accepted", str(r))
 
+# Booster-only Prestige VI is a valid shop entry (coin-priced).
+r = api(A, "POST", "/api/shop/item", {
+    "name": "Prestige VI", "price": 0, "type": "prestige", "prestige_tier": 6,
+}).get_json()
+check(r.get("success") is True, "prestige VI coin item accepted", str(r))
+
+# ...but VI with a diamond price is rejected like every prestige item.
+r = api(A, "POST", "/api/shop/item", {
+    "name": "Prestige VI dia", "price": 0, "price_diamonds": 5,
+    "type": "prestige", "prestige_tier": 6,
+}).get_json()
+check(r.get("success") is False, "prestige VI diamond price rejected", str(r))
+
+# Tier 7 does not exist.
+r = api(A, "POST", "/api/shop/item", {
+    "name": "Prestige VII", "price": 100, "type": "prestige", "prestige_tier": 7,
+}).get_json()
+check(r.get("success") is False, "prestige tier 7 rejected", str(r))
+
 print(f"\n{'='*50}")
 print(f"RESULTS: {PASS} passed, {FAIL} failed")
 if FAILURES:
