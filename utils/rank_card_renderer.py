@@ -143,7 +143,10 @@ LAYOUT = {
     # runs from near the top-right down to the canvas bottom edge.
     "mailbox_right_x": 1278,
     "mailbox_bottom_y": 851,
-    "mailbox_art_h": 755,
+    # Runtime comparison: the real mailbox art needs to sit a little higher
+    # and carry slightly more vertical weight than the earlier pass. The
+    # PNG itself is still used untouched; this only changes its placement.
+    "mailbox_art_h": 780,
 
     "footer_y": 762,
 }
@@ -252,6 +255,30 @@ def _text_size(draw, text, font, tracking=0):
     w = sum(draw.textbbox((0, 0), ch, font=font)[2] for ch in text) + tracking * (len(text) - 1)
     b = draw.textbbox((0, 0), text, font=font)
     return w, b[3] - b[1]
+
+
+def _font_to_fit(draw, factory, text, preferred_size, max_width, min_size=12):
+    """Keep numeric glyphs proportionate as their values grow.
+
+    A card's display treatment can have a deliberate fixed condensed ratio,
+    but individual numbers must never receive a new arbitrary squeeze merely
+    because an extra digit arrived.  For the two stencil/display numbers we
+    instead reduce the *whole* font only when it would overflow its allotted
+    area.  This keeps the width, height, weight, and counter shapes together.
+    """
+    font = factory(preferred_size)
+    width = _text_size(draw, text, font)[0]
+    if width <= max_width:
+        return font
+    size = max(min_size, int(preferred_size * max_width / max(width, 1)))
+    # Account for integer rounding / font hinting without ever going below
+    # the explicitly readable minimum.
+    while size > min_size:
+        font = factory(size)
+        if _text_size(draw, text, font)[0] <= max_width:
+            return font
+        size -= 1
+    return factory(min_size)
 
 
 def _draw_glow_layer(img, painter, blur=6, offset=(0, 0)):
@@ -458,16 +485,26 @@ def _draw_background() -> Image.Image:
     rnd = random.Random(1337)
     sparkle = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
     sd = ImageDraw.Draw(sparkle)
-    for _ in range(80):
+    # Ambient texture only: fewer/dimmer dots preserve the reference's
+    # depth without adding a decorative star field behind live data.
+    for _ in range(45):
         x, y = rnd.randint(0, CANVAS_W), rnd.randint(0, CANVAS_H)
         r = rnd.choice([1, 1, 1, 2])
-        a = rnd.randint(30, 100)
+        a = rnd.randint(22, 76)
         sd.ellipse((x - r, y - r, x + r, y + r), fill=(230, 220, 245, a))
     img = Image.alpha_composite(img, sparkle)
     return img
 
 
 def _rounded_panel(img, draw, box, radius=20, fill=None, outline=None, width=2, glow=False):
+    """Draw low-contrast panel separation with real alpha compositing.
+
+    Drawing an RGBA tuple directly onto the main canvas writes its RGB bytes
+    without blending them first; converting the final canvas to RGB then made
+    the intended 10–15% reference edge read as a hard neon outline.  Put the
+    fill and border on their own overlay so their alpha has the visual weight
+    specified by the palette.
+    """
     fill = fill or COLORS["panel"]
     outline = outline or COLORS["panel_border"]
     if glow:
@@ -479,7 +516,10 @@ def _rounded_panel(img, draw, box, radius=20, fill=None, outline=None, width=2, 
                              radius=radius + pad, fill=COLORS["panel_glow"])
         glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(14))
         img.alpha_composite(glow_layer)
-    draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
+    panel_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(panel_layer).rounded_rectangle(
+        box, radius=radius, fill=fill, outline=outline, width=width)
+    img.alpha_composite(panel_layer)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -798,39 +838,46 @@ def _paste_avatar(img, data, avatar_im):
 
     _circle_mask_paste(img, avatar_im, (int(ax), int(ay), int(aw), int(ah)))
 
-    # The reference ring is painterly: a dim base ring with bright arcs at
-    # the top and lower-left, not a uniform neon circle.
-    ring_box = (cx - r - 4, cy - r - 4, cx + r + 4, cy + r + 4)
-    draw.ellipse(ring_box, outline=(150, 90, 207, 235), width=5)
+    # The reference gives the portrait a single refined frame, not a busy
+    # collection of unrelated ornaments.  Keep a dim base circle and one
+    # selective highlight arc; the pair of small top facets deliberately
+    # echoes the reference without trying to recreate a painterly Discord
+    # decoration asset in code.
+    ring_box = (cx - r - 3, cy - r - 3, cx + r + 3, cy + r + 3)
+    ring_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    rd = ImageDraw.Draw(ring_layer)
+    rd.ellipse(ring_box, outline=(127, 80, 181, 175), width=3)
+    rd.arc(ring_box, start=205, end=332, fill=(205, 137, 239, 225), width=4)
+    rd.arc(ring_box, start=26, end=76, fill=(183, 114, 226, 190), width=3)
+    img.alpha_composite(ring_layer)
 
-    # Ornaments measured off the reference (offsets from avatar origin).
-    acc = (186, 120, 240)
-    _draw_five_point_star(draw, ax + 128, ay + 6, 24, acc)
-    for ox, oy, rot in ((84, 20, -30), (168, 20, 30)):
-        pts = [(ox, ay + oy - 14), (ox + 7, ay + oy), (ox, ay + oy + 14), (ox - 7, ay + oy)]
-        draw.polygon([(ax + p[0], p[1]) for p in pts], fill=(*acc, 235))
-    for ox, oy, sr in ((13, 41, 9), (231, 48, 9), (-8, 88, 6), (243, 139, 6)):
-        _draw_sparkle_star(img, draw, ax + ox, ay + oy, sr, acc)
-    for ox, oy, sr in ((5, 144, 10), (238, 144, 10), (122, 251, 10)):
-        _draw_sparkle_star(img, draw, ax + ox, ay + oy, sr, acc, glow=False)
-    # diagonal accent streaks (upper-right / lower-left of the ring)
-    for p0, p1 in [((203, 23), (247, 60)), ((9, 198), (65, 248))]:
-        draw.line((ax + p0[0], ay + p0[1], ax + p1[0], ay + p1[1]),
-                  fill=(*acc, 200), width=4)
+    acc = (185, 121, 230)
+    # These are intentional ring anchors, rather than decorative stars
+    # scattered around the avatar.
+    for ox in (91, 161):
+        draw.polygon([(ax + ox, ay + 16), (ax + ox + 5, ay + 26),
+                      (ax + ox, ay + 36), (ax + ox - 5, ay + 26)],
+                     fill=(*acc, 205))
+    _draw_sparkle_star(img, draw, ax + 17, ay + 48, 6, acc, glow=False)
+    _draw_sparkle_star(img, draw, ax + 228, ay + 64, 6, acc, glow=False)
 
-    # Level badge -- attached to the avatar's lower right, stencil numerals
-    # like the reference.
+    # Badge is a separate, compact component.  Unlike the large level
+    # display it uses clean uncut numerals; this keeps the small circle
+    # legible and properly centred instead of looking like a clipped copy.
     badge_r = LAYOUT["avatar_level_badge_r"]
     bx = ax + LAYOUT["avatar_badge_center"][0]
     by = ay + LAYOUT["avatar_badge_center"][1]
-    draw.ellipse((bx - badge_r, by - badge_r, bx + badge_r, by + badge_r),
-                 fill=(14, 8, 22, 235), outline=(170, 130, 220, 200), width=2)
+    badge_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(badge_layer).ellipse(
+        (bx - badge_r, by - badge_r, bx + badge_r, by + badge_r),
+        fill=(12, 7, 22, 220), outline=(175, 132, 217, 185), width=2)
+    img.alpha_composite(badge_layer)
     lvl_text = str(data["level"])
-    lvl_font = zilla_bold(44)
+    lvl_font = _font_to_fit(draw, zilla_bold, lvl_text, 42, 46, min_size=24)
     bbox = draw.textbbox((0, 0), lvl_text, font=lvl_font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    _draw_stencil_number(img, draw, (bx - tw / 2 - bbox[0], by - th / 2 - bbox[1]),
-                         lvl_text, lvl_font, (230, 220, 240), cut_color=(14, 8, 22))
+    draw.text((bx - tw / 2 - bbox[0], by - th / 2 - bbox[1]), lvl_text,
+              font=lvl_font, fill=(232, 224, 241))
 
 
 def _draw_name_block(img, draw, data, icons16):
@@ -995,12 +1042,16 @@ def _draw_level_xp_panels(img, draw, data):
                               (200, 190, 215), tracking=1, weight="Bold")
     _draw_condensed(img, (x + 31, y + 22), _level_painter, ratio=ratio)
 
-    # Big stencil-slab number with the reference's purple bloom.
-    lvl_font = zilla_bold(98)
+    # The large level is intentionally independent from the avatar badge:
+    # a taller stencil/slab display with a fixed visual scale.  If a live
+    # level gains a third (or later) digit, fit the whole font rather than
+    # stretching/squeezing glyphs horizontally.
+    level_text = str(data["level"])
+    lvl_font = _font_to_fit(draw, zilla_bold, level_text, 90, w - 52, min_size=60)
     a, _d = lvl_font.getmetrics()
-    digit_h = int(98 * 0.67)
+    digit_h = int(lvl_font.size * 0.67)
     ty = y + 69 - (a - digit_h)
-    _draw_stencil_number(img, draw, (x + 30, ty), str(data["level"]), lvl_font,
+    _draw_stencil_number(img, draw, (x + 30, ty), level_text, lvl_font,
                          (224, 208, 230), cut_color=(16, 8, 30),
                          glow=(150, 80, 220))
 
@@ -1013,22 +1064,33 @@ def _draw_level_xp_panels(img, draw, data):
     # Two-tone: current XP purple/emphasized (condensed, as measured off
     # the reference), "/ needed XP" muted.
     cur_txt = f"{cur:,}"
-    vf = zilla_bold(45)
-    cur_w = draw.textbbox((0, 0), cur_txt, font=vf)[2]
+    needed_txt = f"/ {needed:,} XP"
+    needed_font = outfit(22)
+    needed_w = _text_size(draw, needed_txt, needed_font)[0]
+    # 0.72 is the intended XP-value style. It stays constant for normal
+    # values; an exceptionally long value gets a smaller whole font before
+    # the divider, never a more aggressively squashed set of glyphs.
+    cur_max_w = max(42, (x + LAYOUT["xp_divider_x"]) - (x + 14) - needed_w - 12)
+    vf = _font_to_fit(draw, zilla_bold, cur_txt, 45, cur_max_w / 0.72, min_size=22)
+    cur_ratio = 0.72
 
     def _xpval_painter(d):
         d.text((20, 20), cur_txt, font=vf, fill=COLORS["xp_value"])
-    cw, _ = _draw_condensed(img, (x + 14, y + 50), _xpval_painter, ratio=0.64,
+    cw, _ = _draw_condensed(img, (x + 14, y + 50), _xpval_painter, ratio=cur_ratio,
                             glow=(150, 70, 210), blur=4)
-    draw.text((x + 20 + cw, y + 58), f"/ {needed:,} XP", font=outfit(22),
+    draw.text((x + 20 + cw, y + 58), needed_txt, font=needed_font,
               fill=COLORS["text_muted"])
 
     div_x = x + LAYOUT["xp_divider_x"]
     draw.line((div_x, y + 14, div_x, y + h - 14), fill=(*COLORS["accent"], 30), width=1)
 
     bar_x, bar_y, bar_w, bar_h = x + 8, y + 86, w - 20, 21
-    draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
-                           radius=bar_h // 2, fill=COLORS["xp_bar_bg"])
+    # A dark inset track, not a second hard-outline component.
+    track_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(track_layer).rounded_rectangle(
+        (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=bar_h // 2,
+        fill=(*COLORS["xp_bar_bg"], 190))
+    img.alpha_composite(track_layer)
     frac = min(cur / needed, 1.0)
     if frac > 0:
         fill_w = bar_w * frac
@@ -1042,7 +1104,11 @@ def _draw_level_xp_panels(img, draw, data):
         # bar's outer end) -- per the reference. Small soft dot, nothing more.
         if 4 < fill_w < bar_w - 2:
             hx, hy = bar_x + fill_w - 4, bar_y + bar_h / 2
-            _draw_soft_dot(img, hx, hy, 5, (255, 235, 250, 200))
+            _draw_soft_dot(img, hx, hy, 5, (255, 235, 250, 170))
+            # The bright core is deliberately tiny and calculated from
+            # fill_w, so it is attached to the live progress endpoint.
+            draw.ellipse((hx - 1.5, hy - 1.5, hx + 1.5, hy + 1.5),
+                         fill=(255, 246, 252, 225))
     draw.text((bar_x + 6, bar_y + bar_h + 6), f"{frac * 100:.1f}% to next level",
               font=outfit(19), fill=COLORS["text_muted"])
 
@@ -1052,11 +1118,12 @@ def _draw_level_xp_panels(img, draw, data):
     potion = _draw_potion_icon(27)
     img.paste(potion, (int(div_x + 19), int(y + 42)), potion)
     total_txt = f"{data['xp_total']:,}"
-    tf2 = zilla_bold(38)
+    total_max_w = x + w - 14 - (div_x + 52)
+    tf2 = _font_to_fit(draw, zilla_bold, total_txt, 38, total_max_w / 0.72, min_size=19)
 
     def _total_painter(d):
         d.text((20, 20), total_txt, font=tf2, fill=(205, 200, 215))
-    _draw_condensed(img, (div_x + 52, y + 44), _total_painter, ratio=0.80)
+    _draw_condensed(img, (div_x + 52, y + 44), _total_painter, ratio=0.72)
 
 
 def _draw_gradient_bar(img, x, y, w, h, color_a, color_b):
@@ -1120,14 +1187,18 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
             gl = gl.filter(ImageFilter.GaussianBlur(3))
             img.alpha_composite(gl)
             img.paste(ic, (int(x + w / 2 - 17), y + 23), ic)
-        vf = zilla_bold(32)
-        vb = draw.textbbox((0, 0), value, font=vf)
-        nat_w = vb[2] - vb[0]
+        # Stats use one measured compact treatment.  Long live values reduce
+        # their complete font size to stay in the card; their characters are
+        # never additionally compressed just because a digit was added.
+        value_ratio = 0.85
+        vf = _font_to_fit(draw, zilla_bold, value, 32, (w - 20) / value_ratio,
+                          min_size=16)
+        nat_w = _text_size(draw, value, vf)[0]
 
         def _val_painter(d, _v=value, _f=vf):
             d.text((20, 20), _v, font=_f, fill=(215, 215, 222))
-        _draw_condensed(img, (x + w / 2 - nat_w * 0.72 / 2, y + 82), _val_painter,
-                        ratio=0.72)
+        _draw_condensed(img, (x + w / 2 - nat_w * value_ratio / 2, y + 82), _val_painter,
+                        ratio=value_ratio)
         lf = outfit(21, "Medium")
         lw_nat = _text_size(draw, label, lf, tracking=2)[0]
 
@@ -1177,8 +1248,11 @@ def _draw_inventory(img, draw, data, icons16, item_icons=None):
         col, row = i % cols, i // cols
         sx = ox + col * (sw + gx)
         sy = oy + row * (sh + gy)
-        draw.rounded_rectangle((sx, sy, sx + sw, sy + sh), radius=12,
-                               fill=(30, 24, 46, 170), outline=(*COLORS["accent"], 22), width=1)
+        # The reference retains visible 3×4 cells, but separates the empty
+        # inventory surfaces through a near-black fill and a low-alpha edge
+        # rather than a rigid bright outline.
+        _rounded_panel(img, draw, (sx, sy, sx + sw, sy + sh), radius=12,
+                       fill=(22, 15, 38, 150), outline=(*COLORS["accent"], 48), width=1)
         if i < len(items):
             icon_im = item_icons[i] if i < len(item_icons) else None
             _draw_inventory_item(img, draw, sx, sy, sw, sh, items[i], icon_im)
