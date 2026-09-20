@@ -57,19 +57,19 @@
             </div>
             <div class="form-group" id="item-prestige-tier-field" style="display:none;">
                 <label class="form-label">Prestige tier</label>
-                <select class="form-input" id="item-prestige-tier">
+                <select class="form-input" id="item-prestige-tier" onchange="toggleItemTypeFields()">
                     <option value="1">I</option>
                     <option value="2">II</option>
                     <option value="3">III</option>
                     <option value="4">IV</option>
                     <option value="5">V</option>
-                    <option value="6">VI — Booster-only</option>
+                    <option value="6">VI — Free · Booster-only</option>
                 </select>
                 <div class="form-hint">
-                    Purchasing resets the buyer's {{ currency.coins.name }} to 0. Must be the next
-                    sequential tier. Level/XP/{{ currency.diamonds.name }} untouched.
-                    Tier VI is Booster-only: it never becomes permanent — it stays
-                    effective only while the buyer keeps an active Server Boost.
+                    I–V: purchasing resets the buyer's {{ currency.coins.name }} to 0;
+                    the next sequential tier is required. Level/XP/{{ currency.diamonds.name }} untouched.
+                    VI: Free for active Boosters. No balance reset, stock, level or role requirement.
+                    Boost expiry removes VI; re-boosting requires another free activation.
                 </div>
             </div>
             <div class="form-group" id="item-role-field">
@@ -161,7 +161,9 @@
                             {{ item[2] or '—' }}
                         </td>
                         <td>
-                            {% if item[9] %}
+                            {% if item[0] in free_vi_ids %}
+                            Free
+                            {% elif item[9] %}
                             {{ currency_icon(currency.diamonds.emoji) }} {{ "{:,}".format(item[9]) }}
                             {% else %}
                             {{ currency_icon(currency.coins.emoji) }} {{ "{:,}".format(item[3]) }}
@@ -171,8 +173,11 @@
                             {{ item[4] }}{% if item[4] == 'xp_boost' and item[10] %} ({{ item[10] }}x){% endif %}
                         </td>
                         <td>
-                            {{ item[6]|string + 'h'
-                               if item[6] else 'Permanent' }}
+                            {% if item[0] in free_vi_ids %}
+                            While boosting; activation required
+                            {% else %}
+                            {{ item[6]|string + 'h' if item[6] else 'Permanent' }}
+                            {% endif %}
                         </td>
                         <td>
                             <span class="badge
@@ -283,6 +288,30 @@ switchTab('items');
 // field instead of a role ID, and their "duration" means "how long
 // the boost lasts" rather than "how long until the role is removed" —
 // same underlying duration_hours column, different label/meaning.
+function isFreeVI() {
+    return document.getElementById('item-type').value === 'prestige' &&
+           document.getElementById('item-prestige-tier').value === '6';
+}
+function applyFreeVIFields() {
+    const free = isFreeVI();
+    for (const id of ['item-price', 'item-price-diamonds', 'item-stock', 'item-level', 'item-duration']) {
+        const input = document.getElementById(id);
+        if (free && !input.disabled) {
+            input.dataset.paidValue = input.value;
+            input.value = '0';
+        } else if (!free && input.disabled) {
+            input.value = input.dataset.paidValue || '';
+        }
+        input.disabled = free;
+    }
+    document.getElementById('item-price').min =
+        document.getElementById('item-type').value === 'prestige' && !free ? '1' : '0';
+    if (free) {
+        document.getElementById('item-duration-label').textContent = 'VI: Free while boosting';
+        document.getElementById('item-duration-hint').textContent =
+            'No stock, level or role requirement. Boost expiry removes VI; activate again for Free after re-boosting.';
+    }
+}
 function toggleItemTypeFields() {
     const type = document.getElementById('item-type').value;
     const roleField  = document.getElementById('item-role-field');
@@ -322,6 +351,7 @@ function toggleItemTypeFields() {
         durLabel.textContent = 'Duration hours (0 = permanent)';
         durHint.textContent = '';
     }
+    applyFreeVIFields();
 }
 toggleItemTypeFields();
 
@@ -359,7 +389,16 @@ async function addItem() {
         max_stock:     stock > 0 ? stock : null,
         current_stock: stock > 0 ? stock : null,
     };
-    if (!payload.name || (!payload.price && !payload.price_diamonds)) {
+    const freeVI = isFreeVI();
+    if (freeVI) {
+        payload.price = 0;
+        payload.price_diamonds = null;
+        payload.max_stock = null;
+        payload.current_stock = null;
+        payload.required_level = 0;
+        payload.duration_hours = null;
+    }
+    if (!payload.name || (!freeVI && !payload.price && !payload.price_diamonds)) {
         showToast('Enter name and a coin or diamond price', 'danger');
         return;
     }
@@ -379,7 +418,7 @@ async function addItem() {
             showToast(`Prestige is purchased with ${currencyNameFor('coins')} — do not set a ${currencyNameFor('diamonds')} price`, 'danger');
             return;
         }
-        if (!payload.price || payload.price <= 0) {
+        if (!freeVI && (!payload.price || payload.price <= 0)) {
             showToast(`Prestige items need a ${currencyNameFor('coins')} price (the minimum ${currencyNameFor('coins')} required)`, 'danger');
             return;
         }

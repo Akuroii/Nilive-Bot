@@ -283,61 +283,6 @@ class Leveling(commands.Cog):
             print(f"[VOICE XP] Error for member {member.id} in "
                   f"guild {guild.id}: {e}")
 
-    # ─── LEADERBOARD RESET TASK (Phase 5 / Leveling expansion) ─────
-    # Mirrors cogs/mvp.py's mvp_cycle_task pattern: poll every 30
-    # minutes, compare elapsed time against a stored last_reset per
-    # guild, only act once the configured period has actually passed.
-    # Each guild is isolated in its own try/except so one bad row
-    # can't stop the loop from checking the rest — same defensive
-    # pattern used throughout (shop temp_role_cleanup,
-    # reactionroles expiry_check, moderation scheduled_unban_check).
-    @tasks.loop(minutes=30)
-    async def leaderboard_reset_task(self):
-        now = datetime.now(timezone.utc)
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT guild_id, period, last_reset
-                FROM leveling_reset_config WHERE enabled = 1
-            """)
-            configs = await cursor.fetchall()
-
-        for guild_id, period, last_reset in configs:
-            try:
-                if last_reset:
-                    last_dt = datetime.fromisoformat(last_reset)
-                    if last_dt.tzinfo is None:
-                        last_dt = last_dt.replace(tzinfo=timezone.utc)
-                    elapsed_hours = (now - last_dt).total_seconds() / 3600
-                    if elapsed_hours < _period_hours(period):
-                        continue
-
-                count = await perform_leaderboard_reset(guild_id, period)
-                print(f"[LEVELING RESET] guild={guild_id} period={period} "
-                      f"reset {count} members")
-
-                guild = self.bot.get_guild(guild_id)
-                config = await get_leveling_config(guild_id)
-                channel_id = config.get("levelup_channel_id")
-                if guild and channel_id:
-                    channel = guild.get_channel(int(channel_id))
-                    if channel:
-                        embed = discord.Embed(
-                            title="🔄 Leaderboard Reset",
-                            description=(f"The {period} leaderboard has reset! "
-                                         f"Last cycle's standings are archived — "
-                                         f"everyone starts fresh."),
-                            color=0x7c5cbf)
-                        try:
-                            await channel.send(embed=embed)
-                        except Exception:
-                            pass
-            except Exception as e:
-                print(f"[LEVELING RESET] Error for guild {guild_id}: {e}")
-
-    @leaderboard_reset_task.before_loop
-    async def before_reset_task(self):
-        await self.bot.wait_until_ready()
-
     # ─── RANK COMMAND (Pillow Image Card) ───────────────
     @app_commands.command(name="rank",
                           description="View your rank card")
@@ -483,7 +428,7 @@ class Leveling(commands.Cog):
             name   = member.display_name if member else f"User {uid}"
             eff    = await get_effective_prestige(
                 interaction.guild.id, uid,
-                is_booster=is_booster(member) if member else False)
+                member=member, bot=self.bot)
             if eff > 0:
                 name = f"★{tier_label(eff)} {name}"
             embed.add_field(
@@ -565,10 +510,10 @@ class Leveling(commands.Cog):
     # ─── PRESTIGE STATE / READ-ONLY VIEW ─────────────────
     # The old XP/level-gated "/prestige reset" command has been retired
     # (the finalized Prestige system is Shop-purchased and never resets
-    # XP/Level). This read-only command shows the member's current
+    # XP/Level). This status command shows the member's current
     # Prestige: their permanent tier and their effective tier (which is
-    # VI while they are an active Discord Booster). It performs no writes
-    # and grants nothing.
+    # VI only with a valid activation and an active Discord boost).
+    # It grants nothing; verified expiry may remove a stale VI activation.
     @app_commands.command(name="prestige",
                           description="View your Prestige state")
     async def prestige(self, interaction: discord.Interaction):
@@ -581,7 +526,7 @@ class Leveling(commands.Cog):
             interaction.guild.id, interaction.user.id)
         booster = is_booster(interaction.user)
         effective = await get_effective_prestige(
-            interaction.guild.id, interaction.user.id, is_booster=booster)
+            interaction.guild.id, interaction.user.id, member=interaction.user)
 
         embed = discord.Embed(
             title="⭐ Prestige",
@@ -595,13 +540,24 @@ class Leveling(commands.Cog):
             name="Effective Prestige",
             value=f"**{tier_label(effective)}**",
             inline=False)
-        if booster:
-            embed.add_field(
-                name="Booster bonus",
-                value=("You're an active Discord Booster — you get "
-                       "effective Prestige VI. When the boost ends you "
-                       "return to your permanent Prestige."),
-                inline=False)
+        if booster and effective == 6:
+            explanation = (
+                "Your free Prestige VI activation is active while you boost. "
+                "When boosting ends, VI activation is removed and you return to "
+                f"permanent Prestige {tier_label(permanent)}. After re-boosting, "
+                "activate again for Free; VI does not return automatically.")
+        elif booster:
+            explanation = (
+                "You're eligible for free Prestige VI activation in the Shop. "
+                "Booster status alone does not activate VI. After re-boosting, "
+                "activate again for Free; old VI activations do not return automatically.")
+        else:
+            explanation = (
+                "Only active Discord Boosters can activate Prestige VI, for Free. "
+                "When a boost ends, VI has ended and its activation is removed. "
+                f"Your effective Prestige is your permanent Prestige {tier_label(permanent)}. "
+                "If you boost again, activate VI again for Free; it does not return automatically.")
+        embed.add_field(name="Booster Prestige VI", value=explanation, inline=False)
         await interaction.followup.send(embed=embed)
 
 

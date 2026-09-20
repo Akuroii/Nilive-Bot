@@ -624,7 +624,7 @@ class CommandAliases(commands.Cog):
         """
 
         async def gate(ctx: commands.Context) -> bool:
-            from main import _command_cooldowns, _prune_command_cooldowns
+            from utils.command_gating import _command_cooldowns, _prune_command_cooldowns
 
             now = time.time()
             allowed, msg = await check_command_toggles(

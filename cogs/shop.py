@@ -91,7 +91,7 @@ async def process_purchase(interaction: discord.Interaction,
             SELECT id, name, price, type, role_id,
                    duration_hours, required_level,
                    required_role_id, enabled,
-                   max_stock, current_stock, price_diamonds,
+                   price_diamonds,
                    xp_boost_multiplier, prestige_tier
             FROM shop_items
             WHERE id = ? AND guild_id = ? AND enabled = 1
@@ -104,8 +104,64 @@ async def process_purchase(interaction: discord.Interaction,
         return
 
     (iid, name, price, itype, role_id, duration_hours,
-     req_level, req_role_id, enabled, max_stock, curr_stock,
+     req_level, req_role_id, enabled,
      price_diamonds, xp_boost_multiplier, prestige_tier) = item
+
+    # ── Prestige VI: Booster-only shop tier ────────────────────
+    # Never written to levels.prestige; activation lives in
+    # prestige_vi_activations and is only effective while boosting.
+    # Server-side gate: the disabled button for non-boosters is UX,
+    # this check is the actual enforcement.
+    if itype == "prestige" and prestige_tier == 6:
+        from utils.prestige import (
+            activate_booster_prestige, PrestigeError, tier_label,
+            sync_prestige_roles, is_booster,
+        )
+        if not is_booster(interaction.user):
+            await interaction.response.send_message(
+                "Prestige VI is a Booster-only tier.", ephemeral=True)
+            return
+        try:
+            result = await activate_booster_prestige(
+                guild_id, user_id, price,
+                item_name=name, item_id=iid,
+                display_name=interaction.user.display_name,
+                bot=interaction.client,
+            )
+        except PrestigeError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        try:
+            await sync_prestige_roles(
+                interaction.client, interaction.guild, interaction.user)
+        except Exception as e:
+            print(f"[SHOP] Prestige VI role sync failed: {e}")
+        embed = discord.Embed(
+            title="⭐ Prestige VI Active",
+            description=(
+                f"{interaction.user.mention} activated **Prestige "
+                f"{tier_label(6)}** for **Free** (Booster). No Coins were changed."),
+            color=0xFFD700)
+        embed.add_field(
+            name="While boosting",
+            value="Prestige VI stays active as long as your Server "
+                  "Boost lasts; when it ends you return to your "
+                  "permanent Prestige and VI activation is removed. "
+                  "After re-boosting, activate again for Free.",
+            inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+
+    if itype == "prestige":
+        from utils.shop_validation import integer, ShopValidationError
+        try:
+            req_level = integer(req_level if req_level is not None else 0, "Required level")
+            if req_role_id not in (None, "", 0):
+                req_role_id = integer(req_role_id, "Required role", minimum=1)
+        except ShopValidationError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
 
     # Phase 5 / Economy v2: an item is diamond-priced when
     # price_diamonds is set (nullable column — see database.py
@@ -191,54 +247,11 @@ async def process_purchase(interaction: discord.Interaction,
                 f"price. Ask an admin to fix it.",
                 ephemeral=True)
             return
-        if not prestige_tier or int(prestige_tier) not in (1, 2, 3, 4, 5, 6):
-            await interaction.response.send_message(
-                "This Prestige item isn't configured correctly (missing or "
-                "invalid tier). Ask an admin to fix it.", ephemeral=True)
-            return
-
-        # ── Prestige VI: Booster-only shop tier ────────────────────
-        # Never written to levels.prestige; activation lives in
-        # prestige_vi_activations and is only effective while boosting.
-        # Server-side gate: the disabled button for non-boosters is UX,
-        # this check is the actual enforcement.
-        if int(prestige_tier) == 6:
-            from utils.prestige import (
-                activate_booster_prestige, PrestigeError, tier_label,
-                sync_prestige_roles, is_booster,
-            )
-            if not is_booster(interaction.user):
-                await interaction.response.send_message(
-                    "Prestige VI is a Booster-only tier.", ephemeral=True)
-                return
-            try:
-                result = await activate_booster_prestige(
-                    guild_id, user_id, price,
-                    item_name=name, item_id=iid,
-                    display_name=interaction.user.display_name,
-                    is_booster=True,
-                )
-            except PrestigeError as e:
-                await interaction.response.send_message(str(e), ephemeral=True)
-                return
-            try:
-                await sync_prestige_roles(
-                    interaction.client, interaction.guild, interaction.user)
-            except Exception as e:
-                print(f"[SHOP] Prestige VI role sync failed: {e}")
-            embed = discord.Embed(
-                title="⭐ Prestige VI Active",
-                description=(
-                    f"{interaction.user.mention} activated **Prestige "
-                    f"{tier_label(6)}** (Booster)."),
-                color=0xFFD700)
-            embed.add_field(
-                name="While boosting",
-                value="Prestige VI stays active as long as your Server "
-                      "Boost lasts; when it ends you return to your "
-                      "permanent Prestige.",
-                inline=False)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        from utils.shop_validation import prestige_terms, ShopValidationError
+        try:
+            price, prestige_tier = prestige_terms(price, prestige_tier, price_diamonds)
+        except ShopValidationError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
             return
 
         from utils.prestige import (
@@ -283,6 +296,18 @@ async def process_purchase(interaction: discord.Interaction,
                    f"{cur['diamonds']['emoji']} {cur['diamonds']['name']} are safe."),
             inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        stock_row = await (await db.execute(
+            "SELECT max_stock,current_stock FROM shop_items WHERE id=? AND guild_id=?",
+            (iid, guild_id))).fetchone()
+    if stock_row is None:
+        await interaction.response.send_message("Item not found.", ephemeral=True)
+        return
+    max_stock, curr_stock = stock_row
+    if pay_amount is None or not isinstance(pay_amount, int) or pay_amount <= 0:
+        await interaction.response.send_message("Paid Shop items require a positive price.", ephemeral=True)
         return
 
     # P1 #11 FIX: previously stock and balance were checked with
@@ -575,7 +600,9 @@ class Shop(commands.Cog):
             cursor = await db.execute("""
                 SELECT id, name, description, price,
                        type, duration_hours, featured,
-                       required_level, max_stock, current_stock,
+                       CASE WHEN type='prestige' AND prestige_tier=6 THEN 0 ELSE required_level END,
+                       CASE WHEN type='prestige' AND prestige_tier=6 THEN NULL ELSE max_stock END,
+                       CASE WHEN type='prestige' AND prestige_tier=6 THEN NULL ELSE current_stock END,
                        price_diamonds, xp_boost_multiplier, prestige_tier
                 FROM shop_items
                 WHERE guild_id = ? AND enabled = 1
@@ -597,8 +624,9 @@ class Shop(commands.Cog):
         for (iid, name, desc, price, itype,
              dur, featured, req_lvl, max_s, curr_s,
              price_diamonds, boost_mult, prestige_tier) in items:
+            vi = itype == "prestige" and prestige_tier == 6
             stock_info = ""
-            if max_s:
+            if not vi and max_s:
                 stock_info = (f" • {curr_s or 0}/{max_s} left"
                               if curr_s else " • **Out of stock**")
             if itype == "xp_boost" and boost_mult:
@@ -611,7 +639,7 @@ class Shop(commands.Cog):
             else:
                 dur_info = f" • {dur}h temp" if dur else ""
             lvl_info  = f" • Req. Level {req_lvl}" if req_lvl else ""
-            price_str = (f"{price_diamonds:,} {cd['emoji']}" if price_diamonds
+            price_str = "Free" if vi else (f"{price_diamonds:,} {cd['emoji']}" if price_diamonds
                          else f"{price:,} {cc['emoji']} {cc['name']}")
             embed.add_field(
                 name=f"{'⭐ ' if featured else ''}{name} — {price_str}",
@@ -622,10 +650,11 @@ class Shop(commands.Cog):
         for (iid, name, desc, price, itype,
              dur, featured, req_lvl, max_s, curr_s,
              price_diamonds, boost_mult, prestige_tier) in items[:5]:
-            if max_s and not curr_s:
+            vi = itype == "prestige" and prestige_tier == 6
+            if not vi and max_s and not curr_s:
                 continue
             btn = discord.ui.Button(
-                label=f"Buy {name}",
+                label=f"Activate {name} — Free" if vi else f"Buy {name}",
                 style=discord.ButtonStyle.green,
                 custom_id=f"shop_buy_{iid}")
             if (itype == "prestige" and prestige_tier

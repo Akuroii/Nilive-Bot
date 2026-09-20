@@ -94,7 +94,7 @@ async def get_rank_card_data(guild_id: int, user_id: int,
     # longer implies VI.
     booster_flag = _is_booster(member) if member is not None else False
     effective_prestige = await get_effective_prestige(
-        guild_id, user_id, is_booster=booster_flag)
+        guild_id, user_id, member=member)
 
     equipped = await get_equipped(guild_id, user_id)
 

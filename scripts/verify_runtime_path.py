@@ -51,7 +51,7 @@ os.environ["DASHBOARD_DEMO_GUILD_ID"] = "777"
 GUILD = 777
 USER = 424242          # /rank target (also the dashboard admin)
 BUYER = 555            # shop buyer
-VI_PRICE = 100000
+VI_PRICE = 0
 
 FAILURES = []
 
@@ -102,10 +102,13 @@ class MockFollowup:
 
 
 def mock_interaction(guild_id, member):
+    # Purchases now require member context from the actual bot/guild boundary,
+    # not a caller-supplied booster flag. Model that boundary in this fixture.
+    guild = SimpleNamespace(id=guild_id, get_member=lambda uid: member if uid == member.id else None)
     return SimpleNamespace(
-        guild=SimpleNamespace(id=guild_id),
+        guild=guild,
         user=member,
-        client=SimpleNamespace(),
+        client=SimpleNamespace(get_guild=lambda gid: guild if gid == guild_id else None),
         response=MockResponse(),
         followup=MockFollowup(),
     )
@@ -130,8 +133,8 @@ def section_dashboard():
     html = c.get("/shop").get_data(as_text=True)
     check("shop page offers tier 6", 'value="6"' in html,
           "GET /shop HTML contains <option value=\"6\">")
-    check("shop page labels VI", "VI — Booster-only" in html,
-          "GET /shop HTML labels the option 'VI — Booster-only'")
+    check("shop page labels VI", "VI — Free · Booster-only" in html,
+          "GET /shop HTML labels the option 'VI — Free · Booster-only'")
 
     with c.session_transaction() as s:
         csrf = s.get("csrf_token")
@@ -192,6 +195,7 @@ async def section_bot_rank():
     from PIL import Image
 
     await init_db()
+    await main_mod.bot._async_setup_hook()  # initialise local readiness; never log in
     await main_mod.load_cogs()          # the exact startup path of main.py
 
     cmd = main_mod.bot.tree.get_command("rank")
@@ -254,7 +258,7 @@ async def section_bot_rank():
     itx_vi = await invoke(mock_member(USER, "Shadow", booster=True))
     png_vi = itx_vi.followup.sent[0]["file"].fp.read()
 
-    # 2c. boost expired (activation row still present) -> permanent tier again
+    # 2c. verified expiry removes activation and returns to permanent tier
     data = await get_rank_card_data(GUILD, USER,
                                     member=mock_member(USER, "Shadow", False))
     check("expiry returns to permanent", data["effective_prestige"] == 4,
@@ -264,10 +268,18 @@ async def section_bot_rank():
 
     check("VI card differs from non-VI", png_vi != png_exp,
           "booster-VI render != post-expiry render (bytes differ)")
-    check("re-boost renders VI again",
+    check("re-boost does NOT restore VI",
           (await invoke(mock_member(USER, "Shadow", booster=True))
-           ).followup.sent[0]["file"].fp.read() == png_vi,
-          "same activation row + new boost reproduces the VI card")
+           ).followup.sent[0]["file"].fp.read() == png_exp,
+          "new boost without new activation stays at permanent tier")
+    from cogs.shop import process_purchase
+    async with aiosqlite.connect(DB_PATH) as db:
+        item = await (await db.execute("SELECT id FROM shop_items WHERE prestige_tier=6 AND guild_id=?",
+                                       (GUILD,))).fetchone()
+    await process_purchase(mock_interaction(GUILD, mock_member(USER, "Shadow", True)), item[0])
+    check("new free activation restores VI",
+          (await invoke(mock_member(USER, "Shadow", True))).followup.sent[0]["file"].fp.read() == png_vi,
+          "explicit free activation is required after re-boost")
 
     # save artifacts for eyeballing
     for name, blob in (("verify_rank_normal.png", png),
@@ -276,6 +288,8 @@ async def section_bot_rank():
         with open(os.path.join(TMP, name), "wb") as fh:
             fh.write(blob)
     print(f"  [info] card artifacts written to {TMP}")
+    await main_mod.bot.close()
+    await asyncio.sleep(0)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -327,15 +341,15 @@ async def section_bot_shop(item_id):
                    "AND user_id=?", (GUILD, BUYER))
     check("activation persisted", len(rows) == 1,
           "prestige_vi_activations row exists for buyer")
-    check("balance reset to 0 by purchase", await balance() == 0,
+    check("free VI preserves balance", await balance() == 150000,
           f"balance after purchase = {await balance()} "
-          "(price acts as minimum; reset to 0 like Prestige I-V)")
+          "(VI is free; no coin mutation)")
     rows = await q("SELECT item_name, price_paid FROM purchase_history "
                    "WHERE guild_id=? AND user_id=?", (GUILD, BUYER))
     check("purchase history logged",
-          any(r[0] == "Prestige VI" and r[1] == 150000 for r in rows),
+          any(r[0] == "Prestige VI" and r[1] == 0 for r in rows),
           f"purchase_history: {rows} "
-          "(price_paid = whole pre-purchase balance, as for I-V)")
+          "(zero-value activation receipt, not a financial debit)")
     rows = await q("SELECT prestige FROM levels WHERE guild_id=? AND user_id=?",
                    (GUILD, BUYER))
     check("permanent tier untouched", rows[0][0] == 3,
@@ -345,11 +359,11 @@ async def section_bot_shop(item_id):
     itx = mock_interaction(GUILD, mock_member(BUYER, "Muffin", booster=True))
     await process_purchase(itx, item_id)
     msg = itx.response.messages[0]["content"]
-    check("re-purchase rejected", "already active" in msg, f"reply: {msg!r}")
+    check("re-purchase rejected", "already activated" in msg, f"reply: {msg!r}")
 
     # 3d. effective tier follows boost status
-    eff_boost = await get_effective_prestige(GUILD, BUYER, is_booster=True)
-    eff_unboost = await get_effective_prestige(GUILD, BUYER, is_booster=False)
+    eff_boost = await get_effective_prestige(GUILD, BUYER, member=mock_member(BUYER, "Muffin", True))
+    eff_unboost = await get_effective_prestige(GUILD, BUYER, member=mock_member(BUYER, "Muffin", False))
     check("effective tier semantics",
           eff_boost == 6 and eff_unboost == 3,
           f"boosting -> {eff_boost}, not boosting -> {eff_unboost}")

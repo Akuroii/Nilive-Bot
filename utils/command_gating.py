@@ -6,7 +6,7 @@ Single implementation on purpose. Before this existed there were two copies —
 they had already started to drift (only the slash path pruned the cooldown
 dict). Two copies of a security-relevant check is how "works as a slash
 command, silently unrestricted as an alias" bugs happen, so both paths now call
-in here and share one cooldown dict (``main._command_cooldowns``), keyed the
+in here and share one cooldown dict (owned by this module), keyed the
 same way, so ``/kick`` and ``k`` rate-limit together.
 
 No discord.py import is required at runtime here (only for typing), so both the
@@ -22,6 +22,35 @@ from typing import Any, Dict, Optional, Tuple
 import aiosqlite
 
 from database import DB_PATH
+
+_command_cooldowns: dict[tuple, float] = {}
+
+# MEMORY LEAK FIX (dark-fixes pass #11): _command_cooldowns is a
+# module-level dict written every time a rate-limited slash command
+# is used (see NeroCommandTree.interaction_check in main.py), and nothing
+# ever removed old entries — one permanent
+# (guild_id, user_id, command_name) entry accumulated forever for
+# every distinct combination that ever hit a cooldown-gated command,
+# for the lifetime of the process. Flagged as a low-priority slow
+# leak across several prior passes and deliberately left alone each
+# time. Cleared now the same way as the equivalent fix in
+# cogs/economy.py and cogs/triggers.py this pass: prune
+# opportunistically once the dict has grown large, dropping anything
+# stale enough that no realistically-configured cooldown could still
+# be watching it (cooldown_seconds is dashboard-configured in
+# seconds/minutes via the Commands page, never days).
+_COOLDOWN_PRUNE_THRESHOLD = 5000
+_COOLDOWN_MAX_AGE_SECONDS = 24 * 60 * 60
+
+
+def _prune_command_cooldowns(now: float) -> None:
+    if len(_command_cooldowns) < _COOLDOWN_PRUNE_THRESHOLD:
+        return
+    cutoff = now - _COOLDOWN_MAX_AGE_SECONDS
+    stale = [k for k, ts in _command_cooldowns.items() if ts < cutoff]
+    for k in stale:
+        del _command_cooldowns[k]
+
 
 TOGGLE_SELECT = """
     SELECT enabled, allowed_roles, allowed_channels, owner_only,

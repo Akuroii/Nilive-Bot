@@ -331,7 +331,10 @@ def shop_items_partial():
         price_diamonds = r[9]
         # Price badge uses the guild's configured icon for whichever
         # currency the item is priced in.
-        price_str = (f"{_gem_icon} {price_diamonds:,}"
+        vi = r[4] == "prestige" and r[12] == 6
+        if vi:
+            dur = "While boosting; activation required"
+        price_str = "Free" if vi else (f"{_gem_icon} {price_diamonds:,}"
                      if price_diamonds else f"{_coin_icon} {r[3]:,}")
         rarity = r[11] or "common"
         rarity_class = RARITY_BADGE.get(rarity, "badge")
@@ -394,78 +397,21 @@ def delete_shop_item(item_id: int):
 @require_api_permission(LEVEL_ADMIN)
 def add_shop_item():
     guild_id = get_session_guild_id()
-    data     = request.json or request.form.to_dict()
-
-    max_stock_val = data.get("max_stock")
+    from utils.shop_validation import shop_input, ShopValidationError
+    raw = request.get_json(silent=True) if request.is_json else request.form.to_dict()
     try:
-        max_stock_val = int(max_stock_val) if max_stock_val not in (None, "", 0, "0") else None
-    except (TypeError, ValueError):
-        max_stock_val = None
-    current_stock_val = max_stock_val  # a brand-new item starts full
+        data = shop_input(raw)
+    except ShopValidationError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
 
-    price_diamonds_val = data.get("price_diamonds")
-    try:
-        price_diamonds_val = (
-            int(price_diamonds_val)
-            if price_diamonds_val not in (None, "", 0, "0") else None)
-    except (TypeError, ValueError):
-        price_diamonds_val = None
-
-    price_val = int(data.get("price", 0) or 0)
-    item_name = data.get("name")
-    icon_url  = (data.get("icon_url") or "").strip() or None
-
-    # Finalized Prestige: a shop item of type='prestige' carries the
-    # permanent tier (1..5) it grants. Must be coins-priced; a diamond
-    # price is rejected by the backend at purchase time.
-    prestige_tier_val = data.get("prestige_tier")
-    try:
-        prestige_tier_val = (
-            int(prestige_tier_val)
-            if prestige_tier_val not in (None, "", 0, "0") else None)
-    except (TypeError, ValueError):
-        prestige_tier_val = None
-    if prestige_tier_val is not None and prestige_tier_val not in (1, 2, 3, 4, 5, 6):
-        return jsonify({"success": False,
-                        "error": "Prestige tier must be 1–6"})
-    # Finalized Prestige: Prestige is Coins-only. The UI guards this, but the
-    # API must reject a `prestige` item carrying a diamond price server-side
-    # (the purchase path in cogs/shop.py also rejects it at buy time).
-    if (data.get("type") or "role") == "prestige" and price_diamonds_val:
-        return jsonify({"success": False,
-                        "error": "Prestige items are purchased with Coins and "
-                                 "cannot have a diamond price."})
-
-    # Wallet pass: a potion is delivered into the buyer's inventory and
-    # applies its effect only when used, so an unusable one is worse
-    # than a refused save — the member discovers it's broken only after
-    # paying. It reuses xp_boost_multiplier + duration_hours (no new
-    # columns), and both are required here, mirroring the same check
-    # cogs/shop.py performs at purchase time. Titles need no extra
-    # validation: name + icon + rarity is the whole item.
-    item_type_val = (data.get("type") or "role")
-    try:
-        xp_boost_multiplier_val = (
-            float(data.get("xp_boost_multiplier"))
-            if data.get("xp_boost_multiplier") not in (None, "", 0, "0")
-            else None)
-    except (TypeError, ValueError):
-        xp_boost_multiplier_val = None
-
-    if item_type_val == "potion":
-        potion_mult = xp_boost_multiplier_val or 0.0
-        try:
-            potion_hours = int(data.get("duration_hours") or 0)
-        except (TypeError, ValueError):
-            potion_hours = 0
-        if potion_mult <= 1.0:
-            return jsonify({"success": False,
-                            "error": "Potions need an effect multiplier "
-                                     "greater than 1."})
-        if potion_hours <= 0:
-            return jsonify({"success": False,
-                            "error": "Potions need an effect duration in "
-                                     "hours."})
+    max_stock_val = data["max_stock"]
+    current_stock_val = max_stock_val
+    price_diamonds_val = data["price_diamonds"]
+    price_val = data["price"]
+    item_name = data["name"]
+    icon_url = data["icon_url"] or None
+    prestige_tier_val = data["prestige_tier"]
+    xp_boost_multiplier_val = data["xp_boost_multiplier"]
 
     # Rank Card foundation: rarity is admin-set at creation time,
     # same place price/icon are already captured. Falls back to
@@ -553,7 +499,7 @@ def shop_purchase_history():
     _gem_icon = _currency_icon_html(_cur['diamonds']['emoji'])
     html = ""
     for r in rows:
-        exp   = r[4][:10] if r[4] else "Permanent"
+        exp = r[4][:10] if r[4] else ("—" if r[2] == 0 else "Permanent")
         # 'currency_paid' stores the stable key; the glyph comes from the
         # guild's configured icon for that key.
         currency_icon = (_gem_icon
@@ -566,7 +512,7 @@ def shop_purchase_history():
             f"<tr>"
             f"<td>{_esc(r[0])}</td>"
             f"<td><strong>{_esc(r[1])}</strong></td>"
-            f"<td>{currency_icon} {r[2]:,}</td>"
+            f"<td>{'Free' if r[2] == 0 else f'{currency_icon} {r[2]:,}'}</td>"
             f"<td class='text-muted'>{str(r[3])[:10] if r[3] else '—'}</td>"
             f"<td class='text-muted'>{exp}</td>"
             f"</tr>"
