@@ -1215,7 +1215,7 @@ def shop():
             cursor = await db.execute("""
                 SELECT id, name, description, price, type,
                        role_id, duration_hours, featured, enabled,
-                       price_diamonds
+                       price_diamonds, prestige_tier
                 FROM shop_items WHERE guild_id=?
                 ORDER BY featured DESC, created_at DESC
             """, (guild_id,))
@@ -1223,7 +1223,9 @@ def shop():
 
     items = run_async(get_items())
     ctx   = get_current_user_context()
-    return render("systems/shop.html", items=items, **ctx)
+    free_vi_ids = {row[0] for row in items if row[4] == "prestige" and row[-1] == 6}
+    return render("systems/shop.html", items=[row[:-1] for row in items],
+                  free_vi_ids=free_vi_ids, **ctx)
 
 
 # ── Events ─────────────────────────────────────────────────────────────────────

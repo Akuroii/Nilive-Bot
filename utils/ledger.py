@@ -19,22 +19,33 @@ async def log_transaction(guild_id: int, user_id: int, currency: str,
                            amount: int, balance_after: int | None,
                            type: str, reason: str = None,
                            source: str = "system",
-                           related_user_id: int = None) -> int:
+                           related_user_id: int = None, *,
+                           db: aiosqlite.Connection | None = None) -> int:
+    """Write a ledger row; an optional caller-owned transaction is not committed.
+
+    Existing callers retain the standalone connection/commit behavior.
+    """
     if currency not in VALID_CURRENCIES:
         raise LedgerError(f"Unknown currency: {currency!r}")
     if type not in VALID_TYPES:
         raise LedgerError(f"Unknown transaction type: {type!r}")
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
+    async def insert(connection):
+        cursor = await connection.execute("""
             INSERT INTO transaction_ledger
                 (guild_id, user_id, currency, amount, balance_after,
                  type, reason, source, related_user_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (guild_id, user_id, currency, int(amount),
               balance_after, type, reason, source, related_user_id))
-        await db.commit()
         return cursor.lastrowid
+
+    if db is not None:
+        return await insert(db)
+    async with aiosqlite.connect(DB_PATH) as connection:
+        row_id = await insert(connection)
+        await connection.commit()
+        return row_id
 
 
 async def get_user_ledger(guild_id: int, user_id: int,

@@ -295,7 +295,7 @@ async def check_and_award_level_currency_rewards(bot, member, guild_id: int,
         try:
             from utils.prestige import get_prestige_earn_multiplier, is_booster
             mult = await get_prestige_earn_multiplier(
-                guild_id, member.id, currency, is_booster=is_booster(member))
+                guild_id, member.id, currency, member=member)
         except Exception as e:
             print(f"[PRESTIGE] level reward multiplier lookup failed; "
                   f"granting raw (guild={guild_id} user={member.id}): {e}")

@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import aiosqlite
 from database import DB_PATH
+from datetime import datetime, timezone
 from utils.permissions import check_bot_role_position
 from utils.formatters import now_iso
 from utils.emoji import CHECK_EMOJI
@@ -48,9 +49,60 @@ class Boost(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    async def _reconcile_prestige(self, member):
+        from utils.prestige import sync_prestige_roles, get_effective_prestige
+        # Core VI expiry is independent of optional boost/reaction/color roles.
+        effective = await get_effective_prestige(member.guild.id, member.id, member=member)
+        await sync_prestige_roles(self.bot, member.guild, member, effective_tier=effective)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        from utils.prestige import _resolve_member, expire_vi_activation
+        async with aiosqlite.connect(DB_PATH) as db:
+            pairs = set(await (await db.execute(
+                "SELECT guild_id,user_id FROM prestige_vi_activations")).fetchall())
+            roles = await (await db.execute(
+                "SELECT guild_id,role_id FROM prestige_roles WHERE tier=6")).fetchall()
+        # Also retry stale cosmetic roles even if core activation was already deleted.
+        for guild_id, role_id in roles:
+            guild = self.bot.get_guild(guild_id)
+            role = guild.get_role(role_id) if guild else None
+            for member in getattr(role, "members", ()):
+                pairs.add((guild_id, member.id))
+        for guild_id, user_id in pairs:
+            try:
+                observed_at = datetime.now(timezone.utc)
+                try:
+                    member = await _resolve_member(self.bot, guild_id, user_id, raise_not_found=True)
+                except discord.NotFound:
+                    await expire_vi_activation(guild_id, user_id, before=observed_at)
+                    continue
+                if member is not None:
+                    await self._reconcile_prestige(member)
+            except Exception as exc:
+                print(f"[BOOST] VI reconnect reconciliation failed: {exc}")
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member):
+        from utils.prestige import expire_vi_activation, _resolve_member
+        observed_at = datetime.now(timezone.utc)
+        # A queued departure may predate a rejoin/activation, even with an
+        # empty cache. Confirm absence via fetch; failure is not evidence.
+        try:
+            current = await _resolve_member(
+                self.bot, member.guild.id, member.id, raise_not_found=True)
+        except discord.NotFound:
+            await expire_vi_activation(member.guild.id, member.id, before=observed_at)
+            return
+        if current is not None:
+            await self._reconcile_prestige(current)
+
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         guild  = after.guild
+        if before.premium_since != after.premium_since:
+            current = guild.get_member(after.id) or after
+            await self._reconcile_prestige(current)
         config = await get_boost_config(guild.id)
         if not config or not config.get("enabled", 1):
             return
@@ -78,17 +130,6 @@ class Boost(commands.Cog):
         boost_count = getattr(member, "premium_subscription_count", 1) or 1
         if boost_count >= 2:
             await self._give_role(guild, member, boost2_id)
-
-        # Booster-only Prestige VI: a new boost makes the member
-        # ELIGIBLE for the VI shop entry; effective VI (and the cosmetic
-        # tier-VI role) additionally requires the shop activation, so let
-        # sync_prestige_roles compute the true effective tier instead of
-        # assuming VI. Never touches Coins/XP/Level.
-        try:
-            from utils.prestige import sync_prestige_roles
-            await sync_prestige_roles(self.bot, guild, member)
-        except Exception as e:
-            print(f"[BOOST] Prestige role sync (new boost) failed: {e}")
 
         if channel_id:
             channel = guild.get_channel(int(channel_id))
@@ -145,18 +186,6 @@ class Boost(commands.Cog):
                     await member.remove_roles(role, reason="Boost ended")
                 except Exception:
                     pass
-
-        # Finalized Prestige: when the boost ends, effective Prestige
-        # returns to the permanent tier (never VI). Sync the configured
-        # prestige roles so the member wears their permanent tier's role
-        # (and loses the temporary VI role). Representation only; never
-        # touches Coins/XP/Level.
-        try:
-            from utils.prestige import sync_prestige_roles, get_permanent_prestige
-            perm = await get_permanent_prestige(guild.id, member.id)
-            await sync_prestige_roles(self.bot, guild, member, effective_tier=perm)
-        except Exception as e:
-            print(f"[BOOST] Prestige role sync (unboost) failed: {e}")
 
     async def _give_role(self, guild, member, role_id):
         if not role_id:

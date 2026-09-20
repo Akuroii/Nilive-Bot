@@ -126,7 +126,13 @@ check(r.get("success") is True, "non-prestige diamond role item still accepted",
 r = api(A, "POST", "/api/shop/item", {
     "name": "Prestige VI", "price": 0, "type": "prestige", "prestige_tier": 6,
 }).get_json()
-check(r.get("success") is True, "prestige VI coin item accepted", str(r))
+check(r.get("success") is True, "free prestige VI item accepted", str(r))
+
+# Nonzero VI prices are invalid: this is not a paid product.
+r = api(A, "POST", "/api/shop/item", {
+    "name": "Paid VI", "price": 2500, "type": "prestige", "prestige_tier": 6,
+}).get_json()
+check(r.get("success") is False, "nonzero-price VI listing rejected", str(r))
 
 # ...but VI with a diamond price is rejected like every prestige item.
 r = api(A, "POST", "/api/shop/item", {

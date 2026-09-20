@@ -274,7 +274,7 @@ async def perform_streak_claim(bot, guild_id: int, user_id: int,
         from utils.prestige import get_prestige_earn_multiplier, is_booster
         booster = is_booster(member) if member is not None else None
         mult = await get_prestige_earn_multiplier(
-            guild_id, user_id, "balance", is_booster=booster, bot=bot)
+            guild_id, user_id, "balance", is_booster=booster, bot=bot, member=member)
     except Exception as e:
         print(f"[PRESTIGE] streak multiplier lookup failed; granting raw "
               f"(guild={guild_id} user={user_id}): {e}")
