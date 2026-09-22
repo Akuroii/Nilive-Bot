@@ -19,13 +19,11 @@ from __future__ import annotations
 
 import io
 import os
-import re
 import math
 import asyncio
 import logging
 
 import aiohttp
-import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 from utils.emoji import parse_emoji_input, is_custom_emoji_token, emoji_cdn_url
@@ -73,9 +71,6 @@ AVATAR_RING_INNER_RADIUS = 265          # px, in the source PNG's own pixel spac
 # large transparent glow-falloff margin; these content boxes (alpha > ~10)
 # were measured directly off the two assets so the crystals can be trimmed
 # to their visible art before being laid out as six equal slots.
-POTION_PNG_PATH = _asset_path("potion.png", "potion.png")
-POTION_CONTENT_BOX = (2, 4, 659, 664)  # x0,y0,x1,y1 in source px
-
 ACTIVE_CRYSTAL_PNG_PATH = _asset_path("prestige_crystal_active.png", "active_crystal.png")
 INACTIVE_CRYSTAL_PNG_PATH = _asset_path("prestige_crystal_inactive.png", "inactve_crystal.png")
 ACTIVE_CRYSTAL_CONTENT_BOX = (0, 691, 2776, 4280)     # x0,y0,x1,y1 in source px
@@ -90,13 +85,6 @@ FONT_PATHS = {
     "tajawal_regular": _asset_path(os.path.join("fonts", "Tajawal-Regular.ttf"), "Tajawal-Regular.ttf"),
     "tajawal_medium": _asset_path(os.path.join("fonts", "Tajawal-Medium.ttf"), "Tajawal-Medium.ttf"),
     "tajawal_bold": _asset_path(os.path.join("fonts", "Tajawal-Bold.ttf"), "Tajawal-Bold.ttf"),
-    # Real stencil typeface (supplied directly) for the big LEVEL number --
-    # replaces the earlier notch-carved ZillaSlab workaround.
-    "stencil": _asset_path(os.path.join("fonts", "STENCIL.TTF"), "STENCIL.TTF"),
-    # For Arabic custom currency names (Coins/Diamonds are configurable;
-    # this only kicks in when the configured name itself contains Arabic
-    # script -- see _is_arabic below).
-    "amira": _asset_path(os.path.join("fonts", "Amira-Typo.ttf"), "Amira-Typo.ttf"),
 }
 
 TWEMOJI_BASE = "https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/"
@@ -148,7 +136,7 @@ LAYOUT = {
     # column. Badge center/radius measured as a ratio of the avatar radius
     # off the avatar position reference ((dx,dy)=(1.0r,1.18r) from the
     # avatar's own center, radius=0.23r) and reapplied at the new size.
-    "avatar": (51, 71, 185, 185),  # nudged +4px right to close the ring gap
+    "avatar": (47, 71, 185, 185),
     "avatar_level_badge_r": 21,
     "avatar_level_badge_font": 31,
     "avatar_badge_center": (185, 202),   # relative to avatar origin
@@ -220,33 +208,6 @@ def cinzel_semibold(size):
 
 def zilla_bold(size):
     return _font("zilla_bold", size)
-
-
-def stencil(size):
-    return ImageFont.truetype(FONT_PATHS["stencil"], size)
-
-
-def amira(size):
-    return ImageFont.truetype(FONT_PATHS["amira"], size)
-
-
-_ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F]")
-
-
-def _is_arabic(text: str) -> bool:
-    return bool(_ARABIC_RE.search(text or ""))
-
-
-def _shape_arabic(text: str) -> str:
-    """Reshape + bidi for correct joined, visual-order Arabic (same
-    approach already used for the footer tagline); returns the raw string
-    unshaped if the (pure-python) libs aren't installed."""
-    try:
-        import arabic_reshaper
-        from bidi.algorithm import get_display
-        return get_display(arabic_reshaper.reshape(text))
-    except Exception:
-        return text
 
 
 def outfit(size, weight="Regular"):
@@ -781,12 +742,11 @@ async def render_rank_card(data: dict) -> io.BytesIO:
     mailbox_im = await _load_mailbox()
     ring_im = await _load_avatar_ring()
     active_crystal_im, inactive_crystal_im = await _load_prestige_crystals()
-    potion_im = await _load_potion_icon()
 
     _draw_name_block(img, draw, data, line_icons_16)
     _draw_rank_prestige_panel(img, draw, data, line_icons_16,
                               active_crystal_im, inactive_crystal_im)
-    _draw_level_xp_panels(img, draw, data, potion_im)
+    _draw_level_xp_panels(img, draw, data)
     _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, line_icons_30)
     _draw_inventory(img, draw, data, line_icons_16, item_icons)
     if mailbox_im is not None:
@@ -837,19 +797,6 @@ async def _load_avatar_ring() -> Image.Image | None:
         return im.convert("RGBA")
     except Exception as e:
         log.warning("rank_card: failed to load avatar ring asset: %s", e)
-        return None
-
-
-async def _load_potion_icon():
-    if not os.path.isfile(POTION_PNG_PATH):
-        log.warning("rank_card: potion asset not found at %s", POTION_PNG_PATH)
-        return None
-    try:
-        im = Image.open(POTION_PNG_PATH)
-        im.load()
-        return im.convert("RGBA").crop(POTION_CONTENT_BOX)
-    except Exception as e:
-        log.warning("rank_card: failed to load potion asset: %s", e)
         return None
 
 
@@ -916,15 +863,10 @@ def _paste_avatar(img, data, avatar_im, ring_im=None):
     cx, cy = ax + aw / 2, ay + ah / 2
     r = aw / 2
 
-    # Avatar goes down first; the ring is pasted on top so its own inner
-    # edge/glow overlaps the avatar's outer rim (a recessed-socket look)
-    # instead of the avatar's hard circular edge sitting on top of the
-    # ring artwork. The ring's hole is transparent, so the avatar still
-    # reads through the middle -- only the ring's opaque inner band now
-    # paints over the seam, which also closes up any hairline gap there.
-    _circle_mask_paste(img, avatar_im, (int(ax), int(ay), int(aw), int(ah)))
-
+    # Supplied ring artwork goes down first so it sits behind the avatar.
     _paste_avatar_ring(img, ax, ay, aw, ah, ring_im)
+
+    _circle_mask_paste(img, avatar_im, (int(ax), int(ay), int(aw), int(ah)))
 
     # Level badge -- attached to the avatar's lower right, stencil numerals
     # like the reference.
@@ -934,13 +876,11 @@ def _paste_avatar(img, data, avatar_im, ring_im=None):
     draw.ellipse((bx - badge_r, by - badge_r, bx + badge_r, by + badge_r),
                  fill=(14, 8, 22, 235), outline=(170, 130, 220, 200), width=2)
     lvl_text = str(data["level"])
-    lvl_font = stencil(LAYOUT["avatar_level_badge_font"] + 6)
+    lvl_font = zilla_bold(LAYOUT["avatar_level_badge_font"])
     bbox = draw.textbbox((0, 0), lvl_text, font=lvl_font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    bxy = (bx - tw / 2 - bbox[0], by - th / 2 - bbox[1])
-    _draw_glow_layer(img, lambda d: d.text(bxy, lvl_text, font=lvl_font,
-                                           fill=(160, 85, 225, 120)), blur=4)
-    draw.text(bxy, lvl_text, font=lvl_font, fill=(230, 220, 240))
+    _draw_stencil_number(img, draw, (bx - tw / 2 - bbox[0], by - th / 2 - bbox[1]),
+                         lvl_text, lvl_font, (230, 220, 240), cut_color=(14, 8, 22))
 
 
 def _draw_name_block(img, draw, data, icons16):
@@ -1014,8 +954,8 @@ def _draw_rank_prestige_panel(img, draw, data, icons16,
     # The reference's rank number is big, bold and purple (gradient +
     # bloom) -- part of the accent hierarchy, not white text.
     _draw_gradient_text(img, draw, (x + 28, y + 40), f"#{data['rank']}",
-                        outfit(94, "ExtraBold"), COLORS["rank_number_a"],
-                        COLORS["rank_number_b"], glow=(150, 80, 230), ratio=0.64)
+                        outfit(76, "ExtraBold"), COLORS["rank_number_a"],
+                        COLORS["rank_number_b"], glow=(150, 80, 230), ratio=0.78)
 
     # Two-tone: "TOP" muted, the percentage itself brighter -- matches the
     # reference's emphasis treatment.
@@ -1103,7 +1043,7 @@ def _draw_diamond_pip(draw, cx, cy, r, color, filled):
         draw.polygon(pts, outline=color, width=2)
 
 
-def _draw_level_xp_panels(img, draw, data, potion_im=None):
+def _draw_level_xp_panels(img, draw, data):
     x, y, w, h = LAYOUT["level_panel"]
     _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
     # LEVEL is a small drop-cap serif heading in the reference, not a
@@ -1119,19 +1059,16 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
                               (200, 190, 215), tracking=1, weight="Bold")
     _draw_condensed(img, (x + 31, y + 20), _level_painter, ratio=ratio)
 
-    # Big number in the real supplied Stencil typeface (replaces the earlier
-    # notch-carved ZillaSlab workaround) with the reference's purple bloom.
-    # Condensed like every other variable-width number in this card so a
-    # 3-digit level (150+) doesn't run past the panel edge.
-    lvl_text = str(data["level"])
-    lvl_font = stencil(112)
-    nat_w = draw.textbbox((0, 0), lvl_text, font=lvl_font)[2]
-    lvl_ratio = min(1.0, 143 / nat_w)
-
-    def _lvl_painter(d):
-        d.text((20, 20), lvl_text, font=lvl_font, fill=(228, 214, 235))
-    _draw_condensed(img, (x + 30, y + 69), _lvl_painter, ratio=lvl_ratio,
-                    glow=(160, 85, 225), blur=8)
+    # Big stencil-slab number with the reference's purple bloom. Sized up
+    # and given deeper/wider notches so the faceted-cut treatment actually
+    # reads at a glance instead of disappearing into the glow.
+    lvl_font = zilla_bold(104)
+    a, _d = lvl_font.getmetrics()
+    digit_h = int(104 * 0.67)
+    ty = y + 66 - (a - digit_h)
+    _draw_stencil_number(img, draw, (x + 30, ty), str(data["level"]), lvl_font,
+                         (228, 214, 235), cut_color=(16, 8, 30),
+                         glow=(160, 85, 225), cut_w_ratio=0.09, cut_d_ratio=0.32)
 
     x, y, w, h = LAYOUT["xp_totalxp_panel"]
     _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
@@ -1140,11 +1077,8 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
                        COLORS["text_muted"], tracking=2)
     cur, needed = data["xp_current"], max(data["xp_needed"], 1)
     # Two-tone: current XP purple/emphasized (condensed, as measured off
-    # the reference), "/ needed XP" muted. Percentage math always uses the
-    # raw cur/needed ints below -- _fmt_xp only affects the printed text,
-    # compacting to K/M/B once the full comma-grouped form would start
-    # crowding the panel.
-    cur_txt = _fmt_xp(cur)
+    # the reference), "/ needed XP" muted.
+    cur_txt = f"{cur:,}"
     vf = zilla_bold(45)
     cur_w = draw.textbbox((0, 0), cur_txt, font=vf)[2]
 
@@ -1152,7 +1086,7 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
         d.text((20, 20), cur_txt, font=vf, fill=COLORS["xp_value"])
     cw, _ = _draw_condensed(img, (x + 14, y + 50), _xpval_painter, ratio=0.64,
                             glow=(150, 70, 210), blur=4)
-    draw.text((x + 20 + cw, y + 58), f"/ {_fmt_xp(needed)} XP", font=outfit(22),
+    draw.text((x + 20 + cw, y + 58), f"/ {needed:,} XP", font=outfit(22),
               fill=COLORS["text_muted"])
 
     div_x = x + LAYOUT["xp_divider_x"]
@@ -1175,9 +1109,6 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
             fill=(160, 70, 225, 110)), blur=6)
         _draw_gradient_bar(img, bar_x, bar_y, fill_w, bar_h,
                            COLORS["xp_bar_fill_a"], COLORS["xp_bar_fill_b"])
-        # Subtle internal wave texture inside the fill -- the reference's
-        # layered "celestial" bands, not a flat gradient.
-        _draw_xp_wave_texture(img, bar_x, bar_y, fill_w, bar_h)
         # Glassy top sheen across the fill -- the reference's bar has a
         # lighter highlight band along its upper edge, giving it a
         # dimensional/glass look rather than a flat gradient.
@@ -1190,95 +1121,25 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
                 radius=(bar_h * 0.46) / 2, fill=(255, 255, 255, 55))
             sheen = sheen.filter(ImageFilter.GaussianBlur(1.5))
             img.alpha_composite(sheen)
-        # Bright glowing glint node at the fill's leading edge -- the
-        # reference's "comet" highlight, layered soft purple bloom plus a
-        # bright white core, sitting right at the edge of the fill.
+        # Subtle bright highlight at the leading edge of the FILL itself
+        # (not the bar's outer end) -- per the reference.
         if 4 < fill_w < bar_w - 2:
-            _draw_xp_glint(img, bar_x + fill_w, bar_y + bar_h / 2)
+            hx, hy = bar_x + fill_w - 4, bar_y + bar_h / 2
+            _draw_soft_dot(img, hx, hy, 6, (255, 240, 252, 220))
     draw.text((bar_x + 6, bar_y + bar_h + 6), f"{frac * 100:.1f}% to next level",
               font=outfit(19), fill=COLORS["text_muted"])
 
     tx = div_x + 22
     _draw_tracked_text(draw, (tx, y + 25), "TOTAL XP", outfit(20, "SemiBold"),
                        COLORS["label_purple"], tracking=2)
-    total_txt = _fmt_xp(data["xp_total"])
+    potion = _draw_potion_icon(27)
+    img.paste(potion, (int(div_x + 19), int(y + 42)), potion)
+    total_txt = f"{data['xp_total']:,}"
     tf2 = zilla_bold(38)
-    num_h = 38 * 0.72  # approx cap height, for vertically centering the potion beside it
-    num_cy = y + 44 + num_h / 2
-    if potion_im is not None:
-        p_size = 32
-        aspect = potion_im.width / potion_im.height
-        p_w, p_h = round(p_size * aspect), p_size
-        potion = potion_im.resize((p_w, p_h), Image.LANCZOS)
-        p_x = div_x + 19
-        p_y = round(num_cy - p_h / 2)
-        img.paste(potion, (p_x, p_y), potion)
-        num_x = div_x + 19 + p_w + 10
-    else:
-        num_x = div_x + 52
 
     def _total_painter(d):
         d.text((20, 20), total_txt, font=tf2, fill=(205, 200, 215))
-    _draw_condensed(img, (num_x, y + 44), _total_painter, ratio=0.80)
-
-
-def _fmt_xp(n: int) -> str:
-    """Compact display formatting for XP values -- full comma-grouped
-    below 100k, K/M/B with one decimal (no trailing .0) above that.
-    Never used for the underlying percentage math, only display text."""
-    n = int(n)
-    if n < 100_000:
-        return f"{n:,}"
-    for div, suf in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
-        if n >= div:
-            val = n / div
-            s = f"{val:.1f}"
-            if s.endswith(".0"):
-                s = s[:-2]
-            return f"{s}{suf}"
-    return f"{n:,}"
-
-
-def _draw_xp_wave_texture(img, x, y, w, h):
-    """Soft translucent S-curve bands inside the XP fill -- the reference's
-    subtle internal wave/texture rather than a flat gradient."""
-    w = int(w)
-    if w < 20 or h < 4:
-        return
-    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    ld = ImageDraw.Draw(layer)
-    for phase, amp, alpha, thick in ((0.0, h * 0.24, 40, max(3, int(h * 0.36))),
-                                      (math.pi * 0.75, h * 0.16, 26, max(2, int(h * 0.22)))):
-        pts = []
-        for i in range(0, w + 1, 4):
-            t = i / max(w, 1)
-            yy = h / 2 + amp * math.sin(t * math.pi * 1.6 + phase)
-            pts.append((i, yy))
-        if len(pts) > 1:
-            ld.line(pts, fill=(255, 255, 255, alpha), width=thick, joint="curve")
-    layer = layer.filter(ImageFilter.GaussianBlur(2))
-    mask = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w, h), radius=h // 2, fill=255)
-    arr = np.array(layer)
-    marr = np.array(mask).astype(np.uint16)
-    arr[:, :, 3] = (arr[:, :, 3].astype(np.uint16) * marr // 255).astype(np.uint8)
-    img.alpha_composite(Image.fromarray(arr, "RGBA"), (int(x), int(y)))
-
-
-def _draw_xp_glint(img, cx, cy):
-    """Bright white node with a layered purple/pink bloom at the XP bar's
-    fill edge -- the reference's glowing 'comet' glint, several soft
-    concentric passes rather than one flat dot."""
-    cx, cy = round(cx), round(cy)
-    outer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ImageDraw.Draw(outer).ellipse((cx - 16, cy - 16, cx + 16, cy + 16), fill=(180, 95, 235, 60))
-    img.alpha_composite(outer.filter(ImageFilter.GaussianBlur(7)))
-    mid = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ImageDraw.Draw(mid).ellipse((cx - 9, cy - 9, cx + 9, cy + 9), fill=(210, 120, 245, 140))
-    img.alpha_composite(mid.filter(ImageFilter.GaussianBlur(4)))
-    core = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ImageDraw.Draw(core).ellipse((cx - 5, cy - 5, cx + 5, cy + 5), fill=(255, 255, 255, 235))
-    img.alpha_composite(core.filter(ImageFilter.GaussianBlur(1)))
+    _draw_condensed(img, (div_x + 52, y + 44), _total_painter, ratio=0.80)
 
 
 def _draw_gradient_bar(img, x, y, w, h, color_a, color_b):
@@ -1350,27 +1211,13 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
             d.text((20, 20), _v, font=_f, fill=(215, 215, 222))
         _draw_condensed(img, (x + w / 2 - nat_w * 0.72 / 2, y + 82), _val_painter,
                         ratio=0.72)
-        if _is_arabic(label):
-            # Arabic custom currency name: the configured Amira font, shaped
-            # for correct joined glyphs -- no per-character tracking, which
-            # would break the cursive connections _draw_tracked_text relies
-            # on for Latin letter-spacing.
-            shaped = _shape_arabic(label)
-            lf = amira(24)
-            lw_nat = draw.textbbox((0, 0), shaped, font=lf)[2]
+        lf = outfit(21, "Medium")
+        lw_nat = _text_size(draw, label, lf, tracking=2)[0]
 
-            def _lab_painter(d, _l=shaped, _f=lf, _c=label_color):
-                d.text((20, 20), _l, font=_f, fill=_c)
-            _draw_condensed(img, (x + w / 2 - lw_nat * 0.66 / 2, y + 114), _lab_painter,
-                            ratio=0.66)
-        else:
-            lf = outfit(21, "Medium")
-            lw_nat = _text_size(draw, label, lf, tracking=2)[0]
-
-            def _lab_painter(d, _l=label, _f=lf, _c=label_color):
-                _draw_tracked_text(d, (20, 20), _l, _f, _c, tracking=2)
-            _draw_condensed(img, (x + w / 2 - lw_nat * 0.66 / 2, y + 116), _lab_painter,
-                            ratio=0.66)
+        def _lab_painter(d, _l=label, _f=lf, _c=label_color):
+            _draw_tracked_text(d, (20, 20), _l, _f, _c, tracking=2)
+        _draw_condensed(img, (x + w / 2 - lw_nat * 0.66 / 2, y + 116), _lab_painter,
+                        ratio=0.66)
 
 
 def _fmt_minutes(total_minutes) -> str:
