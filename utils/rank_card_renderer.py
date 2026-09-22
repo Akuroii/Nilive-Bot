@@ -56,6 +56,17 @@ def _asset_path(asset_sub: str, root_fallback: str) -> str:
 
 MAILBOX_PNG_PATH = _asset_path("mailbox.png", "mailbox_trimmed.png")
 
+# Supplied avatar-ring artwork (source of truth -- not redrawn/regenerated).
+# The file's own inner circle (where the avatar sits) is off-center within
+# the PNG and smaller than the file's full bounding box, since the tendrils
+# spray out past it -- these were measured directly off the asset itself
+# (radial scan from its opaque-pixel centroid to the first opaque pixel at
+# each angle, median radius) and are used to align the artwork's hole with
+# the avatar circle exactly.
+AVATAR_RING_PNG_PATH = _asset_path("avatar_ring.png", "Discord ring.png")
+AVATAR_RING_INNER_CENTER = (490, 509)   # px, in the source PNG's own pixel space
+AVATAR_RING_INNER_RADIUS = 265          # px, in the source PNG's own pixel space
+
 FONT_PATHS = {
     "cinzel": _asset_path(os.path.join("fonts", "Cinzel-Variable.ttf"), "Cinzel-Variable.ttf"),
     "zilla_bold": _asset_path(os.path.join("fonts", "ZillaSlab-Bold.ttf"), "ZillaSlab-Bold.ttf"),
@@ -710,8 +721,8 @@ async def render_rank_card(data: dict) -> io.BytesIO:
             for it in grid
         ]))
     mailbox_im = await _load_mailbox()
+    ring_im = await _load_avatar_ring()
 
-    _draw_avatar_and_level(img, draw, data)
     _draw_name_block(img, draw, data, line_icons_16)
     _draw_rank_prestige_panel(img, draw, data, line_icons_16)
     _draw_level_xp_panels(img, draw, data)
@@ -721,10 +732,10 @@ async def render_rank_card(data: dict) -> io.BytesIO:
         _draw_mailbox(img, mailbox_im)
     _draw_footer(img, draw)
 
-    # avatar pasted after background/glow but the placeholder/fetch needs
-    # to happen before drawing -- done inline in _draw_avatar_and_level
-    # via the resolved avatar_im captured above.
-    _paste_avatar(img, data, avatar_im)
+    # avatar (and its ring) pasted after every panel, but the placeholder/
+    # fetch needs to happen before drawing -- done via the resolved
+    # avatar_im/ring_im captured above.
+    _paste_avatar(img, data, avatar_im, ring_im)
 
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="PNG")
@@ -755,6 +766,19 @@ async def _load_mailbox() -> Image.Image | None:
         return None
 
 
+async def _load_avatar_ring() -> Image.Image | None:
+    if not os.path.isfile(AVATAR_RING_PNG_PATH):
+        log.warning("rank_card: avatar ring asset not found at %s", AVATAR_RING_PNG_PATH)
+        return None
+    try:
+        im = Image.open(AVATAR_RING_PNG_PATH)
+        im.load()
+        return im.convert("RGBA")
+    except Exception as e:
+        log.warning("rank_card: failed to load avatar ring asset: %s", e)
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # REGION DRAWERS
 # ─────────────────────────────────────────────────────────────────────────
@@ -774,49 +798,36 @@ def _draw_small_star(draw, cx, cy, r, color):
     draw.polygon(pts, fill=color)
 
 
-def _draw_avatar_and_level(img, draw, data):
-    """Ring, glow, star ornaments and the level badge -- everything except
-    the actual avatar photo, which is pasted in _paste_avatar() after all
-    panels are drawn so the ring's glow doesn't get painted over it."""
-    ax, ay, aw, ah = LAYOUT["avatar"]
+def _paste_avatar_ring(img, ax, ay, aw, ah, ring_im):
+    """Paste the supplied ring artwork behind the avatar, scaled purely so
+    the artwork's own inner circle (AVATAR_RING_INNER_CENTER/_RADIUS)
+    lines up with the avatar's circle -- the artwork itself is never
+    redrawn, recolored or cropped, only resized and positioned."""
+    if ring_im is None:
+        return
     cx, cy = ax + aw / 2, ay + ah / 2
-    r = aw / 2
+    avatar_d = (aw + ah) / 2
+    scale = avatar_d / (AVATAR_RING_INNER_RADIUS * 2)
+    scaled_w = max(1, round(ring_im.width * scale))
+    scaled_h = max(1, round(ring_im.height * scale))
+    scaled = ring_im.resize((scaled_w, scaled_h), Image.LANCZOS)
+    ring_cx = AVATAR_RING_INNER_CENTER[0] * scale
+    ring_cy = AVATAR_RING_INNER_CENTER[1] * scale
+    paste_x = round(cx - ring_cx)
+    paste_y = round(cy - ring_cy)
+    img.paste(scaled, (paste_x, paste_y), scaled)
 
-    glow = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    gd = ImageDraw.Draw(glow)
-    gd.ellipse((cx - r - 14, cy - r - 14, cx + r + 14, cy + r + 14),
-              fill=(*COLORS["ring"], 22))
-    glow = glow.filter(ImageFilter.GaussianBlur(12))
-    img.alpha_composite(glow)
 
-
-def _paste_avatar(img, data, avatar_im):
+def _paste_avatar(img, data, avatar_im, ring_im=None):
     draw = ImageDraw.Draw(img)
     ax, ay, aw, ah = LAYOUT["avatar"]
     cx, cy = ax + aw / 2, ay + ah / 2
     r = aw / 2
 
+    # Supplied ring artwork goes down first so it sits behind the avatar.
+    _paste_avatar_ring(img, ax, ay, aw, ah, ring_im)
+
     _circle_mask_paste(img, avatar_im, (int(ax), int(ay), int(aw), int(ah)))
-
-    # The reference ring is painterly: a dim base ring with bright arcs at
-    # the top and lower-left, not a uniform neon circle.
-    ring_box = (cx - r - 4, cy - r - 4, cx + r + 4, cy + r + 4)
-    draw.ellipse(ring_box, outline=(150, 90, 207, 235), width=5)
-
-    # Ornaments measured off the reference (offsets from avatar origin).
-    acc = (186, 120, 240)
-    _draw_five_point_star(draw, ax + 128, ay + 6, 24, acc)
-    for ox, oy, rot in ((84, 20, -30), (168, 20, 30)):
-        pts = [(ox, ay + oy - 14), (ox + 7, ay + oy), (ox, ay + oy + 14), (ox - 7, ay + oy)]
-        draw.polygon([(ax + p[0], p[1]) for p in pts], fill=(*acc, 235))
-    for ox, oy, sr in ((13, 41, 9), (231, 48, 9), (-8, 88, 6), (243, 139, 6)):
-        _draw_sparkle_star(img, draw, ax + ox, ay + oy, sr, acc)
-    for ox, oy, sr in ((5, 144, 10), (238, 144, 10), (122, 251, 10)):
-        _draw_sparkle_star(img, draw, ax + ox, ay + oy, sr, acc, glow=False)
-    # diagonal accent streaks (upper-right / lower-left of the ring)
-    for p0, p1 in [((203, 23), (247, 60)), ((9, 198), (65, 248))]:
-        draw.line((ax + p0[0], ay + p0[1], ax + p1[0], ay + p1[1]),
-                  fill=(*acc, 200), width=4)
 
     # Level badge -- attached to the avatar's lower right, stencil numerals
     # like the reference.
