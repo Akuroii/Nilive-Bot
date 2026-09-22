@@ -25,7 +25,8 @@ import asyncio
 import logging
 
 import aiohttp
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps, ImageChops
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 from utils.emoji import parse_emoji_input, is_custom_emoji_token, emoji_cdn_url
 
@@ -1258,12 +1259,10 @@ def _draw_xp_wave_texture(img, x, y, w, h):
     layer = layer.filter(ImageFilter.GaussianBlur(2))
     mask = Image.new("L", (w, h), 0)
     ImageDraw.Draw(mask).rounded_rectangle((0, 0, w, h), radius=h // 2, fill=255)
-    # Clip the wave layer to the fill's rounded-rect shape by multiplying
-    # its own alpha against the mask (pure PIL -- no numpy dependency).
-    r, g, b, a = layer.split()
-    a = ImageChops.multiply(a, mask)
-    layer = Image.merge("RGBA", (r, g, b, a))
-    img.alpha_composite(layer, (int(x), int(y)))
+    arr = np.array(layer)
+    marr = np.array(mask).astype(np.uint16)
+    arr[:, :, 3] = (arr[:, :, 3].astype(np.uint16) * marr // 255).astype(np.uint8)
+    img.alpha_composite(Image.fromarray(arr, "RGBA"), (int(x), int(y)))
 
 
 def _draw_xp_glint(img, cx, cy):
