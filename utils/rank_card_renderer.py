@@ -67,6 +67,15 @@ AVATAR_RING_PNG_PATH = _asset_path("avatar_ring.png", "Discord ring.png")
 AVATAR_RING_INNER_CENTER = (490, 509)   # px, in the source PNG's own pixel space
 AVATAR_RING_INNER_RADIUS = 265          # px, in the source PNG's own pixel space
 
+# Supplied prestige-crystal artwork (source of truth). Each PNG carries a
+# large transparent glow-falloff margin; these content boxes (alpha > ~10)
+# were measured directly off the two assets so the crystals can be trimmed
+# to their visible art before being laid out as six equal slots.
+ACTIVE_CRYSTAL_PNG_PATH = _asset_path("prestige_crystal_active.png", "active_crystal.png")
+INACTIVE_CRYSTAL_PNG_PATH = _asset_path("prestige_crystal_inactive.png", "inactve_crystal.png")
+ACTIVE_CRYSTAL_CONTENT_BOX = (0, 140, 346, 587)     # x0,y0,x1,y1 in source px
+INACTIVE_CRYSTAL_CONTENT_BOX = (0, 182, 313, 622)   # x0,y0,x1,y1 in source px
+
 FONT_PATHS = {
     "cinzel": _asset_path(os.path.join("fonts", "Cinzel-Variable.ttf"), "Cinzel-Variable.ttf"),
     "zilla_bold": _asset_path(os.path.join("fonts", "ZillaSlab-Bold.ttf"), "ZillaSlab-Bold.ttf"),
@@ -120,10 +129,17 @@ COLORS = {
 CANVAS_W, CANVAS_H = 1280, 853
 
 LAYOUT = {
-    # Pass 4: re-measured off the reference at 1024x682 and scaled x1.25.
-    "avatar": (47, 71, 243, 243),
-    "avatar_level_badge_r": 30,
-    "avatar_badge_center": (199, 232),   # relative to avatar origin
+    # Pass 5: avatar/ring shrunk to a medium size per the avatar position
+    # reference + client feedback -- the supplied ring artwork flares ~1.6x
+    # past its own inner circle, so it needs a smaller avatar circle than
+    # the reference's own (tighter) ring to clear the username/title
+    # column. Badge center/radius measured as a ratio of the avatar radius
+    # off the avatar position reference ((dx,dy)=(1.0r,1.18r) from the
+    # avatar's own center, radius=0.23r) and reapplied at the new size.
+    "avatar": (47, 71, 185, 185),
+    "avatar_level_badge_r": 21,
+    "avatar_level_badge_font": 31,
+    "avatar_badge_center": (185, 202),   # relative to avatar origin
 
     "name": (333, 98, 600, 63),
     "title_pill": (327, 196, 245, 41),
@@ -722,9 +738,11 @@ async def render_rank_card(data: dict) -> io.BytesIO:
         ]))
     mailbox_im = await _load_mailbox()
     ring_im = await _load_avatar_ring()
+    active_crystal_im, inactive_crystal_im = await _load_prestige_crystals()
 
     _draw_name_block(img, draw, data, line_icons_16)
-    _draw_rank_prestige_panel(img, draw, data, line_icons_16)
+    _draw_rank_prestige_panel(img, draw, data, line_icons_16,
+                              active_crystal_im, inactive_crystal_im)
     _draw_level_xp_panels(img, draw, data)
     _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, line_icons_30)
     _draw_inventory(img, draw, data, line_icons_16, item_icons)
@@ -777,6 +795,24 @@ async def _load_avatar_ring() -> Image.Image | None:
     except Exception as e:
         log.warning("rank_card: failed to load avatar ring asset: %s", e)
         return None
+
+
+async def _load_prestige_crystals():
+    """Returns (active_im, inactive_im), each trimmed to its own measured
+    content box, or None for whichever asset is missing/unreadable."""
+    def _load_one(path, box):
+        if not os.path.isfile(path):
+            log.warning("rank_card: prestige crystal asset not found at %s", path)
+            return None
+        try:
+            im = Image.open(path)
+            im.load()
+            return im.convert("RGBA").crop(box)
+        except Exception as e:
+            log.warning("rank_card: failed to load prestige crystal asset %s: %s", path, e)
+            return None
+    return (_load_one(ACTIVE_CRYSTAL_PNG_PATH, ACTIVE_CRYSTAL_CONTENT_BOX),
+            _load_one(INACTIVE_CRYSTAL_PNG_PATH, INACTIVE_CRYSTAL_CONTENT_BOX))
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -837,7 +873,7 @@ def _paste_avatar(img, data, avatar_im, ring_im=None):
     draw.ellipse((bx - badge_r, by - badge_r, bx + badge_r, by + badge_r),
                  fill=(14, 8, 22, 235), outline=(170, 130, 220, 200), width=2)
     lvl_text = str(data["level"])
-    lvl_font = zilla_bold(44)
+    lvl_font = zilla_bold(LAYOUT["avatar_level_badge_font"])
     bbox = draw.textbbox((0, 0), lvl_text, font=lvl_font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     _draw_stencil_number(img, draw, (bx - tw / 2 - bbox[0], by - th / 2 - bbox[1]),
@@ -903,7 +939,8 @@ def _draw_name_block(img, draw, data, icons16):
         draw.text((text_x + w0, ms_y), date_str, font=mf, fill=(196, 186, 220))
 
 
-def _draw_rank_prestige_panel(img, draw, data, icons16):
+def _draw_rank_prestige_panel(img, draw, data, icons16,
+                              active_crystal_im=None, inactive_crystal_im=None):
     x, y, w, h = LAYOUT["rank_prestige_panel"]
     _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
 
@@ -944,23 +981,32 @@ def _draw_rank_prestige_panel(img, draw, data, icons16):
     _draw_condensed(img, (x + w / 2 - natural_w * ratio / 2, y + 163),
                     _prestige_painter, ratio=ratio)
 
-    # Pips: glowing 4-point sparkles when filled, plain outline diamonds
-    # when empty -- as in the reference.
-    pip_r = 11
-    pitch = 29
+    # Six individual prestige-crystal slots: the supplied active/inactive
+    # crystal artwork, unmodified apart from a uniform resize, one slot per
+    # prestige level -- identical slot size, shared vertical center, equal
+    # pitch. Falls back to the old vector sparkle/diamond pips if either
+    # asset failed to load.
+    crystal_h = 32
+    pitch = 30
     total_pips = 6
     start_x = x + w / 2 - (total_pips - 1) * pitch / 2
     pip_y = y + 205
     for i in range(total_pips):
         cx = start_x + i * pitch
         filled = i < tier
-        if filled:
-            _draw_sparkle_star(img, draw, cx, pip_y, pip_r, COLORS["pip_filled"])
+        src = active_crystal_im if filled else inactive_crystal_im
+        if src is not None:
+            aspect = src.width / src.height
+            cw = max(1, round(crystal_h * aspect))
+            crystal = src.resize((cw, crystal_h), Image.LANCZOS)
+            img.paste(crystal, (round(cx - cw / 2), round(pip_y - crystal_h / 2)), crystal)
+        elif filled:
+            _draw_sparkle_star(img, draw, cx, pip_y, 11, COLORS["pip_filled"])
         else:
-            _draw_diamond_pip(draw, cx, pip_y, pip_r, COLORS["pip_empty"], filled)
+            _draw_diamond_pip(draw, cx, pip_y, 11, COLORS["pip_empty"], filled)
 
     if int(data.get("effective_prestige") or 0) == 6:
-        by = y + 218
+        by = y + 224  # nudged down 6px to clear the taller crystal-slot pips
         bw = 150
         bh = 23
         bx = x + w / 2 - bw / 2
