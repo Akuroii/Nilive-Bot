@@ -1,6 +1,23 @@
 import aiosqlite
 from database import DB_PATH
 
+# The card's avatar circle is 185px across; member.display_avatar.url with
+# no explicit size leaves the CDN to pick one, which can land under that
+# and force the renderer to upscale (the softness the card was showing).
+# Requesting a fixed size well above the render box guarantees a downscale
+# (crisp) instead of an upscale (soft). 256 is a valid Discord CDN size
+# (power of two) comfortably above the 185px box.
+_AVATAR_FETCH_SIZE = 256
+
+
+def _avatar_url(member) -> str:
+    asset = member.display_avatar
+    try:
+        return str(asset.with_size(_AVATAR_FETCH_SIZE).url)
+    except AttributeError:
+        # Stub/mocked avatars in tests may not implement with_size().
+        return str(asset.url)
+
 # ═══════════════════════════════════════════════════════════════════════
 # RANK CARD DATA — Rank Card foundation (pass 1: schema + backend)
 #
@@ -133,7 +150,7 @@ async def get_rank_card_data(guild_id: int, user_id: int,
     return {
         "user_id": user_id, "guild_id": guild_id,
         "username": member.display_name if member is not None else None,
-        "avatar_url": str(member.display_avatar.url) if member is not None else None,
+        "avatar_url": _avatar_url(member) if member is not None else None,
         "member_since": member.joined_at if member is not None else None,
         "level": lvl, "xp_total": xp_val,
         "xp_current": current_xp, "xp_needed": needed_xp,
