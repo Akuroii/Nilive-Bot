@@ -73,8 +73,8 @@ AVATAR_RING_INNER_RADIUS = 265          # px, in the source PNG's own pixel spac
 # to their visible art before being laid out as six equal slots.
 ACTIVE_CRYSTAL_PNG_PATH = _asset_path("prestige_crystal_active.png", "active_crystal.png")
 INACTIVE_CRYSTAL_PNG_PATH = _asset_path("prestige_crystal_inactive.png", "inactve_crystal.png")
-ACTIVE_CRYSTAL_CONTENT_BOX = (0, 140, 346, 587)     # x0,y0,x1,y1 in source px
-INACTIVE_CRYSTAL_CONTENT_BOX = (0, 182, 313, 622)   # x0,y0,x1,y1 in source px
+ACTIVE_CRYSTAL_CONTENT_BOX = (0, 691, 2776, 4280)     # x0,y0,x1,y1 in source px
+INACTIVE_CRYSTAL_CONTENT_BOX = (0, 468, 1257, 2233)   # x0,y0,x1,y1 in source px
 
 FONT_PATHS = {
     "cinzel": _asset_path(os.path.join("fonts", "Cinzel-Variable.ttf"), "Cinzel-Variable.ttf"),
@@ -158,7 +158,10 @@ LAYOUT = {
     "stats_start_x": 39,
 
     # 3 columns x 4 rows (reference-confirmed), tall right column.
-    "inventory_panel": (710, 314, 308, 422),
+    # Left edge realigned to match rank_prestige_panel's x (was 710 vs 706 --
+    # a 4px mismatch that broke the shared-column look); small positive gap
+    # added below the rank panel instead of a 1px overlap.
+    "inventory_panel": (706, 318, 308, 422),
     "inventory_grid_origin": (731, 388),
     "inventory_slot": (76, 76),
     "inventory_slot_gap_x": 8,
@@ -322,7 +325,7 @@ def _draw_condensed(img, xy, painter, ratio=1.0, glow=None, blur=6,
 
 
 def _draw_stencil_number(img, draw, xy, text, font, fill, cut_color=(16, 8, 30),
-                         glow=None):
+                         glow=None, cut_w_ratio=0.055, cut_d_ratio=0.24):
     """The reference renders its big slab numerals (Level 84, badge 84) with
     thin vertical stencil notches cut out of the top/bottom of each glyph
     stem. We draw the number, optionally bloom it, then cut a narrow
@@ -331,8 +334,8 @@ def _draw_stencil_number(img, draw, xy, text, font, fill, cut_color=(16, 8, 30),
     stencil font."""
     x, y = xy
     if glow:
-        _draw_glow_layer(img, lambda d: d.text((x, y), text, font=font, fill=(*glow, 110)),
-                         blur=6)
+        _draw_glow_layer(img, lambda d: d.text((x, y), text, font=font, fill=(*glow, 130)),
+                         blur=8)
     # Glyphs on a scratch layer so the stencil notches only erase ink,
     # never painting dark ticks into the glow/background.
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -341,8 +344,8 @@ def _draw_stencil_number(img, draw, xy, text, font, fill, cut_color=(16, 8, 30),
     cursor = x
     ascent, descent = font.getmetrics()
     cap_h = int((ascent) * 0.72)
-    cut_w = max(2, int(cap_h * 0.055))
-    cut_d = int(cap_h * 0.24)
+    cut_w = max(2, int(cap_h * cut_w_ratio))
+    cut_d = int(cap_h * cut_d_ratio)
     for ch in text:
         if ch.isdigit():
             adv = ld.textbbox((0, 0), ch, font=font)[2]
@@ -944,8 +947,10 @@ def _draw_rank_prestige_panel(img, draw, data, icons16,
     x, y, w, h = LAYOUT["rank_prestige_panel"]
     _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
 
+    # RANK heading is a bright light-purple label in the reference, not the
+    # same muted gray as "TOP" -- sampled off the reference directly.
     _draw_tracked_text(draw, (x + 28, y + 20), "RANK", outfit(21, "SemiBold"),
-                       COLORS["text_muted"], tracking=3)
+                       COLORS["rank_number_a"], tracking=3)
     # The reference's rank number is big, bold and purple (gradient +
     # bloom) -- part of the accent hierarchy, not white text.
     _draw_gradient_text(img, draw, (x + 28, y + 40), f"#{data['rank']}",
@@ -957,8 +962,10 @@ def _draw_rank_prestige_panel(img, draw, data, icons16,
     ty = y + 114
     draw.text((x + 28, ty), "TOP ", font=outfit(18, "Medium"), fill=COLORS["text_muted"])
     tw = draw.textbbox((0, 0), "TOP ", font=outfit(18, "Medium"))[2]
+    # Saturated purple accent (sampled off the reference), not the pale
+    # near-white the value was drifting toward.
     draw.text((x + 28 + tw, ty), f"{data['percentile']:.2f}%",
-              font=outfit(18, "SemiBold"), fill=(170, 140, 210))
+              font=outfit(18, "SemiBold"), fill=COLORS["accent"])
 
     draw.line((x + 28, y + 142, x + w - 28, y + 142), fill=(*COLORS["accent"], 40), width=1)
     draw.ellipse((x + 30, y + 140, x + 34, y + 144), fill=(*COLORS["accent"], 120))
@@ -1041,25 +1048,27 @@ def _draw_level_xp_panels(img, draw, data):
     _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
     # LEVEL is a small drop-cap serif heading in the reference, not a
     # tracked sans label.
-    bf = _font("cinzel", 32, "Bold")
-    sf = _font("cinzel", 25, "Bold")
+    bf = _font("cinzel", 36, "Bold")
+    sf = _font("cinzel", 28, "Bold")
     nat_w = draw.textbbox((0, 0), "L", font=bf)[2] + 1 + sum(
         draw.textbbox((0, 0), ch, font=sf)[2] + 1 for ch in "EVEL")
-    ratio = min(1.0, 81 / nat_w)
+    ratio = min(1.0, 91 / nat_w)
 
     def _level_painter(d):
-        _draw_dropcap_heading(d, (20, 20), "LEVEL", "cinzel", 32, 25,
+        _draw_dropcap_heading(d, (20, 20), "LEVEL", "cinzel", 36, 28,
                               (200, 190, 215), tracking=1, weight="Bold")
-    _draw_condensed(img, (x + 31, y + 22), _level_painter, ratio=ratio)
+    _draw_condensed(img, (x + 31, y + 20), _level_painter, ratio=ratio)
 
-    # Big stencil-slab number with the reference's purple bloom.
-    lvl_font = zilla_bold(98)
+    # Big stencil-slab number with the reference's purple bloom. Sized up
+    # and given deeper/wider notches so the faceted-cut treatment actually
+    # reads at a glance instead of disappearing into the glow.
+    lvl_font = zilla_bold(104)
     a, _d = lvl_font.getmetrics()
-    digit_h = int(98 * 0.67)
-    ty = y + 69 - (a - digit_h)
+    digit_h = int(104 * 0.67)
+    ty = y + 66 - (a - digit_h)
     _draw_stencil_number(img, draw, (x + 30, ty), str(data["level"]), lvl_font,
-                         (224, 208, 230), cut_color=(16, 8, 30),
-                         glow=(150, 80, 220))
+                         (228, 214, 235), cut_color=(16, 8, 30),
+                         glow=(160, 85, 225), cut_w_ratio=0.09, cut_d_ratio=0.32)
 
     x, y, w, h = LAYOUT["xp_totalxp_panel"]
     _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
@@ -1086,20 +1095,37 @@ def _draw_level_xp_panels(img, draw, data):
     bar_x, bar_y, bar_w, bar_h = x + 8, y + 86, w - 20, 21
     draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
                            radius=bar_h // 2, fill=COLORS["xp_bar_bg"])
+    # Thin outline on the empty track so its edge reads clearly against the
+    # panel instead of blending into it -- per the reference.
+    draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
+                           radius=bar_h // 2, outline=(*COLORS["accent"], 60), width=1)
     frac = min(cur / needed, 1.0)
     if frac > 0:
         fill_w = bar_w * frac
-        # soft bloom around the filled portion only
+        # soft bloom around the filled portion only, a touch stronger than
+        # before for the reference's more premium/luminous look
         _draw_glow_layer(img, lambda d: d.rounded_rectangle(
             (bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=bar_h // 2,
-            fill=(150, 60, 220, 80)), blur=4)
+            fill=(160, 70, 225, 110)), blur=6)
         _draw_gradient_bar(img, bar_x, bar_y, fill_w, bar_h,
                            COLORS["xp_bar_fill_a"], COLORS["xp_bar_fill_b"])
-        # Subtle highlight at the leading edge of the FILL itself (not the
-        # bar's outer end) -- per the reference. Small soft dot, nothing more.
+        # Glassy top sheen across the fill -- the reference's bar has a
+        # lighter highlight band along its upper edge, giving it a
+        # dimensional/glass look rather than a flat gradient.
+        if fill_w > 6:
+            sheen = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            sd = ImageDraw.Draw(sheen)
+            inset = max(2, bar_h // 5)
+            sd.rounded_rectangle(
+                (bar_x + inset, bar_y + 2, bar_x + fill_w - inset, bar_y + bar_h * 0.48),
+                radius=(bar_h * 0.46) / 2, fill=(255, 255, 255, 55))
+            sheen = sheen.filter(ImageFilter.GaussianBlur(1.5))
+            img.alpha_composite(sheen)
+        # Subtle bright highlight at the leading edge of the FILL itself
+        # (not the bar's outer end) -- per the reference.
         if 4 < fill_w < bar_w - 2:
             hx, hy = bar_x + fill_w - 4, bar_y + bar_h / 2
-            _draw_soft_dot(img, hx, hy, 5, (255, 235, 250, 200))
+            _draw_soft_dot(img, hx, hy, 6, (255, 240, 252, 220))
     draw.text((bar_x + 6, bar_y + bar_h + 6), f"{frac * 100:.1f}% to next level",
               font=outfit(19), fill=COLORS["text_muted"])
 
