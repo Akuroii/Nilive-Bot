@@ -44,6 +44,9 @@ GUILD, USER = 1, 2
 class StubAvatar:
     url = ""  # command does str(member.display_avatar.url); "" -> placeholder
 
+    def with_size(self, _size):
+        return self  # real discord.py Asset.with_size() returns a new Asset;
+
 
 class StubMember:
     id = USER
