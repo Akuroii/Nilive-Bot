@@ -251,6 +251,57 @@ def _shape_arabic(text: str) -> str:
         return text
 
 
+# ── Currency-name typography — the one reusable rule ────────────────────
+# A currency name is free text: utils/currency.py stores whatever an admin
+# types, so every surface that RASTERISES one with our bundled fonts faces
+# the same three questions (which face, which size, does it need shaping).
+# The answers live here once, so a second Pillow surface that draws a
+# configured currency name imports this instead of re-deriving the rule:
+#
+#     from utils.rank_card_renderer import currency_name_typography
+#
+# Only for text we rasterise ourselves. Discord embeds and dashboard HTML
+# also show the currency name, but their font is chosen by the Discord
+# client / the browser, and both already do their own Arabic shaping —
+# feeding them a pre-shaped bidi string would corrupt it, so they stay on
+# the plain configured string.
+#
+# The Arabic size bump is optical, not arbitrary. Measured against the
+# bundled faces: at a matched nominal size Amiri's Arabic letter bodies
+# come out ~86% of Outfit's cap height, so Arabic reads visibly smaller
+# beside the Latin version. +9% lands it at ~91% — near-matched presence,
+# inside the agreed 5–10% band, and still well inside the stat card's
+# width budget (the longest realistic name measures ~70px condensed in a
+# 116px card).
+CURRENCY_NAME_ARABIC_SIZE_SCALE = 1.09
+
+
+def currency_name_typography(name: str, size: int, latin_font):
+    """How to typeset ONE configured currency name.
+
+        name        the configured display name (utils.currency -> cfg["name"])
+        size        the nominal size the Latin version is drawn at
+        latin_font  the font a non-Arabic name keeps using, unchanged
+
+    Returns `(text, font, is_arabic)`:
+
+      * Latin / any non-Arabic script -> the name and `latin_font` exactly
+        as handed in. Nothing about the existing look changes.
+      * Arabic -> Amiri-Bold (the bundled face that actually HAS Arabic
+        glyphs; Outfit does not, which is the □□□ tofu the rank card used
+        to show), the reshape+bidi form, one size step larger per the
+        scale above.
+
+    `is_arabic` is returned because the caller must NOT apply per-glyph
+    tracking to a shaped run — spacing the characters re-isolates the
+    ligatures that shaping just joined.
+    """
+    if not _is_arabic_text(name):
+        return name, latin_font, False
+    arabic_size = max(1, round(size * CURRENCY_NAME_ARABIC_SIZE_SCALE))
+    return _shape_arabic(name), amiri(arabic_size, bold=True), True
+
+
 def _draw_tracked_text(draw, xy, text, font, fill, tracking=0, anchor=None):
     """draw.text() has no letter-spacing support. When tracking>0, draws
     character-by-character with extra spacing -- used for the reference's
@@ -1228,18 +1279,13 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
             d.text((20, 20), _v, font=_f, fill=(215, 215, 222))
         _draw_condensed(img, (x + w / 2 - nat_w * 0.72 / 2, y + 82), _val_painter,
                         ratio=0.72)
-        # Configurable currency names can be Arabic (utils/currency.py puts
-        # no restriction on what an admin types). The bundled Outfit label
-        # font has no Arabic glyphs -- that's the □□□ tofu -- so an Arabic
-        # label switches to Amiri-Bold with the same reshape+bidi shaping
-        # already used for the footer tagline. Latin labels are untouched.
-        label_is_arabic = _is_arabic_text(label)
-        if label_is_arabic:
-            lf = amiri(22, bold=True)
-            label_text = _shape_arabic(label)
-        else:
-            lf = outfit(21, "Medium")
-            label_text = label
+        # Two of these five labels ARE the configured currency names, so the
+        # shared currency-name rule decides their face/size/shaping (see
+        # currency_name_typography). The three fixed Latin labels take the
+        # same call and come back untouched -- it is a no-op for anything
+        # that isn't Arabic.
+        label_text, lf, label_is_arabic = currency_name_typography(
+            label, 21, outfit(21, "Medium"))
         lw_nat = _text_size(draw, label_text, lf, tracking=(0 if label_is_arabic else 2))[0]
 
         def _lab_painter(d, _l=label_text, _f=lf, _c=label_color, _ar=label_is_arabic):
