@@ -133,7 +133,13 @@ async def get_rank_card_data(guild_id: int, user_id: int,
     return {
         "user_id": user_id, "guild_id": guild_id,
         "username": member.display_name if member is not None else None,
-        "avatar_url": str(member.display_avatar.url) if member is not None else None,
+        # Explicit high-res request: display_avatar.url with no size param
+        # lets Discord's CDN pick whatever it feels like (often well under
+        # what we render at), which is what was producing the soft avatar --
+        # the renderer's own resize step (a single LANCZOS fit to 185px)
+        # was never the problem. Requesting 1024px guarantees a source big
+        # enough to downsample crisply regardless of what the user uploaded.
+        "avatar_url": str(member.display_avatar.with_size(1024).url) if member is not None else None,
         "member_since": member.joined_at if member is not None else None,
         "level": lvl, "xp_total": xp_val,
         "xp_current": current_xp, "xp_needed": needed_xp,
