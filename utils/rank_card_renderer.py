@@ -85,6 +85,7 @@ FONT_PATHS = {
     "tajawal_regular": _asset_path(os.path.join("fonts", "Tajawal-Regular.ttf"), "Tajawal-Regular.ttf"),
     "tajawal_medium": _asset_path(os.path.join("fonts", "Tajawal-Medium.ttf"), "Tajawal-Medium.ttf"),
     "tajawal_bold": _asset_path(os.path.join("fonts", "Tajawal-Bold.ttf"), "Tajawal-Bold.ttf"),
+    "stencil": _asset_path(os.path.join("fonts", "STENCIL.TTF"), "STENCIL.TTF"),
 }
 
 TWEMOJI_BASE = "https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/"
@@ -210,6 +211,10 @@ def zilla_bold(size):
     return _font("zilla_bold", size)
 
 
+def stencil(size):
+    return ImageFont.truetype(FONT_PATHS["stencil"], size)
+
+
 def outfit(size, weight="Regular"):
     return _font("outfit", size, weight)
 
@@ -220,6 +225,30 @@ def amiri(size, bold=False):
 
 def tajawal(size, weight="regular"):
     return ImageFont.truetype(FONT_PATHS[f"tajawal_{weight}"], size)
+
+
+# Arabic block ranges covering the configurable currency-name case (Arabic,
+# Arabic Supplement, Arabic Presentation Forms A/B) -- same detection surface
+# python-bidi/arabic_reshaper are meant for.
+_ARABIC_RANGES = ((0x0600, 0x06FF), (0x0750, 0x077F), (0x08A0, 0x08FF),
+                  (0xFB50, 0xFDFF), (0xFE70, 0xFEFF))
+
+
+def _is_arabic_text(text: str) -> bool:
+    return any(any(lo <= ord(ch) <= hi for lo, hi in _ARABIC_RANGES) for ch in text)
+
+
+def _shape_arabic(text: str) -> str:
+    """Reshape + apply bidi so Arabic renders as joined, correct-visual-order
+    glyphs instead of isolated forms/boxes. Mirrors the existing footer-tagline
+    approach (Pillow has no Arabic shaping of its own); falls back to the raw
+    string if the (pure-python) shaping libs aren't available."""
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+        return get_display(arabic_reshaper.reshape(text))
+    except Exception:
+        return text
 
 
 def _draw_tracked_text(draw, xy, text, font, fill, tracking=0, anchor=None):
@@ -324,38 +353,19 @@ def _draw_condensed(img, xy, painter, ratio=1.0, glow=None, blur=6,
     return crop.size
 
 
-def _draw_stencil_number(img, draw, xy, text, font, fill, cut_color=(16, 8, 30),
-                         glow=None, cut_w_ratio=0.055, cut_d_ratio=0.24):
-    """The reference renders its big slab numerals (Level 84, badge 84) with
-    thin vertical stencil notches cut out of the top/bottom of each glyph
-    stem. We draw the number, optionally bloom it, then cut a narrow
-    vertical slot per glyph at the top and bottom -- matching the
-    reference's distinctive cut-stencil treatment without needing a
-    stencil font."""
+def _draw_stencil_number(img, draw, xy, text, font, fill, glow=None):
+    """Big slab numerals (Level number, badge number) drawn with the repo's
+    actual STENCIL.TTF -- the font's own cut notches provide the stencil
+    look, so this just draws glyphs (with an optional soft bloom behind
+    them), no manual notch-carving. `font` is expected to already be a
+    stencil() instance; kept as a parameter (rather than hardcoded) so
+    callers control size."""
     x, y = xy
     if glow:
         _draw_glow_layer(img, lambda d: d.text((x, y), text, font=font, fill=(*glow, 130)),
                          blur=8)
-    # Glyphs on a scratch layer so the stencil notches only erase ink,
-    # never painting dark ticks into the glow/background.
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ld = ImageDraw.Draw(layer)
-    ld.text((x, y), text, font=font, fill=(*fill, 255))
-    cursor = x
-    ascent, descent = font.getmetrics()
-    cap_h = int((ascent) * 0.72)
-    cut_w = max(2, int(cap_h * cut_w_ratio))
-    cut_d = int(cap_h * cut_d_ratio)
-    for ch in text:
-        if ch.isdigit():
-            adv = ld.textbbox((0, 0), ch, font=font)[2]
-            cx = cursor + adv / 2
-            top_y = y + (ascent - cap_h)
-            ld.rectangle((cx - cut_w / 2, top_y, cx + cut_w / 2, top_y + cut_d),
-                         fill=(0, 0, 0, 0))
-            ld.rectangle((cx - cut_w / 2, y + ascent - cut_d, cx + cut_w / 2, y + ascent),
-                         fill=(0, 0, 0, 0))
-        cursor += ld.textbbox((0, 0), ch, font=font)[2]
+    ImageDraw.Draw(layer).text((x, y), text, font=font, fill=(*fill, 255))
     img.alpha_composite(layer)
 
 
@@ -863,10 +873,14 @@ def _paste_avatar(img, data, avatar_im, ring_im=None):
     cx, cy = ax + aw / 2, ay + ah / 2
     r = aw / 2
 
-    # Supplied ring artwork goes down first so it sits behind the avatar.
-    _paste_avatar_ring(img, ax, ay, aw, ah, ring_im)
-
+    # Avatar goes down first, ring artwork composited on top of it. The
+    # ring's inner glow/edge has its own soft alpha falloff before it
+    # reaches full opacity; with the avatar underneath, that falloff
+    # blends against the avatar instead of exposing bare background,
+    # which is what was reading as a gap between the two.
     _circle_mask_paste(img, avatar_im, (int(ax), int(ay), int(aw), int(ah)))
+
+    _paste_avatar_ring(img, ax, ay, aw, ah, ring_im)
 
     # Level badge -- attached to the avatar's lower right, stencil numerals
     # like the reference.
@@ -876,11 +890,11 @@ def _paste_avatar(img, data, avatar_im, ring_im=None):
     draw.ellipse((bx - badge_r, by - badge_r, bx + badge_r, by + badge_r),
                  fill=(14, 8, 22, 235), outline=(170, 130, 220, 200), width=2)
     lvl_text = str(data["level"])
-    lvl_font = zilla_bold(LAYOUT["avatar_level_badge_font"])
+    lvl_font = stencil(LAYOUT["avatar_level_badge_font"])
     bbox = draw.textbbox((0, 0), lvl_text, font=lvl_font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     _draw_stencil_number(img, draw, (bx - tw / 2 - bbox[0], by - th / 2 - bbox[1]),
-                         lvl_text, lvl_font, (230, 220, 240), cut_color=(14, 8, 22))
+                         lvl_text, lvl_font, (230, 220, 240))
 
 
 def _draw_name_block(img, draw, data, icons16):
@@ -1059,16 +1073,19 @@ def _draw_level_xp_panels(img, draw, data):
                               (200, 190, 215), tracking=1, weight="Bold")
     _draw_condensed(img, (x + 31, y + 20), _level_painter, ratio=ratio)
 
-    # Big stencil-slab number with the reference's purple bloom. Sized up
-    # and given deeper/wider notches so the faceted-cut treatment actually
-    # reads at a glance instead of disappearing into the glow.
-    lvl_font = zilla_bold(104)
-    a, _d = lvl_font.getmetrics()
-    digit_h = int(104 * 0.67)
-    ty = y + 66 - (a - digit_h)
-    _draw_stencil_number(img, draw, (x + 30, ty), str(data["level"]), lvl_font,
-                         (228, 214, 235), cut_color=(16, 8, 30),
-                         glow=(160, 85, 225), cut_w_ratio=0.09, cut_d_ratio=0.32)
+    # Big stencil-slab number, drawn with the repo's real STENCIL.TTF (the
+    # font's own cut notches give the faceted look) plus the reference's
+    # purple bloom. Positioned by the glyphs' actual bbox rather than an
+    # ascent-ratio guess, since that guess was tuned to ZillaSlab's metrics
+    # and STENCIL.TTF's are different (smaller internal leading above the
+    # cap) -- this keeps the same visual cap-top target (y+66) regardless
+    # of which font supplies the glyphs.
+    lvl_text = str(data["level"])
+    lvl_font = stencil(104)
+    bbox0 = draw.textbbox((0, 0), lvl_text, font=lvl_font)
+    ty = (y + 66) - bbox0[1]
+    _draw_stencil_number(img, draw, (x + 30, ty), lvl_text, lvl_font,
+                         (228, 214, 235), glow=(160, 85, 225))
 
     x, y, w, h = LAYOUT["xp_totalxp_panel"]
     _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
@@ -1211,11 +1228,27 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
             d.text((20, 20), _v, font=_f, fill=(215, 215, 222))
         _draw_condensed(img, (x + w / 2 - nat_w * 0.72 / 2, y + 82), _val_painter,
                         ratio=0.72)
-        lf = outfit(21, "Medium")
-        lw_nat = _text_size(draw, label, lf, tracking=2)[0]
+        # Configurable currency names can be Arabic (utils/currency.py puts
+        # no restriction on what an admin types). The bundled Outfit label
+        # font has no Arabic glyphs -- that's the □□□ tofu -- so an Arabic
+        # label switches to Amiri-Bold with the same reshape+bidi shaping
+        # already used for the footer tagline. Latin labels are untouched.
+        label_is_arabic = _is_arabic_text(label)
+        if label_is_arabic:
+            lf = amiri(22, bold=True)
+            label_text = _shape_arabic(label)
+        else:
+            lf = outfit(21, "Medium")
+            label_text = label
+        lw_nat = _text_size(draw, label_text, lf, tracking=(0 if label_is_arabic else 2))[0]
 
-        def _lab_painter(d, _l=label, _f=lf, _c=label_color):
-            _draw_tracked_text(d, (20, 20), _l, _f, _c, tracking=2)
+        def _lab_painter(d, _l=label_text, _f=lf, _c=label_color, _ar=label_is_arabic):
+            if _ar:
+                # Per-glyph tracking would re-isolate the shaped ligatures --
+                # draw the shaped run as a single string instead.
+                d.text((20, 20), _l, font=_f, fill=_c)
+            else:
+                _draw_tracked_text(d, (20, 20), _l, _f, _c, tracking=2)
         _draw_condensed(img, (x + w / 2 - lw_nat * 0.66 / 2, y + 116), _lab_painter,
                         ratio=0.66)
 
@@ -1332,13 +1365,7 @@ def _draw_footer(img, draw):
     # arabic shaping of its own; reshape + bidi give correct joined
     # visual-order text when the (pure-python) libs are installed, and we
     # fall back to the raw string otherwise.
-    text = "عالمنا صغير، ولكن الإلهام فيه بلا حدود"
-    try:
-        import arabic_reshaper
-        from bidi.algorithm import get_display
-        text = get_display(arabic_reshaper.reshape(text))
-    except Exception:
-        pass
+    text = _shape_arabic("عالمنا صغير، ولكن الإلهام فيه بلا حدود")
     f = amiri(30)
     cx = 602
     bbox = draw.textbbox((0, 0), text, font=f)
