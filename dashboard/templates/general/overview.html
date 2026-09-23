@@ -18,10 +18,12 @@
         <div class="stat-value">{{ stats.warn_count }}</div>
         <div class="stat-sub">all time</div>
     </div>
-    <div class="stat-card stat-success">
+    <div class="stat-card {% if is_online %}stat-success{% else %}stat-danger{% endif %}">
         <div class="stat-label">Bot Status</div>
-        <div class="stat-value" style="font-size:18px;color:var(--success)">Online</div>
-        <div class="stat-sub">Nero is running</div>
+        <div class="stat-value" style="font-size:18px;color:{% if is_online %}var(--success){% else %}var(--danger){% endif %}">
+            {% if is_online %}● Online{% else %}● Offline{% endif %}
+        </div>
+        <div class="stat-sub">{% if is_online %}Nero is running{% else %}no recent heartbeat{% endif %}</div>
     </div>
 </div>
 
