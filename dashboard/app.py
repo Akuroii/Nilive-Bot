@@ -1756,6 +1756,11 @@ COMMAND_CATEGORIES = {
     "Utility & Trade": [
         "trade", "trade_history", "report_setup", "report_list",
         "schedule_message", "schedule_list", "schedule_cancel",
+        # AFK pass (2026-09-23): the only prefix command in the bot. It rides
+        # the shared Commands-page architecture (command_toggles + settings
+        # endpoints); meta.prefix=True is what renders its name/usage as
+        # "!afk" and hides the alias UI (see manage/commands.html).
+        "afk",
     ],
 }
 
@@ -1852,6 +1857,14 @@ COMMAND_METADATA = {
     "youtube_setup": {"desc": "Add a YouTube channel to watch for uploads", "params": ["youtube_url", "discord_channel", "ping_role", "custom_message"]},
     "youtube_remove": {"desc": "Remove a YouTube notification", "params": ["entry_id"]},
     "youtube_list": {"desc": "List YouTube notification configs", "params": []},
+    # AFK pass (2026-09-23): prefix-only command, so "prefix": True — the
+    # Commands page renders its name/usage as "!afk [reason]" and hides the
+    # alias controls (aliases don't route through the prefix bridge).
+    "afk": {
+        "desc": "Go AFK with an optional reason; mention alerts stay on and your AFK card button shows saved mention messages (prefix command: !afk)",
+        "params": ["reason"],
+        "prefix": True,
+    },
 }
 
 
