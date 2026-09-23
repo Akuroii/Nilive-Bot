@@ -1,0 +1,2575 @@
+{
+  "generator": "dashboard/static/js/embed-composer.js :: renderDiscordMarkup (v1, untouched)",
+  "literal_oracle": "EmbedComposer.esc(text) — what v1's preview does for title/author/footer/field name",
+  "note": "Recorded by scripts/test_discord_markdown.js --write-golden. Verified against the live v1 module on every run.",
+  "source_sha256": "6208d7b4636741ffa4400b559ca9e78ef92befcb4f827b8c4aec03b31900fd04",
+  "corpus_version": 1,
+  "case_count": 171,
+  "cases": {
+    "esc-01": {
+      "content": {
+        "html": "plain text with no markup",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "plain text with no markup",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "plain text with no markup",
+        "isEmojiOnly": false
+      },
+      "literal": "plain text with no markup"
+    },
+    "esc-02": {
+      "content": {
+        "html": "&lt;script&gt;alert(1)&lt;/script&gt;",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "&lt;script&gt;alert(1)&lt;/script&gt;",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "&lt;script&gt;alert(1)&lt;/script&gt;",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;script&gt;alert(1)&lt;/script&gt;"
+    },
+    "esc-03": {
+      "content": {
+        "html": "a &amp; b",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "a &amp; b",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "a &amp; b",
+        "isEmojiOnly": false
+      },
+      "literal": "a &amp; b"
+    },
+    "esc-04": {
+      "content": {
+        "html": "&quot;double&quot; and &#39;single&#39; quotes",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "&quot;double&quot; and &#39;single&#39; quotes",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "&quot;double&quot; and &#39;single&#39; quotes",
+        "isEmojiOnly": false
+      },
+      "literal": "&quot;double&quot; and &#39;single&#39; quotes"
+    },
+    "esc-05": {
+      "content": {
+        "html": "5 &gt; 3 and 2 &lt; 4",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "5 &gt; 3 and 2 &lt; 4",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "5 &gt; 3 and 2 &lt; 4",
+        "isEmojiOnly": false
+      },
+      "literal": "5 &gt; 3 and 2 &lt; 4"
+    },
+    "esc-06": {
+      "content": {
+        "html": "&amp;amp; already escaped entity",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "&amp;amp; already escaped entity",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "&amp;amp; already escaped entity",
+        "isEmojiOnly": false
+      },
+      "literal": "&amp;amp; already escaped entity"
+    },
+    "esc-07": {
+      "content": {
+        "html": "&lt;img src=x onerror=alert(1)&gt;",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "&lt;img src=x onerror=alert(1)&gt;",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "&lt;img src=x onerror=alert(1)&gt;",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;img src=x onerror=alert(1)&gt;"
+    },
+    "esc-08": {
+      "content": {
+        "html": "&lt;/div&gt;&lt;/a&gt;",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "&lt;/div&gt;&lt;/a&gt;",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "&lt;/div&gt;&lt;/a&gt;",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;/div&gt;&lt;/a&gt;"
+    },
+    "esc-09": {
+      "content": {
+        "html": "&lt;!-- comment --&gt;",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "&lt;!-- comment --&gt;",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "&lt;!-- comment --&gt;",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;!-- comment --&gt;"
+    },
+    "esc-10": {
+      "content": {
+        "html": "javascript:alert(1)",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "javascript:alert(1)",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "javascript:alert(1)",
+        "isEmojiOnly": false
+      },
+      "literal": "javascript:alert(1)"
+    },
+    "esc-11": {
+      "content": {
+        "html": "<code class=\"eb-code\">&amp;lt;</code> inside code",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">&amp;lt;</code> inside code",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">&amp;lt;</code> inside code",
+        "isEmojiOnly": false
+      },
+      "literal": "`&amp;lt;` inside code"
+    },
+    "md-01": {
+      "content": {
+        "html": "<strong>bold</strong>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<strong>bold</strong>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<strong>bold</strong>",
+        "isEmojiOnly": false
+      },
+      "literal": "**bold**"
+    },
+    "md-02": {
+      "content": {
+        "html": "<em>italic</em>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<em>italic</em>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<em>italic</em>",
+        "isEmojiOnly": false
+      },
+      "literal": "*italic*"
+    },
+    "md-03": {
+      "content": {
+        "html": "<u>underline</u>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<u>underline</u>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<u>underline</u>",
+        "isEmojiOnly": false
+      },
+      "literal": "__underline__"
+    },
+    "md-04": {
+      "content": {
+        "html": "<s>strike</s>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<s>strike</s>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<s>strike</s>",
+        "isEmojiOnly": false
+      },
+      "literal": "~~strike~~"
+    },
+    "md-05": {
+      "content": {
+        "html": "<strong><em>bold italic</strong></em>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<strong><em>bold italic</strong></em>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<strong><em>bold italic</strong></em>",
+        "isEmojiOnly": false
+      },
+      "literal": "***bold italic***"
+    },
+    "md-06": {
+      "content": {
+        "html": "<strong>bold _not underline_</strong>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<strong>bold _not underline_</strong>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<strong>bold _not underline_</strong>",
+        "isEmojiOnly": false
+      },
+      "literal": "**bold _not underline_**"
+    },
+    "md-07": {
+      "content": {
+        "html": "<em>_nested_</em>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<em>_nested_</em>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<em>_nested_</em>",
+        "isEmojiOnly": false
+      },
+      "literal": "*_nested_*"
+    },
+    "md-08": {
+      "content": {
+        "html": "<strong>a <em>b</em> c</strong>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<strong>a <em>b</em> c</strong>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<strong>a <em>b</em> c</strong>",
+        "isEmojiOnly": false
+      },
+      "literal": "**a *b* c**"
+    },
+    "md-09": {
+      "content": {
+        "html": "<s><strong>both</strong></s>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<s><strong>both</strong></s>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<s><strong>both</strong></s>",
+        "isEmojiOnly": false
+      },
+      "literal": "~~**both**~~"
+    },
+    "md-10": {
+      "content": {
+        "html": "**unclosed bold",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "**unclosed bold",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "**unclosed bold",
+        "isEmojiOnly": false
+      },
+      "literal": "**unclosed bold"
+    },
+    "md-11": {
+      "content": {
+        "html": "unopened** bold",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "unopened** bold",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "unopened** bold",
+        "isEmojiOnly": false
+      },
+      "literal": "unopened** bold"
+    },
+    "md-12": {
+      "content": {
+        "html": "**",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "**",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "**",
+        "isEmojiOnly": false
+      },
+      "literal": "**"
+    },
+    "md-13": {
+      "content": {
+        "html": "<em>*</em>*",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<em>*</em>*",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<em>*</em>*",
+        "isEmojiOnly": false
+      },
+      "literal": "****"
+    },
+    "md-14": {
+      "content": {
+        "html": "a<strong>b</strong>c",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "a<strong>b</strong>c",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "a<strong>b</strong>c",
+        "isEmojiOnly": false
+      },
+      "literal": "a**b**c"
+    },
+    "md-15": {
+      "content": {
+        "html": "<strong> spaced </strong>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<strong> spaced </strong>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<strong> spaced </strong>",
+        "isEmojiOnly": false
+      },
+      "literal": "** spaced **"
+    },
+    "md-16": {
+      "content": {
+        "html": "<em>a</em> <em>b</em> <em>c</em>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<em>a</em> <em>b</em> <em>c</em>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<em>a</em> <em>b</em> <em>c</em>",
+        "isEmojiOnly": false
+      },
+      "literal": "*a* *b* *c*"
+    },
+    "md-17": {
+      "content": {
+        "html": "<strong>a</strong> and <strong>b</strong>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<strong>a</strong> and <strong>b</strong>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<strong>a</strong> and <strong>b</strong>",
+        "isEmojiOnly": false
+      },
+      "literal": "**a** and **b**"
+    },
+    "md-18": {
+      "content": {
+        "html": "line one\nline two <strong>bold</strong> here",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "line one\nline two <strong>bold</strong> here",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "line one\nline two <strong>bold</strong> here",
+        "isEmojiOnly": false
+      },
+      "literal": "line one\nline two **bold** here"
+    },
+    "md-19": {
+      "content": {
+        "html": "\\<em>not italic\\</em>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "\\<em>not italic\\</em>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "\\<em>not italic\\</em>",
+        "isEmojiOnly": false
+      },
+      "literal": "\\*not italic\\*"
+    },
+    "md-20": {
+      "content": {
+        "html": "<u>a</u> <strong>b</strong> <s>c</s> <em>d</em>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<u>a</u> <strong>b</strong> <s>c</s> <em>d</em>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<u>a</u> <strong>b</strong> <s>c</s> <em>d</em>",
+        "isEmojiOnly": false
+      },
+      "literal": "__a__ **b** ~~c~~ *d*"
+    },
+    "md-21": {
+      "content": {
+        "html": "<em>*</em>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<em>*</em>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<em>*</em>",
+        "isEmojiOnly": false
+      },
+      "literal": "***"
+    },
+    "md-22": {
+      "content": {
+        "html": "*_&quot;_",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "*_&quot;_",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "*_&quot;_",
+        "isEmojiOnly": false
+      },
+      "literal": "*_&quot;_"
+    },
+    "ci-01": {
+      "content": {
+        "html": "<code class=\"eb-code\">code</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">code</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">code</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`code`"
+    },
+    "ci-02": {
+      "content": {
+        "html": "use <code class=\"eb-code\">npm start</code> here",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "use <code class=\"eb-code\">npm start</code> here",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "use <code class=\"eb-code\">npm start</code> here",
+        "isEmojiOnly": false
+      },
+      "literal": "use `npm start` here"
+    },
+    "ci-03": {
+      "content": {
+        "html": "<code class=\"eb-code\">**not bold**</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">**not bold**</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">**not bold**</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`**not bold**`"
+    },
+    "ci-04": {
+      "content": {
+        "html": "<code class=\"eb-code\">*not italic*</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">*not italic*</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">*not italic*</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`*not italic*`"
+    },
+    "ci-05": {
+      "content": {
+        "html": "<code class=\"eb-code\">~~not struck~~</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">~~not struck~~</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">~~not struck~~</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`~~not struck~~`"
+    },
+    "ci-06": {
+      "content": {
+        "html": "<code class=\"eb-code\">`x`</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">`x`</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">`x`</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`` `x` ``"
+    },
+    "ci-07": {
+      "content": {
+        "html": "<code class=\"eb-code\">a ` b</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">a ` b</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">a ` b</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`` a ` b ``"
+    },
+    "ci-08": {
+      "content": {
+        "html": "<code class=\"eb-code\">```x```</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">```x```</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">```x```</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`` ```x``` ``"
+    },
+    "ci-09": {
+      "content": {
+        "html": "<code class=\"eb-code\">``` `**x**` ```</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">``` `**x**` ```</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">``` `**x**` ```</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`` ``` `**x**` ``` ``"
+    },
+    "ci-10": {
+      "content": {
+        "html": "`unclosed code",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "`unclosed code",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "`unclosed code",
+        "isEmojiOnly": false
+      },
+      "literal": "`unclosed code"
+    },
+    "ci-11": {
+      "content": {
+        "html": "a ` b",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "a ` b",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "a ` b",
+        "isEmojiOnly": false
+      },
+      "literal": "a ` b"
+    },
+    "ci-12": {
+      "content": {
+        "html": "<code class=\"eb-code\">a</code> <code class=\"eb-code\">b</code> <code class=\"eb-code\">c</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">a</code> <code class=\"eb-code\">b</code> <code class=\"eb-code\">c</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">a</code> <code class=\"eb-code\">b</code> <code class=\"eb-code\">c</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`a` `b` `c`"
+    },
+    "ci-13": {
+      "content": {
+        "html": "<code class=\"eb-code\">a</code> <strong>b</strong> <code class=\"eb-code\">c</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">a</code> <strong>b</strong> <code class=\"eb-code\">c</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">a</code> <strong>b</strong> <code class=\"eb-code\">c</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`a` **b** `c`"
+    },
+    "ci-14": {
+      "content": {
+        "html": "<strong>bold <code class=\"eb-code\">code</code> bold</strong>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<strong>bold <code class=\"eb-code\">code</code> bold</strong>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<strong>bold <code class=\"eb-code\">code</code> bold</strong>",
+        "isEmojiOnly": false
+      },
+      "literal": "**bold `code` bold**"
+    },
+    "ci-15": {
+      "content": {
+        "html": "<code class=\"eb-code\"><span class=\"eb-mention\">@tester</span></code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\"><span class=\"eb-mention\">@tester</span></code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\"><span class=\"eb-mention\">@tester</span></code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`&lt;@200&gt;`"
+    },
+    "ci-16": {
+      "content": {
+        "html": "<code class=\"eb-code\"><img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":e:</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\"><img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":e:</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\"><img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":e:</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`&lt;:e:111&gt;`"
+    },
+    "ci-17": {
+      "content": {
+        "html": "<code class=\"eb-code\">`</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">`</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">`</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`` ` ``"
+    },
+    "ci-18": {
+      "content": {
+        "html": "<code class=\"eb-code\"> </code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\"> </code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\"> </code>",
+        "isEmojiOnly": false
+      },
+      "literal": "` `"
+    },
+    "ci-19": {
+      "content": {
+        "html": "``",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "``",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "``",
+        "isEmojiOnly": false
+      },
+      "literal": "``"
+    },
+    "ci-20": {
+      "content": {
+        "html": "text <pre class=\"eb-code-block\"><code> odd </code></pre> text",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "text <pre class=\"eb-code-block\"><code> odd </code></pre> text",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "text <pre class=\"eb-code-block\"><code> odd </code></pre> text",
+        "isEmojiOnly": false
+      },
+      "literal": "text ``` odd ``` text"
+    },
+    "ci-21": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>js</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>js</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>js</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```js```"
+    },
+    "ci-22": {
+      "content": {
+        "html": "<code class=\"eb-code\">`a`</code> and <code class=\"eb-code\">`b`</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">`a`</code> and <code class=\"eb-code\">`b`</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">`a`</code> and <code class=\"eb-code\">`b`</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`` `a` `` and `` `b` ``"
+    },
+    "cf-01": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>plain fence</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>plain fence</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>plain fence</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```\nplain fence\n```"
+    },
+    "cf-02": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>const a = 1;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>const a = 1;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>const a = 1;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```js\nconst a = 1;\n```"
+    },
+    "cf-03": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>def f():\n    return 1</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>def f():\n    return 1</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>def f():\n    return 1</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```python\ndef f():\n    return 1\n```"
+    },
+    "cf-04": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>**not bold**</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>**not bold**</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>**not bold**</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```markdown\n**not bold**\n```"
+    },
+    "cf-05": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>\\u001b[31mred\\u001b[0m</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>\\u001b[31mred\\u001b[0m</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>\\u001b[31mred\\u001b[0m</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```ansi\n\\u001b[31mred\\u001b[0m\n```"
+    },
+    "cf-06": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>{&quot;a&quot;: 1}</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>{&quot;a&quot;: 1}</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>{&quot;a&quot;: 1}</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```json\n{&quot;a&quot;: 1}\n```"
+    },
+    "cf-07": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>const a = 1;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>const a = 1;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>const a = 1;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```js\nconst a = 1;```"
+    },
+    "cf-08": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code></code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code></code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code></code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```js\n```"
+    },
+    "cf-09": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code></code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code></code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code></code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```\n```"
+    },
+    "cf-10": {
+      "content": {
+        "html": "```\nnever closed",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "```\nnever closed",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "```\nnever closed",
+        "isEmojiOnly": false
+      },
+      "literal": "```\nnever closed"
+    },
+    "cf-11": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>line one\nline two\nline three</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>line one\nline two\nline three</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>line one\nline two\nline three</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```js\nline one\nline two\nline three\n```"
+    },
+    "cf-12": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>x</code></pre>\n<pre class=\"eb-code-block\"><code>y</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>x</code></pre>\n<pre class=\"eb-code-block\"><code>y</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>x</code></pre>\n<pre class=\"eb-code-block\"><code>y</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```python\nx\n```\n```python\ny\n```"
+    },
+    "cf-13": {
+      "content": {
+        "html": "before\n<pre class=\"eb-code-block\"><code>code</code></pre>\nafter",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "before\n<pre class=\"eb-code-block\"><code>code</code></pre>\nafter",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "before\n<pre class=\"eb-code-block\"><code>code</code></pre>\nafter",
+        "isEmojiOnly": false
+      },
+      "literal": "before\n```\ncode\n```\nafter"
+    },
+    "cf-14": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>int main(void) { return 0; }</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>int main(void) { return 0; }</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>int main(void) { return 0; }</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```c\nint main(void) { return 0; }\n```"
+    },
+    "cf-15": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>nested ``` inside</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>nested ``` inside</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>nested ``` inside</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "````js\nnested ``` inside\n````"
+    },
+    "cf-16": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>const url = &quot;https://x/y?a=1&amp;b=2&quot;;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>const url = &quot;https://x/y?a=1&amp;b=2&quot;;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>const url = &quot;https://x/y?a=1&amp;b=2&quot;;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```js\nconst url = &quot;https://x/y?a=1&amp;b=2&quot;;\n```"
+    },
+    "cf-17": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>&lt;script&gt;alert(1)&lt;/script&gt;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>&lt;script&gt;alert(1)&lt;/script&gt;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>&lt;script&gt;alert(1)&lt;/script&gt;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```\n&lt;script&gt;alert(1)&lt;/script&gt;\n```"
+    },
+    "cf-18": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>**bold** and `inline`</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>**bold** and `inline`</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>**bold** and `inline`</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```\n**bold** and `inline`\n```"
+    },
+    "cf-19": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>// comment</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>// comment</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>// comment</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```cs\n// comment\n```"
+    },
+    "cf-20": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>   indented\n\ttabbed</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>   indented\n\ttabbed</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>   indented\n\ttabbed</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```txt\n   indented\n\ttabbed\n```"
+    },
+    "cf-21": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>trailing newlines\n\n</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>trailing newlines\n\n</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>trailing newlines\n\n</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```\ntrailing newlines\n\n\n```"
+    },
+    "cf-22": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code></code></pre>\n<pre class=\"eb-code-block\"><code></code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code></code></pre>\n<pre class=\"eb-code-block\"><code></code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code></code></pre>\n<pre class=\"eb-code-block\"><code></code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```js\n```\n```js\n```"
+    },
+    "cf-23": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>const aVeryLongVariableName = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>const aVeryLongVariableName = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>const aVeryLongVariableName = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx;</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```js\nconst aVeryLongVariableName = xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx;\n```"
+    },
+    "cf-24": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>no info string but a blank first line\n\nsecond paragraph</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>no info string but a blank first line\n\nsecond paragraph</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>no info string but a blank first line\n\nsecond paragraph</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```\nno info string but a blank first line\n\nsecond paragraph\n```"
+    },
+    "cf-25": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>CRLF line endings</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>CRLF line endings</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>CRLF line endings</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```\r\nCRLF line endings\r\n```"
+    },
+    "cf-26": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>const a = 1;</code></pre>\nand <strong>bold</strong> after",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>const a = 1;</code></pre>\nand <strong>bold</strong> after",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>const a = 1;</code></pre>\nand <strong>bold</strong> after",
+        "isEmojiOnly": false
+      },
+      "literal": "```js\nconst a = 1;\n```\nand **bold** after"
+    },
+    "cf-27": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>&quot;JS&quot;\nquoted info string</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>&quot;JS&quot;\nquoted info string</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>&quot;JS&quot;\nquoted info string</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```&quot;JS&quot;\nquoted info string\n```"
+    },
+    "tok-01": {
+      "content": {
+        "html": "hello <span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "hello <span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "hello <span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "hello &lt;@200&gt;"
+    },
+    "tok-02": {
+      "content": {
+        "html": "old form <span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "old form <span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "old form <span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "old form &lt;@!200&gt;"
+    },
+    "tok-03": {
+      "content": {
+        "html": "unknown user <span class=\"eb-mention\">@999999999999999999</span>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "unknown user <span class=\"eb-mention\">@999999999999999999</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "unknown user <span class=\"eb-mention\">@999999999999999999</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "unknown user &lt;@999999999999999999&gt;"
+    },
+    "tok-04": {
+      "content": {
+        "html": "channel <span class=\"eb-mention\">#announcements</span>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "channel <span class=\"eb-mention\">#announcements</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "channel <span class=\"eb-mention\">#announcements</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "channel &lt;#100&gt;"
+    },
+    "tok-05": {
+      "content": {
+        "html": "unknown channel <span class=\"eb-mention\">#9999999999</span>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "unknown channel <span class=\"eb-mention\">#9999999999</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "unknown channel <span class=\"eb-mention\">#9999999999</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "unknown channel &lt;#9999999999&gt;"
+    },
+    "tok-06": {
+      "content": {
+        "html": "role <span class=\"eb-mention\" style=\"background:#5865f233;color:#5865f2;\">@Moderator</span>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "role <span class=\"eb-mention\" style=\"background:#5865f233;color:#5865f2;\">@Moderator</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "role <span class=\"eb-mention\" style=\"background:#5865f233;color:#5865f2;\">@Moderator</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "role &lt;@&amp;777&gt;"
+    },
+    "tok-07": {
+      "content": {
+        "html": "colourless role <span class=\"eb-mention\">@No Colour Role</span>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "colourless role <span class=\"eb-mention\">@No Colour Role</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "colourless role <span class=\"eb-mention\">@No Colour Role</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "colourless role &lt;@&amp;778&gt;"
+    },
+    "tok-08": {
+      "content": {
+        "html": "unknown role <span class=\"eb-mention\">@9999999999</span>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "unknown role <span class=\"eb-mention\">@9999999999</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "unknown role <span class=\"eb-mention\">@9999999999</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "unknown role &lt;@&amp;9999999999&gt;"
+    },
+    "tok-09": {
+      "content": {
+        "html": "emoji <img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":static:",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "emoji <img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":static:",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "emoji <img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":static:",
+        "isEmojiOnly": false
+      },
+      "literal": "emoji &lt;:static:111&gt;"
+    },
+    "tok-10": {
+      "content": {
+        "html": "animated <img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/222.gif\" alt=\":spin:",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "animated <img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/222.gif\" alt=\":spin:",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "animated <img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/222.gif\" alt=\":spin:",
+        "isEmojiOnly": false
+      },
+      "literal": "animated &lt;a:spin:222&gt;"
+    },
+    "tok-11": {
+      "content": {
+        "html": "<span class=\"eb-mention\">@tester</span> said <strong>hi</strong> in <span class=\"eb-mention\">#announcements</span>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<span class=\"eb-mention\">@tester</span> said <strong>hi</strong> in <span class=\"eb-mention\">#announcements</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<span class=\"eb-mention\">@tester</span> said <strong>hi</strong> in <span class=\"eb-mention\">#announcements</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;@200&gt; said **hi** in &lt;#100&gt;"
+    },
+    "tok-12": {
+      "content": {
+        "html": "<span class=\"eb-mention\">@tester</span><span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "<span class=\"eb-mention\">@tester</span><span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<span class=\"eb-mention\">@tester</span><span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;@200&gt;&lt;@200&gt;"
+    },
+    "tok-13": {
+      "content": {
+        "html": "not a token &lt;@abc&gt; and &lt;#",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "not a token &lt;@abc&gt; and &lt;#",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "not a token &lt;@abc&gt; and &lt;#",
+        "isEmojiOnly": false
+      },
+      "literal": "not a token &lt;@abc&gt; and &lt;#"
+    },
+    "tok-14": {
+      "content": {
+        "html": "empty id &lt;@&gt;",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "empty id &lt;@&gt;",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "empty id &lt;@&gt;",
+        "isEmojiOnly": false
+      },
+      "literal": "empty id &lt;@&gt;"
+    },
+    "tok-15": {
+      "content": {
+        "html": "@everyone and @here",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "@everyone and @here",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "@everyone and @here",
+        "isEmojiOnly": false
+      },
+      "literal": "@everyone and @here"
+    },
+    "tok-16": {
+      "content": {
+        "html": "mention-ish &lt;@200 &gt;",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "mention-ish &lt;@200 &gt;",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "mention-ish &lt;@200 &gt;",
+        "isEmojiOnly": false
+      },
+      "literal": "mention-ish &lt;@200 &gt;"
+    },
+    "tok-17": {
+      "content": {
+        "html": "<strong><span class=\"eb-mention\">@tester</span></strong>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<strong><span class=\"eb-mention\">@tester</span></strong>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<strong><span class=\"eb-mention\">@tester</span></strong>",
+        "isEmojiOnly": false
+      },
+      "literal": "**&lt;@200&gt;**"
+    },
+    "tok-18": {
+      "content": {
+        "html": "<s><img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":static:</s>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<s><img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":static:</s>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<s><img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":static:</s>",
+        "isEmojiOnly": false
+      },
+      "literal": "~~&lt;:static:111&gt;~~"
+    },
+    "tok-19": {
+      "content": {
+        "html": "<span class=\"eb-mention\">@tester</span> in code <code class=\"eb-code\"><span class=\"eb-mention\">@tester</span></code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<span class=\"eb-mention\">@tester</span> in code <code class=\"eb-code\"><span class=\"eb-mention\">@tester</span></code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<span class=\"eb-mention\">@tester</span> in code <code class=\"eb-code\"><span class=\"eb-mention\">@tester</span></code>",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;@200&gt; in code `&lt;@200&gt;`"
+    },
+    "tok-20": {
+      "content": {
+        "html": "resolvable only with empty lookups <span class=\"eb-mention\">#100</span> <span class=\"eb-mention\">@777</span> <span class=\"eb-mention\">@200</span>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "resolvable only with empty lookups <span class=\"eb-mention\">#100</span> <span class=\"eb-mention\">@777</span> <span class=\"eb-mention\">@200</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "resolvable only with empty lookups <span class=\"eb-mention\">#100</span> <span class=\"eb-mention\">@777</span> <span class=\"eb-mention\">@200</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "resolvable only with empty lookups &lt;#100&gt; &lt;@&amp;777&gt; &lt;@200&gt;"
+    },
+    "tok-21": {
+      "content": {
+        "html": "mixed <span class=\"eb-mention\">#a &lt;b&gt; &amp; &quot;c&quot;</span> weird name",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "mixed <span class=\"eb-mention\">#a &lt;b&gt; &amp; &quot;c&quot;</span> weird name",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "mixed <span class=\"eb-mention\">#a &lt;b&gt; &amp; &quot;c&quot;</span> weird name",
+        "isEmojiOnly": false
+      },
+      "literal": "mixed &lt;#101&gt; weird name"
+    },
+    "tok-22": {
+      "content": {
+        "html": "escaped names <span class=\"eb-mention\">@tester</span> <span class=\"eb-mention\">@a &amp; b</span> <span class=\"eb-mention\">@a &amp; b &quot;role&quot;</span>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "escaped names <span class=\"eb-mention\">@tester</span> <span class=\"eb-mention\">@a &amp; b</span> <span class=\"eb-mention\">@a &amp; b &quot;role&quot;</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "escaped names <span class=\"eb-mention\">@tester</span> <span class=\"eb-mention\">@a &amp; b</span> <span class=\"eb-mention\">@a &amp; b &quot;role&quot;</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "escaped names &lt;@200&gt; &lt;@201&gt; &lt;@&amp;779&gt;"
+    },
+    "tok-23": {
+      "content": {
+        "html": "&lt;t:1758600000:R&gt;",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "&lt;t:1758600000:R&gt;",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "&lt;t:1758600000:R&gt;",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;t:1758600000:R&gt;"
+    },
+    "tok-24": {
+      "content": {
+        "html": "&lt;a:animated name:333&gt;",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "&lt;a:animated name:333&gt;",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "&lt;a:animated name:333&gt;",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;a:animated name:333&gt;"
+    },
+    "eo-01": {
+      "content": {
+        "html": "<span>🎲</span>",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "🎲",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "🎲",
+        "isEmojiOnly": false
+      },
+      "literal": "🎲"
+    },
+    "eo-02": {
+      "content": {
+        "html": "<span>🎲</span><span>🎲</span>",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "🎲🎲",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "🎲🎲",
+        "isEmojiOnly": false
+      },
+      "literal": "🎲🎲"
+    },
+    "eo-03": {
+      "content": {
+        "html": "🎲 text",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "🎲 text",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "🎲 text",
+        "isEmojiOnly": false
+      },
+      "literal": "🎲 text"
+    },
+    "eo-04": {
+      "content": {
+        "html": "<span>🎲</span> ",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "🎲 ",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "🎲 ",
+        "isEmojiOnly": false
+      },
+      "literal": "🎲 "
+    },
+    "eo-05": {
+      "content": {
+        "html": " <span>🎲</span> ",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": " 🎲 ",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": " 🎲 ",
+        "isEmojiOnly": false
+      },
+      "literal": " 🎲 "
+    },
+    "eo-06": {
+      "content": {
+        "html": "<img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":only:",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "<img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":only:",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":only:",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;:only:111&gt;"
+    },
+    "eo-07": {
+      "content": {
+        "html": "<img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/222.gif\" alt=\":onlyanim:",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "<img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/222.gif\" alt=\":onlyanim:",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/222.gif\" alt=\":onlyanim:",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;a:onlyanim:222&gt;"
+    },
+    "eo-08": {
+      "content": {
+        "html": "<span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "<span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;@200&gt;"
+    },
+    "eo-09": {
+      "content": {
+        "html": "<span class=\"eb-mention\">@tester</span> <span>🎲</span>",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "<span class=\"eb-mention\">@tester</span> 🎲",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<span class=\"eb-mention\">@tester</span> 🎲",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;@200&gt; 🎲"
+    },
+    "eo-10": {
+      "content": {
+        "html": "<span>👨‍👩‍👧‍👦</span>",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "👨‍👩‍👧‍👦",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "👨‍👩‍👧‍👦",
+        "isEmojiOnly": false
+      },
+      "literal": "👨‍👩‍👧‍👦"
+    },
+    "eo-11": {
+      "content": {
+        "html": "<span>❤️</span>",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "❤️",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "❤️",
+        "isEmojiOnly": false
+      },
+      "literal": "❤️"
+    },
+    "eo-12": {
+      "content": {
+        "html": "1️⃣",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "1️⃣",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "1️⃣",
+        "isEmojiOnly": false
+      },
+      "literal": "1️⃣"
+    },
+    "eo-13": {
+      "content": {
+        "html": "<span>🎲</span>\n<span>🎲</span>",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "🎲\n🎲",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "🎲\n🎲",
+        "isEmojiOnly": false
+      },
+      "literal": "🎲\n🎲"
+    },
+    "eo-14": {
+      "content": {
+        "html": "text only",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "text only",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "text only",
+        "isEmojiOnly": false
+      },
+      "literal": "text only"
+    },
+    "eo-15": {
+      "content": {
+        "html": "   ",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "   ",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "   ",
+        "isEmojiOnly": false
+      },
+      "literal": "   "
+    },
+    "eo-16": {
+      "content": {
+        "html": "🎲 <img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":only: &lt;https://x&gt;",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "🎲 <img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":only: &lt;https://x&gt;",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "🎲 <img class=\"eb-inline-emoji\" src=\"https://cdn.discordapp.com/emojis/111.png\" alt=\":only: &lt;https://x&gt;",
+        "isEmojiOnly": false
+      },
+      "literal": "🎲 &lt;:only:111&gt; &lt;https://x&gt;"
+    },
+    "ws-01": {
+      "content": {
+        "html": "",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "",
+        "isEmojiOnly": false
+      },
+      "literal": ""
+    },
+    "ws-02": {
+      "content": {
+        "html": " ",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": " ",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": " ",
+        "isEmojiOnly": false
+      },
+      "literal": " "
+    },
+    "ws-03": {
+      "content": {
+        "html": "\n\n\n",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "\n\n\n",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "\n\n\n",
+        "isEmojiOnly": false
+      },
+      "literal": "\n\n\n"
+    },
+    "ws-04": {
+      "content": {
+        "html": "line one\nline two",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "line one\nline two",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "line one\nline two",
+        "isEmojiOnly": false
+      },
+      "literal": "line one\nline two"
+    },
+    "ws-05": {
+      "content": {
+        "html": "line one\r\nline two",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "line one\r\nline two",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "line one\r\nline two",
+        "isEmojiOnly": false
+      },
+      "literal": "line one\r\nline two"
+    },
+    "ws-06": {
+      "content": {
+        "html": "  leading and trailing  ",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "  leading and trailing  ",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "  leading and trailing  ",
+        "isEmojiOnly": false
+      },
+      "literal": "  leading and trailing  "
+    },
+    "ws-07": {
+      "content": {
+        "html": "tab\tseparated\tvalues",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "tab\tseparated\tvalues",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "tab\tseparated\tvalues",
+        "isEmojiOnly": false
+      },
+      "literal": "tab\tseparated\tvalues"
+    },
+    "ws-08": {
+      "content": {
+        "html": "Café — naïve — 日本語",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "Café — naïve — 日本語",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "Café — naïve — 日本語",
+        "isEmojiOnly": false
+      },
+      "literal": "Café — naïve — 日本語"
+    },
+    "ws-09": {
+      "content": {
+        "html": "مرحبا بالعالم",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "مرحبا بالعالم",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "مرحبا بالعالم",
+        "isEmojiOnly": false
+      },
+      "literal": "مرحبا بالعالم"
+    },
+    "ws-10": {
+      "content": {
+        "html": "שלום עולם",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "שלום עולם",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "שלום עולם",
+        "isEmojiOnly": false
+      },
+      "literal": "שלום עולם"
+    },
+    "ws-11": {
+      "content": {
+        "html": "​",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "​",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "​",
+        "isEmojiOnly": false
+      },
+      "literal": "​"
+    },
+    "ws-12": {
+      "content": {
+        "html": "🙂🙃🙂 non-latin café",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "🙂🙃🙂 non-latin café",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "🙂🙃🙂 non-latin café",
+        "isEmojiOnly": false
+      },
+      "literal": "🙂🙃🙂 non-latin café"
+    },
+    "ws-13": {
+      "content": {
+        "html": "very long line yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy end",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "very long line yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy end",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "very long line yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy end",
+        "isEmojiOnly": false
+      },
+      "literal": "very long line yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy end"
+    },
+    "ws-14": {
+      "content": {
+        "html": "combining marks é (e + U+0301)",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "combining marks é (e + U+0301)",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "combining marks é (e + U+0301)",
+        "isEmojiOnly": false
+      },
+      "literal": "combining marks é (e + U+0301)"
+    },
+    "gap-01": {
+      "content": {
+        "html": "||spoiler||",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "||spoiler||",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "||spoiler||",
+        "isEmojiOnly": false
+      },
+      "literal": "||spoiler||"
+    },
+    "gap-02": {
+      "content": {
+        "html": "&gt; quoted line",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "&gt; quoted line",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "&gt; quoted line",
+        "isEmojiOnly": false
+      },
+      "literal": "&gt; quoted line"
+    },
+    "gap-03": {
+      "content": {
+        "html": "&gt;&gt;&gt; quote the rest",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "&gt;&gt;&gt; quote the rest",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "&gt;&gt;&gt; quote the rest",
+        "isEmojiOnly": false
+      },
+      "literal": "&gt;&gt;&gt; quote the rest"
+    },
+    "gap-04": {
+      "content": {
+        "html": "# Header one",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "# Header one",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "# Header one",
+        "isEmojiOnly": false
+      },
+      "literal": "# Header one"
+    },
+    "gap-05": {
+      "content": {
+        "html": "### Header three",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "### Header three",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "### Header three",
+        "isEmojiOnly": false
+      },
+      "literal": "### Header three"
+    },
+    "gap-06": {
+      "content": {
+        "html": "#### Header four",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "#### Header four",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "#### Header four",
+        "isEmojiOnly": false
+      },
+      "literal": "#### Header four"
+    },
+    "gap-07": {
+      "content": {
+        "html": "#nospace",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "#nospace",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "#nospace",
+        "isEmojiOnly": false
+      },
+      "literal": "#nospace"
+    },
+    "gap-08": {
+      "content": {
+        "html": "-# subtext",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "-# subtext",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "-# subtext",
+        "isEmojiOnly": false
+      },
+      "literal": "-# subtext"
+    },
+    "gap-09": {
+      "content": {
+        "html": "- list item\n- second item",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "- list item\n- second item",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "- list item\n- second item",
+        "isEmojiOnly": false
+      },
+      "literal": "- list item\n- second item"
+    },
+    "gap-10": {
+      "content": {
+        "html": "* list item",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "* list item",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "* list item",
+        "isEmojiOnly": false
+      },
+      "literal": "* list item"
+    },
+    "gap-11": {
+      "content": {
+        "html": "1. ordered\n2. items",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "1. ordered\n2. items",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "1. ordered\n2. items",
+        "isEmojiOnly": false
+      },
+      "literal": "1. ordered\n2. items"
+    },
+    "gap-12": {
+      "content": {
+        "html": "  - indented item",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "  - indented item",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "  - indented item",
+        "isEmojiOnly": false
+      },
+      "literal": "  - indented item"
+    },
+    "gap-13": {
+      "content": {
+        "html": "[masked](https://nilive.example)",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "[masked](https://nilive.example)",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "[masked](https://nilive.example)",
+        "isEmojiOnly": false
+      },
+      "literal": "[masked](https://nilive.example)"
+    },
+    "gap-14": {
+      "content": {
+        "html": "https://nilive.example/auto",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "https://nilive.example/auto",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "https://nilive.example/auto",
+        "isEmojiOnly": false
+      },
+      "literal": "https://nilive.example/auto"
+    },
+    "gap-15": {
+      "content": {
+        "html": "| a | b |\n|---|---|\n| 1 | 2 |",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "| a | b |\n|---|---|\n| 1 | 2 |",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "| a | b |\n|---|---|\n| 1 | 2 |",
+        "isEmojiOnly": false
+      },
+      "literal": "| a | b |\n|---|---|\n| 1 | 2 |"
+    },
+    "gap-16": {
+      "content": {
+        "html": "![alt](https://x/y.png)",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "![alt](https://x/y.png)",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "![alt](https://x/y.png)",
+        "isEmojiOnly": false
+      },
+      "literal": "![alt](https://x/y.png)"
+    },
+    "gap-17": {
+      "content": {
+        "html": "---",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "---",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "---",
+        "isEmojiOnly": false
+      },
+      "literal": "---"
+    },
+    "gap-18": {
+      "content": {
+        "html": "$$x^2$$",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "$$x^2$$",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "$$x^2$$",
+        "isEmojiOnly": false
+      },
+      "literal": "$$x^2$$"
+    },
+    "gap-19": {
+      "content": {
+        "html": "term[^1]\n\n[^1]: footnote",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "term[^1]\n\n[^1]: footnote",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "term[^1]\n\n[^1]: footnote",
+        "isEmojiOnly": false
+      },
+      "literal": "term[^1]\n\n[^1]: footnote"
+    },
+    "gap-20": {
+      "content": {
+        "html": "<em> </em> *",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<em> </em> *",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<em> </em> *",
+        "isEmojiOnly": false
+      },
+      "literal": "* * *"
+    },
+    "adv-01": {
+      "content": {
+        "html": "a0b",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "a0b",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "a0b",
+        "isEmojiOnly": false
+      },
+      "literal": "a\u00030\u0004b"
+    },
+    "adv-02": {
+      "content": {
+        "html": "<code class=\"eb-code\">``` `**x**` ```</code>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<code class=\"eb-code\">``` `**x**` ```</code>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<code class=\"eb-code\">``` `**x**` ```</code>",
+        "isEmojiOnly": false
+      },
+      "literal": "`` ``` `**x**` ``` ``"
+    },
+    "adv-03": {
+      "content": {
+        "html": "",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "",
+        "isEmojiOnly": false
+      },
+      "literal": "\u0000\u0001\u0002\u0003\u0004\u0005"
+    },
+    "adv-04": {
+      "content": {
+        "html": "bellbackspace",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "bellbackspace",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "bellbackspace",
+        "isEmojiOnly": false
+      },
+      "literal": "\u0007bell\bbackspace"
+    },
+    "adv-05": {
+      "content": {
+        "html": "``",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "``",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "``",
+        "isEmojiOnly": false
+      },
+      "literal": "`\u0003`"
+    },
+    "adv-06": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>0000</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>0000</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>0000</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "```\n\u00030000\u0004\n```"
+    },
+    "adv-07": {
+      "content": {
+        "html": "<span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": true
+      },
+      "description": {
+        "html": "<span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<span class=\"eb-mention\">@tester</span>",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;@200\u0003&gt;"
+    },
+    "adv-08": {
+      "content": {
+        "html": "[31mred[0m",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "[31mred[0m",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "[31mred[0m",
+        "isEmojiOnly": false
+      },
+      "literal": "\u001b[31mred\u001b[0m"
+    },
+    "adv-09": {
+      "content": {
+        "html": "<pre class=\"eb-code-block\"><code>x</code></pre>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<pre class=\"eb-code-block\"><code>x</code></pre>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<pre class=\"eb-code-block\"><code>x</code></pre>",
+        "isEmojiOnly": false
+      },
+      "literal": "````````````````````x````````````````````"
+    },
+    "adv-10": {
+      "content": {
+        "html": "<strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong>",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong>",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong><strong><em></strong><strong></em></strong>",
+        "isEmojiOnly": false
+      },
+      "literal": "********************************************************************************************************************************************************************************************************"
+    },
+    "adv-11": {
+      "content": {
+        "html": "``````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "``````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "``````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````",
+        "isEmojiOnly": false
+      },
+      "literal": "``````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````````"
+    },
+    "adv-12": {
+      "content": {
+        "html": "&lt;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&gt;",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "&lt;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&gt;",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "&lt;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&gt;",
+        "isEmojiOnly": false
+      },
+      "literal": "&lt;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&gt;"
+    },
+    "adv-13": {
+      "content": {
+        "html": "<strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> ",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "<strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> ",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "<strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> <strong>a</strong> ",
+        "isEmojiOnly": false
+      },
+      "literal": "**a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** **a** "
+    },
+    "adv-14": {
+      "content": {
+        "html": "``",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "``",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "``",
+        "isEmojiOnly": false
+      },
+      "literal": "`\u0003\u0004`"
+    },
+    "adv-15": {
+      "content": {
+        "html": "verticaltabform",
+        "isEmojiOnly": false
+      },
+      "description": {
+        "html": "verticaltabform",
+        "isEmojiOnly": false
+      },
+      "fieldValue": {
+        "html": "verticaltabform",
+        "isEmojiOnly": false
+      },
+      "literal": "\u000bvertical\ftab\u001fform"
+    }
+  }
+}
