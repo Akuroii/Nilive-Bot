@@ -95,6 +95,11 @@ FONT_PATHS = {
     "outfit": _asset_path(os.path.join("fonts", "Outfit-Variable.ttf"), "Outfit-Variable.ttf"),
     "amiri_regular": _asset_path(os.path.join("fonts", "Amiri-Regular.ttf"), "Amiri-Regular.ttf"),
     "amiri_bold": _asset_path(os.path.join("fonts", "Amiri-Bold.ttf"), "Amiri-Bold.ttf"),
+    # Real Amira Typo face (user-supplied), used ONLY for the dynamic
+    # currency-name label (see currency_name_style below). Arabic-script
+    # glyphs only -- no Latin coverage -- so it is paired with zilla_bold
+    # for non-Arabic currency names rather than used on its own for both.
+    "amira_typo": _asset_path(os.path.join("fonts", "Amira-Typo.ttf"), "Amira-Typo.ttf"),
     "tajawal_regular": _asset_path(os.path.join("fonts", "Tajawal-Regular.ttf"), "Tajawal-Regular.ttf"),
     "tajawal_medium": _asset_path(os.path.join("fonts", "Tajawal-Medium.ttf"), "Tajawal-Medium.ttf"),
     "tajawal_bold": _asset_path(os.path.join("fonts", "Tajawal-Bold.ttf"), "Tajawal-Bold.ttf"),
@@ -133,7 +138,17 @@ COLORS = {
     "rank_number_b": (146, 78, 232),    # #3 gradient bottom  -- sampled
     "xp_value": (186, 120, 232),        # "1,450" purple      -- sampled
     "label_purple": (140, 100, 180),    # INVENTORY / TOTAL XP headers
-    "gold_label": (168, 142, 116),      # reference's COINS label tint
+    "gold_label": (168, 142, 116),      # unused now -- currency labels use
+                                         # the slot colors below instead
+    # Currency-slot colors (deliberately outside the purple/magenta family
+    # used everywhere else on the card, and deliberately not gold). Applied
+    # by SLOT ("coins" = primary/first-configured currency, "diamonds" =
+    # secondary), never by the currency's configured display name, since
+    # both are rename-able by the guild owner.
+    "currency_pearl": (0xDD, 0xF7, 0xFF),       # coins slot  -- icy pearl
+    "currency_pearl_glow": (0x9D, 0xEB, 0xFF),  # coins slot  -- subtle glow
+    "currency_shell": (0xFF, 0xB8, 0xA8),       # diamonds slot -- coral shell
+    "currency_shell_glow": (0xFF, 0x8F, 0xA3),  # diamonds slot -- subtle glow
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -236,6 +251,18 @@ def amiri(size, bold=False):
     return ImageFont.truetype(FONT_PATHS["amiri_bold" if bold else "amiri_regular"], size)
 
 
+def amira_typo(size):
+    # RAQM layout engine so glyph shaping/joining goes through the font's
+    # own GSUB tables directly (it has full Arabic shaping rules), rather
+    # than PIL's plain layout + a manual reshape-to-presentation-forms pass.
+    # The manual-reshape path (used for amiri() above, which lacks GSUB)
+    # produces isolated-form codepoints this font doesn't carry for every
+    # letter (e.g. isolated teh marbuta) -- raqm avoids that entirely by
+    # shaping the real base codepoints.
+    return ImageFont.truetype(FONT_PATHS["amira_typo"], size,
+                              layout_engine=ImageFont.Layout.RAQM)
+
+
 def tajawal(size, weight="regular"):
     return ImageFont.truetype(FONT_PATHS[f"tajawal_{weight}"], size)
 
@@ -265,30 +292,65 @@ def _shape_arabic(text: str) -> str:
 
 
 # Bump applied to the Arabic font size so a configured Arabic currency name
-# reads with similar visual weight/presence to the Latin default -- Amiri at
-# the same point size as Outfit sits visually smaller/lighter.
+# reads with similar visual weight/presence to the Latin default -- Amira
+# Typo at the same point size as Zilla Slab Bold sits visually smaller/
+# lighter (measured the same way the earlier Amiri/Outfit bump was).
 _ARABIC_CURRENCY_SIZE_BUMP = 1.08
 
 
-def currency_name_style(name: str, base_font_fn, base_size: int,
-                        arabic_bold: bool = True):
+def _fit_currency_label(draw, name, base_font_fn, base_size, max_width,
+                        condense_ratio, min_size=12):
+    """Like _fit_numeral_font, but for a dynamic currency-name label that
+    also goes through currency_name_style's font/shaping choice and the
+    row's usual condense_ratio squeeze. Shrinks base_size until the label,
+    AFTER the condense squeeze, fits max_width -- names are admin-typed
+    (utils/currency.py has no length cap), so an unfit long name would
+    otherwise overflow the stat card / overlap its neighbor.
+    Returns (font, text_to_draw, is_arabic, natural_width)."""
+    size = base_size
+    while size > min_size:
+        lf, label_text, label_is_arabic = currency_name_style(
+            name, base_font_fn, size)
+        lw_nat = _text_size(draw, label_text, lf,
+                            tracking=(0 if label_is_arabic else 2))[0]
+        if lw_nat * condense_ratio <= max_width:
+            return lf, label_text, label_is_arabic, lw_nat
+        size -= 1
+    lf, label_text, label_is_arabic = currency_name_style(
+        name, base_font_fn, min_size)
+    lw_nat = _text_size(draw, label_text, lf,
+                        tracking=(0 if label_is_arabic else 2))[0]
+    return lf, label_text, label_is_arabic, lw_nat
+
+
+def currency_name_style(name: str, base_font_fn, base_size: int):
     """Single reusable place to decide how a *configurable* currency name
     gets drawn, since utils/currency.py puts no restriction on what an admin
     types in. Any renderer in this module that draws a dynamic currency name
-    should go through this instead of hardcoding a font:
+    should go through this instead of hardcoding a font.
 
-      - Arabic name -> Amiri-Bold, existing reshape+bidi shaping, sized ~5-10%
-        up so it carries the same visual weight as the Latin default.
-      - Non-Arabic name -> unchanged: base_font_fn(base_size), raw text.
+    Amira Typo (user-supplied) is the correct face for this label, but the
+    file itself carries Arabic-script glyphs only -- no Latin letters at all
+    (checked its cmap directly) -- so it can only be used on the Arabic
+    branch; an English name set in it would render as empty .notdef boxes.
+    It is paired with base_font_fn (Zilla Slab Bold at this call site) for
+    the non-Arabic branch so both scripts are covered:
 
-    Returns (font, text_to_draw, is_arabic). is_arabic also tells the caller
-    whether per-glyph tracking is safe (it isn't, once Arabic is shaped --
-    shaping produces joined ligatures that per-character drawing would
-    re-isolate).
+      - Arabic name -> Amira Typo via raqm (the font's own GSUB shaping,
+        not the manual-reshape helper other Arabic text in this module
+        uses), sized ~8% up so it carries the same visual weight as the
+        Latin branch.
+      - Non-Arabic name -> unchanged shape: base_font_fn(base_size), raw
+        text, no shaping.
+
+    Returns (font, text_to_draw, is_arabic). is_arabic tells the caller the
+    text is Arabic (drawn via raqm, which needs no per-glyph tracking --
+    raqm already handles inter-glyph spacing/joining correctly, and manual
+    tracking would insert gaps into shaped ligatures).
     """
     if _is_arabic_text(name):
         size = round(base_size * _ARABIC_CURRENCY_SIZE_BUMP)
-        return amiri(size, bold=arabic_bold), _shape_arabic(name), True
+        return amira_typo(size), name, True
     return base_font_fn(base_size), name, False
 
 
@@ -1337,10 +1399,15 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
     coins_cfg = data["currency"]["coins"]
     diamonds_cfg = data["currency"]["diamonds"]
 
-    # The reference tints the default coin label warm/gold while every
-    # other label stays muted lavender.
-    coin_label_color = (COLORS["gold_label"] if coins_cfg["emoji"] == "🪙"
-                        else COLORS["text_muted"])
+    # Slot-based currency colors (NOT name-based -- both currencies are
+    # rename-able by the guild owner, so the color must stay tied to which
+    # slot a currency occupies, never to what its configured name happens to
+    # say). Primary/first-configured slot ("coins") gets the icy pearl tint;
+    # secondary slot ("diamonds") gets the warm coral shell tint. Distinct
+    # from the purple/magenta palette used everywhere else on the card, and
+    # deliberately not gold.
+    coin_label_color = COLORS["currency_pearl"]
+    diamond_label_color = COLORS["currency_shell"]
 
     cards = [
         (icons30.get("messages"), "MESSAGES", f"{data['messages_count']:,}",
@@ -1350,7 +1417,7 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
         (coin_icon_im, coins_cfg["name"].upper(), f"{data['balance']:,}",
          coin_label_color),
         (diamond_icon_im, diamonds_cfg["name"].upper(), f"{data['diamonds']:,}",
-         COLORS["text_muted"]),
+         diamond_label_color),
         (icons30.get("games"), "GAMES WON", f"{data['minigame_wins']:,}",
          COLORS["text_muted"]),
     ]
@@ -1385,11 +1452,17 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
         # only the two currency labels can be dynamic/Arabic.
         is_currency_label = i in (2, 3)
         if is_currency_label:
-            lf, label_text, label_is_arabic = currency_name_style(
-                label, lambda s: outfit(s, "Medium"), 21)
+            # Amira Typo (Arabic-only glyph set) for Arabic names, Zilla
+            # Slab Bold -- same family as the value numerals below it -- for
+            # English/Latin names. Names stay fully dynamic; nothing here is
+            # hardcoded to a specific currency name. Sized down (like the
+            # numeral above) if the admin's name would otherwise overflow
+            # the card at the default size.
+            lf, label_text, label_is_arabic, lw_nat = _fit_currency_label(
+                draw, label, zilla_bold, 21, w - 16, 0.66)
         else:
             lf, label_text, label_is_arabic = outfit(21, "Medium"), label, False
-        lw_nat = _text_size(draw, label_text, lf, tracking=(0 if label_is_arabic else 2))[0]
+            lw_nat = _text_size(draw, label_text, lf, tracking=2)[0]
 
         def _lab_painter(d, _l=label_text, _f=lf, _c=label_color, _ar=label_is_arabic):
             if _ar:
@@ -1398,8 +1471,20 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
                 d.text((20, 20), _l, font=_f, fill=_c)
             else:
                 _draw_tracked_text(d, (20, 20), _l, _f, _c, tracking=2)
+        # Subtle glow behind the two currency labels only, using each slot's
+        # paired glow tone (_draw_condensed's existing glow= param -- same
+        # soft-bloom mechanism already used elsewhere on the card, e.g. the
+        # row icons above, so this matches the card's visual language rather
+        # than introducing a new effect). Kept gentle (low alpha, tight
+        # blur) so it reads as a glow, not a colored halo that competes with
+        # the purple palette.
+        glow_kwargs = {}
+        if is_currency_label:
+            glow_color = (COLORS["currency_pearl_glow"] if i == 2
+                         else COLORS["currency_shell_glow"])
+            glow_kwargs = dict(glow=glow_color, blur=4, glow_alpha=0.35)
         _draw_condensed(img, (x + w / 2 - lw_nat * 0.66 / 2, y + 116), _lab_painter,
-                        ratio=0.66)
+                        ratio=0.66, **glow_kwargs)
 
 
 def _fmt_minutes(total_minutes) -> str:
