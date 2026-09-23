@@ -459,7 +459,24 @@ class Moderation(commands.Cog):
             await interaction.followup.send(
                 "Amount must be between 1 and 100.", ephemeral=True)
             return
-        check = (lambda m: m.author == member) if member else None
+        # CONFIRMED LIMITATION (guard): forum channels have no message
+        # list to bulk-delete — discord.ForumChannel has no .purge at
+        # all, so this used to die with AttributeError. Report the
+        # limitation instead of crashing.
+        if not hasattr(interaction.channel, "purge"):
+            await interaction.followup.send(
+                "Bulk message deletion isn't supported in this channel "
+                "type.", ephemeral=True)
+            return
+        # CONFIRMED BUG FIX: `check=None` is NOT the same as omitting
+        # `check`. discord.py only substitutes its match-everything
+        # default when the argument is the MISSING sentinel; a literal
+        # None reached PurgeIterator's `if self.check(message)` as a
+        # non-callable and every no-member purge crashed with
+        # "'NoneType' object is not callable". A real predicate keeps
+        # the old intent ("no member filter") with unchanged purge
+        # behaviour (same limit, same bulk flag, same reply).
+        check = (lambda m: m.author == member) if member else (lambda m: True)
         deleted = await interaction.channel.purge(
             limit=amount, check=check)
         await interaction.followup.send(
