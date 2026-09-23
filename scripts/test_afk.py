@@ -18,8 +18,8 @@ Final AFK corrections pass (2026-09-23) coverage — the corrected lifecycle:
 
  1. !afk [reason] starts AFK with NO mentions button on the start message
  2. the cancellation/return message carries the mentions button
- 3. exact cancellation text (no emoji before هلا, no space between AFK and
-    the first emoji, the two emojis immediately adjacent)
+ 3. exact cancellation text (no emoji before هلا, exactly ONE space after
+    AFK, the two emoji tags immediately adjacent)
  4. exact mention-count line beneath it
  5. exact button label + custom emoji
  6. non-owner click -> exact ephemeral response
@@ -42,9 +42,12 @@ Final AFK corrections pass (2026-09-23) coverage — the corrected lifecycle:
     button keeps working while disabled
 25. old afk_state / afk_mentions schemas self-heal (session_id included);
     a pre-upgrade session's snapshots resolve through the legacy token
-26. no permanent unintended retention: the retention sweep deletes an ended
-    session's snapshots + marker together, never resurrecting them, and
-    leaves fresher sessions untouched
+26. NO time-based retention/TTL and NO cleanup pass: snapshots and
+    ended-session records are never deleted automatically (even a
+    400-day-old ended session's button still serves its snapshots), and
+    startup re-registers views from afk_ended_sessions identity metadata
+    without loading any snapshot rows into RAM (data stays DB-backed and
+    session-scoped — fetched one session's page at click time)
 
 Run:  DATABASE_PATH=/tmp/afk_test.db OWNER_ID=123 python3 scripts/test_afk.py
 """
@@ -265,18 +268,21 @@ async def run(db_path):
     check("cancellation emojis are the approved static pair",
           afk_mod.RUBY_BACK_EMOJI == "<:Ruby_BACK:1552200382699016253>"
           and afk_mod.AQUA_WELCOME_EMOJI == "<:Aqua_Welcome:1552200384355762226>")
-    # [3] exact cancellation text (2026-09-23 correction B).
+    # [3] exact cancellation text (2026-09-23 correction B): one space after
+    # AFK, the two emoji tags immediately adjacent.
     check("cancel text [3] is the exact approved string",
           afk_mod.AFK_END_TEXT ==
-          "هلا، تم إلغاء الـ AFK"
+          "هلا، تم إلغاء الـ AFK "
           "<:Ruby_BACK:1552200382699016253>"
           "<:Aqua_Welcome:1552200384355762226>",
           repr(afk_mod.AFK_END_TEXT))
     check("cancel text [3] has NO emoji before هلا",
           afk_mod.AFK_END_TEXT.startswith("هلا، تم إلغاء الـ AFK"))
-    check("cancel text [3] has NO space between AFK and the first emoji",
-          "AFK<:Ruby_BACK:1552200382699016253>" in afk_mod.AFK_END_TEXT)
-    check("cancel text [3] keeps the two emojis immediately adjacent",
+    check("cancel text [3] has exactly ONE space after AFK",
+          "AFK <:Ruby_BACK:1552200382699016253>" in afk_mod.AFK_END_TEXT
+          and "AFK  <:" not in afk_mod.AFK_END_TEXT
+          and "AFK<:Ruby_BACK" not in afk_mod.AFK_END_TEXT)
+    check("cancel text [3] keeps the two emoji tags immediately adjacent",
           "<:Ruby_BACK:1552200382699016253><:Aqua_Welcome:1552200384355762226>"
           in afk_mod.AFK_END_TEXT)
     check("cancel text [3] substitutes no other emojis",
@@ -489,7 +495,7 @@ async def run(db_path):
     # [3] + [4] the complete card description, character for character.
     check("card description [3+4] is exactly the approved text + count line",
           cancel.description ==
-          "هلا، تم إلغاء الـ AFK"
+          "هلا، تم إلغاء الـ AFK "
           "<:Ruby_BACK:1552200382699016253>"
           "<:Aqua_Welcome:1552200384355762226>"
           "\n\n**عدد المنشن أثناء غيابه: 1**",
@@ -1020,102 +1026,158 @@ async def run(db_path):
     await cog.on_message(invoking_message(
         bot, guild, author, games, "cleanup", mid=72))
 
-    # ── 18. retention: snapshots live through the button, then are swept ─
-    print(f"{BOLD}[18] data lifetime + retention sweep [26]{RESET}")
+    # ── 18. required scenario: session isolation + NO TTL + DB-backed ────
+    print(f"{BOLD}[18] session isolation, no TTL retention, DB-backed startup"
+          f"{RESET}")
     general.sent.clear()
     games.sent.clear()
-    await run_afk(author, general, "retention")
-    await cog.on_message(invoking_message(
-        bot, guild, other, games, "keep me <@100>", mid=80, mentions=[author]))
-    await cog.on_message(invoking_message(
-        bot, guild, author, games, "done here", mid=81))
-    view_r = sent_view(games)
 
-    # The button serves the just-ended session right after the return.
-    live_click = FakeInteraction(author, guild)
-    await view_r._on_click(live_click)
-    check("post-return button shows the just-ended session's snapshots",
-          "keep me" in (live_click.response.sent[-1]["embed"].description or ""))
+    # Session A: exactly one mention -> return message A -> button A shows A.
+    await run_afk(author, general, "scenario A")
+    await cog.on_message(invoking_message(
+        bot, guild, other, games, "Alpha ping <@100>", mid=80,
+        mentions=[author]))
+    await cog.on_message(invoking_message(
+        bot, guild, author, games, "back from scenario A", mid=81))
+    sc_a = sent_view(games)
+    click_sc_a = FakeInteraction(author, guild)
+    await sc_a._on_click(click_sc_a)
+    check("Session A: return card A carries button A",
+          isinstance(sc_a, afk_mod.AFKMentionsView))
+    check("Session A: button A shows A's mention",
+          "Alpha ping" in
+          (click_sc_a.response.sent[-1]["embed"].description or ""))
     async with aiosqlite.connect(db_path) as db:
         cur = await db.execute(
             "SELECT COUNT(*) FROM afk_mentions WHERE session_id=?",
-            (view_r.session_id,))
-        kept_before = (await cur.fetchone())[0]
-    check("snapshots are NOT deleted at dismissal (button needs them)",
-          kept_before == 1)
+            (sc_a.session_id,))
+        a_rows = (await cur.fetchone())[0]
+    check("Session A: snapshots are not deleted at dismissal",
+          a_rows == 1)
 
-    # A fresher ended session that the sweep must NOT touch.
-    await run_afk(other, games, "fresh keep")
+    # Session B (later, SAME owner): zero mentions -> its own button and the
+    # correct zero-state.
+    await run_afk(author, general, "scenario B")
     await cog.on_message(invoking_message(
-        bot, guild, third, games, "fresh keep <@200>", mid=82, mentions=[other]))
-    await cog.on_message(invoking_message(
-        bot, guild, other, games, "fresh back", mid=83))
-    view_f = sent_view(games)
+        bot, guild, author, games, "back from scenario B", mid=82))
+    sc_b = sent_view(games)
+    click_sc_b = FakeInteraction(author, guild)
+    await sc_b._on_click(click_sc_b)
+    resp_sc_b = click_sc_b.response.sent[-1]
+    check("Session B: zero mentions still get their own session button",
+          isinstance(sc_b, afk_mod.AFKMentionsView)
+          and sc_b.session_id != sc_a.session_id)
+    check("Session B: button B shows the zero-state",
+          resp_sc_b["content"] == afk_mod.AFK_ZERO_MENTIONS_TEXT
+          and resp_sc_b["ephemeral"] is True and resp_sc_b["embed"] is None)
 
-    # Simulate time passing beyond MENTIONS_RETENTION for view_r's session,
-    # plus a very old orphan-era session with its own snapshot row.
-    old_cutoff = (datetime.now(timezone.utc)
-                  - afk_mod.MENTIONS_RETENTION - timedelta(days=1))
+    # After Session B exists, button A still shows A — never B's state.
+    click_sc_a2 = FakeInteraction(author, guild)
+    await sc_a._on_click(click_sc_a2)
+    panel_again = click_sc_a2.response.sent[-1]["embed"].description or ""
+    check("after Session B, button A still shows A (not B)",
+          "Alpha ping" in panel_again
+          and len(panel_again.split("\n")) == 1)
+
+    # No TTL and no cleanup: neither must exist at all.
+    check("no time-based retention constant exists",
+          not hasattr(afk_mod, "MENTIONS_RETENTION"))
+    check("no cleanup pass exists on the cog",
+          not hasattr(afk_mod.AFK, "cleanup_expired"))
+
+    # A 400-day-old ended session: nothing may delete it, and its button
+    # must still serve its snapshots (no arbitrary expiry).
+    ancient_token = "ancientkeep01"
+    ancient_end = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
     async with aiosqlite.connect(db_path) as db:
-        await db.execute(
-            "UPDATE afk_ended_sessions SET ended_at=? WHERE session_id=?",
-            (old_cutoff.isoformat(), view_r.session_id))
         await db.execute(
             "INSERT INTO afk_ended_sessions "
             "(session_id, guild_id, owner_id, ended_at) VALUES (?, 1, 100, ?)",
-            ("oldtoken123456", old_cutoff.isoformat()))
+            (ancient_token, ancient_end))
         await db.execute(
             "INSERT INTO afk_mentions "
             "(guild_id, message_id, target_user_id, author_id, author_name,"
             " channel_id, content, session_id) "
-            "VALUES (1, 999, 100, 200, 'Sara', 20, 'ancient ping',"
-            " 'oldtoken123456')")
+            "VALUES (1, 990, 100, 200, 'Sara', 20, 'ancient keep', ?)",
+            (ancient_token,))
         await db.commit()
 
-    await cog.cleanup_expired()
+    # Restart with an SQL spy: startup must register views from the
+    # afk_ended_sessions identity metadata and must NOT load (or touch) any
+    # snapshot rows — data stays DB-backed and session-scoped.
+    captured_sql: list[str] = []
+    original_connect = aiosqlite.connect
+
+    def recording_connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        real_execute = conn.execute
+
+        async def recording_execute(sql, *a, **k):
+            captured_sql.append(" ".join(str(sql).split()))
+            return await real_execute(sql, *a, **k)
+
+        conn.execute = recording_execute
+        return conn
+
+    bot.added_views.clear()
+    aiosqlite.connect = recording_connect
+    try:
+        cog_restart = AFK(bot)
+        await cog_restart.cog_load()
+    finally:
+        aiosqlite.connect = original_connect
+
+    check("startup reads ended-session identity metadata",
+          any("SELECT" in s.upper() and "afk_ended_sessions" in s
+              for s in captured_sql))
+    check("startup never SELECTs snapshot rows into RAM",
+          not any(s.upper().startswith("SELECT") and "afk_mentions" in s
+                  for s in captured_sql))
+    check("startup performs no snapshot INSERT/UPDATE/DELETE",
+          not any(s.upper().startswith(("INSERT", "UPDATE", "DELETE"))
+                  and "afk_mentions" in s for s in captured_sql))
 
     async with aiosqlite.connect(db_path) as db:
         cur = await db.execute(
-            "SELECT COUNT(*) FROM afk_mentions WHERE session_id IN (?, ?)",
-            (view_r.session_id, "oldtoken123456"))
-        expired_rows = (await cur.fetchone())[0]
-        cur = await db.execute(
-            "SELECT COUNT(*) FROM afk_ended_sessions WHERE session_id IN (?, ?)",
-            (view_r.session_id, "oldtoken123456"))
-        expired_markers = (await cur.fetchone())[0]
-        cur = await db.execute(
             "SELECT COUNT(*) FROM afk_mentions WHERE session_id=?",
-            (view_f.session_id,))
-        fresh_rows = (await cur.fetchone())[0]
+            (ancient_token,))
+        ancient_rows = (await cur.fetchone())[0]
         cur = await db.execute(
             "SELECT COUNT(*) FROM afk_ended_sessions WHERE session_id=?",
-            (view_f.session_id,))
-        fresh_markers = (await cur.fetchone())[0]
-    check("sweep deletes expired sessions' snapshots [26]", expired_rows == 0)
-    check("sweep deletes expired sessions' markers too [26]",
-          expired_markers == 0)
-    check("sweep leaves fresher sessions untouched [26]",
-          fresh_rows == 1 and fresh_markers == 1)
+            (ancient_token,))
+        ancient_markers = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM afk_mentions WHERE session_id=?",
+            (sc_a.session_id,))
+        a_rows_after = (await cur.fetchone())[0]
+    check("400-day-old snapshots + marker survive startup untouched",
+          ancient_rows == 1 and ancient_markers == 1)
+    check("Session A snapshots also survive startup untouched",
+          a_rows_after == 1)
 
-    # Buttons of swept sessions never resurrect the data — the approved
-    # zero-state answers instead, ephemerally.
-    old_view = afk_mod.AFKMentionsView(guild.id, author.id, "oldtoken123456")
-    old_click = FakeInteraction(author, guild)
-    await old_view._on_click(old_click)
-    old_resp = old_click.response.sent[-1]
-    check("swept session's button cannot resurrect old snapshots [26]",
-          old_resp["embed"] is None
-          and "ancient ping" not in (old_resp["content"] or "")
-          and old_resp["content"] == afk_mod.AFK_ZERO_MENTIONS_TEXT)
-    aged_click = FakeInteraction(author, guild)
-    await view_r._on_click(aged_click)
-    check("aged return button answers the zero-state after the sweep",
-          aged_click.response.sent[-1]["content"] == afk_mod.AFK_ZERO_MENTIONS_TEXT)
-    fresh_click = FakeInteraction(other, guild)
-    await view_f._on_click(fresh_click)
-    check("fresh return button still serves its snapshots after a sweep",
-          "fresh keep" in
-          (fresh_click.response.sent[-1]["embed"].description or ""))
+    # After restart, A, B and the ancient session each resolve their OWN
+    # ended session through the re-registered persistent views.
+    custom_sc_a = sc_a.children[0].custom_id
+    custom_sc_b = sc_b.children[0].custom_id
+    custom_ancient = afk_mod._mentions_custom_id(
+        guild.id, author.id, ancient_token)
+    check("after restart all three buttons are re-registered",
+          all(c in bot.added_views
+              for c in (custom_sc_a, custom_sc_b, custom_ancient)))
+
+    re_a = FakeInteraction(author, guild)
+    await bot.added_views[custom_sc_a]._on_click(re_a)
+    check("after restart button A still shows A",
+          "Alpha ping" in (re_a.response.sent[-1]["embed"].description or ""))
+    re_b = FakeInteraction(author, guild)
+    await bot.added_views[custom_sc_b]._on_click(re_b)
+    check("after restart button B still shows B's zero-state",
+          re_b.response.sent[-1]["content"] == afk_mod.AFK_ZERO_MENTIONS_TEXT)
+    re_ancient = FakeInteraction(author, guild)
+    await bot.added_views[custom_ancient]._on_click(re_ancient)
+    check("400-day-old button still serves its snapshots (no TTL)",
+          "ancient keep" in
+          (re_ancient.response.sent[-1]["embed"].description or ""))
 
     # ── 19. old afk_state / afk_mentions schemas self-heal ───────────────
     print(f"{BOLD}[19] old schemas self-heal (25){RESET}")

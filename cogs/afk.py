@@ -44,9 +44,9 @@ Guild-scoped state in SQLite (the same database every other cog uses):
 ``afk_state`` (one active row per guild+member: ``reason``, ``started_at``,
 ``mention_count`` and the session's unique ``session_id`` token),
 ``afk_mentions`` (dedup ledger of counted messages, tagged with the
-``session_id`` that collected them) and ``afk_ended_sessions`` (the small
-ended-session registry the return card's button and the retention sweep are
-keyed on). All of it survives a bot restart.
+``session_id`` that collected them) and ``afk_ended_sessions`` (the
+ended-session registry the return card's button is keyed on). All of it
+survives a bot restart.
 
 Dashboard & mentions button (AFK final-corrections pass, 2026-09-23)
 -------------------------------------------------------------------
@@ -76,11 +76,15 @@ Dashboard & mentions button (AFK final-corrections pass, 2026-09-23)
   stays stored.
 * Each deduplicated mention snapshot stores the mentioner's id, display name
   at mention time, channel id, message id, full content and creation time
-  (columns self-healed on older installs with guarded ALTERs). Snapshots are
-  NOT deleted at dismissal — the just-ended session's rows must outlive the
-  return card's button — but they are never kept forever: sessions ended
-  more than ``MENTIONS_RETENTION`` ago are swept (snapshots + marker) at cog
-  load and at every dismissal, so no permanent AFK-message history exists.
+  (columns self-healed on older installs with guarded ALTERs). Snapshots and
+  ended-session records are NEVER deleted automatically: there is no
+  time-based retention/TTL and no cleanup pass — a return card's button stays
+  bound to its session indefinitely. All snapshot data stays DB-backed and
+  session-scoped (a button click fetches one session's page only; startup
+  registers views from ``afk_ended_sessions`` identity metadata and never
+  loads snapshot rows into memory). If data volume ever becomes an actual
+  production problem, a cleanup policy will be decided later from real
+  measurements.
 """
 
 import math
@@ -88,7 +92,7 @@ import uuid
 
 import aiosqlite
 import discord
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from discord.ext import commands
 
 from database import DB_PATH
@@ -108,9 +112,10 @@ AQUA_WELCOME_EMOJI = "<:Aqua_Welcome:1552200384355762226>"
 
 AFK_ON_TEXT = f"{AFK_EMOJI} لن يتمكن أحد من منشنك الآن {AFK_EMOJI}"
 # Approved cancellation text (2026-09-23 final corrections), exactly:
-#   "هلا، تم إلغاء الـ AFK" first with NO emoji before it, NO space between
-#   "AFK" and the first emoji, and the two emojis immediately adjacent.
-AFK_END_TEXT = f"هلا، تم إلغاء الـ AFK{RUBY_BACK_EMOJI}{AQUA_WELCOME_EMOJI}"
+#   "هلا، تم إلغاء الـ AFK" first with NO emoji before it, exactly ONE
+#   space between "AFK" and the first emoji tag, and the two emoji tags
+#   immediately adjacent to each other.
+AFK_END_TEXT = f"هلا، تم إلغاء الـ AFK {RUBY_BACK_EMOJI}{AQUA_WELCOME_EMOJI}"
 
 # Approved user-facing strings for the AFK dashboard/button pass (2026-09):
 AFK_DISABLED_TEXT = "الـ AFK معطّل حاليًا في هذا السيرفر."
@@ -135,13 +140,6 @@ MENTIONS_PANEL_TIMEOUT = 300
 # Snapshot content is stored in full, but the panel truncates long messages
 # for display so 10 entries can never overflow the embed description limit.
 MAX_PANEL_CONTENT_LENGTH = 200
-
-# Retention window for the just-ended session's snapshots: available through
-# the return card's button, then swept together with the session's marker —
-# bounded by design (no permanent historical AFK-message storage). Measured
-# from the moment the session ENDED (the return card goes up then), and only
-# rows/markers of ended sessions age — a live session's rows are untouched.
-MENTIONS_RETENTION = timedelta(days=7)
 
 # Reasons longer than this are defensively truncated so the embed can never
 # overflow Discord's field/description limits.
@@ -334,8 +332,8 @@ class AFKMentionsView(discord.ui.View):
             self.guild_id, self.owner_id, self.session_id, 1)
         if total == 0:
             # The session is identifiable but has no saved mentions (a real
-            # zero-mention return, or rows past the retention sweep): the
-            # approved zero-state wording covers both, ephemerally.
+            # zero-mention return): the approved zero-state wording covers
+            # it, ephemerally.
             await interaction.response.send_message(
                 AFK_ZERO_MENTIONS_TEXT, ephemeral=True)
             return
@@ -357,20 +355,21 @@ class AFK(commands.Cog):
 
     async def cog_load(self):
         await self.ensure_table()
-        # Opportunistic retention sweep before any button can be re-registered.
-        await self.cleanup_expired()
         await self.register_persistent_views()
 
     async def register_persistent_views(self):
-        """Re-register the return-card button of every retrievable session.
+        """Re-register the return-card button of every recorded session.
 
         The button lives on the CANCELLATION card, so after a restart the
         live custom_ids are the ENDED sessions recorded in
         ``afk_ended_sessions`` — including zero-mention sessions, which have
-        no ``afk_mentions`` rows to be discovered from. Registration is
-        keyed by the deterministic custom_id, and discord.py's view store
-        keeps one dispatcher per custom_id, so a duplicate registration for
-        the same session cannot create double-replies.
+        no ``afk_mentions`` rows to be discovered from. This reads only that
+        session-identity metadata: snapshot rows stay in SQLite and are
+        fetched per session (one page at a time) when its button is clicked —
+        never loaded into memory here. Registration is keyed by the
+        deterministic custom_id, and discord.py's view store keeps one
+        dispatcher per custom_id, so a duplicate registration for the same
+        session cannot create double-replies.
         """
         try:
             async with aiosqlite.connect(DB_PATH) as db:
@@ -389,37 +388,6 @@ class AFK(commands.Cog):
             except Exception as e:
                 print(f"[AFK] could not re-register mentions view "
                       f"{guild_id}/{owner_id}/{session_id}: {e}")
-
-    async def cleanup_expired(self):
-        """Sweep sessions whose retention window has passed (never permanent).
-
-        Snapshots of a session that ended more than ``MENTIONS_RETENTION``
-        ago are deleted together with that session's ``afk_ended_sessions``
-        marker — exactly the "available through the return card, cleaned up
-        afterwards" policy. Runs opportunistically at cog load and after each
-        dismissal; no scheduler and no separate retention subsystem. Only
-        ENDED sessions age here: a live session's rows are untouched until
-        its owner returns.
-        """
-        cutoff = (datetime.now(timezone.utc) - MENTIONS_RETENTION).isoformat()
-        try:
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("""
-                    DELETE FROM afk_mentions
-                    WHERE EXISTS (
-                        SELECT 1 FROM afk_ended_sessions e
-                        WHERE e.session_id = afk_mentions.session_id
-                          AND e.guild_id = afk_mentions.guild_id
-                          AND e.owner_id = afk_mentions.target_user_id
-                          AND e.ended_at < ?
-                    )
-                """, (cutoff,))
-                await db.execute("""
-                    DELETE FROM afk_ended_sessions WHERE ended_at < ?
-                """, (cutoff,))
-                await db.commit()
-        except Exception as e:
-            print(f"[AFK] could not sweep expired AFK sessions: {e}")
 
     async def ensure_table(self):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -440,13 +408,13 @@ class AFK(commands.Cog):
                 ON afk_state(guild_id)
             """)
             # Dedup ledger: a given message can count at most once per
-            # target. Rows survive the dismissal (the return card's button
-            # needs them) until the retention sweep deletes them with their
-            # ended-session marker. The (author_id, author_name, channel_id,
-            # content) columns turn each deduplicated mention into the
-            # owner's viewable snapshot, and session_id pins every row to
-            # the session that collected it — self-healed onto older
-            # installs by _heal_schema below.
+            # target. Rows survive the dismissal and are never deleted
+            # automatically (the return card's button must retrieve them for
+            # as long as the button exists — no TTL, no cleanup pass). The
+            # (author_id, author_name, channel_id, content) columns turn each
+            # deduplicated mention into the owner's viewable snapshot, and
+            # session_id pins every row to the session that collected it —
+            # self-healed onto older installs by _heal_schema below.
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS afk_mentions (
                     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -468,9 +436,9 @@ class AFK(commands.Cog):
             """)
             # Ended-session registry: written atomically at dismissal. It is
             # what gives the return card's button its stable identity after a
-            # restart (session token -> snapshots) and what the retention
-            # sweep ages out. One row per ended session — several return
-            # cards of the same owner can coexist, each with its own token.
+            # restart (session token -> snapshots). One row per ended session
+            # — several return cards of the same owner can coexist, each with
+            # its own token — and rows are never cleaned up on a timer.
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS afk_ended_sessions (
                     session_id TEXT NOT NULL,
@@ -664,15 +632,15 @@ class AFK(commands.Cog):
         double-report.
 
         The session's ``afk_mentions`` snapshots are deliberately NOT deleted
-        here: the cancellation card's button must retrieve them after the
-        session is gone. Instead the session is recorded in
-        ``afk_ended_sessions`` (the button's stable identity after restarts
-        AND the retention anchor), and ``cleanup_expired`` removes both once
-        ``MENTIONS_RETENTION`` has passed. Rows and marker left behind by a
-        pre-upgrade session carry the shared per-owner legacy token
-        (``LEGACY_SESSION_ID``) and resolve unambiguously because every query
-        also matches guild+owner and a member can only ever have one such
-        session (new sessions always get a fresh uuid token).
+        here — nor anywhere else: the cancellation card's button must retrieve
+        them for as long as the button exists (no time-based retention/TTL
+        and no cleanup pass). Instead the session is recorded in
+        ``afk_ended_sessions`` (the button's stable identity after restarts).
+        Rows and marker left behind by a pre-upgrade session carry the shared
+        per-owner legacy token (``LEGACY_SESSION_ID``) and resolve
+        unambiguously because every query also matches guild+owner and a
+        member can only ever have one such session (new sessions always get a
+        fresh uuid token).
         """
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -783,8 +751,6 @@ class AFK(commands.Cog):
                 await message.channel.send(embed=embed, view=view)
             except Exception as e:
                 print(f"[AFK] could not send AFK-end embed: {e}")
-            # Opportunistic retention sweep (bounded storage, no scheduler).
-            await self.cleanup_expired()
 
         # Real mentions of AFK members (never a username text search).
         handled: set[int] = set()
