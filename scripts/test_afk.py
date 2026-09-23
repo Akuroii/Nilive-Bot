@@ -445,7 +445,7 @@ async def run(db_path):
           count_of(games, "تم إلغاء الـ AFK") == 1)
     cancel = last_sent(games)["embed"]
     check("cancel reports the 2 mentions counted",
-          "**عدد المنشن أثناء غيابه: 2**" in cancel.description)
+          "**عدد المنشن أثناء غيابك: 2**" in cancel.description)
     async with aiosqlite.connect(db_path) as db:
         cur = await db.execute("SELECT COUNT(*) FROM afk_state "
                                "WHERE guild_id=1 AND user_id=100")
