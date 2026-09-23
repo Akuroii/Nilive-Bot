@@ -459,7 +459,24 @@ class Moderation(commands.Cog):
             await interaction.followup.send(
                 "Amount must be between 1 and 100.", ephemeral=True)
             return
-        check = (lambda m: m.author == member) if member else None
+        # CONFIRMED LIMITATION (guard): forum channels have no message
+        # list to bulk-delete — discord.ForumChannel has no .purge at
+        # all, so this used to die with AttributeError. Report the
+        # limitation instead of crashing.
+        if not hasattr(interaction.channel, "purge"):
+            await interaction.followup.send(
+                "Bulk message deletion isn't supported in this channel "
+                "type.", ephemeral=True)
+            return
+        # CONFIRMED BUG FIX: `check=None` is NOT the same as omitting
+        # `check`. discord.py only substitutes its match-everything
+        # default when the argument is the MISSING sentinel; a literal
+        # None reached PurgeIterator's `if self.check(message)` as a
+        # non-callable and every no-member purge crashed with
+        # "'NoneType' object is not callable". A real predicate keeps
+        # the old intent ("no member filter") with unchanged purge
+        # behaviour (same limit, same bulk flag, same reply).
+        check = (lambda m: m.author == member) if member else (lambda m: True)
         deleted = await interaction.channel.purge(
             limit=amount, check=check)
         await interaction.followup.send(
@@ -471,12 +488,21 @@ class Moderation(commands.Cog):
     @app_commands.checks.has_permissions(manage_channels=True)
     async def lock(self, interaction: discord.Interaction,
                    reason: str = "No reason provided"):
-        overwrite = interaction.channel.overwrites_for(
-            interaction.guild.default_role)
-        overwrite.send_messages = False
-        await interaction.channel.set_permissions(
-            interaction.guild.default_role,
-            overwrite=overwrite, reason=reason)
+        # CONFIRMED BUG FIX: threads and forum posts have no permission
+        # overwrites of their own (discord.Thread has neither
+        # overwrites_for nor set_permissions) — the overwrite dance
+        # below crashed with AttributeError on them. Locking a thread is
+        # the native `locked` flag; guild channels keep the exact
+        # original overwrite behaviour.
+        if isinstance(interaction.channel, discord.Thread):
+            await interaction.channel.edit(locked=True, reason=reason)
+        else:
+            overwrite = interaction.channel.overwrites_for(
+                interaction.guild.default_role)
+            overwrite.send_messages = False
+            await interaction.channel.set_permissions(
+                interaction.guild.default_role,
+                overwrite=overwrite, reason=reason)
         await log_mod_action(interaction.guild.id, interaction.user,
                              interaction.user, "lock", reason)
         embed = discord.Embed(
@@ -492,12 +518,17 @@ class Moderation(commands.Cog):
     @app_commands.checks.has_permissions(manage_channels=True)
     async def unlock(self, interaction: discord.Interaction,
                      reason: str = "No reason provided"):
-        overwrite = interaction.channel.overwrites_for(
-            interaction.guild.default_role)
-        overwrite.send_messages = None
-        await interaction.channel.set_permissions(
-            interaction.guild.default_role,
-            overwrite=overwrite, reason=reason)
+        # Same thread/forum-post fix as /lock above: the native `locked`
+        # flag for threads, unchanged overwrite behaviour elsewhere.
+        if isinstance(interaction.channel, discord.Thread):
+            await interaction.channel.edit(locked=False, reason=reason)
+        else:
+            overwrite = interaction.channel.overwrites_for(
+                interaction.guild.default_role)
+            overwrite.send_messages = None
+            await interaction.channel.set_permissions(
+                interaction.guild.default_role,
+                overwrite=overwrite, reason=reason)
         embed = discord.Embed(
             title="🔓 Channel Unlocked",
             description=f"{interaction.channel.mention} has been unlocked.",

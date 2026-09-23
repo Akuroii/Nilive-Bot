@@ -278,10 +278,17 @@ async def on_app_command_error(interaction: discord.Interaction,
         pass
 
     try:
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "Something went wrong running that command. "
-                "The error has been logged.", ephemeral=True)
+        msg = ("Something went wrong running that command. "
+               "The error has been logged.")
+        if interaction.response.is_done():
+            # CONFIRMED BUG FIX: commands that had already deferred (or
+            # otherwise responded) hit `is_done() == True` here, and the
+            # user-facing reply was silently swallowed. The first
+            # response slot is consumed at that point, so the message
+            # must go out through the followup webhook instead.
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
     except Exception:
         pass
 
