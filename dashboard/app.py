@@ -1016,11 +1016,54 @@ def tickets():
 
 # ── Embed builder ──────────────────────────────────────────────────────────────
 
+def _bot_identity_for_page(guild_id):
+    """
+    The bot's name + avatar for a message preview, read from SQLite only.
+
+    Why it exists: the Embed Builder used to fetch /api/botprofile/config
+    while initialising, and that route calls Discord live
+    (utils/bot_profile.get_live_bot_member — a blocking requests.get with an
+    8s timeout). So the composer could not paint until Discord answered, and
+    when Discord was slow the page just sat there. The same values the
+    dashboard already stores (guild_bot_profile, written by
+    /api/botprofile/config) are enough for a FIRST paint; the page refines
+    them with one non-blocking call after it is interactive.
+
+    Deliberately no Discord call and no new endpoint: the data rides along
+    with the page render, exactly like __CURRENCY__ / __CHECK_ICON__, and
+    contains only what every member of the guild can already see (the bot's
+    nickname in this guild and its avatar URL). Never raises — a preview is
+    not worth failing a page render for.
+    """
+    if not guild_id:
+        return None
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH, timeout=2)
+        try:
+            row = conn.execute(
+                "SELECT nickname, avatar_url FROM guild_bot_profile WHERE guild_id = ?",
+                (guild_id,)).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[BOTIDENTITY] read failed: {e}")
+        return None
+    if not row:
+        return None
+    name, avatar = row[0], row[1]
+    if not name and not avatar:
+        return None
+    return {"name": name or None, "avatar": avatar or None, "source": "stored"}
+
+
 @app.route("/embed-builder")
 @require_page("embedbuilder")
 def embed_builder():
     ctx = get_current_user_context()
-    return render("manage/embedbuilder.html", **ctx)
+    return render("manage/embedbuilder.html",
+                  bot_identity=_bot_identity_for_page(ctx.get("guild_id")),
+                  **ctx)
 
 
 # ── Reaction roles ─────────────────────────────────────────────────────────────

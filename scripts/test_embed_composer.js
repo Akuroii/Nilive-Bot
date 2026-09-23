@@ -148,6 +148,38 @@ assert(normMissing.color === '#7c5cbf' && normMissing.fields.length === 0, 'miss
 assert(EC.embedsFromApi([]).length === 1 && EC.embedsFromApi([])[0].color === '#7c5cbf',
     'empty API list → one blank embed');
 
+// Phase 0: templates saved before this change are bare embed dicts using the
+// FLAT keys the Discord-side cog reads (author/author_icon/footer/_icon).
+// Reading only the nested API shape dropped those icons the moment a legacy
+// template was loaded into the editor.
+const legacy = EC.embedFromApi({
+    title: 'Legacy Welcome', color: '#7c5cbf',
+    author: 'Legacy Author', author_icon: 'https://cdn/author.png',
+    footer: 'old footer', footer_icon: 'https://cdn/footer.png',
+});
+assert(legacy.author === 'Legacy Author' && legacy.authorIcon === 'https://cdn/author.png',
+    'legacy flat author_icon → authorIcon', 'got ' + JSON.stringify([legacy.author, legacy.authorIcon]));
+assert(legacy.footer === 'old footer' && legacy.footerIcon === 'https://cdn/footer.png',
+    'legacy flat footer_icon → footerIcon', 'got ' + JSON.stringify([legacy.footer, legacy.footerIcon]));
+const nestedWins = EC.embedFromApi({
+    author: { name: 'A', icon_url: 'https://nested/a.png' }, author_icon: 'https://flat/a.png',
+    footer: { text: 'F', icon_url: 'https://nested/f.png' }, footer_icon: 'https://flat/f.png',
+});
+assert(nestedWins.authorIcon === 'https://nested/a.png' && nestedWins.footerIcon === 'https://nested/f.png',
+    'nested API shape wins over a flat key', 'got ' + JSON.stringify([nestedWins.authorIcon, nestedWins.footerIcon]));
+assert(EC.embedFromApi({ author: 'A' }).authorIcon === '' && EC.embedFromApi({ footer: 'F' }).footerIcon === '',
+    'no icon key anywhere → empty icon field');
+const payloadShape = EC.cleanEmbedForPayload({
+    author: 'A', authorIcon: 'https://i', authorUrl: 'https://u',
+    footer: 'F', footerIcon: 'https://f', url: 'https://t', timestamp: 'TS',
+});
+assert(payloadShape.author && payloadShape.author.icon_url === 'https://i' && payloadShape.author.url === 'https://u',
+    'payload keeps the Discord-shaped author object (icon + url inside it)',
+    'got ' + JSON.stringify(payloadShape.author));
+const payloadEmpty = EC.cleanEmbedForPayload({ author: '' });
+assert(payloadEmpty.author === undefined && payloadEmpty.footer === undefined,
+    'unset author/footer are omitted from the payload, not emitted empty');
+
 // ═══════════════════════════════════════════════════════════════
 section('renderDiscordMarkup — equivalence with the old implementation');
 const corpus = [
@@ -186,6 +218,120 @@ assert(EC.renderDiscordMarkup('🎲 text', { checkEmojiOnly: true, lookups: LOOK
     'emoji + text is NOT emoji-only');
 const ch = EC.renderDiscordMarkup('go <#100>', { lookups: LOOKUPS }).html;
 assert(ch === 'go <span class="eb-mention">#announcements</span>', 'channel mention resolved', ch);
+
+// ═══════════════════════════════════════════════════════════════
+// Code spans / fenced blocks.
+//
+// These assert the INTENDED rendering (Discord's rules), not "whatever the
+// previous implementation produced" — the equivalence corpus above pins the
+// shared behaviour, this section defines the behaviour code must have. Every
+// case here was wrong in at least one of the two earlier implementations:
+// the pre-Phase-0 renderer ran markdown inside code (`**x**` came out bold),
+// and the first Phase-0 pass turned a fenced block into `<pre>js\n…`, let a
+// long line widen the preview box, and leaked its own placeholder characters
+// for `` ```x``` ``.
+// ═══════════════════════════════════════════════════════════════
+section('renderDiscordMarkup — code spans and fenced blocks');
+const md = (s) => EC.renderDiscordMarkup(s, { lookups: LOOKUPS }).html;
+
+// the info string is the language, never content
+assert(md('```js\nconst a = 1;\n```') === '<pre class="eb-code-block"><code>const a = 1;</code></pre>',
+    'fence with an info string: the language is dropped', md('```js\nconst a = 1;\n```'));
+assert(md('```\nplain fence\n```') === '<pre class="eb-code-block"><code>plain fence</code></pre>',
+    'fence without an info string', md('```\nplain fence\n```'));
+assert(md('```markdown\n**not bold**\n```') === '<pre class="eb-code-block"><code>**not bold**</code></pre>',
+    'markdown inside a fence stays literal', md('```markdown\n**not bold**\n```'));
+
+// the three-by-three rule that comes with dedented fences (CommonMark): for
+// a single-line body, drop the newline after the info string, not the text
+assert(md('```js\nconst a = 1;```') === '<pre class="eb-code-block"><code>const a = 1;</code></pre>',
+    'fence whose body does not end in a newline', md('```js\nconst a = 1;```'));
+assert(md('```js\n```') === '<pre class="eb-code-block"><code></code></pre>',
+    'empty fence', md('```js\n```'));
+assert(md('```python\nx\n```\n```python\ny\n```')
+    === '<pre class="eb-code-block"><code>x</code></pre>\n<pre class="eb-code-block"><code>y</code></pre>',
+    'two fences keep their order', md('```python\nx\n```\n```python\ny\n```'));
+assert(md('```\nnever closed') === '```\nnever closed',
+    'an unclosed fence stays exactly as typed', md('```\nnever closed'));
+
+// long lines: the block is its own box and the CSS above wraps it (the
+// browser gate measures the box's width; this pins the markup it hooks onto).
+// No `"`/`&`/`<` in the payload: those are escaped before the code pass, so
+// the body is the escaped text by design, not the raw line.
+const longLine = 'const aVeryLongVariableName = ' + 'x'.repeat(400) + ';';
+const longHtml = md('```js\n' + longLine + '\n```');
+assert(longHtml.indexOf('<pre class="eb-code-block"><code>') === 0 && longHtml.indexOf(longLine) > 0
+    && longHtml.indexOf('</code></pre>') === longHtml.length - '</code></pre>'.length,
+    'a long fenced line stays inside one <pre class="eb-code-block"><code>', longHtml.slice(0, 80));
+
+// inline spans
+assert(md('use `npm start` here') === 'use <code class="eb-code">npm start</code> here',
+    'single-backtick inline code', md('use `npm start` here'));
+assert(md('`` `x` ``') === '<code class="eb-code">`x`</code>',
+    'double-backtick inline code holding a backtick', md('`` `x` ``'));
+assert(md('`` a ` b ``') === '<code class="eb-code">a ` b</code>',
+    'double-backtick span with an inner single run', md('`` a ` b ``'));
+// a code span is at least as long as its opener, and may close on a LONGER
+// run — otherwise `` `x` `` is two broken halves instead of one span
+assert(md('`` ``` `x` ``` ``') === '<code class="eb-code">``` `x` ```</code>',
+    'double-backtick span closed by a longer run', md('`` ``` `x` ``` ``'));
+assert(md('a `` b') === 'a `` b', 'a run that never closes is left alone', md('a `` b'));
+
+// markdown next to, and around, code
+assert(md('**bold `code` bold**') === '<strong>bold <code class="eb-code">code</code> bold</strong>',
+    'inline code inside bold keeps both', md('**bold `code` bold**'));
+assert(md('`**x**` and **y**') === '<code class="eb-code">**x**</code> and <strong>y</strong>',
+    'code next to live markdown', md('`**x**` and **y**'));
+assert(md('`a` and `b`') === '<code class="eb-code">a</code> and <code class="eb-code">b</code>',
+    'two inline spans keep their order', md('`a` and `b`'));
+assert(md('`a` `b` `c`') === '<code class="eb-code">a</code> <code class="eb-code">b</code> <code class="eb-code">c</code>',
+    'three inline spans keep their order', md('`a` `b` `c`'));
+assert(md('`a` **b** `c`') === '<code class="eb-code">a</code> <strong>b</strong> <code class="eb-code">c</code>',
+    'spans around other markdown keep their order', md('`a` **b** `c`'));
+assert(md('x `**y**` z') === 'x <code class="eb-code">**y**</code> z',
+    'markdown inside a span is literal, text around it is not', md('x `**y**` z'));
+// KNOWN pre-existing deviation, deliberately NOT changed in Phase 0: a
+// mention/emoji TOKEN inside a code span still resolves (Discord shows the
+// token as literal text). Token stashing happens before the code pass — it
+// dates from before this work and behaves the same at HEAD — and fixing it
+// changes rendering for every consumer of this module, so it belongs to the
+// Phase 1 markdown corpus, not to a stability commit. What is asserted here
+// is the part these fixes own: the code span is still one span, the token
+// stays inside it, and nothing leaks.
+const tokenInCode = md('`<@200>` vs <@200>');
+assert(tokenInCode.indexOf('<code class="eb-code">') === 0
+    && tokenInCode.indexOf('</code>') > 0
+    && tokenInCode.indexOf('</code>') > tokenInCode.indexOf('<@200>'.slice(0, 4))
+    && tokenInCode.split('<code class="eb-code">').length === 2,
+    'a token inside code stays inside its code span (resolution inside code is a known deviation)',
+    tokenInCode);
+
+// placeholders: the alphabet the renderer uses internally must never show up
+const CTRL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/;
+const leakCases = [
+    '`` ``` `**x**` ``` ``',      // re-stashed its own placeholder before this pass
+    '`` ```x``` ``',
+    'a\u00030\u0004b',            // a placeholder that is genuinely in the input
+    '`a\u0001b`',
+    'x\u0007y',
+    '\u0003 \u0004',
+    '`code` \u0000 `more`',
+];
+leakCases.forEach((input, i) => {
+    const out = md(input);
+    assert(!CTRL.test(out), 'no control character leaks into the output (#'.concat(i, ')'),
+        JSON.stringify(out));
+});
+// \u0003 0 \u0004 — the placeholder SHAPE, typed by a user. The control
+// characters go; the digits between them are just text.
+assert(md('a\u00030\u0004b') === 'a0b', 'a placeholder-looking input is scrubbed, not resolved',
+    JSON.stringify(md('a\u00030\u0004b')));
+assert(md('`` ``` `**x**` ``` ``') === '<code class="eb-code">``` `**x**` ```</code>',
+    'the nested-run case keeps its content instead of a placeholder',
+    md('`` ``` `**x**` ``` ``'));
+// a body with a control character cannot smuggle a placeholder back in
+assert(!CTRL.test(md('```\n' + '\u0003' + '0000' + '\u0004' + '\n```')),
+    'a fenced body containing placeholder characters is scrubbed');
 
 // ═══════════════════════════════════════════════════════════════
 section('componentRowsHtml — engine component JSON → action rows');

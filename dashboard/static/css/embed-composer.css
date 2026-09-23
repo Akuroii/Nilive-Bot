@@ -193,6 +193,37 @@
 .eb-pe-author { font-size:14px; font-weight:600; color:#f2f3f5; margin:8px 0 8px; display:flex; align-items:center; gap:6px; }
 .eb-pe-title { font-weight:700; color:#fff; font-size:16px; margin-bottom:8px; line-height:1.3; }
 .eb-pe-desc { color:#dbdee1; font-size:14px; line-height:1.375; white-space:pre-wrap; }
+/* ── CODE IN THE PREVIEW ──────────────────────────────────────────
+   main.css styles the bare `code` element, which is enough for an inline
+   span but leaves a fenced BLOCK as browser defaults: no background, no
+   padding, and `white-space:pre` with no overflow rule — so one long line
+   (a minified URL, a JSON blob) widened the preview box and pushed the whole
+   layout sideways. Discord wraps a fence's long lines inside the message
+   box; this does the same, and keeps the horizontal safety net for the
+   unusual unbreakable string. */
+.eb-pe-desc .eb-code-block,
+.eb-pe-field-value .eb-code-block,
+.eb-msg-content .eb-code-block {
+    background:#2b2d31; border-radius:4px; padding:8px 10px; margin:6px 0;
+    white-space:pre-wrap; overflow-wrap:anywhere; overflow-x:auto;
+    font-family:'JetBrains Mono','Fira Code',monospace; font-size:12px; line-height:1.45;
+}
+.eb-pe-desc .eb-code-block code,
+.eb-pe-field-value .eb-code-block code,
+.eb-msg-content .eb-code-block code {
+    background:none; padding:0; border-radius:0; color:#dbdee1;
+    font:inherit; white-space:inherit;
+}
+/* A bold/italic/underline `code` span carries the same box: main.css styles
+   the element, and these wrappers inherit every property but font-family,
+   which a browser flips to monospace for a nested `code` — Discord keeps the
+   surrounding font and only tints the chip. Deliberately NOT
+   `code.eb-code` on its own: a standalone span keeps main.css's monospace. */
+.eb-pe-desc strong code, .eb-pe-desc em code, .eb-pe-desc u code, .eb-pe-desc s code,
+.eb-pe-field-value strong code, .eb-pe-field-value em code, .eb-pe-field-value u code, .eb-pe-field-value s code,
+.eb-msg-content strong code, .eb-msg-content em code, .eb-msg-content u code, .eb-msg-content s code {
+    font-family:inherit;
+}
 .eb-pe-fields { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
 .eb-pe-field { min-width:0; }
 .eb-pe-field-name { font-weight:600; color:#f2f3f5; font-size:14px; margin-bottom:2px; }

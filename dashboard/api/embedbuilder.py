@@ -13,6 +13,8 @@ from dashboard.permissions import (
 )
 from dashboard.api import api_bp
 from utils import app_emoji_cache
+from utils import discord_limits as DL
+from utils import embed_schema as ES
 from utils.emoji import parse_emoji_input
 
 # ── Embed Builder v2 — Composer (Content + multi-Embed + Attachments) ──────
@@ -42,12 +44,26 @@ from utils.emoji import parse_emoji_input
 # understand both the new shape and legacy single-embed rows saved
 # before this change, so old templates keep working.
 
-MAX_EMBEDS = 10
-MAX_ATTACHMENTS = 10
-MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024  # Discord's default non-boosted upload cap
+MAX_EMBEDS = DL.MESSAGE_EMBEDS_MAX
+MAX_ATTACHMENTS = DL.ATTACHMENTS_MAX
+# Discord's documented ceiling for a Create Message REQUEST is 25 MiB; the
+# file budget is that minus a small allowance for the multipart envelope
+# (see utils/discord_limits.py). One table, one number, both sides.
+MAX_TOTAL_ATTACHMENT_BYTES = DL.attachment_total_bytes_max()
 
 
 def _validate_embeds(embeds) -> tuple[bool, str]:
+    """
+    Shape/size gate for templates being SAVED (embed_templates).
+
+    Deliberately weaker than ES.validate_for_discord, which runs on the send
+    path: a draft may legitimately hold a title that is a few characters too
+    long while the admin is still editing, and refusing to save it would
+    throw their work away. Only what this route has always enforced is
+    enforced here — the embeds are a list, at most MAX_EMBEDS of them, each a
+    dict — with the numbers coming from the shared limits table so the save
+    path, the send path and the page cannot drift apart.
+    """
     if not isinstance(embeds, list):
         return False, "embeds must be a list"
     if len(embeds) > MAX_EMBEDS:
@@ -56,6 +72,21 @@ def _validate_embeds(embeds) -> tuple[bool, str]:
         if not isinstance(e, dict):
             return False, "Each embed must be an object"
     return True, ""
+
+
+@api_bp.route("/embedbuilder/limits", methods=["GET"])
+@require_api_permission(LEVEL_OWNER)
+def api_embedbuilder_limits():
+    """
+    The limits the builder page must enforce, straight from the same table
+    the route above validates with (utils/discord_limits.py).
+
+    The page used to hard-code its own copies of these numbers; the client
+    now merges this response over its built-in defaults, and falls back to
+    those defaults if this call fails — the page must work offline/limited,
+    never block on it.
+    """
+    return jsonify({"success": True, "limits": DL.limits_payload()})
 
 
 @api_bp.route("/embedbuilder/send", methods=["POST"])
@@ -75,32 +106,48 @@ def api_embedbuilder_send():
     except Exception:
         return jsonify({"success": False, "error": "Malformed payload_json"})
 
-    content = (payload.get("content") or "").strip()
-    embeds  = payload.get("embeds") or []
-
-    ok, err = _validate_embeds(embeds)
-    if not ok:
-        return jsonify({"success": False, "error": err})
+    # Trim the content exactly as before (a message of nothing but spaces is
+    # an empty message, not a valid one), so validation sees what is sent.
+    if isinstance(payload.get("content"), str):
+        payload["content"] = payload["content"].strip()
 
     files = request.files.getlist("files")
-    if len(files) > MAX_ATTACHMENTS:
-        return jsonify({"success": False,
-                        "error": f"A message can carry at most {MAX_ATTACHMENTS} attachments"})
-    total_bytes = 0
+    file_meta = []
     for f in files:
         f.stream.seek(0, os.SEEK_END)
-        total_bytes += f.stream.tell()
+        size = f.stream.tell()
         f.stream.seek(0)
-    if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES:
-        return jsonify({"success": False,
-                        "error": "Attachments exceed the 25MB total upload limit"})
+        file_meta.append({"name": f.filename or "", "size": size})
 
-    if not content and not embeds and not files:
-        return jsonify({"success": False, "error": "Nothing to send — add content, an embed, or an attachment"})
+    # ── Authoritative validation (utils/embed_schema.py) ───────────────
+    # Every rule Discord enforces on this payload, checked HERE, with the
+    # offending field's path — because the client is not the only way
+    # anything reaches this route, and because "Invalid Form Body" after a
+    # 25MB upload is not a fixable error message. Discord's own 400 shape
+    # ({"errors": {"embeds.0.title": ...}}) is mirrored in `errors[]` so the
+    # page can highlight the input; `error` stays the plain first message
+    # for callers that only read that.
+    clean_payload, ok, errors = ES.validate_for_discord(payload, file_meta)
+    if not ok:
+        return jsonify({
+            "success": False,
+            "error": ES.first_error_message(errors),
+            "error_path": (errors[0].get("path") if errors else ""),
+            "errors": errors,
+        })
 
     bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:
         return jsonify({"success": False, "error": "Bot token not configured"})
+
+    content = clean_payload.get("content") or ""
+    embeds = clean_payload.get("embeds") or []
+
+    # Advisory (never blocking): a file above the free-tier per-file cap may
+    # be refused by Discord on a non-boosted server. Surfaced with the
+    # success response so the page can warn after a send that Discord
+    # accepted anyway, instead of guessing beforehand.
+    advisory = ES.advisory_file_warnings(file_meta)
 
     discord_payload = {}
     if content:
@@ -140,7 +187,10 @@ def api_embedbuilder_send():
         return jsonify({"success": False, "error": f"Discord API error {resp.status_code}: {detail}"})
 
     log_action(guild_id, f"Sent embed builder message to channel {channel_id}", "embedbuilder")
-    return jsonify({"success": True, "message_id": resp.json().get("id")})
+    out = {"success": True, "message_id": resp.json().get("id")}
+    if advisory:
+        out["warnings"] = advisory
+    return jsonify(out)
 
 
 # ── Templates (whole message: content + all embeds) ────────────────────────

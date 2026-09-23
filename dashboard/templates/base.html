@@ -67,6 +67,17 @@
      from the one resolver in utils/emoji.py so client-side status lines and
      toasts show the same check as the Discord-side replies. -->
 <script>window.__CHECK_ICON__ = {{ check_icon | tojson }};</script>
+{% if bot_identity %}
+<!-- Bot name + avatar for message previews, rendered WITH the page instead
+     of fetched. The Embed Builder used to call /api/botprofile/config during
+     initialisation, which does a live Discord round-trip (up to 8s) inside
+     the request that page was waiting on — so a slow Discord meant a blank
+     composer. This is only emitted for pages that ask for it (see
+     dashboard/app.py's _bot_identity_for_page) and holds nothing secret:
+     the bot's nickname in this guild and its avatar URL, both already
+     visible to every member of the server. -->
+<script>window.__BOT_IDENTITY__ = {{ bot_identity | tojson }};</script>
+{% endif %}
 {{ check_icon_css }}
 <!-- Baseline alignment for configured currency icons rendered as CDN
      images (dashboard/utils/currency_ctx.py:icon_css). A browser cannot
@@ -514,6 +525,13 @@
 <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 <script src="{{ url_for('static', filename='js/nero-select.js') }}"></script>
 <script src="{{ url_for('static', filename='js/nero-alias-input.js') }}"></script>
+<!-- Page-module registry (init/destroy per page). Pages opt in with
+     data-page-module + data-page-script on their own root element; without
+     that marker this file does nothing at all. It is loaded AFTER
+     dashboard.js/nero-select.js on purpose: its mount runs after
+     reInitDashboardComponents(), so a page module can rely on its
+     NeroSelect/NeroAlias widgets already being initialised. -->
+<script src="{{ url_for('static', filename='js/nav-lifecycle.js') }}"></script>
 <script>
     htmx.config.globalViewTransitions = false;
     htmx.config.defaultSwapStyle = 'innerHTML';
