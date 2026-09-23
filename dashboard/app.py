@@ -534,16 +534,39 @@ def index():
             warn_count   = (await (await db.execute(
                 "SELECT COUNT(*) FROM warnings WHERE guild_id=?",
                 (guild_id,))).fetchone())[0]
+            hb_row       = await (await db.execute(
+                "SELECT last_heartbeat FROM bot_status WHERE id = 1",
+            )).fetchone()
         return {
-            "mvp_count":    mvp_count,
-            "member_count": member_count,
-            "open_tickets": open_tickets,
-            "warn_count":   warn_count,
+            "mvp_count":       mvp_count,
+            "member_count":    member_count,
+            "open_tickets":    open_tickets,
+            "warn_count":      warn_count,
+            "last_heartbeat":  hb_row[0] if hb_row else None,
         }
 
     stats = run_async(get_stats())
+
+    # Bot liveness for the status card — the same "last beat < 90s" rule
+    # as /health (general/health.html). This card used to be hardcoded
+    # "Online" (always green), so a stale heartbeat was invisible from
+    # the overview. Same parse as the /health route.
+    import datetime as _dt
+    last_hb_raw = stats.pop("last_heartbeat", None)
+    is_online = False
+    if last_hb_raw:
+        try:
+            last_hb = _dt.datetime.fromisoformat(
+                str(last_hb_raw).replace("Z", "+00:00"))
+            is_online = (
+                _dt.datetime.now(_dt.timezone.utc) - last_hb
+            ).total_seconds() < 90
+        except Exception:
+            is_online = False
+
     ctx   = get_current_user_context()
-    return render("general/overview.html", stats=stats, **ctx)
+    return render("general/overview.html", stats=stats, is_online=is_online,
+                  **ctx)
 
 
 # ── Members ────────────────────────────────────────────────────────────────────
