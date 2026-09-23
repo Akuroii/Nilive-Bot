@@ -121,7 +121,9 @@
                           title="{{ 'Command enabled' if enabled else 'Command disabled' }}"></span>
                     <div class="cmd-meta-wrap">
                         <div class="cmd-name-line">
-                            <span class="cmd-row-name">/{{ cmd }}</span>
+                            {# AFK pass: prefix commands (meta.prefix) render
+                               with "!" — everything else keeps "/". #}
+                            <span class="cmd-row-name">{{ '!' if meta.prefix else '/' }}{{ cmd }}</span>
                             {% if meta.params %}
                                 {% for param in meta.params %}
                                 <span class="cmd-param-tag">[{{ param }}]</span>
@@ -142,10 +144,14 @@
                         <div class="cmd-usage text-muted text-xs" id="usage-{{ cmd }}" style="margin-top:3px;"
                              data-params="{{ meta.params|default([])|join(',') }}">
                             <span class="cmd-usage-label">Usage:</span>
-                            <code>/{{ cmd }}{% for param in meta.params|default([]) %} [{{ param }}]{% endfor %}</code>
+                            <code>{{ '!' if meta.prefix else '/' }}{{ cmd }}{% for param in meta.params|default([]) %} [{{ param }}]{% endfor %}</code>
+                            {# AFK pass: the alias hint only makes sense for
+                               slash commands; prefix commands never get it. #}
+                            {% if not meta.prefix %}
                             <span class="cmd-usage-alias-hint" id="usage-alias-{{ cmd }}" style="display:none;">
                                 &nbsp;or&nbsp;<code>alias{% for param in meta.params|default([]) %} [{{ param }}]{% endfor %}</code>
                             </span>
+                            {% endif %}
                         </div>
                     </div>
                 </div>
@@ -155,7 +161,7 @@
                             id="edit-btn-{{ cmd }}" onclick="toggleEditPanel('{{ cmd }}')">
                         <span class="cmd-edit-chevron">›</span> Edit
                     </button>
-                    <label class="toggle" title="{{ 'Disable' if enabled else 'Enable' }} /{{ cmd }}">
+                    <label class="toggle" title="{{ 'Disable' if enabled else 'Enable' }} {{ '!' if meta.prefix else '/' }}{{ cmd }}">
                         <input type="checkbox" id="toggle-input-{{ cmd }}" {% if enabled %}checked{% endif %}
                                onchange="toggleCmd('{{ cmd }}', this.checked, this)">
                         <span class="toggle-slider"></span>
@@ -178,6 +184,14 @@
                                            placeholder="0 (no cooldown)">
                                     <div class="form-hint">Rate limit per user in seconds</div>
                                 </div>
+                                {# AFK pass: aliases resolve through the
+                                   slash-command bridge only, so the editor is
+                                   hidden for prefix commands instead of
+                                   pretending they are supported. The shared
+                                   load/save JS is null-safe when these
+                                   elements don't exist (NeroAlias.getValues
+                                   returns [] for a missing host). #}
+                                {% if not meta.prefix %}
                                 <div class="form-group" style="margin-bottom:0;">
                                     <label class="form-label">Aliases</label>
                                     <div class="alias-host" data-alias-input
@@ -193,6 +207,7 @@
                                         fine, case does not matter, and it applies to this server only.
                                     </div>
                                 </div>
+                                {% endif %}
                             </div>
 
                             <div class="cmd-edit-picker-grid">
