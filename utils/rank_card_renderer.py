@@ -24,7 +24,7 @@ import asyncio
 import logging
 
 import aiohttp
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps, ImageChops
 
 from utils.emoji import parse_emoji_input, is_custom_emoji_token, emoji_cdn_url
 
@@ -66,6 +66,19 @@ MAILBOX_PNG_PATH = _asset_path("mailbox.png", "mailbox_trimmed.png")
 AVATAR_RING_PNG_PATH = _asset_path("avatar_ring.png", "Discord ring.png")
 AVATAR_RING_INNER_CENTER = (490, 509)   # px, in the source PNG's own pixel space
 AVATAR_RING_INNER_RADIUS = 265          # px, in the source PNG's own pixel space
+
+# Re-measured independently: a least-squares circle fit (120 boundary
+# samples every 3 degrees, alpha>60 threshold) to the ring PNG's actual
+# inner-hole boundary gives a true center of ~(509, 509), not (490, 509) --
+# the hole itself is asymmetric (tendrils reach ~40px further in on the
+# left than the right), which the single scalar radius above averages out
+# reasonably (measured ~266 vs the stored 265) but the X center does not.
+# Rather than move the ring (and disturb the level badge / everything else
+# anchored to the avatar box), this raw source-space delta is scaled by
+# _paste_avatar (same scale factor used for the ring) and applied to the
+# avatar image only, so it sits concentric with where the ring's hole
+# actually is instead of where the old constant assumed it was.
+AVATAR_RING_INNER_CENTER_X_TRUE = 509   # px, source-space, see comment above
 
 # Supplied prestige-crystal artwork (source of truth). Each PNG carries a
 # large transparent glow-falloff margin; these content boxes (alpha > ~10)
@@ -251,55 +264,32 @@ def _shape_arabic(text: str) -> str:
         return text
 
 
-# ── Currency-name typography — the one reusable rule ────────────────────
-# A currency name is free text: utils/currency.py stores whatever an admin
-# types, so every surface that RASTERISES one with our bundled fonts faces
-# the same three questions (which face, which size, does it need shaping).
-# The answers live here once, so a second Pillow surface that draws a
-# configured currency name imports this instead of re-deriving the rule:
-#
-#     from utils.rank_card_renderer import currency_name_typography
-#
-# Only for text we rasterise ourselves. Discord embeds and dashboard HTML
-# also show the currency name, but their font is chosen by the Discord
-# client / the browser, and both already do their own Arabic shaping —
-# feeding them a pre-shaped bidi string would corrupt it, so they stay on
-# the plain configured string.
-#
-# The Arabic size bump is optical, not arbitrary. Measured against the
-# bundled faces: at a matched nominal size Amiri's Arabic letter bodies
-# come out ~86% of Outfit's cap height, so Arabic reads visibly smaller
-# beside the Latin version. +9% lands it at ~91% — near-matched presence,
-# inside the agreed 5–10% band, and still well inside the stat card's
-# width budget (the longest realistic name measures ~70px condensed in a
-# 116px card).
-CURRENCY_NAME_ARABIC_SIZE_SCALE = 1.09
+# Bump applied to the Arabic font size so a configured Arabic currency name
+# reads with similar visual weight/presence to the Latin default -- Amiri at
+# the same point size as Outfit sits visually smaller/lighter.
+_ARABIC_CURRENCY_SIZE_BUMP = 1.08
 
 
-def currency_name_typography(name: str, size: int, latin_font):
-    """How to typeset ONE configured currency name.
+def currency_name_style(name: str, base_font_fn, base_size: int,
+                        arabic_bold: bool = True):
+    """Single reusable place to decide how a *configurable* currency name
+    gets drawn, since utils/currency.py puts no restriction on what an admin
+    types in. Any renderer in this module that draws a dynamic currency name
+    should go through this instead of hardcoding a font:
 
-        name        the configured display name (utils.currency -> cfg["name"])
-        size        the nominal size the Latin version is drawn at
-        latin_font  the font a non-Arabic name keeps using, unchanged
+      - Arabic name -> Amiri-Bold, existing reshape+bidi shaping, sized ~5-10%
+        up so it carries the same visual weight as the Latin default.
+      - Non-Arabic name -> unchanged: base_font_fn(base_size), raw text.
 
-    Returns `(text, font, is_arabic)`:
-
-      * Latin / any non-Arabic script -> the name and `latin_font` exactly
-        as handed in. Nothing about the existing look changes.
-      * Arabic -> Amiri-Bold (the bundled face that actually HAS Arabic
-        glyphs; Outfit does not, which is the □□□ tofu the rank card used
-        to show), the reshape+bidi form, one size step larger per the
-        scale above.
-
-    `is_arabic` is returned because the caller must NOT apply per-glyph
-    tracking to a shaped run — spacing the characters re-isolates the
-    ligatures that shaping just joined.
+    Returns (font, text_to_draw, is_arabic). is_arabic also tells the caller
+    whether per-glyph tracking is safe (it isn't, once Arabic is shaped --
+    shaping produces joined ligatures that per-character drawing would
+    re-isolate).
     """
-    if not _is_arabic_text(name):
-        return name, latin_font, False
-    arabic_size = max(1, round(size * CURRENCY_NAME_ARABIC_SIZE_SCALE))
-    return _shape_arabic(name), amiri(arabic_size, bold=True), True
+    if _is_arabic_text(name):
+        size = round(base_size * _ARABIC_CURRENCY_SIZE_BUMP)
+        return amiri(size, bold=arabic_bold), _shape_arabic(name), True
+    return base_font_fn(base_size), name, False
 
 
 def _draw_tracked_text(draw, xy, text, font, fill, tracking=0, anchor=None):
@@ -402,6 +392,27 @@ def _draw_condensed(img, xy, painter, ratio=1.0, glow=None, blur=6,
         img.alpha_composite(gl)
     img.alpha_composite(crop, (int(xy[0]), int(xy[1])))
     return crop.size
+
+
+def _fit_numeral_font(draw, text, font_fn, max_width, start_size, min_size=14):
+    """Pick the largest integer point size (<= start_size) at which `text`
+    fits within max_width -- i.e. fit numerals by adjusting the actual font
+    size, the normal typesetting way. This replaces render-at-fixed-size
+    then squeeze-the-raster-horizontally (_draw_condensed with ratio<1 on a
+    plain number): a non-uniform horizontal squash thins vertical stems
+    without thinning horizontal ones, which is exactly what reads as
+    distorted/squeezed/uneven numerals. Sizing down keeps every glyph's
+    proportions intact -- softer on width than the old squeeze ratios, but
+    actually clean at 100% zoom. Returns (font, natural_width)."""
+    size = start_size
+    while size > min_size:
+        f = font_fn(size)
+        w = draw.textbbox((0, 0), text, font=f)[2]
+        if w <= max_width:
+            return f, w
+        size -= 1
+    f = font_fn(min_size)
+    return f, draw.textbbox((0, 0), text, font=f)[2]
 
 
 def _draw_stencil_number(img, draw, xy, text, font, fill, glow=None):
@@ -761,8 +772,15 @@ async def _resolve_currency_icon(session: aiohttp.ClientSession, emoji_str: str,
 def _circle_mask_paste(base: Image.Image, im: Image.Image, box):
     x, y, w, h = box
     im = ImageOps.fit(im, (w, h), Image.LANCZOS)
-    mask = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, w, h), fill=255)
+    # The mask itself was drawn at 1:1 (185x185ish) with ImageDraw's plain
+    # (non-antialiased) ellipse -- confirmed with a high-contrast test
+    # pattern to produce a visibly hard-stepped circular edge. Drawing the
+    # mask at 4x and downsampling with LANCZOS gives a properly antialiased
+    # edge; this only changes the mask, not the avatar pixels themselves.
+    ss = 4
+    mask_big = Image.new("L", (w * ss, h * ss), 0)
+    ImageDraw.Draw(mask_big).ellipse((0, 0, w * ss, h * ss), fill=255)
+    mask = mask_big.resize((w, h), Image.LANCZOS)
     base.paste(im, (x, y), mask)
 
 
@@ -929,7 +947,12 @@ def _paste_avatar(img, data, avatar_im, ring_im=None):
     # reaches full opacity; with the avatar underneath, that falloff
     # blends against the avatar instead of exposing bare background,
     # which is what was reading as a gap between the two.
-    _circle_mask_paste(img, avatar_im, (int(ax), int(ay), int(aw), int(ah)))
+    avatar_d = (aw + ah) / 2
+    ring_scale = avatar_d / (AVATAR_RING_INNER_RADIUS * 2)
+    avatar_offset_x = round((AVATAR_RING_INNER_CENTER_X_TRUE - AVATAR_RING_INNER_CENTER[0])
+                            * ring_scale)
+    _circle_mask_paste(img, avatar_im,
+                       (int(ax + avatar_offset_x), int(ay), int(aw), int(ah)))
 
     _paste_avatar_ring(img, ax, ay, aw, ah, ring_im)
 
@@ -941,7 +964,12 @@ def _paste_avatar(img, data, avatar_im, ring_im=None):
     draw.ellipse((bx - badge_r, by - badge_r, bx + badge_r, by + badge_r),
                  fill=(14, 8, 22, 235), outline=(170, 130, 220, 200), width=2)
     lvl_text = str(data["level"])
-    lvl_font = stencil(LAYOUT["avatar_level_badge_font"])
+    # Sized to fit inside the badge circle -- levels can run to 3 digits,
+    # and the badge font was previously a fixed size regardless of digit
+    # count, which pushed "905"-style levels outside the circle entirely.
+    lvl_font, _ = _fit_numeral_font(draw, lvl_text, stencil,
+                                    2 * badge_r - 10,
+                                    LAYOUT["avatar_level_badge_font"], min_size=13)
     bbox = draw.textbbox((0, 0), lvl_text, font=lvl_font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     _draw_stencil_number(img, draw, (bx - tw / 2 - bbox[0], by - th / 2 - bbox[1]),
@@ -1017,10 +1045,15 @@ def _draw_rank_prestige_panel(img, draw, data, icons16,
     _draw_tracked_text(draw, (x + 28, y + 20), "RANK", outfit(21, "SemiBold"),
                        COLORS["rank_number_a"], tracking=3)
     # The reference's rank number is big, bold and purple (gradient +
-    # bloom) -- part of the accent hierarchy, not white text.
-    _draw_gradient_text(img, draw, (x + 28, y + 40), f"#{data['rank']}",
-                        outfit(76, "ExtraBold"), COLORS["rank_number_a"],
-                        COLORS["rank_number_b"], glow=(150, 80, 230), ratio=0.78)
+    # bloom) -- part of the accent hierarchy, not white text. Sized to fit
+    # the panel width directly (rank can run to 3 digits on large servers)
+    # instead of a fixed size + horizontal squeeze.
+    rank_txt = f"#{data['rank']}"
+    rank_font, _rw = _fit_numeral_font(draw, rank_txt, lambda s: outfit(s, "ExtraBold"),
+                                       w - 56, 76, min_size=34)
+    _draw_gradient_text(img, draw, (x + 28, y + 40), rank_txt,
+                        rank_font, COLORS["rank_number_a"],
+                        COLORS["rank_number_b"], glow=(150, 80, 230))
 
     # Two-tone: "TOP" muted, the percentage itself brighter -- matches the
     # reference's emphasis treatment.
@@ -1132,7 +1165,10 @@ def _draw_level_xp_panels(img, draw, data):
     # cap) -- this keeps the same visual cap-top target (y+66) regardless
     # of which font supplies the glyphs.
     lvl_text = str(data["level"])
-    lvl_font = stencil(104)
+    # Sized to fit the panel width -- same overflow problem as the badge
+    # number: a fixed size regardless of digit count let 3-digit levels
+    # spill out of the card's left edge.
+    lvl_font, _ = _fit_numeral_font(draw, lvl_text, stencil, w - 45, 104, min_size=44)
     bbox0 = draw.textbbox((0, 0), lvl_text, font=lvl_font)
     ty = (y + 66) - bbox0[1]
     _draw_stencil_number(img, draw, (x + 30, ty), lvl_text, lvl_font,
@@ -1143,57 +1179,35 @@ def _draw_level_xp_panels(img, draw, data):
 
     _draw_tracked_text(draw, (x + 14, y + 29), "XP PROGRESS", outfit(19, "SemiBold"),
                        COLORS["text_muted"], tracking=2)
+    div_x = x + LAYOUT["xp_divider_x"]
     cur, needed = data["xp_current"], max(data["xp_needed"], 1)
-    # Two-tone: current XP purple/emphasized (condensed, as measured off
-    # the reference), "/ needed XP" muted.
+    # Two-tone: current XP purple/emphasized, "/ needed XP" muted. The value
+    # is fit to the space actually available before the divider (rather
+    # than drawn at a fixed size and squeezed) so large XP totals don't
+    # distort -- see _fit_numeral_font.
     cur_txt = f"{cur:,}"
-    vf = zilla_bold(45)
-    cur_w = draw.textbbox((0, 0), cur_txt, font=vf)[2]
-
-    def _xpval_painter(d):
-        d.text((20, 20), cur_txt, font=vf, fill=COLORS["xp_value"])
-    cw, _ = _draw_condensed(img, (x + 14, y + 50), _xpval_painter, ratio=0.64,
-                            glow=(150, 70, 210), blur=4)
-    draw.text((x + 20 + cw, y + 58), f"/ {needed:,} XP", font=outfit(22),
+    suffix_txt = f"/ {needed:,} XP"
+    suffix_font = outfit(22)
+    suffix_w = draw.textbbox((0, 0), suffix_txt, font=suffix_font)[2]
+    # Budget leaves extra room (14px, not just a hairline) before the
+    # suffix -- at full/near-full glyph size there's less natural slack
+    # than the old squeezed version had, and the glow's blur bleeds a few
+    # px past the glyph edge, so a tight gap read as the value and the
+    # "/ needed XP" text overlapping.
+    available = (div_x - 10) - (x + 14) - 14 - suffix_w
+    vf, cur_w = _fit_numeral_font(draw, cur_txt, zilla_bold, max(available, 40), 45,
+                                  min_size=22)
+    _draw_glow_layer(img, lambda d: d.text((x + 14, y + 50), cur_txt, font=vf,
+                                            fill=(150, 70, 210, 140)), blur=3)
+    draw.text((x + 14, y + 50), cur_txt, font=vf, fill=COLORS["xp_value"])
+    draw.text((x + 28 + cur_w, y + 58), suffix_txt, font=outfit(22),
               fill=COLORS["text_muted"])
 
-    div_x = x + LAYOUT["xp_divider_x"]
     draw.line((div_x, y + 14, div_x, y + h - 14), fill=(*COLORS["accent"], 30), width=1)
 
     bar_x, bar_y, bar_w, bar_h = x + 8, y + 86, w - 20, 21
-    draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
-                           radius=bar_h // 2, fill=COLORS["xp_bar_bg"])
-    # Thin outline on the empty track so its edge reads clearly against the
-    # panel instead of blending into it -- per the reference.
-    draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
-                           radius=bar_h // 2, outline=(*COLORS["accent"], 60), width=1)
     frac = min(cur / needed, 1.0)
-    if frac > 0:
-        fill_w = bar_w * frac
-        # soft bloom around the filled portion only, a touch stronger than
-        # before for the reference's more premium/luminous look
-        _draw_glow_layer(img, lambda d: d.rounded_rectangle(
-            (bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=bar_h // 2,
-            fill=(160, 70, 225, 110)), blur=6)
-        _draw_gradient_bar(img, bar_x, bar_y, fill_w, bar_h,
-                           COLORS["xp_bar_fill_a"], COLORS["xp_bar_fill_b"])
-        # Glassy top sheen across the fill -- the reference's bar has a
-        # lighter highlight band along its upper edge, giving it a
-        # dimensional/glass look rather than a flat gradient.
-        if fill_w > 6:
-            sheen = Image.new("RGBA", img.size, (0, 0, 0, 0))
-            sd = ImageDraw.Draw(sheen)
-            inset = max(2, bar_h // 5)
-            sd.rounded_rectangle(
-                (bar_x + inset, bar_y + 2, bar_x + fill_w - inset, bar_y + bar_h * 0.48),
-                radius=(bar_h * 0.46) / 2, fill=(255, 255, 255, 55))
-            sheen = sheen.filter(ImageFilter.GaussianBlur(1.5))
-            img.alpha_composite(sheen)
-        # Subtle bright highlight at the leading edge of the FILL itself
-        # (not the bar's outer end) -- per the reference.
-        if 4 < fill_w < bar_w - 2:
-            hx, hy = bar_x + fill_w - 4, bar_y + bar_h / 2
-            _draw_soft_dot(img, hx, hy, 6, (255, 240, 252, 220))
+    _draw_xp_bar(img, bar_x, bar_y, bar_w, bar_h, frac)
     draw.text((bar_x + 6, bar_y + bar_h + 6), f"{frac * 100:.1f}% to next level",
               font=outfit(19), fill=COLORS["text_muted"])
 
@@ -1203,11 +1217,11 @@ def _draw_level_xp_panels(img, draw, data):
     potion = _draw_potion_icon(27)
     img.paste(potion, (int(div_x + 19), int(y + 42)), potion)
     total_txt = f"{data['xp_total']:,}"
-    tf2 = zilla_bold(38)
-
-    def _total_painter(d):
-        d.text((20, 20), total_txt, font=tf2, fill=(205, 200, 215))
-    _draw_condensed(img, (div_x + 52, y + 44), _total_painter, ratio=0.80)
+    total_x = div_x + 52
+    total_available = (x + w) - total_x - 12
+    tf2, _tw = _fit_numeral_font(draw, total_txt, zilla_bold, max(total_available, 40), 38,
+                                 min_size=18)
+    draw.text((total_x, y + 44), total_txt, font=tf2, fill=(205, 200, 215))
 
 
 def _draw_gradient_bar(img, x, y, w, h, color_a, color_b):
@@ -1224,11 +1238,99 @@ def _draw_gradient_bar(img, x, y, w, h, color_a, color_b):
     img.paste(grad, (int(x), int(y)), mask)
 
 
-def _draw_soft_dot(img, cx, cy, r, color):
-    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ImageDraw.Draw(layer).ellipse((cx - r, cy - r, cx + r, cy + r), fill=color)
-    layer = layer.filter(ImageFilter.GaussianBlur(2))
-    img.alpha_composite(layer)
+def _draw_xp_bar(img, bar_x, bar_y, bar_w, bar_h, frac):
+    """Dark recessed pill track, purple gradient fill with soft diagonal
+    internal lighting, and a bright glowing circular thumb at the current
+    progress position -- matches the reference's visual character (dark
+    track / gradient fill / wave lighting / glow thumb / pill geometry)
+    using the existing Nero purple palette rather than the reference's own
+    hex values. frac is the already-computed, real XP fraction (0..1) --
+    no hardcoded percentage."""
+    radius = bar_h // 2
+
+    # Track: a vertical gradient (slightly darker at the top inner edge)
+    # instead of a flat fill gives a recessed/inset look cheaply.
+    track = Image.new("RGBA", (bar_w, bar_h), (0, 0, 0, 0))
+    tg = ImageDraw.Draw(track)
+    base = COLORS["xp_bar_bg"]
+    top_shadow = tuple(max(0, c - 14) for c in base)
+    for row in range(bar_h):
+        t = row / max(bar_h - 1, 1)
+        col = tuple(int(top_shadow[c] + (base[c] - top_shadow[c]) * t) for c in range(3))
+        tg.line([(0, row), (bar_w, row)], fill=(*col, 255))
+    track_mask = Image.new("L", (bar_w, bar_h), 0)
+    ImageDraw.Draw(track_mask).rounded_rectangle((0, 0, bar_w, bar_h), radius=radius, fill=255)
+    img.paste(track, (int(bar_x), int(bar_y)), track_mask)
+    # Thin outline on the empty track so its edge reads clearly against the
+    # panel instead of blending into it.
+    ImageDraw.Draw(img).rounded_rectangle(
+        (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=radius,
+        outline=(*COLORS["accent"], 60), width=1)
+
+    fill_w = bar_w * frac if frac > 0 else 0
+
+    if fill_w > 0:
+        # Soft outer purple bloom around the filled portion only.
+        _draw_glow_layer(img, lambda d: d.rounded_rectangle(
+            (bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=radius,
+            fill=(160, 70, 225, 110)), blur=6)
+
+        _draw_gradient_bar(img, bar_x, bar_y, fill_w, bar_h,
+                           COLORS["xp_bar_fill_a"], COLORS["xp_bar_fill_b"])
+
+        # Internal wave-like lighting: two soft blurred highlight blobs on
+        # a diagonal (bottom-left / top-right), clipped to the fill's own
+        # pill shape -- reproduces the reference's diagonal internal glow
+        # bands (its two radial-gradients) without copying its CSS.
+        if fill_w > 10:
+            fw = int(fill_w)
+            wave = Image.new("RGBA", (fw, bar_h), (0, 0, 0, 0))
+            wd = ImageDraw.Draw(wave)
+            wd.ellipse((-fw * 0.15, bar_h * 0.55, fw * 0.55, bar_h * 2.1),
+                      fill=(255, 255, 255, 70))
+            wd.ellipse((fw * 0.45, -bar_h * 1.4, fw * 1.15, bar_h * 0.55),
+                      fill=(255, 255, 255, 55))
+            wave = wave.filter(ImageFilter.GaussianBlur(bar_h * 0.35))
+            wave_mask = Image.new("L", (fw, bar_h), 0)
+            ImageDraw.Draw(wave_mask).rounded_rectangle((0, 0, fw, bar_h), radius=radius,
+                                                         fill=255)
+            wave.putalpha(ImageChops.multiply(wave.split()[3], wave_mask))
+            img.alpha_composite(wave, (int(bar_x), int(bar_y)))
+
+        # Glassy top sheen band on top of the wave lighting -- dimensional/
+        # glass look rather than a flat gradient.
+        if fill_w > 6:
+            sheen = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            sd = ImageDraw.Draw(sheen)
+            inset = max(2, bar_h // 5)
+            sd.rounded_rectangle(
+                (bar_x + inset, bar_y + 2, bar_x + fill_w - inset, bar_y + bar_h * 0.48),
+                radius=(bar_h * 0.46) / 2, fill=(255, 255, 255, 45))
+            sheen = sheen.filter(ImageFilter.GaussianBlur(1.5))
+            img.alpha_composite(sheen)
+
+    # Thumb: bright glowing circular marker at the current progress
+    # position. Clamped so its glow never clips outside the pill's rounded
+    # caps at either 0% or 100%.
+    thumb_r = bar_h * 0.62
+    inset_r = thumb_r * 0.55
+    thumb_cx = max(bar_x + inset_r, min(bar_x + fill_w, bar_x + bar_w - inset_r))
+    thumb_cy = bar_y + bar_h / 2
+
+    # Layered glow, largest/softest first -- mirrors the reference's
+    # stacked box-shadow (wide soft violet halo, tighter bright halo,
+    # crisp white core).
+    _draw_glow_layer(img, lambda d: d.ellipse(
+        (thumb_cx - thumb_r * 2.1, thumb_cy - thumb_r * 2.1,
+         thumb_cx + thumb_r * 2.1, thumb_cy + thumb_r * 2.1),
+        fill=(190, 110, 255, 130)), blur=7)
+    _draw_glow_layer(img, lambda d: d.ellipse(
+        (thumb_cx - thumb_r * 1.3, thumb_cy - thumb_r * 1.3,
+         thumb_cx + thumb_r * 1.3, thumb_cy + thumb_r * 1.3),
+        fill=(255, 255, 255, 200)), blur=3)
+    ImageDraw.Draw(img).ellipse(
+        (thumb_cx - thumb_r, thumb_cy - thumb_r, thumb_cx + thumb_r, thumb_cy + thumb_r),
+        fill=(255, 255, 255, 255))
 
 
 def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
@@ -1271,21 +1373,22 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
             gl = gl.filter(ImageFilter.GaussianBlur(3))
             img.alpha_composite(gl)
             img.paste(ic, (int(x + w / 2 - 17), y + 23), ic)
-        vf = zilla_bold(32)
-        vb = draw.textbbox((0, 0), value, font=vf)
-        nat_w = vb[2] - vb[0]
-
-        def _val_painter(d, _v=value, _f=vf):
-            d.text((20, 20), _v, font=_f, fill=(215, 215, 222))
-        _draw_condensed(img, (x + w / 2 - nat_w * 0.72 / 2, y + 82), _val_painter,
-                        ratio=0.72)
-        # Two of these five labels ARE the configured currency names, so the
-        # shared currency-name rule decides their face/size/shaping (see
-        # currency_name_typography). The three fixed Latin labels take the
-        # same call and come back untouched -- it is a no-op for anything
-        # that isn't Arabic.
-        label_text, lf, label_is_arabic = currency_name_typography(
-            label, 21, outfit(21, "Medium"))
+        # Sized to fit the card width directly rather than drawn big and
+        # squeezed -- keeps stroke weight even on both short values (138)
+        # and long ones (34,725) instead of the squeeze warping wide values
+        # more than narrow ones.
+        vf, nat_w = _fit_numeral_font(draw, value, zilla_bold, w - 16, 32, min_size=16)
+        draw.text((x + w / 2 - nat_w / 2, y + 82), value, font=vf, fill=(215, 215, 222))
+        # Configurable currency names can be Arabic (utils/currency.py puts
+        # no restriction on what an admin types) -- MESSAGES/VOICE TIME/
+        # GAMES WON are fixed English labels and never go through this,
+        # only the two currency labels can be dynamic/Arabic.
+        is_currency_label = i in (2, 3)
+        if is_currency_label:
+            lf, label_text, label_is_arabic = currency_name_style(
+                label, lambda s: outfit(s, "Medium"), 21)
+        else:
+            lf, label_text, label_is_arabic = outfit(21, "Medium"), label, False
         lw_nat = _text_size(draw, label_text, lf, tracking=(0 if label_is_arabic else 2))[0]
 
         def _lab_painter(d, _l=label_text, _f=lf, _c=label_color, _ar=label_is_arabic):
