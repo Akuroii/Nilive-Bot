@@ -30,7 +30,10 @@
    (re)start one idle timer; a burst of keystrokes collapses into a single
    write. Lifecycle events (pagehide / tab hidden) flush immediately.
    Every result is reported, never thrown: the editor keeps working with
-   storage broken, and the save state is exposed for the UI to show.
+   storage broken, and the save state is exposed for the UI to show. A
+   failure is reported only while it is still OWED — a dirty draft, a write
+   in flight or a scheduled write; once the draft is back to the version
+   storage holds, the next save path clears it.
 
    Record shape (fixed key order, deterministic bytes):
      { schemaVersion, namespace, key, guildId, documentId,
@@ -799,6 +802,26 @@ window.NERO.embed = window.NERO.embed || {};
                 // ("the newest edit is not written yet"). Without this notify a
                 // skipped save leaves the status bar claiming unsaved work for
                 // content that storage already holds.
+                //
+                // A recorded failure describes work that is STILL OWED, so this
+                // is also where one stops being reported: nothing is owed here
+                // (the newest content is what storage holds, and any scheduled
+                // write was just cancelled), which means a failure recorded for
+                // an earlier edit has been RESOLVED — an Undo or a Discard put
+                // the draft back to the saved version — and must not outlive it.
+                // Left set, it pinned the status bar on "Save failed" and
+                // offered a retry that could never clear itself, while this same
+                // session's state() already said "saved".
+                //
+                // The invariant this keeps:
+                //   lastError is non-null only while something is owed —
+                //     isDirty() || inFlight || a scheduled write.
+                // A write already in flight is deliberately left alone: its own
+                // completion reports its outcome, and clearing here would hide a
+                // failure that is still unresolved. Transient and non-retryable
+                // failures alike are cleared — whether a retry could work is not
+                // what decides whether a resolved failure is reported.
+                if (lastError && !inFlight) lastError = null;
                 notify();
                 return Promise.resolve({ ok: true, skipped: true, reason: 'clean', key: key() });
             }

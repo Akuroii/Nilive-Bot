@@ -849,6 +849,27 @@ async function runAll() {
             assert(got.label === 'Try saving again' && got.enabled === true && got.state === 'retry',
                 'a transient failure (' + reason + ') does offer a retry', JSON.stringify(got));
         });
+        // ── 5d-3c: the bar's half of "a resolved failure stops being reported" ──
+        // The session clears a failure as soon as nothing is owed, and its own
+        // retryable() answer follows (no failure on record ⇒ nothing to retry).
+        // The bar holds no memory of its own, so handed that resolved snapshot it
+        // must render exactly what the snapshot says — never the failure it saw a
+        // moment ago, and never an invented retry.
+        const resolved = describeSave(facts({
+            retryable: false,
+            session: sessionWith({ lastError: null, degraded: 'transaction-failed', writes: 2 }),
+        }));
+        assert(resolved.state === 'unavailable' && resolved.label === 'Save now' && resolved.enabled === false,
+            'a cleared failure is rendered from the snapshot: the remaining latch explains itself, with no retry',
+            JSON.stringify(resolved));
+        assert(resolved.label !== 'Try saving again' && resolved.state !== 'retry',
+            'and the dead retry is gone the moment the session stops recording a failure',
+            JSON.stringify(resolved));
+        const healthyAgain = describeSave(facts({ session: sessionWith({ lastError: null, writes: 2 }) }));
+        assert(healthyAgain.state === 'saved' && healthyAgain.label === 'Saved' && healthyAgain.enabled === false,
+            'with the storage healthy again the same cleared failure renders as the plain "Saved" of 5d-3b',
+            JSON.stringify(healthyAgain));
+
         assert(describeSave().state === 'clean',
             'the mapping tolerates no facts at all (it never throws)');
 

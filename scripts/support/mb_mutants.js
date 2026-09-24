@@ -712,6 +712,37 @@ const MUTANTS = [
         ]],
     },
     {
+        id: 'A23',
+        target: 'actionbar',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_actionbar.js'),
+        why: 'the save control claims "Saved" while storage is known to be unusable (the latch is ignored once anything was written)',
+        edits: [[
+            "        if (session.degraded && !retryable) {",
+            "        if (session.writes > 0) {\n            return { state: 'saved', label: 'Saved', enabled: false, title: 'This draft is stored' };\n        }\n        if (session.degraded && !retryable) {",
+        ]],
+    },
+    // ── the resolved failure (step 5d-3 Step C) ──
+    {
+        id: 'D11',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'a failure is never resolved (a dead retry keeps the status region on "Save failed" forever)',
+        edits: [[
+            "                if (lastError && !inFlight) lastError = null;",
+            "                /* the failure is kept */",
+        ]],
+    },
+    {
+        id: 'D12',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'a failure is cleared while its write is still in flight (the outcome is unknown)',
+        edits: [[
+            "                if (lastError && !inFlight) lastError = null;",
+            "                if (lastError) lastError = null;",
+        ]],
+    },
+    {
         id: 'P4',
         target: 'page',
         harness: path.join(ROOT, 'scripts', 'test_message_builder_page.js'),
@@ -719,6 +750,16 @@ const MUTANTS = [
         edits: [[
             "            save: {\n                perform: function () { return saveNow(inst); },\n            },",
             "            save: {\n                perform: function () { return null; },\n            },",
+        ]],
+    },
+    {
+        id: 'P5',
+        target: 'page',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_page.js'),
+        why: 'a manual save forces a write even when nothing is owed (a press rewrites the stored draft)',
+        edits: [[
+            "    function saveNow(inst) {\n        if (!inst || inst.destroyed || !inst.session) return Promise.resolve({ ok: false, reason: 'no-session' });\n        return inst.session.saveNow();",
+            "    function saveNow(inst) {\n        if (!inst || inst.destroyed || !inst.session) return Promise.resolve({ ok: false, reason: 'no-session' });\n        return inst.session.saveNow({ force: true });",
         ]],
     },
     {

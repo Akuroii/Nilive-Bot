@@ -1930,6 +1930,501 @@ async function main() {
         env.unmount();
     }
 
+    // ─────────────────────────────────────────────────────────────
+    section('Q. manual-save races: a resolved failure stops being reported');
+    // ─────────────────────────────────────────────────────────────
+    // 5d-3c, end to end on the real page. The defect: a write fails, the user
+    // Undoes (or Discards) back to the version storage holds, and the status bar
+    // went on saying "Save failed" with an enabled "Try saving again" that could
+    // never clear — the session's own state already said "saved". A failure
+    // describes work that is still OWED, so with nothing owed the one save path
+    // stops reporting it. These are the manual-save races around that rule: what
+    // it must resolve, what it must NOT resolve, and what it must never touch.
+    {
+        const RECORD_VERSION = (() => {
+            const probe = makeEnv();
+            return probe.NERO.embed.drafts.RECORD_VERSION;
+        })();
+
+        /** One page, one stored draft, and a disk that can be broken on demand. */
+        const qPage = async (content) => {
+            const env = makeEnv();
+            const loaded = filledDocument();
+            loaded.content = content || 'saved A';
+            const record = makeRecord(env, loaded, { documentId: 'doc-q' });
+            const idb = installIdb(env, seedSpec(env, [record]));
+            const armed = armWriteFailure(idb);
+            env.sandbox.indexedDB = armed.wrapper;
+            env.win.indexedDB = armed.wrapper;
+            await env.mount();
+            env.q = { record: record, loaded: loaded, armed: armed, idb: idb };
+            return env;
+        };
+        const click = (env, name) => env.el('mb2-bar-actions').dispatch('click', { type: 'click', target: env.inst.actionbar.button(name) });
+        const saveInfo = (env) => {
+            const b = env.inst.actionbar.button('save');
+            return { label: b.textContent, disabled: b.disabled === true, state: b.getAttribute('data-mb2-save-state') };
+        };
+        const edit = (env, text) => env.store().dispatch({ type: 'content/set', text: text });
+        /** Break the disk, edit, and fail exactly one save: where every Q case starts. */
+        const failOnce = async (env, text) => {
+            edit(env, text || 'typed B');
+            env.q.armed.state.on = true;
+            click(env, 'save');
+            await env.settle(60);
+            return env.session().state();
+        };
+        /** Discard through the real dialog (the bar's only path to restoring). */
+        const discardThroughDialog = (env) => {
+            click(env, 'discard');
+            const dialog = env.inst.actionbar.dialog();
+            dialog.overlay.dispatch('click', { type: 'click', target: dialog.confirm });
+            return dialog;
+        };
+
+        // ── Q1. a transient failure resolved by UNDO back to the saved version ──
+        {
+            const env = await qPage('saved A');
+            const store = env.store(), session = env.session();
+            assert(store.getDocument().content === 'saved A' && session.state().state === 'saved',
+                'Q1 rig: the stored draft is open and nothing is owed', session.state().state);
+
+            const failed = await failOnce(env, 'typed B');
+            assert(failed.state === 'error' && failed.lastError && failed.lastError.reason === 'transaction-failed',
+                'Q1 rig: the write failed', JSON.stringify(failed.lastError));
+            assert(saveInfo(env).state === 'retry' && saveInfo(env).disabled === false && env.pill() === 'Save failed',
+                'Q1 rig: the failure is reported with the ONE retry action offered', JSON.stringify(saveInfo(env)));
+
+            // The user takes the edit back: the draft IS what storage holds.
+            assert(store.undo() === true, 'Q1: the edit is undone');
+            assert(store.isDirty() === false && session.isDirty() === false && store.getDocument().content === 'saved A',
+                'Q1 rig: the draft is back to the stored version');
+            assert(session.state().state === 'saved' && session.state().lastError !== null,
+                'Q1 rig: the session already says "saved" while still recording the failure — the 5d-3b defect',
+                JSON.stringify(session.state().lastError));
+            assert(saveInfo(env).state === 'retry' && saveInfo(env).disabled === false,
+                'Q1 rig: and the control still offers a retry with nothing left to retry', JSON.stringify(saveInfo(env)));
+
+            const before = {
+                puts: env.puts('drafts').length, writes: session.state().writes,
+                revision: session.state().revision, depth: JSON.stringify(store.historyDepth()),
+            };
+            click(env, 'save');                                   // press the retry
+            await env.settle(60);
+            const after = session.state();
+            assert(after.lastError === null,
+                'Q1: the resolved failure is no longer reported', JSON.stringify(after.lastError));
+            assert(after.state === 'saved' && after.dirty === false && session.isDirty() === false,
+                'Q1: the session says saved, and nothing is owed', after.state);
+            assert(env.pill() !== 'Save failed', 'Q1: the status region no longer claims a failure', env.pill());
+            assert(env.pill() === 'Editing in memory',
+                'Q1: it reports what is still true — the storage latch the failed write left behind (priority rules unchanged)',
+                env.pill());
+            assert(saveInfo(env).state === 'unavailable' && saveInfo(env).label === 'Save now' &&
+                saveInfo(env).disabled === true,
+                'Q1: the dead retry affordance is gone; what is left is the disabled explanation of that latch (D3)',
+                JSON.stringify(saveInfo(env)));
+            assert(env.puts('drafts').length === before.puts && after.writes === before.writes &&
+                after.revision === before.revision,
+                'Q1: resolving wrote nothing at all',
+                JSON.stringify({ puts: env.puts('drafts').length, writes: after.writes }));
+            assert(JSON.stringify(store.historyDepth()) === before.depth,
+                'Q1: and added nothing to history', JSON.stringify(store.historyDepth()));
+            assert(env.record(session.key()).document.content === 'saved A' &&
+                env.record(session.key()).documentHash === env.q.record.documentHash,
+                'Q1: storage still holds exactly the version it held',
+                env.record(session.key()).document.content);
+            env.unmount();
+        }
+
+        // ── Q2. the same failure resolved by DISCARD back to the saved version ──
+        {
+            const env = await qPage('saved B');
+            const store = env.store(), session = env.session();
+            await failOnce(env, 'typed C');
+            assert(session.state().lastError !== null && saveInfo(env).state === 'retry',
+                'Q2 rig: a failed write, with the retry offered');
+
+            assert(env.inst.actionbar.button('discard').disabled === false,
+                'Q2 rig: there is a stored version to go back to');
+            discardThroughDialog(env);
+            assert(store.getDocument().content === 'saved B' && store.isDirty() === false,
+                'Q2 rig: the discard restored the stored version', store.getDocument().content);
+            assert(session.state().lastError !== null && saveInfo(env).state === 'retry',
+                'Q2 rig: the failure is still on record with nothing owed (the same defect, reached by discarding)');
+
+            const putsBefore = env.puts('drafts').length;
+            const writesBefore = session.state().writes;
+            click(env, 'save');
+            await env.settle(60);
+            assert(session.state().lastError === null && session.state().state === 'saved',
+                'Q2: pressing the retry resolves the failure — one press, no write, nothing owed',
+                JSON.stringify(session.state().lastError));
+            assert(env.pill() !== 'Save failed' && saveInfo(env).state === 'unavailable',
+                'Q2: the status region stops claiming a failure and the dead retry is gone',
+                env.pill() + '/' + saveInfo(env).state);
+            assert(env.puts('drafts').length === putsBefore && session.state().writes === writesBefore,
+                'Q2: and nothing was written', String(env.puts('drafts').length - putsBefore));
+            assert(env.record(session.key()).document.content === 'saved B',
+                'Q2: storage is untouched', env.record(session.key()).document.content);
+            env.unmount();
+        }
+
+        // ── Q3. an edit while the failure is on record: the retry writes the NEWEST content ──
+        {
+            const env = await qPage('saved A');
+            const store = env.store(), session = env.session();
+            await failOnce(env, 'typed B');
+            edit(env, 'typed B2');                                 // the user keeps typing
+            env.q.armed.state.on = false;                           // the disk is fine again
+            const putsBefore = env.puts('drafts').length;
+            const writesBefore = session.state().writes;
+
+            click(env, 'save');
+            await env.settle(80);
+            assert(env.puts('drafts').length === putsBefore + 1 && session.state().writes === writesBefore + 1,
+                'Q3: the retry wrote exactly once',
+                String(env.puts('drafts').length - putsBefore));
+            assert(env.record(session.key()).document.content === 'typed B2',
+                'Q3: and what it wrote is the NEWEST content, not the snapshot that failed',
+                env.record(session.key()).document.content);
+            assert(session.state().lastError === null && session.state().state === 'saved' &&
+                store.isDirty() === false,
+                'Q3: the failure is resolved by the write landing, and nothing is owed',
+                JSON.stringify(session.state().lastError));
+            assert(env.pill() === 'Saved' && saveInfo(env).state === 'saved' &&
+                saveInfo(env).label === 'Saved' && saveInfo(env).disabled === true,
+                'Q3: both surfaces agree it is saved', env.pill() + '/' + JSON.stringify(saveInfo(env)));
+            assert(session.retryable() === false, 'Q3: and the retry is no longer on offer');
+            env.unmount();
+        }
+
+        // ── Q4. a discard while the retry's write is still in the air ──
+        {
+            const env = await qPage('saved A');
+            const store = env.store(), session = env.session();
+            await failOnce(env, 'typed B');
+            env.q.armed.state.on = false;                           // the disk is fine again
+            env.q.idb.hold();                                       // ...but the write cannot land yet
+            click(env, 'save');
+            await env.settle(30);
+            assert(session.state().saving === true,
+                'Q4 rig: the retry started a write that is still in flight');
+
+            discardThroughDialog(env);
+            assert(store.getDocument().content === 'saved A' && store.isDirty() === false,
+                'Q4: the discard restored the stored version while that write was in the air',
+                store.getDocument().content);
+
+            env.q.idb.release();
+            await env.settle(80);
+            const after = session.state();
+            assert(after.saving === false && after.lastError === null,
+                'Q4: the write landed with nothing left in flight and no failure reported',
+                JSON.stringify(after.lastError));
+            assert(store.getDocument().content === 'saved A',
+                'Q4: the stale completion did NOT replace the restored document',
+                store.getDocument().content);
+            assert(env.record(session.key()).document.content === 'typed B',
+                'Q4 rig: storage holds what actually landed (the edit that was in the air)',
+                env.record(session.key()).document.content);
+            assert(store.isDirty() === true && session.isDirty() === true && env.pill() === 'Unsaved changes',
+                'Q4: so the page is honestly dirty again — what it shows is not what storage holds',
+                env.pill());
+            assert(saveInfo(env).state === 'dirty' && saveInfo(env).disabled === false,
+                'Q4: which is exactly what the control now says', JSON.stringify(saveInfo(env)));
+            assert(env.inst.actionbar.button('discard').disabled === false,
+                'Q4: and a second discard is available (it would go back to what really persisted)');
+            env.unmount();
+        }
+
+        // ── Q5. a press while the idle write is still scheduled: one write, not two ──
+        {
+            const env = await qPage('saved A');
+            const session = env.session();
+            edit(env, 'typed B');
+            assert(session.pendingSave() === true, 'Q5 rig: the idle write is scheduled');
+            click(env, 'save');                                    // the same path, now
+            await env.settle(60);
+            assert(env.puts('drafts').length === 1 && session.state().writes === 1,
+                'Q5: the press wrote once', String(env.puts('drafts').length));
+            assert(session.pendingSave() === false, 'Q5: and the queued write was cancelled, not duplicated');
+            await env.settle(1600);                                // longer than the idle interval
+            assert(env.puts('drafts').length === 1 && session.state().writes === 1,
+                'Q5: nothing fired afterwards — a cancelled idle write cannot double-write',
+                String(env.puts('drafts').length));
+            assert(env.pill() === 'Saved', 'Q5: and the page says saved', env.pill());
+            env.unmount();
+        }
+
+        // ── Q6. two presses in one tick: one write ──
+        {
+            const env = await qPage('saved A');
+            const session = env.session(), bar = env.inst.actionbar;
+            edit(env, 'typed B');
+            const revisionBefore = session.state().revision;
+            env.q.idb.hold();
+            click(env, 'save');
+            click(env, 'save');                                    // the second press lands in the same tick
+            await env.settle(30);
+            assert(session.state().saving === true, 'Q6 rig: a write is in flight');
+            assert(bar.stats().savePresses === 2 && bar.stats().saves === 1,
+                'Q6: both presses are counted, but the second one started NO second save',
+                JSON.stringify({ presses: bar.stats().savePresses, saves: bar.stats().saves }));
+            env.q.idb.release();
+            await env.settle(80);
+            assert(env.puts('drafts').length === 1 && session.state().writes === 1 &&
+                session.state().revision === revisionBefore + 1,
+                'Q6: exactly one write landed for the burst',
+                JSON.stringify({ puts: env.puts('drafts').length, writes: session.state().writes }));
+            assert(session.state().lastError === null && env.pill() === 'Saved',
+                'Q6: and it is saved, with no failure invented', env.pill());
+            env.unmount();
+        }
+
+        // ── Q7. the retry fails again: the failure stays reported ──
+        {
+            const env = await qPage('saved A');
+            const store = env.store(), session = env.session();
+            await failOnce(env, 'typed B');
+            const putsBefore = env.puts('drafts').length;
+            click(env, 'save');                                    // the disk is still broken
+            await env.settle(60);
+            assert(session.state().state === 'error' &&
+                session.state().lastError && session.state().lastError.reason === 'transaction-failed',
+                'Q7: a retry that fails again keeps the failure on record',
+                JSON.stringify(session.state().lastError));
+            assert(saveInfo(env).state === 'retry' && saveInfo(env).disabled === false &&
+                env.pill() === 'Save failed',
+                'Q7: so the retry stays on offer and the status region keeps saying so',
+                JSON.stringify(saveInfo(env)));
+            assert(store.isDirty() === true && session.isDirty() === true,
+                'Q7: the edit is still owed, and still in memory');
+            assert(env.puts('drafts').length === putsBefore,
+                'Q7: nothing was committed', String(env.puts('drafts').length - putsBefore));
+            assert(env.record(session.key()).document.content === 'saved A',
+                'Q7: and storage still holds the last version that really landed',
+                env.record(session.key()).document.content);
+            env.unmount();
+        }
+
+        // ── Q8. a failure no retry can fix: no retry is offered, and the rule still resolves it ──
+        {
+            const env = await qPage('saved A');
+            const store = env.store(), session = env.session();
+            edit(env, 'typed B');
+            assert(saveInfo(env).state === 'dirty' && saveInfo(env).disabled === false,
+                'Q8 rig: the edit made the save available', JSON.stringify(saveInfo(env)));
+            // How §24 makes a document that cannot be stored: the asset registry
+            // is preserved as-is, so a Blob there reaches the persistence gate.
+            session.document().assets = { a1: { blob: new Blob(['x'], { type: 'image/png' }), filename: 'one.png' } };
+            const putsBefore = env.puts('drafts').length;
+            click(env, 'save');
+            await env.settle(60);
+            assert(session.state().lastError && session.state().lastError.reason === 'not-serializable',
+                'Q8 rig: the write failed for a reason no retry can fix',
+                JSON.stringify(session.state().lastError));
+            assert(session.retryable() === false && saveInfo(env).state === 'unavailable' &&
+                saveInfo(env).label === 'Save now' && saveInfo(env).disabled === true,
+                'Q8: the control switched to the disabled explanation — never "Try saving again"',
+                JSON.stringify(saveInfo(env)));
+            assert(env.pill() === 'Save failed', 'Q8: and the status region reports the failure', env.pill());
+            assert(env.puts('drafts').length === putsBefore && session.state().writes === 0,
+                'Q8: nothing reached storage — this was never the disk\'s fault',
+                String(env.puts('drafts').length - putsBefore));
+            assert(store.isDirty() === true, 'Q8: the edit is still in memory');
+
+            // Undo takes the draft (and the poison) back to the stored version,
+            // and the SAME rule resolves a non-retryable failure (D2).
+            store.undo();
+            assert(store.isDirty() === false && session.isDirty() === false,
+                'Q8 rig: the draft is back to the stored version');
+            await session.saveNow();                               // the save path, as the idle timer would run it
+            assert(session.state().lastError === null && session.state().state === 'saved',
+                'Q8: the same rule clears it — whether a retry could work is not what decides',
+                JSON.stringify(session.state().lastError));
+            assert(env.pill() !== 'Save failed' && env.pill() === 'No changes yet',
+                'Q8: with nothing owed and nothing written, the page says exactly that',
+                env.pill());
+            assert(saveInfo(env).state === 'clean' && saveInfo(env).disabled === true,
+                'Q8: and the control is the disabled "nothing to save", not a stale failure',
+                JSON.stringify(saveInfo(env)));
+            assert(env.puts('drafts').length === putsBefore &&
+                env.record(session.key()).document.content === 'saved A',
+                'Q8: storage is untouched', env.record(session.key()).document.content);
+            env.unmount();
+        }
+
+        // ── Q9. a preserved record: the guard outranks the rule ──
+        {
+            const env = makeEnv();
+            const record = makeRecord(env, filledDocument(), {
+                documentId: 'doc-qguard',
+                mutate: (r) => { r.schemaVersion = RECORD_VERSION + 1; },
+            });
+            installIdb(env, seedSpec(env, [record]));
+            await env.mount();
+            const store = env.store(), session = env.session();
+            assert(session.state().state === 'blocked' && session.guard() !== null,
+                'Q9 rig: the preserved record raised the write guard');
+            assert(saveInfo(env).state === 'blocked' && saveInfo(env).disabled === true,
+                'Q9: the control is the disabled explanation of the guard (unchanged, D3)',
+                JSON.stringify(saveInfo(env)));
+            assert(session.state().lastError === null, 'Q9 rig: a guarded session has no failure to report');
+            const refused = await session.saveNow();
+            assert(refused.ok === false && refused.blocked === true,
+                'Q9: a save is refused before the skip path, so the resolution rule cannot fire here',
+                JSON.stringify(refused));
+            assert(session.state().lastError === null && session.isDirty() === false,
+                'Q9: and nothing was invented: no failure, no dirty state');
+            edit(env, 'typed over a guarded record');
+            click(env, 'save');                                    // a disabled action is not an action
+            const refused2 = await session.saveNow();
+            assert(refused2.blocked === true && session.state().state === 'blocked' &&
+                session.state().lastError === null,
+                'Q9: an edit over a guarded record is still refused, and still not reported as a failure',
+                JSON.stringify(refused2));
+            assert(store.isDirty() === true && env.puts().length === 0,
+                'Q9: the edit is in memory and nothing was written');
+            assert(JSON.stringify(env.record(record.key)) === JSON.stringify(record),
+                'Q9: the preserved record is byte-identical');
+            env.unmount();
+        }
+
+        // ── Q10. an environment failure: latched, never re-probed, and still resolvable ──
+        {
+            const env = makeEnv();
+            installIdb(env);
+            env.sandbox.indexedDB = null;                          // no IndexedDB at all
+            env.win.indexedDB = null;
+            await env.mount();
+            const store = env.store(), session = env.session();
+            assert(env.pill() === 'Editing in memory', 'Q10 rig: the page boots in memory', env.pill());
+            edit(env, 'worth saving');
+            await session.saveNow();
+            assert(session.state().lastError && session.state().lastError.reason === 'no-indexeddb',
+                'Q10 rig: the save failed because there is no storage',
+                JSON.stringify(session.state().lastError));
+            assert(session.retryable() === false && env.pill() === 'Save failed',
+                'Q10: a failure no retry can fix is reported, with no retry offered',
+                JSON.stringify(saveInfo(env)));
+            assert(session.storage().stats().opens === 0 && session.storage().reason() === 'no-indexeddb',
+                'Q10: and nothing re-probed the environment to find that out',
+                JSON.stringify(session.storage().stats()));
+
+            // Nothing left to save (a draft with no content that was never
+            // persisted): the same rule resolves it, and the environment stays
+            // latched — the resolution is NOT a storage probe.
+            edit(env, '');
+            assert(session.isDirty() === false, 'Q10 rig: nothing is owed any more');
+            const opensBefore = session.storage().stats().opens;
+            await session.saveNow();
+            assert(session.state().lastError === null && session.state().state === 'clean',
+                'Q10: the environment failure stops being reported once nothing is owed',
+                JSON.stringify(session.state().lastError));
+            assert(env.pill() === 'Editing in memory' && env.pill() !== 'Save failed',
+                'Q10: the page goes back to what is true — editing in memory', env.pill());
+            assert(session.storage().stats().opens === opensBefore &&
+                session.storage().reason() === 'no-indexeddb',
+                'Q10: an environment failure is still latched and never auto-re-probed',
+                JSON.stringify(session.storage().stats()));
+            assert(session.storage().stats().puts === 0 && env.puts().length === 0,
+                'Q10: and nothing was written, then or now');
+            assert(store.isDirty() === false, 'Q10: the document is the empty one it started as');
+            env.unmount();
+        }
+
+        // ── Q11. teardown: the final flush waits for the write, it does not add one ──
+        {
+            const env = await qPage('saved A');
+            const session = env.session();
+            await failOnce(env, 'typed B');
+            env.q.armed.state.on = false;
+            env.q.idb.hold();
+            click(env, 'save');                                    // the retry's write is in the air
+            await env.settle(30);
+            assert(session.state().saving === true, 'Q11 rig: a write is in flight');
+            const putsBefore = env.puts('drafts').length;
+            env.unmount();                                         // destroy flushes what is owed
+            await env.settle(30);
+            assert(env.puts('drafts').length === putsBefore,
+                'Q11: teardown did NOT start a second write for the same edit',
+                String(env.puts('drafts').length - putsBefore));
+            env.q.idb.release();
+            await env.settle(80);
+            assert(env.puts('drafts').length === putsBefore + 1 && session.state().writes === 1,
+                'Q11: exactly one write landed — the one that was already in flight',
+                JSON.stringify({ puts: env.puts('drafts').length, writes: session.state().writes }));
+            assert(session.state().lastError === null && session.state().saving === false,
+                'Q11: it succeeded, and the failure it replaced is gone',
+                JSON.stringify(session.state().lastError));
+            assert(env.record(session.key()).document.content === 'typed B',
+                'Q11: storage holds the edit that was in the air',
+                env.record(session.key()).document.content);
+        }
+
+        // ── Q11b. teardown onto a broken disk: it reports its own failure ──
+        {
+            const env = await qPage('saved A');
+            const session = env.session();
+            await failOnce(env, 'typed B');                         // the disk stays broken
+            const putsBefore = env.puts('drafts').length;
+            env.unmount();                                         // destroy flushes what is owed
+            await env.settle(80);
+            assert(env.puts('drafts').length === putsBefore,
+                'Q11b: the final flush wrote nothing (the disk is still broken)',
+                String(env.puts('drafts').length - putsBefore));
+            assert(session.state().lastError && session.state().lastError.reason === 'transaction-failed',
+                'Q11b: and it reports its own failure rather than pretending the draft is safe',
+                JSON.stringify(session.state().lastError));
+            assert(env.record(session.key()).document.content === 'saved A',
+                'Q11b: storage still holds the last version that really landed',
+                env.record(session.key()).document.content);
+        }
+
+        // ── Q12. hygiene: the step adds no surface, no node and no noise ──
+        {
+            const env = await qPage('saved A');
+            const store = env.store(), session = env.session(), bar = env.inst.actionbar;
+            const surface = Object.keys(session).sort();
+            const expected = [
+                'attach', 'bindLifecycle', 'changed', 'destroy', 'document', 'documentId', 'guildId',
+                'guard', 'importFromV1', 'isDirty', 'key', 'listDrafts', 'load', 'meta', 'newDocumentId',
+                'onState', 'pendingSave', 'resolveGuard', 'retryable', 'saveNow', 'savedDocument',
+                'savedHash', 'schedule', 'start', 'state', 'storage', 'use',
+            ].sort();
+            assert(JSON.stringify(surface) === JSON.stringify(expected),
+                'Q12: the session exposes exactly the surface it did before this step — no new state, no second dirty flag',
+                JSON.stringify(surface));
+
+            const failed = await failOnce(env, 'typed B');
+            assert(failed.lastError !== null, 'Q12 rig: the cycle starts with a failure');
+            store.undo();
+            click(env, 'save');
+            await env.settle(60);
+            assert(session.state().lastError === null, 'Q12 rig: and it resolves with the one retry action');
+
+            assert(JSON.stringify(Object.keys(session).sort()) === JSON.stringify(expected),
+                'Q12: the resolution created no new session surface either');
+            assert(env.el('mb2-bar-status').children.length === 3,
+                'Q12: the status region is still one pill + one detail + one notice — no second live region',
+                String(env.el('mb2-bar-status').children.length));
+            assert(env.el('mb2-bar-actions').children.length === 5,
+                'Q12: the bar still offers exactly the five actions of 5d-3b',
+                String(env.el('mb2-bar-actions').children.length));
+            assert(bar.stats().savePresses === 2 && bar.stats().saves === 2,
+                'Q12: each press was counted once, and each one invoked the save path once',
+                JSON.stringify({ presses: bar.stats().savePresses, saves: bar.stats().saves }));
+            assert(env.consoleLines.error.length === 0,
+                'Q12: nothing was logged as an error during the whole cycle',
+                JSON.stringify(env.consoleLines.error));
+            assert(env.net.calls === 0, 'Q12: and nothing touched the network');
+            env.unmount();
+        }
+
+        console.log('    (Q: the resolved-failure rule and its races, end to end)');
+    }
+
     console.log('\nmessage-builder page: ' + pass + ' passed, ' + fail + ' failed');
     if (fail) {
         console.log('Failures:');

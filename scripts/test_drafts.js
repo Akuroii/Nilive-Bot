@@ -2176,6 +2176,268 @@ const G2 = '222222222222222222';
             JSON.stringify(storage4.stats()));
     }
 
+    section('25. a resolved failure stops being reported (the skip path clears it)');
+    // ═══════════════════════════════════════════════════════════
+    // What review found in 5d-3b: a write fails, the user Undoes (or Discards)
+    // back to the version storage holds — and the status bar went on saying
+    // "Save failed" while offering a retry that could never clear itself, even
+    // though this same session's state() already said "saved". A recorded
+    // failure describes work that is still OWED; with nothing owed, the one
+    // save path stops reporting it. This section pins that rule down: it fires
+    // for a transient AND for a non-retryable failure, it never fires while
+    // something is still owed (a dirty draft, a write in flight, a scheduled
+    // re-check), and it changes nothing about the skip's return shape, the
+    // counters or what storage holds.
+    {
+        const clock = clockPair();
+
+        /**
+         * The real fake, plus a switch for the two write outcomes a test has to
+         * be able to command: FAIL the next readwrite transaction (a disk that
+         * has just gone bad) and HANG it (a write that has not answered yet —
+         * the adapter's own timeout is then the only way it can end).
+         */
+        const controlledIdb = () => {
+            const fake = fakeIndexedDB();
+            const armed = { mode: null };            // null | 'fail' | 'hang'
+            const baseOpen = fake.indexedDB.open;
+            fake.indexedDB.open = (name, version) => {
+                const req = baseOpen(name, version);
+                let success = null;
+                Object.defineProperty(req, 'onsuccess', {
+                    configurable: true,
+                    get() {
+                        if (!success) return undefined;
+                        return (ev) => {
+                            const db = req.result;
+                            const realTransaction = db.transaction;
+                            db.transaction = (storeName, txMode) => {
+                                if (armed.mode === 'fail' && txMode === 'readwrite') {
+                                    throw new Error('forced: the write transaction failed');
+                                }
+                                if (armed.mode === 'hang' && txMode === 'readwrite') {
+                                    // A transaction that never settles: the put
+                                    // request is accepted and never answers, so
+                                    // only the adapter's timeout can end it.
+                                    return { oncomplete: null, onerror: null, onabort: null,
+                                        objectStore: () => ({ put: () => ({}) }) };
+                                }
+                                return realTransaction.call(db, storeName, txMode);
+                            };
+                            success(ev);
+                        };
+                    },
+                    set(fn) { success = fn; },
+                });
+                return req;
+            };
+            return {
+                fake: fake,
+                fail: () => { armed.mode = 'fail'; },
+                hang: () => { armed.mode = 'hang'; },
+                fix: () => { armed.mode = null; },
+            };
+        };
+
+        // ── A. a transient failure, resolved by going back to the saved version ──
+        {
+            const b = controlledIdb();
+            const storage = drafts.idbStorage({ indexedDB: b.fake.indexedDB, scheduler: clock.scheduler });
+            const docA = model.fromEditorDocument({ content: 'A' }, { ids: nextIds(), guildId: G1 });
+            const s = drafts.create({
+                guildId: G1, documentId: docA.id, now: clock.now,
+                storage, scheduler: clock.scheduler,
+            });
+            s.use(docA);
+            const first = await s.saveNow();
+            assert(first.ok === true && s.state().state === 'saved' && s.state().lastError === null,
+                'A rig: the draft is stored once, and nothing has failed yet', JSON.stringify(first));
+            const written = { writes: s.state().writes, revision: s.state().revision };
+
+            b.fail();
+            s.changed(model.setContent(s.document(), 'B'));
+            const failed = await s.saveNow();
+            assert(failed.ok === false && failed.reason === 'transaction-failed',
+                'A rig: a transient write failure', JSON.stringify(failed));
+            assert(s.state().state === 'error' && s.state().lastError.reason === 'transaction-failed' &&
+                s.retryable() === true && s.isDirty() === true,
+                'while the edit is still owed, the failure IS reported (and the retry offered)',
+                JSON.stringify(s.state().lastError));
+
+            // The half of the rule that must not move: a save with work to do
+            // still attempts the write, and still reports the failure.
+            const again = await s.saveNow();
+            assert(again.ok === false && s.state().state === 'error' && s.state().lastError !== null,
+                'a save with work to do attempts the write again and keeps reporting the failure',
+                JSON.stringify(again));
+
+            // ...and now the draft is taken back to what storage holds. Both
+            // real routes land here: an Undo hands over a previous document and
+            // a Discard hands over savedDocument(); either way the session's own
+            // isDirty() is false, and that is what governs.
+            s.changed(s.savedDocument());
+            assert(s.isDirty() === false, 'A rig: the draft is back to the version storage holds');
+            const putsBefore = storage.stats().puts;
+            const resolved = await s.saveNow();
+            assert(resolved.ok === true && resolved.skipped === true && resolved.reason === 'clean' &&
+                resolved.key === s.key(),
+                'the save path skips — the { ok: true, skipped: true } return shape is unchanged',
+                JSON.stringify(resolved));
+            assert(s.state().lastError === null,
+                'and the resolved failure is no longer reported (it used to pin the status bar on "Save failed")',
+                JSON.stringify(s.state().lastError));
+            assert(s.state().state === 'saved' && s.retryable() === false && s.isDirty() === false,
+                'so the session says saved again, with no retry on offer', s.state().state);
+            assert(s.state().writes === written.writes && s.state().revision === written.revision &&
+                storage.stats().puts === putsBefore,
+                'resolving wrote nothing, moved no revision and never reached storage',
+                JSON.stringify(storage.stats()));
+            const stored = storedRecord(b.fake, drafts.V2_NAMESPACE, 'drafts', s.key(), 'the stored draft');
+            assert(stored && stored.document.content === 'A',
+                'and the stored draft is still the one that was written at the start',
+                stored && stored.document.content);
+        }
+
+        // ── B. a NON-retryable failure is resolved by the same rule (D2) ──
+        {
+            const fake = fakeIndexedDB();
+            const storage = drafts.idbStorage({ indexedDB: fake.indexedDB, scheduler: clock.scheduler });
+            const doc = model.fromEditorDocument({ content: 'x', embeds: [{ title: 'T' }] }, { ids: nextIds() });
+            const s = drafts.create({
+                guildId: G1, documentId: doc.id, now: clock.now,
+                storage, scheduler: clock.scheduler,
+            });
+            s.use(doc);
+            await s.saveNow();
+            assert(s.state().state === 'saved', 'B rig: stored once', s.state().state);
+            const putsBefore = storage.stats().puts;
+
+            // How §24 produces a document that cannot be stored: the asset
+            // registry is preserved as-is, so a Blob there reaches the gate.
+            s.document().assets = { a1: { blob: new Blob(['x'], { type: 'image/png' }), filename: 'one.png' } };
+            const bad = await s.saveNow();
+            assert(bad.ok === false && bad.reason === 'not-serializable' && s.isDirty() === true,
+                'B rig: the write fails for a reason no retry can fix', JSON.stringify(bad));
+            assert(s.state().state === 'error' && s.state().lastError.reason === 'not-serializable' &&
+                s.retryable() === false,
+                'a non-retryable failure is reported exactly as loudly, and offers no retry',
+                JSON.stringify(s.state().lastError));
+            assert(storage.stats().puts === putsBefore && storage.isAvailable() === true &&
+                storage.reason() === null,
+                'and it never reached storage — nothing was blamed on the disk',
+                JSON.stringify(storage.stats()));
+
+            s.changed(s.savedDocument());                    // back to the version storage holds
+            assert(s.isDirty() === false, 'B rig: the draft is back to the stored version');
+            const done = await s.saveNow();
+            assert(done.ok === true && done.skipped === true,
+                'B rig: the save path skips', JSON.stringify(done));
+            assert(s.state().lastError === null && s.state().state === 'saved',
+                'the same rule clears a NON-retryable failure: whether a retry could work is not what decides it',
+                JSON.stringify(s.state().lastError));
+            assert(storage.stats().puts === putsBefore && storage.isAvailable() === true,
+                'with no write attempted and the adapter still healthy',
+                JSON.stringify(storage.stats()));
+            const rec = storedRecord(fake, drafts.V2_NAMESPACE, 'drafts', s.key(), 'the untouched draft');
+            assert(rec && rec.document.content === 'x', 'and the stored draft is untouched',
+                rec && rec.document.content);
+        }
+
+        // ── C. an unresolved write keeps its failure, and so does a scheduled re-check ──
+        {
+            const clockC = clockPair();
+            const b = controlledIdb();
+            const storage = drafts.idbStorage({ indexedDB: b.fake.indexedDB, scheduler: clockC.scheduler });
+            const docA = model.fromEditorDocument({ content: 'A' }, { ids: nextIds(), guildId: G1 });
+            const s = drafts.create({
+                guildId: G1, documentId: docA.id, now: clockC.now,
+                storage, scheduler: clockC.scheduler,
+            });
+            s.use(docA);
+            await s.saveNow();
+            b.fail();
+            s.changed(model.setContent(s.document(), 'B'));
+            const firstFail = await s.saveNow();
+            assert(firstFail.ok === false && firstFail.reason === 'transaction-failed' &&
+                s.state().lastError.reason === 'transaction-failed',
+                'C rig: a transient failure is on record', JSON.stringify(s.state().lastError));
+
+            // A write that is IN FLIGHT is not resolved: its outcome is unknown,
+            // so its failure must stay reported until that outcome arrives.
+            b.hang();                                       // the next transaction never settles
+            s.changed(model.setContent(s.document(), 'C'));
+            const hanging = s.saveNow();
+            await settle(20);                               // let the adapter reach the transaction
+            assert(s.state().saving === true && s.isDirty() === true && clockC.pending() === 1,
+                'C rig: a write is in flight and owed, with only its own timeout armed',
+                JSON.stringify({ pending: clockC.pending(), saving: s.state().saving }));
+            s.changed(s.savedDocument());                   // the user takes the edit back meanwhile
+            assert(s.isDirty() === false, 'C rig: nothing is owed by the document any more');
+            const inFlight = await s.saveNow();
+            assert(inFlight.ok === true && inFlight.skipped === true && s.state().saving === true,
+                'a save path run while the write is still in flight skips (one write at a time)',
+                JSON.stringify(inFlight));
+            assert(s.state().lastError !== null,
+                'and it does NOT clear a failure whose write is unresolved',
+                JSON.stringify(s.state().lastError));
+
+            // The write answers — with its OWN failure (the adapter's timeout;
+            // its default is 1500 ms, one timeout instead of spinning).
+            clockC.advance(2000);
+            clockC.runDue();
+            await settle(6);
+            await hanging;
+            assert(s.state().saving === false && s.state().lastError &&
+                s.state().lastError.reason === 'write-timeout',
+                'the in-flight write reports its own outcome, not the old failure',
+                JSON.stringify(s.state().lastError));
+            assert(s.isDirty() === false && s.pendingSave() === true,
+                'and the re-check it promised is a scheduled write, so something is still owed',
+                String(s.pendingSave()));
+
+            // Now that re-check runs: nothing is owed, so the failure goes.
+            const putsBefore = storage.stats().puts;
+            clockC.advance(drafts.DEFAULT_IDLE_MS + 1);
+            clockC.runDue();
+            await settle(6);
+            assert(s.state().lastError === null && s.state().state === 'saved' && s.isDirty() === false,
+                'once the save path runs with nothing owed, the failure is cleared for good',
+                JSON.stringify(s.state().lastError));
+            assert(s.pendingSave() === false && storage.stats().puts === putsBefore,
+                'and it wrote nothing', JSON.stringify(storage.stats()));
+        }
+
+        // ── D. subscribers are handed the cleared state, in the same snapshot ──
+        {
+            const clockD = clockPair();
+            const b = controlledIdb();
+            const storage = drafts.idbStorage({ indexedDB: b.fake.indexedDB, scheduler: clockD.scheduler });
+            const docA = model.fromEditorDocument({ content: 'A' }, { ids: nextIds(), guildId: G1 });
+            const s = drafts.create({
+                guildId: G1, documentId: docA.id, now: clockD.now,
+                storage, scheduler: clockD.scheduler,
+            });
+            s.use(docA);
+            await s.saveNow();
+            b.fail();
+            s.changed(model.setContent(s.document(), 'B'));
+            await s.saveNow();
+            assert(s.state().lastError !== null, 'D rig: a failure is on record');
+            b.fix();
+            s.changed(s.savedDocument());
+
+            const seen = [];
+            const off = s.onState((snap) => seen.push(snap.lastError ? snap.lastError.reason : null));
+            await s.saveNow();
+            off();
+            assert(seen.length === 1, 'the resolving skip notifies its subscribers exactly once',
+                String(seen.length));
+            assert(seen.length === 1 && seen[0] === null,
+                'and the snapshot they receive has NO failure in it (the clear precedes the notify)',
+                JSON.stringify(seen));
+        }
+    }
+
     section('summary');
     console.log(`\ndrafts: ${pass} passed, ${fail} failed`);
     if (fail) { console.log('Failures:'); failures.forEach(f => console.log(' -', f)); process.exit(1); }
