@@ -609,6 +609,37 @@ const MUTANTS = [
             "        return true;",
         ]],
     },
+    // ── recovery (step 5d-3 Step A) ──
+    {
+        id: 'D7',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'recover() drops the database handle but forgets to clear the latch, so the retry stays degraded',
+        edits: [[
+            "            db = null;                   // never trust a handle that just failed a transaction\n            openPromise = null;\n            degraded = null;",
+            "            db = null;                   // never trust a handle that just failed a transaction\n            openPromise = null;",
+        ]],
+    },
+    {
+        id: 'D8',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'recover() re-probes an ENVIRONMENT failure (an open timeout is retried forever)',
+        edits: [[
+            "            if (TRANSIENT.indexOf(degraded) === -1) return false; // an environment failure is final",
+            "            if (false) return false;",
+        ]],
+    },
+    {
+        id: 'D9',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'recover() keeps the torn database handle (a recovered write reuses the failed connection)',
+        edits: [[
+            "            db = null;                   // never trust a handle that just failed a transaction",
+            "            /* the failed handle is kept */",
+        ]],
+    },
     {
         id: 'P3',
         why: 'the discard is pushed onto the undo stack (the discarded edit stays reachable)',

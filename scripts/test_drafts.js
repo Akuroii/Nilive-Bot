@@ -961,10 +961,12 @@ const G2 = '222222222222222222';
             'a hanging database times out into degraded mode instead of spinning', storageC.reason());
         assert(storageC.stats().timeouts > 0, 'the timeout is counted', JSON.stringify(storageC.stats()));
 
-        // (d) degradation is per-adapter and sticky (v1's proven behaviour: a
-        //     database that failed once is not trusted again this session), and
-        //     recovery is the next page load — the work is still in memory and
-        //     still dirty until then, so nothing is lost.
+        // (d) A TRANSIENT write failure degrades the adapter, and a later
+        //     attempt can recover IN-SESSION: this is the policy 5d-3 Step A
+        //     made true (the failure used to latch for the rest of the page
+        //     life, so "retry on next idle" could never succeed). The work is
+        //     still in memory and still dirty while the disk is broken, so
+        //     nothing is lost either way.
         const fakeD = fakeIndexedDB();
         const storageD = drafts.idbStorage({ indexedDB: fakeD.indexedDB, scheduler: clock.scheduler });
         const sD = drafts.create({ guildId: G1, documentId: doc.id, now: clock.now, storage: storageD, scheduler: clock.scheduler });
@@ -974,28 +976,36 @@ const G2 = '222222222222222222';
         sD.changed(model.setContent(doc, 'recoverable'));
         assert((await sD.saveNow()).ok === false, 'a write fails while the database is broken');
         assert(storageD.isAvailable() === false && storageD.reason() === 'write-error',
-            'the adapter marks itself degraded and stays degraded for this session',
-            storageD.reason());
-        fakeD.controls.failTx = false;                       // the disk is fine again
-        const stillDegraded = await sD.saveNow();
-        assert(stillDegraded.ok === false && stillDegraded.reason === 'write-error',
-            'later saves keep reporting the failure instead of silently retrying', JSON.stringify(stillDegraded));
-        assert(sD.isDirty() === true && sD.state().state === 'error',
-            'and the edit is still in memory, still dirty, still unsaved', sD.state().state);
+            'the adapter marks itself degraded', storageD.reason());
+        assert(fakeD.raw(drafts.V2_NAMESPACE, 'drafts', sD.key()).document.content === 'doomed',
+            'and the last good draft is what storage still holds (no partial write)');
 
-        // next page load: fresh adapter, same database, same document
+        fakeD.controls.failTx = false;                       // the disk is fine again
+        const opensBeforeRetry = storageD.stats().opens;
+        const retried = await sD.saveNow();
+        assert(retried.ok === true && retried.revision === 2,
+            'the very next save retries and SUCCEEDS (recovery is not a page reload)',
+            JSON.stringify(retried));
+        assert(storageD.stats().recoveries === 1,
+            'exactly one recovery was performed', String(storageD.stats().recoveries));
+        assert(storageD.stats().opens === opensBeforeRetry + 1,
+            'and it re-opened the database exactly once',
+            storageD.stats().opens + ' vs ' + opensBeforeRetry);
+        assert(storageD.isAvailable() === true && sD.state().degraded === null,
+            'the degraded latch is gone once the write lands', JSON.stringify(sD.state().degraded));
+        assert(fakeD.raw(drafts.V2_NAMESPACE, 'drafts', sD.key()).document.content === 'recoverable',
+            'with the newest content');
+        assert(sD.isDirty() === false && sD.state().state === 'saved', 'and the session is clean again');
+
+        // A fresh adapter on the same database still reads the recovered draft
+        // (the in-session path above must not have left anything odd behind).
         const storageD2 = drafts.idbStorage({ indexedDB: fakeD.indexedDB, scheduler: clock.scheduler });
         const sD2 = drafts.create({ guildId: G1, documentId: doc.id, now: clock.now, storage: storageD2, scheduler: clock.scheduler });
-        const recovered = await sD2.load();
-        assert(recovered.ok === true && recovered.document.content === 'doomed',
-            'the next session reads the last good draft from disk', recovered.document && recovered.document.content);
-        sD2.use(model.setContent(recovered.document, 'recoverable'));
-        const savedAfterRecovery = await sD2.saveNow();
-        assert(savedAfterRecovery.ok === true && savedAfterRecovery.revision === 2,
-            'and writes the newer state (the revision continues from disk)', JSON.stringify(savedAfterRecovery));
-        assert(fakeD.raw(drafts.V2_NAMESPACE, 'drafts', sD2.key()).document.content === 'recoverable',
-            'with the newest content');
-        assert(sD2.isDirty() === false && sD2.state().state === 'saved', 'and the session is clean again');
+        const reread = await sD2.load();
+        assert(reread.ok === true && reread.document.content === 'recoverable',
+            'the next session reads the recovered draft from disk',
+            reread.document && reread.document.content);
+        assert(reread.meta.revision === 2, 'including its revision', JSON.stringify(reread.meta && reread.meta.revision));
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -1606,7 +1616,7 @@ const G2 = '222222222222222222';
     }
 
     // ═══════════════════════════════════════════════════════════
-    section('16. savedDocument(): the last PERSISTED document, and only for this identity');
+    section('22. savedDocument(): the last PERSISTED document, and only for this identity');
     // ═══════════════════════════════════════════════════════════
     // The one question a hash cannot answer is "what was the message before the
     // change I want to discard?". savedDocument() answers it — and it must be
@@ -1765,6 +1775,295 @@ const G2 = '222222222222222222';
             'and starting a different draft identity cannot reach the loaded document');
         assert(reader.document().content === 'another draft',
             'the session is editing the new document', reader.document().content);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    section('23. recover(): the latch, the re-probe, and what it must never touch');
+    // ═══════════════════════════════════════════════════════════
+    // The contract behind "retry on next idle" — and behind the Save button in
+    // 5d-3 Step B. A TRANSIENT write failure may be retried; an ENVIRONMENT
+    // failure is final and must not be re-probed (a missing IndexedDB or a
+    // hanging open would otherwise cost a full open attempt per save for an
+    // answer that cannot change). Recovery is not a second persistence path.
+    {
+        const clock = clockPair();
+        const scheduler = clock.scheduler;
+
+        /**
+         * A double for the failure modes the base fake cannot be *told* to
+         * produce. It delegates to the real fake and, the moment the adapter
+         * takes the database handle, makes the next readwrite transaction fail
+         * in the requested way — exactly what a browser does when it does.
+         */
+        const forcedIdb = (mode) => {
+            const fake = fakeIndexedDB();
+            const armed = { on: false };
+            const baseOpen = fake.indexedDB.open;
+            fake.indexedDB.open = (name, version) => {
+                const req = baseOpen(name, version);
+                let success = null;
+                let upgrade = null;
+                Object.defineProperty(req, 'onsuccess', {
+                    configurable: true,
+                    get() {
+                        if (!success) return undefined;
+                        return (ev) => {
+                            const db = req.result;
+                            const realTransaction = db.transaction;
+                            db.transaction = (storeName, txMode) => {
+                                if (!armed.on || txMode !== 'readwrite') {
+                                    return realTransaction.call(db, storeName, txMode);
+                                }
+                                if (mode === 'transaction-failed') throw new Error('forced: transaction() threw');
+                                if (mode === 'request-failed') {
+                                    return { objectStore() { throw new Error('forced: objectStore() threw'); } };
+                                }
+                                if (mode === 'write-aborted') {
+                                    const tx = { oncomplete: null, onerror: null, onabort: null };
+                                    tx.objectStore = () => ({ put: () => ({}) });
+                                    // A microtask, not a timer: the adapter assigns its
+                                    // handlers synchronously right after transaction()
+                                    // returns, so this runs once they are in place.
+                                    Promise.resolve().then(() => { if (tx.onabort) tx.onabort(); });
+                                    return tx;
+                                }
+                                if (mode === 'write-timeout') {
+                                    // A transaction whose request never settles: the
+                                    // adapter's own timeout is the only answer.
+                                    return { oncomplete: null, onerror: null, onabort: null,
+                                        objectStore: () => ({ put: () => ({}) }) };
+                                }
+                                return realTransaction.call(db, storeName, txMode);
+                            };
+                            success(ev);
+                        };
+                    },
+                    set(fn) { success = fn; },
+                });
+                Object.defineProperty(req, 'onupgradeneeded', {
+                    configurable: true,
+                    get() {
+                        if (!upgrade) return undefined;
+                        return (ev) => {
+                            if (mode === 'upgrade-failed') {
+                                req.result.objectStoreNames = {
+                                    contains() { throw new Error('forced: upgrade threw'); },
+                                };
+                            }
+                            upgrade(ev);
+                        };
+                    },
+                    set(fn) { upgrade = fn; },
+                });
+                return req;
+            };
+            return { fake: fake, break: () => { armed.on = true; }, fix: () => { armed.on = false; } };
+        };
+
+        // One armer per reason: it returns a session on a fresh adapter and a
+        // function that breaks the next write.
+        const armers = {
+            'write-error': () => { const f = fakeIndexedDB(); return { fake: f, break: () => { f.controls.failTx = true; }, fix: () => { f.controls.failTx = false; } }; },
+            'write-timeout': () => forcedIdb('write-timeout'),
+            'transaction-failed': () => forcedIdb('transaction-failed'),
+            'request-failed': () => forcedIdb('request-failed'),
+            'write-aborted': () => forcedIdb('write-aborted'),
+        };
+
+        // ── (a) every TRANSIENT reason is recoverable, and the retry lands ──
+        for (const reason of Object.keys(armers)) {
+            const armer = armers[reason]();
+            const storage = drafts.idbStorage({
+                indexedDB: armer.fake.indexedDB, scheduler: scheduler,
+                timeoutMs: 50,           // the timeout cases must not wait
+            });
+            const doc = model.fromEditorDocument({ content: 'first' }, { ids: nextIds(), guildId: G1 });
+            const s = drafts.create({ guildId: G1, documentId: doc.id, now: clock.now, storage, scheduler: scheduler });
+            s.use(doc);
+            assert((await s.saveNow()).ok === true, reason + ': setup save succeeds');
+            armer.break();
+            s.changed(model.setContent(s.document(), 'second'));
+            const pending = s.saveNow();
+            await settle(6);                 // let the request reach the storage
+            clock.advance(200);              // and let the adapter's own timeout fire
+            clock.runDue();
+            const failed = await pending;
+            assert(failed.ok === false, reason + ': the write fails', JSON.stringify(failed));
+            assert(storage.isAvailable() === false && storage.reason() === reason,
+                reason + ': the adapter latched on exactly that reason', String(storage.reason()));
+            assert(s.isDirty() === true && s.state().state === 'error',
+                reason + ': the session is dirty and in error', s.state().state);
+
+            armer.fix();
+            const recoveriesBefore = storage.stats().recoveries;
+            const opensBefore = storage.stats().opens;
+            const retried = await s.saveNow();
+            assert(retried.ok === true, reason + ': the next save recovers and succeeds',
+                JSON.stringify(retried));
+            assert(storage.stats().recoveries === recoveriesBefore + 1,
+                reason + ': exactly one recovery was performed',
+                String(storage.stats().recoveries - recoveriesBefore));
+            assert(storage.stats().opens === opensBefore + 1,
+                reason + ': with exactly one re-open', String(storage.stats().opens - opensBefore));
+            assert(storage.isAvailable() === true && s.state().degraded === null,
+                reason + ': the latch is cleared', String(s.state().degraded));
+            assert(s.state().lastError === null && s.state().state === 'saved',
+                reason + ': and the session reads saved', s.state().state);
+            assert(armer.fake.raw(drafts.V2_NAMESPACE, 'drafts', s.key()).document.content === 'second',
+                reason + ': the retried document is what storage holds');
+            assert(retried.revision === 2, reason + ': the revision advanced normally',
+                String(retried.revision));
+        }
+
+        // ── (b) every ENVIRONMENT reason refuses recovery, with no re-probe ──
+        const finals = [
+            ['no-indexeddb', null],
+            ['open-error', () => { const f = fakeIndexedDB(); f.controls.unavailable = true; return f; }],
+            ['open-timeout', () => { const f = fakeIndexedDB(); f.controls.hangOpen = true; return f; }],
+            ['upgrade-failed', () => forcedIdb('upgrade-failed')],
+        ];
+        for (const [reason, make] of finals) {
+            const made = make ? make() : null;
+            const fake = made && made.fake ? made.fake : made;   // forcedIdb() returns a rig
+            const storage = drafts.idbStorage({
+                indexedDB: fake ? fake.indexedDB : null,
+                scheduler: scheduler, timeoutMs: 50,
+            });
+            const doc = model.fromEditorDocument({ content: 'doomed' }, { ids: nextIds(), guildId: G1 });
+            const s = drafts.create({ guildId: G1, documentId: doc.id, now: clock.now, storage, scheduler: scheduler });
+            s.use(doc);
+            const attemptPending = s.saveNow();
+            await settle(6);
+            clock.advance(200);              // a hanging open answers on the timeout
+            clock.runDue();
+            const attempted = await attemptPending;
+            assert(attempted.ok === false, reason + ': the save cannot succeed', JSON.stringify(attempted));
+            assert(storage.reason() === reason,
+                reason + ': the adapter is latched on exactly that reason', String(storage.reason()));
+            const opensBefore = storage.stats().opens;
+            assert(storage.recover() === false, reason + ': recovery is refused');
+            assert(storage.reason() === reason && storage.isAvailable() === false,
+                reason + ': and it stays latched', String(storage.reason()));
+            assert(storage.stats().opens === opensBefore,
+                reason + ': with no re-open attempt (no request wasted on a final answer)',
+                String(storage.stats().opens - opensBefore));
+            // …and a further save attempt changes nothing.
+            const againPending = s.saveNow();
+            await settle(6);
+            clock.advance(200);
+            clock.runDue();
+            const again = await againPending;
+            assert(again.ok === false && storage.stats().opens === opensBefore,
+                reason + ': nor does a later save try to open the database again',
+                String(storage.stats().opens - opensBefore));
+            assert(s.isDirty() === true && s.document().content === 'doomed',
+                reason + ': the document is still in memory, still dirty');
+        }
+
+        // ── (c) THE FULL STORY with a store attached ──
+        // What a successful retry updates (revision, baseline, the store\'s
+        // confirmation) and what recovery itself must never touch.
+        const fake = fakeIndexedDB();
+        const storage = drafts.idbStorage({ indexedDB: fake.indexedDB, scheduler: scheduler });
+        // Normalized the way the page canonicalizes a loaded document: the store
+        // then holds a document that is a fixed point of normalization, so the
+        // hash a write confirms is the hash of what the store holds.
+        const doc = model.normalizeDocument(
+            model.fromEditorDocument({ content: 'saved A' }, { ids: nextIds(), guildId: G1 }));
+        const store = storeMod.createStore({
+            document: doc, scheduler: scheduler, now: clock.now,
+            reducers: storeMod.createReducers(),
+        });
+        const s = drafts.create({ guildId: G1, documentId: doc.id, now: clock.now, storage, scheduler: scheduler });
+        s.use(doc);
+        s.attach(store);
+        await s.saveNow();
+        const hashA = store.savedDocumentHash();
+        assert(store.isDirty() === false && s.savedDocument().content === 'saved A',
+            'setup: A is persisted; the store is clean and the baseline is A');
+
+        store.dispatch({ type: 'content/set', text: 'B' });
+        const identityBefore = s.documentId();
+        const revisionBefore = s.state().revision;
+        fake.controls.failTx = true;
+        const failedB = await s.saveNow();
+        assert(failedB.ok === false, 'the write of B fails', JSON.stringify(failedB));
+        assert(store.isDirty() === true, 'the store is dirty while B is unpersisted');
+        assert(s.savedDocument().content === 'saved A',
+            'and the baseline still describes what is on disk (A), not the failed B');
+
+        fake.controls.failTx = false;
+        const retryB = await s.saveNow();
+        assert(retryB.ok === true && retryB.revision === revisionBefore + 1,
+            'the retry succeeds and advances the revision normally', JSON.stringify(retryB));
+        assert(s.documentId() === identityBefore,
+            'recovery and the retry never change the document identity', String(s.documentId()));
+        assert(store.getDocument().content === 'B',
+            'the store\'s document was never replaced by the adapter or the session',
+            store.getDocument().content);
+        assert(store.isDirty() === false && store.savedDocumentHash() !== hashA,
+            'and the store became clean only because the write CONFIRMED B by hash');
+        assert(store.savedDocumentHash() === model.hashDocument(store.getDocument()),
+            'the confirmed hash is the hash of what the store is holding');
+        assert(s.savedDocument().content === 'B',
+            'with the session baseline updated to the newly persisted document',
+            s.savedDocument().content);
+
+        // Recovery alone: a storage-side operation that touches nothing else.
+        fake.controls.failTx = true;
+        store.dispatch({ type: 'content/set', text: 'C' });
+        await s.saveNow();
+        const pointerKey = drafts.metaKey(G1, 'last');
+        const pointerBefore = JSON.stringify(fake.raw(drafts.V2_NAMESPACE, 'meta', pointerKey) || null);
+        const recordBefore = JSON.stringify(fake.raw(drafts.V2_NAMESPACE, 'drafts', s.key()));
+        assert(storage.recover() === true, 'setup: the transient failure is recoverable');
+        const documentAfter = store.getDocument();
+        assert(documentAfter.content === 'C',
+            'recovery does not mutate the document', documentAfter.content);
+        assert(store.getDocument() === documentAfter,
+            'nor swap the document object the store holds');
+        assert(s.documentId() === identityBefore, 'nor change the document id');
+        assert(store.isDirty() === true, 'nor mark the store clean');
+        assert(s.savedDocument().content === 'B',
+            'nor claim the unsaved C is persisted', s.savedDocument().content);
+        assert(JSON.stringify(fake.raw(drafts.V2_NAMESPACE, 'drafts', s.key())) === recordBefore,
+            'nor write anything while recovering');
+        assert(JSON.stringify(fake.raw(drafts.V2_NAMESPACE, 'meta', pointerKey) || null) === pointerBefore,
+            'nor touch the last-draft pointer');
+        assert(storage.recover() === false,
+            'a second recovery is a no-op (the latch is already clear) and never throws');
+        assert(JSON.stringify(fake.raw(drafts.V2_NAMESPACE, 'meta', pointerKey) || null) === pointerBefore,
+            'and the pointer is still untouched after it');
+
+        // ── (d) a recovery that does not help stays honest ──
+        fake.controls.failTx = true;
+        const stillBroken = await s.saveNow();
+        assert(stillBroken.ok === false && stillBroken.reason === 'write-error',
+            'while the disk is still broken the retry FAILS again, honestly', JSON.stringify(stillBroken));
+        assert(store.getDocument().content === 'C' && store.isDirty() === true,
+            'the edit is still in memory and still dirty');
+        assert(s.state().degraded === 'write-error' && s.state().lastError,
+            'the adapter is latched on the real reason again', String(s.state().degraded));
+        assert(s.savedDocument().content === 'B',
+            'and nothing pretended C or even B was re-persisted', s.savedDocument().content);
+        fake.controls.failTx = false;
+
+        // ── (e) an adapter without recover() is unaffected ──
+        // The call site is guarded, so a caller-supplied storage keeps working:
+        // no new requirement is imposed on the storage contract.
+        const plainWrites = [];
+        const plainStorage = {
+            isAvailable: () => true,
+            reason: () => null,
+            get: () => Promise.resolve(null),
+            put: (key, value) => { plainWrites.push(key); return Promise.resolve({ ok: true }); },
+        };
+        const plainDoc = model.fromEditorDocument({ content: 'plain' }, { ids: nextIds(), guildId: G1 });
+        const plain = drafts.create({ guildId: G1, documentId: plainDoc.id, now: clock.now, storage: plainStorage, scheduler: scheduler });
+        plain.use(plainDoc);
+        assert((await plain.saveNow()).ok === true,
+            'a storage that never heard of recover() still saves normally');
+        assert(plainWrites.length === 1, 'and was written exactly once', String(plainWrites.length));
     }
 
     section('summary');

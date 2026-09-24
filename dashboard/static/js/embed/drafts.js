@@ -374,7 +374,7 @@ window.NERO.embed = window.NERO.embed || {};
         const idb = options.indexedDB || (typeof indexedDB !== 'undefined' ? indexedDB : null);
         const readOnly = !!options.readOnly;
 
-        const stats = { opens: 0, gets: 0, puts: 0, deletes: 0, writes: 0, failures: 0, timeouts: 0 };
+        const stats = { opens: 0, gets: 0, puts: 0, deletes: 0, writes: 0, failures: 0, timeouts: 0, recoveries: 0 };
         let db = null;
         let degraded = idb ? null : 'no-indexeddb';
         let openPromise = null;
@@ -383,6 +383,36 @@ window.NERO.embed = window.NERO.embed || {};
             if (degraded === null) stats.failures++;
             degraded = degraded || why;
             return degraded;
+        }
+
+        // The failures that mean "this write did not land" rather than "this
+        // browser cannot store anything". A transient one is worth re-probing;
+        // an environment failure is not, and must stay latched — retrying a
+        // missing IndexedDB or an open timeout costs a full open attempt per
+        // save for an answer that cannot change.
+        const TRANSIENT = [
+            'write-timeout', 'write-error', 'write-aborted',
+            'transaction-failed', 'request-failed',
+        ];
+
+        /**
+         * Allow ONE more attempt after a TRANSIENT write failure.
+         *
+         * Nothing here is a second persistence path: recovery only clears the
+         * latch and drops the (possibly half-torn) database handle so the
+         * normal open path runs again. It does not touch the document, the
+         * identity, the revision, the saved hash or the last-draft pointer, and
+         * it cannot make anything look saved — the store's dirty state still
+         * only changes through markSavedHash() after a write actually succeeds.
+         */
+        function recover() {
+            if (!idb || !degraded) return false;                  // nothing to recover from
+            if (TRANSIENT.indexOf(degraded) === -1) return false; // an environment failure is final
+            db = null;                   // never trust a handle that just failed a transaction
+            openPromise = null;
+            degraded = null;
+            stats.recoveries++;
+            return true;
         }
 
         // ── open ──────────────────────────────────────────────────
@@ -497,6 +527,7 @@ window.NERO.embed = window.NERO.embed || {};
             open: doOpen,
             isAvailable: () => !degraded,
             reason: () => degraded,
+            recover: recover,
             get: (key) => {
                 if (!idb || degraded) return Promise.resolve(null);
                 stats.gets++;
@@ -762,6 +793,15 @@ window.NERO.embed = window.NERO.embed || {};
                 notify();
                 return Promise.resolve({ ok: false, reason: 'not-serializable', error: err, path: err.path || null });
             }
+
+            // One line, one meaning: if the last failure was a transient write
+            // failure, give the storage exactly one chance to come back before
+            // this write is attempted. This is what makes "retry on next idle"
+            // (and a manual Save) able to actually succeed, instead of talking
+            // to a latched adapter forever. It runs on EVERY write path — the
+            // idle timer, the lifecycle flush, destroy's final save and a
+            // user-driven save — so there is still exactly one persistence path.
+            if (storage.recover && storage.isAvailable && !storage.isAvailable()) storage.recover();
 
             const targetKey = record.key;
             inFlight = storage.put(targetKey, record).then((result) => {
