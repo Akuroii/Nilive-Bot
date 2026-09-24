@@ -752,7 +752,22 @@ window.NERO.embed = window.NERO.embed || {};
                     lastSavedHash = record.documentHash;
                     lastError = null;
                     saveCount++;
-                    if (boundStore && boundStore.markSaved) boundStore.markSaved(currentDocument);
+                    // Confirm the save to the store ONLY if the document it is
+                    // holding is the snapshot that just reached storage. The
+                    // write is asynchronous: `record` may be document A while
+                    // `currentDocument` is already B (the user typed during the
+                    // write). Marking B saved here would clear the store's
+                    // dirty flag and move its saved hash onto content that is
+                    // still only in memory — the boundary's own bookkeeping
+                    // stays correct either way (lastSavedHash is A, the next
+                    // write is already scheduled), but the store's flag is the
+                    // canonical one the UI reads, so it must never clear early.
+                    // Hash-equal content is marked saved: storage holds exactly
+                    // that content, so there is nothing left to write.
+                    if (boundStore && boundStore.markSaved &&
+                        model.hashDocument(currentDocument) === record.documentHash) {
+                        boundStore.markSaved(currentDocument);
+                    }
                     if (pendingAfterFlight) { pendingAfterFlight = false; schedule(); }
                     notify();
                     return { ok: true, key: targetKey, revision: revision, updatedAt: lastUpdatedAt };

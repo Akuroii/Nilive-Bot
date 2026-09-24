@@ -28,11 +28,24 @@ const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..', '..');
-const PAGE = path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'message-builder-page.js');
+const TARGETS = {
+    page: {
+        file: path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'message-builder-page.js'),
+        env: 'NERO_MB_PAGE_SRC',
+        label: 'dashboard/static/js/embed/message-builder-page.js',
+    },
+    drafts: {
+        file: path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'drafts.js'),
+        env: 'NERO_DRAFTS_SRC',
+        label: 'dashboard/static/js/embed/drafts.js',
+    },
+};
 const HARNESS = path.join(ROOT, 'scripts', 'test_message_builder_page.js');
 
 /**
- * A mutant is { id, why, edits: [[find, replace], …] }.
+ * A mutant is { id, target, why, edits: [[find, replace], …] }.
+ * `target` names the file under test (default: the page module); the harness is
+ * pointed at the mutated copy through that target's env hook.
  * A replacement that does not apply is a FAILED mutant (the source moved), not
  * a silent pass — that is how a battery rots.
  */
@@ -79,6 +92,36 @@ const MUTANTS = [
         why: 'the preview clock is read on every render instead of fixed for the page',
         edits: [["now: function () { return inst.startedAt; },", "now: Date.now,"]],
     },
+    // ── the persistence boundary (drafts.js) — the in-flight save race ──
+    {
+        id: 'M9',
+        target: 'drafts',
+        why: 'the in-flight write confirms the CURRENT document instead of the snapshot it wrote',
+        edits: [[
+            "                    if (boundStore && boundStore.markSaved &&\n                        model.hashDocument(currentDocument) === record.documentHash) {\n                        boundStore.markSaved(currentDocument);\n                    }",
+            "                    if (boundStore && boundStore.markSaved) boundStore.markSaved(currentDocument);",
+        ]],
+    },
+    {
+        id: 'M10',
+        target: 'drafts',
+        why: 'the guard is inverted: it confirms only when the hashes DIFFER',
+        edits: [["model.hashDocument(currentDocument) === record.documentHash",
+                 "model.hashDocument(currentDocument) !== record.documentHash"]],
+    },
+    {
+        // (A mutant that removed only the post-write re-schedule was tried and
+        // correctly reported MISSED: the edit's own coalescing timer writes the
+        // newer document anyway, so that line is redundancy, not the mechanism.
+        // The real mechanism is changed() -> schedule(); break THAT.)
+        id: 'M11',
+        target: 'drafts',
+        why: 'an edit no longer schedules a write (only an explicit save does)',
+        edits: [[
+            "            if (!isDirty()) { cancelScheduled(); return false; }\n            return schedule();",
+            "            if (!isDirty()) { cancelScheduled(); return false; }\n            return false;",
+        ]],
+    },
     {
         id: 'M8',
         why: 'the session attaches AFTER the load, so the loaded draft looks like an edit',
@@ -104,18 +147,27 @@ function main() {
         process.exit(2);
     }
 
-    const before = sha1(PAGE);
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mb-mutants-'));
-    const original = fs.readFileSync(PAGE, 'utf8');
+    const before = {};
+    const original = {};
+    Object.keys(TARGETS).forEach(key => {
+        before[key] = sha1(TARGETS[key].file);
+        original[key] = fs.readFileSync(TARGETS[key].file, 'utf8');
+    });
     let caught = 0;
     const missed = [];
 
     console.log('message-builder mutation battery — ' + selected.length + ' mutants');
-    console.log('module under test: dashboard/static/js/embed/message-builder-page.js (' + before.slice(0, 12) + ')');
-    console.log('battery:           scripts/test_message_builder_page.js\n');
+    Object.keys(TARGETS).forEach(key => {
+        console.log('  ' + key.padEnd(7) + TARGETS[key].label + ' (' + before[key].slice(0, 12) + ')');
+    });
+    console.log('battery: scripts/test_message_builder_page.js\n');
 
     selected.forEach(mutant => {
-        let source = original;
+        const targetKey = mutant.target || 'page';
+        const target = TARGETS[targetKey];
+        if (!target) { missed.push(mutant.id + ' (unknown target)'); return; }
+        let source = original[targetKey];
         const applied = [];
         for (const [find, replace] of mutant.edits) {
             if (source.indexOf(find) === -1) {
@@ -134,8 +186,10 @@ function main() {
 
         const file = path.join(tmpDir, mutant.id + '.js');
         fs.writeFileSync(file, source);
+        const envPatch = { NERO_MB_PAGE_SRC: process.env.NERO_MB_PAGE_SRC, NERO_DRAFTS_SRC: process.env.NERO_DRAFTS_SRC };
+        envPatch[target.env] = file;
         const run = spawnSync(process.execPath, [HARNESS], {
-            env: Object.assign({}, process.env, { NERO_MB_PAGE_SRC: file }),
+            env: Object.assign({}, process.env, envPatch),
             encoding: 'utf8',
             timeout: 120000,
         });
@@ -143,7 +197,7 @@ function main() {
         if (failed) caught++;
         else missed.push(mutant.id);
         const firstFailure = (run.stdout || '').split('\n').filter(l => l.indexOf('  FAIL') === 0)[0] || '';
-        console.log('  ' + (failed ? 'CAUGHT  ' : 'MISSED  ') + mutant.id + '  ' + mutant.why);
+        console.log('  ' + (failed ? 'CAUGHT  ' : 'MISSED  ') + mutant.id + '  [' + targetKey + '] ' + mutant.why);
         if (failed) {
             const count = ((run.stdout || '').match(/  FAIL /g) || []).length;
             console.log('      ' + count + ' failing check(s)' + (firstFailure ? ' — e.g.' + firstFailure.replace('  FAIL ', ' ') : ''));
@@ -153,12 +207,17 @@ function main() {
         }
     });
 
-    const after = sha1(PAGE);
+    const after = {};
+    let unchanged = true;
+    Object.keys(TARGETS).forEach(key => {
+        after[key] = sha1(TARGETS[key].file);
+        if (after[key] !== before[key]) unchanged = false;
+    });
     console.log('\ncaught ' + caught + '/' + selected.length + ' mutants' +
         (missed.length ? ' — MISSED: ' + missed.join(', ') : ''));
-    console.log('module unchanged by the run: ' + (before === after ? 'yes (' + after.slice(0, 12) + ')' : 'NO — working tree changed!'));
+    console.log('sources unchanged by the run: ' + (unchanged ? 'yes' : 'NO — working tree changed!'));
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) { /* best effort */ }
-    if (missed.length || before !== after) process.exit(1);
+    if (missed.length || !unchanged) process.exit(1);
     console.log('MUTATION BATTERY: EVERY MUTANT CAUGHT');
 }
 
