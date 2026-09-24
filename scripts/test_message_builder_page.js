@@ -33,6 +33,16 @@
         re-loads the draft the first one saved.
      J. Hygiene: the v1 database is never opened, and the page keeps exactly one
         document object — the store's.
+     K. Persistence must never confirm an unwritten document (the in-flight save
+        race, step 5a follow-up).
+     L. The structure rail on the page (step 5b): rows from the store, selection
+        in both directions, undo/redo reflected, teardown clean.
+     M. The inspector on the page (step 5c): the panel follows the selection,
+        every edit reaches the canonical document, the preview patches once.
+     N. The action bar on the page (step 5d): Undo/Redo drive the store, Copy
+        JSON hands the page's own payload to the clipboard and reports through
+        the one status region, a failed copy opens the fallback dialog, and
+        teardown empties the container and releases the subscription.
 
    Run:  node scripts/test_message_builder_page.js
    ═══════════════════════════════════════════════════════════════ */
@@ -58,6 +68,7 @@ const js = (...parts) => path.join(ROOT_DIR, 'dashboard', 'static', 'js', ...par
 const PAGE_PATH = process.env.NERO_MB_PAGE_SRC || js('embed', 'message-builder-page.js');
 const DRAFTS_PATH = process.env.NERO_DRAFTS_SRC || js('embed', 'drafts.js');
 const STORE_PATH = process.env.NERO_STORE_SRC || js('embed', 'store.js');
+const ACTIONBAR_PATH = process.env.NERO_ACTIONBAR_SRC || js('embed', 'views', 'actionbar.js');
 const FOUNDATION = [
     js('nav-lifecycle.js'),
     js('embed', 'model.js'),
@@ -68,6 +79,7 @@ const FOUNDATION = [
     js('embed', 'views', 'statusbar.js'),
     js('embed', 'views', 'rail.js'),
     js('embed', 'views', 'inspector.js'),
+    ACTIONBAR_PATH,
     PAGE_PATH,
 ];
 const TEMPLATE_TREE = parseTemplate(
@@ -276,8 +288,14 @@ async function main() {
             String(env.el('mb2-inspector-body').children.length));
         assert(env.el('mb2-strip').hidden === true && env.el('mb2-strip').textContent === '',
             'the validation strip exists, hidden and empty (step 6 owns its contents)');
-        assert(env.el('mb2-bar-actions').children.length === 0,
-            'no action buttons yet (5d) — not even disabled placeholders');
+        // 5d fills the container — and only with actions that exist. This is the
+        // one 5a placeholder that legitimately flips: it asserted the container
+        // was empty until the buttons were real.
+        const barButtons = env.el('mb2-bar-actions').children;
+        assert(barButtons.length === 3 &&
+            barButtons.map(b => b.getAttribute('data-mb2-action')).join(',') === 'undo,redo,copy',
+            'the action container holds the three real actions (5d), in order',
+            barButtons.map(b => b.getAttribute('data-mb2-action')).join(','));
         assert(env.el('mb2-rail').getAttribute('aria-labelledby') === 'mb2-rail-title' &&
                env.el('mb2-inspector').getAttribute('aria-labelledby') === 'mb2-inspector-title',
             'the regions the page touches keep their labelling');
@@ -1282,6 +1300,111 @@ async function main() {
         assert(env.el('mb2-inspector-body').getAttribute('data-insp-view') === null,
             'and removes its view marker');
         assert(env.store()._subscriberCounts().selectors === 0, 'every subscription is gone');
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    section('N. the action bar on the page');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const env = makeEnv();
+        const record = makeRecord(env, filledDocument(), { documentId: 'doc-bar' });
+        installIdb(env, seedSpec(env, [record]));
+        // The bar reads the clipboard from the window, so this watches exactly
+        // what the page hands the browser — and can switch it to a failure.
+        const copied = [];
+        env.win.navigator = {
+            clipboard: {
+                writeText(text) { copied.push(String(text)); return Promise.resolve(); },
+            },
+        };
+        await env.mount();
+
+        const bar = env.inst.actionbar;
+        const actions = env.el('mb2-bar-actions');
+        assert(!!bar, 'the page created an action bar');
+        assert(actions.children.length === 3, 'and rendered its three actions into the container',
+            String(actions.children.length));
+        assert(bar.keys().join(',') === 'undo,redo,copy', 'in the approved order', bar.keys().join(','));
+        assert(bar.button('undo').disabled === true && bar.button('redo').disabled === true,
+            'a freshly loaded draft has nothing to undo or redo');
+        assert(env.notice() === '', 'and booting invents no notice', env.notice());
+        // The bar must not add a live region of its own: the page has exactly the
+        // two the shell declares (the step-6 validation strip and the bar status).
+        assert(env.root.querySelectorAll('[aria-live]').length === 2,
+            'the page still declares exactly two live regions',
+            String(env.root.querySelectorAll('[aria-live]').length));
+
+        // An edit made anywhere on the page enables Undo: same store, one bar.
+        const content = env.inst.inspector.control('content');
+        content.value = 'Edited from the inspector';
+        env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+        assert(env.store().isDirty() === true, 'the edit is dirty');
+        assert(bar.button('undo').disabled === false, 'and the bar knows Undo is available');
+
+        const patches = env.inst.preview.stats().patches;
+        actions.dispatch('click', { type: 'click', target: bar.button('undo') });
+        assert(env.store().getDocument().content === record.document.content,
+            'Undo restores the loaded draft exactly', JSON.stringify(env.store().getDocument().content));
+        assert(env.inst.preview.stats().patches === patches + 1,
+            'the preview patched once, through the store subscription (never from the bar)',
+            String(env.inst.preview.stats().patches - patches));
+        assert(content.value === record.document.content, 'the inspector followed the undo',
+            String(content.value));
+        assert(bar.button('redo').disabled === false, 'and Redo became available');
+        assert(env.store().isDirty() === false,
+            'the restored document is the one on disk, so the store is clean again');
+
+        // The edit and its undo must not leave anything new in storage: either
+        // the queued write is skipped as clean or it writes the same payload.
+        await env.settle(700);
+        const storedKeys = Object.keys(env.draftsData());
+        assert(storedKeys.length === 1 &&
+            env.NERO.embed.model.stableStringify(env.draftsData()[storedKeys[0]].document) ===
+            env.NERO.embed.model.stableStringify(record.document),
+            'storage still holds exactly the loaded draft, byte for byte', storedKeys.join(','));
+        assert(env.session().pendingSave() === false, 'and nothing is queued any more');
+        assert(env.pill() === 'Saved' || env.pill() === 'No changes yet',
+            'the status line agrees with the store, not with the bar', env.pill());
+
+        // Copy JSON: the page's own payload, pretty-printed, announced once.
+        actions.dispatch('click', { type: 'click', target: bar.button('copy') });
+        await sleep(0);
+        const expected = JSON.stringify(
+            env.NERO.embed.model.toDiscordPayload(env.store().getDocument()), null, 2);
+        assert(copied.length === 1, 'the clipboard received exactly one write', String(copied.length));
+        assert(copied[0] === expected, 'and it is the payload of the page document, pretty-printed',
+            String(copied[0]).slice(0, 40));
+        assert(env.notice().indexOf('copied') !== -1,
+            'the result is announced in the page\'s one status region', env.notice());
+        assert(env.root.querySelectorAll('[aria-live]').length === 2,
+            'and no extra live region appeared for it',
+            String(env.root.querySelectorAll('[aria-live]').length));
+
+        // A clipboard that refuses: the JSON stays reachable, Escape gets out.
+        env.win.navigator.clipboard = { writeText() { return Promise.reject(new Error('denied')); } };
+        actions.dispatch('click', { type: 'click', target: bar.button('copy') });
+        await sleep(0);
+        const dialog = bar.dialog();
+        assert(!!dialog, 'a refused copy opens the fallback dialog on the page');
+        const area = dialog.panel.querySelectorAll('textarea')[0];
+        assert(!!area && area.value === expected, 'holding the same JSON',
+            area ? String(area.value).slice(0, 40) : 'no text field');
+        assert(env.dom.focused() === area, 'focused, so the user can copy it by hand');
+        dialog.overlay.dispatch('keydown', {
+            type: 'keydown', key: 'Escape', target: area, preventDefault() {},
+        });
+        assert(bar.dialog() === null, 'Escape closes the dialog');
+        assert(env.dom.focused() === bar.button('copy'), 'and focus returns to the Copy JSON button');
+
+        // Teardown: the container is emptied and the subscription released.
+        assert(env.store()._subscriberCounts().listeners >= 1,
+            'the bar subscribes to the store',
+            String(env.store()._subscriberCounts().listeners));
+        env.unmount();
+        assert(env.el('mb2-bar-actions').children.length === 0, 'teardown empties the action bar');
+        assert(env.store()._subscriberCounts().listeners === 0 && env.store()._subscriberCounts().selectors === 0,
+            'and every subscription is gone',
+            JSON.stringify(env.store()._subscriberCounts()));
     }
 
     // ─────────────────────────────────────────────────────────────

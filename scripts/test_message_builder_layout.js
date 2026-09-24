@@ -175,7 +175,7 @@ assert(order.every(i => i >= 0) && order[0] < order[1] && order[1] < order[2] &&
     'document order is rail → inspector → preview → bar', String(order));
 
 assert(byId(TREE, 'mb2-bar-actions') && byId(TREE, 'mb2-bar-actions').children.length === 0,
-    'the action container is empty in 5a (no disabled stand-ins for buttons that do not exist yet)');
+    'the action container is empty in the MARKUP (actionbar.js renders the buttons at runtime)');
 
 // Hygiene: no inline script, no on* handlers, no inline styles, no v1/v2 class clash.
 const INLINE_HANDLERS = ELEMENTS.filter(n => Object.keys(n.attrs).some(a => a.indexOf('on') === 0 && a.length > 2));
@@ -230,7 +230,8 @@ const scriptOrder = (SCRIPTS.match(/js\/[^']+?'/g) || []).map(s => s.replace(/'$
 const expectedOrder = [
     'js/embed/model.js', 'js/embed/store.js', 'js/embed/discord-markdown.js',
     'js/embed/preview.js', 'js/embed/drafts.js', 'js/embed/views/statusbar.js',
-    'js/embed/views/rail.js', 'js/embed/views/inspector.js', 'js/embed/message-builder-page.js',
+    'js/embed/views/rail.js', 'js/embed/views/inspector.js', 'js/embed/views/actionbar.js',
+    'js/embed/message-builder-page.js',
 ];
 assert(JSON.stringify(scriptOrder) === JSON.stringify(expectedOrder),
     'data-page-script loads the foundations before the page, in dependency order',
@@ -289,6 +290,32 @@ assert(/view\.dirty/.test(STATUS_CODE) && !/store\.isDirty/.test(STATUS_CODE) &&
     'the statusbar is TOLD the dirty state (view.dirty) and never reaches into the store itself');
 assert(!/indexedDB|localStorage|sessionStorage/.test(statusbar) && !/indexedDB|localStorage|sessionStorage/.test(PAGE_SRC),
     'no page/view module opens storage on its own (persistence belongs to drafts.js)');
+
+// ── the action bar's contract (step 5d) ──────────────────────────
+// The bar is the one place where a button does something irreversible-ish, so
+// the static contract matters: it exists, it is loaded in order (B above), it
+// is styled (including the disabled state), its dialog cannot join the bar's
+// flex row, and it reaches for neither storage nor the renderer.
+const ACTIONBAR_PATH = path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'views', 'actionbar.js');
+assert(fs.existsSync(ACTIONBAR_PATH), 'the action bar module exists');
+const ACTIONBAR_SRC = fs.readFileSync(ACTIONBAR_PATH, 'utf8');
+const ACTIONBAR_CODE = ACTIONBAR_SRC.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+assert(/NERO\.embed\.views\.actionbar\s*=/.test(ACTIONBAR_SRC),
+    'the action bar view publishes NERO.embed.views.actionbar');
+assert(/\.mb2-bar-btn\s*\{/.test(CSS_NO_COMMENTS) && /\.mb2-bar-btn:disabled/.test(CSS_NO_COMMENTS),
+    'the bar buttons are styled, including their real disabled state');
+assert(/\.mb2-dialog-overlay\s*\{[^}]*position:\s*fixed/.test(CSS_NO_COMMENTS),
+    'a dialog is fixed to the viewport (it never joins the bar\'s flex row)');
+assert(/\.mb2-dialog\s*\{[^}]*max-width/.test(CSS_NO_COMMENTS),
+    'the dialog panel is bounded by a max-width, never a fixed width');
+assert(/\.mb2-dialog-btn\s*\{[^}]*min-height:\s*3[0-9]px/.test(CSS_NO_COMMENTS),
+    'dialog controls keep the touch-target floor');
+assert(!/indexedDB|localStorage|sessionStorage/.test(ACTIONBAR_SRC),
+    'the action bar opens no storage of its own');
+assert(!/NERO\.embed\.(preview|drafts)/.test(ACTIONBAR_CODE),
+    'and never reaches for the renderer or the draft session');
+assert(!/aria-live|role="status"/.test(ACTIONBAR_CODE),
+    'and declares no second live region (the page owns the only one)');
 
 // ═══════════════════════════════════════════════════════════════
 section('C. the route');

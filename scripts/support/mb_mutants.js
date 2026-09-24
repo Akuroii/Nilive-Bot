@@ -56,6 +56,12 @@ const TARGETS = {
         label: 'dashboard/static/js/embed/views/inspector.js',
         harness: path.join(ROOT, 'scripts', 'test_message_builder_inspector.js'),
     },
+    actionbar: {
+        file: path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'views', 'actionbar.js'),
+        env: 'NERO_ACTIONBAR_SRC',
+        label: 'dashboard/static/js/embed/views/actionbar.js',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_actionbar.js'),
+    },
 };
 const HARNESS = path.join(ROOT, 'scripts', 'test_message_builder_page.js');
 
@@ -380,6 +386,115 @@ const MUTANTS = [
             "        inst.store.markSaved(inst.store.getDocument());\n        inst.session.attach(inst.store);\n        if (inst.preview) inst.preview.updateDocument(inst.store.getDocument());\n        else mountPreview(inst);",
         ]],
     },
+    // ── the action bar (step 5d-1) ──
+    {
+        id: 'A1',
+        target: 'actionbar',
+        why: 'Undo writes into the document in place instead of asking the store to move its history',
+        edits: [[
+            "            stats.undos++;\n            store.undo();",
+            "            stats.undos++;\n            store.getDocument().content = '';\n            return true;",
+        ]],
+    },
+    {
+        id: 'A2',
+        target: 'actionbar',
+        why: 'the bar never subscribes to the store (its buttons freeze at their first state)',
+        edits: [[
+            "        unsubs.push(store.subscribe(function () { render(); }));",
+            "        /* no subscription */",
+        ]],
+    },
+    {
+        id: 'A3',
+        target: 'actionbar',
+        why: 'Undo is always enabled (a button that lies about what the history can do)',
+        edits: [[
+            "            setDisabled(buttons.undo.node, !store.canUndo());",
+            "            setDisabled(buttons.undo.node, false);",
+        ]],
+    },
+    {
+        id: 'A4',
+        target: 'actionbar',
+        why: 'destroy() leaks its store subscription (a re-mounted page stacks renders)',
+        edits: [[
+            "            unsubs.splice(0).forEach(function (off) {\n                try { off(); } catch (e) { /* an unsubscribe must never block teardown */ }\n            });",
+            "            /* subscriptions leaked */",
+        ]],
+    },
+    {
+        id: 'A5',
+        target: 'actionbar',
+        why: 'destroy() leaves its buttons mounted (the next mount renders into a full container)',
+        edits: [[
+            "            for (const key in buttons) {\n                const node = buttons[key].node;\n                if (node.parentNode) node.parentNode.removeChild(node);\n            }",
+            "            /* buttons left mounted */",
+        ]],
+    },
+    {
+        id: 'A6',
+        target: 'actionbar',
+        why: 'the dialog has no keydown handler (Escape does not close it and Tab is not trapped)',
+        edits: [[
+            "            overlay.addEventListener('keydown', onDialogKeydown);",
+            "            /* no keydown handler */",
+        ]],
+    },
+    {
+        id: 'A7',
+        target: 'actionbar',
+        why: 'closing a dialog does not return focus to the button that opened it',
+        edits: [[
+            "            if (!destroyed && closing.invoker && closing.invoker.parentNode) focusNode(closing.invoker);",
+            "            if (false) focusNode(closing.invoker);",
+        ]],
+    },
+    {
+        id: 'A8',
+        target: 'actionbar',
+        why: 'closing a dialog leaves its overlay in the DOM',
+        edits: [[
+            "            if (closing.overlay.parentNode) closing.overlay.parentNode.removeChild(closing.overlay);",
+            "            /* overlay leaked */",
+        ]],
+    },
+    {
+        id: 'A9',
+        target: 'actionbar',
+        why: 'the clipboard fallback opens without the JSON the user needs',
+        edits: [[
+            "            area.value = text;",
+            "            area.value = '';",
+        ]],
+    },
+    {
+        id: 'A10',
+        target: 'actionbar',
+        why: 'a successful copy says nothing to the user',
+        edits: [[
+            "                notify('ok', 'JSON copied to the clipboard.');",
+            "                /* nothing said */",
+        ]],
+    },
+    {
+        id: 'A11',
+        target: 'actionbar',
+        why: 'the in-flight guard is gone (a second click starts a second clipboard write)',
+        edits: [[
+            "            if (destroyed || copying) return false;",
+            "            if (destroyed) return false;",
+        ]],
+    },
+    {
+        id: 'A12',
+        target: 'actionbar',
+        why: 'opening a dialog does not close the previous one (two dialogs stack)',
+        edits: [[
+            "            closeDialog('replaced');                 // never more than one",
+            "            /* no replacement */",
+        ]],
+    },
 ];
 
 function sha1(file) {
@@ -492,6 +607,7 @@ function main() {
             NERO_STORE_SRC: process.env.NERO_STORE_SRC,
             NERO_RAIL_SRC: process.env.NERO_RAIL_SRC,
             NERO_INSPECTOR_SRC: process.env.NERO_INSPECTOR_SRC,
+            NERO_ACTIONBAR_SRC: process.env.NERO_ACTIONBAR_SRC,
         };
         envPatch[target.env] = file;
         const run = spawnSync(process.execPath, [harness], {

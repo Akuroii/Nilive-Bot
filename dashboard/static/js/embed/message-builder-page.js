@@ -10,6 +10,7 @@
 //      embed/preview.js          the differential preview engine
 //      embed/drafts.js           the persistence boundary (draft session)
 //      embed/views/statusbar.js  the status half of the status/action bar
+//      embed/views/actionbar.js  the action half (buttons + their dialogs)
 //
 // THE THREE RULES THIS FILE EXISTS TO KEEP
 //
@@ -29,7 +30,8 @@
 //     holds stays byte-equivalent to the payload that was persisted.
 //
 // BOOT ORDER (each step matters, and the harness asserts each one)
-//     paint shell → create statusbar → create store → create session →
+//     paint shell → create statusbar → create store → create rail →
+//     create inspector → create actionbar → create session →
 //     subscribe → session.attach(store)  [BEFORE load, see below] →
 //     session.bindLifecycle(window) → render status → resume() [async].
 //
@@ -49,8 +51,9 @@
 //     and every save attempt is refused until the user explicitly replaces it
 //     (the dialog lands in 5d).
 //
-// NOT IN 5a: rail rows, inspector controls, action buttons, dialogs, validation,
-// limits, counters, Send, assets, components/actions/roles, library/revisions.
+// NOT IN 5a: rail rows, inspector controls, validation, limits, counters, Send,
+// assets, components/actions/roles, library/revisions. The rail landed in 5b,
+// the inspector in 5c and the action bar (buttons + dialogs) in 5d.
 // Consumed by: manage/message_builder.html (data-page-module="message-builder")
 // Tested by:   scripts/test_message_builder_page.js
 // ═══════════════════════════════════════════════════════════════
@@ -91,9 +94,11 @@ window.NERO.embed = window.NERO.embed || {};
         if (!views.statusbar || !views.statusbar.create) throw new Error('message-builder needs embed/views/statusbar.js loaded first');
         if (!views.rail || !views.rail.create) throw new Error('message-builder needs embed/views/rail.js loaded first');
         if (!views.inspector || !views.inspector.create) throw new Error('message-builder needs embed/views/inspector.js loaded first');
+        if (!views.actionbar || !views.actionbar.create) throw new Error('message-builder needs embed/views/actionbar.js loaded first');
         return {
             model: f.model, store: f.store, preview: f.preview, drafts: f.drafts,
             statusbar: views.statusbar, rail: views.rail, inspector: views.inspector,
+            actionbar: views.actionbar,
         };
     }
 
@@ -182,6 +187,7 @@ window.NERO.embed = window.NERO.embed || {};
             statusbar: null,
             rail: null,
             inspector: null,
+            actionbar: null,
         };
         current = inst;
 
@@ -221,6 +227,21 @@ window.NERO.embed = window.NERO.embed || {};
             // Boot state: the message root is what the inspector will show.
             inst.store.dispatch({ type: 'ui/selectNode', nodeId: f.rail.CONTENT_NODE });
         }
+        // The action bar is the third view over the same store: its buttons end
+        // in store calls (undo/redo) or in a pure read (Copy JSON). It reports
+        // what it did through onNotice — the page's ONE status region — so the
+        // bar itself owns no messaging and no document state.
+        inst.actionbar = f.actionbar.create({
+            document: doc,
+            model: f.model,
+            store: inst.store,
+            mount: els.actions,
+            // The clipboard is read live from the window: a browser can be
+            // missing it entirely (a non-secure context), which is a state the
+            // bar handles rather than a reason to fail at boot.
+            navigator: win ? win.navigator : null,
+            onNotice: function (notice) { setNotice(inst, notice); },
+        });
         inst.session = f.drafts.create({ guildId: inst.guildId, now: Date.now });
 
         inst.unsubs.push(inst.session.onState(function (snapshot) { onSessionState(inst, snapshot); }));
@@ -250,6 +271,23 @@ window.NERO.embed = window.NERO.embed || {};
             pending: !!(inst.session && inst.session.pendingSave && inst.session.pendingSave()),
             notice: inst.notice,
         });
+    }
+
+    /**
+     * The ONE way anything on this page says something to the user outside the
+     * status pill: a notice line inside #mb2-bar-status (the page's only live
+     * region besides the step-6 validation strip). A view reports results by
+     * calling back here; it never touches the element and never creates a
+     * region of its own — two live regions announcing the same thing is how a
+     * screen-reader user hears everything twice.
+     */
+    function setNotice(inst, notice) {
+        if (!inst || inst.destroyed) return false;
+        const text = notice && notice.text ? String(notice.text) : '';
+        if (!text) return false;                  // nothing to say: never invent an empty notice
+        inst.notice = { tone: (notice && notice.tone) || 'info', text: text };
+        renderStatus(inst);
+        return true;
     }
 
     function onSessionState(inst, snapshot) {
@@ -421,6 +459,7 @@ window.NERO.embed = window.NERO.embed || {};
         });
         if (inst.inspector) { try { inst.inspector.destroy(); } catch (e) { /* already gone */ } }
         if (inst.rail) { try { inst.rail.destroy(); } catch (e) { /* already gone */ } }
+        if (inst.actionbar) { try { inst.actionbar.destroy(); } catch (e) { /* already gone */ } }
         if (inst.session) { try { inst.session.destroy(); } catch (e) { /* reported above */ } }
         if (inst.preview) { try { inst.preview.destroy(); } catch (e) { /* already gone */ } }
         if (inst.store) { try { inst.store.destroy(); } catch (e) { /* already gone */ } }

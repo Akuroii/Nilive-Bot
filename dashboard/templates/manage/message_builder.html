@@ -37,7 +37,7 @@
      class="mb2-shell"
      data-page-module="message-builder"
      data-guild-id="{{ guild_id or '' }}"
-     data-page-script="{{ url_for('static', filename='js/embed/model.js') }} {{ url_for('static', filename='js/embed/store.js') }} {{ url_for('static', filename='js/embed/discord-markdown.js') }} {{ url_for('static', filename='js/embed/preview.js') }} {{ url_for('static', filename='js/embed/drafts.js') }} {{ url_for('static', filename='js/embed/views/statusbar.js') }} {{ url_for('static', filename='js/embed/views/rail.js') }} {{ url_for('static', filename='js/embed/views/inspector.js') }} {{ url_for('static', filename='js/embed/message-builder-page.js') }}">
+     data-page-script="{{ url_for('static', filename='js/embed/model.js') }} {{ url_for('static', filename='js/embed/store.js') }} {{ url_for('static', filename='js/embed/discord-markdown.js') }} {{ url_for('static', filename='js/embed/preview.js') }} {{ url_for('static', filename='js/embed/drafts.js') }} {{ url_for('static', filename='js/embed/views/statusbar.js') }} {{ url_for('static', filename='js/embed/views/rail.js') }} {{ url_for('static', filename='js/embed/views/inspector.js') }} {{ url_for('static', filename='js/embed/views/actionbar.js') }} {{ url_for('static', filename='js/embed/message-builder-page.js') }}">
 
     <!-- ── VALIDATION STRIP ───────────────────────────────────────────────
          One region, one owner (step 6). It exists now, with the semantics it
@@ -86,8 +86,10 @@
          status region is in the markup with role/aria-live so announcements
          works from the first render; its text is written by statusbar.js from
          the store's dirty flag + the session's persistence state. The actions
-         container is filled in 5d — a disabled button for a feature that does
-         not exist yet is not an option. -->
+         container is EMPTY in the markup on purpose: actionbar.js renders the
+         buttons (5d-1: Undo · Redo · Copy JSON, plus the dialogs they need),
+         so the markup never carries a button for a feature that does not exist
+         yet — and the buttons arrive and leave with the page fragment. -->
     <div id="mb2-bar" class="mb2-bar">
         <p id="mb2-bar-status" class="mb2-bar-status" role="status" aria-live="polite"></p>
         <div id="mb2-bar-actions" class="mb2-bar-actions"></div>

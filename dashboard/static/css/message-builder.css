@@ -153,6 +153,100 @@
 .mb2-tone-danger .mb2-status-pill  { color: var(--danger); }
 .mb2-tone-muted .mb2-status-pill   { color: var(--text3); }
 
+/* ── Action bar buttons (actionbar.js owns everything inside the container) ──
+   The disabled style keys off :disabled — the button's real property — because
+   a disabled control must look disabled, not merely be one. */
+.mb2-bar-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 34px;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg3);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.mb2-bar-btn:hover:not(:disabled) { border-color: var(--accent); }
+.mb2-bar-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.mb2-bar-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── Dialogs (the clipboard fallback today; confirmations in 5d-2) ──
+   Fixed to the viewport so the overlay never participates in the bar's flex
+   row, and dead centre with a bounded panel. No body scroll lock and no
+   overflow:hidden anywhere: the page keeps scrolling and the panel scrolls
+   internally if its content is taller than the viewport. */
+.mb2-dialog-overlay {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.55);
+}
+.mb2-dialog {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    max-width: 620px;
+    max-height: 100%;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--mb2-radius);
+    background: var(--bg2);
+    overflow: auto;
+}
+.mb2-dialog-title { margin: 0; font-size: 15px; color: var(--text); }
+.mb2-dialog-body {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text2);
+    overflow-wrap: anywhere;
+}
+.mb2-dialog-content { display: flex; flex-direction: column; min-width: 0; }
+.mb2-dialog-json {
+    width: 100%;
+    min-height: 160px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg3);
+    color: var(--text2);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    margin: 0;
+    resize: vertical;
+}
+.mb2-dialog-json:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mb2-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.mb2-dialog-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 34px;
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg3);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.mb2-dialog-btn:hover { border-color: var(--accent); }
+.mb2-dialog-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 /* ── Structure rail (rail.js owns everything inside #mb2-rail-body) ──
    Rows are flat in the DOM with aria-level for the hierarchy; the indent is
    visual only, so the tree stays navigable by keyboard and readable by a
