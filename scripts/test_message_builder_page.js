@@ -67,6 +67,7 @@ const FOUNDATION = [
     DRAFTS_PATH,
     js('embed', 'views', 'statusbar.js'),
     js('embed', 'views', 'rail.js'),
+    js('embed', 'views', 'inspector.js'),
     PAGE_PATH,
 ];
 const TEMPLATE_TREE = parseTemplate(
@@ -269,7 +270,10 @@ async function main() {
             String(env.el('mb2-rail-body').children.length));
         assert(/Message content/.test(env.el('mb2-rail-body').textContent),
             'and it is derived from the canonical document');
-        assert(env.el('mb2-inspector-body').children.length === 0, 'no inspector controls yet (5c)');
+        assert(env.el('mb2-inspector-body').children.length === 1 &&
+               env.el('mb2-inspector-body').getAttribute('data-insp-view') === 'content',
+            'the inspector shows exactly the content panel (5c)',
+            String(env.el('mb2-inspector-body').children.length));
         assert(env.el('mb2-strip').hidden === true && env.el('mb2-strip').textContent === '',
             'the validation strip exists, hidden and empty (step 6 owns its contents)');
         assert(env.el('mb2-bar-actions').children.length === 0,
@@ -1145,6 +1149,139 @@ async function main() {
         assert(env2.store().getDocument().embeds[0].fields.length ===
                record2.document.embeds[0].fields.length,
             'its rows describe the loaded document, not a default');
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    section('M. the inspector on the page');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const env = makeEnv();
+        const record = makeRecord(env, filledDocument(), { documentId: 'doc-inspected' });
+        installIdb(env, seedSpec(env, [record]));
+        await env.mount();
+
+        const inspector = env.inst.inspector;
+        const body = env.el('mb2-inspector-body');
+        assert(!!inspector, 'the page created an inspector');
+        assert(body.getAttribute('data-insp-view') === 'content',
+            'it opens on the message root the page selected at boot',
+            String(body.getAttribute('data-insp-view')));
+        assert(body.children.length === 1, 'with one panel mounted', String(body.children.length));
+
+        const content = inspector.control('content');
+        assert(!!content && content.getAttribute('data-insp') === 'content',
+            'the content control is there');
+        assert(content.value === record.document.content,
+            'and it shows the loaded draft, not a default',
+            String(content.value));
+
+        // Typing is a store edit: the document, the preview and the status bar
+        // all move, and the rail is untouched (it is not the editing surface).
+        const patchesBefore = env.inst.preview.stats().patches;
+        const rowsBefore = env.el('mb2-rail-body').children.length;
+        content.value = 'Typed on the page';
+        body.dispatch('input', { type: 'input', target: content });
+        assert(env.store().getDocument().content === 'Typed on the page',
+            'typing reaches the canonical document', env.store().getDocument().content);
+        assert(env.inst.preview.stats().patches === patchesBefore + 1,
+            'the preview patched once, through the store subscription',
+            String(env.inst.preview.stats().patches - patchesBefore));
+        assert(env.store().isDirty() === true, 'the edit is dirty');
+        assert(env.session().pendingSave() === true, 'and a save is queued');
+        assert(env.el('mb2-rail-body').children.length === rowsBefore,
+            'the rail did not gain rows for a content edit');
+
+        // Selecting another node is UI state: no preview paint, new panel.
+        const embedId = env.store().getDocument().embeds[0].id;
+        const patchesAfterEdit = env.inst.preview.stats().patches;
+        env.store().dispatch({ type: 'ui/selectNode', nodeId: embedId });
+        assert(env.inst.preview.stats().patches === patchesAfterEdit,
+            'selecting a node does not repaint the preview',
+            String(env.inst.preview.stats().patches - patchesAfterEdit));
+        assert(body.getAttribute('data-insp-view') === 'embed',
+            'and the inspector shows the embed panel', String(body.getAttribute('data-insp-view')));
+        const title = inspector.control('title');
+        assert(title.value === record.document.embeds[0].title,
+            'with the loaded embed s title', String(title.value));
+
+        // An edit from the inspector and one from the rail both land in the same
+        // place: the rail s add-field button changes the inspector s field list.
+        const fieldsBefore = env.store().getDocument().embeds[0].fields.length;
+        title.value = 'Renamed by the inspector';
+        body.dispatch('input', { type: 'input', target: title });
+        assert(env.store().getDocument().embeds[0].title === 'Renamed by the inspector',
+            'the embed title is editable from the page');
+        const embedRowLabel = (function () {
+            let found = '';
+            env.el('mb2-rail-body').children.forEach(row => {
+                if (row.getAttribute('data-node-id') !== embedId) return;
+                row.children.forEach(child => {
+                    if ((child.className || '').indexOf('mb2-rail-label') !== -1) found = child.textContent;
+                });
+            });
+            return found;
+        })();
+        assert(embedRowLabel.indexOf('Renamed by the inspector') !== -1,
+            'the rail relabelled the renamed embed (store → rail)', embedRowLabel);
+
+        let addFieldButton = null;
+        env.el('mb2-rail-body').children.forEach(row => {
+            if (row.getAttribute('data-node-id') !== embedId) return;
+            row.children.forEach(child => {
+                if ((child.className || '').indexOf('mb2-rail-actions') === -1) return;
+                child.children.forEach(button => {
+                    if (button.getAttribute('data-rail-action') === 'addField') addFieldButton = button;
+                });
+            });
+        });
+        env.el('mb2-rail-body').dispatch('click', { type: 'click', target: addFieldButton });
+        assert(env.store().getDocument().embeds[0].fields.length === fieldsBefore + 1,
+            'a rail action adds a field to the same document',
+            String(env.store().getDocument().embeds[0].fields.length));
+        const newFieldId = env.store().getDocument().embeds[0].fields[fieldsBefore].id;
+        assert(env.store().getUi().selectedNodeId === newFieldId,
+            'and the rail selected the new field (5b)');
+        assert(body.getAttribute('data-insp-view') === 'field',
+            'so the inspector follows it without being told (store → view)',
+            String(body.getAttribute('data-insp-view')));
+
+        const fieldValue = inspector.control('field.value');
+        fieldValue.value = 'value from the page';
+        body.dispatch('input', { type: 'input', target: fieldValue });
+        assert(env.store().getDocument().embeds[0].fields[fieldsBefore].value === 'value from the page',
+            'field values are editable from the page');
+
+        // Undo is reflected in the control that made the change.
+        env.store().undo();
+        assert(fieldValue.value === '', 'undo reflects into the field input',
+            String(fieldValue.value));
+
+        // Going back to the embed shows a row per field, straight from the store.
+        env.store().dispatch({ type: 'ui/selectNode', nodeId: embedId });
+        const rowButtons = [];
+        (function collect(node) {
+            (node.children || []).forEach(child => {
+                if (child.getAttribute && child.getAttribute('data-insp-action') === 'selectField') {
+                    rowButtons.push(child);
+                }
+                collect(child);
+            });
+        })(body);
+        assert(rowButtons.length === fieldsBefore + 1,
+            'the embed panel lists every field in the document',
+            String(rowButtons.length));
+        assert(rowButtons.some(b => b.getAttribute('data-field-id') === newFieldId),
+            'including the one the rail just added');
+
+        // Teardown releases the inspector s DOM and its subscriptions.
+        const selectorsBefore = env.store()._subscriberCounts().selectors;
+        assert(selectorsBefore >= 6, 'the page holds the rail s and inspector s subscriptions',
+            String(selectorsBefore));
+        env.unmount();
+        assert(env.el('mb2-inspector-body').children.length === 0, 'teardown empties the inspector');
+        assert(env.el('mb2-inspector-body').getAttribute('data-insp-view') === null,
+            'and removes its view marker');
+        assert(env.store()._subscriberCounts().selectors === 0, 'every subscription is gone');
     }
 
     // ─────────────────────────────────────────────────────────────

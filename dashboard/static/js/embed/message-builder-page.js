@@ -71,6 +71,7 @@ window.NERO.embed = window.NERO.embed || {};
         rail: 'mb2-rail',
         railBody: 'mb2-rail-body',
         inspector: 'mb2-inspector',
+        inspectorBody: 'mb2-inspector-body',
         preview: 'mb2-preview-region',
         mount: 'mb2-mount',
         bar: 'mb2-bar',
@@ -89,9 +90,10 @@ window.NERO.embed = window.NERO.embed || {};
         if (!f.drafts || !f.drafts.create) throw new Error('message-builder needs embed/drafts.js loaded first');
         if (!views.statusbar || !views.statusbar.create) throw new Error('message-builder needs embed/views/statusbar.js loaded first');
         if (!views.rail || !views.rail.create) throw new Error('message-builder needs embed/views/rail.js loaded first');
+        if (!views.inspector || !views.inspector.create) throw new Error('message-builder needs embed/views/inspector.js loaded first');
         return {
             model: f.model, store: f.store, preview: f.preview, drafts: f.drafts,
-            statusbar: views.statusbar, rail: views.rail,
+            statusbar: views.statusbar, rail: views.rail, inspector: views.inspector,
         };
     }
 
@@ -150,6 +152,7 @@ window.NERO.embed = window.NERO.embed || {};
             strip: requireElement(root, doc, ID.strip),
             rail: requireElement(root, doc, ID.rail),
             railBody: requireElement(root, doc, ID.railBody),
+            inspectorBody: requireElement(root, doc, ID.inspectorBody),
             inspector: requireElement(root, doc, ID.inspector),
             preview: requireElement(root, doc, ID.preview),
             mount: requireElement(root, doc, ID.mount),
@@ -178,6 +181,7 @@ window.NERO.embed = window.NERO.embed || {};
             preview: null,
             statusbar: null,
             rail: null,
+            inspector: null,
         };
         current = inst;
 
@@ -199,6 +203,19 @@ window.NERO.embed = window.NERO.embed || {};
             document: doc,
             store: inst.store,
             mount: els.railBody,
+        });
+        // The inspector is the editing view over the same store: it renders the
+        // selected node's properties and each input is a store action. Like the
+        // rail it is created before the draft loads, so the page is usable
+        // immediately and repaints itself when the stored document arrives.
+        inst.inspector = f.inspector.create({
+            document: doc,
+            model: f.model,
+            store: inst.store,
+            mount: els.inspectorBody,
+            // One clock for the whole page life — the same one the preview
+            // header uses, so "Now" cannot disagree with the rendered time.
+            now: function () { return inst.startedAt; },
         });
         if (!inst.store.getUi().selectedNodeId) {
             // Boot state: the message root is what the inspector will show.
@@ -402,6 +419,7 @@ window.NERO.embed = window.NERO.embed || {};
         inst.unsubs.splice(0).forEach(function (off) {
             try { off(); } catch (e) { /* an unsubscribe must never block teardown */ }
         });
+        if (inst.inspector) { try { inst.inspector.destroy(); } catch (e) { /* already gone */ } }
         if (inst.rail) { try { inst.rail.destroy(); } catch (e) { /* already gone */ } }
         if (inst.session) { try { inst.session.destroy(); } catch (e) { /* reported above */ } }
         if (inst.preview) { try { inst.preview.destroy(); } catch (e) { /* already gone */ } }

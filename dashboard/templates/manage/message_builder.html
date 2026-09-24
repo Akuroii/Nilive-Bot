@@ -37,7 +37,7 @@
      class="mb2-shell"
      data-page-module="message-builder"
      data-guild-id="{{ guild_id or '' }}"
-     data-page-script="{{ url_for('static', filename='js/embed/model.js') }} {{ url_for('static', filename='js/embed/store.js') }} {{ url_for('static', filename='js/embed/discord-markdown.js') }} {{ url_for('static', filename='js/embed/preview.js') }} {{ url_for('static', filename='js/embed/drafts.js') }} {{ url_for('static', filename='js/embed/views/statusbar.js') }} {{ url_for('static', filename='js/embed/views/rail.js') }} {{ url_for('static', filename='js/embed/message-builder-page.js') }}">
+     data-page-script="{{ url_for('static', filename='js/embed/model.js') }} {{ url_for('static', filename='js/embed/store.js') }} {{ url_for('static', filename='js/embed/discord-markdown.js') }} {{ url_for('static', filename='js/embed/preview.js') }} {{ url_for('static', filename='js/embed/drafts.js') }} {{ url_for('static', filename='js/embed/views/statusbar.js') }} {{ url_for('static', filename='js/embed/views/rail.js') }} {{ url_for('static', filename='js/embed/views/inspector.js') }} {{ url_for('static', filename='js/embed/message-builder-page.js') }}">
 
     <!-- ── VALIDATION STRIP ───────────────────────────────────────────────
          One region, one owner (step 6). It exists now, with the semantics it
@@ -60,9 +60,11 @@
         </nav>
 
         <!-- ── INSPECTOR ──────────────────────────────────────────────────
-             The fields of whatever is selected. tabindex="-1" so the rail can
-             move focus here after a structural change without a tab stop that
-             is invisible in the tab order. Filled in 5c. -->
+             The properties of whatever is selected: the message content, an
+             embed or one field. inspector.js renders into #mb2-inspector-body
+             and edits only through store actions. tabindex="-1" so a structural
+             change can move focus here without a tab stop that is invisible in
+             the tab order. -->
         <section id="mb2-inspector" class="mb2-inspector" aria-labelledby="mb2-inspector-title" tabindex="-1">
             <h2 class="mb2-region-title" id="mb2-inspector-title">Inspector</h2>
             <div id="mb2-inspector-body" class="mb2-inspector-body"></div>

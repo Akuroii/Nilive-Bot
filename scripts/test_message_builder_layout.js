@@ -230,7 +230,7 @@ const scriptOrder = (SCRIPTS.match(/js\/[^']+?'/g) || []).map(s => s.replace(/'$
 const expectedOrder = [
     'js/embed/model.js', 'js/embed/store.js', 'js/embed/discord-markdown.js',
     'js/embed/preview.js', 'js/embed/drafts.js', 'js/embed/views/statusbar.js',
-    'js/embed/views/rail.js', 'js/embed/message-builder-page.js',
+    'js/embed/views/rail.js', 'js/embed/views/inspector.js', 'js/embed/message-builder-page.js',
 ];
 assert(JSON.stringify(scriptOrder) === JSON.stringify(expectedOrder),
     'data-page-script loads the foundations before the page, in dependency order',
@@ -265,6 +265,26 @@ assert(/NERO\.embed\.views\.statusbar\s*=/.test(statusbar),
     'the statusbar view publishes NERO.embed.views.statusbar');
 assert(/mb2-rail-row/.test(CSS_NO_COMMENTS) && /mb2-rail-btn/.test(CSS_NO_COMMENTS),
     'the rail rows are styled in the page stylesheet');
+
+// ── the inspector's stylesheet contract (step 5c) ────────────────
+// The inspector is a column of labelled controls: it needs the touch-target
+// floor and the wrapping rules, and it must NOT bring validation styling.
+assert(/\.mb2-insp-input/.test(CSS_NO_COMMENTS) && /\.mb2-insp-label/.test(CSS_NO_COMMENTS),
+    'the inspector controls and labels are styled');
+assert(/\.mb2-insp-group/.test(CSS_NO_COMMENTS) && /\.mb2-insp-fields/.test(CSS_NO_COMMENTS),
+    'its groups and the field list are styled');
+assert(/min-height:\s*3[0-9]px/.test(CSS_NO_COMMENTS),
+    'controls keep a touch-target minimum height');
+assert(/\.mb2-insp-input\s*\{[^}]*width:\s*100%/.test(CSS_NO_COMMENTS),
+    'inputs fill their column instead of overflowing it');
+assert(!/\.mb2-insp[^{]*\{[^}]*overflow\s*:\s*hidden/.test(CSS_NO_COMMENTS),
+    'no inspector rule clips content (long field names wrap instead)');
+['danger', 'warning', 'success'].forEach(tone => {
+    assert(!new RegExp('\\.mb2-insp[^{]*\\{[^}]*--' + tone).test(CSS_NO_COMMENTS),
+        'no validation tone leaks into the inspector (' + tone + ')');
+});
+assert(!/mb2-insp-(error|invalid|limit|count|warning)/.test(CSS_NO_COMMENTS),
+    'and no validation classes exist yet');
 assert(/view\.dirty/.test(STATUS_CODE) && !/store\.isDirty/.test(STATUS_CODE) && !/options\.store/.test(STATUS_CODE),
     'the statusbar is TOLD the dirty state (view.dirty) and never reaches into the store itself');
 assert(!/indexedDB|localStorage|sessionStorage/.test(statusbar) && !/indexedDB|localStorage|sessionStorage/.test(PAGE_SRC),

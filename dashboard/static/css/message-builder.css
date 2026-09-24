@@ -213,6 +213,101 @@
 .mb2-rail-btn:disabled { opacity: .35; cursor: default; }
 .mb2-rail-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
+/* ── Inspector (inspector.js owns everything inside #mb2-inspector-body) ──
+   Direct controls, no decoration: one labelled control per property, grouped
+   with fieldsets. Every rule here is about touch target size, wrapping and
+   focus — none of it is validation state, which step 6 owns. */
+.mb2-insp-panel { display: block; }
+.mb2-insp-field { margin-bottom: 12px; min-width: 0; }
+.mb2-insp-label,
+.mb2-insp-legend {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .02em;
+    color: var(--text2);
+    margin-bottom: 4px;
+}
+.mb2-insp-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 10px;
+    min-height: 34px;              /* touch target */
+}
+.mb2-insp-input:focus { border-color: var(--accent); }
+.mb2-insp-input::placeholder { color: var(--text3); }
+.mb2-insp-textarea { resize: vertical; min-height: 72px; line-height: 1.45; }
+.mb2-insp-color { width: 56px; height: 34px; padding: 2px; cursor: pointer; }
+.mb2-insp-row { display: flex; gap: 8px; align-items: flex-end; }
+.mb2-insp-row .mb2-insp-input { flex: 1 1 auto; }
+.mb2-insp-now { flex: 0 0 auto; min-height: 34px; }
+.mb2-insp-group {
+    border: 0;
+    border-top: 1px solid var(--border);
+    margin: 0 0 14px;
+    padding: 12px 0 0;
+    min-width: 0;
+}
+.mb2-insp-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text2);
+    margin-bottom: 12px;
+    cursor: pointer;
+    min-height: 32px;
+}
+.mb2-insp-checkbox { width: 16px; height: 16px; accent-color: var(--accent); flex: 0 0 auto; }
+.mb2-insp-checktext { min-width: 0; }
+.mb2-insp-btn {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text2);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+    padding: 8px 10px;
+    min-height: 32px;
+    cursor: pointer;
+}
+.mb2-insp-btn:hover { border-color: var(--accent); color: var(--text); }
+.mb2-insp-fields {
+    list-style: none;
+    margin: 0 0 10px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.mb2-insp-fieldrow { display: flex; gap: 6px; align-items: stretch; }
+.mb2-insp-fieldbtn {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: left;
+    /* long field names wrap rather than widening the column */
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+.mb2-insp-remove { flex: 0 0 auto; }
+.mb2-insp-contextrow { margin-bottom: 12px; align-items: center; }
+.mb2-insp-context {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--text2);
+    overflow-wrap: anywhere;
+}
+.mb2-insp-hint { font-size: 12px; color: var(--text3); margin: 4px 0 0; }
+.mb2-insp-empty { font-size: 13px; color: var(--text2); margin: 0 0 10px; }
+
 /* ── Responsive ──────────────────────────────────────────────── */
 /* Two columns: the preview stops being a side column and becomes a sticky top
    pane (order:-1) with a bounded height instead of being dropped. */
@@ -241,6 +336,9 @@
     .mb2-rail-row { margin-bottom: 0; }
     .mb2-rail-row-embed, .mb2-rail-row-field { padding-left: 8px; }
     .mb2-rail-actions { opacity: 1; }
+    /* Stacked layout: the inspector is the only editing surface on screen, so
+       its rows keep the full width and the colour/Now controls stay tappable. */
+    .mb2-insp-row { align-items: stretch; }
     .mb2-preview { max-height: 36vh; }
     .mb2-bar { align-items: flex-start; }
 }

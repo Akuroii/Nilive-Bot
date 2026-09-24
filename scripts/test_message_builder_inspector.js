@@ -1,0 +1,736 @@
+#!/usr/bin/env node
+/* ═══════════════════════════════════════════════════════════════
+   Message Builder v2 — phase 1, step 5c: the property inspector.
+
+   WHAT THIS HAS TO PROVE
+
+     A. THE ACTION SURFACE — every keystroke leaves as a store action from the
+        declared vocabulary, carrying ids (never indexes), with a coalesce key
+        so a typing burst stays one undo step. Nothing else is dispatched, and
+        `document/load` is never used to smuggle an edit in.
+     B. THE MUTATION BOUNDARY — the store's documents are deep-frozen for the
+        whole harness and the freeze is proven live before any check relies on
+        it, so an in-place write throws instead of quietly working. A second
+        store subscription proves the DOM follows the STORE: an edit made
+        anywhere else lands here without the inspector being told.
+     C. EVERY EDITABLE PROPERTY — content, embed title/description/url/
+        timestamp/colour, author name/url/icon, footer text/icon, image,
+        thumbnail, and field name/value/inline: each control changes exactly the
+        canonical document field it claims to, in the shape the model normalizes
+        to, and clearing a value clears it.
+     D. SELECTION — the inspector shows what the store says is selected, in both
+        directions: a rail selection swaps the panel, and the inspector's own
+        navigation (field rows) dispatches ui/selectNode so the rail follows.
+     E. EXTERNAL CHANGE — undo, redo and a document replacement are reflected in
+        the inputs, and a render with nothing new writes nothing.
+     F. BOUNDARIES — no persistence, no renderer calls, no validation: the
+        module is loaded WITHOUT preview.js/drafts.js in the sandbox at all, and
+        its source (comments stripped) contains no validation vocabulary.
+     G. ACCESSIBILITY — every control is labelled by a matching <label for>,
+        every button has an accessible name, ids are unique, groups are
+        fieldsets.
+     H. TEARDOWN — destroy() unsubscribes, removes its listeners, empties the
+        mount, and is idempotent.
+     I. IDENTITY/PERF — a keystroke creates no nodes and rewrites no values;
+        swapping embeds reuses the same inputs; the field list reconciles by id.
+
+   Run:  node scripts/test_message_builder_inspector.js
+   ═══════════════════════════════════════════════════════════════ */
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const { createDom } = require('./support/dom_stub.js');
+
+let pass = 0, fail = 0; const failures = [];
+function assert(cond, name, extra) {
+    if (cond) { pass++; console.log('  PASS', name); }
+    else { fail++; failures.push(name + (extra ? ' — ' + extra : '')); console.log('  FAIL', name, extra || ''); }
+}
+let currentSection = '(none)';
+function section(t) { currentSection = t; console.log('\n== ' + t + ' =='); }
+
+const ROOT_DIR = path.join(__dirname, '..');
+const js = (...p) => path.join(ROOT_DIR, 'dashboard', 'static', 'js', ...p);
+const INSPECTOR_PATH = process.env.NERO_INSPECTOR_SRC || js('embed', 'views', 'inspector.js');
+const RAIL_PATH = process.env.NERO_RAIL_SRC || js('embed', 'views', 'rail.js');
+const INSPECTOR_SOURCE = fs.readFileSync(INSPECTOR_PATH, 'utf8');
+
+/** Comments describe the boundaries; only CODE can breach them. */
+function stripComments(src) {
+    return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+}
+const CODE = stripComments(INSPECTOR_SOURCE);
+
+// ── sandbox: model + store + rail + inspector, and NOTHING else ──
+// preview.js and drafts.js are deliberately absent: if the inspector reached
+// for either, it would throw here rather than pass unnoticed.
+function makeSandbox() {
+    const dom = createDom();
+    const sandbox = {
+        window: {}, document: dom.document, console: console,
+        setTimeout, clearTimeout, Promise, Object, Array, Math, Date, JSON, Number,
+        String, RegExp, Error, TypeError, Set, Map, Symbol, isFinite, parseInt,
+    };
+    sandbox.window.document = dom.document;
+    vm.createContext(sandbox);
+    [js('embed', 'model.js'), js('embed', 'store.js'), RAIL_PATH, INSPECTOR_PATH].forEach(file => {
+        vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: path.basename(file) });
+    });
+    return { dom, sandbox, NERO: sandbox.window.NERO };
+}
+
+function deepFreeze(value, seen) {
+    seen = seen || new Set();
+    if (value === null || typeof value !== 'object' || seen.has(value)) return value;
+    seen.add(value);
+    Object.freeze(value);
+    Object.getOwnPropertyNames(value).forEach(key => deepFreeze(value[key], seen));
+    return value;
+}
+
+const CLOCK = 1790284740000;               // 2026-09-24T12:39:00.000Z
+const FIXTURE_TS = '2026-01-02T03:04:05.000Z';
+
+function filledDocument(NERO, text) {
+    const model = NERO.embed.model;
+    const base = model.blankMessageDocument();
+    return model.normalizeDocument(Object.assign({}, base, {
+        content: text || 'Hello',
+        embeds: [Object.assign({}, base.embeds[0], {
+            title: 'Title one',
+            description: 'Description one',
+            url: 'https://example.com/one',
+            timestamp: '2026-01-02T03:04:05.000Z',
+            color: 0x5865f2,
+            author: { name: 'Author one', url: 'https://example.com/author', icon: null },
+            footer: { text: 'Footer one', icon: null },
+            fields: [
+                { id: 'fld_a', name: 'A', value: '1', inline: false },
+                { id: 'fld_b', name: 'B', value: '2', inline: true },
+            ],
+        })],
+    }));
+}
+
+/**
+ * A store + an inspector, with every published document frozen and every
+ * dispatch recorded. `rig.mount` is where events are delivered (the DOM double
+ * has no bubbling, so an event goes to the mount carrying the real target).
+ */
+function makeRig(options) {
+    options = options || {};
+    const { dom, NERO } = makeSandbox();
+    const model = NERO.embed.model;
+    const storeMod = NERO.embed.store;
+    const document_ = options.document || filledDocument(NERO);
+
+    const store = storeMod.createStore({
+        document: document_,
+        // The page selects the message root at boot (5b wiring); the rig starts
+        // from that same state so the harness tests the real configuration.
+        ui: { selectedNodeId: 'content' },
+        reducers: storeMod.createReducers(model),
+        now: () => CLOCK,
+        scheduler: { setTimeout: () => 0, clearTimeout: () => {} },
+    });
+
+    const freeze = (d) => deepFreeze(d);
+    freeze(store.getDocument());
+    store.subscribe((state) => freeze(state.document));
+
+    const dispatched = [];
+    const rawDispatch = store.dispatch;
+    store.dispatch = (action) => { dispatched.push(action); return rawDispatch(action); };
+
+    const mount = dom.document.createElement('div');
+    mount.setAttribute('id', 'mb2-inspector-body');
+
+    const inspector = NERO.embed.views.inspector.create({
+        document: dom.document,
+        model: model,
+        store: store,
+        mount: mount,
+        now: () => CLOCK,
+    });
+
+    return {
+        dom, NERO, model, store, inspector, mount, dispatched,
+        doc: () => store.getDocument(),
+        // deltas: never assert absolutes that drift
+        created: () => inspector.stats().nodesCreated,
+        writes: () => inspector.stats().valueWrites,
+        renders: () => inspector.stats().renders,
+        keys: () => dispatched.map(a => a.type),
+        last: () => dispatched[dispatched.length - 1],
+        input: (key) => inspector.control(key),
+        type: (keyOrNode, value) => {
+            const node = typeof keyOrNode === 'string' ? inspector.control(keyOrNode) : keyOrNode;
+            node.value = value;
+            mount.dispatch('input', { type: 'input', target: node });
+            return node;
+        },
+        toggle: (keyOrNode, on) => {
+            const node = typeof keyOrNode === 'string' ? inspector.control(keyOrNode) : keyOrNode;
+            node.checked = !!on;
+            mount.dispatch('change', { type: 'change', target: node });
+            return node;
+        },
+        panel: () => inspector.panel(),
+        click: (action) => {
+            const node = findAction(mount, action);
+            assert(!!node, 'rig: found the ' + action + ' button');
+            if (node) mount.dispatch('click', { type: 'click', target: node });
+            return node;
+        },
+        select: (nodeId) => store.dispatch({ type: 'ui/selectNode', nodeId: nodeId }),
+    };
+}
+
+function walk(node, out) {
+    out = out || [];
+    (node.children || []).forEach(child => { out.push(child); walk(child, out); });
+    return out;
+}
+
+function findAction(node, action) {
+    const all = walk(node);
+    for (let i = 0; i < all.length; i++) {
+        if (all[i].getAttribute && all[i].getAttribute('data-insp-action') === action) return all[i];
+    }
+    return null;
+}
+
+function runAll() {
+    // ═══════════════════════════════════════════════════════════════
+    section('A. the action surface: declared actions, ids, coalescing');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const rig = makeRig();
+        const storeActions = Object.keys(rig.NERO.embed.store.createReducers(rig.NERO.embed.model));
+        const embedId = rig.doc().embeds[0].id;
+        const fieldId = rig.doc().embeds[0].fields[0].id;
+
+        assert(rig.inspector.view() === 'content', 'the boot selection shows the content panel',
+            String(rig.inspector.view()));
+        rig.type('content', 'Hello there');
+        rig.select(embedId);
+        rig.type('title', 'T2');
+        rig.type('url', 'https://example.com/two');
+        rig.type('author.name', 'A2');
+        rig.type('footer.text', 'F2');
+        rig.type('media.image', 'https://example.com/i.png');
+        rig.select(fieldId);
+        rig.type('field.name', 'A renamed');
+        rig.toggle('field.inline', true);
+        rig.select(embedId);
+        rig.click('addField');
+
+        const types = rig.keys();
+        assert(types.every(t => storeActions.indexOf(t) !== -1),
+            'every dispatched action is declared by the store reducers',
+            types.filter(t => storeActions.indexOf(t) === -1).join(','));
+        assert(types.indexOf('document/load') === -1,
+            'no edit is smuggled in as a whole-document replacement');
+        ['content/set', 'embed/set', 'embed/setAuthor', 'embed/setFooter', 'embed/setMedia',
+         'field/set', 'field/add', 'ui/selectNode'].forEach(t => {
+            assert(types.indexOf(t) !== -1, 'the inspector uses ' + t, types.join(','));
+        });
+
+        const valueActions = rig.dispatched.filter(a => a.type !== 'ui/selectNode');
+        const scoped = valueActions.filter(a => a.type !== 'content/set');
+        assert(scoped.every(a => typeof a.embedId === 'string' && a.embedId.length),
+            'every embed/field action carries the embed id (ids, never indexes)',
+            scoped.filter(a => typeof a.embedId !== 'string').map(a => a.type).join(','));
+        assert(valueActions.every(a => !('index' in a) && !('at' in a) && !('position' in a)),
+            'no action refers to a position');
+        assert(rig.dispatched.filter(a => a.type === 'field/set').every(a => typeof a.fieldId === 'string'),
+            'every field action carries the field id');
+        const text = valueActions.filter(a => ['content/set', 'embed/set', 'embed/setAuthor', 'embed/setFooter',
+            'embed/setMedia', 'field/set'].indexOf(a.type) !== -1);
+        assert(text.every(a => a.meta && typeof a.meta.coalesceKey === 'string' && a.meta.coalesceKey.length),
+            'every text edit declares a coalesce key (a burst is one undo step)',
+            JSON.stringify(text.map(a => a.meta).slice(0, 3)));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    section('B. the mutation boundary and the single source of truth');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const rig = makeRig();
+        let threw = false;
+        try { rig.doc().content = 'in place'; } catch (e) { threw = true; }
+        assert(threw, 'the frozen rig is live: writing to the store s document throws');
+
+        // An edit made anywhere else must land in the inspector untouched.
+        const embedId = rig.doc().embeds[0].id;
+        const before = rig.writes();
+        rig.store.dispatch({ type: 'embed/set', embedId: embedId, patch: { title: 'From elsewhere' } });
+        rig.select(embedId);
+        assert(rig.input('title').value === 'From elsewhere',
+            'an edit made outside the inspector appears here (no mirror)',
+            rig.input('title').value);
+        assert(rig.writes() > before, 'and it arrived by rendering from the store');
+
+        // The inspector's own edit must reach the document through the store.
+        rig.type('title', 'From the inspector');
+        assert(rig.doc().embeds[0].title === 'From the inspector',
+            'typing reaches the canonical document');
+        assert(rig.input('title').value === rig.doc().embeds[0].title,
+            'and the input shows the store s value');
+
+        // A rejected (no-op) edit changes nothing at all.
+        const docBefore = rig.doc();
+        const writesBefore = rig.writes();
+        const dispatchesBefore = rig.dispatched.length;
+        rig.type('title', 'From the inspector');
+        assert(rig.doc() === docBefore, 're-typing the same value is a no-op in the document');
+        assert(rig.dispatched.length === dispatchesBefore,
+            'and it is not even dispatched (the guard reads, never stores)',
+            String(rig.dispatched.length - dispatchesBefore));
+        assert(rig.writes() === writesBefore, 'and it costs no DOM writes');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    section('C. every editable property');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const rig = makeRig();
+        const model = rig.NERO.embed.model;
+        const embedId = rig.doc().embeds[0].id;
+        const fieldId = rig.doc().embeds[0].fields[0].id;
+
+        // content
+        rig.type('content', 'New content');
+        assert(rig.doc().content === 'New content', 'message content is editable');
+        assert(rig.input('content').value === 'New content', 'the textarea shows it');
+        rig.type('content', '');
+        assert(rig.doc().content === '', 'content can be cleared');
+
+        rig.select(embedId);
+        assert(rig.inspector.view() === 'embed', 'selecting an embed shows the embed panel');
+        assert(rig.mount.children.length === 1 && rig.mount.children[0] === rig.panel(),
+            'exactly one panel is mounted at a time', String(rig.mount.children.length));
+        const embedPanel = rig.panel();
+        const titleNode = rig.inspector.control('title');
+
+        // scalars
+        rig.type('title', 'T2');
+        assert(rig.doc().embeds[0].title === 'T2', 'title');
+        rig.type('description', 'D2');
+        assert(rig.doc().embeds[0].description === 'D2', 'description');
+        rig.type('url', 'https://example.com/two');
+        assert(rig.doc().embeds[0].url === 'https://example.com/two', 'title link');
+        rig.type('timestamp', '2026-12-31T23:59:00.000Z');
+        assert(rig.doc().embeds[0].timestamp === '2026-12-31T23:59:00.000Z', 'timestamp');
+        rig.type('timestamp', '');
+        assert(rig.doc().embeds[0].timestamp === '', 'timestamp can be cleared');
+
+        // colour
+        assert(rig.input('color').value === model.colorToHex(rig.doc().embeds[0].color),
+            'the colour input shows the document colour', rig.input('color').value);
+        rig.type('color', '#00ff88');
+        assert(rig.doc().embeds[0].color === 0x00ff88, 'colour is stored as an int',
+            String(rig.doc().embeds[0].color));
+        assert(rig.last().type === 'embed/setColor', 'through embed/setColor', rig.last().type);
+
+        // author
+        rig.type('author.name', 'Ada');
+        assert(rig.doc().embeds[0].author.name === 'Ada', 'author name');
+        rig.type('author.url', 'https://example.com/ada');
+        assert(rig.doc().embeds[0].author.url === 'https://example.com/ada', 'author link');
+        rig.type('author.icon', 'https://example.com/ada.png');
+        assert(JSON.stringify(rig.doc().embeds[0].author.icon) ===
+            JSON.stringify({ kind: 'url', url: 'https://example.com/ada.png' }),
+            'author icon is normalized to a media asset',
+            JSON.stringify(rig.doc().embeds[0].author.icon));
+        assert(rig.last().type === 'embed/setAuthor', 'through embed/setAuthor', rig.last().type);
+        rig.type('author.icon', '');
+        assert(rig.doc().embeds[0].author.icon === null, 'clearing the author icon clears the asset');
+        assert(rig.doc().embeds[0].author.name === 'Ada', 'and leaves the rest of the author alone');
+
+        // footer
+        rig.type('footer.text', 'beep boop');
+        assert(rig.doc().embeds[0].footer.text === 'beep boop', 'footer text');
+        rig.type('footer.icon', 'https://example.com/f.png');
+        assert(rig.doc().embeds[0].footer.icon.url === 'https://example.com/f.png', 'footer icon');
+        assert(rig.last().type === 'embed/setFooter', 'through embed/setFooter', rig.last().type);
+        rig.type('footer.icon', '');
+        assert(rig.doc().embeds[0].footer.icon === null, 'clearing the footer icon clears the asset');
+
+        // media
+        rig.type('media.image', 'https://example.com/big.png');
+        assert(rig.doc().embeds[0].image.url === 'https://example.com/big.png', 'large image url');
+        assert(rig.last().type === 'embed/setMedia' && rig.last().slot === 'image',
+            'through embed/setMedia {slot:image}');
+        rig.type('media.thumbnail', 'https://example.com/thumb.png');
+        assert(rig.doc().embeds[0].thumbnail.url === 'https://example.com/thumb.png', 'thumbnail url');
+        assert(rig.last().slot === 'thumbnail', 'through embed/setMedia {slot:thumbnail}');
+        rig.type('media.image', '');
+        assert(rig.doc().embeds[0].image === null, 'clearing the image clears the slot');
+        assert(rig.doc().embeds[0].thumbnail !== null, 'and leaves the thumbnail alone');
+
+        // fields
+        rig.select(fieldId);
+        assert(rig.inspector.view() === 'field', 'selecting a field shows the field panel');
+        assert(rig.mount.children.length === 1 && rig.panel() !== embedPanel,
+            'and the embed panel came off the page', String(rig.mount.children.length));
+        rig.select(embedId);
+        assert(rig.panel() === embedPanel,
+            'going back reuses the same panel and the same inputs (nothing rebuilt)');
+        assert(rig.inspector.control('title') === titleNode,
+            'the title input survived the round trip');
+        rig.select(fieldId);
+        const context = rig.inspector.control('context');
+        assert(/^Field 1 in /.test(context.textContent), 'the panel says which field it is',
+            context.textContent);
+        assert(context.textContent.indexOf(rig.doc().embeds[0].title) !== -1,
+            'and which embed it belongs to');
+        rig.type('field.name', 'Renamed');
+        assert(rig.doc().embeds[0].fields[0].name === 'Renamed', 'field name');
+        rig.type('field.value', 'value two');
+        assert(rig.doc().embeds[0].fields[0].value === 'value two', 'field value');
+        assert(rig.last().type === 'field/set' && rig.last().fieldId === fieldId,
+            'through field/set with the field id');
+        rig.toggle('field.inline', true);
+        assert(rig.doc().embeds[0].fields[0].inline === true, 'inline is editable');
+        assert(rig.last().patch.inline === true, 'and normalizes to a boolean');
+        rig.toggle('field.inline', false);
+        assert(rig.doc().embeds[0].fields[0].inline === false, 'and can be turned off');
+        rig.type('field.value', '');
+        assert(rig.doc().embeds[0].fields[0].value === '', 'field value can be cleared');
+        assert(rig.doc().embeds[0].fields[1].value === '2', 'the sibling field is untouched');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    section('D. selection: the store owns it, both directions');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const rig = makeRig();
+        const embedId = rig.doc().embeds[0].id;
+        const fieldId = rig.doc().embeds[0].fields[0].id;
+
+        // rail → inspector
+        const railMount = rig.dom.document.createElement('div');
+        const railView = rig.NERO.embed.views.rail.create({
+            document: rig.dom.document, store: rig.store, mount: railMount,
+        });
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: embedId });
+        assert(rig.inspector.view() === 'embed', 'a store selection swaps the inspector to the embed');
+        assert(railView.isSelected(embedId), 'and the rail agrees');
+
+        // inspector → store → rail
+        const fieldRowButton = findAction(rig.mount, 'selectField');
+        assert(!!fieldRowButton, 'the embed panel lists its fields');
+        rig.mount.dispatch('click', { type: 'click', target: fieldRowButton });
+        assert(rig.store.getUi().selectedNodeId === fieldId,
+            'clicking a field row dispatches ui/selectNode',
+            String(rig.store.getUi().selectedNodeId));
+        assert(rig.inspector.view() === 'field', 'the inspector follows its own navigation');
+        assert(railView.isSelected(fieldId), 'and the rail follows it too');
+
+        // back to the embed from the field panel
+        const embedButton = findAction(rig.mount, 'selectEmbed');
+        rig.mount.dispatch('click', { type: 'click', target: embedButton });
+        assert(rig.store.getUi().selectedNodeId === embedId, 'the embed shortcut selects the embed');
+        assert(rig.inspector.view() === 'embed', 'and the panel follows');
+
+        // no selection
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: null });
+        assert(rig.inspector.view() === 'none', 'no selection shows the empty panel');
+        assert(/Select the message content/.test(rig.inspector.control('message').textContent),
+            'with an instruction', rig.inspector.control('message').textContent);
+        rig.mount.dispatch('click', { type: 'click', target: findAction(rig.mount, 'selectContent') });
+        assert(rig.store.getUi().selectedNodeId === 'content', 'its button selects the content root');
+        assert(rig.inspector.view() === 'content', 'and the content panel appears');
+
+        // a stale selection (the node was removed elsewhere)
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: 'fld_nope' });
+        assert(rig.inspector.view() === 'none', 'a selection that no longer exists shows the empty panel');
+        assert(/no longer there/.test(rig.inspector.control('message').textContent),
+            'and says so', rig.inspector.control('message').textContent);
+        assert(rig.inspector.selection().kind === 'unknown', 'the selection is reported as unknown');
+
+        railView.destroy();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    section('E. structural content actions, and external change');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const rig = makeRig();
+        const embedId = rig.doc().embeds[0].id;
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: embedId });
+
+        // add a field (through the store, from the inspector's own button)
+        const before = rig.doc().embeds[0].fields.length;
+        rig.click('addField');
+        assert(rig.doc().embeds[0].fields.length === before + 1,
+            'the add button adds a field to the canonical document',
+            String(rig.doc().embeds[0].fields.length));
+        assert(rig.last().type === 'field/add' && rig.last().embedId === embedId,
+            'through field/add');
+        const list = walk(rig.mount).filter(n => n.getAttribute('data-insp-action') === 'selectField');
+        assert(list.length === before + 1, 'and the list shows a row for it', String(list.length));
+
+        // remove one (the first)
+        const firstRemove = walk(rig.mount).filter(n => n.getAttribute('data-insp-action') === 'removeField')[0];
+        const removeId = firstRemove.getAttribute('data-field-id');
+        rig.mount.dispatch('click', { type: 'click', target: firstRemove });
+        assert(rig.doc().embeds[0].fields.length === before, 'the remove button removes that field');
+        assert(rig.last().type === 'field/remove' && rig.last().fieldId === removeId,
+            'through field/remove with the row s field id');
+        assert(rig.doc().embeds[0].fields.every(f => f.id !== removeId), 'and it is the one that went');
+
+        // the "Now" button uses the injected clock (never a second clock)
+        rig.click('now');
+        assert(rig.doc().embeds[0].timestamp === new Date(CLOCK).toISOString(),
+            'the Now button uses the injected clock',
+            rig.doc().embeds[0].timestamp);
+        assert(rig.input('timestamp').value === new Date(CLOCK).toISOString(),
+            'and the input shows it');
+
+        // undo / redo are reflected in the inputs
+        rig.store.undo();
+        assert(rig.input('timestamp').value === FIXTURE_TS,
+            'undo puts the previous timestamp back in the input',
+            rig.input('timestamp').value);
+        rig.store.redo();
+        assert(rig.input('timestamp').value === new Date(CLOCK).toISOString(),
+            'redo puts it back');
+
+        // a whole-document replacement (a different draft being adopted)
+        const other = filledDocument(rig.NERO, 'Replaced');
+        other.embeds[0].id = embedId;
+        rig.store.dispatch({ type: 'document/load', document: other, meta: { history: false } });
+        assert(rig.input('title').value === 'Title one',
+            'a replaced document repaints the inputs', rig.input('title').value);
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: 'content' });
+        assert(rig.input('content').value === 'Replaced',
+            'including the content panel', rig.input('content').value);
+
+        // a render with nothing new must write nothing
+        const writes = rig.writes();
+        const created = rig.created();
+        rig.inspector.render();
+        assert(rig.writes() === writes, 'a no-op render writes no input values');
+        assert(rig.created() === created, 'and creates no nodes');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    section('F. boundaries: persistence, the renderer, validation');
+    // ─────────────────────────────────────────────────────────────
+    {
+        assert(!/preview/.test(CODE), 'the code never mentions the preview',
+            (CODE.match(/.{0,30}preview.{0,30}/) || [''])[0]);
+        assert(!/updateDocument|\.patch\(|reconcile/.test(CODE),
+            'and never calls a renderer');
+        assert(!/draft|session|markSaved|savedDocumentHash|pendingSave|idb|IndexedDB/i.test(CODE),
+            'and never touches persistence',
+            (CODE.match(/.{0,30}(draft|session|markSaved).{0,30}/i) || [''])[0]);
+        ['aria-invalid', 'maxlength', 'minlength', 'pattern=', 'validate', 'validation',
+         'issues', 'mb2-strip', 'Nerrored', 'counter'].forEach(word => {
+            assert(CODE.indexOf(word) === -1, 'no validation vocabulary: ' + word);
+        });
+        assert(!/\bcover\b|256|1024|4096|6000/.test(CODE.replace(/[a-f0-9]{6,}/gi, '')),
+            'and no field limits are baked in');
+        assert(!/model\.set[A-Z]/.test(CODE),
+            'the inspector never calls a model setter itself (the store does)',
+            (CODE.match(/model\.set[A-Z]\w*/) || [''])[0]);
+        const modelCalls = CODE.match(/model\.[a-zA-Z]+\s*\(/g) || [];
+        assert(modelCalls.length > 0 &&
+               modelCalls.every(c => c === 'model.colorToHex(' || c === 'model.mediaUrl('),
+            'the model is called for display formatting only', modelCalls.join(','));
+        assert(!/innerHTML/.test(CODE), 'no innerHTML anywhere');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    section('G. accessibility of the controls');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const rig = makeRig();
+        const embedId = rig.doc().embeds[0].id;
+        const fieldId = rig.doc().embeds[0].fields[0].id;
+
+        function audit(panelName, expectControls) {
+            const all = walk(rig.mount);
+            const inputs = all.filter(n => n.tagName === 'INPUT' || n.tagName === 'TEXTAREA');
+            if (expectControls !== false) {
+                assert(inputs.length > 0, panelName + ': the panel has controls', String(inputs.length));
+            }
+            assert(inputs.every(input => {
+                const id = input.getAttribute('id');
+                if (!id) return false;
+                return all.some(n => n.tagName === 'LABEL' && n.getAttribute('for') === id);
+            }), panelName + ': every control has a <label for>');
+            const buttons = all.filter(n => n.tagName === 'BUTTON');
+            assert(buttons.every(b => (b.getAttribute('aria-label') || b.textContent || '').trim().length > 0),
+                panelName + ': every button has an accessible name');
+            const ids = all.map(n => n.getAttribute('id')).filter(Boolean);
+            assert(new Set(ids).size === ids.length, panelName + ': ids are unique', ids.join(','));
+            assert(all.filter(n => n.getAttribute('data-insp')).every(n => {
+                const id = n.getAttribute('id');
+                return all.some(m => m.tagName === 'LABEL' && m.getAttribute('for') === id);
+            }), panelName + ': every data-insp control is labelled');
+        }
+
+        assert(rig.mount.getAttribute('data-insp-view') === 'content', 'the view is announced on the mount');
+        audit('content');
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: embedId });
+        audit('embed');
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: fieldId });
+        audit('field');
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: null });
+        audit('empty', false);
+
+        const groups = walk(rig.mount).filter(n => n.getAttribute('data-insp-action') === 'selectContent');
+        assert(groups.length === 1, 'the empty panel offers one way back');
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: embedId });
+        const fieldsets = walk(rig.mount).filter(n => n.tagName === 'FIELDSET');
+        assert(fieldsets.length >= 3, 'the embed panel groups its controls in fieldsets',
+            String(fieldsets.length));
+        assert(fieldsets.every(f => walk(f).some(n => n.tagName === 'LEGEND')),
+            'every fieldset has a legend');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    section('H. teardown');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const rig = makeRig();
+        const before = rig.store._subscriberCounts().selectors;
+        assert(before >= 2, 'the inspector subscribed to the store', String(before));
+        const listenerCount = (rig.mount.listeners || []).length;
+        assert(listenerCount >= 3, 'it listens for input, change and click', String(listenerCount));
+
+        assert(rig.inspector.destroy() === true, 'destroy reports it did something');
+        assert(rig.store._subscriberCounts().selectors === 0, 'no subscription survives');
+        assert((rig.mount.listeners || []).length === 0, 'no listener survives');
+        assert(rig.mount.children.length === 0, 'the mount is empty again');
+        assert(rig.mount.getAttribute('data-insp-view') === null, 'and its view marker is gone');
+
+        const dispatchedBefore = rig.dispatched.length;
+        rig.mount.dispatch('input', { type: 'input', target: { getAttribute: () => 'content', value: 'x' } });
+        rig.mount.dispatch('click', { type: 'click', target: { getAttribute: () => 'addField' } });
+        assert(rig.dispatched.length === dispatchedBefore, 'and events after destroy do nothing');
+
+        assert(rig.inspector.destroy() === false, 'destroy is idempotent');
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: rig.doc().embeds[0].id });
+        assert(rig.mount.children.length === 0, 'the store no longer repaints it');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    section('I. identity and cost of a keystroke');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const rig = makeRig();
+        const embedId = rig.doc().embeds[0].id;
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: embedId });
+
+        const created = rig.created();
+        const writes = rig.writes();
+        const fieldRowsBefore = walk(rig.mount).filter(n => n.getAttribute('data-insp-action') === 'selectField');
+        const nodeIdentity = fieldRowsBefore.map(n => n);
+
+        const title = rig.input('title');
+        for (let i = 0; i < 8; i++) rig.type(title, 'Typing ' + i);
+        assert(rig.created() === created, 'a typing burst creates no nodes',
+            String(rig.created() - created));
+        assert(rig.writes() === writes, 'and rewrites no values (the caret stays put)',
+            String(rig.writes() - writes));
+        assert(title.value === 'Typing 7', 'the input holds what was typed');
+        assert(rig.doc().embeds[0].title === 'Typing 7', 'and so does the document');
+
+        // the field list reconciles by id: unrelated edits keep the same rows
+        const rowsNow = walk(rig.mount).filter(n => n.getAttribute('data-insp-action') === 'selectField');
+        assert(rowsNow.length === nodeIdentity.length && rowsNow.every((n, i) => n === nodeIdentity[i]),
+            'editing the title does not rebuild the field rows');
+
+        // swapping embeds reuses the inputs
+        const titleNode = title;
+        rig.store.dispatch({ type: 'embed/add' });
+        const newEmbedId = rig.doc().embeds[1].id;
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: newEmbedId });
+        assert(rig.input('title') === titleNode, 'switching embeds reuses the same input node');
+        assert(rig.input('title').value === '', 'and shows the new embed s values',
+            rig.input('title').value);
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: embedId });
+        assert(rig.input('title').value === 'Typing 7', 'switching back shows the first embed again');
+
+        // undo granularity: one burst is one undo step
+        const depth = rig.store.historyDepth().size;
+        for (let i = 0; i < 5; i++) rig.type('description', 'burst ' + i);
+        assert(rig.store.historyDepth().size === depth + 1,
+            'a burst in one control is ONE history entry',
+            JSON.stringify(rig.store.historyDepth()));
+        rig.store.undo();
+        assert(rig.doc().embeds[0].description === 'Description one',
+            'and one undo reverts the whole burst', rig.doc().embeds[0].description);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    section('J. control shapes (a checkbox cannot double-dispatch)');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const rig = makeRig();
+        const fieldId = rig.doc().embeds[0].fields[0].id;
+        rig.store.dispatch({ type: 'ui/selectNode', nodeId: fieldId });
+        const box = rig.input('field.inline');
+        box.checked = true;
+        const before = rig.dispatched.length;
+        rig.mount.dispatch('input', { type: 'input', target: box });
+        rig.mount.dispatch('change', { type: 'change', target: box });
+        assert(rig.dispatched.length === before + 1,
+            'a checkbox that fires input AND change dispatches once',
+            String(rig.dispatched.length - before));
+        assert(rig.doc().embeds[0].fields[0].inline === true, 'and the value lands');
+        assert(!!box.checked === true, 'the box stays checked');
+
+        // The property path, not just the attribute: a browser reads `input.type`.
+        assert(box.type === 'checkbox', 'the checkbox carries the type PROPERTY a browser reads',
+            String(box.type));
+        // With the attribute gone, the property alone must still drive the control
+        // (this is what a real browser does; the DOM double only stores attributes).
+        box.removeAttribute('type');
+        box.checked = false;
+        rig.mount.dispatch('change', { type: 'change', target: box });
+        assert(rig.doc().embeds[0].fields[0].inline === false,
+            'and it still toggles with the type attribute removed (property-driven)',
+            String(rig.doc().embeds[0].fields[0].inline));
+
+        // Cycling panels must never leave more than one mounted.
+        const ids = [];
+        ['content', rig.doc().embeds[0].id, fieldId, 'content', fieldId].forEach(id => {
+            rig.select(id);
+            ids.push(rig.mount.children.length);
+        });
+        assert(ids.every(n => n === 1), 'seven panel switches, one panel at a time',
+            ids.join(','));
+
+        // an event with no target, or an unknown target, is ignored
+        const after = rig.dispatched.length;
+        rig.mount.dispatch('input', { type: 'input' });
+        rig.mount.dispatch('input', { type: 'input', target: rig.dom.document.createElement('div') });
+        rig.mount.dispatch('click', { type: 'click', target: rig.dom.document.createElement('button') });
+        assert(rig.dispatched.length === after, 'unrelated events are ignored');
+    }
+}
+
+let aborted = null;
+try {
+    runAll();
+} catch (err) {
+    aborted = err;
+    fail++;
+    failures.push('section ' + currentSection + ' aborted: ' + ((err && err.message) || String(err)));
+    console.log('\n  FAIL  section ' + currentSection + ' aborted before its checks completed');
+    console.log('        ' + ((err && err.stack) || String(err)).split('\n').slice(0, 4).join('\n        '));
+}
+
+console.log('\nmessage-builder inspector: ' + pass + ' passed, ' + fail + ' failed');
+if (fail) {
+    console.log('Failures:');
+    failures.forEach(f => console.log(' -', f));
+    process.exit(1);
+}
+console.log('ALL MESSAGE-BUILDER INSPECTOR CHECKS PASSED');

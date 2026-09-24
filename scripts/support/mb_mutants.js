@@ -50,6 +50,12 @@ const TARGETS = {
         label: 'dashboard/static/js/embed/views/rail.js',
         harness: path.join(ROOT, 'scripts', 'test_message_builder_rail.js'),
     },
+    inspector: {
+        file: path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'views', 'inspector.js'),
+        env: 'NERO_INSPECTOR_SRC',
+        label: 'dashboard/static/js/embed/views/inspector.js',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_inspector.js'),
+    },
 };
 const HARNESS = path.join(ROOT, 'scripts', 'test_message_builder_page.js');
 
@@ -101,7 +107,10 @@ const MUTANTS = [
     {
         id: 'M7',
         why: 'the preview clock is read on every render instead of fixed for the page',
-        edits: [["now: function () { return inst.startedAt; },", "now: Date.now,"]],
+        edits: [[
+            "        const preview = NERO.embed.preview.create(inst.els.mount, {\n            // One clock per page life: the header time cannot drift while the\n            // page is open, and the same document renders the same bytes.\n            now: function () { return inst.startedAt; },",
+            "        const preview = NERO.embed.preview.create(inst.els.mount, {\n            // One clock per page life: the header time cannot drift while the\n            // page is open, and the same document renders the same bytes.\n            now: Date.now,",
+        ]],
     },
     // ── the persistence boundary (drafts.js) — the in-flight save race ──
     {
@@ -260,6 +269,106 @@ const MUTANTS = [
             "                history = history.slice(0, historyIndex + 1);\n                history.push({\n                    hash: model.hashDocument(state.document),\n                    document: model.cloneDocument(state.document),\n                    coalesceKey: null,\n                    at: now(),\n                });\n                historyIndex = history.length - 2;\n                return;",
         ]],
     },
+    // ── the inspector ──
+    {
+        id: 'N1',
+        target: 'inspector',
+        why: 'an edit writes into the document in place instead of dispatching',
+        edits: [[
+            "            dispatch({\n                type: 'embed/set',\n                embedId: sel.embed.id,",
+            "            sel.embed[key] = String(value);\n            return true;\n            dispatch({\n                type: 'embed/set',\n                embedId: sel.embed.id,",
+        ]],
+    },
+    {
+        id: 'N2',
+        target: 'inspector',
+        why: 'the inspector stops dispatching altogether (a private document)',
+        edits: [[
+            "        function dispatch(action) {\n            stats.dispatches++;\n            return store.dispatch(action);\n        }",
+            "        function dispatch(action) {\n            stats.dispatches++;\n            return true;\n        }",
+        ]],
+    },
+    {
+        id: 'N3',
+        target: 'inspector',
+        why: 'the inspector renders from its own copy of the document (a mirror)',
+        edits: [[
+            "        function selection() {\n            const state = store.getState();",
+            "        function selection() {\n            if (!selection.__mirror) selection.__mirror = model.cloneDocument(store.getState().document);\n            const state = { document: selection.__mirror, ui: store.getState().ui };",
+        ]],
+    },
+    {
+        id: 'N4',
+        target: 'inspector',
+        why: 'the inspector drives the renderer itself instead of leaving it to the store',
+        edits: [[
+            "        function dispatch(action) {\n            stats.dispatches++;\n            return store.dispatch(action);\n        }",
+            "        function dispatch(action) {\n            stats.dispatches++;\n            if (NERO.embed.preview && NERO.embed.preview.create) {\n                NERO.embed.preview.create(mount, { now: function () { return Date.now(); } });\n            }\n            return store.dispatch(action);\n        }",
+        ]],
+    },
+    {
+        id: 'N5',
+        target: 'inspector',
+        why: 'validation leaks in: a hard-coded field limit on every text control',
+        edits: [[
+            "            input.setAttribute('type', opts.type || 'text');",
+            "            input.setAttribute('type', opts.type || 'text');\n            input.setAttribute('maxlength', '256');",
+        ]],
+    },
+    {
+        id: 'N6',
+        target: 'inspector',
+        why: 'the inspector never subscribes to the store (it renders once)',
+        edits: [[
+            "        unsubs.push(store.subscribe(function (s) { return s.ui.selectedNodeId; }, function () { render(); }));\n        unsubs.push(store.subscribe(function (s) { return s.document; }, function () { render(); }));",
+            "        /* no subscriptions */",
+        ]],
+    },
+    {
+        id: 'N7',
+        target: 'inspector',
+        why: 'destroy() leaks its store subscriptions',
+        edits: [[
+            "            unsubs.splice(0).forEach(function (off) { try { off(); } catch (e) { /* already off */ } });",
+            "            /* subscriptions leaked */",
+        ]],
+    },
+    {
+        id: 'N8',
+        target: 'inspector',
+        why: 'the inspector keeps its own selection and ignores later store changes',
+        edits: [[
+            "            const id = (state.ui && state.ui.selectedNodeId) || null;",
+            "            if (!selection.__own) selection.__own = (state.ui && state.ui.selectedNodeId) || null;\n            const id = selection.__own;",
+        ]],
+    },
+    {
+        id: 'N9',
+        target: 'inspector',
+        why: 'the panel swap appends the new panel without detaching the old one',
+        edits: [[
+            "            if (previous && previous.node.parentNode) previous.node.parentNode.removeChild(previous.node);",
+            "            if (false && previous) previous.node.parentNode.removeChild(previous.node);",
+        ]],
+    },
+    {
+        id: 'N10',
+        target: 'inspector',
+        why: 'a field row is rebuilt on every render (focus and identity are lost)',
+        edits: [[
+            "                let row = fieldRows.get(field.id);\n                if (!row) {\n                    row = buildFieldRow();\n                    fieldRows.set(field.id, row);\n                }",
+            "                const row = buildFieldRow();\n                fieldRows.set(field.id, row);",
+        ]],
+    },
+    {
+        id: 'N11',
+        target: 'inspector',
+        why: 'every render overwrites the input the user is typing into (the caret jumps)',
+        edits: [[
+            "            if (node.value !== next) {\n                node.value = next;\n                stats.valueWrites++;\n            }",
+            "            node.value = next;\n            stats.valueWrites++;",
+        ]],
+    },
     {
         id: 'M8',
         why: 'the session attaches AFTER the load, so the loaded draft looks like an edit',
@@ -295,8 +404,35 @@ function main() {
     let caught = 0;
     const missed = [];
 
-    // ── Preflight: every harness must be GREEN before any mutant runs ──
-    // A harness that already fails would mark every mutant "caught" for free,
+    // ── Preflight: no ambiguous anchors ──
+    // A mutation is applied with String.replace, i.e. to the FIRST occurrence.
+    // When a later edit duplicates an anchor (it happens: two call sites with
+    // the same line), the mutant silently starts mutating the wrong one and
+    // reports MISSED — which looks like a gap in the tests rather than a stale
+    // mutant. Ambiguity is therefore a battery defect and fails loudly here.
+    const ambiguous = [];
+    MUTANTS.forEach(mutant => {
+        const target = TARGETS[mutant.target || 'page'];
+        if (!target) return;
+        const source = original[mutant.target || 'page'];
+        mutant.edits.forEach(([find]) => {
+            const first = source.indexOf(find);
+            if (first === -1) return;                         // reported per-mutant
+            if (source.indexOf(find, first + 1) !== -1) {
+                ambiguous.push(mutant.id + ' [' + (mutant.target || 'page') + '] "' +
+                    find.split('\n')[0].trim().slice(0, 60) + '…"');
+            }
+        });
+    });
+    if (ambiguous.length) {
+        console.error('PREFLIGHT FAILED — these anchors match more than one place, so the');
+        console.error('mutation would land on whichever comes first:');
+        ambiguous.forEach(a => console.error('  ' + a));
+        console.error('Widen the anchor with context until it is unique.');
+        process.exit(2);
+    }
+
+    // ── Preflight: every harness must be GREEN before any mutant runs ──    // A harness that already fails would mark every mutant "caught" for free,
     // which is the one way this battery could lie. So the unmutated baseline
     // runs first and aborts the whole battery if it is not clean.
     const harnesses = Object.keys(TARGETS)
@@ -355,6 +491,7 @@ function main() {
             NERO_DRAFTS_SRC: process.env.NERO_DRAFTS_SRC,
             NERO_STORE_SRC: process.env.NERO_STORE_SRC,
             NERO_RAIL_SRC: process.env.NERO_RAIL_SRC,
+            NERO_INSPECTOR_SRC: process.env.NERO_INSPECTOR_SRC,
         };
         envPatch[target.env] = file;
         const run = spawnSync(process.execPath, [harness], {
