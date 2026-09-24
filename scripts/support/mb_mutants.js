@@ -44,6 +44,12 @@ const TARGETS = {
         env: 'NERO_STORE_SRC',
         label: 'dashboard/static/js/embed/store.js',
     },
+    rail: {
+        file: path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'views', 'rail.js'),
+        env: 'NERO_RAIL_SRC',
+        label: 'dashboard/static/js/embed/views/rail.js',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_rail.js'),
+    },
 };
 const HARNESS = path.join(ROOT, 'scripts', 'test_message_builder_page.js');
 
@@ -153,6 +159,107 @@ const MUTANTS = [
             "            const wasDirty = isDirty();\n            savedHash = model.hashDocument(state.document);",
         ]],
     },
+    // ── the structure rail ──
+    {
+        id: 'R1',
+        target: 'rail',
+        why: 'removing a field mutates the document in place instead of dispatching',
+        edits: [[
+            "            if (type === 'embed') store.dispatch({ type: 'embed/remove', embedId: row.embedId });\n            else store.dispatch({ type: 'field/remove', embedId: row.embedId, fieldId: row.fieldId });",
+            "            if (type === 'embed') {\n                const doc = store.getDocument();\n                doc.embeds = doc.embeds.filter(function (e) { return e.id !== row.embedId; });\n            } else {\n                const doc = store.getDocument();\n                doc.embeds.forEach(function (e) {\n                    if (e.id === row.embedId) e.fields = e.fields.filter(function (f) { return f.id !== row.fieldId; });\n                });\n            }",
+        ]],
+    },
+    {
+        id: 'R2',
+        target: 'rail',
+        why: 'adding an embed writes into the document instead of dispatching',
+        edits: [[
+            "            const before = idsIn(store.getState().document);\n            store.dispatch(action);",
+            "            const before = idsIn(store.getState().document);\n            store.getDocument().embeds.push({ id: 'emb_direct_' + Math.random(), title: '', url: '', description: '', color: 0x7c5cbf, author: { name: '', url: '', icon: null }, footer: { text: '', icon: null }, thumbnail: null, image: null, timestamp: '', fields: [] });",
+        ]],
+    },
+    {
+        id: 'R3',
+        target: 'rail',
+        why: 'the rail keeps its own copy of the document and renders from that',
+        edits: [[
+            "            const state = store.getState();\n            const items = derive(state.document, collapsed);",
+            "            const state = store.getState();\n            if (!render.__own) render.__own = JSON.parse(JSON.stringify(state.document));\n            const items = derive(render.__own, collapsed);",
+        ]],
+    },
+    {
+        id: 'R4',
+        target: 'rail',
+        why: 'selection is view state instead of a store action',
+        edits: [[
+            "            if (currentSelection() === id) return false;\n            store.dispatch({ type: 'ui/selectNode', nodeId: id });\n            return true;",
+            "            if (currentSelection() === id) return false;\n            return true;",
+        ]],
+    },
+    {
+        id: 'R5',
+        target: 'rail',
+        why: 'rows are rebuilt on every render (identity and focus are lost)',
+        edits: [[
+            "                let row = rows.get(vm.id);\n                if (row) stats.nodesReused++;\n                else {\n                    row = buildRow();\n                    rows.set(vm.id, row);\n                }",
+            "                let row = rows.get(vm.id);\n                if (row) stats.nodesReused++;\n                row = buildRow();\n                rows.set(vm.id, row);",
+        ]],
+    },
+    {
+        id: 'R6',
+        target: 'rail',
+        why: 'delete does not restore focus to a survivor',
+        edits: [[
+            "            select(survivor);\n            pendingFocus = survivor;\n            render();",
+            "            select(survivor);\n            render();",
+        ]],
+    },
+    {
+        id: 'R7',
+        target: 'rail',
+        why: 'the roving tabindex is never updated (every row is a tab stop)',
+        edits: [[
+            "                setAttr(row.node, 'tabindex', id === focusTarget ? 0 : -1);",
+            "                setAttr(row.node, 'tabindex', 0);",
+        ]],
+    },
+    {
+        id: 'R8',
+        target: 'rail',
+        why: 'the rail never subscribes to the store (it renders only once)',
+        edits: [[
+            "        unsubs.push(store.subscribe(function (s) { return s.document; }, function () { render(); }));",
+            "            /* no subscription */",
+        ]],
+    },
+    {
+        id: 'R9',
+        target: 'rail',
+        why: 'destroy() leaks its store subscriptions (a re-mounted rail stacks renders)',
+        edits: [[
+            "            unsubs.splice(0).forEach(function (off) { try { off(); } catch (e) { /* fine */ } });",
+            "            /* subscriptions leaked */",
+        ]],
+    },
+    {
+        id: 'S1',
+        target: 'store',
+        harness: path.join(ROOT, 'scripts', 'test_message_model.js'),
+        why: 'a replacement document (meta.history:false) no longer re-seeds the undo baseline',
+        edits: [[
+            "                history = [{\n                    hash: model.hashDocument(state.document),\n                    document: model.cloneDocument(state.document),\n                    coalesceKey: null,\n                    at: now(),\n                }];\n                historyIndex = 0;\n                return;",
+            "                return;",
+        ]],
+    },
+    {
+        id: 'S2',
+        target: 'store',
+        why: 'a replacement keeps whatever came before it in the stack (only the index resets)',
+        edits: [[
+            "                history = [{\n                    hash: model.hashDocument(state.document),\n                    document: model.cloneDocument(state.document),\n                    coalesceKey: null,\n                    at: now(),\n                }];\n                historyIndex = 0;\n                return;",
+            "                history = history.slice(0, historyIndex + 1);\n                history.push({\n                    hash: model.hashDocument(state.document),\n                    document: model.cloneDocument(state.document),\n                    coalesceKey: null,\n                    at: now(),\n                });\n                historyIndex = history.length - 2;\n                return;",
+        ]],
+    },
     {
         id: 'M8',
         why: 'the session attaches AFTER the load, so the loaded draft looks like an edit',
@@ -188,16 +295,42 @@ function main() {
     let caught = 0;
     const missed = [];
 
+    // ── Preflight: every harness must be GREEN before any mutant runs ──
+    // A harness that already fails would mark every mutant "caught" for free,
+    // which is the one way this battery could lie. So the unmutated baseline
+    // runs first and aborts the whole battery if it is not clean.
+    const harnesses = Object.keys(TARGETS)
+        .map(key => TARGETS[key].harness || HARNESS)
+        .concat(MUTANTS.map(m => m.harness).filter(Boolean))
+        .filter((h, i, all) => all.indexOf(h) === i);
+    const baselines = harnesses.map(h => spawnSync(process.execPath, [h], {
+        cwd: ROOT, encoding: 'utf8', env: Object.assign({}, process.env),
+    }));
+    const redBaselines = harnesses.filter((h, i) => baselines[i].status !== 0);
+    if (redBaselines.length) {
+        console.error('PREFLIGHT FAILED — the battery cannot judge a mutation while a harness is red:');
+        redBaselines.forEach(h => console.error('  ' + path.relative(ROOT, h) + ' is failing'));
+        console.error('Fix the harness (or the code it tests) first: a mutant "caught" by an');
+        console.error('already-broken harness proves nothing.');
+        process.exit(2);
+    }
+
     console.log('message-builder mutation battery — ' + selected.length + ' mutants');
+    console.log('preflight: ' + harnesses.map(h => path.basename(h)).join(', ') + ' all green');
     Object.keys(TARGETS).forEach(key => {
         console.log('  ' + key.padEnd(7) + TARGETS[key].label + ' (' + before[key].slice(0, 12) + ')');
     });
-    console.log('battery: scripts/test_message_builder_page.js\n');
+    console.log('battery harnesses: ' + Object.keys(TARGETS)
+        .map(key => key + ' -> ' + path.basename(TARGETS[key].harness || HARNESS))
+        .join(', ') + '\n');
 
     selected.forEach(mutant => {
         const targetKey = mutant.target || 'page';
         const target = TARGETS[targetKey];
         if (!target) { missed.push(mutant.id + ' (unknown target)'); return; }
+        // Which harness judges this mutant: the mutant's own choice (when the
+        // property is asserted in a more specific suite), else its target's.
+        const harness = mutant.harness || target.harness || HARNESS;
         let source = original[targetKey];
         const applied = [];
         for (const [find, replace] of mutant.edits) {
@@ -217,9 +350,14 @@ function main() {
 
         const file = path.join(tmpDir, mutant.id + '.js');
         fs.writeFileSync(file, source);
-        const envPatch = { NERO_MB_PAGE_SRC: process.env.NERO_MB_PAGE_SRC, NERO_DRAFTS_SRC: process.env.NERO_DRAFTS_SRC };
+        const envPatch = {
+            NERO_MB_PAGE_SRC: process.env.NERO_MB_PAGE_SRC,
+            NERO_DRAFTS_SRC: process.env.NERO_DRAFTS_SRC,
+            NERO_STORE_SRC: process.env.NERO_STORE_SRC,
+            NERO_RAIL_SRC: process.env.NERO_RAIL_SRC,
+        };
         envPatch[target.env] = file;
-        const run = spawnSync(process.execPath, [HARNESS], {
+        const run = spawnSync(process.execPath, [harness], {
             env: Object.assign({}, process.env, envPatch),
             encoding: 'utf8',
             timeout: 120000,
@@ -229,6 +367,7 @@ function main() {
         else missed.push(mutant.id);
         const firstFailure = (run.stdout || '').split('\n').filter(l => l.indexOf('  FAIL') === 0)[0] || '';
         console.log('  ' + (failed ? 'CAUGHT  ' : 'MISSED  ') + mutant.id + '  [' + targetKey + '] ' + mutant.why);
+        if (!failed) console.log('      run against ' + path.basename(harness));
         if (failed) {
             const count = ((run.stdout || '').match(/  FAIL /g) || []).length;
             console.log('      ' + count + ' failing check(s)' + (firstFailure ? ' — e.g.' + firstFailure.replace('  FAIL ', ' ') : ''));

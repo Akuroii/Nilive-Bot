@@ -69,6 +69,7 @@ window.NERO.embed = window.NERO.embed || {};
         root: 'mb2-root',
         strip: 'mb2-strip',
         rail: 'mb2-rail',
+        railBody: 'mb2-rail-body',
         inspector: 'mb2-inspector',
         preview: 'mb2-preview-region',
         mount: 'mb2-mount',
@@ -87,7 +88,11 @@ window.NERO.embed = window.NERO.embed || {};
         if (!f.preview || !f.preview.create) throw new Error('message-builder needs embed/preview.js loaded first');
         if (!f.drafts || !f.drafts.create) throw new Error('message-builder needs embed/drafts.js loaded first');
         if (!views.statusbar || !views.statusbar.create) throw new Error('message-builder needs embed/views/statusbar.js loaded first');
-        return { model: f.model, store: f.store, preview: f.preview, drafts: f.drafts, statusbar: views.statusbar };
+        if (!views.rail || !views.rail.create) throw new Error('message-builder needs embed/views/rail.js loaded first');
+        return {
+            model: f.model, store: f.store, preview: f.preview, drafts: f.drafts,
+            statusbar: views.statusbar, rail: views.rail,
+        };
     }
 
     function ownerDocument(root) {
@@ -144,6 +149,7 @@ window.NERO.embed = window.NERO.embed || {};
             root: root,
             strip: requireElement(root, doc, ID.strip),
             rail: requireElement(root, doc, ID.rail),
+            railBody: requireElement(root, doc, ID.railBody),
             inspector: requireElement(root, doc, ID.inspector),
             preview: requireElement(root, doc, ID.preview),
             mount: requireElement(root, doc, ID.mount),
@@ -171,6 +177,7 @@ window.NERO.embed = window.NERO.embed || {};
             session: null,
             preview: null,
             statusbar: null,
+            rail: null,
         };
         current = inst;
 
@@ -184,12 +191,26 @@ window.NERO.embed = window.NERO.embed || {};
             now: Date.now,
             reducers: f.store.createReducers(f.model),
         });
+        // The rail is a pure view over the store: it renders the structure and
+        // dispatches actions. It is created before the draft loads so the page
+        // shows the still-empty document immediately and repaints itself when
+        // the stored one arrives (the rail subscribes to the store).
+        inst.rail = f.rail.create({
+            document: doc,
+            store: inst.store,
+            mount: els.railBody,
+        });
+        if (!inst.store.getUi().selectedNodeId) {
+            // Boot state: the message root is what the inspector will show.
+            inst.store.dispatch({ type: 'ui/selectNode', nodeId: f.rail.CONTENT_NODE });
+        }
         inst.session = f.drafts.create({ guildId: inst.guildId, now: Date.now });
 
         inst.unsubs.push(inst.session.onState(function (snapshot) { onSessionState(inst, snapshot); }));
         // Coarse store listener on purpose: it fires for markSaved/undo/redo as
         // well as edits, and the statusbar's writes are change-guarded, so an
-        // unchanged status costs zero DOM writes on a keystroke.
+        // unchanged status costs zero DOM writes on a keystroke. (The rail has
+        // its own selector-based subscriptions and is not re-rendered by this.)
         inst.unsubs.push(inst.store.subscribe(function () { renderStatus(inst); }));
 
         inst.session.attach(inst.store);
@@ -381,6 +402,7 @@ window.NERO.embed = window.NERO.embed || {};
         inst.unsubs.splice(0).forEach(function (off) {
             try { off(); } catch (e) { /* an unsubscribe must never block teardown */ }
         });
+        if (inst.rail) { try { inst.rail.destroy(); } catch (e) { /* already gone */ } }
         if (inst.session) { try { inst.session.destroy(); } catch (e) { /* reported above */ } }
         if (inst.preview) { try { inst.preview.destroy(); } catch (e) { /* already gone */ } }
         if (inst.store) { try { inst.store.destroy(); } catch (e) { /* already gone */ } }

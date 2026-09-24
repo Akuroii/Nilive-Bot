@@ -37,7 +37,7 @@
      class="mb2-shell"
      data-page-module="message-builder"
      data-guild-id="{{ guild_id or '' }}"
-     data-page-script="{{ url_for('static', filename='js/embed/model.js') }} {{ url_for('static', filename='js/embed/store.js') }} {{ url_for('static', filename='js/embed/discord-markdown.js') }} {{ url_for('static', filename='js/embed/preview.js') }} {{ url_for('static', filename='js/embed/drafts.js') }} {{ url_for('static', filename='js/embed/views/statusbar.js') }} {{ url_for('static', filename='js/embed/message-builder-page.js') }}">
+     data-page-script="{{ url_for('static', filename='js/embed/model.js') }} {{ url_for('static', filename='js/embed/store.js') }} {{ url_for('static', filename='js/embed/discord-markdown.js') }} {{ url_for('static', filename='js/embed/preview.js') }} {{ url_for('static', filename='js/embed/drafts.js') }} {{ url_for('static', filename='js/embed/views/statusbar.js') }} {{ url_for('static', filename='js/embed/views/rail.js') }} {{ url_for('static', filename='js/embed/message-builder-page.js') }}">
 
     <!-- ── VALIDATION STRIP ───────────────────────────────────────────────
          One region, one owner (step 6). It exists now, with the semantics it
@@ -49,8 +49,11 @@
     <div class="mb2-grid">
 
         <!-- ── STRUCTURE (rail) ───────────────────────────────────────────
-             Selection + structure only: add/duplicate/move/remove, and the
-             list of fields. Filled in 5b. -->
+             Selection + structure only: the message root, its embeds and their
+             fields, with add/duplicate/move/remove. The rail derives every row
+             from the store and renders into #mb2-rail-body (which rail.js turns
+             into the tree: role="tree" is set by the view, not duplicated
+             here). -->
         <nav id="mb2-rail" class="mb2-rail" aria-labelledby="mb2-rail-title">
             <h2 class="mb2-region-title" id="mb2-rail-title">Structure</h2>
             <div id="mb2-rail-body" class="mb2-rail-body"></div>

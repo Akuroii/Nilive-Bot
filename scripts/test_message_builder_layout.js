@@ -230,7 +230,7 @@ const scriptOrder = (SCRIPTS.match(/js\/[^']+?'/g) || []).map(s => s.replace(/'$
 const expectedOrder = [
     'js/embed/model.js', 'js/embed/store.js', 'js/embed/discord-markdown.js',
     'js/embed/preview.js', 'js/embed/drafts.js', 'js/embed/views/statusbar.js',
-    'js/embed/message-builder-page.js',
+    'js/embed/views/rail.js', 'js/embed/message-builder-page.js',
 ];
 assert(JSON.stringify(scriptOrder) === JSON.stringify(expectedOrder),
     'data-page-script loads the foundations before the page, in dependency order',
@@ -263,6 +263,8 @@ const statusbar = fs.readFileSync(STATUSBAR_PATH, 'utf8');
 const STATUS_CODE = statusbar.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 assert(/NERO\.embed\.views\.statusbar\s*=/.test(statusbar),
     'the statusbar view publishes NERO.embed.views.statusbar');
+assert(/mb2-rail-row/.test(CSS_NO_COMMENTS) && /mb2-rail-btn/.test(CSS_NO_COMMENTS),
+    'the rail rows are styled in the page stylesheet');
 assert(/view\.dirty/.test(STATUS_CODE) && !/store\.isDirty/.test(STATUS_CODE) && !/options\.store/.test(STATUS_CODE),
     'the statusbar is TOLD the dirty state (view.dirty) and never reaches into the store itself');
 assert(!/indexedDB|localStorage|sessionStorage/.test(statusbar) && !/indexedDB|localStorage|sessionStorage/.test(PAGE_SRC),
@@ -313,8 +315,21 @@ assert(/grid-template-columns:[^;]*minmax\(0,\s*1fr\)/.test(CSS_NO_COMMENTS),
     'the flexible grid track cannot overflow (minmax(0, 1fr))');
 assert(/min-width:\s*0/.test(CSS_NO_COMMENTS),
     'grid children opt out of the auto minimum that causes sideways scroll');
-assert(!/overflow:\s*hidden/.test(CSS_NO_COMMENTS),
-    'no overflow:hidden (a sticky ancestor would silently kill the sticky preview)');
+// The invariant is about the STICKY PREVIEW's ancestors, not about the word:
+// an overflow:hidden inside the rail's own label cannot affect a sibling region.
+// So this checks the rules that could actually reach the preview or the shell.
+const OVERFLOW_RULES = (CSS_NO_COMMENTS.match(/[^{}]+\{[^{}]*\}/g) || [])
+    .filter(block => /overflow\s*:\s*hidden/.test(block))
+    .map(block => block.split('{')[0].trim());
+const STICKY_ANCESTORS = ['.mb2-preview', '.mb2-grid', '.mb2-shell', 'html', 'body'];
+const offenders = OVERFLOW_RULES.filter(sel =>
+    STICKY_ANCESTORS.some(target => sel.split(',').map(x => x.trim()).indexOf(target) !== -1));
+assert(offenders.length === 0,
+    'no overflow:hidden on the sticky preview or any of its ancestors',
+    offenders.join(' | '));
+assert(OVERFLOW_RULES.every(sel => /\.mb2-rail-label/.test(sel) || /\.mb2-rail-btn/.test(sel) || /\.mb2-rail-row/.test(sel)),
+    'the only overflow:hidden rules are the rail label s ellipsis (by design)',
+    OVERFLOW_RULES.join(' | '));
 // (a media query is `max-width:`, so the character before `width` is `-`;
 // requiring whitespace/;/brace excludes breakpoints from a fixed-width check)
 assert(!/(^|[;{\s])width:\s*\d{3,}px/.test(CSS_NO_COMMENTS) &&

@@ -153,6 +153,66 @@
 .mb2-tone-danger .mb2-status-pill  { color: var(--danger); }
 .mb2-tone-muted .mb2-status-pill   { color: var(--text3); }
 
+/* ── Structure rail (rail.js owns everything inside #mb2-rail-body) ──
+   Rows are flat in the DOM with aria-level for the hierarchy; the indent is
+   visual only, so the tree stays navigable by keyboard and readable by a
+   screen reader. Selected and focused are deliberately different states: the
+   selection is store state (it drives the inspector in 5c), focus is where the
+   keyboard is. */
+.mb2-rail-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 6px 8px;
+    margin-bottom: 2px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text2);
+    font-size: 13px;
+}
+.mb2-rail-row:hover { background: var(--bg4); color: var(--text); }
+.mb2-rail-row-embed { padding-left: 16px; }
+.mb2-rail-row-field { padding-left: 30px; font-size: 12px; }
+.mb2-rail-row-selected {
+    background: var(--bg3);
+    border-color: var(--accent);
+    color: var(--text);
+}
+.mb2-rail-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.mb2-rail-row-selected .mb2-rail-label { font-weight: 600; }
+.mb2-rail-actions {
+    display: flex;
+    gap: 2px;
+    flex: 0 0 auto;
+    opacity: 0;
+    transition: opacity .12s;
+}
+.mb2-rail-row:hover .mb2-rail-actions,
+.mb2-rail-row:focus-within .mb2-rail-actions,
+.mb2-rail-row-selected .mb2-rail-actions { opacity: 1; }
+.mb2-rail-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text2);
+    font-size: 12px;
+    line-height: 1;
+    padding: 3px 6px;
+    cursor: pointer;
+    min-width: 24px;
+}
+.mb2-rail-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.mb2-rail-btn:disabled { opacity: .35; cursor: default; }
+.mb2-rail-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 /* ── Responsive ──────────────────────────────────────────────── */
 /* Two columns: the preview stops being a side column and becomes a sticky top
    pane (order:-1) with a bounded height instead of being dropped. */
@@ -178,6 +238,9 @@
         -webkit-overflow-scrolling: touch;
     }
     .mb2-rail-body > * { scroll-snap-align: start; flex: 0 0 auto; }
+    .mb2-rail-row { margin-bottom: 0; }
+    .mb2-rail-row-embed, .mb2-rail-row-field { padding-left: 8px; }
+    .mb2-rail-actions { opacity: 1; }
     .mb2-preview { max-height: 36vh; }
     .mb2-bar { align-items: flex-start; }
 }

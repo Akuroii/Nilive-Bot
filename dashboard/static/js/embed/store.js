@@ -123,7 +123,26 @@ window.NERO.embed = window.NERO.embed || {};
 
         // ── History ───────────────────────────────────────────────
         function pushHistory(action) {
-            if (action && action.meta && action.meta.history === false) return;
+            if (action && action.meta && action.meta.history === false) {
+                // "Do not record this" is NOT "leave the stack alone". The flag
+                // marks a REPLACEMENT (loading a draft, importing v1, adopting a
+                // guarded record): the document the store was holding is gone,
+                // so every state the stack still has is one the user has
+                // discarded and undo must never reach. Re-seed the baseline —
+                // the replacement is the only history there is.
+                //
+                // Without this, loading a draft left the CONSTRUCTOR document as
+                // history[0]: the first undo after one edit jumped straight past
+                // the load and replaced the restored draft with a blank message.
+                history = [{
+                    hash: model.hashDocument(state.document),
+                    document: model.cloneDocument(state.document),
+                    coalesceKey: null,
+                    at: now(),
+                }];
+                historyIndex = 0;
+                return;
+            }
             const hash = model.hashDocument(state.document);
 
             // Coalescing: a typing burst is ONE undo step. The reducer

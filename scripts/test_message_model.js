@@ -43,6 +43,11 @@ function section(t) { console.log('\n== ' + t + ' =='); }
 
 // ── Load the real modules ────────────────────────────────────────
 const JS_DIR = path.join(__dirname, '..', 'dashboard', 'static', 'js');
+// Source overrides, so the mutation battery can point this suite at a mutated
+// copy instead of the file on disk (same convention as the 5a/5b harnesses: a
+// mutant is only "caught" if the suite that asserts the property fails).
+const MODEL_PATH = process.env.NERO_MODEL_SRC || path.join(JS_DIR, 'embed', 'model.js');
+const STORE_PATH = process.env.NERO_STORE_SRC || path.join(JS_DIR, 'embed', 'store.js');
 
 function loadV1() {
     const src = fs.readFileSync(path.join(JS_DIR, 'embed-composer.js'), 'utf8');
@@ -55,8 +60,8 @@ function loadV1() {
 function loadV2() {
     const sandbox = { window: {}, console };
     vm.createContext(sandbox);
-    vm.runInContext(fs.readFileSync(path.join(JS_DIR, 'embed', 'model.js'), 'utf8'), sandbox);
-    vm.runInContext(fs.readFileSync(path.join(JS_DIR, 'embed', 'store.js'), 'utf8'), sandbox);
+    vm.runInContext(fs.readFileSync(MODEL_PATH, 'utf8'), sandbox);
+    vm.runInContext(fs.readFileSync(STORE_PATH, 'utf8'), sandbox);
     return sandbox.window.NERO.embed;
 }
 
@@ -489,6 +494,99 @@ assert(st.canUndo() === false, 'undo stops at the beginning of history');
 assert(st.isDirty() === true, 'rewinding still reports dirty (the saved snapshot is not in history)');
 st.markSaved();
 assert(st.isDirty() === false, 'and marking saved clears it again');
+
+// ── A load re-seeds the undo baseline ──────────────────────────
+// The exact user path: the page boots with a document, loads the persisted
+// draft, the user edits once and presses undo. Undo must return to the LOADED
+// draft — never to the document the store was constructed with, which is a
+// state that was never in storage.
+{
+    const boot = model.blankMessageDocument();
+    const rl = store.createStore({ document: boot, reducers: reducers, now: clock.now, scheduler: clock.scheduler });
+
+    const base = model.blankMessageDocument();
+    const loaded = model.normalizeDocument(Object.assign({}, base, {
+        content: 'Loaded draft',
+        embeds: [Object.assign({}, base.embeds[0], {
+            title: 'Loaded embed',
+            fields: [
+                { id: 'fld_1', name: 'One', value: '1', inline: false },
+                { id: 'fld_2', name: 'Two', value: '2', inline: false },
+            ],
+        })],
+    }));
+    const embedId = loaded.embeds[0].id;
+
+    // the page's setCanonical(): replace, then record what is on disk
+    rl.dispatch({ type: 'document/load', document: loaded, meta: { history: false } });
+    rl.markSaved(rl.getDocument());
+
+    assert(rl.getDocument().content === 'Loaded draft', 'the load installs the stored document');
+    assert(rl.canUndo() === false && rl.historyDepth().size === 1,
+        'a load adds no undo entry (the replacement is the whole history)',
+        JSON.stringify(rl.historyDepth()));
+    assert(rl.isDirty() === false, 'and the loaded document is clean');
+
+    // one edit, then undo: back to the LOADED draft
+    rl.dispatch({ type: 'field/add', embedId: embedId });
+    assert(rl.getDocument().embeds[0].fields.length === 3, 'the edit adds a field');
+    assert(rl.canUndo() === true && rl.historyDepth().size === 2,
+        'the edit is the first real undo step', JSON.stringify(rl.historyDepth()));
+    rl.undo();
+    assert(rl.getDocument().content === 'Loaded draft',
+        'undo returns to the loaded draft, not the boot document',
+        JSON.stringify(rl.getDocument().content));
+    assert(rl.getDocument().embeds.length === 1 && rl.getDocument().embeds[0].fields.length === 2,
+        'the loaded embed and both its fields are intact',
+        String(rl.getDocument().embeds[0].fields.length));
+    assert(rl.getDocument().embeds[0].title === 'Loaded embed', 'and so is the embed content');
+    assert(rl.isDirty() === false, 'undoing back to the loaded state is clean again');
+    assert(rl.canUndo() === false, 'nothing before the load is reachable');
+    rl.undo();
+    assert(rl.getDocument().content === 'Loaded draft' && rl.canUndo() === false,
+        'further undo calls cannot reach a pre-load document');
+    rl.redo();
+    assert(rl.getDocument().embeds[0].fields.length === 3, 'redo re-applies the edit');
+    rl.redo();
+    assert(rl.getDocument().embeds[0].fields.length === 3, 'and stops at the latest state');
+
+    // normal history still behaves normally AFTER a load
+    rl.dispatch({ type: 'content/set', text: 'typed' });
+    rl.dispatch({ type: 'field/set', embedId: embedId, fieldId: rl.getDocument().embeds[0].fields[0].id, patch: { name: 'Renamed' } });
+    const depthNormal = rl.historyDepth();
+    assert(depthNormal.size === 4 && depthNormal.index === 3,
+        'later edits keep stacking normally', JSON.stringify(depthNormal));
+    rl.undo();
+    assert(rl.getDocument().embeds[0].fields[0].name !== 'Renamed', 'undo still reverts one edit at a time');
+    rl.undo();
+    assert(rl.getDocument().content === 'Loaded draft' && rl.getDocument().embeds[0].fields.length === 3,
+        'and keeps walking back through the edits', String(rl.getDocument().embeds[0].fields.length));
+    rl.undo();
+    assert(rl.getDocument().embeds[0].fields.length === 2 && rl.canUndo() === false,
+        'the third undo reaches the loaded draft and then stops');
+    rl.undo();
+    assert(rl.getDocument().content === 'Loaded draft' && rl.getDocument().embeds[0].fields.length === 2,
+        'a further undo cannot reach the pre-load document');
+}
+
+// A replacement also re-seeds a stack that already had a deep history: loading
+// a second draft must not make the FIRST draft reachable by undo either.
+{
+    const rl2 = store.createStore({ document: model.blankMessageDocument(), reducers: reducers, now: clock.now, scheduler: clock.scheduler });
+    rl2.dispatch({ type: 'content/set', text: 'first' });
+    rl2.dispatch({ type: 'embed/add' });
+    rl2.dispatch({ type: 'content/set', text: 'second' });
+    assert(rl2.historyDepth().size === 4, 'setup: the stack has real depth', JSON.stringify(rl2.historyDepth()));
+    const swap = model.normalizeDocument(Object.assign({}, model.blankMessageDocument(), { content: 'imported' }));
+    rl2.dispatch({ type: 'document/load', document: swap, meta: { history: false } });
+    assert(rl2.historyDepth().size === 1 && rl2.canUndo() === false,
+        'a second replacement collapses the stack to the new baseline', JSON.stringify(rl2.historyDepth()));
+    rl2.dispatch({ type: 'content/set', text: 'imported, edited' });
+    rl2.undo();
+    assert(rl2.getDocument().content === 'imported',
+        'and undo returns to the replacement, not to the discarded first draft',
+        JSON.stringify(rl2.getDocument().content));
+}
 
 // ── markSavedHash: the ASYNCHRONOUS confirmation ────────────────
 // The writer reports which document reached storage (by hash) and the store

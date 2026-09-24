@@ -66,6 +66,7 @@ const FOUNDATION = [
     js('embed', 'preview.js'),
     DRAFTS_PATH,
     js('embed', 'views', 'statusbar.js'),
+    js('embed', 'views', 'rail.js'),
     PAGE_PATH,
 ];
 const TEMPLATE_TREE = parseTemplate(
@@ -257,14 +258,17 @@ async function main() {
     }
 
     // ─────────────────────────────────────────────────────────────
-    section('B. the shell regions stay empty in 5a');
+    section('B. the shell regions and what fills them');
     // ─────────────────────────────────────────────────────────────
     {
         const env = makeEnv();
         installIdb(env);
         await env.mount();
-        assert(env.el('mb2-rail-body').children.length === 0, 'no rail rows yet (5b)');
-        assert(env.el('mb2-rail-body').textContent === '', 'the rail renders no text yet');
+        assert(env.el('mb2-rail-body').children.length === 2,
+            'the rail shows the message root and the blank document s embed (5b)',
+            String(env.el('mb2-rail-body').children.length));
+        assert(/Message content/.test(env.el('mb2-rail-body').textContent),
+            'and it is derived from the canonical document');
         assert(env.el('mb2-inspector-body').children.length === 0, 'no inspector controls yet (5c)');
         assert(env.el('mb2-strip').hidden === true && env.el('mb2-strip').textContent === '',
             'the validation strip exists, hidden and empty (step 6 owns its contents)');
@@ -1015,9 +1019,13 @@ async function main() {
         await env5.settle();
         assert(env5.pill() === 'Saved', 'K5: the document is saved first', env5.pill());
         env5.session().schedule();                        // a write is queued ...
-        // ... and a render happens (a UI action, the way selecting a node will):
-        // the bar must show the queued write as unsaved work.
-        env5.store().dispatch({ type: 'ui/selectNode', nodeId: 'content' });
+        // ... and a render happens (a real UI action: the page already selected
+        // the message root at boot, so this selects the embed instead — a
+        // same-value selection is a no-op reducer and would render nothing).
+        env5.store().dispatch({
+            type: 'ui/selectNode',
+            nodeId: env5.store().getDocument().embeds[0].id,
+        });
         assert(env5.pill() === 'Unsaved changes',
             'K5: a queued write reads as unsaved work', env5.pill());
         await env5.settle(1700);                          // ... and resolves as "clean"
@@ -1027,6 +1035,116 @@ async function main() {
             env5.pill());
         assert(idb5.log.filter(e => e.op === 'put-committed' && e.store === 'drafts').length === 1,
             'K5: and nothing was written for the skipped save');
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    section('L. the rail on the page');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const env = makeEnv();
+        const record = makeRecord(env, filledDocument(), { documentId: 'doc-filled' });
+        installIdb(env, seedSpec(env, [record]));
+        await env.mount();
+        const rail = env.inst.rail;
+        const mount = env.el('mb2-rail-body');
+        const model = env.NERO.embed.model;
+        const doc = env.store().getDocument();
+
+        assert(!!rail, 'the page created a rail');
+        assert(mount.getAttribute('role') === 'tree', 'and turned the region into a tree');
+        assert(env.inst.ctx.counters.initMs >= 0, 'mounting it did not break the registry s timing');
+
+        // rows for the loaded document
+        const ids = Array.from(mount.children).map(n => n.getAttribute('data-node-id'));
+        assert(ids[0] === env.NERO.embed.views.rail.CONTENT_NODE, 'the message root is first', ids[0]);
+        assert(ids.indexOf(doc.embeds[0].id) !== -1, 'the loaded embed has a row');
+        assert(ids.indexOf(doc.embeds[0].fields[0].id) !== -1, 'so do its fields');
+        assert(ids.indexOf(doc.embeds[0].fields[1].id) !== -1, 'all of them', ids.join(','));
+
+        // the boot selection is the message root, and the rail shows it
+        assert(env.store().getUi().selectedNodeId === env.NERO.embed.views.rail.CONTENT_NODE,
+            'the page selects the message root at boot', String(env.store().getUi().selectedNodeId));
+        const contentRow = mount.children[0];
+        assert(contentRow.getAttribute('aria-selected') === 'true', 'and the rail reflects it');
+        // ... and that boot selection is UI state, not a document edit: loading a
+        // draft must stay fully non-mutating, undo history included.
+        assert(env.store().canUndo() === false, 'the boot selection is not an undo entry');
+        assert(env.store().historyDepth().size === 1, 'and the history is still a single state',
+            String(env.store().historyDepth().size));
+
+        // the preview still paints once, and the rail did not change that
+        assert(env.inst.preview.stats().patches === 1,
+            'the rail added no preview paints', String(env.inst.preview.stats().patches));
+
+        // a rail action reaches the document and the preview patches it
+        const before = env.inst.preview.stats();
+        const embedId = doc.embeds[0].id;
+        let addFieldButton = null;
+        mount.children.forEach(row => {
+            if (row.getAttribute('data-node-id') !== embedId) return;
+            row.children.forEach(child => {
+                if ((child.className || '').indexOf('mb2-rail-actions') === -1) return;
+                child.children.forEach(button => {
+                    if (button.getAttribute('data-rail-action') === 'addField') addFieldButton = button;
+                });
+            });
+        });
+        assert(!!addFieldButton, 'the embed row exposes an add-field button');
+        mount.dispatch('click', { type: 'click', target: addFieldButton });
+        assert(env.store().getDocument().embeds[0].fields.length === 3,
+            'clicking it added a field through the store',
+            String(env.store().getDocument().embeds[0].fields.length));
+        assert(env.inst.preview.stats().patches === before.patches + 1,
+            'and the preview patched itself once',
+            String(env.inst.preview.stats().patches - before.patches));
+        assert(env.store().isDirty() === true, 'the edit is dirty');
+        assert(env.session().pendingSave() === true, 'and a save is queued (the rail does not bypass persistence)');
+
+        // undo/redo from anywhere still drives the rail: the rows must always
+        // mirror the canonical document, never a view-side copy of it.
+        const railApi = env.NERO.embed.views.rail;
+        function rowIdsNow() {
+            return Array.from(mount.children).map(n => n.getAttribute('data-node-id'));
+        }
+        function derivedIds() {
+            return railApi.derive(env.store().getDocument(), new Set()).map(vm => vm.id);
+        }
+        assert(rowIdsNow().join(',') === derivedIds().join(','),
+            'the rows mirror the document after the edit', rowIdsNow().join(','));
+        const rowsAfterAdd = rowIdsNow().length;
+
+        env.store().undo();
+        assert(env.store().getDocument().embeds[0].fields.length === 2, 'undo removed the field');
+        assert(rowIdsNow().join(',') === derivedIds().join(','),
+            'and the rail followed the undo', rowIdsNow().join(','));
+        assert(rowIdsNow().length === rowsAfterAdd - 1, 'the row is gone',
+            String(rowIdsNow().length));
+
+        env.store().redo();
+        assert(rowIdsNow().join(',') === derivedIds().join(','),
+            'and the rail followed the redo', rowIdsNow().join(','));
+        assert(rowIdsNow().length === rowsAfterAdd, 'the row is back', String(rowIdsNow().length));
+
+        // teardown
+        const selectorsBefore = env.store()._subscriberCounts().selectors;
+        assert(selectorsBefore >= 4, 'the page has the rail s subscriptions plus its own',
+            String(selectorsBefore));
+        env.unmount();
+        assert(env.el('mb2-rail-body').children.length === 0, 'teardown empties the rail');
+        assert(env.el('mb2-rail-body').getAttribute('role') === null, 'and removes its tree semantics');
+        assert(env.store()._subscriberCounts().selectors === 0, 'every subscription is gone');
+
+        // revision-neutral: a load still leaves a clean document
+        const env2 = makeEnv();
+        const record2 = makeRecord(env2, filledDocument(), { documentId: 'doc-loaded' });
+        installIdb(env2, seedSpec(env2, [record2]));
+        await env2.mount();
+        assert(env2.store().isDirty() === false,
+            'the rail did not make the freshly loaded draft dirty');
+        assert(env2.puts().length === 0, 'and it caused no write', String(env2.puts().length));
+        assert(env2.store().getDocument().embeds[0].fields.length ===
+               record2.document.embeds[0].fields.length,
+            'its rows describe the loaded document, not a default');
     }
 
     // ─────────────────────────────────────────────────────────────
