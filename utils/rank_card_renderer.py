@@ -781,7 +781,7 @@ def _line_icon_diamond(size):
 # the files are static across renders.
 # ─────────────────────────────────────────────────────────────────────────
 
-_STAT_ICON_DISPLAY_SIZE = 34
+_STAT_ICON_DISPLAY_SIZE = 40
 _STAT_ICON_MARGIN = 0.14  # fraction of the trimmed content's longer side
 
 
@@ -941,8 +941,10 @@ async def render_rank_card(data: dict) -> io.BytesIO:
     async with aiohttp.ClientSession() as session:
         avatar_im, coin_icon_im, diamond_icon_im = await asyncio.gather(
             _fetch_avatar(session, data.get("avatar_url")),
-            _resolve_currency_icon(session, data["currency"]["coins"]["emoji"], 32),
-            _resolve_currency_icon(session, data["currency"]["diamonds"]["emoji"], 32),
+            _resolve_currency_icon(session, data["currency"]["coins"]["emoji"],
+                                   _STAT_ICON_DISPLAY_SIZE),
+            _resolve_currency_icon(session, data["currency"]["diamonds"]["emoji"],
+                                   _STAT_ICON_DISPLAY_SIZE),
         )
         item_icons = list(await asyncio.gather(*[
             _fetch_image(session, it["icon_url"]) if it.get("icon_url") else _no_icon()
@@ -1500,20 +1502,31 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
         x = x0 + i * (w + gap)
         _rounded_panel(img, draw, (x, y, x + w, y + h), radius=14)
         if icon_im is not None:
-            ic = icon_im if icon_im.width == 34 else icon_im.resize((34, 34))
+            isz = _STAT_ICON_DISPLAY_SIZE
+            ic = icon_im if icon_im.width == isz else icon_im.resize((isz, isz))
+            # Icon box kept centered on the same vertical point the old
+            # fixed 34px box was (top 23 + half of 34 = 40) so growing the
+            # box grows outward from that same center rather than shifting
+            # the row down.
+            icon_x, icon_y = int(x + w / 2 - isz / 2), int(y + 40 - isz / 2)
             # reference icons carry a soft bloom
             gl = Image.new("RGBA", img.size, (0, 0, 0, 0))
-            gl.paste(ic, (int(x + w / 2 - 17), y + 23), ic)
+            gl.paste(ic, (icon_x, icon_y), ic)
             gl.putalpha(gl.split()[3].point(lambda a: int(a * 0.75)))
             gl = gl.filter(ImageFilter.GaussianBlur(3))
             img.alpha_composite(gl)
-            img.paste(ic, (int(x + w / 2 - 17), y + 23), ic)
+            img.paste(ic, (icon_x, icon_y), ic)
         # Sized to fit the card width directly rather than drawn big and
         # squeezed -- keeps stroke weight even on both short values (138)
         # and long ones (34,725) instead of the squeeze warping wide values
         # more than narrow ones.
         vf, nat_w = _fit_numeral_font(draw, value, zilla_bold, w - 16, 32, min_size=16)
-        draw.text((x + w / 2 - nat_w / 2, y + 82), value, font=vf, fill=(215, 215, 222))
+        # Nudged up from the original y+82 -- the value's ink sits directly
+        # above its label (not below), and the two were touching with
+        # effectively no gap between them. The label below stays put; only
+        # the number moves, opening a small, subtle gap above the label
+        # without disturbing the label's own position or the icon above.
+        draw.text((x + w / 2 - nat_w / 2, y + 72), value, font=vf, fill=(215, 215, 222))
         # Configurable currency names can be Arabic (utils/currency.py puts
         # no restriction on what an admin types) -- MESSAGES/VOICE TIME/
         # GAMES WON are fixed English labels and never go through this,
