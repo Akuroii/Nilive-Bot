@@ -595,6 +595,20 @@ window.NERO.embed = window.NERO.embed || {};
         let revision = 0;
         let createdAt = null;
         let lastSavedHash = null;       // hash of what storage holds
+        // The DOCUMENT that hash describes — the last successfully persisted
+        // version of the CURRENT draft identity, held as a private clone.
+        //
+        // It exists for exactly one question, the one the hash cannot answer:
+        // "what was the message before the edit the user wants to discard?".
+        // It is set only where persistence is KNOWN to have succeeded (a
+        // confirmed write, a successful load) and cleared wherever the saved
+        // identity is deliberately reset (start/use/attach) — so it can never
+        // describe a document that belongs to a different draft.
+        //
+        // It is never a second copy of the canonical document: the store still
+        // owns what is being edited, and reads it from here at most once, at
+        // the moment a user asks to go back.
+        let lastSavedDocument = null;
         let lastError = null;
         let lastUpdatedAt = null;
         let currentDocument = options.document || null;
@@ -625,6 +639,7 @@ window.NERO.embed = window.NERO.embed || {};
             if (opts.guildId !== undefined) guildId = opts.guildId;
             currentDocument = document ? model.normalizeDocument(document) : model.blankMessageDocument({ ids: ids });
             lastSavedHash = null;
+            lastSavedDocument = null;      // a NEW identity has nothing persisted yet
             revision = 0;
             createdAt = null;
             lastUpdatedAt = null;
@@ -756,6 +771,11 @@ window.NERO.embed = window.NERO.embed || {};
                     createdAt = record.createdAt;
                     lastUpdatedAt = record.updatedAt;
                     lastSavedHash = record.documentHash;
+                    // The write is CONFIRMED: this record's document is now the
+                    // last persisted version of this draft. Cloned on the way in
+                    // — the caller's document object may be edited in place by a
+                    // later bug, and a clone cannot follow it there.
+                    lastSavedDocument = model.cloneDocument(record.document);
                     lastError = null;
                     saveCount++;
                     // Confirm the write to the store by HASH, never by handing it
@@ -845,6 +865,11 @@ window.NERO.embed = window.NERO.embed || {};
                 createdAt = meta.createdAt || null;
                 lastUpdatedAt = meta.updatedAt || null;
                 lastSavedHash = meta.documentHash || null;
+                // The record was read successfully, so this document IS what
+                // storage holds for this identity — the baseline a discard
+                // returns to. (meta.documentHash may be absent on a repaired
+                // record; status 'ok'/'repaired' is the verdict that matters.)
+                lastSavedDocument = verdict.document ? model.cloneDocument(verdict.document) : null;
                 lastError = null;
                 notify();
                 return {
@@ -873,7 +898,10 @@ window.NERO.embed = window.NERO.embed || {};
             if (opts.documentId) documentId = opts.documentId;
             else if (!documentId && currentDocument.id) documentId = currentDocument.id;
             if (opts.guildId !== undefined) guildId = opts.guildId;
-            if (opts.saved !== false) lastSavedHash = null;
+            if (opts.saved !== false) {
+                lastSavedHash = null;
+                lastSavedDocument = null;  // the saved identity is being reset
+            }
             notify();
             return currentDocument;
         }
@@ -908,7 +936,10 @@ window.NERO.embed = window.NERO.embed || {};
             boundStore = store;
             const doc = store.getDocument ? store.getDocument() : null;
             if (doc && !currentDocument) currentDocument = doc;
-            if (doc && store.isDirty && !store.isDirty()) lastSavedHash = null;
+            if (doc && store.isDirty && !store.isDirty()) {
+                lastSavedHash = null;
+                lastSavedDocument = null;  // attaching re-establishes what "saved" means
+            }
             unsubscribe = store.subscribe(
                 (s) => s.document,
                 (next) => { changed(next); }
@@ -1127,6 +1158,13 @@ window.NERO.embed = window.NERO.embed || {};
             resolveGuard: resolveGuard,
             guard: () => (blocked ? { reason: blocked.reason, key: blocked.key } : null),
             savedHash: () => lastSavedHash,
+            /**
+             * The last successfully persisted document for the CURRENT draft
+             * identity, or null when nothing has been established yet. Always a
+             * fresh clone: a caller may keep it, compare it or hand it to the
+             * store, and cannot reach session state through it.
+             */
+            savedDocument: () => (lastSavedDocument ? model.cloneDocument(lastSavedDocument) : null),
             destroy: destroy,
             // test/debug seams
             storage: () => storage,

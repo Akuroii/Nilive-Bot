@@ -292,9 +292,9 @@ async function main() {
         // one 5a placeholder that legitimately flips: it asserted the container
         // was empty until the buttons were real.
         const barButtons = env.el('mb2-bar-actions').children;
-        assert(barButtons.length === 3 &&
-            barButtons.map(b => b.getAttribute('data-mb2-action')).join(',') === 'undo,redo,copy',
-            'the action container holds the three real actions (5d), in order',
+        assert(barButtons.length === 4 &&
+            barButtons.map(b => b.getAttribute('data-mb2-action')).join(',') === 'undo,redo,copy,discard',
+            'the action container holds the real actions (5d), in order',
             barButtons.map(b => b.getAttribute('data-mb2-action')).join(','));
         assert(env.el('mb2-rail').getAttribute('aria-labelledby') === 'mb2-rail-title' &&
                env.el('mb2-inspector').getAttribute('aria-labelledby') === 'mb2-inspector-title',
@@ -1322,9 +1322,10 @@ async function main() {
         const bar = env.inst.actionbar;
         const actions = env.el('mb2-bar-actions');
         assert(!!bar, 'the page created an action bar');
-        assert(actions.children.length === 3, 'and rendered its three actions into the container',
+        assert(actions.children.length === 4, 'and rendered its actions into the container',
             String(actions.children.length));
-        assert(bar.keys().join(',') === 'undo,redo,copy', 'in the approved order', bar.keys().join(','));
+        assert(bar.keys().join(',') === 'undo,redo,copy,discard', 'in the approved order',
+            bar.keys().join(','));
         assert(bar.button('undo').disabled === true && bar.button('redo').disabled === true,
             'a freshly loaded draft has nothing to undo or redo');
         assert(env.notice() === '', 'and booting invents no notice', env.notice());
@@ -1405,6 +1406,279 @@ async function main() {
         assert(env.store()._subscriberCounts().listeners === 0 && env.store()._subscriberCounts().selectors === 0,
             'and every subscription is gone',
             JSON.stringify(env.store()._subscriberCounts()));
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    section('O. discard on the page: back to the persisted version, never a write');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const env = makeEnv();
+        const record = makeRecord(env, filledDocument(), { documentId: 'doc-discard' });
+        const idb = installIdb(env, seedSpec(env, [record]));
+        await env.mount();
+
+        const bar = env.inst.actionbar;
+        const store = env.store();
+        const session = env.session();
+        const actions = env.el('mb2-bar-actions');
+        const button = bar.button('discard');
+        assert(!!button, 'the page wired a discard action into the bar');
+        assert(button.disabled === true,
+            'a freshly loaded draft has nothing to discard (the store matches storage)');
+
+        // An edit makes it available.
+        const content = env.inst.inspector.control('content');
+        content.value = 'edited after the load';
+        env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+        assert(store.isDirty() === true, 'the edit is dirty');
+        assert(button.disabled === false, 'so discarding becomes available');
+
+        const writesBefore = env.puts('drafts').length;
+        const pointerBefore = JSON.stringify(env.metaData());
+        const documentIdBefore = session.documentId();
+        const depthBefore = store.historyDepth();
+
+        // Confirm through the real dialog.
+        actions.dispatch('click', { type: 'click', target: button });
+        const dialog = bar.dialog();
+        assert(!!dialog && dialog.key === 'discard', 'clicking it asks for confirmation first');
+        assert(store.getDocument().content === 'edited after the load',
+            'and nothing has been restored while the dialog is open',
+            store.getDocument().content);
+        dialog.overlay.dispatch('click', { type: 'click', target: dialog.confirm });
+
+        assert(store.getDocument().content === record.document.content,
+            'confirming restores the persisted document exactly',
+            JSON.stringify(store.getDocument().content));
+        assert(env.payload(store.getDocument()) === env.payload(record.document),
+            'byte for byte (same canonical payload)');
+        assert(session.documentId() === documentIdBefore,
+            'under the SAME draft identity (the id is untouched)',
+            String(session.documentId()));
+        assert(store.isDirty() === false, 'the store is clean again');
+        assert(env.session().isDirty() === false, 'and so is the session');
+        assert(store.canUndo() === false && store.historyDepth().size === 1 &&
+            store.historyDepth().index === 0,
+            'no undo entry was created — a discard cannot be undone, and cannot reach the discarded edit',
+            JSON.stringify(store.historyDepth()));
+        assert(depthBefore.size > 1, 'rig: the edit had created history', JSON.stringify(depthBefore));
+
+        await env.settle(700);
+        assert(env.puts('drafts').length === writesBefore,
+            'NO persistence write happened',
+            String(env.puts('drafts').length - writesBefore));
+        assert(session.pendingSave() === false, 'and none is queued');
+        assert(JSON.stringify(env.metaData()) === pointerBefore,
+            'the last-draft pointer was not rewritten');
+        assert(env.record(session.key()).documentHash === record.documentHash,
+            'and the stored record is still the loaded one');
+        assert(env.notice().indexOf('discarded') !== -1,
+            'the result is reported in the page\'s one status region', env.notice());
+        assert(button.disabled === true, 'with nothing left to discard the action goes unavailable');
+        assert(env.pill() === 'Saved' || env.pill() === 'No changes yet',
+            'and the status line agrees: the document is what storage holds', env.pill());
+
+        // The preview followed the store, as always: it was not told anything.
+        assert(env.inst.preview.stats().patches > 0, 'the preview patched through the store',
+            String(env.inst.preview.stats().patches));
+        env.unmount();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    section('O2. the in-flight save must not survive a discard');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const env = makeEnv();
+        const loaded = filledDocument();
+        loaded.content = 'saved A';
+        const record = makeRecord(env, loaded, { documentId: 'doc-race' });
+        const idb = installIdb(env, seedSpec(env, [record]));
+        await env.mount();
+
+        const store = env.store();
+        const session = env.session();
+        const bar = env.inst.actionbar;
+        const model = env.NERO.embed.model;
+        const hash = (d) => model.hashDocument(d);
+
+        assert(session.documentId() === 'doc-race', 'rig: the loaded draft is the session\'s identity',
+            String(session.documentId()));
+        assert(bar.button('discard').disabled === true, 'rig: nothing to discard yet');
+
+        // The user edits to B and a save of B starts...
+        store.dispatch({ type: 'content/set', text: 'B' });
+        const B = store.getDocument();
+        const depthAfterEdit = store.historyDepth();
+        idb.hold();
+        const inFlight = session.saveNow();
+        await env.settle(30);
+        assert(env.record(session.key()).document.content === 'saved A',
+            'rig: the write of B is in flight and nothing has landed yet',
+            env.record(session.key()).document.content);
+
+        // ...and is discarded while it is still in the air.
+        const pointerKey = Object.keys(env.metaData())[0];
+        const pointerTarget = env.metaData()[pointerKey].documentId;
+        assert(pointerTarget === 'doc-race', 'rig: the pointer names this draft',
+            String(pointerTarget));
+        env.el('mb2-bar-actions').dispatch('click', { type: 'click', target: bar.button('discard') });
+        bar.dialog().overlay.dispatch('click', { type: 'click', target: bar.dialog().confirm });
+        assert(store.getDocument().content === 'saved A',
+            'the discard restored the persisted version (A) while the write of B was in flight',
+            store.getDocument().content);
+        assert(store.getDocument() !== B,
+            'and it is not the same object as the unsaved B');
+        assert(store.isDirty() === false, 'the store is clean right after the discard');
+        assert(store.historyDepth().size === 1,
+            'and the discard replaced the history baseline', JSON.stringify(store.historyDepth()));
+
+        // Now the old write completes. It describes a document the user has
+        // already discarded, so it must not become the store's document.
+        idb.release();
+        await inFlight;
+        await env.settle(60);
+
+        const committed = env.record(session.key());
+        assert(committed.document.content === 'B' && committed.documentHash === hash(B),
+            'rig: storage now holds B (the write that was already in the air landed)',
+            JSON.stringify({ content: committed.document.content, hashIsB: committed.documentHash === hash(B) }));
+
+        assert(store.getDocument().content === 'saved A',
+            'THE INVARIANT: completing the old save does NOT replace the restored document',
+            store.getDocument().content);
+        assert(store.getDocument() !== B, 'and does not hand the store the discarded B object');
+        assert(store.isDirty() === true,
+            'the store is DIRTY, honestly: what it holds (A) is not what storage holds (B)',
+            'dirty=' + store.isDirty());
+        assert(store.savedDocumentHash() === hash(B),
+            'the store s saved hash describes what was actually written (B)');
+        assert(store.historyDepth().size === 1 && store.canUndo() === false,
+            'the completion created no undo entry',
+            JSON.stringify(store.historyDepth()));
+        assert(store.historyDepth().size <= depthAfterEdit.size,
+            'and left no trace of the discarded edit reachable by undo',
+            JSON.stringify(store.historyDepth()));
+        assert(env.metaData()[pointerKey].documentId === pointerTarget,
+            'and the completion cannot REPOINT the last-draft pointer at anything else',
+            String(env.metaData()[pointerKey].documentId));
+        assert(env.metaData()[pointerKey].documentId === session.documentId(),
+            'it still names the draft the session is editing',
+            String(env.metaData()[pointerKey].documentId));
+        assert(session.savedDocument().content === 'B',
+            'the session\'s baseline is now B — the last thing that really persisted',
+            session.savedDocument().content);
+        assert(env.pill() === 'Unsaved changes',
+            'and the bar says so (the document disagrees with storage)', env.pill());
+        assert(bar.button('discard').disabled === false,
+            'so a second discard is available (it would go back to B)');
+
+        // A second discard lands on B: the honest successor state.
+        env.el('mb2-bar-actions').dispatch('click', { type: 'click', target: bar.button('discard') });
+        bar.dialog().overlay.dispatch('click', { type: 'click', target: bar.dialog().confirm });
+        assert(store.getDocument().content === 'B',
+            'discarding again restores what is actually persisted', store.getDocument().content);
+        assert(store.isDirty() === false && store.canUndo() === false,
+            'and the store is clean and undiscardable-again-free',
+            JSON.stringify(store.historyDepth()));
+        env.unmount();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    section('O3. discard while a save is pending, then edit again');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const env = makeEnv();
+        const loaded = filledDocument();
+        loaded.content = 'saved A';
+        const record = makeRecord(env, loaded, { documentId: 'doc-race-2' });
+        const idb = installIdb(env, seedSpec(env, [record]));
+        await env.mount();
+
+        const store = env.store();
+        const session = env.session();
+        const bar = env.inst.actionbar;
+
+        store.dispatch({ type: 'content/set', text: 'B' });
+        idb.hold();
+        const inFlight = session.saveNow();
+        await env.settle(30);
+        const writesWhileHeld = env.puts('drafts').length;
+
+        bar.button('discard') && env.el('mb2-bar-actions').dispatch('click', { type: 'click', target: bar.button('discard') });
+        bar.dialog().overlay.dispatch('click', { type: 'click', target: bar.dialog().confirm });
+        assert(store.getDocument().content === 'saved A', 'the discard restored A',
+            store.getDocument().content);
+
+        // ...and the user types again BEFORE the old write finishes.
+        store.dispatch({ type: 'content/set', text: 'C' });
+        assert(store.getDocument().content === 'C', 'and the new edit is C');
+        assert(store.isDirty() === true, 'which is unsaved');
+
+        idb.release();
+        await inFlight;
+        await env.settle(60);
+
+        assert(store.getDocument().content === 'C',
+            'the completion left the newest edit exactly as the user typed it',
+            store.getDocument().content);
+        assert(store.isDirty() === true,
+            'the store stays dirty (B persisted, C is newer)', 'dirty=' + store.isDirty());
+        assert(session.pendingSave() === true || env.puts('drafts').length > writesWhileHeld,
+            'and the newest edit is still owed a write',
+            'pending=' + session.pendingSave() + ' writes=' + env.puts('drafts').length);
+
+        await env.settle(1700);
+        assert(env.record(session.key()).document.content === 'C',
+            'which happens: storage ends up holding C',
+            env.record(session.key()).document.content);
+        assert(store.isDirty() === false && session.isDirty() === false,
+            'and then both are clean');
+        assert(store.getDocument().content === 'C', 'with the document untouched by all of it');
+        assert(session.savedDocument().content === 'C',
+            'and the baseline is what was last persisted',
+            session.savedDocument().content);
+        env.unmount();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    section('O4. discard is refused where it would be meaningless or unsafe');
+    // ─────────────────────────────────────────────────────────────
+    {
+        // A fresh page with no stored draft: there is no persisted version, so
+        // discarding must not exist as an action at all.
+        const env = makeEnv();
+        installIdb(env, { seed: { nero_message_builder: { drafts: {}, assets: {}, meta: {} } } });
+        await env.mount();
+        assert(env.store().isDirty() === false, 'rig: a new draft starts clean');
+        const button = env.inst.actionbar.button('discard');
+        assert(!!button && button.disabled === true,
+            'nothing has ever been persisted, so discard is unavailable');
+        const before = env.store().getDocument();
+        env.el('mb2-bar-actions').dispatch('click', { type: 'click', target: button });
+        assert(env.inst.actionbar.dialog() === null,
+            'and clicking it does not even ask (a disabled action is not an action)');
+        assert(env.store().getDocument() === before, 'the document is untouched');
+        env.unmount();
+
+        // A PRESERVED record: the page never established a saved version, so a
+        // discard must not hand the user a document that was never readable.
+        const env2 = makeEnv();
+        const corrupt = makeRecord(env2, filledDocument(), {
+            documentId: 'doc-broken',
+            mutate: (record) => { record.document = 'not-a-document'; },
+        });
+        installIdb(env2, seedSpec(env2, [corrupt]));
+        await env2.mount();
+        const button2 = env2.inst.actionbar.button('discard');
+        assert(env2.session().guard() !== null, 'rig: the record is preserved (guard is up)');
+        assert(!!button2 && button2.disabled === true,
+            'a preserved record leaves discard unavailable');
+        assert(env2.session().savedDocument() === null,
+            'and the session has no saved baseline to offer');
+        assert(env2.record(env2.session().key()).document === 'not-a-document',
+            'the preserved record is still exactly as it was',
+            JSON.stringify(env2.record(env2.session().key())));
+        env2.unmount();
     }
 
     // ─────────────────────────────────────────────────────────────

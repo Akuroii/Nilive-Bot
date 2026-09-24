@@ -241,6 +241,12 @@ window.NERO.embed = window.NERO.embed || {};
             // bar handles rather than a reason to fail at boot.
             navigator: win ? win.navigator : null,
             onNotice: function (notice) { setNotice(inst, notice); },
+            // The draft session is the page's to expose, not the bar's to hold:
+            // the bar gets a question and an action, and never a persistence API.
+            discard: {
+                available: function () { return hasDiscardableChanges(inst); },
+                perform: function () { return discardChanges(inst); },
+            },
         });
         inst.session = f.drafts.create({ guildId: inst.guildId, now: Date.now });
 
@@ -271,6 +277,11 @@ window.NERO.embed = window.NERO.embed || {};
             pending: !!(inst.session && inst.session.pendingSave && inst.session.pendingSave()),
             notice: inst.notice,
         });
+        // The bar's own derived state (which actions exist and are available)
+        // depends on the SESSION too — a confirmed save changes what "discard"
+        // would go back to — and this is the one place both owners are observed.
+        // Its writes are change-guarded, so this costs nothing per keystroke.
+        if (inst.actionbar && inst.actionbar.refresh) inst.actionbar.refresh();
     }
 
     /**
@@ -287,6 +298,44 @@ window.NERO.embed = window.NERO.embed || {};
         if (!text) return false;                  // nothing to say: never invent an empty notice
         inst.notice = { tone: (notice && notice.tone) || 'info', text: text };
         renderStatus(inst);
+        return true;
+    }
+
+    /**
+     * Is there anything to discard? A discard puts the store back to the last
+     * document persistence CONFIRMED, so it only means something when the store
+     * has drifted from that document. The saved baseline is the session's; the
+     * drift is the store's (its dirty flag is exactly "not what storage holds").
+     * With nothing persisted yet there is no version to go back to, so the
+     * action stays unavailable rather than restoring a blank over an edit.
+     */
+    function hasDiscardableChanges(inst) {
+        if (!inst || inst.destroyed || !inst.session || !inst.session.savedDocument) return false;
+        if (!inst.session.savedDocument()) return false;
+        return inst.store.isDirty();
+    }
+
+    /**
+     * THE DISCARD: the canonical document becomes the last persisted one, under
+     * the SAME draft identity. Deliberately nothing else happens — no write is
+     * scheduled (the restored document is what storage already holds, so the
+     * session's own dirty check skips it), no pointer is touched (the pointer
+     * only ever moves on a successful write), and no undo entry is created
+     * (setCanonical replaces the baseline, which is the whole point: undoing a
+     * discard must not be possible, because the state it discarded was never
+     * saved).
+     */
+    function discardChanges(inst) {
+        if (!inst || inst.destroyed || !inst.session) return false;
+        const saved = inst.session.savedDocument ? inst.session.savedDocument() : null;
+        if (!saved) return false;
+        if (!inst.store.isDirty()) return false;            // nothing drifted: no-op
+        setCanonical(inst, saved);
+        setNotice(inst, {
+            tone: 'info',
+            text: 'Changes discarded — back to the last saved version (' +
+                  (inst.session.documentId() || 'this draft') + ').',
+        });
         return true;
     }
 

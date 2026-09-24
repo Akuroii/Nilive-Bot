@@ -495,6 +495,128 @@ const MUTANTS = [
             "            /* no replacement */",
         ]],
     },
+    // ── discard (step 5d-2) ──
+    {
+        id: 'A13',
+        target: 'actionbar',
+        why: 'the discard button ignores whether there is anything to discard',
+        edits: [[
+            "            if (buttons.discard && canDiscard) setDisabled(buttons.discard.node, !canDiscard());",
+            "            /* availability ignored */",
+        ]],
+    },
+    {
+        id: 'A14',
+        target: 'actionbar',
+        why: 'the discard button acts even when the page says there is nothing to discard',
+        edits: [[
+            "            if (canDiscard && !canDiscard()) return false;      // a disabled button is not an action",
+            "            if (false) return false;",
+        ]],
+    },
+    {
+        id: 'A15',
+        target: 'actionbar',
+        why: 'the confirmation opens with focus on the destructive control',
+        edits: [[
+            "            startFocus();       // the cancel button — never the destructive one",
+            "            /* focus left where it was */",
+        ]],
+    },
+    {
+        id: 'A16',
+        target: 'actionbar',
+        why: 'confirming the discard closes the dialog without running the action',
+        edits: [[
+            "                        stats.discards++;\n                        runDiscard();\n                        return true;",
+            "                        stats.discards++;\n                        return true;",
+        ]],
+    },
+    // ── the saved baseline (drafts.js) and the first real consumer of it (the page) ──
+    {
+        id: 'D1',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'the baseline is taken from the document in memory instead of the one that was written',
+        edits: [[
+            "                    lastSavedDocument = model.cloneDocument(record.document);",
+            "                    lastSavedDocument = model.cloneDocument(currentDocument);",
+        ]],
+    },
+    {
+        id: 'D2',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'savedDocument() hands out the session\'s own object (a caller can corrupt it)',
+        edits: [[
+            "            savedDocument: () => (lastSavedDocument ? model.cloneDocument(lastSavedDocument) : null),",
+            "            savedDocument: () => lastSavedDocument,",
+        ]],
+    },
+    {
+        id: 'D3',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'a NEW draft identity inherits the previous one\'s saved document',
+        edits: [[
+            "            lastSavedDocument = null;      // a NEW identity has nothing persisted yet",
+            "            /* the old baseline is kept */",
+        ]],
+    },
+    {
+        id: 'D4',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'use() keeps the previous baseline for a document it does not describe',
+        edits: [[
+            "                lastSavedDocument = null;  // the saved identity is being reset",
+            "                /* the old baseline is kept */",
+        ]],
+    },
+    {
+        id: 'D5',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'attach() leaves a baseline behind that the attached store does not describe',
+        edits: [[
+            "                lastSavedDocument = null;  // attaching re-establishes what \"saved\" means",
+            "                /* the old baseline is kept */",
+        ]],
+    },
+    {
+        id: 'D6',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'a successful load does not establish a baseline',
+        edits: [[
+            "                lastSavedDocument = verdict.document ? model.cloneDocument(verdict.document) : null;",
+            "                /* no baseline from a load */",
+        ]],
+    },
+    {
+        id: 'P1',
+        why: 'discarding marks the store saved without restoring the persisted document',
+        edits: [[
+            "        setCanonical(inst, saved);",
+            "        inst.store.markSavedHash(inst.session.savedHash());",
+        ]],
+    },
+    {
+        id: 'P2',
+        why: 'discard is offered even when the store already matches storage',
+        edits: [[
+            "        return inst.store.isDirty();",
+            "        return true;",
+        ]],
+    },
+    {
+        id: 'P3',
+        why: 'the discard is pushed onto the undo stack (the discarded edit stays reachable)',
+        edits: [[
+            "        setCanonical(inst, saved);",
+            "        inst.store.dispatch({ type: 'document/load', document: NERO.embed.model.normalizeDocument(saved), meta: { history: true } });\n        inst.store.markSaved(inst.store.getDocument());",
+        ]],
+    },
 ];
 
 function sha1(file) {

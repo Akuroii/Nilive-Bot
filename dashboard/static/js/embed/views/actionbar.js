@@ -78,6 +78,13 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         const mount = options.mount;
         const model = options.model || (NERO.embed.model || null);
         const onNotice = typeof options.onNotice === 'function' ? options.onNotice : null;
+        // What "discard" MEANS is not this file's business. The page owns the
+        // draft session, so it hands the bar two functions: is there anything to
+        // discard, and do it. The bar owns the button, the confirmation and the
+        // dialog — never the restore itself, and never a persistence call.
+        const discard = options.discard || null;
+        const canDiscard = discard && typeof discard.available === 'function' ? discard.available : null;
+        const runDiscard = discard && typeof discard.perform === 'function' ? discard.perform : null;
 
         if (!doc || typeof doc.createElement !== 'function') {
             throw new TypeError('actionbar.create needs options.document');
@@ -102,6 +109,9 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             copyAttempts: 0,
             copied: 0,
             copyFailures: 0,
+            discardPrompts: 0,
+            discards: 0,
+            confirms: 0,
             dialogsOpened: 0,
             dialogsClosed: 0,
             focusMoves: 0,
@@ -207,6 +217,9 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             setDisabled(buttons.undo.node, !store.canUndo());
             setDisabled(buttons.redo.node, !store.canRedo());
             setDisabled(buttons.copy.node, copying);
+            // Availability comes from the page (it owns the saved baseline); a
+            // capability that is not wired at all renders no button.
+            if (buttons.discard && canDiscard) setDisabled(buttons.discard.node, !canDiscard());
             return true;
         }
 
@@ -234,10 +247,19 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             body.setAttribute('id', BODY_ID);
             const content = el('div', 'mb2-dialog-content');
             const actions = el('div', 'mb2-dialog-actions');
-            const close = el('button', 'mb2-dialog-btn', 'Close');
+            // The SAFE control comes first: it is what startFocus() lands on, so
+            // opening a dialog never puts the destructive action under the
+            // pointer or under Enter.
+            const close = el('button', 'mb2-dialog-btn', spec.cancelLabel || 'Close');
             close.setAttribute('type', 'button');
             close.setAttribute('data-mb2-dialog-action', 'close');
             actions.appendChild(close);
+            if (spec.confirm) {
+                const go = el('button', 'mb2-dialog-btn mb2-dialog-btn-danger', spec.confirm.label);
+                go.setAttribute('type', 'button');
+                go.setAttribute('data-mb2-dialog-action', spec.confirm.action || 'confirm');
+                actions.appendChild(go);
+            }
 
             panel.appendChild(title);
             panel.appendChild(body);
@@ -250,6 +272,10 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             overlay.addEventListener('keydown', onDialogKeydown);
             mount.appendChild(overlay);
 
+            const handlers = {};
+            if (spec.confirm && typeof spec.confirm.run === 'function') {
+                handlers[spec.confirm.action || 'confirm'] = spec.confirm.run;
+            }
             dialog = {
                 key: spec.key,
                 overlay: overlay,
@@ -259,6 +285,8 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 content: content,
                 actions: actions,
                 close: close,
+                confirm: spec.confirm ? actions.children[actions.children.length - 1] : null,
+                handlers: handlers,
                 invoker: spec.invoker || null,
             };
             stats.dialogsOpened++;
@@ -309,7 +337,16 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         function onDialogClick(event) {
             if (destroyed || !dialog || !event) return;
             if (event.target === dialog.overlay) { closeDialog('backdrop'); return; }
-            if (attr(event.target, 'data-mb2-dialog-action') === 'close') closeDialog('close');
+            const action = attr(event.target, 'data-mb2-dialog-action');
+            if (!action) return;
+            if (action === 'close') { closeDialog('close'); return; }
+            const handler = dialog.handlers[action];
+            if (!handler) return;
+            // Confirmations run AFTER the dialog is gone: the bar must not hold
+            // an open modal while the page changes state underneath it.
+            closeDialog('confirm');
+            stats.confirms++;
+            handler();
         }
 
         function onDialogKeydown(event) {
@@ -431,6 +468,41 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             return open;
         }
 
+        // ── Discard changes ──────────────────────────────────────
+        /**
+         * The one irreversible-ish action in the bar, so it asks first. The
+         * dialog says what will happen and what will NOT (the stored copy is
+         * not deleted), the safe control is focused, and Escape or the backdrop
+         * cancels without running anything.
+         */
+        function confirmDiscard() {
+            if (destroyed || !runDiscard) return false;
+            if (canDiscard && !canDiscard()) return false;      // a disabled button is not an action
+            stats.discardPrompts++;
+            openDialog({
+                key: 'discard',
+                title: 'Discard changes?',
+                body: 'The message goes back to the last saved version. Anything typed since then ' +
+                      'is lost. The saved draft itself is not deleted.',
+                cancelLabel: 'Keep editing',
+                invoker: buttons.discard ? buttons.discard.node : null,
+                confirm: {
+                    label: 'Discard changes',
+                    run: function () {
+                        // Re-checked at the moment it would run: a save can
+                        // confirm itself while the dialog is open, and then
+                        // there is nothing left to discard.
+                        if (canDiscard && !canDiscard()) return false;
+                        stats.discards++;
+                        runDiscard();
+                        return true;
+                    },
+                },
+            });
+            startFocus();       // the cancel button — never the destructive one
+            return true;
+        }
+
         // ── Wiring ───────────────────────────────────────────────
         function onMountClick(event) {
             if (destroyed || !event) return;
@@ -438,11 +510,18 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             if (key === 'undo') undo();
             else if (key === 'redo') redo();
             else if (key === 'copy') copyJson();
+            else if (key === 'discard') confirmDiscard();
         }
 
         addButton({ key: 'undo', order: ORDER.undo, label: 'Undo', ariaLabel: 'Undo the last change' });
         addButton({ key: 'redo', order: ORDER.redo, label: 'Redo', ariaLabel: 'Redo the last undone change' });
         addButton({ key: 'copy', order: ORDER.copy, label: 'Copy JSON', ariaLabel: 'Copy JSON to the clipboard' });
+        if (runDiscard) {
+            addButton({
+                key: 'discard', order: ORDER.discard, label: 'Discard changes',
+                ariaLabel: 'Discard changes and go back to the last saved version',
+            });
+        }
 
         mount.addEventListener('click', onMountClick);
         // Coarse on purpose: the two booleans are derived from the store's
@@ -471,6 +550,8 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         return {
             ORDER: ORDER,
             render: render,
+            /** Re-check the derived state (the page calls this on session changes). */
+            refresh: function () { return render(); },
             destroy: destroy,
             /** The mounted button for `key` (null when it does not exist yet). */
             button: function (key) { return buttons[key] ? buttons[key].node : null; },
@@ -486,7 +567,9 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                     title: dialog.title,
                     body: dialog.body,
                     content: dialog.content,
+                    actions: dialog.actions,
                     close: dialog.close,
+                    confirm: dialog.confirm,
                 };
             },
             stats: function () { return Object.assign({}, stats); },

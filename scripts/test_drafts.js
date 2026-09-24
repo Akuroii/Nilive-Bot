@@ -1605,6 +1605,168 @@ const G2 = '222222222222222222';
             'and no write happens for it', String(fake.writesTo(drafts.V2_NAMESPACE).length - afterDetach));
     }
 
+    // ═══════════════════════════════════════════════════════════
+    section('16. savedDocument(): the last PERSISTED document, and only for this identity');
+    // ═══════════════════════════════════════════════════════════
+    // The one question a hash cannot answer is "what was the message before the
+    // change I want to discard?". savedDocument() answers it — and it must be
+    // impossible for the answer to belong to a DIFFERENT draft, or to follow an
+    // in-memory edit. These checks are the contract 5d-2 builds the discard
+    // action on.
+    {
+        const clock = clockPair();
+        const fake = fakeIndexedDB();
+        const storage = drafts.idbStorage({ indexedDB: fake.indexedDB, scheduler: clock.scheduler });
+        const docA = model.fromEditorDocument({ content: 'saved A', embeds: [{ title: 'A' }] }, { ids: nextIds(), guildId: G1 });
+        const s = drafts.create({ guildId: G1, documentId: docA.id, now: clock.now, storage, scheduler: clock.scheduler });
+
+        assert(s.savedDocument() === null,
+            'a session that has never loaded or saved has nothing persisted to return');
+
+        s.use(docA);
+        assert(s.savedDocument() === null,
+            'use() resets the saved identity: taking ownership of a document is not persisting it');
+
+        const first = await s.saveNow();
+        assert(first.ok === true, 'the first save succeeds', JSON.stringify(first));
+        const saved = s.savedDocument();
+        assert(!!saved, 'and now a persisted document exists');
+        assert(saved.content === 'saved A' &&
+            model.stableStringify(model.toDiscordPayload(saved)) ===
+            model.stableStringify(model.toDiscordPayload(docA)),
+            'it is the document that was written, byte for byte',
+            JSON.stringify(saved && saved.content));
+
+        // A clone, twice over: on the way in and on the way out.
+        assert(s.savedDocument() !== s.document(),
+            'INVARIANT: the baseline is not the live document — no aliasing, ever');
+        assert(s.savedDocument() !== s.savedDocument() && s.savedDocument() !== saved,
+            'INVARIANT: every read is a fresh clone, never a shared reference');
+        assert(s.document() === s.document(),
+            'while the live document is the same object every time (the Store owns that one)');
+        saved.content = 'mutated by the caller';
+        saved.embeds[0].title = 'mutated too';
+        assert(s.savedDocument().content === 'saved A' &&
+            s.savedDocument().embeds[0].title === 'A',
+            'mutating the returned document cannot change what the session holds',
+            JSON.stringify(s.savedDocument().content));
+        const live = s.document();
+        live.content = 'edited in place by a future bug';
+        assert(s.savedDocument().content === 'saved A',
+            'and an in-place write to the live document cannot follow it either',
+            JSON.stringify(s.savedDocument().content));
+        live.content = 'saved A';              // put the live document back
+
+        // An edit through the normal path leaves the baseline alone.
+        s.changed(model.setContent(s.document(), 'edited B'));
+        assert(s.savedDocument().content === 'saved A',
+            'an unsaved edit does not move the baseline');
+        assert(fake.writesTo(drafts.V2_NAMESPACE).length === 1,
+            'and nothing was written for it yet', String(fake.writesTo(drafts.V2_NAMESPACE).length));
+
+        // In flight: not the baseline until persistence CONFIRMS it.
+        const inflight = s.saveNow();
+        assert(s.savedDocument().content === 'saved A',
+            'while the write of B is in flight the baseline is still A');
+        const second = await inflight;
+        assert(second.ok === true, 'the write of B succeeds', JSON.stringify(second));
+        assert(s.savedDocument().content === 'edited B',
+            'and only then does the baseline become B', s.savedDocument().content);
+
+        // The snapshot rule: when a write completes while the user has ALREADY
+        // typed on, the baseline is the document that was WRITTEN — never the
+        // one that happens to be in memory at completion time.
+        s.changed(model.setContent(s.document(), 'typed during the write'));
+        const racing = s.saveNow();                     // writes 'typed during the write'
+        s.changed(model.setContent(s.document(), 'typed after it'));   // in memory, unsaved
+        await racing;
+        assert(s.savedDocument().content === 'typed during the write',
+            'a write that lands while the user typed on leaves the WRITTEN document as the baseline',
+            s.savedDocument().content);
+        assert(s.document().content === 'typed after it',
+            'with the live document untouched by it', s.document().content);
+
+        // A FAILED write never becomes the baseline.
+        fake.controls.failTx = true;
+        s.changed(model.setContent(s.document(), 'C that cannot be stored'));
+        const failed = await s.saveNow();
+        assert(failed.ok === false && s.state().lastError,
+            'the next write fails', JSON.stringify(failed));
+        assert(s.savedDocument().content === 'typed during the write',
+            'and a failed save does not replace the baseline', s.savedDocument().content);
+
+        // A degraded storage does not either.
+        fake.controls.failTx = false;
+        fake.controls.unavailable = true;
+        s.changed(model.setContent(s.document(), 'D while storage is gone'));
+        const degraded = await s.saveNow();
+        assert(degraded.ok === false, 'with storage unavailable the save cannot succeed',
+            JSON.stringify(degraded));
+        assert(s.savedDocument().content === 'typed during the write',
+            'and the baseline is untouched by it', s.savedDocument().content);
+        fake.controls.unavailable = false;
+
+        // IDENTITY: the baseline belongs to ONE draft and dies with it. A fresh
+        // storage, because the adapter's degraded flag is deliberately latched
+        // once a write fails (one flag, no spinning) — and that is not what
+        // this block is about.
+        const clock3 = clockPair();
+        const fake3 = fakeIndexedDB();
+        const storage3 = drafts.idbStorage({ indexedDB: fake3.indexedDB, scheduler: clock3.scheduler });
+        const s3 = drafts.create({ guildId: G1, now: clock3.now, storage: storage3, scheduler: clock3.scheduler });
+        s3.use(model.fromEditorDocument({ content: 'first identity' }, { ids: nextIds(), guildId: G1 }));
+        await s3.saveNow();
+        assert(s3.savedDocument() && s3.savedDocument().content === 'first identity',
+            'setup: the first identity has a baseline', JSON.stringify(s3.savedDocument() && s3.savedDocument().content));
+
+        const docE = model.fromEditorDocument({ content: 'E new draft' }, { ids: nextIds(), guildId: G1 });
+        s3.start(docE);
+        assert(s3.savedDocument() === null,
+            'after start() a new identity has nothing persisted — the old baseline is gone');
+
+        const third = await s3.saveNow();
+        assert(third.ok === true && s3.savedDocument().content === 'E new draft',
+            'saving the new identity establishes its own baseline', JSON.stringify(third));
+
+        const docF = model.fromEditorDocument({ content: 'F adopted' }, { ids: nextIds(), guildId: G1 });
+        s3.use(docF);
+        assert(s3.savedDocument() === null,
+            'use() drops the previous identity\'s baseline');
+
+        const fourth = await s3.saveNow();
+        assert(fourth.ok === true && s3.savedDocument().content === 'F adopted',
+            'and the adopted document gets its own', JSON.stringify(fourth));
+
+        const store = storeMod.createStore({
+            document: model.blankMessageDocument({ ids: nextIds() }),
+            scheduler: clock3.scheduler, now: clock3.now,
+            reducers: storeMod.createReducers(),
+        });
+        s3.attach(store);
+        assert(s3.savedDocument() === null,
+            'attach() to a clean store re-establishes what "saved" means (nothing, yet)');
+
+        // A load for one identity followed by a start for another: the loaded
+        // record must not be restorable through the new identity.
+        const clock2 = clockPair();
+        const fake2 = fakeIndexedDB();
+        const storage2 = drafts.idbStorage({ indexedDB: fake2.indexedDB, scheduler: clock2.scheduler });
+        const stored = model.fromEditorDocument({ content: 'stored record' }, { ids: nextIds(), guildId: G1 });
+        const writer = drafts.create({ guildId: G1, documentId: stored.id, now: clock2.now, storage: storage2, scheduler: clock2.scheduler });
+        writer.use(stored);
+        await writer.saveNow();
+
+        const reader = drafts.create({ guildId: G1, now: clock2.now, storage: storage2, scheduler: clock2.scheduler });
+        const loaded = await reader.load({ documentId: stored.id, guildId: G1 });
+        assert(loaded.ok === true && reader.savedDocument() && reader.savedDocument().content === 'stored record',
+            'a successful load establishes the baseline from the record', JSON.stringify(loaded.status));
+        reader.start(model.fromEditorDocument({ content: 'another draft' }, { ids: nextIds(), guildId: G1 }));
+        assert(reader.savedDocument() === null,
+            'and starting a different draft identity cannot reach the loaded document');
+        assert(reader.document().content === 'another draft',
+            'the session is editing the new document', reader.document().content);
+    }
+
     section('summary');
     console.log(`\ndrafts: ${pass} passed, ${fail} failed`);
     if (fail) { console.log('Failures:'); failures.forEach(f => console.log(' -', f)); process.exit(1); }

@@ -158,6 +158,18 @@ function makeRig(options) {
     mount.setAttribute('id', 'mb2-bar-actions');
     dom.attach(mount);
 
+    // The discard capability is the PAGE's, so the rig supplies one exactly as
+    // the page does: a question and an action, never a persistence API.
+    const discards = [];
+    // No capability by default (that is the 5d-1 bar); `discard: true` wires the
+    // page-shaped one, `discardable()` makes it available.
+    const discard = options.discard === true
+        ? {
+            available() { return !!(options.discardable ? options.discardable() : false); },
+            perform() { discards.push(Date.now()); return true; },
+        }
+        : (options.discard || null);
+
     const bar = NERO.embed.views.actionbar.create({
         document: dom.document,
         model: options.model || model,
@@ -165,6 +177,7 @@ function makeRig(options) {
         mount: mount,
         navigator: nav,
         onNotice: function (notice) { notices.push(notice); },
+        discard: discard || undefined,
     });
 
     function pressKey(target, key, opts) {
@@ -180,7 +193,8 @@ function makeRig(options) {
     }
 
     return {
-        dom, NERO, model, store, bar, mount, nav, calls, notices, dispatched,
+        dom, NERO, model, store, bar, mount, nav, calls, notices, dispatched, discards,
+        discardPrompts: () => discards.length,
         keyFrozen: () => Object.isFrozen(store.getDocument().embeds[0]),
         doc: () => store.getDocument(),
         payload: () => model.stableStringify(model.toDiscordPayload(store.getDocument())),
@@ -615,6 +629,134 @@ async function runAll() {
         assert(now.undos === before.undos && now.redos === before.redos &&
             now.copyAttempts === before.copyAttempts,
             'unrelated clicks are ignored', JSON.stringify(now));
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    section('J. Discard changes: the button, the confirmation, the capability');
+    // ─────────────────────────────────────────────────────────────
+    {
+        // Without a capability there is no button: the bar never renders a dead
+        // action for something the page has not wired.
+        const bare = makeRig();
+        assert(bare.keys().indexOf('discard') === -1,
+            'a bar with no discard capability renders no discard button', bare.keys().join(','));
+        bare.mount.dispatch('click', { type: 'click', target: bare.mount });
+        assert(bare.discardPrompts() === 0, 'and nothing can prompt for one');
+
+        // With the capability (the page's shape): the button exists, in order.
+        let discardable = false;
+        const rig = makeRig({ discard: true, discardable: () => discardable });
+        assert(rig.keys().join(',') === 'undo,redo,copy,discard',
+            'the discard button comes LAST (it is the destructive one)', rig.keys().join(','));
+        const button = rig.button('discard');
+        assert(button.getAttribute('type') === 'button' &&
+            button.getAttribute('data-mb2-action') === 'discard' &&
+            button.textContent === 'Discard changes',
+            'it is a real labelled button', String(button.textContent));
+        assert(String(button.getAttribute('aria-label')).indexOf('Discard changes') === 0,
+            'whose accessible name contains the visible label', String(button.getAttribute('aria-label')));
+        assert(button.disabled === true,
+            'with nothing to discard it is unavailable');
+        // A disabled control can still receive a synthetic click (a stray event,
+        // a programmatic dispatch), so the guard has to be in the handler too.
+        rig.clickNode(button);
+        assert(rig.bar.dialog() === null && rig.discardPrompts() === 0,
+            'and a click delivered while it is unavailable neither prompts nor acts',
+            String(rig.discardPrompts()));
+
+        discardable = true;
+        rig.bar.refresh();
+        assert(button.disabled === false, 'and becomes available when there is something to discard');
+
+        // Clicking asks first. Nothing is discarded by a click alone.
+        const dispatchesBefore = rig.dispatched.length;
+        rig.click('discard');
+        const dialog = rig.bar.dialog();
+        assert(!!dialog && dialog.key === 'discard', 'clicking it opens the confirmation');
+        assert(rig.discardPrompts() === 0, 'and discards nothing yet',
+            String(rig.discardPrompts()));
+        assert(rig.dialogCount() === 1, 'one dialog, as always', String(rig.dialogCount()));
+        assert(dialog.panel.getAttribute('role') === 'dialog' &&
+            dialog.panel.getAttribute('aria-modal') === 'true' &&
+            dialog.panel.getAttribute('aria-labelledby') === dialog.title.getAttribute('id'),
+            'the confirmation is a real modal dialog, labelled by its title');
+        assert(/discard/i.test(dialog.title.textContent),
+            'the title asks the question', dialog.title.textContent);
+        assert(/not deleted/i.test(dialog.body.textContent),
+            'and the body says what will NOT happen (the saved draft survives)',
+            dialog.body.textContent);
+        assert(!!dialog.confirm && dialog.confirm.textContent === 'Discard changes',
+            'the confirmation has a destructive button, labelled in words',
+            dialog.confirm && String(dialog.confirm.textContent));
+        assert(rig.dom.focused() === dialog.close,
+            'focus lands on the SAFE control (keep editing), never on the destructive one',
+            rig.dom.focused() ? String(rig.dom.focused().textContent) : 'nothing focused');
+
+        // Cancel / Escape / backdrop all mean "do nothing".
+        dialog.overlay.dispatch('click', { type: 'click', target: dialog.close });
+        assert(rig.bar.dialog() === null && rig.discardPrompts() === 0,
+            'cancelling performs nothing', String(rig.discardPrompts()));
+        assert(rig.dom.focused() === button, 'and focus returns to the button that asked');
+        rig.click('discard');
+        const viaEscape = rig.bar.dialog();
+        rig.pressKey(viaEscape.close, 'Escape');
+        assert(rig.bar.dialog() === null && rig.discardPrompts() === 0,
+            'Escape performs nothing either', String(rig.discardPrompts()));
+        rig.click('discard');
+        const viaBackdrop = rig.bar.dialog();
+        viaBackdrop.overlay.dispatch('click', { type: 'click', target: viaBackdrop.overlay });
+        assert(rig.discardPrompts() === 0, 'and neither does the backdrop');
+
+        // Confirming runs the capability's action exactly once, and the bar
+        // itself still never touches the document.
+        rig.click('discard');
+        const confirmed = rig.bar.dialog();
+        confirmed.overlay.dispatch('click', { type: 'click', target: confirmed.confirm });
+        assert(rig.discardPrompts() === 1, 'confirming runs the page\'s discard exactly once',
+            String(rig.discardPrompts()));
+        assert(rig.bar.dialog() === null, 'and closes the dialog');
+        assert(rig.bar.stats().confirms === 1, 'counted as a confirmation',
+            String(rig.bar.stats().confirms));
+        assert(rig.dispatched.length === dispatchesBefore,
+            'the bar dispatched nothing of its own (the page owns the document)',
+            String(rig.dispatched.length - dispatchesBefore));
+        assert(rig.doc().content === 'Hello **world**',
+            'and the document was not built or replaced here', rig.doc().content);
+
+        // Availability can change between opening and confirming: the action is
+        // re-checked at the moment it would run.
+        rig.click('discard');
+        const raced = rig.bar.dialog();
+        discardable = false;
+        rig.bar.refresh();
+        raced.overlay.dispatch('click', { type: 'click', target: raced.confirm });
+        assert(rig.discardPrompts() === 1,
+            'a discard that became unavailable while the dialog was open does not run',
+            String(rig.discardPrompts()));
+
+        // The clipboard fallback is not a confirmation: it must have no
+        // destructive button of its own.
+        rig.nav.clipboard = { writeText() { return Promise.reject(new Error('denied')); } };
+        rig.click('copy');
+        await flush();
+        const fallback = rig.bar.dialog();
+        assert(!!fallback && fallback.key === 'copy-fallback', 'the copy fallback still opens');
+        assert(fallback.confirm === null && fallback.actions.children.length === 1,
+            'and it offers exactly one action (Close)', String(fallback.actions.children.length));
+        fallback.overlay.dispatch('click', { type: 'click', target: fallback.close });
+
+        // Teardown with a dialog open.
+        discardable = true;
+        rig.bar.refresh();
+        rig.click('discard');
+        assert(!!rig.bar.dialog(), 'rig: a confirmation is open');
+        rig.bar.destroy();
+        assert(rig.bar.dialog() === null && rig.mount.children.length === 0,
+            'destroy() takes an open confirmation with it',
+            String(rig.mount.children.length));
+        let threw = null;
+        try { discardable = true; rig.bar.refresh(); } catch (e) { threw = e; }
+        assert(!threw, 'and renders nothing afterwards', threw && threw.message);
     }
 }
 

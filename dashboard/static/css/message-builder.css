@@ -246,6 +246,9 @@
 }
 .mb2-dialog-btn:hover { border-color: var(--accent); }
 .mb2-dialog-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The destructive choice is labelled in words; the tone only reinforces it. */
+.mb2-dialog-btn-danger { border-color: var(--danger); color: var(--danger); }
+.mb2-dialog-btn-danger:hover { border-color: var(--danger); }
 
 /* ── Structure rail (rail.js owns everything inside #mb2-rail-body) ──
    Rows are flat in the DOM with aria-level for the hierarchy; the indent is
