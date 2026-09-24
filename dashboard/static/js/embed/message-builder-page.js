@@ -247,6 +247,11 @@ window.NERO.embed = window.NERO.embed || {};
                 available: function () { return hasDiscardableChanges(inst); },
                 perform: function () { return discardChanges(inst); },
             },
+            // Same shape for Save now: an action, never a persistence API. The
+            // page performs it; the bar only renders the capability.
+            save: {
+                perform: function () { return saveNow(inst); },
+            },
         });
         inst.session = f.drafts.create({ guildId: inst.guildId, now: Date.now });
 
@@ -267,14 +272,17 @@ window.NERO.embed = window.NERO.embed || {};
 
     function renderStatus(inst) {
         if (!inst || inst.destroyed || !inst.statusbar) return;
+        // The two facts the UI cannot derive for free: both hash the document.
+        // They are computed ONCE here and handed to every surface that needs
+        // them, so asking the same question three times per keystroke (and
+        // paying for three document hashes) never happens.
+        const dirty = inst.store ? inst.store.isDirty() : false;             // store-owned
+        const sessionState = inst.session ? inst.session.state() : null;     // session-owned
+        const pending = !!(inst.session && inst.session.pendingSave && inst.session.pendingSave());
         inst.statusbar.render({
-            // The store owns document dirty-ness — this is the only place the
-            // UI asks that question.
-            dirty: inst.store ? inst.store.isDirty() : false,
-            // The session owns the persistence lifecycle (saving/saved/error/
-            // blocked/degraded/revision/timestamps).
-            session: inst.session ? inst.session.state() : null,
-            pending: !!(inst.session && inst.session.pendingSave && inst.session.pendingSave()),
+            dirty: dirty,
+            session: sessionState,
+            pending: pending,
             notice: inst.notice,
         });
         // The bar's own derived state (which actions exist and are available)
@@ -282,6 +290,33 @@ window.NERO.embed = window.NERO.embed || {};
         // would go back to — and this is the one place both owners are observed.
         // Its writes are change-guarded, so this costs nothing per keystroke.
         if (inst.actionbar && inst.actionbar.refresh) inst.actionbar.refresh();
+        if (inst.actionbar && inst.actionbar.renderSave) {
+            inst.actionbar.renderSave({
+                dirty: dirty,
+                pending: pending,
+                session: sessionState,
+                // The retryability question is the session's, and the session
+                // asks the storage adapter — the bar never keeps its own list.
+                retryable: !!(inst.session && inst.session.retryable && inst.session.retryable()),
+            });
+        }
+    }
+
+    /**
+     * SAVE NOW — the manual half of the ONE persistence path.
+     *
+     * This calls the session's own saveNow(), with no arguments and no force:
+     * a manual save is exactly the write the idle timer performs, so a click
+     * cannot write something the automatic path would not, cannot skip a gate
+     * (destroyed / blocked / clean / in-flight) and cannot start a second
+     * write while one is in flight — saveNow() returns the SAME promise for a
+     * save already running. The result is deliberately not interpreted here:
+     * the session records the outcome in its state, and renderStatus() renders
+     * it, so there is one description of what happened rather than two.
+     */
+    function saveNow(inst) {
+        if (!inst || inst.destroyed || !inst.session) return Promise.resolve({ ok: false, reason: 'no-session' });
+        return inst.session.saveNow();
     }
 
     /**

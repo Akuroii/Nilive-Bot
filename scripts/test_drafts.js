@@ -2066,6 +2066,116 @@ const G2 = '222222222222222222';
         assert(plainWrites.length === 1, 'and was written exactly once', String(plainWrites.length));
     }
 
+    // ═══════════════════════════════════════════════════════════
+    section('24. retryable(): the same question as recover(), asked without acting');
+    // ═══════════════════════════════════════════════════════════
+    // A UI has to decide whether to OFFER a retry, and finding out by calling
+    // recover() would clear the latch as a side effect of a question. This is
+    // the pure half: same answer, nothing changes — and the answer must match
+    // recover()'s decision exactly, or a button would offer a retry that
+    // cannot work (or hide one that can).
+    {
+        const clock = clockPair();
+
+        // A transient write failure: retryable, and PROVABLY unanswered.
+        const fake = fakeIndexedDB();
+        const storage = drafts.idbStorage({ indexedDB: fake.indexedDB, scheduler: clock.scheduler });
+        const doc = model.fromEditorDocument({ content: 'text' }, { ids: nextIds(), guildId: G1 });
+        const s = drafts.create({ guildId: G1, documentId: doc.id, now: clock.now, storage, scheduler: clock.scheduler });
+        s.use(doc);
+        assert(s.retryable() === false, 'nothing has failed yet, so nothing is retryable');
+        assert(storage.retryable() === false && storage.reason() === null,
+            'and the adapter has nothing to report');
+
+        await s.saveNow();
+        assert(s.retryable() === false, 'a successful save leaves nothing to retry');
+
+        fake.controls.failTx = true;
+        s.changed(model.setContent(s.document(), 'changed'));
+        const failed = await s.saveNow();
+        assert(failed.ok === false, 'rig: the write failed',
+            JSON.stringify(failed));
+        const reasonBefore = storage.reason();
+        const recoveriesBefore = storage.stats().recoveries;
+        const opensBefore = storage.stats().opens;
+        assert(storage.retryable() === true, 'the adapter says the latch is transient',
+            String(reasonBefore));
+        assert(s.retryable() === true, 'and so does the session');
+
+        // The point of the exercise: asking is not doing.
+        for (let i = 0; i < 5; i++) {
+            s.retryable();
+            storage.retryable();
+        }
+        assert(storage.reason() === reasonBefore && storage.isAvailable() === false,
+            'asking five times did NOT clear the latch',
+            String(storage.reason()));
+        assert(storage.stats().recoveries === recoveriesBefore,
+            'no recovery was performed by asking', String(storage.stats().recoveries));
+        assert(storage.stats().opens === opensBefore,
+            'and no database was opened by asking', String(storage.stats().opens));
+
+        // The two answers agree — which is what makes the button honest.
+        assert(storage.retryable() === true && storage.recover() === true &&
+            storage.reason() === null && s.retryable() === false,
+            'the predicate and the action agree: what retryable() promises, recover() accepts');
+
+        fake.controls.failTx = false;
+        const retried = await s.saveNow();
+        assert(retried.ok === true && s.retryable() === false,
+            'and after the retry lands there is nothing left to retry', JSON.stringify(retried));
+
+        // An environment failure: not retryable, and asking must not re-probe.
+        const noIdb = drafts.idbStorage({ indexedDB: null, scheduler: clock.scheduler });
+        const s2 = drafts.create({ guildId: G1, documentId: 'doc-none', now: clock.now, storage: noIdb, scheduler: clock.scheduler });
+        s2.use(doc);
+        await s2.saveNow();
+        const opensForNone = noIdb.stats().opens;
+        assert(noIdb.reason() === 'no-indexeddb', 'rig: there is no IndexedDB',
+            String(noIdb.reason()));
+        assert(noIdb.retryable() === false && s2.retryable() === false,
+            'an environment failure is NOT retryable');
+        assert(noIdb.recover() === false, 'and recover() refuses it, as it always did');
+        assert(noIdb.stats().opens === opensForNone,
+            'with no open attempt from either the question or the refusal',
+            String(noIdb.stats().opens - opensForNone));
+        assert(s2.retryable() === false, 'and it stays a no');
+
+        // A storage that cannot answer is not assumed retryable: an offer to
+        // retry must never be a guess.
+        const plain = {
+            isAvailable: () => false,
+            reason: () => 'write-error',
+            get: () => Promise.resolve(null),
+            put: () => Promise.resolve({ ok: false, reason: 'write-error' }),
+        };
+        const s3 = drafts.create({ guildId: G1, documentId: 'doc-plain', now: clock.now, storage: plain, scheduler: clock.scheduler });
+        s3.use(doc);
+        await s3.saveNow();
+        assert(s3.retryable() === false,
+            'a storage with no retryable() is not treated as retryable (no promises it cannot keep)');
+
+        // A non-write failure is not a retry question at all. (The storage here
+        // WORKS, so the failure has to come from the document itself.)
+        const fake4 = fakeIndexedDB();
+        const storage4 = drafts.idbStorage({ indexedDB: fake4.indexedDB, scheduler: clock.scheduler });
+        const s4 = drafts.create({ guildId: G1, documentId: 'doc-bad', now: clock.now, storage: storage4, scheduler: clock.scheduler });
+        // How the existing suite produces one: a value the model keeps and
+        // JSON cannot carry. (Normalization coerces plain fields, so the
+        // poison goes into the asset registry, which is preserved as-is.)
+        const poisoned = model.fromEditorDocument({ content: 'x', embeds: [{ title: 'T' }] }, { ids: nextIds() });
+        poisoned.assets = { a1: { blob: new Blob(['x'], { type: 'image/png' }), filename: 'one.png' } };
+        s4.use(poisoned);
+        const bad = await s4.saveNow();
+        assert(bad.ok === false && bad.reason === 'not-serializable',
+            'rig: the document cannot be serialized', JSON.stringify(bad));
+        assert(s4.retryable() === false && storage4.retryable() === false,
+            'a document that cannot be serialized offers no retry either');
+        assert(storage4.stats().puts === 0 && storage4.isAvailable() === true,
+            'and it never reached storage (so nothing latched, and nothing is blamed on the disk)',
+            JSON.stringify(storage4.stats()));
+    }
+
     section('summary');
     console.log(`\ndrafts: ${pass} passed, ${fail} failed`);
     if (fail) { console.log('Failures:'); failures.forEach(f => console.log(' -', f)); process.exit(1); }

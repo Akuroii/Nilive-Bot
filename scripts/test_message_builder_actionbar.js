@@ -178,6 +178,8 @@ function makeRig(options) {
         navigator: nav,
         onNotice: function (notice) { notices.push(notice); },
         discard: discard || undefined,
+        // The save capability is the page's too: an action, never a session.
+        save: options.save || undefined,
     });
 
     function pressKey(target, key, opts) {
@@ -567,6 +569,17 @@ async function runAll() {
             'the bar never opens storage (persistence belongs to drafts.js)');
         assert(!/NERO\.embed\.(preview|drafts)/.test(CODE),
             'it never reaches for the renderer or the session');
+        // The save control extends this rule rather than weakening it: the bar
+        // renders a capability, it does not perform a write. Nothing in this
+        // file may name a persistence entry point, or the button would be a
+        // second write path wearing a label.
+        assert(!/\bsaveNow\b|\.put\(|buildRecord|draftKey|markSaved/.test(CODE),
+            'no persistence call of its own: Save now only calls the page\'s capability',
+            (CODE.match(/\bsaveNow\b|\.put\(|buildRecord|draftKey|markSaved/) || [''])[0]);
+        assert(!/resolveGuard|\.storage\(\)|forceReplace/.test(CODE),
+            'and nothing about the guard or the adapter: this step ships no guard UI');
+        assert(!/isDirty|hashDocument|\.state\(\)/.test(CODE),
+            'the save control reads the facts the page already computed — it never asks the store or the session itself');
         assert(!/mb2-bar-status|aria-live|role="status"/.test(CODE),
             'it never writes into the status region and creates no live region of its own');
         assert(!/maxlength|maxLength|\bvalidat|truncat|\bcounters?\b|\blimits?\b/i.test(CODE),
@@ -757,6 +770,244 @@ async function runAll() {
         let threw = null;
         try { discardable = true; rig.bar.refresh(); } catch (e) { threw = e; }
         assert(!threw, 'and renders nothing afterwards', threw && threw.message);
+    }
+    // ─────────────────────────────────────────────────────────────
+    section('K. Save now: the one contextual control (and when there is no retry)');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const describeSave = makeSandbox().NERO.embed.views.actionbar.describeSave;
+        const facts = (over) => Object.assign({
+            dirty: false, pending: false, retryable: false,
+            session: { blocked: null, saving: false, lastError: null, degraded: null, writes: 0 },
+        }, over || {});
+        const sessionWith = (over) => Object.assign(
+            { blocked: null, saving: false, lastError: null, degraded: null, writes: 0 }, over || {});
+
+        // ── the pure mapping: every state, and what it must NOT say ──
+        const cases = [
+            ['nothing has ever been written', facts(), 'Save now', false, 'clean'],
+            ['dirty (something to save)', facts({ dirty: true }), 'Save now', true, 'dirty'],
+            ['a write is queued but the store is clean',
+                facts({ pending: true }), 'Save now', true, 'dirty'],
+            ['a save is in flight',
+                facts({ dirty: true, session: sessionWith({ saving: true }) }), 'Saving\u2026', false, 'saving'],
+            ['the write was confirmed',
+                facts({ session: sessionWith({ writes: 3 }) }), 'Saved', false, 'saved'],
+            ['a TRANSIENT failure',
+                facts({ dirty: true, retryable: true, session: sessionWith({ lastError: { reason: 'write-error' } }) }),
+                'Try saving again', true, 'retry'],
+            ['an ENVIRONMENT failure (no IndexedDB)',
+                facts({ dirty: true, session: sessionWith({ lastError: { reason: 'no-indexeddb' }, degraded: 'no-indexeddb' }) }),
+                'Save now', false, 'unavailable'],
+            ['an open timeout',
+                facts({ dirty: true, session: sessionWith({ lastError: { reason: 'open-timeout' }, degraded: 'open-timeout' }) }),
+                'Save now', false, 'unavailable'],
+            ['a document that cannot be serialized',
+                facts({ dirty: true, session: sessionWith({ lastError: { reason: 'not-serializable' } }) }),
+                'Save now', false, 'unavailable'],
+            ['storage known unusable before any write',
+                facts({ dirty: true, session: sessionWith({ degraded: 'no-indexeddb' }) }),
+                'Save now', false, 'unavailable'],
+            ['a protected record (the guard is up)',
+                facts({ dirty: true, session: sessionWith({ blocked: 'corrupt-record' }) }),
+                'Save now', false, 'blocked'],
+            // A transient latch and nothing owed: there is nothing to save, so
+            // the control is unavailable — but it is NOT the environment case
+            // below, because a retry from here would work.
+            ['a transient latch with nothing owed yet',
+                facts({ retryable: true, session: sessionWith({ degraded: 'write-error', writes: 0 }) }),
+                'Save now', false, 'clean'],
+            // …and the same latch WITH something to save: the click is what
+            // gives the storage its one chance to come back.
+            ['a transient latch with an edit to save',
+                facts({ dirty: true, retryable: true, session: sessionWith({ degraded: 'write-error', writes: 0 }) }),
+                'Save now', true, 'dirty'],
+        ];
+        cases.forEach((c) => {
+            const got = describeSave(c[1]);
+            assert(got.label === c[2] && got.enabled === c[3] && got.state === c[4],
+                'mapping — ' + c[0] + ': "' + c[2] + '"' + (c[3] ? ' (available)' : ' (unavailable)'),
+                JSON.stringify(got));
+        });
+        // The requirement, stated on its own so it cannot be softened by a
+        // refactor: no failure that a retry cannot fix may ever offer a retry.
+        ['no-indexeddb', 'open-timeout', 'open-error', 'upgrade-failed', 'not-serializable'].forEach((reason) => {
+            const got = describeSave(facts({
+                dirty: true, retryable: false,
+                session: sessionWith({ lastError: { reason: reason }, degraded: reason }),
+            }));
+            assert(got.label !== 'Try saving again' && got.state !== 'retry' && got.enabled === false,
+                'a non-retryable failure (' + reason + ') offers NO retry action',
+                JSON.stringify(got));
+        });
+        // …and the honest other half: a retryable one does.
+        ['write-timeout', 'write-error', 'write-aborted', 'transaction-failed', 'request-failed'].forEach((reason) => {
+            const got = describeSave(facts({
+                dirty: true, retryable: true,
+                session: sessionWith({ lastError: { reason: reason }, degraded: reason }),
+            }));
+            assert(got.label === 'Try saving again' && got.enabled === true && got.state === 'retry',
+                'a transient failure (' + reason + ') does offer a retry', JSON.stringify(got));
+        });
+        assert(describeSave().state === 'clean',
+            'the mapping tolerates no facts at all (it never throws)');
+
+        // ── the button: only when the page wired it ──
+        const bare = makeRig();
+        assert(bare.keys().indexOf('save') === -1,
+            'a bar with no save capability renders no save button', bare.keys().join(','));
+        bare.mount.dispatch('click', { type: 'click', target: bare.mount });
+        assert(bare.stats().saves === 0, 'and nothing can start a save');
+
+        // ── the wired button: declared position, honest initial state ──
+        const saveCalls = [];
+        const rig = makeRig({
+            save: { perform() { saveCalls.push(Date.now()); return Promise.resolve({ ok: true }); } },
+            discard: true,
+        });
+        assert(rig.keys().join(',') === 'undo,redo,save,copy,discard',
+            'Save now sits between Redo and Copy JSON (the approved order)', rig.keys().join(','));
+        const button = rig.button('save');
+        assert(button.getAttribute('type') === 'button' &&
+            button.getAttribute('data-mb2-action') === 'save',
+            'it is a real button of the save action');
+        assert(button.textContent === 'Save now' && button.disabled === true,
+            'it starts as a DISABLED "Save now": nothing has told it there is anything to save yet',
+            String(button.textContent) + '/' + button.disabled);
+
+        // ── transitions through renderSave ──
+        const steps = [
+            [facts({ dirty: false }), 'Save now', true, 'clean'],
+            [facts({ dirty: true }), 'Save now', false, 'dirty'],
+            [facts({ dirty: true, session: sessionWith({ saving: true }) }), 'Saving\u2026', true, 'saving'],
+            [facts({ session: sessionWith({ writes: 1 }) }), 'Saved', true, 'saved'],
+            [facts({ dirty: true, retryable: true, session: sessionWith({ lastError: { reason: 'write-error' } }) }),
+                'Try saving again', false, 'retry'],
+            [facts({ dirty: true, session: sessionWith({ lastError: { reason: 'no-indexeddb' }, degraded: 'no-indexeddb' }) }),
+                'Save now', true, 'unavailable'],
+            [facts({ dirty: true }), 'Save now', false, 'dirty'],
+            [facts({ session: sessionWith({ writes: 1 }) }), 'Saved', true, 'saved'],
+        ];
+        steps.forEach((s, i) => {
+            rig.bar.renderSave(s[0]);
+            assert(button.textContent === s[1] && button.disabled === s[2] &&
+                button.getAttribute('data-mb2-save-state') === s[3],
+                'step ' + (i + 1) + ': the control reads "' + s[1] + '"' + (s[2] ? ' (unavailable)' : ' (available)'),
+                String(button.textContent) + '/' + button.disabled + '/' + button.getAttribute('data-mb2-save-state'));
+        });
+        assert(String(button.getAttribute('title')).length > 0 &&
+            String(button.getAttribute('aria-label')) === button.textContent,
+            'the accessible name is the visible label, and the tooltip explains the state',
+            String(button.getAttribute('aria-label')) + ' | ' + String(button.getAttribute('title')));
+
+        // ── clicking runs the page's action, exactly once per click ──
+        rig.bar.renderSave(facts({ dirty: true }));
+        assert(button.disabled === false, 'rig: there is something to save');
+        const beforeClick = rig.stats();
+        rig.click('save');
+        assert(saveCalls.length === 1 && rig.stats().saves === 1,
+            'clicking calls the page\'s save exactly once',
+            saveCalls.length + '/' + rig.stats().saves);
+        assert(rig.stats().savePresses === beforeClick.savePresses + 1,
+            'and the press is counted', String(rig.stats().savePresses));
+        assert(rig.dispatched.length === 0,
+            'the bar dispatched nothing: the page owns the document and the write',
+            String(rig.dispatched.length));
+        assert(rig.doc().content === 'Hello **world**',
+            'and the document is untouched by the bar', rig.doc().content);
+
+        // ── unavailable means unavailable, even for a synthetic click ──
+        rig.bar.renderSave(facts({ dirty: true, session: sessionWith({ lastError: { reason: 'no-indexeddb' }, degraded: 'no-indexeddb' }) }));
+        rig.clickNode(button);
+        assert(rig.stats().savePresses === beforeClick.savePresses + 2 && rig.stats().saves === 1,
+            'a click delivered while it is unavailable is SEEN but starts no save',
+            rig.stats().savePresses + ' presses / ' + rig.stats().saves + ' saves');
+        assert(saveCalls.length === 1, 'and the page\'s action did not run', String(saveCalls.length));
+        rig.bar.renderSave(facts({ dirty: true, session: sessionWith({ saving: true }) }));
+        rig.clickNode(button);
+        assert(saveCalls.length === 1, 'nor does a click while a save is already in flight',
+            String(saveCalls.length));
+        rig.bar.renderSave(facts({ session: sessionWith({ blocked: 'corrupt-record' }) }));
+        rig.clickNode(button);
+        assert(saveCalls.length === 1, 'nor over a protected record', String(saveCalls.length));
+
+        // ── listener hygiene: one listener however often the bar renders ──
+        for (let i = 0; i < 25; i++) {
+            rig.bar.renderSave(facts({ dirty: i % 2 === 0 }));
+            rig.bar.refresh();
+        }
+        rig.bar.renderSave(facts({ dirty: true }));
+        const beforeMany = saveCalls.length;
+        rig.click('save');
+        assert(saveCalls.length === beforeMany + 1,
+            'after 25 re-renders one click still means ONE save (no duplicated listeners)',
+            String(saveCalls.length - beforeMany));
+        rig.click('save');
+        rig.click('save');
+        assert(saveCalls.length === beforeMany + 3,
+            'and every further click means exactly one more', String(saveCalls.length - beforeMany));
+
+        // ── a keystroke must not cost writes ──
+        const writesBefore = rig.stats().stateWrites;
+        const labelsBefore = rig.stats().saveLabels;
+        for (let i = 0; i < 20; i++) rig.bar.renderSave(facts({ dirty: true }));
+        assert(rig.stats().stateWrites === writesBefore && rig.stats().saveLabels === labelsBefore,
+            'rendering the same state 20 times writes nothing (a keystroke is not a DOM write)',
+            (rig.stats().stateWrites - writesBefore) + '/' + (rig.stats().saveLabels - labelsBefore));
+
+        // ── a perform() that throws or rejects must not break the bar ──
+        const rough = makeRig({
+            save: { perform() { throw new Error('the page exploded'); } },
+            discard: true,
+        });
+        rough.bar.renderSave(facts({ dirty: true }));
+        let threw = null;
+        try { rough.click('save'); } catch (e) { threw = e; }
+        assert(!threw, 'a save that throws does not take the bar down with it', threw && threw.message);
+        assert(rough.button('copy').disabled === false && rough.keys().length === 5,
+            'and the rest of the bar still works');
+        rough.bar.destroy();
+
+        const rejecting = makeRig({
+            save: { perform() { return Promise.reject(new Error('nope')); } },
+            discard: true,
+        });
+        rejecting.bar.renderSave(facts({ dirty: true }));
+        rejecting.click('save');
+        await flush();
+        assert(rejecting.button('undo') !== null && rejecting.bar.stats().saves === 1,
+            'and a rejected save is swallowed (the session reports its own failures)',
+            String(rejecting.bar.stats().saves));
+        rejecting.bar.destroy();
+
+        // ── one listener, however many times the bar renders ──
+        const clickListeners = () => rig.mount.listeners.filter(l => l.type === 'click').length;
+        assert(clickListeners() === 1,
+            'the mount carries exactly ONE click listener', String(clickListeners()));
+        rig.bar.renderSave(facts({ dirty: true }));
+        rig.bar.refresh();
+        rig.bar.renderSave(facts({ dirty: true }));
+        assert(clickListeners() === 1,
+            'and rendering (or re-rendering the save state) never adds another',
+            String(clickListeners()));
+        const beforeOneListener = saveCalls.length;
+        rig.click('save');
+        assert(saveCalls.length === beforeOneListener + 1,
+            'so one click is still one save after all of that',
+            String(saveCalls.length - beforeOneListener));
+
+        // ── teardown ──
+        rig.bar.renderSave(facts({ dirty: true }));
+        rig.bar.destroy();
+        assert(rig.mount.children.length === 0, 'destroy() removes the button',
+            String(rig.mount.children.length));
+        assert(clickListeners() === 0,
+            'and its click listener with it', String(clickListeners()));
+        assert(rig.bar.renderSave(facts({ dirty: true })) === false,
+            'and rendering afterwards is a no-op, not a crash');
+        let afterThrew = null;
+        try { rig.clickNode(button); } catch (e) { afterThrew = e; }
+        assert(!afterThrew, 'a stray click on the removed node does nothing', afterThrew && afterThrew.message);
     }
 }
 

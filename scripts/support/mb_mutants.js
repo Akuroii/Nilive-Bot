@@ -640,6 +640,87 @@ const MUTANTS = [
             "            /* the failed handle is kept */",
         ]],
     },
+    // ── the save control (step 5d-3 Step B) ──
+    {
+        id: 'A17',
+        target: 'actionbar',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_actionbar.js'),
+        why: 'the save control offers a retry for a failure no retry can fix',
+        edits: [[
+            "            if (retryable) {",
+            "            if (true) {",
+        ]],
+    },
+    {
+        id: 'A18',
+        target: 'actionbar',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_actionbar.js'),
+        why: 'the save control ignores a write that is already in flight (a second save is offered)',
+        edits: [[
+            "        if (session.saving) {",
+            "        if (false) {",
+        ]],
+    },
+    {
+        id: 'A19',
+        target: 'actionbar',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_actionbar.js'),
+        why: 'a click on an unavailable save control still starts a save',
+        edits: [[
+            "            if (buttons.save && buttons.save.node.disabled) return false;",
+            "            if (false) return false;",
+        ]],
+    },
+    {
+        id: 'A20',
+        target: 'actionbar',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_actionbar.js'),
+        why: 'the save control claims "Saved" for a draft that was never written',
+        edits: [[
+            "        if (session.writes > 0) {",
+            "        if (true) {",
+        ]],
+    },
+    {
+        id: 'A21',
+        target: 'actionbar',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_actionbar.js'),
+        why: 'the save control is offered even though storage is known to be unusable',
+        edits: [[
+            "        if (session.degraded && !retryable) {",
+            "        if (false) {",
+        ]],
+    },
+    {
+        id: 'A22',
+        target: 'actionbar',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_actionbar.js'),
+        why: 'the save control rewrites its label on every render (a keystroke costs a DOM write)',
+        edits: [[
+            "            if (node.textContent !== spec.label) {\n                node.textContent = spec.label;\n                stats.saveLabels++;\n            }",
+            "            node.textContent = spec.label;\n            stats.saveLabels++;",
+        ]],
+    },
+    {
+        id: 'D10',
+        target: 'drafts',
+        harness: path.join(ROOT, 'scripts', 'test_drafts.js'),
+        why: 'retryable() answers yes for ANY failure, including the ones retrying cannot fix',
+        edits: [[
+            "            if (typeof storage.retryable !== 'function') return false;\n            return !!storage.retryable();",
+            "            return true;",
+        ]],
+    },
+    {
+        id: 'P4',
+        target: 'page',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_page.js'),
+        why: 'the page wires a save button that does not save (the capability is not connected)',
+        edits: [[
+            "            save: {\n                perform: function () { return saveNow(inst); },\n            },",
+            "            save: {\n                perform: function () { return null; },\n            },",
+        ]],
+    },
     {
         id: 'P3',
         why: 'the discard is pushed onto the undo stack (the discarded edit stays reachable)',

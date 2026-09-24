@@ -415,6 +415,19 @@ window.NERO.embed = window.NERO.embed || {};
             return true;
         }
 
+        /**
+         * The same question recover() answers — asked WITHOUT acting on it.
+         *
+         * A UI has to decide whether to OFFER a retry before one is asked for,
+         * and finding out by calling recover() would clear the latch as a side
+         * effect of a question. This only reads the latch against the one list
+         * above, so "what counts as retryable" has exactly one definition in
+         * the codebase and the answer cannot drift from recover()'s behaviour.
+         */
+        function retryable() {
+            return !!degraded && TRANSIENT.indexOf(degraded) !== -1;
+        }
+
         // ── open ──────────────────────────────────────────────────
         // One timeout, one degraded flag, no spinning. A VersionError (a
         // newer build already owns this database) degrades rather than
@@ -528,6 +541,7 @@ window.NERO.embed = window.NERO.embed || {};
             isAvailable: () => !degraded,
             reason: () => degraded,
             recover: recover,
+            retryable: retryable,
             get: (key) => {
                 if (!idb || degraded) return Promise.resolve(null);
                 stats.gets++;
@@ -718,6 +732,21 @@ window.NERO.embed = window.NERO.embed || {};
             const hash = model.hashDocument(currentDocument);
             if (lastSavedHash === null) return model.documentHasContent(currentDocument);
             return hash !== lastSavedHash;
+        }
+
+        /**
+         * Would a retry plausibly succeed, given the failure we are sitting on?
+         *
+         * Pure and side-effect free — the UI asks this to decide whether to
+         * OFFER a retry, and an offer must not change anything by being asked.
+         * The answer comes from the storage adapter (which owns the list of
+         * transient reasons), so this file does not keep a second copy of it;
+         * a storage that cannot answer is not assumed retryable.
+         */
+        function retryableFailure() {
+            if (!lastError) return false;                                  // nothing failed
+            if (typeof storage.retryable !== 'function') return false;
+            return !!storage.retryable();
         }
 
         if (typeof options.onState === 'function') observers.push(options.onState);
@@ -1193,6 +1222,14 @@ window.NERO.embed = window.NERO.embed || {};
             // state (for the future UI; nothing here renders)
             state: state,
             isDirty: isDirty,
+            /**
+             * Pure: could one more attempt plausibly succeed? True only when
+             * the last failure was a TRANSIENT write failure — asked of the
+             * storage adapter, so the definition lives in exactly one place
+             * and asking changes nothing. A storage that cannot answer is not
+             * assumed retryable: an offer to retry must never be a guess.
+             */
+            retryable: retryableFailure,
             onState: onState,
             document: () => currentDocument,
             resolveGuard: resolveGuard,

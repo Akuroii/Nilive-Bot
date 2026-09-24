@@ -229,6 +229,44 @@ function makeRecord(env, document_, opts) {
     return record;
 }
 
+/**
+ * Make the NEXT readwrite transaction fail, the way a disk that has just gone
+ * bad does — the fake has no such switch, and a page-level test of a FAILED
+ * save needs one. Everything else is the real adapter talking to the real fake.
+ */
+function armWriteFailure(idb) {
+    const state = { on: false };
+    const wrapper = {
+        open(name, version) {
+            const req = idb.open(name, version);
+            let real = null;
+            Object.defineProperty(req, 'onsuccess', {
+                configurable: true,
+                get() { return real; },
+                set(fn) {
+                    real = fn && function (ev) {
+                        const db = req.result;
+                        const tx = db.transaction.bind(db);
+                        db.transaction = function (storeName, mode) {
+                            if (state.on && mode === 'readwrite') {
+                                throw new Error('forced: the write transaction failed');
+                            }
+                            return tx(storeName, mode);
+                        };
+                        return fn(ev);
+                    };
+                },
+            });
+            return req;
+        },
+    };
+    return { state: state, wrapper: wrapper };
+}
+
+
+
+
+
 function seedSpec(env, records, opts) {
     opts = opts || {};
     const drafts = env.NERO.embed.drafts;
@@ -292,8 +330,8 @@ async function main() {
         // one 5a placeholder that legitimately flips: it asserted the container
         // was empty until the buttons were real.
         const barButtons = env.el('mb2-bar-actions').children;
-        assert(barButtons.length === 4 &&
-            barButtons.map(b => b.getAttribute('data-mb2-action')).join(',') === 'undo,redo,copy,discard',
+        assert(barButtons.length === 5 &&
+            barButtons.map(b => b.getAttribute('data-mb2-action')).join(',') === 'undo,redo,save,copy,discard',
             'the action container holds the real actions (5d), in order',
             barButtons.map(b => b.getAttribute('data-mb2-action')).join(','));
         assert(env.el('mb2-rail').getAttribute('aria-labelledby') === 'mb2-rail-title' &&
@@ -1322,9 +1360,9 @@ async function main() {
         const bar = env.inst.actionbar;
         const actions = env.el('mb2-bar-actions');
         assert(!!bar, 'the page created an action bar');
-        assert(actions.children.length === 4, 'and rendered its actions into the container',
+        assert(actions.children.length === 5, 'and rendered its actions into the container',
             String(actions.children.length));
-        assert(bar.keys().join(',') === 'undo,redo,copy,discard', 'in the approved order',
+        assert(bar.keys().join(',') === 'undo,redo,save,copy,discard', 'in the approved order',
             bar.keys().join(','));
         assert(bar.button('undo').disabled === true && bar.button('redo').disabled === true,
             'a freshly loaded draft has nothing to undo or redo');
@@ -1682,6 +1720,216 @@ async function main() {
     }
 
     // ─────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
+    section('P. Save now on the page: the seven states, end to end');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const env = makeEnv();
+        const idb = installIdb(env);
+        const armed = armWriteFailure(idb);            // the disk can be broken on demand
+        env.sandbox.indexedDB = armed.wrapper;
+        env.win.indexedDB = armed.wrapper;
+        await env.mount();
+
+        const bar = env.inst.actionbar;
+        const store = env.store();
+        const session = env.session();
+        const actions = env.el('mb2-bar-actions');
+        const button = bar.button('save');
+        assert(!!button, 'the page wired a save action into the bar');
+        assert(button.getAttribute('data-mb2-action') === 'save' &&
+            button.textContent === 'Save now' && button.disabled === true,
+            '1. CLEAN: a fresh page has nothing to save, so the control is an unavailable "Save now"',
+            String(button.textContent) + '/' + button.disabled);
+
+        // ── 2. dirty → the control becomes available ──
+        store.dispatch({ type: 'content/set', text: 'typed' });
+        assert(button.disabled === false && button.textContent === 'Save now' &&
+            button.getAttribute('data-mb2-save-state') === 'dirty',
+            '2. DIRTY: typing makes it an available "Save now"',
+            String(button.textContent) + '/' + button.disabled + '/' + button.getAttribute('data-mb2-save-state'));
+        assert(env.pill() === 'Unsaved changes', 'and the status line agrees', env.pill());
+
+        // ── 3. the click writes through the session's own path ──
+        const putsBefore = env.puts('drafts').length;
+        const revisionBefore = session.state().revision;
+        idb.hold();                                   // the write cannot complete yet
+        actions.dispatch('click', { type: 'click', target: button });
+        assert(session.state().saving === true,
+            'rig: a write is in flight', JSON.stringify(session.state()));
+        assert(button.disabled === true &&
+            button.getAttribute('data-mb2-save-state') === 'saving' &&
+            /^Saving/.test(button.textContent),
+            '3. SAVING: while the write is in flight the control says so and cannot be pressed again',
+            String(button.textContent) + '/' + button.disabled);
+        assert(env.pill() === 'Saving\u2026', 'and the status pill says the same thing', env.pill());
+        // A second press while saving must not start a second write.
+        actions.dispatch('click', { type: 'click', target: button });
+        idb.release();
+        await env.settle(60);
+        assert(env.puts('drafts').length === putsBefore + 1,
+            'exactly ONE write happened for the burst (a click during a save adds none)',
+            String(env.puts('drafts').length - putsBefore));
+        assert(session.state().revision === revisionBefore + 1,
+            'the revision advanced once, through the normal write path',
+            String(session.state().revision));
+
+        // ── 4. saved ──
+        assert(button.disabled === true && button.textContent === 'Saved' &&
+            button.getAttribute('data-mb2-save-state') === 'saved',
+            '4. SAVED: after persistence the control reads "Saved" and is unavailable',
+            String(button.textContent) + '/' + button.disabled);
+        assert(store.isDirty() === false && session.state().writes === 1,
+            'the store is clean and the session counted the write',
+            String(session.state().writes));
+        assert(env.pill() === 'Saved', 'and the status line says Saved', env.pill());
+
+        // ── 5. a failed save: retryable → "Try saving again" ──
+        store.dispatch({ type: 'content/set', text: 'second edit' });
+        armed.state.on = true;                        // the disk is broken now
+        actions.dispatch('click', { type: 'click', target: button });
+        await env.settle(60);
+        const failed = session.state();
+        assert(failed.state === 'error' && failed.lastError &&
+            failed.lastError.reason === 'transaction-failed',
+            '5. FAILED: the write failed and the session says why',
+            JSON.stringify(failed.lastError));
+        assert(session.retryable() === true,
+            'the session reports it as retryable (asked, not acted on)');
+        assert(button.disabled === false && button.textContent === 'Try saving again' &&
+            button.getAttribute('data-mb2-save-state') === 'retry',
+            'so the control offers the ONE retry action',
+            String(button.textContent) + '/' + button.disabled);
+        assert(store.isDirty() === true && env.pill() === 'Save failed',
+            'the edit is still there, still unsaved', env.pill());
+
+        // ── 6. the retry actually saves (recovery included) ──
+        const recoveriesBefore = env.adapterStats().recoveries;
+        armed.state.on = false;                       // the disk is fine again
+        actions.dispatch('click', { type: 'click', target: button });
+        await env.settle(80);
+        assert(session.state().state === 'saved' && button.textContent === 'Saved',
+            '6. RETRY: pressing it saves for real', String(session.state().state));
+        assert(env.adapterStats().recoveries === recoveriesBefore + 1,
+            'with exactly one storage recovery (the Step A path, unchanged)',
+            String(env.adapterStats().recoveries));
+        assert(env.record(session.key()).document.content === 'second edit',
+            'and the newest content is what storage holds',
+            JSON.stringify(env.record(session.key()).document.content));
+        assert(session.state().revision === revisionBefore + 2,
+            'the revision advanced normally', String(session.state().revision));
+
+        // ── 7. reload: what the button saved survives ──
+        const savedId = session.documentId();
+        const writesAtReload = env.puts('drafts').length;
+        env.unmount();
+        await env.mount();
+        assert(env.session().documentId() === savedId, '7. RELOAD: the same draft reopens',
+            String(env.session().documentId()));
+        assert(env.store().getDocument().content === 'second edit',
+            'with what the save button persisted', env.store().getDocument().content);
+        assert(env.store().isDirty() === false, 'and it reopens clean');
+        assert(env.puts('drafts').length === writesAtReload,
+            'reopening rewrites nothing', String(env.puts('drafts').length));
+        // The reopened page has written nothing YET this page life, so both
+        // surfaces describe it the same way: nothing is owed and nothing was
+        // written here. The save control mirrors the status line rather than
+        // inventing a second vocabulary for "it is on disk".
+        const reopened = env.inst.actionbar.button('save');
+        assert(reopened.textContent === 'Save now' && reopened.disabled === true &&
+            reopened.getAttribute('data-mb2-save-state') === 'clean',
+            'and both surfaces agree nothing is owed: a disabled "Save now"',
+            String(reopened.textContent) + '/' + reopened.getAttribute('data-mb2-save-state'));
+        assert(env.pill() === 'No changes yet',
+            'with the status line saying the same thing', env.pill());
+        env.unmount();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    section('P2. a failure no retry can fix offers NO retry action');
+    // ─────────────────────────────────────────────────────────────
+    {
+        const cases = [
+            ['no IndexedDB at all', null],
+            ['an IndexedDB that refuses to open', { throwOnOpen: true }],
+        ];
+        for (const pair of cases) {
+            const env = makeEnv();
+            installIdb(env, pair[1] || {});
+            if (!pair[1]) {
+                env.sandbox.indexedDB = null;          // win.indexedDB keeps the double
+                env.win.indexedDB = null;
+            }
+            await env.mount();
+            const button = env.inst.actionbar.button('save');
+            const session = env.session();
+            env.store().dispatch({ type: 'content/set', text: 'worth saving' });
+            assert(button.disabled === true && button.textContent === 'Save now',
+                'with ' + pair[0] + ', the control never becomes available',
+                String(button.textContent) + '/' + button.disabled);
+
+            // Even when a write IS attempted (the idle timer, or a forced one),
+            // the failure is not retryable and the control must not pretend it is.
+            await session.saveNow();
+            assert(session.retryable() === false,
+                'the session reports the failure as NOT retryable (' + pair[0] + ')');
+            assert(button.textContent !== 'Try saving again' &&
+                button.getAttribute('data-mb2-save-state') === 'unavailable' &&
+                button.disabled === true,
+                'and no retry action is offered for it',
+                String(button.textContent) + '/' + button.getAttribute('data-mb2-save-state'));
+            const presses = env.inst.actionbar.stats().saves;
+            env.el('mb2-bar-actions').dispatch('click', { type: 'click', target: button });
+            assert(env.inst.actionbar.stats().saves === presses,
+                'and clicking it starts no save', String(env.inst.actionbar.stats().saves));
+            assert(env.store().isDirty() === true,
+                'the edit is still in memory, still unsaved (nothing was lost)');
+            assert(env.puts('drafts').length === 0, 'and nothing was written',
+                String(env.puts('drafts').length));
+            env.unmount();
+        }
+    }
+
+
+    // ─────────────────────────────────────────────────────────────
+    section('P3. what a keystroke costs: the save control must not add work');
+    // ─────────────────────────────────────────────────────────────
+    // The save control needs the same two facts the status bar needs (store
+    // dirty-ness and the session snapshot), and both of them hash the whole
+    // document. Measured at 5d-3a — before this step existed — the page paid
+    // exactly 10 hashDocument() calls per keystroke; the save control was built
+    // to share those facts rather than ask for its own, so the number must not
+    // grow. This is the guard: a control that recomputed them would show up
+    // here immediately.
+    {
+        const env = makeEnv();
+        installIdb(env, seedSpec(env, [makeRecord(env, filledDocument(), { documentId: 'doc-filled' })]));
+        await env.mount();
+        const modelRef = env.NERO.embed.model;
+        const realHash = modelRef.hashDocument;
+        let hashes = 0;
+        try {
+            modelRef.hashDocument = function (d) { hashes++; return realHash.call(this, d); };
+            const content = env.inst.inspector.control('content');
+            for (let i = 0; i < 10; i++) {
+                content.value = 'typing ' + i;
+                env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+            }
+        } finally {
+            modelRef.hashDocument = realHash;
+        }
+        const per = hashes / 10;
+        console.log('    hashDocument() calls per keystroke: ' + per.toFixed(2) + ' (baseline 10)');
+        assert(per <= 10,
+            'a keystroke costs no more document hashing than it did before the save control existed',
+            per.toFixed(2));
+        assert(env.inst.actionbar.button('save').textContent === 'Save now' &&
+            env.inst.actionbar.button('save').disabled === false,
+            'rig: the document is dirty, so the save control was rendered from those same facts',
+            String(env.inst.actionbar.button('save').textContent));
+        env.unmount();
+    }
+
     console.log('\nmessage-builder page: ' + pass + ' passed, ' + fail + ' failed');
     if (fail) {
         console.log('Failures:');

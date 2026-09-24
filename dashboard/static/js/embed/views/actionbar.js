@@ -71,6 +71,89 @@ window.NERO.embed.views = window.NERO.embed.views || {};
     const TITLE_ID = 'mb2-dialog-title';
     const BODY_ID = 'mb2-dialog-body';
 
+    /**
+     * The ONE contextual save control, as a pure mapping from the facts the
+     * page supplies to what the button says and whether it can act.
+     *
+     * The facts are: store dirty-ness (the store owns it), the session's
+     * persistence snapshot (the session owns it), whether a write is queued,
+     * and whether the current failure is RETRYABLE — a question the session
+     * answers from the storage adapter's own list, so this file never keeps a
+     * second copy of what "retryable" means.
+     *
+     * The rule that matters most: "Try saving again" is offered ONLY for a
+     * failure a retry could actually fix. A missing IndexedDB, an open
+     * timeout/error or a failed upgrade cannot be fixed by clicking, so the
+     * control stays a disabled "Save now" — never a retry that is known not to
+     * work. Pure and exported so the mapping is testable without a bar and
+     * cannot drift from what renders.
+     */
+    function describeSave(view) {
+        view = view || {};
+        const session = view.session || {};
+        const retryable = !!view.retryable;
+        const owed = !!view.dirty || !!view.pending;
+
+        if (session.blocked) {
+            // The guard is absolute: nothing may be written over the record
+            // this page refused to touch, so the control is not offered.
+            return {
+                state: 'blocked', label: 'Save now', enabled: false,
+                title: 'Saving is unavailable — the saved draft is protected',
+            };
+        }
+        if (session.saving) {
+            return {
+                state: 'saving', label: 'Saving\u2026', enabled: false,
+                title: 'A save is in progress',
+            };
+        }
+        if (session.lastError) {
+            if (retryable) {
+                return {
+                    state: 'retry', label: 'Try saving again', enabled: true,
+                    title: 'The last save failed — try it again',
+                };
+            }
+            // A failure a retry cannot fix gets no retry affordance at all.
+            return {
+                state: 'unavailable', label: 'Save now', enabled: false,
+                title: 'Saving is unavailable — ' + reasonPhrase(session.lastError),
+            };
+        }
+        if (session.degraded && !retryable) {
+            // Storage is known to be unusable: an enabled button would be an
+            // affordance that cannot work.
+            return {
+                state: 'unavailable', label: 'Save now', enabled: false,
+                title: 'Saving is unavailable — draft storage cannot be opened',
+            };
+        }
+        if (owed) {
+            return {
+                state: 'dirty', label: 'Save now', enabled: true,
+                title: 'Save this draft now',
+            };
+        }
+        if (session.writes > 0) {
+            return {
+                state: 'saved', label: 'Saved', enabled: false,
+                title: 'This draft is stored',
+            };
+        }
+        return {
+            state: 'clean', label: 'Save now', enabled: false,
+            title: 'Nothing to save yet',
+        };
+    }
+
+    /** The failure, in words that fit in a tooltip. Never invents a reason. */
+    function reasonPhrase(lastError) {
+        const reason = lastError && lastError.reason ? String(lastError.reason) : 'the last save failed';
+        if (reason === 'not-serializable') return 'this document cannot be turned into JSON';
+        return reason.replace(/-/g, ' ');
+    }
+
     function create(options) {
         options = options || {};
         const doc = options.document;
@@ -85,6 +168,12 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         const discard = options.discard || null;
         const canDiscard = discard && typeof discard.available === 'function' ? discard.available : null;
         const runDiscard = discard && typeof discard.perform === 'function' ? discard.perform : null;
+        // Saving is the page's to perform and nobody else's: the bar gets one
+        // function that ends in the session's own saveNow(), exactly as it gets
+        // one function for discard. It is never handed the session, a storage
+        // handle, or anything it could use to write on its own initiative.
+        const runSave = options.save && typeof options.save.perform === 'function'
+            ? options.save.perform : null;
 
         if (!doc || typeof doc.createElement !== 'function') {
             throw new TypeError('actionbar.create needs options.document');
@@ -109,6 +198,9 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             copyAttempts: 0,
             copied: 0,
             copyFailures: 0,
+            savePresses: 0,
+            saves: 0,
+            saveLabels: 0,
             discardPrompts: 0,
             discards: 0,
             confirms: 0,
@@ -220,6 +312,67 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             // Availability comes from the page (it owns the saved baseline); a
             // capability that is not wired at all renders no button.
             if (buttons.discard && canDiscard) setDisabled(buttons.discard.node, !canDiscard());
+            return true;
+        }
+
+        /**
+         * The save control, rendered from facts the PAGE supplies — because the
+         * page is the only place both owners (store dirty-ness, session
+         * persistence) are observed together, and because deriving them here
+         * would mean hashing the document a second and third time per keystroke
+         * for no reason. Called by the page on every session/store change; every
+         * write below is change-guarded, so a keystroke that does not move the
+         * state costs nothing.
+         */
+        function renderSave(view) {
+            if (destroyed || !buttons.save) return false;
+            stats.renders++;
+            const spec = describeSave(view);
+            const node = buttons.save.node;
+            if (node.textContent !== spec.label) {
+                node.textContent = spec.label;
+                stats.saveLabels++;
+            }
+            if (attr(node, 'data-mb2-save-state') !== spec.state) {
+                node.setAttribute('data-mb2-save-state', spec.state);
+                stats.stateWrites++;
+            }
+            if (attr(node, 'title') !== spec.title) {
+                // The tooltip is also the accessible DESCRIPTION of a control
+                // that is often disabled — which is exactly when a user needs
+                // to be told why.
+                node.setAttribute('title', spec.title);
+                node.setAttribute('aria-label', spec.label);
+                stats.stateWrites++;
+            }
+            setDisabled(node, !spec.enabled);
+            return true;
+        }
+
+        /**
+         * Save now. The bar owns the button, not the write: this calls the one
+         * function the page handed it, which ends in the session's own
+         * saveNow() — the same write the idle timer performs, so there is still
+         * exactly one persistence path and no way for a click to force, bypass
+         * or duplicate one. The result is not interpreted here: the session
+         * notifies its observers and the page re-renders from the new facts.
+         */
+        function pressSave() {
+            if (destroyed || !runSave) return false;
+            stats.savePresses++;
+            // A disabled control can still receive a synthetic click, so the
+            // guard lives in the handler too — a click can never start a write
+            // the bar is currently saying is unavailable.
+            if (buttons.save && buttons.save.node.disabled) return false;
+            stats.saves++;
+            try {
+                const inflight = runSave();
+                if (inflight && typeof inflight.catch === 'function') {
+                    // The session reports its own failures in its state; this
+                    // only stops an unanswered promise from being unhandled.
+                    inflight.catch(function () { });
+                }
+            } catch (e) { /* a save that throws must not break the bar */ }
             return true;
         }
 
@@ -510,11 +663,23 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             if (key === 'undo') undo();
             else if (key === 'redo') redo();
             else if (key === 'copy') copyJson();
+            else if (key === 'save') pressSave();
             else if (key === 'discard') confirmDiscard();
         }
 
         addButton({ key: 'undo', order: ORDER.undo, label: 'Undo', ariaLabel: 'Undo the last change' });
         addButton({ key: 'redo', order: ORDER.redo, label: 'Redo', ariaLabel: 'Redo the last undone change' });
+        if (runSave) {
+            // Starts disabled and says so: until the page has supplied the
+            // facts, the bar does not know whether there is anything to save,
+            // and a control that has not been told anything must not claim it
+            // can act.
+            const saveButton = addButton({
+                key: 'save', order: ORDER.save, label: 'Save now',
+                ariaLabel: 'Save now',
+            });
+            saveButton.disabled = true;
+        }
         addButton({ key: 'copy', order: ORDER.copy, label: 'Copy JSON', ariaLabel: 'Copy JSON to the clipboard' });
         if (runDiscard) {
             addButton({
@@ -552,6 +717,9 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             render: render,
             /** Re-check the derived state (the page calls this on session changes). */
             refresh: function () { return render(); },
+            /** The save control, from facts the page owns (see renderSave). */
+            renderSave: renderSave,
+            saveState: function (view) { return describeSave(view); },
             destroy: destroy,
             /** The mounted button for `key` (null when it does not exist yet). */
             button: function (key) { return buttons[key] ? buttons[key].node : null; },
@@ -579,5 +747,6 @@ window.NERO.embed.views = window.NERO.embed.views || {};
     NERO.embed.views.actionbar = {
         create: create,
         ORDER: ORDER,
+        describeSave: describeSave,
     };
 })(window.NERO);
