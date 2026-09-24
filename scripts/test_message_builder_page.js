@@ -57,10 +57,11 @@ const js = (...parts) => path.join(ROOT_DIR, 'dashboard', 'static', 'js', ...par
 // evidence of nothing.
 const PAGE_PATH = process.env.NERO_MB_PAGE_SRC || js('embed', 'message-builder-page.js');
 const DRAFTS_PATH = process.env.NERO_DRAFTS_SRC || js('embed', 'drafts.js');
+const STORE_PATH = process.env.NERO_STORE_SRC || js('embed', 'store.js');
 const FOUNDATION = [
     js('nav-lifecycle.js'),
     js('embed', 'model.js'),
-    js('embed', 'store.js'),
+    STORE_PATH,
     js('embed', 'discord-markdown.js'),
     js('embed', 'preview.js'),
     DRAFTS_PATH,
@@ -799,15 +800,17 @@ async function main() {
     section('K. the in-flight save race (persistence must not confirm an unwritten document)');
     // ─────────────────────────────────────────────────────────────
     // The bug this section pins down: saveNow() snapshots the document, writes
-    // it ASYNCHRONOUSLY, and used to then call store.markSaved(currentDocument).
-    // If the user typed during the write, currentDocument is no longer the
-    // snapshot that reached storage — so the store's canonical dirty flag was
-    // cleared and its saved hash moved onto content that existed only in
-    // memory. The probe that found it is now this test.
+    // it ASYNCHRONOUSLY, and used to then confirm the CURRENT document to the
+    // store. If the user typed during the write, that confirmation was a lie —
+    // either the store's dirty flag was cleared and its saved hash moved onto
+    // content that existed only in memory, or the store's document was rewound
+    // to the older snapshot. The store now learns only WHICH HASH reached
+    // storage (store.markSavedHash); its document, history and undo stack are
+    // never touched by a write.
     {
         const hash = (d) => env.NERO.embed.model.hashDocument(d);
 
-        // ── K1: the race itself ──────────────────────────────────
+        // ── K1: the race, and the stronger invariant it must now hold ──
         const env = makeEnv();
         const idb = installIdb(env);
         await env.mount();
@@ -818,6 +821,7 @@ async function main() {
         // 1 ─ the store holds A
         store.dispatch({ type: 'content/set', text: 'A' });
         const A = store.getDocument();
+        const depthBefore = store.historyDepth().size;
 
         // 2 ─ saveNow() begins persisting A, held open so the edit below lands
         //     strictly inside the write
@@ -832,6 +836,7 @@ async function main() {
         const B = store.getDocument();
         assert(B !== A && store.isDirty() === true, 'K1.3: the store now holds B and is dirty',
             'sameObject=' + (B === A) + ' dirty=' + store.isDirty());
+        const depthAfterEdit = store.historyDepth().size;
 
         // 4 ─ the write of A succeeds
         idb.release();
@@ -845,22 +850,28 @@ async function main() {
                 revision: committed && committed.revision,
                 hashIsA: committed && committed.documentHash === hash(A) }));
 
-        // 5 ─ the current document is B, and the store must STILL be dirty
-        assert(store.getDocument().content === 'B', 'K1.5: the current document is B',
+        // 5 ─ the stronger invariant
+        assert(store.getDocument() === B,
+            'K1.5: the current document is STILL the exact B object the user typed into',
+            'sameObject=' + (store.getDocument() === B) + ' content=' + store.getDocument().content);
+        assert(store.getDocument().content === 'B', 'K1.5: and it still reads B',
             store.getDocument().content);
         assert(store.isDirty() === true,
             'K1.5: the store stays DIRTY — B is newer than the persisted snapshot',
-            'store.isDirty()=' + store.isDirty() + ', savedDocumentHash === hash(B): ' +
-            (store.savedDocumentHash() === hash(B)));
-        assert(store.savedDocumentHash() !== hash(B),
-            'K1.5: the store s saved hash never claims the unwritten document is saved');
-
-        // 5b ─ the saved hash that describes what storage holds is the
-        //      boundary's, and it describes A.
+            'store.isDirty()=' + store.isDirty());
+        assert(store.savedDocumentHash() === hash(A),
+            'K1.5: the store s saved hash describes exactly what was written (A)',
+            'savedDocumentHash === hash(A): ' + (store.savedDocumentHash() === hash(A)) +
+            ', === hash(B): ' + (store.savedDocumentHash() === hash(B)));
+        assert(store.historyDepth().size === depthAfterEdit,
+            'K1.5: the write added no history entry',
+            store.historyDepth().size + ' vs ' + depthAfterEdit);
+        assert(store.historyDepth().size >= depthBefore && store.canUndo() === true,
+            'K1.5: no undo entry was lost (the edit history is intact)',
+            JSON.stringify(store.historyDepth()) + ' canUndo=' + store.canUndo());
         assert(session.savedHash() === hash(A),
-            'K1.5b: the persistence boundary s saved hash still describes A (what was written)',
-            'savedHash === hash(A): ' + (session.savedHash() === hash(A)) +
-            ', === hash(B): ' + (session.savedHash() === hash(B)));
+            'K1.5b: the persistence boundary s saved hash also describes A',
+            'savedHash === hash(A): ' + (session.savedHash() === hash(A)));
 
         // 6 ─ the session/UI must not report the document as fully saved
         assert(session.isDirty() === true && session.state().state !== 'saved' && env.pill() !== 'Saved',
@@ -876,15 +887,18 @@ async function main() {
             JSON.stringify({ content: afterB && afterB.document.content,
                 revision: afterB && afterB.revision, hashIsB: afterB && afterB.documentHash === hash(B) }));
 
-        // 8 + 9 ─ only now is it clean, and the saved state describes B
+        // 8 + 9 ─ only now is it clean, describing B
+        assert(store.savedDocumentHash() === hash(B),
+            'K1.8: the store s saved hash now describes B',
+            store.savedDocumentHash() === hash(B));
         assert(store.isDirty() === false && session.isDirty() === false,
             'K1.8: only after B is written is the document clean',
             JSON.stringify({ storeDirty: store.isDirty(), sessionDirty: session.isDirty() }));
-        assert(store.savedDocumentHash() === hash(B) && session.savedHash() === hash(B) &&
-               session.state().revision === 2,
-            'K1.9: the saved hash and revision describe B, not A',
-            JSON.stringify({ store: store.savedDocumentHash() === hash(B),
-                session: session.savedHash() === hash(B), revision: session.state().revision }));
+        assert(session.savedHash() === hash(B) && session.state().revision === 2,
+            'K1.9: the boundary s saved hash and the revision describe B, not A',
+            JSON.stringify({ session: session.savedHash() === hash(B), revision: session.state().revision }));
+        assert(store.getDocument() === B,
+            'K1.9: all the way through, the store s document object was never replaced');
         assert(env.puts('drafts').length === 2, 'K1: exactly two draft writes for two documents',
             String(env.puts('drafts').length));
         assert(env.pill() === 'Saved', 'K1.8: the bar says Saved once B is on disk', env.pill());
@@ -901,6 +915,7 @@ async function main() {
         await env2.settle(30);
         store2.dispatch({ type: 'content/set', text: 'y' });     // a real edit ...
         store2.dispatch({ type: 'content/set', text: 'x' });     // ... reverted to the same content
+        const reverted = store2.getDocument();
         idb2.release();
         await flight2;
         await env2.settle(60);
@@ -908,21 +923,21 @@ async function main() {
                env2.NERO.embed.model.hashDocument(env2.record(session2.key()).document),
             'K2: the in-memory document is hash-identical to the persisted snapshot');
         assert(store2.isDirty() === false,
-            'K2: hash-identical content IS marked saved (the guard does not over-protect)',
+            'K2: hash-identical content IS marked saved (the boundary does not over-protect)',
             'store.isDirty()=' + store2.isDirty());
+        assert(store2.getDocument() === reverted,
+            'K2: and the document object is still the one the user was editing');
         assert(session2.isDirty() === false, 'K2: the session agrees it is saved');
         await env2.settle(1700);
         assert(env2.puts('drafts').length === 1,
-            'K2: and no redundant second write happens', String(env2.puts('drafts').length));
+            'K2: no redundant second write happens', String(env2.puts('drafts').length));
         assert(env2.record(session2.key()).document.content === 'x',
             'K2: storage holds the reverted content exactly once');
-        // DOCUMENTED LIMITATION (pre-existing, outside this fix's scope): the
-        // revert left a queued write that resolves as "clean" without notifying,
-        // so the bar is not re-rendered and keeps saying "Unsaved changes" until
-        // the next store action. Asserted so a silent change is caught, and
-        // reported to the supervisor as a separate finding.
-        assert(env2.pill() === 'Unsaved changes',
-            'K2: DOCUMENTED LIMITATION — a skipped ("clean") save does not notify, so the bar is stale',
+        // Fixed in this checkpoint: the skipped ("clean") save resolves without
+        // writing anything, but the pending write it cancelled is visible state
+        // — so it notifies, and the bar can no longer stay stale.
+        assert(env2.pill() === 'Saved',
+            'K2: after a skipped save the bar reflects the settled state (not stale)',
             env2.pill());
 
         // ── K3: tearing the page down inside the race loses nothing ──
@@ -946,36 +961,72 @@ async function main() {
             JSON.stringify({ content: flushed && flushed.document.content,
                 revision: flushed && flushed.revision }));
 
-        // ── K4: the store-side hash lag (documented, reported, not patched) ──
-        // The store's saved hash can only be updated through markSaved(document),
-        // which ALSO replaces the store's document. So the store cannot be told
-        // "A is on disk" while it holds B without discarding B or changing the
-        // store API — both excluded from this fix. Consequence, asserted here so
-        // it is visible rather than theoretical: if the in-memory document
-        // happens to match the store's LAST STALE hash (a document blanked back
-        // to exactly what boot hashed), the store reads clean while storage
-        // holds something else. The SESSION flag stays correct; the store's flag
-        // is the stale one.
+        // ── K4: the coincidental-hash case (was the stale-hash limitation) ──
+        // The editor is blanked back to exactly what the store hashed at boot
+        // while A is in flight. The old code could read clean here; now the
+        // store is told hash(A) is on disk while holding the blank document, so
+        // it is dirty — and the document itself stays authoritative.
         const env4 = makeEnv();
         const idb4 = installIdb(env4);
         await env4.mount();
+        const model4 = env4.NERO.embed.model;
         env4.store().dispatch({ type: 'content/set', text: 'A' });
+        const A4 = env4.store().getDocument();
         idb4.hold();
         const flight4 = env4.session().saveNow();
         await env4.settle(30);
         env4.store().dispatch({ type: 'content/set', text: '' });   // back to blank
+        const blanked = env4.store().getDocument();
         idb4.release();
         await flight4;
         await env4.settle(60);
         const stored4 = env4.record(env4.session().key());
         assert(!!stored4 && stored4.document.content === 'A',
-            'K4: storage holds A while the editor is blank (blank documents are never written)');
-        assert(env4.session().isDirty() === true,
-            'K4: the session still reports the unsaved difference (its flag is correct)',
-            JSON.stringify({ sessionDirty: env4.session().isDirty(), state: env4.session().state().state }));
-        assert(env4.store().isDirty() === false,
-            'K4: DOCUMENTED LIMITATION — the store flag can read clean here (stale hash coincidence)',
+            'K4: storage holds A while the editor is blank',
+            JSON.stringify(stored4 && stored4.document.content));
+        assert(env4.store().getDocument() === blanked && blanked.content === '',
+            'K4: the blank document the user is editing is still the store s document');
+        assert(env4.store().savedDocumentHash() === model4.hashDocument(A4),
+            'K4: the store s saved hash describes A, the snapshot that was written',
+            'savedDocumentHash === hash(A): ' + (env4.store().savedDocumentHash() === model4.hashDocument(A4)));
+        assert(env4.store().isDirty() === true,
+            'K4: the store reads DIRTY, not a stale coincidence',
             'store.isDirty()=' + env4.store().isDirty() + ' pill=' + env4.pill());
+        assert(env4.session().isDirty() === true,
+            'K4: and the session agrees there is unwritten work',
+            JSON.stringify({ sessionDirty: env4.session().isDirty(), state: env4.session().state().state }));
+        await env4.settle(1700);
+        assert(env4.record(env4.session().key()).document.content === '',
+            'K4: the blanking edit is persisted once the burst settles (a user CAN clear a saved draft)',
+            JSON.stringify(env4.record(env4.session().key()).document.content));
+        assert(env4.store().isDirty() === false && env4.session().isDirty() === false,
+            'K4: and only then is everything clean',
+            JSON.stringify({ storeDirty: env4.store().isDirty(), sessionDirty: env4.session().isDirty() }));
+
+        // ── K5: the notification itself ──────────────────────────────
+        // A pending write is visible state ("the newest edit is not written
+        // yet"). When it resolves without writing anything, subscribers must
+        // hear about it — otherwise the bar keeps claiming unsaved work.
+        const env5 = makeEnv();
+        const idb5 = installIdb(env5);
+        await env5.mount();
+        env5.store().dispatch({ type: 'content/set', text: 'saved once' });
+        await env5.session().saveNow();
+        await env5.settle();
+        assert(env5.pill() === 'Saved', 'K5: the document is saved first', env5.pill());
+        env5.session().schedule();                        // a write is queued ...
+        // ... and a render happens (a UI action, the way selecting a node will):
+        // the bar must show the queued write as unsaved work.
+        env5.store().dispatch({ type: 'ui/selectNode', nodeId: 'content' });
+        assert(env5.pill() === 'Unsaved changes',
+            'K5: a queued write reads as unsaved work', env5.pill());
+        await env5.settle(1700);                          // ... and resolves as "clean"
+        assert(env5.session().pendingSave() === false, 'K5: the queued write resolved');
+        assert(env5.pill() === 'Saved',
+            'K5: the bar is updated when a skipped save clears the queue (no stale status)',
+            env5.pill());
+        assert(idb5.log.filter(e => e.op === 'put-committed' && e.store === 'drafts').length === 1,
+            'K5: and nothing was written for the skipped save');
     }
 
     // ─────────────────────────────────────────────────────────────

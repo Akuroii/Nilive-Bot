@@ -39,6 +39,11 @@ const TARGETS = {
         env: 'NERO_DRAFTS_SRC',
         label: 'dashboard/static/js/embed/drafts.js',
     },
+    store: {
+        file: path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'store.js'),
+        env: 'NERO_STORE_SRC',
+        label: 'dashboard/static/js/embed/store.js',
+    },
 };
 const HARNESS = path.join(ROOT, 'scripts', 'test_message_builder_page.js');
 
@@ -96,30 +101,56 @@ const MUTANTS = [
     {
         id: 'M9',
         target: 'drafts',
-        why: 'the in-flight write confirms the CURRENT document instead of the snapshot it wrote',
+        why: 'an in-flight save confirms the CURRENT document instead of the written snapshot',
         edits: [[
-            "                    if (boundStore && boundStore.markSaved &&\n                        model.hashDocument(currentDocument) === record.documentHash) {\n                        boundStore.markSaved(currentDocument);\n                    }",
+            "                    if (boundStore && boundStore.markSavedHash) {\n                        boundStore.markSavedHash(record.documentHash);\n                    }",
             "                    if (boundStore && boundStore.markSaved) boundStore.markSaved(currentDocument);",
         ]],
     },
     {
         id: 'M10',
         target: 'drafts',
-        why: 'the guard is inverted: it confirms only when the hashes DIFFER',
-        edits: [["model.hashDocument(currentDocument) === record.documentHash",
-                 "model.hashDocument(currentDocument) !== record.documentHash"]],
+        why: 'a skipped ("clean") save does not notify, so the bar can stay stale',
+        edits: [[
+            "                notify();\n                return Promise.resolve({ ok: true, skipped: true, reason: 'clean', key: key() });",
+            "                return Promise.resolve({ ok: true, skipped: true, reason: 'clean', key: key() });",
+        ]],
     },
     {
-        // (A mutant that removed only the post-write re-schedule was tried and
-        // correctly reported MISSED: the edit's own coalescing timer writes the
-        // newer document anyway, so that line is redundancy, not the mechanism.
-        // The real mechanism is changed() -> schedule(); break THAT.)
         id: 'M11',
         target: 'drafts',
-        why: 'an edit no longer schedules a write (only an explicit save does)',
+        why: 'an edit during an in-flight write is not re-queued (the clearing is dropped)',
         edits: [[
-            "            if (!isDirty()) { cancelScheduled(); return false; }\n            return schedule();",
-            "            if (!isDirty()) { cancelScheduled(); return false; }\n            return false;",
+            "                if (inFlight) pendingAfterFlight = true;\n                cancelScheduled();\n                return false;",
+            "                cancelScheduled();\n                return false;",
+        ]],
+    },
+    // ── the store ──
+    {
+        id: 'M12',
+        target: 'store',
+        why: 'markSavedHash never records anything (the store never learns what was written)',
+        edits: [[
+            "            const next = String(hash);\n            if (savedHash === next) return false;\n            const wasDirty = isDirty();\n            savedHash = next;",
+            "            const next = String(hash);\n            if (savedHash === next) return false;\n            const wasDirty = isDirty();",
+        ]],
+    },
+    {
+        id: 'M13',
+        target: 'store',
+        why: 'markSavedHash replaces the document (a copy of the current one) instead of leaving it alone',
+        edits: [[
+            "            const wasDirty = isDirty();\n            savedHash = next;\n            if (isDirty() !== wasDirty) notify({ type: '@save/markHash' });\n            return true;",
+            "            const wasDirty = isDirty();\n            savedHash = next;\n            state = Object.assign({}, state, { document: model.cloneDocument(state.document) });\n            if (isDirty() !== wasDirty) notify({ type: '@save/markHash' });\n            return true;",
+        ]],
+    },
+    {
+        id: 'M14',
+        target: 'store',
+        why: 'markSavedHash claims the CURRENT document is what was written (clears dirty regardless of the hash)',
+        edits: [[
+            "            const wasDirty = isDirty();\n            savedHash = next;",
+            "            const wasDirty = isDirty();\n            savedHash = model.hashDocument(state.document);",
         ]],
     },
     {

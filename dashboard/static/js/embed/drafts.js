@@ -719,6 +719,12 @@ window.NERO.embed = window.NERO.embed || {};
             if (!currentDocument) return Promise.resolve({ ok: false, reason: 'no-document' });
             if (!documentId) return Promise.resolve({ ok: false, reason: 'no-document-id' });
             if (!isDirty() && !opts.force) {
+                // Nothing to write — but cancelScheduled() above may just have
+                // cleared a pending write, which is state subscribers show
+                // ("the newest edit is not written yet"). Without this notify a
+                // skipped save leaves the status bar claiming unsaved work for
+                // content that storage already holds.
+                notify();
                 return Promise.resolve({ ok: true, skipped: true, reason: 'clean', key: key() });
             }
             if (inFlight) {
@@ -752,21 +758,18 @@ window.NERO.embed = window.NERO.embed || {};
                     lastSavedHash = record.documentHash;
                     lastError = null;
                     saveCount++;
-                    // Confirm the save to the store ONLY if the document it is
-                    // holding is the snapshot that just reached storage. The
-                    // write is asynchronous: `record` may be document A while
-                    // `currentDocument` is already B (the user typed during the
-                    // write). Marking B saved here would clear the store's
-                    // dirty flag and move its saved hash onto content that is
-                    // still only in memory — the boundary's own bookkeeping
-                    // stays correct either way (lastSavedHash is A, the next
-                    // write is already scheduled), but the store's flag is the
-                    // canonical one the UI reads, so it must never clear early.
-                    // Hash-equal content is marked saved: storage holds exactly
-                    // that content, so there is nothing left to write.
-                    if (boundStore && boundStore.markSaved &&
-                        model.hashDocument(currentDocument) === record.documentHash) {
-                        boundStore.markSaved(currentDocument);
+                    // Confirm the write to the store by HASH, never by handing it
+                    // a document. This call is asynchronous: `record` may be
+                    // document A while `currentDocument` is already B, because
+                    // the user typed during the write. markSavedHash() records
+                    // "what storage holds is A" and leaves the store's document
+                    // (B), its history and its undo stack exactly as they are —
+                    // so the store stays dirty until B itself is written.
+                    // Handing the document over instead would either rewind the
+                    // store to A or (markSaved(currentDocument)) claim B is on
+                    // disk when it is not.
+                    if (boundStore && boundStore.markSavedHash) {
+                        boundStore.markSavedHash(record.documentHash);
                     }
                     if (pendingAfterFlight) { pendingAfterFlight = false; schedule(); }
                     notify();
@@ -880,7 +883,20 @@ window.NERO.embed = window.NERO.embed || {};
             if (document) currentDocument = document;
             if (destroyed) return false;
             notify();
-            if (!isDirty()) { cancelScheduled(); return false; }
+            if (!isDirty()) {
+                // While a write is in flight the clean verdict is PROVISIONAL:
+                // lastSavedHash still describes the state from before that
+                // write, so an edit landing in this window can look like
+                // "nothing worth storing" and never be queued. The visible
+                // case is clearing the message back to nothing while the first
+                // save is still going: it read as clean (no content, nothing
+                // ever saved) and the clearing was silently dropped, so a
+                // reload brought the old text back. Queue a re-check instead —
+                // the write's own completion decides, with the fresh hash.
+                if (inFlight) pendingAfterFlight = true;
+                cancelScheduled();
+                return false;
+            }
             return schedule();
         }
 

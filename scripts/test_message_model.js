@@ -490,6 +490,66 @@ assert(st.isDirty() === true, 'rewinding still reports dirty (the saved snapshot
 st.markSaved();
 assert(st.isDirty() === false, 'and marking saved clears it again');
 
+// ── markSavedHash: the ASYNCHRONOUS confirmation ────────────────
+// The writer reports which document reached storage (by hash) and the store
+// keeps its own document. This is what makes an in-flight save safe: the store
+// can be told "A is on disk" while the user is already editing B.
+const mh1 = store.createStore({ document: model.blankMessageDocument(), reducers: reducers, now: clock.now, scheduler: clock.scheduler });
+let mhNotifies = 0;
+mh1.subscribe(() => { mhNotifies++; });
+mh1.dispatch({ type: 'content/set', text: 'A' });
+const docA = mh1.getDocument();
+const hashA = model.hashDocument(docA);
+const depthA = mh1.historyDepth().size;
+mh1.dispatch({ type: 'content/set', text: 'B' });
+const docB = mh1.getDocument();
+const hashB = model.hashDocument(docB);
+const depthB = mh1.historyDepth().size;
+assert(mh1.isDirty() === true, 'markSavedHash setup: the store is dirty');
+
+const notifiedBefore = mhNotifies;
+const changed1 = mh1.markSavedHash(hashA);
+assert(changed1 === true, 'markSavedHash reports that it changed the saved hash');
+assert(mh1.savedDocumentHash() === hashA, 'markSavedHash records the hash that was written');
+assert(mh1.getDocument() === docB, 'markSavedHash does NOT replace the store document');
+assert(mh1.getDocument().content === 'B', 'the newer document is still the one being edited');
+assert(mh1.isDirty() === true, 'the store stays DIRTY: the written snapshot is not the current document');
+assert(mh1.historyDepth().size === depthB && mh1.canUndo() === true,
+    'markSavedHash adds no history entry and loses none', JSON.stringify(mh1.historyDepth()));
+assert(mhNotifies === notifiedBefore,
+    'markSavedHash does not notify when the dirty state did not change (dirty stayed dirty)',
+    mhNotifies + ' vs ' + notifiedBefore);
+
+// the write of B lands: same call, and now the dirty state flips
+const notifiedBefore2 = mhNotifies;
+const changed2 = mh1.markSavedHash(hashB);
+assert(changed2 === true && mh1.savedDocumentHash() === hashB, 'the second confirmation records B');
+assert(mh1.isDirty() === false, 'once B is the written snapshot the store is clean');
+assert(mh1.getDocument() === docB, 'and the document object is still the user s own');
+assert(mhNotifies === notifiedBefore2 + 1,
+    'the notification fires exactly when the saved/dirty state changes',
+    mhNotifies + ' vs ' + (notifiedBefore2 + 1));
+assert(mh1.markSavedHash(hashB) === false && mhNotifies === notifiedBefore2 + 1,
+    'confirming an already-recorded hash is a no-op (no repeat notification)');
+
+// a hash that matches neither keeps the store dirty and notifies on the flip
+const mh2 = store.createStore({ document: model.blankMessageDocument(), reducers: reducers, now: clock.now, scheduler: clock.scheduler });
+mh2.dispatch({ type: 'content/set', text: 'x' });
+const hashX = model.hashDocument(mh2.getDocument());
+assert(mh2.markSavedHash(hashX) === true && mh2.isDirty() === false, 'a matching hash clears dirty');
+let mh2Notified = 0;
+mh2.subscribe(() => { mh2Notified++; });
+assert(mh2.markSavedHash(model.hashDocument(model.blankMessageDocument({ content: 'something else' }))) === true,
+    'recording a different hash is accepted');
+assert(mh2.isDirty() === true, 'and leaving the store ahead of storage makes it dirty again');
+assert(mh2Notified === 1, 'with a notification for the flip', String(mh2Notified));
+assert(mh2.getDocument().content === 'x', 'the document was never touched');
+assert(mh2.markSavedHash(null) === false && mh2.markSavedHash('') === false,
+    'an empty/absent hash is refused rather than recorded');
+assert(mh2.historyDepth().size === 2, 'no history entries from any of it', JSON.stringify(mh2.historyDepth()));
+mh2.destroy();
+mh1.destroy();
+
 // the previous state is never mutated
 let frozenError = null;
 try {

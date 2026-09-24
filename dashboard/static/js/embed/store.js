@@ -249,11 +249,40 @@ window.NERO.embed = window.NERO.embed || {};
         function historyDepth() { return { size: history.length, index: historyIndex }; }
 
         // ── Save state / dirty tracking ───────────────────────────
+        /**
+         * Confirm a SYNCHRONOUS save: the store is handed the document that was
+         * just stored, and adopting it is correct because the caller's document
+         * IS that one (loading a draft, bootstrapping the page).
+         */
         function markSaved(document) {
             const target = document || state.document;
             savedHash = model.hashDocument(target);
             if (document) state = Object.assign({}, state, { document: document });
             notify({ type: '@save/mark' });
+        }
+
+        /**
+         * Confirm an ASYNCHRONOUS write without touching the document.
+         *
+         * The writer snapshots the document, stores it, and only then learns it
+         * succeeded — by which time the user may have typed on. So the write
+         * reports WHICH document reached storage (its hash) and the store keeps
+         * whatever it is holding: the canonical document is never replaced,
+         * history is never touched, and no undo entry appears. The document
+         * stays dirty until its own hash is the one that was written, which is
+         * the only honest reading of "saved".
+         *
+         * notify() fires only when the dirty state actually changed, so a write
+         * that confirms an older snapshot wakes nobody up.
+         */
+        function markSavedHash(hash) {
+            if (hash === null || hash === undefined || hash === '') return false;
+            const next = String(hash);
+            if (savedHash === next) return false;
+            const wasDirty = isDirty();
+            savedHash = next;
+            if (isDirty() !== wasDirty) notify({ type: '@save/markHash' });
+            return true;
         }
 
         function isDirty() { return model.hashDocument(state.document) !== savedHash; }
@@ -300,6 +329,7 @@ window.NERO.embed = window.NERO.embed || {};
             canRedo: canRedo,
             historyDepth: historyDepth,
             markSaved: markSaved,
+            markSavedHash: markSavedHash,
             isDirty: isDirty,
             savedDocumentHash: savedDocumentHash,
             scheduleIdle: scheduleIdle,
