@@ -370,8 +370,14 @@ window.NERO.embed = window.NERO.embed || {};
      * harness compares `JSON.stringify` output, and so does a human
      * reading "Copy JSON".
      */
-    function toWireEmbed(e) {
+    function toWireEmbed(e, withKeys) {
         const out = {};
+        // Phase 1 step 3: `withKeys` adds the model's own ids to the payload
+        // so the differential preview can key DOM nodes by them. It is the
+        // ONLY difference between the keyed and the plain payload — the
+        // harness asserts stripping `key` reproduces the wire bytes exactly,
+        // so the preview still renders precisely what would be sent.
+        if (withKeys) out.key = e.id === undefined || e.id === null ? null : String(e.id);
         if (e.title) out.title = e.title;
         if (e.description) out.description = e.description;
         if (e.color !== null && e.color !== undefined) out.color = e.color;
@@ -392,17 +398,21 @@ window.NERO.embed = window.NERO.embed || {};
             // Note the outer test: v1 assigns `fields` whenever the INPUT
             // array is non-empty, even if filtering leaves it empty, so an
             // embed whose fields are all blank still sends `"fields": []`.
-            out.fields = e.fields.filter(f => f.name || f.value).map(f => ({
-                name: f.name || ZERO_WIDTH,
-                value: f.value || ZERO_WIDTH,
-                inline: !!f.inline,
-            }));
+            out.fields = e.fields.filter(f => f.name || f.value).map(f => {
+                const wire = {
+                    name: f.name || ZERO_WIDTH,
+                    value: f.value || ZERO_WIDTH,
+                    inline: !!f.inline,
+                };
+                if (withKeys) wire.key = f.id === undefined || f.id === null ? null : String(f.id);
+                return withKeys ? Object.assign({ key: wire.key }, wire) : wire;
+            });
         }
         return out;
     }
 
-    function toWireEmbeds(embeds) {
-        return (embeds || []).filter(embedHasContent).map(toWireEmbed);
+    function toWireEmbeds(embeds, withKeys) {
+        return (embeds || []).filter(embedHasContent).map(e => toWireEmbed(e, withKeys));
     }
 
     /**
@@ -413,7 +423,7 @@ window.NERO.embed = window.NERO.embed || {};
      */
     function toDiscordPayload(doc, opts) {
         opts = opts || {};
-        const embeds = toWireEmbeds((doc && doc.embeds) || []);
+        const embeds = toWireEmbeds((doc && doc.embeds) || [], !!opts.withKeys);
         const content = doc && doc.content;
         // Key ORDER matters (it is what a human reads in "Copy JSON" and
         // what the byte-equality harness compares): content first, then
