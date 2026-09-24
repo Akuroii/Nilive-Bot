@@ -1,0 +1,197 @@
+/* ═══════════════════════════════════════════════════════════════
+   NERO DASHBOARD — message-builder.css
+   Message Builder v2 (phase 1) — the shell's own stylesheet.
+
+   SCOPE
+   -----
+   Loaded by manage/message_builder.html only (a <link> inside the page's
+   content block), so nothing here can reach the frozen v1 builder or any other
+   page. Two rules follow from that and are asserted by
+   scripts/test_message_builder_layout.js:
+
+     * no `eb-*` selector: that namespace belongs to the frozen v1 composer and
+       lives in embed-composer.css. v2 uses mb2- / #mb2-.
+     * no override of a shared class from main.css (.card, .btn, .form-input,
+       .modal …). v2 styles its SHELL and leaves shared components alone.
+
+   LAYOUT MODEL
+   ------------
+   Three columns (rail · inspector · preview) that degrade to two and then to
+   one. Sizing rules that keep the page from ever overflowing horizontally:
+   every flexible track is minmax(0, …), every grid child is min-width:0 (a
+   grid item's default min-width is auto, which is what actually causes "the
+   whole page scrolls sideways" bugs), and long unbroken values (URLs in embed
+   fields) wrap with overflow-wrap:anywhere rather than forcing the column
+   wider. No fixed shell width is set anywhere.
+
+   The topbar is sticky at top:0 and ~53px tall, so the sticky preview offsets
+   itself below it via one variable; when the preview stops being a side column
+   (narrower widths) it becomes a top pane instead of a static block — the
+   preview is never hidden, at any width.
+   ═══════════════════════════════════════════════════════════════ */
+
+.mb2-shell {
+    --mb2-sticky-top: calc(53px + 12px);
+    --mb2-radius: 12px;
+    display: block;
+    min-width: 0;
+    padding-bottom: 8px;          /* the sticky bar's own space */
+}
+
+/* ── Regions ─────────────────────────────────────────────────── */
+.mb2-grid {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr) 380px;
+    gap: 20px;
+    align-items: start;
+    min-width: 0;
+}
+
+.mb2-rail,
+.mb2-inspector,
+.mb2-preview {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--mb2-radius);
+    padding: 16px;
+    min-width: 0;                 /* see LAYOUT MODEL */
+}
+
+.mb2-region-title {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin: 0 0 12px;
+}
+
+.mb2-rail-body,
+.mb2-inspector-body {
+    min-width: 0;
+}
+
+/* The inspector is focusable (tabindex="-1") so a structural change can move
+   focus into it; that must not draw a ring by itself. */
+.mb2-inspector:focus { outline: none; }
+.mb2-shell :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── Preview: sticky, scrolls internally, never rebuilt ───────── */
+.mb2-preview {
+    position: sticky;
+    top: var(--mb2-sticky-top);
+    align-self: start;
+    max-height: calc(100vh - var(--mb2-sticky-top) - 24px);
+    overflow: auto;
+}
+
+.mb2-mount {
+    min-width: 0;
+    overflow-wrap: anywhere;      /* pasted URLs must not widen the column */
+}
+
+/* ── Validation strip (owner: step 6) ────────────────────────── */
+.mb2-strip {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    background: var(--bg3);
+    color: var(--text2);
+    font-size: 13px;
+}
+.mb2-strip[hidden] { display: none; }
+
+/* ── Status / action bar ─────────────────────────────────────── */
+.mb2-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 20;
+    margin-top: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--mb2-radius);
+}
+
+.mb2-bar-status {
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+    font-size: 13px;
+}
+
+.mb2-bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.mb2-status-pill {
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.mb2-status-detail {
+    color: var(--text3);
+    font-size: 12px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.mb2-tone-ok .mb2-status-pill      { color: var(--success); }
+.mb2-tone-warn .mb2-status-pill    { color: var(--warning); }
+.mb2-tone-danger .mb2-status-pill  { color: var(--danger); }
+.mb2-tone-muted .mb2-status-pill   { color: var(--text3); }
+
+/* ── Responsive ──────────────────────────────────────────────── */
+/* Two columns: the preview stops being a side column and becomes a sticky top
+   pane (order:-1) with a bounded height instead of being dropped. */
+@media (max-width: 1360px) {
+    .mb2-grid { grid-template-columns: 220px minmax(0, 1fr); }
+    .mb2-preview {
+        grid-column: 1 / -1;
+        order: -1;
+        max-height: 42vh;
+    }
+}
+
+/* One column. The rail turns into a horizontal, scroll-snapping strip so it
+   stays reachable without eating the viewport before the inspector. */
+@media (max-width: 768px) {
+    .mb2-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+    .mb2-rail { position: static; }
+    .mb2-rail-body {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        scroll-snap-type: x proximity;
+        -webkit-overflow-scrolling: touch;
+    }
+    .mb2-rail-body > * { scroll-snap-align: start; flex: 0 0 auto; }
+    .mb2-preview { max-height: 36vh; }
+    .mb2-bar { align-items: flex-start; }
+}
+
+@media (max-width: 480px) {
+    .mb2-rail,
+    .mb2-inspector,
+    .mb2-preview { padding: 12px; }
+    .mb2-bar { gap: 8px; }
+    .mb2-bar-status { flex-direction: column; gap: 2px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mb2-shell *,
+    .mb2-shell *::before,
+    .mb2-shell *::after { transition: none !important; animation: none !important; }
+}

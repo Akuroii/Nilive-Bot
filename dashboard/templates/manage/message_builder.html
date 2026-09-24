@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{#
+   Message Builder v2 — the page SHELL (phase 1, step 5a).
+
+   What lives here and nowhere else:
+     * the regions (structure rail, inspector, sticky preview, validation strip,
+       status/action bar) and their accessibility semantics;
+     * the page-module declaration (data-page-module + data-page-script) that
+       nav-lifecycle.js uses to load the foundations IN ORDER and to call
+       init(root, ctx) / destroy(root, ctx);
+     * the guild id the draft namespace is keyed by — server-rendered from the
+       session, never read from a query string or from client storage.
+
+   What deliberately does NOT live here:
+     * any document data. The page boots blank and the draft arrives from
+       IndexedDB through the session; there is no draft in the HTML, so the page
+       paints without waiting on storage and nothing can race the load.
+     * any inline <script> and any on* attribute: htmx swaps #content-area, and
+       an inline script inside a swapped fragment is exactly the bug
+       nav-lifecycle.js was written to remove (it never re-executes).
+     * any stylesheet decision of its own — see the one <link> below.
+
+   The stylesheet is loaded from INSIDE the content block (not from base.html)
+   so it arrives with the fragment that needs it and leaves with it: no other
+   page pays for v2 CSS, and base.html stays untouched.
+
+   The namespace is mb2-/#mb2- on purpose: CSS classes and ids are global, and
+   `mb-*` is already taken by the minigame builder (embed-composer.css), while
+   `eb-*` belongs to the frozen v1 composer.
+#}
+{% block title %}Message Builder{% endblock %}
+{% block content %}
+<span data-page-title="Message Builder"></span>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/message-builder.css') }}">
+
+<div id="mb2-root"
+     class="mb2-shell"
+     data-page-module="message-builder"
+     data-guild-id="{{ guild_id or '' }}"
+     data-page-script="{{ url_for('static', filename='js/embed/model.js') }} {{ url_for('static', filename='js/embed/store.js') }} {{ url_for('static', filename='js/embed/discord-markdown.js') }} {{ url_for('static', filename='js/embed/preview.js') }} {{ url_for('static', filename='js/embed/drafts.js') }} {{ url_for('static', filename='js/embed/views/statusbar.js') }} {{ url_for('static', filename='js/embed/message-builder-page.js') }}">
+
+    <!-- ── VALIDATION STRIP ───────────────────────────────────────────────
+         One region, one owner (step 6). It exists now, with the semantics it
+         will need, and stays hidden while it has nothing to say: an empty
+         always-visible strip would be a fake affordance. No validator, no
+         limits fetch and no counters are wired to it in step 5a. -->
+    <p id="mb2-strip" class="mb2-strip" role="status" aria-live="polite" hidden></p>
+
+    <div class="mb2-grid">
+
+        <!-- ── STRUCTURE (rail) ───────────────────────────────────────────
+             Selection + structure only: add/duplicate/move/remove, and the
+             list of fields. Filled in 5b. -->
+        <nav id="mb2-rail" class="mb2-rail" aria-labelledby="mb2-rail-title">
+            <h2 class="mb2-region-title" id="mb2-rail-title">Structure</h2>
+            <div id="mb2-rail-body" class="mb2-rail-body"></div>
+        </nav>
+
+        <!-- ── INSPECTOR ──────────────────────────────────────────────────
+             The fields of whatever is selected. tabindex="-1" so the rail can
+             move focus here after a structural change without a tab stop that
+             is invisible in the tab order. Filled in 5c. -->
+        <section id="mb2-inspector" class="mb2-inspector" aria-labelledby="mb2-inspector-title" tabindex="-1">
+            <h2 class="mb2-region-title" id="mb2-inspector-title">Inspector</h2>
+            <div id="mb2-inspector-body" class="mb2-inspector-body"></div>
+        </section>
+
+        <!-- ── PREVIEW ────────────────────────────────────────────────────
+             Read-only output. The mount is empty in the markup on purpose:
+             preview.js owns everything inside it and reconciles it
+             differentially, so hand-written preview markup here would be a
+             second renderer. -->
+        <aside id="mb2-preview-region" class="mb2-preview" aria-labelledby="mb2-preview-title">
+            <h2 class="mb2-region-title" id="mb2-preview-title">Preview</h2>
+            <div id="mb2-mount" class="mb2-mount"></div>
+        </aside>
+    </div>
+
+    <!-- ── STATUS / ACTION BAR ────────────────────────────────────────────
+         Sticky, separate from the rail (which is a list, not a toolbar). The
+         status region is in the markup with role/aria-live so announcements
+         works from the first render; its text is written by statusbar.js from
+         the store's dirty flag + the session's persistence state. The actions
+         container is filled in 5d — a disabled button for a feature that does
+         not exist yet is not an option. -->
+    <div id="mb2-bar" class="mb2-bar">
+        <p id="mb2-bar-status" class="mb2-bar-status" role="status" aria-live="polite"></p>
+        <div id="mb2-bar-actions" class="mb2-bar-actions"></div>
+    </div>
+
+</div>
+{% endblock %}

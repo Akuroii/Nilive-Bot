@@ -1066,6 +1066,27 @@ def embed_builder():
                   **ctx)
 
 
+# ── Message Builder v2 (phase 1) ───────────────────────────────────────────────
+# A SECOND route, next to the frozen one — not a replacement. Phase 1 also has
+# no Send: the v2 page edits a normalized MessageDocument, keeps it in a draft
+# of its own (a different IndexedDB database than v1's), and renders the
+# differential preview. The switch/`?legacy=1` decision belongs to the phase
+# that makes v2 the default; until then this route is reachable by URL only and
+# nothing links to it.
+#
+# Same permission key as /embed-builder on purpose: the v2 page edits the same
+# kind of content, so it must not widen access. `bot_identity` comes from the
+# same helper, so the preview renders the guild's bot identity (name/avatar)
+# without any Discord call from the browser.
+@app.route("/embed-builder/v2")
+@require_page("embedbuilder")
+def embed_builder_v2():
+    ctx = get_current_user_context()
+    return render("manage/message_builder.html",
+                  bot_identity=_bot_identity_for_page(ctx.get("guild_id")),
+                  **ctx)
+
+
 # ── Reaction roles ─────────────────────────────────────────────────────────────
 
 @app.route("/reaction-roles")
