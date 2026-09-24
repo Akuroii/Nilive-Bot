@@ -147,8 +147,14 @@ COLORS = {
     # both are rename-able by the guild owner.
     "currency_pearl": (0xDD, 0xF7, 0xFF),       # coins slot  -- icy pearl
     "currency_pearl_glow": (0x9D, 0xEB, 0xFF),  # coins slot  -- subtle glow
-    "currency_shell": (0xFF, 0xB8, 0xA8),       # diamonds slot -- coral shell
-    "currency_shell_glow": (0xFF, 0x8F, 0xA3),  # diamonds slot -- subtle glow
+    "currency_shell": (0xD6, 0xB4, 0xFC),       # diamonds slot -- lilac
+    "currency_shell_glow": (0xE4, 0xCE, 0xFD),  # diamonds slot -- subtle glow
+                                                 # (lightened tint of the
+                                                 # primary above -- only the
+                                                 # primary tone was given, so
+                                                 # the glow is derived rather
+                                                 # than left mismatched at
+                                                 # the old coral)
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -312,14 +318,18 @@ def _fit_currency_label(draw, name, base_font_fn, base_size, max_width,
         lf, label_text, label_is_arabic = currency_name_style(
             name, base_font_fn, size)
         lw_nat = _text_size(draw, label_text, lf,
-                            tracking=(0 if label_is_arabic else 2))[0]
+                            tracking=(0 if label_is_arabic else 2),
+                            direction=("rtl" if label_is_arabic else None),
+                            language=("ar" if label_is_arabic else None))[0]
         if lw_nat * condense_ratio <= max_width:
             return lf, label_text, label_is_arabic, lw_nat
         size -= 1
     lf, label_text, label_is_arabic = currency_name_style(
         name, base_font_fn, min_size)
     lw_nat = _text_size(draw, label_text, lf,
-                        tracking=(0 if label_is_arabic else 2))[0]
+                        tracking=(0 if label_is_arabic else 2),
+                        direction=("rtl" if label_is_arabic else None),
+                        language=("ar" if label_is_arabic else None))[0]
     return lf, label_text, label_is_arabic, lw_nat
 
 
@@ -407,12 +417,17 @@ def _draw_dropcap_heading(draw, xy, text, font_family, big_size, small_size,
     return cursor - x
 
 
-def _text_size(draw, text, font, tracking=0):
+def _text_size(draw, text, font, tracking=0, direction=None, language=None):
+    kw = {}
+    if direction:
+        kw["direction"] = direction
+    if language:
+        kw["language"] = language
     if tracking <= 0:
-        b = draw.textbbox((0, 0), text, font=font)
+        b = draw.textbbox((0, 0), text, font=font, **kw)
         return b[2] - b[0], b[3] - b[1]
-    w = sum(draw.textbbox((0, 0), ch, font=font)[2] for ch in text) + tracking * (len(text) - 1)
-    b = draw.textbbox((0, 0), text, font=font)
+    w = sum(draw.textbbox((0, 0), ch, font=font, **kw)[2] for ch in text) + tracking * (len(text) - 1)
+    b = draw.textbbox((0, 0), text, font=font, **kw)
     return w, b[3] - b[1]
 
 
@@ -1467,8 +1482,11 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
         def _lab_painter(d, _l=label_text, _f=lf, _c=label_color, _ar=label_is_arabic):
             if _ar:
                 # Per-glyph tracking would re-isolate the shaped ligatures --
-                # draw the shaped run as a single string instead.
-                d.text((20, 20), _l, font=_f, fill=_c)
+                # draw the shaped run as a single string instead. Direction
+                # is passed explicitly (not left to raqm/fribidi's paragraph
+                # auto-detection) so the word always lays out right-to-left
+                # the same way regardless of Pillow/raqm/fribidi version.
+                d.text((20, 20), _l, font=_f, fill=_c, direction="rtl", language="ar")
             else:
                 _draw_tracked_text(d, (20, 20), _l, _f, _c, tracking=2)
         # Subtle glow behind the two currency labels only, using each slot's
