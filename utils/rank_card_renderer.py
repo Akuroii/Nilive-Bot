@@ -22,6 +22,7 @@ import os
 import math
 import asyncio
 import logging
+import functools
 
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps, ImageChops
@@ -88,6 +89,13 @@ ACTIVE_CRYSTAL_PNG_PATH = _asset_path("prestige_crystal_active.png", "active_cry
 INACTIVE_CRYSTAL_PNG_PATH = _asset_path("prestige_crystal_inactive.png", "inactve_crystal.png")
 ACTIVE_CRYSTAL_CONTENT_BOX = (0, 691, 2776, 4280)     # x0,y0,x1,y1 in source px
 INACTIVE_CRYSTAL_CONTENT_BOX = (0, 468, 1257, 2233)   # x0,y0,x1,y1 in source px
+
+# Supplied stat-row icon artwork (source of truth -- not redrawn/regenerated).
+# Replaces the hand-drawn line icons below for these three keys only; see
+# _load_stat_icon_asset / LINE_ICON_BUILDERS.
+STAT_ICON_MESSAGES_PNG_PATH = _asset_path("stat_icon_messages.png", "stat_icon_messages.png")
+STAT_ICON_VOICE_PNG_PATH = _asset_path("stat_icon_voice.png", "stat_icon_voice.png")
+STAT_ICON_GAMES_PNG_PATH = _asset_path("stat_icon_games.png", "stat_icon_games.png")
 
 FONT_PATHS = {
     "cinzel": _asset_path(os.path.join("fonts", "Cinzel-Variable.ttf"), "Cinzel-Variable.ttf"),
@@ -758,10 +766,70 @@ def _line_icon_diamond(size):
     return im
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# STAT-ROW ICON ASSETS — Messages / Voice Time / Games Won now use the
+# supplied artwork below instead of the hand-drawn line icons above. Each
+# source PNG is a large canvas with a variable transparent margin, so it's
+# trimmed to its opaque content first, then re-centered with a consistent
+# margin (matching the ~14-24% margin the hand-drawn icons above carried)
+# before being downsampled. _draw_stat_cards always displays these three
+# at a fixed 34px regardless of the supersample `size` this builder is
+# invoked with (68, needed only so the hand-drawn AA-less icons below look
+# smooth) -- resizing straight from the source's native resolution to that
+# 34px display target in one LANCZOS pass keeps these sharper than routing
+# through the intermediate 68px step would. Cached per (path, size) since
+# the files are static across renders.
+# ─────────────────────────────────────────────────────────────────────────
+
+_STAT_ICON_DISPLAY_SIZE = 34
+_STAT_ICON_MARGIN = 0.14  # fraction of the trimmed content's longer side
+
+
+@functools.lru_cache(maxsize=None)
+def _load_stat_icon_asset(path: str, size: int) -> Image.Image | None:
+    if not os.path.isfile(path):
+        log.warning("rank_card: stat icon asset not found at %s -- falling back "
+                    "to the hand-drawn line icon.", path)
+        return None
+    try:
+        im = Image.open(path)
+        im.load()
+        im = im.convert("RGBA")
+    except Exception as e:
+        log.warning("rank_card: failed to load stat icon %s: %s", path, e)
+        return None
+
+    bbox = im.split()[3].getbbox()
+    if bbox is not None:
+        im = im.crop(bbox)
+
+    side = max(im.width, im.height)
+    canvas_side = max(1, round(side * (1 + _STAT_ICON_MARGIN)))
+    canvas = Image.new("RGBA", (canvas_side, canvas_side), (0, 0, 0, 0))
+    canvas.paste(im, ((canvas_side - im.width) // 2, (canvas_side - im.height) // 2), im)
+
+    return canvas.resize((size, size), Image.LANCZOS)
+
+
+def _line_icon_messages_asset(size):
+    return (_load_stat_icon_asset(STAT_ICON_MESSAGES_PNG_PATH, _STAT_ICON_DISPLAY_SIZE)
+            or _line_icon_messages(size))
+
+
+def _line_icon_voice_asset(size):
+    return (_load_stat_icon_asset(STAT_ICON_VOICE_PNG_PATH, _STAT_ICON_DISPLAY_SIZE)
+            or _line_icon_voice(size))
+
+
+def _line_icon_games_asset(size):
+    return (_load_stat_icon_asset(STAT_ICON_GAMES_PNG_PATH, _STAT_ICON_DISPLAY_SIZE)
+            or _line_icon_games(size))
+
+
 LINE_ICON_BUILDERS = {
-    "messages": _line_icon_messages,
-    "voice": _line_icon_voice,
-    "games": _line_icon_games,
+    "messages": _line_icon_messages_asset,
+    "voice": _line_icon_voice_asset,
+    "games": _line_icon_games_asset,
     "inventory": _line_icon_inventory,
     "calendar": _line_icon_calendar,
     "crown": _line_icon_crown,
