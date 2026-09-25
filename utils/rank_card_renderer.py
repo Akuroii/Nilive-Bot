@@ -25,6 +25,8 @@ import logging
 import functools
 
 import aiohttp
+import uharfbuzz as hb
+import freetype
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps, ImageChops
 
 from utils.emoji import parse_emoji_input, is_custom_emoji_token, emoji_cdn_url
@@ -338,18 +340,107 @@ def _fit_currency_label(draw, name, base_font_fn, base_size, max_width,
     Returns (font, text_to_draw, is_arabic, natural_width)."""
     size = base_size
     while size > min_size:
-        lf, label_text, label_is_arabic = currency_name_style(
+        lf, label_text, label_is_arabic, label_mask = currency_name_style(
             name, base_font_fn, size)
+        if label_mask is not None:
+            lw_nat = label_mask.width
+        else:
+            lw_nat = _text_size(draw, label_text, lf,
+                                tracking=(0 if label_is_arabic else 2))[0]
+        if lw_nat * condense_ratio <= max_width:
+            return lf, label_text, label_is_arabic, lw_nat, label_mask
+        size -= 1
+    lf, label_text, label_is_arabic, label_mask = currency_name_style(
+        name, base_font_fn, min_size)
+    if label_mask is not None:
+        lw_nat = label_mask.width
+    else:
         lw_nat = _text_size(draw, label_text, lf,
                             tracking=(0 if label_is_arabic else 2))[0]
-        if lw_nat * condense_ratio <= max_width:
-            return lf, label_text, label_is_arabic, lw_nat
-        size -= 1
-    lf, label_text, label_is_arabic = currency_name_style(
-        name, base_font_fn, min_size)
-    lw_nat = _text_size(draw, label_text, lf,
-                        tracking=(0 if label_is_arabic else 2))[0]
-    return lf, label_text, label_is_arabic, lw_nat
+    return lf, label_text, label_is_arabic, lw_nat, label_mask
+
+
+@functools.lru_cache(maxsize=8)
+def _hb_face(font_path: str):
+    with open(font_path, "rb") as f:
+        return hb.Face(f.read())
+
+
+def shape_arabic_mask(text: str, font_path: str, size_px: int):
+    """RAQM-independent Arabic shaping: real HarfBuzz (uharfbuzz -- its own
+    bundled HarfBuzz, unrelated to whatever Pillow's _imagingft was built
+    with) applies the font's own GSUB init/medi/fina/rlig rules directly to
+    the base codepoints (no presentation-form substitution, no reshaping
+    library, no manual reversal), then FreeType rasterizes the shaped glyph
+    run by glyph index. Returns (alpha_mask_image, advance_width_px); the
+    mask is tight-cropped to its own bbox, "L" mode, fully antialiased.
+    """
+    face_hb = _hb_face(font_path)
+    font_hb = hb.Font(face_hb)
+    upem = face_hb.upem
+    font_hb.scale = (upem, upem)
+
+    buf = hb.Buffer()
+    buf.add_str(text)
+    buf.guess_segment_properties()
+    hb.shape(font_hb, buf)
+
+    ft_face = freetype.Face(font_path)
+    ft_face.set_pixel_sizes(0, size_px)
+    scale = size_px / upem
+
+    pen_x, pen_y = 0.0, 0.0
+    glyphs = []
+    for info, pos in zip(buf.glyph_infos, buf.glyph_positions):
+        ft_face.load_glyph(info.codepoint, freetype.FT_LOAD_RENDER)
+        bmp = ft_face.glyph.bitmap
+        left, top = ft_face.glyph.bitmap_left, ft_face.glyph.bitmap_top
+        x = pen_x + pos.x_offset * scale
+        y = pen_y - pos.y_offset * scale
+        if bmp.width and bmp.rows:
+            # Plain frombytes off FreeType's own buffer -- no numpy needed.
+            glyph_img = Image.frombytes("L", (bmp.width, bmp.rows), bytes(bmp.buffer))
+            glyphs.append((glyph_img, left, top, x, y))
+        pen_x += pos.x_advance * scale
+        pen_y += pos.y_advance * scale
+
+    if not glyphs:
+        return Image.new("L", (1, 1), 0), 0
+    canvas = Image.new("L", (int(pen_x) + size_px, size_px * 3), 0)
+    baseline_y = size_px * 2
+    for g, left, top, x, y in glyphs:
+        canvas.paste(g, (int(x) + left, int(baseline_y - top - y)), g)
+    bbox = canvas.getbbox()
+    if bbox:
+        canvas = canvas.crop(bbox)
+    return canvas, int(pen_x)
+
+
+def _draw_condensed_mask(img, xy, mask, color, ratio=1.0, glow=None, blur=4,
+                         glow_alpha=0.35):
+    """Composite an already-rendered alpha mask (from shape_arabic_mask)
+    with a solid color, condensed by `ratio` -- the mask-based counterpart
+    to _draw_condensed (which takes a painter(draw) callback instead).
+    Kept separate rather than folded into _draw_condensed: ImageDraw.bitmap()
+    does not treat an 'L'-mode mask as antialiased alpha (verified -- it
+    hard-thresholds), so a mask needs a direct Image.paste compositing path
+    that _draw_condensed's painter(draw)-only callback can't reach; this
+    function does not modify _draw_condensed or any of its call sites."""
+    if mask.getbbox() is None:
+        return (0, 0)
+    if ratio != 1.0:
+        mask = mask.resize((max(1, int(round(mask.width * ratio))), mask.height),
+                           Image.LANCZOS)
+    if glow:
+        gl = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        gl.paste(Image.new("RGBA", mask.size, (*glow, 255)),
+                (int(xy[0]), int(xy[1])), mask)
+        gl.putalpha(gl.split()[3].point(lambda a: int(a * glow_alpha)))
+        gl = gl.filter(ImageFilter.GaussianBlur(blur))
+        img.alpha_composite(gl)
+    solid = Image.new("RGBA", mask.size, (*color, 255))
+    img.paste(solid, (int(xy[0]), int(xy[1])), mask)
+    return mask.size
 
 
 def currency_name_style(name: str, base_font_fn, base_size: int):
@@ -379,32 +470,21 @@ def currency_name_style(name: str, base_font_fn, base_size: int):
     """
     if _is_arabic_text(name):
         size = round(base_size * _ARABIC_CURRENCY_SIZE_BUMP)
-        text_to_draw = name
         if not ImageFont.core.HAVE_RAQM:
-            # Matches the BASIC-layout branch amira_typo() falls back to
-            # above -- BASIC applies no bidi reordering of its own, so it
-            # must be given text that's already in visual order.
-            #
-            # Deliberately get_display() ONLY, no arabic_reshaper: this
-            # font's Arabic Presentation Forms-B coverage is incomplete
-            # (verified against its cmap: 89/144 codepoints present,
-            # missing isolated teh marbuta U+FE93 among others), so
-            # reshaping to presentation forms produces a missing-glyph box
-            # on some words -- including this exact currency name. Bidi
-            # reordering alone only ever uses base codepoints, which are
-            # fully covered, at the cost of letters not being cursively
-            # joined (BASIC has no GSUB shaping either way, so joining
-            # isn't achievable in this fallback regardless).
-            try:
-                from bidi.algorithm import get_display
-                text_to_draw = get_display(name)
-            except Exception:
-                log.exception(
-                    "rank_card_renderer: get_display() fallback failed for "
-                    "Arabic currency name %r -- drawing raw logical string, "
-                    "which will render out of order.", name)
-        return amira_typo(size), text_to_draw, True
-    return base_font_fn(base_size), name, False
+            # raqm unavailable: BASIC layout cannot join Arabic glyphs no
+            # matter what text it's given (no GSUB shaping happens at all),
+            # so instead of drawing text via Pillow, shape with an
+            # independent HarfBuzz binding (uharfbuzz -- bundles its own
+            # HarfBuzz, decoupled from whatever Pillow's _imagingft was
+            # built with) and rasterize with FreeType, applying this
+            # font's own init/medi/fina/rlig GSUB rules directly to the
+            # base codepoints. Returns a pre-rendered alpha mask instead
+            # of a (font, text) pair; caller composites it directly (see
+            # _draw_condensed_mask) rather than calling d.text().
+            mask, _adv = shape_arabic_mask(name, FONT_PATHS["amira_typo"], size)
+            return None, None, True, mask
+        return amira_typo(size), name, True, None
+    return base_font_fn(base_size), name, False, None
 
 
 def _draw_tracked_text(draw, xy, text, font, fill, tracking=0, anchor=None):
@@ -1584,19 +1664,13 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
             # hardcoded to a specific currency name. Sized down (like the
             # numeral above) if the admin's name would otherwise overflow
             # the card at the default size.
-            lf, label_text, label_is_arabic, lw_nat = _fit_currency_label(
+            lf, label_text, label_is_arabic, lw_nat, label_mask = _fit_currency_label(
                 draw, label, zilla_bold, 21, w - 16, 0.66)
         else:
             lf, label_text, label_is_arabic = outfit(21, "Medium"), label, False
             lw_nat = _text_size(draw, label_text, lf, tracking=2)[0]
+            label_mask = None
 
-        def _lab_painter(d, _l=label_text, _f=lf, _c=label_color, _ar=label_is_arabic):
-            if _ar:
-                # Per-glyph tracking would re-isolate the shaped ligatures --
-                # draw the shaped run as a single string instead.
-                d.text((20, 20), _l, font=_f, fill=_c)
-            else:
-                _draw_tracked_text(d, (20, 20), _l, _f, _c, tracking=2)
         # Subtle glow behind the two currency labels only, using each slot's
         # paired glow tone (_draw_condensed's existing glow= param -- same
         # soft-bloom mechanism already used elsewhere on the card, e.g. the
@@ -1609,8 +1683,26 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
             glow_color = (COLORS["currency_pearl_glow"] if i == 2
                          else COLORS["currency_shell_glow"])
             glow_kwargs = dict(glow=glow_color, blur=4, glow_alpha=0.35)
-        _draw_condensed(img, (x + w / 2 - lw_nat * 0.66 / 2, y + 116), _lab_painter,
-                        ratio=0.66, **glow_kwargs)
+
+        if label_mask is not None:
+            # raqm-unavailable Arabic fallback: label_text/lf are None (see
+            # currency_name_style) -- draw the pre-shaped HarfBuzz/FreeType
+            # mask directly instead of going through the painter(draw)
+            # callback _draw_condensed expects (see _draw_condensed_mask's
+            # docstring for why: ImageDraw.bitmap() doesn't antialias an
+            # 'L'-mode mask correctly). _draw_condensed itself is untouched.
+            _draw_condensed_mask(img, (x + w / 2 - lw_nat * 0.66 / 2, y + 116),
+                                 label_mask, label_color, ratio=0.66, **glow_kwargs)
+        else:
+            def _lab_painter(d, _l=label_text, _f=lf, _c=label_color, _ar=label_is_arabic):
+                if _ar:
+                    # Per-glyph tracking would re-isolate the shaped
+                    # ligatures -- draw the shaped run as a single string.
+                    d.text((20, 20), _l, font=_f, fill=_c)
+                else:
+                    _draw_tracked_text(d, (20, 20), _l, _f, _c, tracking=2)
+            _draw_condensed(img, (x + w / 2 - lw_nat * 0.66 / 2, y + 116), _lab_painter,
+                            ratio=0.66, **glow_kwargs)
 
 
 def _fmt_minutes(total_minutes) -> str:
