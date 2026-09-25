@@ -207,8 +207,8 @@ const MUTANTS = [
         target: 'rail',
         why: 'the rail keeps its own copy of the document and renders from that',
         edits: [[
-            "            const state = store.getState();\n            const items = derive(state.document, collapsed);",
-            "            const state = store.getState();\n            if (!render.__own) render.__own = JSON.parse(JSON.stringify(state.document));\n            const items = derive(render.__own, collapsed);",
+            "            const state = store.getState();\n            const items = derive(state.document, collapsed, limits);",
+            "            const state = store.getState();\n            if (!render.__own) render.__own = JSON.parse(JSON.stringify(state.document));\n            const items = derive(render.__own, collapsed, limits);",
         ]],
     },
     {
@@ -947,6 +947,218 @@ const MUTANTS = [
         edits: [[
             "        const text = label + ' — ' + issues[0].message +",
             "        const text = issues[0].message +",
+        ]],
+    },
+
+    // ── step 6b: the measurements (validate.js) ──────────────────────
+    {
+        id: 'V11',
+        target: 'validate',
+        why: 'a counter calls "over" one character early (>= instead of >, against the rule)',
+        edits: [[
+            "        return { key: entry.key, used: entry.used, max: entry.max, over: entry.used > entry.max };",
+            "        return { key: entry.key, used: entry.used, max: entry.max, over: entry.used >= entry.max };",
+        ]],
+    },
+    {
+        id: 'V12',
+        target: 'validate',
+        why: 'the field cap allows adding AT the cap (the control would never be disabled for a full embed)',
+        edits: [[
+            "                    canAdd: fields.length < limits.embed.fields_max,",
+            "                    canAdd: fields.length <= limits.embed.fields_max,",
+        ]],
+    },
+    {
+        id: 'V13',
+        target: 'validate',
+        why: 'the message cap allows adding AT the cap',
+        edits: [[
+            "                canAdd: m.message.embeds.used < m.message.embeds.max,",
+            "                canAdd: m.message.embeds.used <= m.message.embeds.max,",
+        ]],
+    },
+    {
+        id: 'V14',
+        target: 'validate',
+        why: 'a counter measures the title against the description limit (the numbers come from the wrong key)',
+        edits: [[
+            "                    { key: 'title', used: textLen(e.title), max: limits.embed.title_max },",
+            "                    { key: 'title', used: textLen(e.title), max: limits.embed.description_max },",
+        ]],
+    },
+    {
+        id: 'V15',
+        target: 'validate',
+        why: 'caps() fails OPEN on an unusable table (a page with no limits would allow every add)',
+        edits: [[
+            "            return { ok: false, embeds: { used: 0, max: 0, canAdd: false }, fields: fields };",
+            "            return { ok: false, embeds: { used: 0, max: 0, canAdd: true }, fields: fields };",
+        ]],
+    },
+    {
+        id: 'V16',
+        target: 'validate',
+        why: 'the embed character budget stops being measured (the total counter disappears)',
+        edits: [[
+            "                    { key: 'total', used: embedCharCount(e, fields), max: limits.message.embed_total_chars_max },",
+            "                    { key: 'total', used: 0, max: limits.message.embed_total_chars_max },",
+        ]],
+    },
+    {
+        id: 'V17',
+        target: 'validate',
+        why: 'the field counters measure against the embed limits (a name is counted like a title)',
+        edits: [[
+            "                        { key: 'field.name', used: textLen(f.name), max: limits.embed.field_name_max },",
+            "                        { key: 'field.name', used: textLen(f.name), max: limits.embed.title_max },",
+        ]],
+    },
+    // ── step 6b: the page hands the table over ──────────────────────
+    {
+        id: 'VP9',
+        target: 'page',
+        why: 'the views are handed no limits at all (counters blank and every add permanently disabled)',
+        edits: [[
+            "        inst.rail = f.rail.create({\n            document: doc,\n            store: inst.store,\n            mount: els.railBody,\n            limits: inst.limits,\n        });",
+            "        inst.rail = f.rail.create({\n            document: doc,\n            store: inst.store,\n            mount: els.railBody,\n        });",
+        ]],
+    },
+    {
+        id: 'VP10',
+        target: 'page',
+        why: 'the views are handed a COPY of the limits (a second limits state that can drift)',
+        edits: [[
+            "            mount: els.railBody,\n            limits: inst.limits,\n        });",
+            "            mount: els.railBody,\n            limits: Object.assign({}, inst.limits),\n        });",
+        ]],
+    },
+    // ── step 6b: the rail's caps and badges ─────────────────────────
+    {
+        id: 'R10',
+        target: 'rail',
+        why: 'the add-embed control is never disabled (the embeds cap is decoration)',
+        edits: [[
+            "                applyDisabled(row, { addEmbed: vm.canAddEmbed === false });",
+            "                applyDisabled(row, { addEmbed: false });",
+        ]],
+    },
+    {
+        id: 'R11',
+        target: 'rail',
+        why: 'the add-field control is never disabled (the fields cap is decoration)',
+        edits: [[
+            "                addField: vm.canAddField === false,",
+            "                addField: false,",
+        ]],
+    },
+    {
+        id: 'R12',
+        target: 'rail',
+        why: 'a warning-only node gets the error tone (the badge overstates the problem)',
+        edits: [[
+            "                const tone = entry.error ? 'error' : 'warning';",
+            "                const tone = 'error';",
+        ]],
+    },
+    {
+        id: 'R13',
+        target: 'rail',
+        why: 'the badge digits are written on every paint, change-guard or not',
+        edits: [[
+            "                if (row.badgeNum.textContent !== String(count)) stats.badgeWrites++;",
+            "                stats.badgeWrites++;",
+        ]],
+    },
+    {
+        id: 'R14',
+        target: 'rail',
+        why: 'every issue is attributed to the message root (badges lose their node)',
+        edits: [[
+            "                const id = String(issue.nodeId);",
+            "                const id = String(CONTENT_NODE);",
+        ]],
+    },
+    {
+        id: 'R15',
+        target: 'rail',
+        why: 'an issue change re-renders the whole rail (row identity and focus die for a number)',
+        edits: [[
+            "        unsubs.push(store.subscribe(function (s) { return s.ui.issues; },\n            function () { paintBadges(issuesByNode()); }));",
+            "        unsubs.push(store.subscribe(function (s) { return s.ui.issues; },\n            function () { render(); }));",
+        ]],
+    },
+    {
+        id: 'R16',
+        target: 'rail',
+        why: 'the add-embed guard is gone (a programmatic add can push past the cap)',
+        edits: [[
+            "            if (!capFacts(store.getState().document, limits).canAddEmbed) return;\n            const created = dispatchAndPick({ type: 'embed/add' }, 'embed');",
+            "            const created = dispatchAndPick({ type: 'embed/add' }, 'embed');",
+        ]],
+    },
+    {
+        id: 'R17',
+        target: 'rail',
+        why: 'the badge carries no meaning for assistive tech (only a stray number)',
+        edits: [[
+            "                setText(row.badgeText, plural);",
+            "                setText(row.badgeText, String(count));",
+        ]],
+    },
+    // ── step 6b: the inspector's readouts ───────────────────────────
+    {
+        id: 'N12',
+        target: 'inspector',
+        why: 'the counters are painted once and never updated again',
+        edits: [[
+            "        function paintCounts(sel, panel) {",
+            "        function paintCounts(sel, panel) {\n            if (stats.renders > 1) return;",
+        ]],
+    },
+    {
+        id: 'N13',
+        target: 'inspector',
+        why: 'the over-state never reaches the counter (a value past its limit looks clean)',
+        edits: [[
+            "                setClass(counters[key], 'mb2-count-over', !!(entry && entry.over));",
+            "                setClass(counters[key], 'mb2-count-over', false);",
+        ]],
+    },
+    {
+        id: 'N14',
+        target: 'inspector',
+        why: 'the counter is written on every render, change-guard or not',
+        edits: [[
+            "                setText(counters[key], entry ? entry.used + ' / ' + entry.max : '');",
+            "                counters[key].textContent = entry ? entry.used + ' / ' + entry.max : '';",
+        ]],
+    },
+    {
+        id: 'N15',
+        target: 'inspector',
+        why: 'the inspector parses the limits attribute itself (a second parser, a second limits state)',
+        edits: [[
+            "        const limits = options.limits || null;",
+            "        const limits = JSON.parse((options.document && options.document.getElementById('mb2-root').getAttribute('data-limits')) || 'null');",
+        ]],
+    },
+    {
+        id: 'N16',
+        target: 'inspector',
+        why: 'the field cap is never applied (the add button stays live on a full embed)',
+        edits: [[
+            "                setDisabled(panel.addField, !(cap && cap.canAdd));",
+            "                setDisabled(panel.addField, false);",
+        ]],
+    },
+    {
+        id: 'N17',
+        target: 'inspector',
+        why: 'the add-field action no longer checks the cap (a click past the cap goes through)',
+        edits: [[
+            "                    const cap = capFacts(store.getState().document).fields[sel.embed.id];\n                    if (!cap || !cap.canAdd) return false;   // 6b: at the cap the button is off",
+            "                    /* the cap is not checked here */",
         ]],
     },
 ];

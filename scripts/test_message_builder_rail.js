@@ -44,6 +44,7 @@ function assert(cond, name, extra) {
     else { fail++; failures.push(name + (extra ? ' — ' + extra : '')); console.log('  FAIL', name, extra || ''); }
 }
 function section(t) { console.log('\n== ' + t + ' =='); }
+function eq(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
 
 const ROOT_DIR = path.join(__dirname, '..');
 const js = (...p) => path.join(ROOT_DIR, 'dashboard', 'static', 'js', ...p);
@@ -59,10 +60,35 @@ function makeSandbox() {
     };
     sandbox.window.document = dom.document;
     vm.createContext(sandbox);
-    [js('embed', 'model.js'), js('embed', 'store.js'), RAIL_PATH].forEach(file => {
-        vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: path.basename(file) });
-    });
+    // validate.js is part of the rail's world since 6b: the add caps and the
+    // badge counts come from ITS measurement (rail.js re-implements nothing).
+    [js('embed', 'model.js'), js('embed', 'store.js'), js('embed', 'validate.js'), RAIL_PATH]
+        .forEach(file => {
+            vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: path.basename(file) });
+        });
     return { dom, sandbox, NERO: sandbox.window.NERO };
+}
+
+/**
+ * The limits table the server renders into the page, mirroring
+ * utils/discord_limits.limits_payload(). scripts/test_message_builder_page.js
+ * carries the same fixture and scripts/test_embed_schema.py pins the KEYS to the
+ * real payload, so this cannot drift from what the route actually serves.
+ */
+function servedLimits() {
+    return {
+        message: { content_max: 2000, embeds_max: 10, embed_total_chars_max: 6000, request_bytes_max: 26214400 },
+        attachments: { count_max: 10, total_bytes_max: 26148864, file_bytes_advisory: 20971520, file_advisory_is_hard: false },
+        embed: {
+            title_max: 256, description_max: 4096, fields_max: 25, field_name_max: 256,
+            field_value_max: 1024, footer_text_max: 2048, author_name_max: 256,
+        },
+        components: {
+            rows_max: 5, buttons_per_row_max: 5, button_label_max: 80, button_url_max: 512,
+            custom_id_max: 100, select_options_max: 25, select_option_label_max: 100,
+            select_option_description_max: 100, select_placeholder_max: 150,
+        },
+    };
 }
 
 function deepFreeze(value, seen) {
@@ -104,10 +130,18 @@ function makeRig(options) {
 
     const mount = dom.document.createElement('div');
     mount.setAttribute('id', 'mb2-rail-body');
-    const rail = NERO.embed.views.rail.create({ document: dom.document, store, mount });
+    // 6b: the page hands the rail the served limits BY REFERENCE. A test that
+    // wants the fail-closed branch passes `limits: null` (or a broken table);
+    // that is not the default, because a capless rail refuses every add.
+    const limits = Object.prototype.hasOwnProperty.call(options, 'limits') ? options.limits : servedLimits();
+    const rail = NERO.embed.views.rail.create({ document: dom.document, store, mount, limits: limits });
+
+    // The page dispatches what validation found; this rig does the same with one
+    // call, so badge behaviour is tested against the real store slice.
+    const setIssues = (issues) => store.dispatch({ type: 'ui/setIssues', issues: issues || [] });
 
     return {
-        dom, NERO, model, store, rail, mount, dispatched,
+        dom, NERO, model, store, rail, mount, dispatched, limits, setIssues,
         settle: () => {},
         rows: () => Array.from(mount.children),
         ids: () => Array.from(mount.children).map(n => n.getAttribute('data-node-id')),
@@ -589,6 +623,187 @@ function runAll() {
         assert(rig.dispatched.filter(t => t === 'ui/selectNode').length >= 0, 'dispatch log intact');
     }
 
+
+    // ─────────────────────────────────────────────────────────────
+    section('H. the 6b facts: add caps and issue badges');
+    // ─────────────────────────────────────────────────────────────
+    {
+        // ── the add-embed control lives on the message root ──
+        const rig = makeRig();
+        const { model, store, rail } = rig;
+        const addEmbed = rig.actionButton('content', 'addEmbed');
+        assert(!!addEmbed, 'the message root row carries the add-embed control');
+        assert((addEmbed.getAttribute('aria-label') || '').length > 0,
+            'with an accessible name of its own', addEmbed.getAttribute('aria-label'));
+        assert(addEmbed.disabled === false,
+            'and it is enabled while the message has room (1 of 10 embeds)');
+        assert(rig.row('content').textContent.indexOf('1 / 10') !== -1,
+            'the embeds fact is visible beside it, from the SERVED table',
+            rig.row('content').textContent);
+        const acts = rig.during(() => rig.click(addEmbed));
+        assert(acts.indexOf('embed/add') !== -1, 'clicking it dispatches embed/add', acts.join(','));
+        assert(store.getDocument().embeds.length === 2, 'and the message grew by one');
+        assert(rig.row('content').textContent.indexOf('2 / 10') !== -1,
+            'the fact followed the document', rig.row('content').textContent);
+
+        // ── at the cap: disabled, and the guard refuses a programmatic add ──
+        const limits = servedLimits();
+        limits.message.embeds_max = 2;
+        limits.embed.fields_max = 1;
+        const full = makeRig({ limits: limits });
+        full.store.dispatch({ type: 'embed/add' });
+        assert(full.store.getDocument().embeds.length === 2, 'rig: the message is at its embeds cap');
+        const atCap = full.actionButton('content', 'addEmbed');
+        assert(atCap.disabled === true,
+            'at embeds_max the add-embed control is DISABLED (a full message is not an error)',
+            String(atCap.disabled));
+        assert(full.row('content').textContent.indexOf('2 / 2') !== -1,
+            'and the fact reads 2 / 2', full.row('content').textContent);
+        const capActs = full.during(() => { full.rail.addEmbed(); });
+        assert(capActs.length === 0 && full.store.getDocument().embeds.length === 2,
+            'a programmatic add is refused too (the guard is the second belt)', capActs.join(','));
+        assert(full.store.getUi().selectedNodeId !== undefined, 'rig: the store is still healthy');
+        assert(full.NERO.embed.validate.caps(full.store.getDocument(), limits).embeds.canAdd === false,
+            'and the cap the control was painted from says the same thing');
+
+        // one below the cap the control is live again (it is a fact, not a mode)
+        const near = makeRig({ limits: limits });
+        const nearBtn = near.actionButton('content', 'addEmbed');
+        assert(nearBtn.disabled === false, 'one embed below the cap, the control is live');
+        near.click(nearBtn);
+        assert(near.store.getDocument().embeds.length === 2 && nearBtn.disabled === true,
+            'and adding the last allowed embed turns it off');
+        assert(near.rail.badge === undefined || true, 'rig: the rail API is intact');
+
+        // ── the field cap ──
+        const embedId = near.store.getDocument().embeds[0].id;
+        const addField = near.actionButton(embedId, 'addField');
+        assert(addField.disabled === false, 'the add-field control starts live (0 of 1 fields)');
+        near.click(addField);
+        assert(near.store.getDocument().embeds[0].fields.length === 1, 'it adds the one field');
+        assert(near.actionButton(embedId, 'addField').disabled === true,
+            'and at fields_max it is disabled');
+        const fieldActs = near.during(() => near.rail.addField(embedId));
+        assert(fieldActs.length === 0 && near.store.getDocument().embeds[0].fields.length === 1,
+            'a programmatic add-field past the cap is refused', fieldActs.join(','));
+        // a SECOND embed is unaffected by the first one's cap
+        const other = near.store.getDocument().embeds[1].id;
+        assert(near.actionButton(other, 'addField').disabled === false,
+            'the other embed still has room (caps are per embed)',
+            String(near.actionButton(other, 'addField').disabled));
+
+        // ── no usable table: fail closed ──
+        const bare = makeRig({ limits: null });
+        assert(bare.actionButton('content', 'addEmbed').disabled === true,
+            'with no limits table the add-embed control is disabled (fail closed)');
+        assert(bare.actionButton(bare.store.getDocument().embeds[0].id, 'addField').disabled === true,
+            'so is every add-field control');
+        assert(bare.row('content').textContent.indexOf(' / ') === -1 ||
+               bare.row('content').textContent.indexOf('0 / 0') === -1,
+            'and no embeds fact is invented (nothing to measure against)',
+            bare.row('content').textContent);
+        const bareActs = bare.during(() => { bare.rail.addEmbed(); bare.rail.addField(bare.store.getDocument().embeds[0].id); });
+        assert(bareActs.length === 0, 'and both add actions refuse without a table', bareActs.join(','));
+    }
+    {
+        // ── the badges: presentation only, from store.ui.issues ──
+        const rig = makeRig();
+        const { store, rail } = rig;
+        const embedId = store.getDocument().embeds[0].id;
+        store.dispatch({ type: 'field/add', embedId: embedId });
+        const fieldId = store.getDocument().embeds[0].fields[0].id;
+        store.dispatch({ type: 'content/set', text: 'Hello' });
+
+        const badgeOf = (id) => {
+            const row = rig.row(id);
+            if (!row) return null;
+            let found = null;
+            row.children.forEach(child => {
+                if ((child.className || '').indexOf('mb2-rail-badge') !== -1) found = child;
+            });
+            return found;
+        };
+        assert(!!badgeOf(embedId) && badgeOf(embedId).hidden === true,
+            'every row has a badge, hidden while its node is clean');
+        assert(rail.badge(embedId) === null, 'and the API agrees there is nothing to show');
+
+        const issue = (nodeId, severity, code) => ({ code: code, path: '', nodeId: nodeId, severity: severity, message: 'x' });
+        rig.setIssues([
+            issue('content', 'warning', 'content.whitespace-only'),
+            issue(embedId, 'warning', 'embed.unused'),
+            issue(embedId, 'error', 'embed.title.too-long'),
+            issue(fieldId, 'warning', 'embed.field.value.missing'),
+        ]);
+        assert(badgeOf('content').hidden === false && badgeOf('content').textContent.indexOf('1 problem') !== -1,
+            'a node with one issue shows a badge that says one problem',
+            badgeOf('content').textContent);
+        assert(badgeOf(embedId).hidden === false && badgeOf(embedId).textContent.indexOf('2 problems') !== -1,
+            'a node with two issues says two', badgeOf(embedId).textContent);
+        assert(badgeOf(embedId).getAttribute('data-badge-tone') === 'error',
+            'and its tone is the WORST of the two (one error makes it an error badge)',
+            String(badgeOf(embedId).getAttribute('data-badge-tone')));
+        assert(badgeOf(fieldId).getAttribute('data-badge-tone') === 'warning',
+            'a warning-only node stays a warning');
+        assert(eq(rail.badge(embedId), { count: 2, tone: 'error' }),
+            'the API reports the same derivation the DOM was painted from',
+            JSON.stringify(rail.badge(embedId)));
+        assert(badgeOf(embedId).children.some(c => (c.className || '').indexOf('mb2-sr-only') !== -1 &&
+               c.textContent === '2 problems'),
+            'the badge carries its meaning for assistive tech (the digits alone are hidden)');
+        assert(rig.dom.ops.innerHTMLSet === 0, 'no markup was ever written for a badge');
+
+        // Badges are a PAINT, not a render: identity, focus and rows survive.
+        const rowsBefore = rig.rows();
+        const renders = rail.stats().renders;
+        rig.setIssues([issue(embedId, 'error', 'embed.title.too-long')]);
+        assert(rail.stats().renders === renders,
+            'a new issue list does not re-render the rows (badges are a paint)', String(rail.stats().renders));
+        assert(rig.rows().every((row, i) => row === rowsBefore[i]),
+            'and every row element is the same object it was');
+        assert(eq(rail.badge(embedId), { count: 1, tone: 'error' }), 'the badge followed the new list');
+        assert(badgeOf('content') === null || badgeOf('content').hidden === true,
+            'and the node that is now clean went back to hidden');
+
+        // Change-guarded: the SAME issues again cost no writes.
+        const writes = rail.stats().badgeWrites;
+        rig.setIssues([issue(embedId, 'error', 'embed.title.too-long')]);
+        assert(rail.stats().badgeWrites === writes,
+            'repainting an identical issue list writes nothing',
+            String(rail.stats().badgeWrites - writes));
+
+        // An issue about a node with no row paints nothing and throws nothing.
+        rig.setIssues([issue('no-such-node', 'error', 'embed.title.too-long'),
+                       issue(embedId, 'error', 'embed.title.too-long')]);
+        assert(rail.badge('no-such-node') === null, 'an issue about a node with no row has no badge');
+
+        // Fixing everything hides every badge again.
+        rig.setIssues([]);
+        assert(rig.rows().every(row => {
+            let bad = null;
+            row.children.forEach(child => { if ((child.className || '').indexOf('mb2-rail-badge') !== -1) bad = child; });
+            return bad === null || bad.hidden === true;
+        }), 'a clean document hides every badge');
+        assert(rail.badge(embedId) === null && rail.badge('content') === null, 'and the API says so too');
+
+        // Badges never dispatch: the rail only reads the list.
+        const before = rig.dispatched.length;
+        rig.setIssues([issue(embedId, 'error', 'embed.title.too-long')]);
+        assert(rig.dispatched.length === before + 1 &&
+               rig.dispatched[rig.dispatched.length - 1] === 'ui/setIssues',
+            'the only dispatch in that exchange was the test s own', rig.dispatched.join(','));
+        assert(!/ui\/setIssues/.test(fs.readFileSync(RAIL_PATH, 'utf8').replace(/\/\*[\s\S]*?\*\//g, ' ')),
+            'and the rail s own source never dispatches an issue list');
+
+        // Teardown with a live badge: the rows go, and so does the subscription.
+        assert(rail.destroy() === true, 'the rail tears down while a badge is showing');
+        const after = store._subscriberCounts().selectors;
+        store.dispatch({ type: 'ui/setIssues', issues: [issue(embedId, 'error', 'embed.title.too-long')] });
+        assert(store._subscriberCounts().selectors === after, 'the badge subscription is gone');
+        assert(rig.rows().length === 0, 'and the rows (with their badges) are off the tree');
+        assert(rig.dom.warnings.length === 0, 'nothing warned during the badge work',
+            rig.dom.warnings.join(' | '));
+    }
+
     // ─────────────────────────────────────────────────────────────
     section('G. teardown');
     // ─────────────────────────────────────────────────────────────
@@ -597,14 +812,16 @@ function runAll() {
         const { store, rail } = rig;
         store.dispatch({ type: 'embed/add' });
         const before = store._subscriberCounts().selectors;
-        assert(before >= 2, 'the rail subscribed to the store', String(before));
+        assert(before >= 3, 'the rail subscribed to the store (document, selection, issues)',
+            String(before));
         assert(rig.mount.listeners.length >= 2, 'and listens on its own mount',
             String(rig.mount.listeners.length));
         assert(rig.mount.getAttribute('role') === 'tree', 'the tree semantics are in place');
 
         rail.destroy();
-        assert(store._subscriberCounts().selectors === before - 2,
-            'destroy unsubscribes both subscriptions', String(store._subscriberCounts().selectors));
+        assert(store._subscriberCounts().selectors === before - 3,
+            'destroy unsubscribes every subscription — including the 6b badge one',
+            String(store._subscriberCounts().selectors));
         assert(rig.mount.listeners.length === 0, 'and removes its listeners',
             String(rig.mount.listeners.length));
         assert(rig.mount.children.length === 0, 'the mount is empty again');

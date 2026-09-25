@@ -109,6 +109,47 @@
 .mb2-strip.mb2-tone-warn   { border-left-color: var(--warning); }
 .mb2-strip.mb2-tone-danger { border-left-color: var(--danger); }
 
+/* ── 6b counters (inspector.js owns these elements) ─────────────
+   `used / max` under the control it belongs to, and a tone that only changes
+   when the number is PAST the limit. aria-hidden is set by the script: the
+   strip announces problems, a counter must not talk over a keystroke. */
+.mb2-count {
+    display: block;
+    margin-top: 4px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text2);
+    opacity: .75;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.mb2-count-over { color: var(--danger); opacity: 1; font-weight: 600; }
+.mb2-count-total {
+    margin: 10px 0 0;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+    text-align: left;
+}
+.mb2-count.mb2-count-fields {
+    display: inline-block;
+    margin: 0 0 0 8px;
+    vertical-align: middle;
+}
+/* Visually hidden, still read: the badge's meaning for assistive tech. Written
+   without overflow:hidden so the shell's overflow rules stay exactly as they
+   were (the layout harness pins them). */
+.mb2-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
 /* ── Status / action bar ─────────────────────────────────────── */
 .mb2-bar {
     position: sticky;
@@ -314,6 +355,30 @@
 }
 .mb2-rail-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
 .mb2-rail-btn:disabled { opacity: .35; cursor: default; }
+/* ── 6b: the rail's facts — the embeds count and the issue badges ──────
+   Numbers beside the rows, never verdicts of their own: the tone class is the
+   same mb2-tone-* vocabulary the strip and the status bar use, and the badge is
+   hidden (not emptied) when its node has nothing to report. [hidden] is left
+   alone so the attribute keeps winning over display. */
+.mb2-rail-count {
+    font-size: 11px;
+    color: var(--text2);
+    opacity: .7;
+    white-space: nowrap;
+}
+.mb2-rail-badge {
+    display: inline-block;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg3);
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+}
+.mb2-rail-badge[hidden] { display: none; }
+.mb2-rail-badge.mb2-tone-warn { border-color: var(--warning); color: var(--warning); }
+.mb2-rail-badge.mb2-tone-danger { border-color: var(--danger); color: var(--danger); }
 .mb2-rail-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ── Inspector (inspector.js owns everything inside #mb2-inspector-body) ──
@@ -381,7 +446,11 @@
     min-height: 32px;
     cursor: pointer;
 }
-.mb2-insp-btn:hover { border-color: var(--accent); color: var(--text); }
+.mb2-insp-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+/* 6b: the add-field button is disabled exactly at the served fields cap, and a
+   control that cannot act must LOOK like it cannot act (the :disabled property,
+   not a colour that pretends). */
+.mb2-insp-btn:disabled { opacity: .45; cursor: not-allowed; }
 .mb2-insp-fields {
     list-style: none;
     margin: 0 0 10px;

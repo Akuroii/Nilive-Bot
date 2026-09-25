@@ -127,6 +127,23 @@ const SERVED_LIMITS = servedLimits();
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const rep = (ch, n) => String(ch).repeat(n);
+/**
+ * Count textContent writes to ONE element. The 6a claims are about the STRIP,
+ * and other regions legitimately write their own text now (6b's counters), so a
+ * global DOM-ops total would be measuring other people's work. This wraps the
+ * element's own accessors instead, which is what "the strip was written once"
+ * actually means.
+ */
+function watchText(el) {
+    const desc = Object.getOwnPropertyDescriptor(el, 'textContent');
+    let writes = 0;
+    Object.defineProperty(el, 'textContent', {
+        configurable: true,
+        get() { return desc.get.call(el); },
+        set(value) { writes++; desc.set.call(el, value); },
+    });
+    return function () { return writes; };
+}
 // The page's validateTimer is {owner, id} or null. A mutant can leave a
 // raw realm Timeout behind instead, and JSON.stringify() cannot express one
 // (it is circular) — so descriptions go through this.
@@ -247,6 +264,22 @@ function makeEnv(opts) {
     env.metaData = () => (env.idb.snapshot('nero_message_builder').meta || {});
     env.record = (key) => env.draftsData()[key];
     env.settle = (ms) => sleep(ms == null ? 25 : ms);
+    /**
+     * Wait for a condition instead of guessing a duration. The 6b sections use
+     * this: a debounced validation pass is asynchronous, and asserting on the
+     * paint after a fixed sleep makes the check a race against the machine's
+     * load. The condition is evaluated until it holds (or the budget runs out),
+     * then the caller asserts — so a slow machine slows the test, it does not
+     * fail it.
+     */
+    env.until = async function (predicate, ms) {
+        const deadline = Date.now() + (ms == null ? 2000 : ms);
+        while (Date.now() < deadline) {
+            if (predicate()) return true;
+            await sleep(10);
+        }
+        return false;
+    };
     env.store = () => env.inst && env.inst.store;
     env.session = () => env.inst && env.inst.session;
     env.payload = (document_) => env.NERO.embed.model.stableStringify(
@@ -2547,7 +2580,8 @@ async function main() {
 
         // The same burst, now over the limit: the strip appears with the count,
         // the server's wording and the danger tone.
-        const before = env.dom.ops.textContentSet;
+        const stripWrites = watchText(strip);
+        const before = stripWrites();
         type(rep('x', env.limits.message.content_max + 1));
         await env.settle(250);
         assert(env.inst.ctx.counters.validateRuns === 3,
@@ -2560,9 +2594,9 @@ async function main() {
         assert(strip.getAttribute('class') === 'mb2-strip mb2-tone-danger',
             'R2: an error tints the strip danger (the status bar\'s own tone vocabulary)',
             strip.getAttribute('class'));
-        assert(env.dom.ops.textContentSet - before === 1,
-            'R2: appearing cost exactly one text write',
-            String(env.dom.ops.textContentSet - before));
+        assert(stripWrites() - before === 1,
+            'R2: appearing cost exactly one text write (to the strip itself)',
+            String(stripWrites() - before));
         assert(env.inst.ctx.counters.validateRuns === 3 &&
                JSON.stringify(env.store().getUi().issues) ===
                JSON.stringify(env.NERO.embed.validate.validate(env.store().getDocument(), env.limits)),
@@ -2570,7 +2604,7 @@ async function main() {
             JSON.stringify(env.store().getUi().issues));
 
         // ── R3: updates when the issue changes, disappears when it is fixed ──
-        const count = () => env.dom.ops.textContentSet;
+        const count = stripWrites;
         let mark = count();
         type(rep('x', env.limits.message.content_max + 2));
         await env.settle(250);
@@ -2790,7 +2824,262 @@ async function main() {
         assert(env.net.calls === 0, 'R9: and validation never touches the network');
         assert(env.inst.ctx.counters.validateRuns === 2,
             'R9: five keystrokes, one pass', String(env.inst.ctx.counters.validateRuns));
+        // 6b: the views were handed the page's ONE limits object, and neither of
+        // them parses the attribute or keeps a table of its own.
+        const railSrc = fs.readFileSync(process.env.NERO_RAIL_SRC || js('embed', 'views', 'rail.js'), 'utf8');
+        const inspSrc = fs.readFileSync(process.env.NERO_INSPECTOR_SRC || js('embed', 'views', 'inspector.js'), 'utf8');
+        const codeOnly = (src) => src
+            .replace(/\/\*[\s\S]*?\*\//g, ' ')
+            .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+        [['rail', railSrc], ['inspector', inspSrc]].forEach(([name, src]) => {
+            assert(!/JSON\.parse|data-limits/.test(codeOnly(src)),
+                'R9: the ' + name + ' never parses the limits table (the page is the only parser)');
+            assert(!/ui\/setIssues/.test(src), 'R9: and the ' + name + ' never dispatches an issue list');
+            assert(!/aria-live/.test(src), 'R9: and never creates a live region');
+        });
+        assert((pageSrc.match(/limits: inst\.limits/g) || []).length === 2,
+            'R9: the page hands the same limits object to both views (by reference, twice)',
+            String((pageSrc.match(/limits: inst\.limits/g) || []).length));
+        assert((pageSrc.match(/getAttribute\('data-limits'\)/g) || []).length === 1,
+            'R9: and reads the attribute exactly once, at mount',
+            String((pageSrc.match(/getAttribute\('data-limits'\)/g) || []).length));
         env.unmount();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    section('S. the 6b facts on the page: counters, caps and badges');
+    // ─────────────────────────────────────────────────────────────
+    const railRow = (env, id) => env.el('mb2-rail-body').children
+        .find(row => row.getAttribute('data-node-id') === id) || null;
+    const railChild = (row, cls) => (row ? row.children : [])
+        .find(child => (child.className || '').split(/\s+/).indexOf(cls) !== -1) || null;
+    const railButton = (row, action) => {
+        let found = null;
+        (row ? row.children : []).forEach(child => {
+            if ((child.className || '').indexOf('mb2-rail-actions') === -1) return;
+            child.children.forEach(button => {
+                if (button.getAttribute('data-rail-action') === action) found = button;
+            });
+        });
+        return found;
+    };
+    const badgeOf = (env, id) => {
+        const badge = railChild(railRow(env, id), 'mb2-rail-badge');
+        return badge && badge.hidden === false ? badge : null;
+    };
+    const issuesFor = (env, id) => env.store().getUi().issues.filter(i => i.nodeId === id);
+
+    {
+        // ── S1: boot — a loaded draft shows its facts immediately ──
+        const env = makeEnv();
+        installIdb(env, seedSpec(env, [makeRecord(env, filledDocument(), { documentId: 'doc-filled' })]));
+        await env.mount();
+        const doc = env.store().getDocument();
+        const embedId = doc.embeds[0].id;
+        assert(env.inst.inspector.count('content').textContent ===
+               doc.content.length + ' / ' + env.limits.message.content_max,
+            'the content counter shows the loaded draft against the served content_max',
+            env.inst.inspector.count('content').textContent);
+        assert(env.inst.inspector.count('content').getAttribute('aria-hidden') === 'true' &&
+               env.inst.inspector.count('content').getAttribute('aria-live') === null,
+            'and it is decoration (aria-hidden), never a live region');
+        assert(railRow(env, 'content').textContent.indexOf('1 / ' + env.limits.message.embeds_max) !== -1,
+            'the rail shows the embeds fact from the same served table',
+            railRow(env, 'content').textContent);
+        assert(railButton(railRow(env, 'content'), 'addEmbed').disabled === false,
+            'and the add-embed control is live below the cap');
+        assert(railButton(railRow(env, embedId), 'addField').disabled === false,
+            'so is the embed add-field control (2 of 25 fields)');
+        assert(badgeOf(env, 'content') === null && badgeOf(env, embedId) === null,
+            'a valid loaded draft carries no badge on any row');
+
+        // ── S2: over the limit — the strip and the badge say the same thing ──
+        const content = env.inst.inspector.control('content');
+        content.value = rep('x', env.limits.message.content_max + 1);
+        env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+        assert(await env.until(() => env.el('mb2-strip').hidden === false),
+            'rig: the debounced pass reported the problem');
+        assert(env.inst.inspector.count('content').textContent ===
+               (env.limits.message.content_max + 1) + ' / ' + env.limits.message.content_max,
+            'the counter follows the keystroke', env.inst.inspector.count('content').textContent);
+        assert(env.inst.inspector.count('content').className.indexOf('mb2-count-over') !== -1,
+            'and goes into its over-state', env.inst.inspector.count('content').className);
+        assert(env.el('mb2-strip').hidden === false &&
+               /2001 characters/.test(env.el('mb2-strip').textContent),
+            'the strip reports the same problem', env.el('mb2-strip').textContent);
+        const badge = badgeOf(env, 'content');
+        assert(!!badge && badge.getAttribute('data-badge-tone') === 'error' &&
+               /1 problem/.test(badge.textContent),
+            'and the rail row carries an error badge for that node',
+            badge ? badge.textContent : '(no badge)');
+        assert(issuesFor(env, 'content').length === 1 && /1 problem/.test(badge.textContent),
+            'ONE list, two surfaces: the badge counts exactly what ui.issues holds',
+            String(issuesFor(env, 'content').length));
+        assert(badgeOf(env, embedId) === null, 'and no other row got a badge for it');
+
+        // fixing it clears both surfaces in the same pass
+        content.value = rep('x', env.limits.message.content_max);
+        env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+        assert(await env.until(() => env.el('mb2-strip').hidden === true),
+            'rig: the pass ran again and found nothing');
+        assert(badgeOf(env, 'content') === null,
+            'fixing it hides the strip AND the badge');
+        assert(env.inst.inspector.count('content').className === 'mb2-count',
+            'and the counter leaves its over-state', env.inst.inspector.count('content').className);
+
+        // ── S3: the by-reference table — no second copy anywhere ──
+        // The page parses data-limits ONCE and hands that object to both views.
+        // If a view had copied it, or cached a number, changing the page's own
+        // object would not move its counter or its cap. It does.
+        const limits = env.inst.limits;
+        const keep = { embeds: limits.message.embeds_max, title: limits.embed.title_max };
+        try {
+            limits.message.embeds_max = 1;             // the loaded draft already has 1
+            limits.embed.title_max = 7;                // and its title is 7 characters
+            env.inst.rail.render();
+            env.store().dispatch({ type: 'ui/selectNode', nodeId: embedId });
+            env.inst.inspector.render();
+            assert(railButton(railRow(env, 'content'), 'addEmbed').disabled === true,
+                'a change to the page OWN limits object moves the rail cap (passed by reference)');
+            assert(railRow(env, 'content').textContent.indexOf('1 / 1') !== -1,
+                'and the embeds fact with it', railRow(env, 'content').textContent);
+            assert(env.inst.inspector.count('title').textContent === '7 / 7',
+                'the inspector counter reads the same object',
+                env.inst.inspector.count('title').textContent);
+            limits.embed.title_max = 3;
+            env.inst.inspector.render();
+            assert(env.inst.inspector.count('title').textContent === '7 / 3' &&
+                   env.inst.inspector.count('title').className.indexOf('mb2-count-over') !== -1,
+                'and an over-limit title follows the same object too',
+                env.inst.inspector.count('title').textContent + ' '
+                    + env.inst.inspector.count('title').className);
+        } finally {
+            limits.message.embeds_max = keep.embeds;
+            limits.embed.title_max = keep.title;
+            env.inst.rail.render();
+            env.store().dispatch({ type: 'ui/selectNode', nodeId: 'content' });
+            env.inst.inspector.render();
+        }
+        assert(railButton(railRow(env, 'content'), 'addEmbed').disabled === false,
+            'restoring the numbers restores the control (it is a fact, not a mode)');
+        env.unmount();
+    }
+    {
+        // ── S4: a custom served table drives counters, caps and badges ──
+        const limits = servedLimits();
+        limits.message.content_max = 20;
+        limits.embed.title_max = 5;
+        limits.embed.fields_max = 1;
+        limits.message.embeds_max = 2;
+        const env = makeEnv({ limits: limits });
+        installIdb(env);
+        await env.mount();
+        const embedId = env.store().getDocument().embeds[0].id;
+        const content = env.inst.inspector.control('content');
+        assert(env.inst.inspector.count('content').textContent === '0 / 20',
+            'the counter reads the served content_max of 20',
+            env.inst.inspector.count('content').textContent);
+        assert(railRow(env, 'content').textContent.indexOf('1 / 2') !== -1,
+            'the embeds cap is the served 2', railRow(env, 'content').textContent);
+        content.value = rep('c', 21);
+        env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+        assert(await env.until(() => badgeOf(env, 'content') !== null),
+            'rig: the over-limit message was reported');
+        assert(/is 21 characters/.test(env.el('mb2-strip').textContent) &&
+               badgeOf(env, 'content') !== null,
+            'a 21-character message is over the served 20 (strip + badge)',
+            env.el('mb2-strip').textContent);
+        env.store().dispatch({ type: 'ui/selectNode', nodeId: embedId });
+        const title = env.inst.inspector.control('title');
+        assert(env.inst.inspector.count('title').textContent === '0 / 5',
+            'the title counter reads the served 5', env.inst.inspector.count('title').textContent);
+        title.value = 'sixsix';
+        env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: title });
+        assert(await env.until(() => badgeOf(env, embedId) !== null),
+            'rig: the over-limit title was reported');
+        assert(issuesFor(env, embedId).length >= 1,
+            'a 6-character title badges the EMBED row',
+            badgeOf(env, embedId) ? badgeOf(env, embedId).textContent : '(no badge)');
+        assert(env.el('mb2-strip').textContent.indexOf('problem') !== -1 &&
+               env.store().getUi().issues.length >= 2,
+            'the store holds every issue while the strip shows the first',
+            String(env.store().getUi().issues.length));
+        // the fields cap, end to end: one field is the whole allowance
+        assert(env.inst.inspector.count('fields').textContent === '0 / 1',
+            'the fields fact is the served 1', env.inst.inspector.count('fields').textContent);
+        const addField = railButton(railRow(env, embedId), 'addField');
+        assert(addField.disabled === false, 'rig: the rail add-field control starts live');
+        env.el('mb2-rail-body').dispatch('click', { type: 'click', target: addField });
+        assert(env.store().getDocument().embeds[0].fields.length === 1,
+            'clicking it adds the one allowed field',
+            String(env.store().getDocument().embeds[0].fields.length));
+        // The rail selected the new field (5b), so the inspector is showing that
+        // panel now — read the embed's facts back by selecting it again.
+        env.store().dispatch({ type: 'ui/selectNode', nodeId: embedId });
+        assert(env.inst.inspector.count('fields').textContent === '1 / 1',
+            'and the fact reads 1 / 1', env.inst.inspector.count('fields').textContent);
+        assert(railButton(railRow(env, embedId), 'addField').disabled === true &&
+               env.inst.inspector.count('fields').className.indexOf('mb2-count') === 0,
+            'the control is disabled at the cap (and a full embed is not an ERROR: no over-state)',
+            String(railButton(railRow(env, embedId), 'addField').disabled));
+        env.el('mb2-rail-body').dispatch('click', { type: 'click', target: railButton(railRow(env, embedId), 'addField') });
+        assert(env.store().getDocument().embeds[0].fields.length === 1,
+            'and clicking the disabled control adds nothing',
+            String(env.store().getDocument().embeds[0].fields.length));
+        assert(env.net.calls === 0, 'none of this touched the network');
+        env.unmount();
+    }
+    {
+        // ── S5: an unusable table fails closed on every 6b surface ──
+        const env = makeEnv({ limits: 'not json at all' });
+        installIdb(env);
+        await env.mount();
+        const embedId = env.store().getDocument().embeds[0].id;
+        assert(env.inst.inspector.count('content').textContent === '',
+            'no limits table, no counter text (never a guessed number)',
+            JSON.stringify(env.inst.inspector.count('content').textContent));
+        assert(railButton(railRow(env, 'content'), 'addEmbed').disabled === true &&
+               railButton(railRow(env, embedId), 'addField').disabled === true,
+            'and every add control is disabled (fail closed, never unlimited)');
+        assert(railRow(env, 'content').textContent.indexOf(' / ') === -1,
+            'with no embeds fact invented', railRow(env, 'content').textContent);
+        const badge = badgeOf(env, 'content');
+        assert(!!badge && badge.getAttribute('data-badge-tone') === 'error',
+            'the one explicit limits issue is badged on the message root',
+            badge ? badge.textContent : '(no badge)');
+        assert(env.el('mb2-strip').hidden === false &&
+               /limits did not reach this page/.test(env.el('mb2-strip').textContent),
+            'and the strip explains it (6a) — the badge is the same issue, not a second one',
+            env.el('mb2-strip').textContent);
+        assert(env.consoleLines.error.length === 0, 'nothing was thrown or logged as an error',
+            env.consoleLines.error.join(' | '));
+        env.unmount();
+    }
+    {
+        // ── S6: teardown with facts and a badge on screen ──
+        const env = makeEnv();
+        installIdb(env, seedSpec(env, [makeRecord(env, filledDocument(), { documentId: 'doc-filled' })]));
+        await env.mount();
+        const content = env.inst.inspector.control('content');
+        content.value = rep('x', env.limits.message.content_max + 1);
+        env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+        assert(await env.until(() => badgeOf(env, 'content') !== null),
+            'rig: a badge is showing before teardown');
+        const stripWrites = watchText(env.el('mb2-strip'));
+        const runs = env.inst.ctx.counters.validateRuns;
+        env.unmount();
+        assert(env.el('mb2-rail-body').children.length === 0, 'the rail (and its badges) is off the tree');
+        assert(env.el('mb2-inspector-body').children.length === 0, 'the inspector (and its counters) too');
+        // The fragment (strip included) leaves with the page in a real navigation;
+        // what this proves is that nothing writes to it after teardown, and that
+        // no late validation pass repaints a region that is already gone.
+        await env.settle(300);   // more than one validation interval, on purpose
+        assert(stripWrites() === 0, 'the strip is not written after teardown',
+            String(stripWrites()));
+        assert(env.inst.ctx.counters.validateRuns === runs,
+            'and no validation pass runs after it', String(env.inst.ctx.counters.validateRuns));
+        assert(env.consoleLines.error.length === 0, 'teardown logged no error',
+            env.consoleLines.error.join(' | '));
     }
 
     console.log('\nmessage-builder page: ' + pass + ' passed, ' + fail + ' failed');

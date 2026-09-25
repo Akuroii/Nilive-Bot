@@ -142,7 +142,8 @@ const run = (document_, limits) => V.validate(document_, limits === undefined ? 
 section('A. the module, its contract, and what it must NOT reach for');
 // ═══════════════════════════════════════════════════════════════
 {
-    ['validate', 'ensureLimits', 'limitsIssue', 'signature', 'isHttpUrl', 'isIsoTimestamp']
+    ['validate', 'ensureLimits', 'limitsIssue', 'signature', 'isHttpUrl', 'isIsoTimestamp',
+     'counts', 'caps']
         .forEach(name => assert(typeof V[name] === 'function', 'the engine publishes ' + name + '()'));
     assert(V.ERROR === 'error' && V.WARNING === 'warning',
         'severity vocabulary is error/warning', V.ERROR + '/' + V.WARNING);
@@ -707,6 +708,242 @@ section('I. cost on the largest document phase 1 allows (10 × 25)');
         average.toFixed(3) + ' ms');
     assert(p95 < 2, 'and 95% of passes cost under 2 ms (far inside the 16 ms keystroke budget)',
         p95.toFixed(3) + ' ms');
+}
+
+// ═══════════════════════════════════════════════════════════════
+section('J. the 6b readouts: counts() and caps()');
+// ═══════════════════════════════════════════════════════════════
+{
+    // These two are what the inspector's counters and the rail's add caps are
+    // painted from. They must be PROJECTIONS of the same measurement the rules
+    // run on (so a counter and its rule can never disagree), they must not
+    // invent a limit, and they must fail CLOSED on an unusable table.
+
+    // ── the shapes ──
+    const document_ = doc({
+        content: 'Hello',
+        embeds: [embed({
+            id: 'emb-a', title: 'Title', description: 'Desc',
+            author: { name: 'Author', url: '', icon: null },
+            footer: { text: 'Footer', icon: null },
+            fields: [field({ id: 'fld-a', name: 'Name', value: 'Value' })],
+        })],
+    });
+    const c = V.counts(document_, LIMITS);
+    assert(c.ok === true, 'counts() reports the table was usable');
+    assert(eq(Object.keys(c.nodes), ['content', 'emb-a', 'fld-a']),
+        'and addresses the document by exactly its node ids', Object.keys(c.nodes).join(','));
+    assert(eq(c.nodes['content'].map(e => e.key), ['content']),
+        'the message root carries its one counter');
+    assert(eq(c.nodes['emb-a'].map(e => e.key),
+        ['title', 'description', 'author.name', 'footer.text', 'total', 'fields']),
+        'an embed carries its controls, the embed total and the fields count, in a fixed order',
+        c.nodes['emb-a'].map(e => e.key).join(','));
+    assert(eq(c.nodes['fld-a'].map(e => e.key), ['field.name', 'field.value']),
+        'a field carries its two counters');
+    assert(c.nodes['content'][0].used === 5 && c.nodes['content'][0].max === LIMITS.message.content_max,
+        'a counter is {used, max} against the SERVED number, never a copy',
+        JSON.stringify(c.nodes['content'][0]));
+    assert(c.nodes['emb-a'].find(e => e.key === 'title').used === 5 &&
+           c.nodes['emb-a'].find(e => e.key === 'title').max === LIMITS.embed.title_max,
+        'and the same for an embed control');
+    assert(c.nodes['emb-a'].find(e => e.key === 'fields').used === 1 &&
+           c.nodes['emb-a'].find(e => e.key === 'fields').max === LIMITS.embed.fields_max,
+        'the fields counter is used/max too');
+    assert(c.message && c.message.embeds && c.message.embeds.used === 1 &&
+           c.message.embeds.max === LIMITS.message.embeds_max,
+        'and the message-level embeds fact is reported once, not per embed',
+        JSON.stringify(c.message));
+
+    // ── the embed total is the SAME arithmetic as the embed.total-chars rule ──
+    const parts = embed({
+        id: 'emb-b', title: rep('t', 256), description: rep('d', 4096),
+        author: { name: rep('a', 256), url: '', icon: null },
+        footer: { text: rep('f', 2048), icon: null },
+    });
+    const sum = 256 + 4096 + 256 + 2048;
+    const total = V.counts(doc({ embeds: [parts] }), LIMITS).nodes['emb-b'].find(e => e.key === 'total');
+    assert(total.used === sum, 'the embed total sums title+description+author+footer (+fields)',
+        total.used + ' vs ' + sum);
+    // Every part of that embed is individually legal, and together they are past
+    // Discord's per-embed budget — which is exactly why the total is measured
+    // rather than left to the parts.
+    assert(total.over === true && sum > LIMITS.message.embed_total_chars_max,
+        'four individually-legal parts add up past the embed budget, and the total says so',
+        total.used + ' vs max ' + total.max);
+    assert(byCode(run(doc({ embeds: [parts] })), 'embed.total-chars').length === 1,
+        'and the RULE reports it at the same moment (one decision, two surfaces)');
+    const smallEmbed = embed({
+        id: 'emb-d', title: rep('t', 10), description: rep('d', 20),
+        author: { name: rep('a', 5), url: '', icon: null },
+        footer: { text: rep('f', 15), icon: null },
+        fields: [field({ id: 'fld-d', name: 'N', value: rep('v', 50) })],
+    });
+    const smallTotal = V.counts(doc({ embeds: [smallEmbed] }), LIMITS).nodes['emb-d'].find(e => e.key === 'total');
+    assert(smallTotal.used === 10 + 20 + 5 + 15 + 1 + 50 && smallTotal.over === false,
+        'a small embed counts its fields in the total too, and stays clean', JSON.stringify(smallTotal));
+    assert(V.caps(doc({ embeds: [smallEmbed] }), LIMITS).fields['emb-d'].used === 1,
+        'rig: that embed has exactly one field');
+
+    // ── `over` is the rule's own comparison, at the exact limit ──
+    const at = doc({ content: rep('x', LIMITS.message.content_max) });
+    const above = doc({ content: rep('x', LIMITS.message.content_max + 1) });
+    assert(V.counts(at, LIMITS).nodes['content'][0].over === false,
+        'exactly at the limit is NOT over (the limit is inclusive)');
+    assert(V.counts(above, LIMITS).nodes['content'][0].over === true, 'one past it is');
+    assert(run(at).length === 0 && byCode(run(above), 'content.too-long').length === 1,
+        'and the rule agrees at both sides — the counter cannot disagree with it');
+
+    // For every counter key there is a rule with the same boundary. Assert the
+    // equivalence directly rather than trusting the shared helper by inspection.
+    [['title', 'embed.title.too-long'], ['description', 'embed.description.too-long'],
+     ['author.name', 'embed.author.name.too-long'], ['footer.text', 'embed.footer.text.too-long']]
+        .forEach(([key, code]) => {
+            const atLimit = embed({ id: 'emb-l' });
+            const overLimit = embed({ id: 'emb-l' });
+            const path = { 'title': 'title', 'description': 'description',
+                'author.name': 'author.name', 'footer.text': 'footer.text' }[key];
+            const max = { 'title': LIMITS.embed.title_max, 'description': LIMITS.embed.description_max,
+                'author.name': LIMITS.embed.author_name_max, 'footer.text': LIMITS.embed.footer_text_max }[key];
+            const set = (e, text) => {
+                if (key === 'author.name') e.author = { name: text, url: '', icon: null };
+                else if (key === 'footer.text') e.footer = { text: text, icon: null };
+                else e[key] = text;
+                return e;
+            };
+            const factsAt = V.counts(doc({ embeds: [set(atLimit, rep('x', max))] }), LIMITS).nodes['emb-l']
+                .find(e => e.key === key);
+            const factsOver = V.counts(doc({ embeds: [set(overLimit, rep('x', max + 1))] }), LIMITS).nodes['emb-l']
+                .find(e => e.key === key);
+            assert(factsAt.over === false && byCode(run(doc({ embeds: [set(embed({ id: 'emb-l' }), rep('x', max))] })), code).length === 0,
+                key + ': at the served limit the counter is clean AND the rule is silent');
+            assert(factsOver.over === true && byCode(run(doc({ embeds: [set(embed({ id: 'emb-l' }), rep('x', max + 1))] })), code).length === 1,
+                key + ': one character past the limit both flip');
+        });
+
+    // ── caps: refused exactly AT the cap, allowed one below ──
+    const fieldsAt = (n) => doc({ embeds: [embed({ id: 'emb-f', fields: Array.from({ length: n }, (_, i) => field({ id: 'fld-' + i })) })] });
+    assert(V.caps(fieldsAt(LIMITS.embed.fields_max - 1), LIMITS).fields['emb-f'].canAdd === true,
+        'one field below the served cap, the embed may still grow');
+    const full = V.caps(fieldsAt(LIMITS.embed.fields_max), LIMITS).fields['emb-f'];
+    assert(full.canAdd === false && full.used === LIMITS.embed.fields_max && full.max === LIMITS.embed.fields_max,
+        'exactly AT the cap the answer is no (adding is refused where the rule is still silent)',
+        JSON.stringify(full));
+    assert(byCode(run(fieldsAt(LIMITS.embed.fields_max)), 'embed.fields.too-many').length === 0,
+        'and the rule is still silent there — a full embed is not an error');
+    assert(byCode(run(fieldsAt(LIMITS.embed.fields_max + 1)), 'embed.fields.too-many').length === 1,
+        'one FIELD past the cap the rule fires (the two boundaries are one apart, by design)');
+
+    const embedsAt = (n) => doc({ embeds: Array.from({ length: n }, (_, i) => embed({ id: 'emb-' + i })) });
+    assert(V.caps(embedsAt(LIMITS.message.embeds_max - 1), LIMITS).embeds.canAdd === true,
+        'one embed below the message cap, the message may still grow');
+    const fullMsg = V.caps(embedsAt(LIMITS.message.embeds_max), LIMITS).embeds;
+    assert(fullMsg.canAdd === false && fullMsg.used === LIMITS.message.embeds_max,
+        'at the message cap the answer is no', JSON.stringify(fullMsg));
+    assert(byCode(run(embedsAt(LIMITS.message.embeds_max)), 'embeds.too-many').length === 0 &&
+           byCode(run(embedsAt(LIMITS.message.embeds_max + 1)), 'embeds.too-many').length === 1,
+        'and the message rule starts exactly one above it');
+    assert(Object.keys(V.caps(doc(), LIMITS).fields).length === 1,
+        'every embed in the document has a field cap entry');
+    assert(V.caps(doc(), LIMITS).fields['no-such-embed'] === undefined,
+        'and an unknown embed id gets no answer at all (never a default of "yes")');
+
+    // ── a custom table changes the facts (nothing is baked in) ──
+    const small = servedLimits();
+    small.message.content_max = 7;
+    small.embed.title_max = 3;
+    small.embed.fields_max = 1;
+    small.message.embeds_max = 2;
+    const custom = V.counts(doc({ content: '12345678', embeds: [embed({ id: 'emb-s', title: 'abcd' })] }), small);
+    assert(custom.nodes['content'][0].max === 7 && custom.nodes['content'][0].over === true,
+        'a served content_max of 7 is what the counter measures against',
+        JSON.stringify(custom.nodes['content'][0]));
+    assert(custom.nodes['emb-s'].find(e => e.key === 'title').over === true,
+        'and a title_max of 3 flags a 4-character title');
+    // The field counters measure against the FIELD limits, not the embed's: a
+    // 3-character name is over a field_name_max of 2 while the same text as a
+    // title is legal, so a swapped key cannot hide behind equal default numbers.
+    small.embed.field_name_max = 2;
+    small.embed.field_value_max = 3;
+    const fieldDoc = doc({ embeds: [embed({ id: 'emb-s',
+        fields: [field({ id: 'fld-s', name: 'abc', value: 'wxyz' })] })] });
+    const fieldCounts = V.counts(fieldDoc, small).nodes['fld-s'];
+    const nameCounter = fieldCounts.find(e => e.key === 'field.name');
+    const valueCounter = fieldCounts.find(e => e.key === 'field.value');
+    assert(nameCounter.max === 2 && valueCounter.max === 3,
+        'the field counters use field_name_max / field_value_max (not the title/description numbers)',
+        JSON.stringify(fieldCounts));
+    assert(nameCounter.over === true && valueCounter.over === true &&
+           byCode(run(fieldDoc, small), 'embed.field.name.too-long').length === 1 &&
+           byCode(run(fieldDoc, small), 'embed.field.value.too-long').length === 1,
+        'and both counters flip exactly where their own rules fire (one decision, two surfaces)');
+    const oneField = V.caps(doc({ embeds: [embed({ id: 'emb-s', fields: [field({ id: 'fld-s' })] })] }), small);
+    const noField = V.caps(doc({ embeds: [embed({ id: 'emb-s' })] }), small);
+    assert(oneField.fields['emb-s'].canAdd === false && oneField.fields['emb-s'].max === 1,
+        'a fields_max of 1 closes the add cap for an embed that already has its one field',
+        JSON.stringify(oneField.fields));
+    assert(noField.fields['emb-s'].canAdd === true,
+        'while the same embed with no field yet may still take it', JSON.stringify(noField.fields));
+    assert(V.caps(embedsAt(2), small).embeds.canAdd === false &&
+           V.caps(embedsAt(2), small).embeds.max === 2,
+        'and an embeds_max of 2 closes the message cap at two embeds',
+        JSON.stringify(V.caps(embedsAt(2), small).embeds));
+
+    // ── fail closed: no usable table, no numbers ──
+    [undefined, null, 'nope', 42, {}, { message: {} },
+     Object.assign(servedLimits(), { embed: {} })].forEach((bad, i) => {
+        const c2 = V.counts(doc({ content: 'hello' }), bad);
+        const k2 = V.caps(doc({ embeds: [embed({})] }), bad);
+        assert(c2.ok === false && Object.keys(c2.nodes).length === 0 && c2.message === null,
+            'counts() refuses table #' + i + ' outright (no numbers at all)');
+        assert(k2.ok === false && k2.embeds.canAdd === false &&
+               k2.embeds.used === 0 && Object.keys(k2.fields).length === 0,
+            'and caps() answers "cannot add" for table #' + i + ' (fail closed, never unlimited)');
+    });
+
+    // ── purity: two calls, two independent results, no state kept ──
+    const first = V.counts(document_, LIMITS);
+    first.nodes['emb-a'].push({ key: 'mutant', used: 1, max: 1 });
+    first.nodes['content'][0].used = 9999;
+    const second = V.counts(document_, LIMITS);
+    assert(second.nodes['emb-a'].length === 6 && second.nodes['content'][0].used === 5,
+        'mutating a returned readout cannot reach the next call (no shared state)');
+    assert(eq(second, V.counts(document_, LIMITS)), 'and two calls with the same input are identical');
+    assert(eq(V.counts(doc(), LIMITS), V.counts(doc(), LIMITS)),
+        'including for a document with nothing in it', JSON.stringify(V.counts(doc(), LIMITS)));
+    assert(eq(V.caps(document_, LIMITS), V.caps(document_, LIMITS)), 'caps() is deterministic too');
+    assert(run(document_).length === run(document_).length,
+        'and measuring does not change what the rules say afterwards');
+
+    // ── ids: the readouts address the SAME nodes the issues do ──
+    const bad = doc({
+        content: rep('x', LIMITS.message.content_max + 1),
+        embeds: [embed({ id: 'emb-z', title: rep('t', LIMITS.embed.title_max + 1),
+                         fields: [field({ id: 'fld-z', name: rep('n', LIMITS.embed.field_name_max + 1), value: 'ok' })] })],
+    });
+    const issueNodes = run(bad).map(i => i.nodeId);
+    const countNodes = Object.keys(V.counts(bad, LIMITS).nodes);
+    issueNodes.forEach(id => assert(countNodes.indexOf(id) !== -1,
+        'every node an issue points at (' + id + ') has a readout under the same id'));
+    assert(countNodes.indexOf('content') !== -1 && countNodes.indexOf('emb-z') !== -1 &&
+           countNodes.indexOf('fld-z') !== -1, 'and the message, embed and field are all addressed',
+        countNodes.join(','));
+
+    // ── cost: the readouts are the same order as one validation pass ──
+    const big = doc({
+        content: rep('c', 500),
+        embeds: Array.from({ length: 10 }, (_, e) => embed({
+            id: 'emb-' + e, title: rep('t', 100),
+            fields: Array.from({ length: 25 }, (_, f) => field({ id: 'f' + e + '-' + f, value: rep('v', 200) })),
+        })),
+    });
+    for (let i = 0; i < 3; i++) { V.counts(big, LIMITS); V.caps(big, LIMITS); }
+    const started = process.hrtime.bigint();
+    for (let i = 0; i < 50; i++) { V.counts(big, LIMITS); V.caps(big, LIMITS); }
+    const perCall = Number(process.hrtime.bigint() - started) / 1e6 / 50;
+    console.log('    counts() + caps() on the maximum document: ' + perCall.toFixed(3) + ' ms per pair');
+    assert(perCall < 2, 'measuring the maximum document stays far inside the keystroke budget',
+        perCall.toFixed(3) + ' ms');
 }
 
 // ═══════════════════════════════════════════════════════════════

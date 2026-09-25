@@ -28,7 +28,11 @@
 //      checkbox, button) wrap createElement — that is all the abstraction there
 //      is, and it is DOM plumbing, not a framework.
 //
-//   3. NO VALIDATION. No limits, no counters, no error paths, no aria-invalid,
+//   3. NO VALIDATION RULES. It never decides whether a value is legal: the rules
+//      live in embed/validate.js and their results in store.ui.issues (the page
+//      paints the strip). What 6b adds here is a READOUT — each control shows
+//      its own `used / max` from the same measurement the validator runs — plus
+//      the field cap on the add button. No error paths, no aria-invalid,
 //      no maxlength. Step 6 owns all of it. Native input behaviour only.
 //
 //   4. NO PERSISTENCE, NO PREVIEW. The inspector never touches drafts.js and
@@ -57,7 +61,9 @@
 //   Every text control carries meta.coalesceKey, so a typing burst stays ONE
 //   undo step (the store's rule, not a second history of ours).
 //
-// NOT IN THIS FILE (deliberately): validation/counters/limits, persistence,
+// NOT IN THIS FILE (deliberately): the validation RULES and the limits TABLE
+// (it receives the served table and asks validate.counts()/caps() for numbers;
+// it stores neither), persistence,
 // assets/uploads, components/actions/roles, templates, publishing, preview
 // rendering, and any structural action the rail already owns (add/duplicate/
 // move/remove an EMBED is structure; adding and removing a FIELD is content, so
@@ -86,6 +92,10 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         const mount = options.mount;
         const model = options.model || (NERO.embed.model || null);
         const now = typeof options.now === 'function' ? options.now : function () { return Date.now(); };
+        // The served limits table, passed BY REFERENCE from the page: the same
+        // object the validator is given. The inspector keeps no copy of it, and
+        // it never parses data-limits itself (the page is the only parser).
+        const limits = options.limits || null;
 
         if (!doc || typeof doc.createElement !== 'function') {
             throw new TypeError('inspector.create needs options.document');
@@ -108,6 +118,8 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             valueWrites: 0,
             textWrites: 0,
             attrWrites: 0,
+            classWrites: 0,
+            disabledWrites: 0,
             dispatches: 0,
             rowsCreated: 0,
         };
@@ -169,6 +181,59 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 node.checked = next;
                 stats.valueWrites++;
             }
+        }
+
+        function setClass(node, name, on) {
+            const has = node.classList ? node.classList.contains(name) : false;
+            if (on && !has) { node.classList.add(name); stats.classWrites++; }
+            else if (!on && has) { node.classList.remove(name); stats.classWrites++; }
+        }
+
+        /** A disabled control is a real `disabled` property, written only when it changes. */
+        function setDisabled(node, on) {
+            const next = !!on;
+            if (!node || node.disabled === next) return;
+            node.disabled = next;
+            stats.disabledWrites++;
+        }
+
+        // ── 6b: the numbers beside the controls ──────────────────────
+        // Both readers are projections of the validator's ONE measurement pass
+        // (embed/validate.js), fed with the served limits: the inspector does not
+        // own a limit, does not compare anything itself, and keeps no cache — a
+        // counter cannot drift from the rule it belongs to, because it is the
+        // same comparison on the same helpers. Unusable limits ⇒ no numbers
+        // (counters blank, add button disabled): fail closed, never "unlimited".
+        function countFacts(document_) {
+            const validate = NERO.embed.validate;
+            if (!validate || typeof validate.counts !== 'function') return { ok: false, nodes: {} };
+            const facts = validate.counts(document_, limits);
+            return facts && facts.ok ? facts : { ok: false, nodes: {} };
+        }
+
+        function capFacts(document_) {
+            const validate = NERO.embed.validate;
+            const closed = { embeds: { used: 0, max: 0, canAdd: false }, fields: {} };
+            if (!validate || typeof validate.caps !== 'function') return closed;
+            const caps = validate.caps(document_, limits);
+            return caps && caps.ok ? caps : closed;
+        }
+
+        /**
+         * A counter element under one control, registered in the panel that owns
+         * it. It is DECORATION: aria-hidden, not focusable, no live region — a
+         * counter that announced every keystroke would talk over the user, and
+         * the strip is where a problem is announced. `key` is the measurement's
+         * own vocabulary (`content`, `title`, `author.name`, `total`, …), so
+         * nothing is translated between measuring and painting.
+         */
+        function attachCount(bucket, wrap, key, extra) {
+            const span = el('span', extra ? 'mb2-count ' + extra : 'mb2-count');
+            span.setAttribute('aria-hidden', 'true');
+            span.setAttribute('data-count', key);
+            wrap.appendChild(span);
+            bucket[key] = span;
+            return span;
         }
 
         // ── four explicit control builders ───────────────────────────
@@ -275,9 +340,11 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             const node = el('div', 'mb2-insp-panel');
             const content = textAreaField(node, 'mb2-insp-content', 'Message content', 'content', 8);
             content.setAttribute('placeholder', 'What the message says. Discord markdown is supported.');
+            const counters = {};
+            attachCount(counters, content.parentNode, 'content');
             node.appendChild(el('p', 'mb2-insp-hint',
                 'Discord markdown is supported. Mention channels or users with <#id> and <@id>.'));
-            return { node: node, controls: { content: content } };
+            return { node: node, controls: { content: content }, counters: counters };
         }
 
         function buildEmbedPanel() {
@@ -318,9 +385,34 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             const fields = group(node, 'Fields');
             const list = el('ul', 'mb2-insp-fields');
             fields.appendChild(list);
-            actionButton(fields, 'addField', '+ Add field', 'Add a field to this embed', 'mb2-insp-btn');
+            // 6b: the add button is disabled exactly at fields_max, and the
+            // fields fact ("2 / 25") sits next to it, so a full embed is visible
+            // as full rather than as a button that mysteriously does nothing.
+            const addField = actionButton(fields, 'addField', '+ Add field',
+                'Add a field to this embed', 'mb2-insp-btn');
 
-            return { node: node, controls: controls, fieldList: list };
+            // The counters, one per control that actually has a served limit.
+            // url/timestamp/color/icons have no limit in the served table, so
+            // they get none: a counter needs a real maximum or it is a lie.
+            const counters = {};
+            attachCount(counters, controls.title.parentNode, 'title');
+            attachCount(counters, controls.description.parentNode, 'description');
+            attachCount(counters, controls['author.name'].parentNode, 'author.name');
+            attachCount(counters, controls['footer.text'].parentNode, 'footer.text');
+            const total = el('span', 'mb2-count mb2-count-total');
+            total.setAttribute('aria-hidden', 'true');
+            total.setAttribute('data-count', 'total');
+            fields.appendChild(total);
+            counters.total = total;
+            // The fields counter sits BESIDE the add-field button rather than
+            // under it (the button is the thing it explains), so it carries the
+            // one extra class the stylesheet hooks: .mb2-count-fields.
+            attachCount(counters, fields, 'fields', 'mb2-count-fields');
+
+            return {
+                node: node, controls: controls, fieldList: list,
+                addField: addField, counters: counters,
+            };
         }
 
         function buildFieldRow() {
@@ -383,10 +475,13 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             const controls = { context: context };
             controls['field.name'] = textField(node, 'mb2-insp-field-name', 'Name', 'field.name');
             controls['field.value'] = textAreaField(node, 'mb2-insp-field-value', 'Value', 'field.value', 3);
+            const counters = {};
+            attachCount(counters, controls['field.name'].parentNode, 'field.name');
+            attachCount(counters, controls['field.value'].parentNode, 'field.value');
             controls['field.inline'] = checkField(node, 'mb2-insp-field-inline', 'Show on the same line as the next field', 'field.inline');
             node.appendChild(el('p', 'mb2-insp-hint',
                 'Move or remove this field from the structure panel on the left.'));
-            return { node: node, controls: controls };
+            return { node: node, controls: controls, counters: counters };
         }
 
         function buildEmptyPanel() {
@@ -613,10 +708,13 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                     if (!sel || !sel.embed) return false;
                     dispatch({ type: 'ui/selectNode', nodeId: sel.embed.id });
                     return true;
-                case 'addField':
+                case 'addField': {
                     if (!sel || !sel.embed) return false;
+                    const cap = capFacts(store.getState().document).fields[sel.embed.id];
+                    if (!cap || !cap.canAdd) return false;   // 6b: at the cap the button is off
                     dispatch({ type: 'field/add', embedId: sel.embed.id });
                     return true;
+                }
                 case 'removeField':
                     if (!sel || !sel.embed || !fieldId) return false;
                     dispatch({ type: 'field/remove', embedId: sel.embed.id, fieldId: fieldId });
@@ -642,6 +740,27 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             runAction(action, target);
         }
 
+        /**
+         * Paint the visible panel's counters (6b). The facts are keyed by NODE, so
+         * the panel only has to know which node it is showing — it does not walk
+         * the document, and a hidden panel's counters are left exactly as they
+         * were (nothing writes to a panel nobody can see). Both the text and the
+         * over-state are change-guarded, so a keystroke that changes no counter
+         * costs no DOM write.
+         */
+        function paintCounts(sel, panel) {
+            const counters = panel && panel.counters;
+            if (!counters) return;
+            const list = sel && sel.id ? countFacts(store.getState().document).nodes[sel.id] : null;
+            const byKey = new Map();
+            (list || []).forEach(function (entry) { byKey.set(entry.key, entry); });
+            Object.keys(counters).forEach(function (key) {
+                const entry = byKey.get(key) || null;
+                setText(counters[key], entry ? entry.used + ' / ' + entry.max : '');
+                setClass(counters[key], 'mb2-count-over', !!(entry && entry.over));
+            });
+        }
+
         // ── Render ──────────────────────────────────────────────────
         function render() {
             if (destroyed) return;
@@ -654,6 +773,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
 
             if (key === 'content') {
                 setValue(panel.controls.content, store.getState().document.content || '');
+                paintCounts(sel, panel);
                 return;
             }
 
@@ -672,6 +792,9 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 setValue(panel.controls['media.image'], model.mediaUrl(embed.image));
                 setValue(panel.controls['media.thumbnail'], model.mediaUrl(embed.thumbnail));
                 syncFieldList(panel.fieldList, embed);
+                const cap = capFacts(store.getState().document).fields[embed.id];
+                setDisabled(panel.addField, !(cap && cap.canAdd));
+                paintCounts(sel, panel);
                 return;
             }
 
@@ -683,6 +806,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 setValue(panel.controls['field.name'], sel.field.name || '');
                 setValue(panel.controls['field.value'], sel.field.value || '');
                 setChecked(panel.controls['field.inline'], sel.field.inline);
+                paintCounts(sel, panel);
                 return;
             }
 
@@ -733,6 +857,11 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             view: function () { return visibleKey; },
             panel: function () { const p = panels[visibleKey]; return p ? p.node : null; },
             control: control,
+            /** The counter element for a key of the VISIBLE panel (6b), or null. */
+            count: function (key) {
+                const panel = panels[visibleKey];
+                return panel && panel.counters ? (panel.counters[key] || null) : null;
+            },
             stats: function () { return Object.assign({}, stats); },
         };
     }

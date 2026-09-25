@@ -53,6 +53,10 @@
 //     * Issues are read back from `store.ui.issues` — the store is the only
 //       place they live. The page keeps no list of its own, only the change
 //       signature that decides whether the store needs telling again.
+//     * Step 6b adds no state here at all: the views are handed this same
+//       `limits` object and read their counters/caps/badges from the validator's
+//       measurement and the store's issue list. The page still owns the limits
+//       PARSE (readLimits) and the strip; it does not paint a counter or a badge.
 //
 // BOOT ORDER (each step matters, and the harness asserts each one)
 //     paint shell → create statusbar → create store → create rail →
@@ -282,10 +286,15 @@ window.NERO.embed = window.NERO.embed || {};
         // dispatches actions. It is created before the draft loads so the page
         // shows the still-empty document immediately and repaints itself when
         // the stored one arrives (the rail subscribes to the store).
+        // 6b: the views are handed the SAME limits table the validator is given
+        // (the object read once from data-limits at mount). By reference, never
+        // copied: the rail paints its add caps and the inspector its counters from
+        // the one authority, so there is no second table to keep in step.
         inst.rail = f.rail.create({
             document: doc,
             store: inst.store,
             mount: els.railBody,
+            limits: inst.limits,
         });
         // The inspector is the editing view over the same store: it renders the
         // selected node's properties and each input is a store action. Like the
@@ -296,6 +305,7 @@ window.NERO.embed = window.NERO.embed || {};
             model: f.model,
             store: inst.store,
             mount: els.inspectorBody,
+            limits: inst.limits,
             // One clock for the whole page life — the same one the preview
             // header uses, so "Now" cannot disagree with the rendered time.
             now: function () { return inst.startedAt; },

@@ -74,7 +74,11 @@ function makeSandbox() {
     };
     sandbox.window.document = dom.document;
     vm.createContext(sandbox);
-    [js('embed', 'model.js'), js('embed', 'store.js'), RAIL_PATH, INSPECTOR_PATH].forEach(file => {
+    // validate.js since 6b: the inspector's counters and the field cap are ITS
+    // measurement, so the harness must load the real thing (and a mutant that
+    // breaks it has to show up here).
+    [js('embed', 'model.js'), js('embed', 'store.js'), js('embed', 'validate.js'),
+     RAIL_PATH, INSPECTOR_PATH].forEach(file => {
         vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: path.basename(file) });
     });
     return { dom, sandbox, NERO: sandbox.window.NERO };
@@ -87,6 +91,27 @@ function deepFreeze(value, seen) {
     Object.freeze(value);
     Object.getOwnPropertyNames(value).forEach(key => deepFreeze(value[key], seen));
     return value;
+}
+
+/**
+ * The limits table the server renders into the page, mirroring
+ * utils/discord_limits.limits_payload() (the page harness carries the same
+ * fixture; scripts/test_embed_schema.py pins the KEYS to the real payload).
+ */
+function servedLimits() {
+    return {
+        message: { content_max: 2000, embeds_max: 10, embed_total_chars_max: 6000, request_bytes_max: 26214400 },
+        attachments: { count_max: 10, total_bytes_max: 26148864, file_bytes_advisory: 20971520, file_advisory_is_hard: false },
+        embed: {
+            title_max: 256, description_max: 4096, fields_max: 25, field_name_max: 256,
+            field_value_max: 1024, footer_text_max: 2048, author_name_max: 256,
+        },
+        components: {
+            rows_max: 5, buttons_per_row_max: 5, button_label_max: 80, button_url_max: 512,
+            custom_id_max: 100, select_options_max: 25, select_option_label_max: 100,
+            select_option_description_max: 100, select_placeholder_max: 150,
+        },
+    };
 }
 
 const CLOCK = 1790284740000;               // 2026-09-24T12:39:00.000Z
@@ -146,21 +171,27 @@ function makeRig(options) {
     const mount = dom.document.createElement('div');
     mount.setAttribute('id', 'mb2-inspector-body');
 
+    // 6b: the page hands the inspector the served limits by reference; a test
+    // that wants the fail-closed branch passes `limits: null`.
+    const limits = Object.prototype.hasOwnProperty.call(options, 'limits') ? options.limits : servedLimits();
     const inspector = NERO.embed.views.inspector.create({
         document: dom.document,
         model: model,
         store: store,
         mount: mount,
+        limits: limits,
         now: () => CLOCK,
     });
 
     return {
-        dom, NERO, model, store, inspector, mount, dispatched,
+        dom, NERO, model, store, inspector, mount, dispatched, limits,
         doc: () => store.getDocument(),
         // deltas: never assert absolutes that drift
         created: () => inspector.stats().nodesCreated,
         writes: () => inspector.stats().valueWrites,
         renders: () => inspector.stats().renders,
+        textWrites: () => inspector.stats().textWrites,
+        disabledWrites: () => inspector.stats().disabledWrites,
         keys: () => dispatched.map(a => a.type),
         last: () => dispatched[dispatched.length - 1],
         input: (key) => inspector.control(key),
@@ -528,10 +559,27 @@ function runAll() {
         assert(!/draft|session|markSaved|savedDocumentHash|pendingSave|idb|IndexedDB/i.test(CODE),
             'and never touches persistence',
             (CODE.match(/.{0,30}(draft|session|markSaved).{0,30}/i) || [''])[0]);
-        ['aria-invalid', 'maxlength', 'minlength', 'pattern=', 'validate', 'validation',
-         'issues', 'mb2-strip', 'Nerrored', 'counter'].forEach(word => {
-            assert(CODE.indexOf(word) === -1, 'no validation vocabulary: ' + word);
+        // 6b: this file now SHOWS numbers, so the blanket bans on
+        // 'validate'/'counter' are replaced by the boundary that actually
+        // matters — it never decides legality, never owns the issue list, never
+        // parses the limits table and never paints a live region.
+        ['aria-invalid', 'maxlength', 'minlength', 'pattern=', 'Nerrored'].forEach(word => {
+            assert(CODE.indexOf(word) === -1, 'no inline error vocabulary: ' + word);
         });
+        // The rules and their wording stay in embed/validate.js: this file must
+        // not know an issue code or a sentence, only how to ask for numbers.
+        ['too-long', 'too-many', 'url-invalid', 'attachment-missing', 'limits.missing',
+         'setIssues', 'ui.issues', "Discord's limit is"].forEach(word => {
+            assert(CODE.indexOf(word) === -1, 'no rule or issue vocabulary: ' + word);
+        });
+        assert(!/validate\.validate\s*\(/.test(CODE),
+            'it never RUNS the rules — it only asks for counts and caps');
+        assert((CODE.match(/validate\.counts\s*\(/g) || []).length >= 1 &&
+               (CODE.match(/validate\.caps\s*\(/g) || []).length >= 1,
+            'and it gets its numbers from that one measurement');
+        assert(!/JSON\.parse|data-limits/.test(CODE),
+            'it never parses the limits table itself (the page is the only parser)');
+        assert(!/mb2-strip|aria-live/.test(CODE), 'and never paints a live region of its own');
         assert(!/\bcover\b|256|1024|4096|6000/.test(CODE.replace(/[a-f0-9]{6,}/gi, '')),
             'and no field limits are baked in');
         assert(!/model\.set[A-Z]/.test(CODE),
@@ -591,6 +639,162 @@ function runAll() {
             String(fieldsets.length));
         assert(fieldsets.every(f => walk(f).some(n => n.tagName === 'LEGEND')),
             'every fieldset has a legend');
+    }
+
+
+    // ═══════════════════════════════════════════════════════════════
+    section('K. the 6b readouts: counters and the field cap');
+    // ═══════════════════════════════════════════════════════════════
+    {
+        const rep = (ch, n) => String(ch).repeat(n);
+
+        // ── the counters exist, and they measure against the SERVED table ──
+        const rig = makeRig();
+        const embedId = rig.doc().embeds[0].id;
+        const fieldId = rig.doc().embeds[0].fields[0].id;
+        assert(!!rig.inspector.count('content'), 'the content panel has a counter');
+        rig.select(embedId);
+        ['title', 'description', 'author.name', 'footer.text', 'total', 'fields'].forEach(key => {
+            assert(!!rig.inspector.count(key), 'the embed panel has a ' + key + ' counter');
+        });
+        assert(rig.inspector.count('url') === null && rig.inspector.count('color') === null,
+            'and none for the properties that have no served limit (a counter needs a real max)');
+        rig.select(fieldId);
+        assert(!!rig.inspector.count('field.name') && !!rig.inspector.count('field.value'),
+            'the field panel has its two counters');
+
+        rig.select(embedId);
+        const title = rig.input('title');
+        assert(rig.inspector.count('title').textContent === '9 / 256',
+            'the counter reads used / max against the served title_max (Title one is 9 characters)',
+            rig.inspector.count('title').textContent);
+        assert(rig.inspector.count('title').getAttribute('data-count') === 'title',
+            'and it is keyed by the same name the measurement uses');
+        assert(rig.inspector.count('title').getAttribute('aria-hidden') === 'true' &&
+               rig.inspector.count('title').getAttribute('data-insp') === null,
+            'it is decoration, not a control (aria-hidden, no data-insp)');
+
+        // ── typing keeps it in step, and the over-state is the rule's own ──
+        rig.type(title, rep('t', 256));
+        assert(rig.inspector.count('title').textContent === '256 / 256',
+            'exactly at the limit the counter shows max / max', rig.inspector.count('title').textContent);
+        assert(rig.inspector.count('title').className.indexOf('mb2-count-over') === -1,
+            'and it is NOT over (the limit is inclusive)', rig.inspector.count('title').className);
+        assert(rig.NERO.embed.validate.validate(rig.doc(), rig.limits)
+               .filter(i => i.code === 'embed.title.too-long').length === 0,
+            'rig: and the rule is silent at exactly the limit');
+        rig.type(title, rep('t', 257));
+        assert(rig.inspector.count('title').textContent === '257 / 256',
+            'one past it the counter says so', rig.inspector.count('title').textContent);
+        assert(rig.inspector.count('title').className.indexOf('mb2-count-over') !== -1,
+            'and the over-state is applied', rig.inspector.count('title').className);
+        assert(rig.NERO.embed.validate.validate(rig.doc(), rig.limits)
+               .filter(i => i.code === 'embed.title.too-long').length === 1,
+            'while the RULE reports the same boundary (counter and rule cannot disagree)');
+        rig.store.undo();
+        assert(rig.inspector.count('title').className.indexOf('mb2-count-over') === -1,
+            'undo takes the over-state away again', rig.inspector.count('title').className);
+
+        // ── only the counter that moved is written ──
+        const writes = rig.textWrites();
+        rig.type('description', 'a description');
+        // Two counters move, not one, and that is the point: the description's own
+        // counter AND the embed's character budget, which contains it. Nothing
+        // else in the panel is written.
+        assert(rig.textWrites() - writes === 2,
+            'typing in one control writes that control s counter and the embed total, nothing else',
+            String(rig.textWrites() - writes));
+        const writesTitle = rig.inspector.count('title').textContent;
+        rig.type('description', 'a description 2');
+        assert(rig.inspector.count('title').textContent === writesTitle,
+            'and the untouched title counter still reads the same');
+        const writes2 = rig.textWrites();
+        rig.inspector.render();
+        assert(rig.textWrites() === writes2, 'a no-op render writes no counter');
+
+        // ── the embed-wide facts: total characters and the fields cap ──
+        assert(/^\d+ \/ 6000$/.test(rig.inspector.count('total').textContent),
+            'the embed panel shows the embed character budget',
+            rig.inspector.count('total').textContent);
+        assert(rig.inspector.count('fields').textContent === '2 / 25',
+            'and the fields fact beside the add button',
+            rig.inspector.count('fields').textContent);
+        const addField = findAction(rig.mount, 'addField');
+        assert(!!addField && addField.disabled === false,
+            'with 2 of 25 fields the add button is live');
+
+        // ── at the cap: disabled, and the guard refuses a click ──
+        const tight = servedLimits();
+        tight.embed.fields_max = 2;
+        const capped = makeRig({ limits: tight });
+        const cappedEmbed = capped.doc().embeds[0].id;
+        capped.select(cappedEmbed);
+        assert(capped.inspector.count('fields').textContent === '2 / 2',
+            'rig: the served cap is 2 and the embed has 2 fields',
+            capped.inspector.count('fields').textContent);
+        const cappedBtn = findAction(capped.mount, 'addField');
+        assert(cappedBtn.disabled === true,
+            'at fields_max the add-field control is disabled', String(cappedBtn.disabled));
+        const before = capped.dispatched.length;
+        capped.mount.dispatch('click', { type: 'click', target: cappedBtn });
+        assert(capped.dispatched.length === before &&
+               capped.doc().embeds[0].fields.length === 2,
+            'and a click on the disabled control does nothing (no dispatch, no field)',
+            String(capped.doc().embeds[0].fields.length));
+
+        // one field below the cap it is live again
+        const roomy = servedLimits();
+        roomy.embed.fields_max = 3;
+        const room = makeRig({ limits: roomy });
+        room.select(room.doc().embeds[0].id);
+        assert(findAction(room.mount, 'addField').disabled === false,
+            'one field below the cap the control is live');
+        room.click('addField');
+        assert(room.doc().embeds[0].fields.length === 3 &&
+               findAction(room.mount, 'addField').disabled === true,
+            'adding the last allowed field turns it off in the same pass');
+        assert(room.inspector.count('fields').textContent === '3 / 3',
+            'and the fact moved with it', room.inspector.count('fields').textContent);
+
+        // ── an unusable table: no numbers, no adds (fail closed) ──
+        const bare = makeRig({ limits: null });
+        bare.select(bare.doc().embeds[0].id);
+        assert(bare.inspector.count('title').textContent === '',
+            'with no limits table the counter is blank (no invented number)',
+            JSON.stringify(bare.inspector.count('title').textContent));
+        assert(bare.inspector.count('title').className === 'mb2-count' &&
+               bare.inspector.count('fields').className === 'mb2-count mb2-count-fields',
+            'the fields counter carries the extra class its stylesheet rule hooks (beside the add button)',
+            bare.inspector.count('fields').className);
+        assert(bare.inspector.count('title').className === 'mb2-count',
+            'and it carries no over-state', bare.inspector.count('title').className);
+        assert(findAction(bare.mount, 'addField').disabled === true,
+            'and the field cap fails closed (disabled), never unlimited');
+        const bareActs = bare.dispatched.length;
+        bare.click('addField');
+        assert(bare.dispatched.length === bareActs, 'so the action refuses', String(bare.dispatched.length));
+
+        // ── a loaded document repaints the counters without a keystroke ──
+        const loaded = makeRig();
+        const other = filledDocument(loaded.NERO);
+        other.embeds[0].id = loaded.doc().embeds[0].id;
+        other.embeds[0].title = rep('t', 100);
+        loaded.store.dispatch({ type: 'document/load', document: other, meta: { history: false } });
+        loaded.select(other.embeds[0].id);
+        assert(loaded.inspector.count('title').textContent === '100 / 256',
+            'a loaded document repaints the counters (no keystroke needed)',
+            loaded.inspector.count('title').textContent);
+
+        // ── teardown ──
+        assert(loaded.inspector.destroy() === true, 'the inspector tears down');
+        const panels = loaded.mount.children.length;
+        assert(panels === 0, 'and its panels (with their counters) are off the tree');
+        const w = loaded.inspector.stats().textWrites;
+        loaded.store.dispatch({ type: 'content/set', text: 'after destroy' });
+        assert(loaded.inspector.stats().textWrites === w,
+            'no counter is written after teardown', String(loaded.inspector.stats().textWrites - w));
+        assert(loaded.dom.warnings.length === 0, 'nothing warned during the counter work',
+            loaded.dom.warnings.join(' | '));
     }
 
     // ═══════════════════════════════════════════════════════════════

@@ -10,16 +10,24 @@
 //
 //       { code, path, nodeId, severity, message }
 //
-//   No DOM, no timers, no storage, no network, no counters and no module
-//   state: the same document and the same limits always produce the same list,
-//   and a second call cannot see anything the first one left behind. The page
-//   owns WHEN this runs and WHERE the result goes — never this file.
+//   No DOM, no timers, no storage, no network and no module state: the same
+//   document and the same limits always produce the same list, and a second
+//   call cannot see anything the first one left behind. The page owns WHEN this
+//   runs and WHERE the result goes — never this file.
+//
+//   It also MEASURES what the views display (step 6b): counts() reports each
+//   node's used/max numbers and caps() reports whether a node may still grow.
+//   Both are projections of the same measurement pass the rules run on, so a
+//   counter and its rule can never disagree, and no view re-implements a limit.
+//   Measuring is still not drawing: this file creates no element, ever.
 //
 // WHERE IT SITS (the whole step-6 flow, one implementation each)
 //
 //       served limits → validate(document, limits) → store.ui.issues
 //                                                    → #mb2-strip (6a)
-//                                                    → counters/badges (6b)
+//                    → counts()/caps()              → counters + add caps (6b)
+//                                                    → rail badges (6b, from the
+//                                                      same store.ui.issues)
 //
 //   `ui.issues` is the ONE issue list and it already existed in
 //   embed/store.js (`ui/setIssues`), so this step adds no state, no second
@@ -382,6 +390,142 @@ window.NERO.embed = window.NERO.embed || {};
         return total;
     }
 
+    // ── The facts the views display (step 6b) ────────────────────
+    /**
+     * ONE measurement pass over (document, limits). Every number 6b shows — the
+     * character counters, the embed/field caps — comes from here, and it is
+     * measured with the SAME helpers the rules above use (textLen,
+     * embedCharCount), so "the counter says over" and "the validator says
+     * too long" can never disagree: they are the same comparison.
+     *
+     * Pure like everything else in this file: no DOM, no state, and an unusable
+     * table yields `ok: false` with no facts at all. The views fail CLOSED on
+     * that (counters blank, add controls disabled) rather than showing a page
+     * that "has no limits".
+     *
+     * Shape:
+     *   { ok, message: { content, embeds },
+     *     embeds: [ { id, index, label,
+     *                 controls: [ {key, used, max}, … ],   // fixed order
+     *                 fields:   { used, max, canAdd },
+     *                 fieldCounts: [ { id, index, label, controls: [ … ] } ] } ] }
+     */
+    function measure(document_, limits) {
+        const check = ensureLimits(limits);
+        const doc = isObject(document_) ? document_ : {};
+        const embeds = Array.isArray(doc.embeds) ? doc.embeds : [];
+        if (!check.ok) return { ok: false, message: null, embeds: [] };
+
+        const out = {
+            ok: true,
+            message: {
+                content: { key: 'content', used: textLen(doc.content), max: limits.message.content_max },
+                embeds: { key: 'embeds', used: embeds.length, max: limits.message.embeds_max },
+            },
+            embeds: [],
+        };
+
+        for (let i = 0; i < embeds.length; i++) {
+            const e = isObject(embeds[i]) ? embeds[i] : {};
+            const fields = Array.isArray(e.fields) ? e.fields : [];
+            const author = isObject(e.author) ? e.author : {};
+            const footer = isObject(e.footer) ? e.footer : {};
+            const fieldCounts = [];
+
+            for (let j = 0; j < fields.length; j++) {
+                const f = isObject(fields[j]) ? fields[j] : {};
+                fieldCounts.push({
+                    id: f.id === undefined || f.id === null ? null : String(f.id),
+                    index: j,
+                    label: 'Field ' + (j + 1),
+                    controls: [
+                        { key: 'field.name', used: textLen(f.name), max: limits.embed.field_name_max },
+                        { key: 'field.value', used: textLen(f.value), max: limits.embed.field_value_max },
+                    ],
+                });
+            }
+
+            out.embeds.push({
+                id: e.id === undefined || e.id === null ? null : String(e.id),
+                index: i,
+                label: 'Embed ' + (i + 1),
+                // Fixed order — the inspector paints counters by key, the tests
+                // assert the order, and nothing here depends on object key order.
+                controls: [
+                    { key: 'title', used: textLen(e.title), max: limits.embed.title_max },
+                    { key: 'description', used: textLen(e.description), max: limits.embed.description_max },
+                    { key: 'author.name', used: textLen(author.name), max: limits.embed.author_name_max },
+                    { key: 'footer.text', used: textLen(footer.text), max: limits.embed.footer_text_max },
+                    { key: 'total', used: embedCharCount(e, fields), max: limits.message.embed_total_chars_max },
+                    { key: 'fields', used: fields.length, max: limits.embed.fields_max },
+                ],
+                fields: {
+                    used: fields.length,
+                    max: limits.embed.fields_max,
+                    canAdd: fields.length < limits.embed.fields_max,
+                },
+                fieldCounts: fieldCounts,
+            });
+        }
+        return out;
+    }
+
+    /** One measurement entry, with the comparison the views paint. */
+    function readout(entry) {
+        return { key: entry.key, used: entry.used, max: entry.max, over: entry.used > entry.max };
+    }
+
+    /**
+     * counts(document, limits) → { ok, nodes: { <nodeId>: [ {key, used, max, over} ] }, message }
+     * The per-node counters, addressed by the SAME node ids the issues carry, so
+     * a view can paint the node it is showing without deriving anything.
+     */
+    function counts(document_, limits) {
+        const m = measure(document_, limits);
+        const nodes = {};
+        if (!m.ok) return { ok: false, nodes: nodes, message: null };
+
+        nodes[CONTENT_NODE] = [readout(m.message.content)];
+        m.embeds.forEach(function (embed) {
+            if (embed.id !== null) nodes[embed.id] = embed.controls.map(readout);
+            embed.fieldCounts.forEach(function (field) {
+                if (field.id !== null) nodes[field.id] = field.controls.map(readout);
+            });
+        });
+        return { ok: true, nodes: nodes, message: { embeds: readout(m.message.embeds) } };
+    }
+
+    /**
+     * caps(document, limits) → { ok, embeds: {used, max, canAdd},
+     *                            fields: { <embedId>: {used, max, canAdd} } }
+     *
+     * `canAdd` is `used < max` — adding is refused exactly AT the cap, while the
+     * rules above only complain ABOVE it. Both are true at once by design: a
+     * full embed is not an error, it is a control that has nothing left to do.
+     * An unusable table can only ever answer "cannot add" (fail closed).
+     */
+    function caps(document_, limits) {
+        const m = measure(document_, limits);
+        const fields = {};
+        if (!m.ok) {
+            return { ok: false, embeds: { used: 0, max: 0, canAdd: false }, fields: fields };
+        }
+        m.embeds.forEach(function (embed) {
+            if (embed.id !== null) {
+                fields[embed.id] = { used: embed.fields.used, max: embed.fields.max, canAdd: embed.fields.canAdd };
+            }
+        });
+        return {
+            ok: true,
+            embeds: {
+                used: m.message.embeds.used,
+                max: m.message.embeds.max,
+                canAdd: m.message.embeds.used < m.message.embeds.max,
+            },
+            fields: fields,
+        };
+    }
+
     // ── The entry point ──────────────────────────────────────────
     /**
      * validate(document, limits) → [issue, …] in a deterministic order:
@@ -447,6 +591,8 @@ window.NERO.embed = window.NERO.embed || {};
         CONTENT_NODE: CONTENT_NODE,
         REQUIRED_LIMITS: REQUIRED_LIMITS,
         validate: validate,
+        counts: counts,
+        caps: caps,
         ensureLimits: ensureLimits,
         limitsIssue: limitsIssue,
         signature: signature,

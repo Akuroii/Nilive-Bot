@@ -43,8 +43,24 @@
 //   Tab is never intercepted (no focus trap); action buttons inside a row are
 //   ordinary buttons in the tab order with labels of their own.
 //
-// NOT IN THIS FILE (deliberately): the inspector, validation, counters, limits,
-// persistence, assets, components/actions/roles, templates, Send.
+// 6b ADDITIONS (the rail's half of the step-6 facts; see the file header of
+// embed/validate.js for the whole flow)
+//
+//   * THE ADD CAPS. The one control that adds an embed lives on the message
+//     root, and it is DISABLED exactly at `embeds_max`; each embed's add-field
+//     button is disabled exactly at `fields_max`. The numbers come from the same
+//     measurement the validator runs on (validate.caps()), so "the button is
+//     off" and "the validator would complain" are one decision, not two.
+//   * THE BADGES. A row whose node carries issues from `store.ui.issues` shows
+//     how many, tinted by the worst severity. Presentation only: the rail never
+//     builds, filters or stores an issue, and it never dispatches one — it
+//     renders the ONE list the page already has.
+//   * FAIL CLOSED. No usable limits table ⇒ no add control is enabled. The rail
+//     never guesses a limit and never assumes "unlimited".
+//
+// NOT IN THIS FILE (deliberately): the inspector, the validation RULES (it only
+// reads their results), the limits TABLE (it receives it), persistence, assets,
+// components/actions/roles, templates, Send.
 //
 // Consumed by: embed/message-builder-page.js
 // Tested by:   scripts/test_message_builder_rail.js (behaviour, this step),
@@ -92,11 +108,44 @@ window.NERO.embed.views = window.NERO.embed.views || {};
     }
 
     /**
+     * The add caps for a document, measured by embed/validate.js — the rail holds
+     * no limit of its own and never re-implements a comparison. Fail closed: an
+     * unusable table (or a missing validator) can only answer "cannot add", and
+     * the page's strip is what explains why.
+     */
+    function capFacts(document_, limits) {
+        const validate = NERO.embed.validate;
+        const none = {
+            usable: false,
+            canAddEmbed: false,
+            embedsUsed: 0,
+            embedsMax: 0,
+            canAddField: function () { return false; },
+        };
+        if (!validate || typeof validate.caps !== 'function') return none;
+        const caps = validate.caps(document_, limits);
+        if (!caps || !caps.ok) return none;
+        return {
+            usable: true,
+            canAddEmbed: caps.embeds.canAdd,
+            embedsUsed: caps.embeds.used,
+            embedsMax: caps.embeds.max,
+            canAddField: function (embedId) {
+                const entry = caps.fields[embedId];
+                return !!(entry && entry.canAdd);
+            },
+        };
+    }
+
+    /**
      * The flat row list behind the DOM. Flat (with aria-level) rather than
      * nested, because that is what a tree needs to be navigable by keyboard and
      * it makes reconciliation a single ordered list.
      */
-    function derive(document_, collapsed) {
+    function derive(document_, collapsed, limits) {
+        // 6b: the add caps are facts about the document, measured by the
+        // validator's own helpers. Absent limits ⇒ every cap is closed.
+        const caps = capFacts(document_, limits);
         const items = [{
             id: CONTENT_NODE,
             type: 'content',
@@ -106,6 +155,10 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             label: contentLabel(document_),
             embedId: null,
             fieldId: null,
+            canAddEmbed: caps.canAddEmbed,
+            embedsKnown: caps.usable,
+            embedsUsed: caps.embedsUsed,
+            embedsMax: caps.embedsMax,
         }];
         const embeds = (document_ && document_.embeds) || [];
         embeds.forEach(function (embed, i) {
@@ -125,6 +178,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 canMoveUp: i > 0,
                 canMoveDown: i < embeds.length - 1,
                 canRemove: embeds.length > 1,
+                canAddField: caps.canAddField(embed.id),
             });
             if (!open) return;
             fields.forEach(function (field, j) {
@@ -158,6 +212,10 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         const doc = options.document;
         const store = options.store;
         const mount = options.mount;
+        // The served limits table, passed BY REFERENCE from the page. The rail
+        // keeps no copy of it and re-reads it on every render, so there is
+        // nothing here that can go stale.
+        const limits = options.limits || null;
 
         if (!doc || typeof doc.createElement !== 'function') {
             throw new TypeError('rail.create needs options.document');
@@ -176,6 +234,8 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             nodesReused: 0,
             attrWrites: 0,
             textWrites: 0,
+            disabledWrites: 0,
+            badgeWrites: 0,
             actions: 0,
         };
 
@@ -232,12 +292,37 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             node.setAttribute('role', 'treeitem');
             const label = doc.createElement('span');
             label.className = 'mb2-rail-label';
+            // The badge (6b) is decoration WITH a name for assistive tech: the
+            // digits alone would read as a stray number, so the visible part is
+            // hidden from the accessibility tree and a visually-hidden phrase
+            // carries the meaning. It announces nothing by itself — the strip is
+            // this page's only validation live region.
+            const badge = doc.createElement('span');
+            badge.className = 'mb2-rail-badge';
+            badge.hidden = true;
+            const badgeNum = doc.createElement('span');
+            badgeNum.className = 'mb2-rail-badge-num';
+            badgeNum.setAttribute('aria-hidden', 'true');
+            const badgeText = doc.createElement('span');
+            badgeText.className = 'mb2-sr-only';
+            badge.appendChild(badgeNum);
+            badge.appendChild(badgeText);
+            // The count (6b) is the embeds fact on the message root row; it
+            // stays empty on every other row.
+            const count = doc.createElement('span');
+            count.className = 'mb2-rail-count';
             const actions = doc.createElement('span');
             actions.className = 'mb2-rail-actions';
             node.appendChild(label);
+            node.appendChild(badge);
+            node.appendChild(count);
             node.appendChild(actions);
-            stats.nodesCreated += 3;
-            return { node: node, label: label, actions: actions, buttons: {}, last: {} };
+            stats.nodesCreated += 7;
+            return {
+                node: node, label: label, badge: badge, badgeNum: badgeNum,
+                badgeText: badgeText, count: count, actions: actions,
+                buttons: {}, last: {},
+            };
         }
 
         function updateRow(row, vm) {
@@ -259,7 +344,20 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             setClass(row.node, 'mb2-rail-row-selected', false);   // set in paintSelection
 
             // Order of the action buttons is fixed per row type.
-            if (vm.type === 'content') return;
+            if (vm.type === 'content') {
+                // 6b: the message root is where an embed is added, and this row
+                // carries the embeds fact beside it ("3 / 10"). The button is
+                // disabled exactly at the cap: a full message is not an error,
+                // it is a control with nothing left to do.
+                if (!row.buttons.addEmbed) {
+                    makeButton(row, 'addEmbed', '＋', 'Add an embed to the message', 'Add embed');
+                }
+                // No usable table ⇒ no number to show: "0 / 0" would be a
+                // measurement the page never made. The strip explains the rest.
+                setText(row.count, vm.embedsKnown ? vm.embedsUsed + ' / ' + vm.embedsMax : '');
+                applyDisabled(row, { addEmbed: vm.canAddEmbed === false });
+                return;
+            }
             const wanted = vm.type === 'embed'
                 ? ['addField', 'duplicate', 'up', 'down', 'remove']
                 : ['up', 'down', 'remove'];
@@ -278,19 +376,87 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 }
             });
             const disabled = {
+                addField: vm.canAddField === false,
                 up: vm.canMoveUp === false,
                 down: vm.canMoveDown === false,
                 remove: vm.canRemove === false,
             };
-            ['up', 'down', 'remove'].forEach(function (action) {
+            applyDisabled(row, disabled);
+        }
+
+        /**
+         * One place that turns a fact into a disabled control. `disabled` is the
+         * button's real PROPERTY (what a browser and a screen reader act on), and
+         * it is written only when it differs — a keystroke that changes no cap
+         * costs no DOM write.
+         */
+        function applyDisabled(row, wanted) {
+            Object.keys(wanted).forEach(function (action) {
                 const button = row.buttons[action];
                 if (!button) return;
-                const next = !!disabled[action];
-                if (button.disabled !== next) button.disabled = next;
+                const next = !!wanted[action];
+                if (button.disabled !== next) {
+                    button.disabled = next;
+                    stats.disabledWrites++;
+                }
             });
         }
 
         // ── painting ─────────────────────────────────────────────────
+        /**
+         * The issues grouped by the node they are about: what the badges show.
+         * Read-only — `store.ui.issues` is the ONE list (the page dispatched it
+         * after validation ran), and the rail keeps no part of it.
+         */
+        function issuesByNode() {
+            const ui = store.getUi ? store.getUi() : null;
+            const issues = ui && Array.isArray(ui.issues) ? ui.issues : [];
+            const byNode = new Map();
+            issues.forEach(function (issue) {
+                if (!issue || issue.nodeId === undefined || issue.nodeId === null) return;
+                const id = String(issue.nodeId);
+                const entry = byNode.get(id) || { count: 0, error: false };
+                entry.count++;
+                if (issue.severity === 'error') entry.error = true;
+                byNode.set(id, entry);
+            });
+            return byNode;
+        }
+
+        /**
+         * Paint every badge from that grouping. Presentation only: the count and
+         * the tone are derived here and stored nowhere, so a badge cannot outlive
+         * the issue it came from. Writes are guarded like every other write in
+         * this file, and `hidden` flips only on a real transition.
+         */
+        function paintBadges(byNode) {
+            if (destroyed) return;
+            rows.forEach(function (row, id) {
+                const entry = byNode.get(id) || null;
+                const count = entry ? entry.count : 0;
+                if (!count) {
+                    if (!row.badge.hidden) {
+                        row.badge.hidden = true;
+                        stats.badgeWrites++;
+                    }
+                    return;
+                }
+                const tone = entry.error ? 'error' : 'warning';
+                const plural = count === 1 ? '1 problem' : count + ' problems';
+                if (row.badgeNum.textContent !== String(count)) stats.badgeWrites++;
+                if (row.badgeText.textContent !== plural) stats.badgeWrites++;
+                setText(row.badgeNum, String(count));
+                setText(row.badgeText, plural);
+                setAttr(row.badge, 'data-badge-tone', tone);
+                setClass(row.badge, 'mb2-tone-danger', tone === 'error');
+                setClass(row.badge, 'mb2-tone-warn', tone !== 'error');
+                if (row.badge.hidden) {
+                    row.badge.hidden = false;
+                    stats.badgeWrites++;
+                }
+            });
+        }
+
         function paintSelection(selected) {
             rows.forEach(function (row, id) {
                 const isSelected = id === selected;
@@ -320,7 +486,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         function render() {
             if (destroyed) return;
             const state = store.getState();
-            const items = derive(state.document, collapsed);
+            const items = derive(state.document, collapsed, limits);
             const wanted = new Map();
             items.forEach(function (vm) { wanted.set(vm.id, true); });
 
@@ -349,6 +515,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
 
             stampRows(items);
             paintSelection(currentSelection());
+            paintBadges(issuesByNode());
             paintTabIndex();
             applyFocus();
             stats.renders++;
@@ -435,12 +602,21 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             return created;
         }
 
+        /**
+         * 6b: both add actions are capped. A disabled button cannot be clicked in
+         * a browser, so this is the second belt — a programmatic call (or a widget
+         * that ignores `disabled`) still cannot push the document past a served
+         * limit. The facts come from the same measurement the button was painted
+         * from, so the guard and the control can never disagree.
+         */
         function addEmbed() {
+            if (!capFacts(store.getState().document, limits).canAddEmbed) return;
             const created = dispatchAndPick({ type: 'embed/add' }, 'embed');
             if (created) { select(created); pendingFocus = created; render(); }
         }
 
         function addField(embedId) {
+            if (!capFacts(store.getState().document, limits).canAddField(embedId)) return;
             const created = dispatchAndPick({ type: 'field/add', embedId: embedId }, 'field');
             if (created) {
                 collapsed.delete(embedId);        // the new field must be visible
@@ -551,7 +727,8 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             const row = rows.get(nodeId);
             if (!row) return;
             const embedId = row.embedId;
-            if (action === 'addField') addField(embedId);
+            if (action === 'addEmbed') addEmbed();
+            else if (action === 'addField') addField(embedId);
             else if (action === 'duplicate') duplicate(embedId);
             else if (action === 'up') {
                 if (row.fieldId) moveField(embedId, row.fieldId, -1);
@@ -626,6 +803,11 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         const unsubs = [];
         unsubs.push(store.subscribe(function (s) { return s.document; }, function () { render(); }));
         unsubs.push(store.subscribe(function (s) { return s.ui.selectedNodeId; }, function () { render(); }));
+        // 6b: badges follow the issue list, and only the badges. Re-rendering the
+        // rows for a validation result would throw away focus and row identity
+        // for a number that lives in a span.
+        unsubs.push(store.subscribe(function (s) { return s.ui.issues; },
+            function () { paintBadges(issuesByNode()); }));
 
         // First paint: the rail is derived from whatever the store already holds.
         render();
@@ -659,6 +841,19 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             focusedId: function () { return focusedId; },
             rowIds: function () { return visibleIds(); },
             rowNode: function (id) { const row = rows.get(id); return row ? row.node : null; },
+            /**
+             * The badge as the view sees it: the SAME derivation the paint uses,
+             * so a test never has to reverse-engineer the DOM, and a caller can
+             * ask about a node id that has no row (it gets null, not a guess).
+             */
+            badge: function (id) {
+                const row = rows.get(id);
+                if (!row || row.badge.hidden) return null;
+                const entry = issuesByNode().get(id);
+                return entry
+                    ? { count: entry.count, tone: entry.error ? 'error' : 'warning' }
+                    : null;
+            },
             isSelected: function (id) { const row = rows.get(id); return row ? row.node.getAttribute('aria-selected') === 'true' : false; },
             stats: function () { return Object.assign({}, stats); },
         };

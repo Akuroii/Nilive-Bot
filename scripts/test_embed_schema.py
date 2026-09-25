@@ -312,6 +312,23 @@ def limits_table_tests():
           "and every one of them is an integer (the client compares sizes, not strings)",
           ", ".join(non_numeric))
 
+    # 6b: the counters and the add caps read numbers too, and they read them from
+    # the same table. Every `limits.<block>.<key>` the client mentions — the
+    # measurement code as well as the rules — must exist in the payload, so a
+    # counter can never measure against a limit the server does not have.
+    used = sorted(set(re.findall(r"limits\.([a-z_]+)\.([a-z_]+)", js_source)))
+    unknown = [f"{b}.{k}" for b, k in used if k not in payload.get(b, {})]
+    check(not unknown,
+          f"every limit the client MEASURES against is served ({len(used)} referenced)",
+          ", ".join(unknown))
+    counter_keys = {"message.content_max", "message.embeds_max", "message.embed_total_chars_max",
+                    "embed.title_max", "embed.description_max", "embed.fields_max",
+                    "embed.field_name_max", "embed.field_value_max", "embed.footer_text_max",
+                    "embed.author_name_max"}
+    check(counter_keys.issubset({f"{b}.{k}" for b, k in used}),
+          "including every key the 6b counters and caps display",
+          ", ".join(sorted(counter_keys - {f"{b}.{k}" for b, k in used})))
+
 
 def main():
     print("Embed Builder — embed_schema / discord_limits verification")

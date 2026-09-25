@@ -430,6 +430,39 @@ assert(!/(^|[;{\s])width:\s*\d{3,}px/.test(CSS_NO_COMMENTS) &&
     'no fixed shell width that cannot shrink');
 assert(/overflow-wrap:\s*anywhere/.test(CSS_NO_COMMENTS),
     'long unbroken values wrap instead of widening the column');
+
+// ═══════════════════════════════════════════════════════════════
+section('D2. the 6b classes: counters, caps and badges');
+// ═══════════════════════════════════════════════════════════════
+// The elements these rules style are created by inspector.js / rail.js, so this
+// is the only place their shape is pinned: a class that exists in the script but
+// not here would ship as unstyled text.
+assert(/\.mb2-count\s*\{[^}]*font-variant-numeric:\s*tabular-nums/.test(CSS_NO_COMMENTS),
+    'counters use tabular figures (the number cannot jitter while typing)');
+assert(/\.mb2-count-over\s*\{[^}]*var\(--danger\)/.test(CSS_NO_COMMENTS),
+    'the over-state is the danger tone, not a colour invented here');
+assert(/\.mb2-count\.mb2-count-fields\s*\{[^}]*display:\s*inline-block/.test(CSS_NO_COMMENTS),
+    'the fields counter sits beside the add button instead of under it');
+assert(/\.mb2-insp-btn:disabled\s*\{/.test(CSS_NO_COMMENTS) &&
+       /\.mb2-insp-btn:hover:not\(:disabled\)/.test(CSS_NO_COMMENTS),
+    'a disabled inspector button looks disabled and does not react to hover');
+assert(/\.mb2-rail-badge\s*\{/.test(CSS_NO_COMMENTS) &&
+       /\.mb2-rail-badge\[hidden\]\s*\{\s*display:\s*none/.test(CSS_NO_COMMENTS),
+    'the badge exists and its [hidden] state is not overridden by its own display');
+assert(/\.mb2-rail-badge\.mb2-tone-warn\s*\{[^}]*var\(--warning\)/.test(CSS_NO_COMMENTS) &&
+       /\.mb2-rail-badge\.mb2-tone-danger\s*\{[^}]*var\(--danger\)/.test(CSS_NO_COMMENTS),
+    'badge tones are the shared warning/danger variables (one vocabulary with the strip)');
+assert(/\.mb2-rail-count\s*\{[^}]*white-space:\s*nowrap/.test(CSS_NO_COMMENTS),
+    'the embeds fact never breaks in half');
+assert(/\.mb2-sr-only\s*\{[^}]*clip-path:\s*inset\(50%\)/.test(CSS_NO_COMMENTS),
+    'the badge carries a visually-hidden name for assistive tech');
+assert(!/\.mb2-sr-only\s*\{[^}]*overflow\s*:\s*hidden/.test(CSS_NO_COMMENTS),
+    'and it hides without overflow:hidden, so the overflow invariant above stays meaningful');
+assert(!/\.mb2-sr-only\s*\{[^}]*display:\s*none/.test(CSS_NO_COMMENTS),
+    'it is hidden visually, never from the accessibility tree');
+assert(!/\.mb2-(count|rail-badge|rail-count)[^{]*\{[^}]*position:\s*fixed/.test(CSS_NO_COMMENTS),
+    'no counter or badge is positioned against the viewport');
+
 const breaks = (CSS_NO_COMMENTS.match(/@media[^{]+/g) || []).join(' ');
 ['1360px', '768px', '480px'].forEach(bp => {
     assert(breaks.indexOf(bp) !== -1, 'breakpoint ' + bp + ' is defined', breaks);
