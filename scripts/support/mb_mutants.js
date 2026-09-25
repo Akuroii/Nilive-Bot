@@ -68,6 +68,12 @@ const TARGETS = {
         label: 'dashboard/static/js/embed/validate.js',
         harness: path.join(ROOT, 'scripts', 'test_message_builder_validate.js'),
     },
+    assets: {
+        file: path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'assets.js'),
+        env: 'NERO_ASSETS_SRC',
+        label: 'dashboard/static/js/embed/assets.js',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_assets.js'),
+    },
 };
 const HARNESS = path.join(ROOT, 'scripts', 'test_message_builder_page.js');
 
@@ -1161,6 +1167,233 @@ const MUTANTS = [
             "                    /* the cap is not checked here */",
         ]],
     },
+
+    // ── step 7a: the asset core ─────────────────────────────────────
+    {
+        id: 'AS1',
+        target: 'assets',
+        why: 'the SHA-256 padding length is wrong, so identity stops matching the real digest',
+        edits: [[
+            "        const padding = ((56 - (afterOne % 64)) + 64) % 64;",
+            "        const padding = ((64 - (afterOne % 64)) + 64) % 64;",
+        ]],
+    },
+    {
+        id: 'AS2',
+        target: 'assets',
+        why: 'the asset id is built from the tail of the digest instead of its head',
+        edits: [[
+            "        return 'a_' + hex.slice(0, 16);",
+            "        return 'a_' + hex.slice(-16);",
+        ]],
+    },
+    {
+        id: 'AS3',
+        target: 'assets',
+        why: 'any RIFF container is called WebP (a WAV would be accepted as an image)',
+        edits: [[
+            "        if (startsWith(bytes, RIFF_SIGNATURE) && ascii(bytes, 8, 4) === 'WEBP') {\n            return MIME_WEBP;\n        }",
+            "        if (startsWith(bytes, RIFF_SIGNATURE)) {\n            return MIME_WEBP;\n        }",
+        ]],
+    },
+    {
+        id: 'AS4',
+        target: 'assets',
+        why: 'the GIF version byte is not checked any more',
+        edits: [[
+            "        if (startsWith(bytes, GIF_SIGNATURE) &&\n            (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61) {",
+            "        if (startsWith(bytes, GIF_SIGNATURE) && bytes[5] === 0x61) {",
+        ]],
+    },
+    {
+        id: 'AS5',
+        target: 'assets',
+        why: 'a filename keeps its directory parts (../../etc/passwd survives as a path)',
+        edits: [[
+            "        const base = baseName(name).toLowerCase().replace(/\\.[^.]*$/, function (tail, at) {",
+            "        const base = String(name).toLowerCase().replace(/\\.[^.]*$/, function (tail, at) {",
+        ]],
+    },
+    {
+        id: 'AS6',
+        target: 'assets',
+        why: 'a leading dot is allowed, so a dotfile can be stored',
+        edits: [[
+            "            .replace(/^[.-]+/, '')            // never a dotfile, never a leading dash",
+            "            .replace(/^-+/, '')               // never a leading dash",
+        ]],
+    },
+    {
+        id: 'AS7',
+        target: 'assets',
+        why: 'the filename length cap is not applied',
+        edits: [[
+            "        const cut = stem.slice(0, Math.max(1, room)).replace(/[.-]+$/, '');\n        return cut || FALLBACK_STEM;",
+            "        return stem;",
+        ]],
+    },
+    {
+        id: 'AS8',
+        target: 'assets',
+        why: 'a two-way filename collision is not de-collided (two files, one name)',
+        edits: [[
+            "            collisions = Object.keys(groups).filter(name => groups[name].length > 1).sort();",
+            "            collisions = Object.keys(groups).filter(name => groups[name].length > 2).sort();",
+        ]],
+    },
+    {
+        id: 'AS9',
+        target: 'assets',
+        why: 'the conflict winner depends on input order rather than a fixed rule',
+        edits: [[
+            "                if (filename < byId[id].filename) byId[id] = entry;",
+            "                if (filename > byId[id].filename) byId[id] = entry;",
+        ]],
+    },
+    {
+        id: 'AS10',
+        target: 'assets',
+        why: 'the file cap is a hard-coded number instead of the served one',
+        edits: [[
+            "        const countMax = table.count_max;",
+            "        const countMax = 10;",
+        ]],
+    },
+    {
+        id: 'AS11',
+        target: 'assets',
+        why: 'the limits table is treated as usable even when its keys are missing (fails OPEN)',
+        edits: [[
+            "        return { ok: missing.length === 0, reason: missing.length ? 'limits-unusable' : null, missing: missing };",
+            "        return { ok: true, reason: null, missing: missing };",
+        ]],
+    },
+    {
+        id: 'AS12',
+        target: 'assets',
+        why: 'one more file may be added AT the cap',
+        edits: [[
+            "            count: { used: used, max: countMax, over: used > countMax, canAdd: used < countMax },",
+            "            count: { used: used, max: countMax, over: used > countMax, canAdd: used <= countMax },",
+        ]],
+    },
+    {
+        id: 'AS13',
+        target: 'assets',
+        why: 'the served "this cap is hard" flag is ignored, so a blocking size never blocks',
+        edits: [[
+            "            blocked: oversized && advisory.isHard,",
+            "            blocked: false,",
+        ]],
+    },
+    {
+        id: 'AS14',
+        target: 'assets',
+        why: 'pruneOrphans deletes from the map it was given instead of building a new one',
+        edits: [[
+            "            } else {\n                pruned.push(key);\n            }",
+            "            } else {\n                delete source[key];\n                pruned.push(key);\n            }",
+        ]],
+    },
+    {
+        id: 'AS15',
+        target: 'assets',
+        why: 'an unknown availability claims the bytes are present (the optimistic default)',
+        edits: [[
+            "        const availability = AVAILABILITY.indexOf(fields.availability) !== -1\n            ? fields.availability : 'bytes-missing';",
+            "        const availability = fields.availability === 'bytes-missing' ? 'bytes-missing' : 'bytes-local';",
+        ]],
+    },
+    {
+        id: 'AS16',
+        target: 'assets',
+        why: 'a record rebuilt from storage drops keys this build does not know about',
+        edits: [[
+            "        Object.keys(value).sort().forEach(key => {\n            if (RECORD_KEYS.indexOf(key) !== -1) return;\n            out[key] = value[key];\n        });\n        return out;",
+            "        return out;",
+        ]],
+    },
+    {
+        id: 'AS17',
+        target: 'assets',
+        why: 'a name claiming a format an embed cannot show is accepted',
+        edits: [[
+            "        if (declaredExt && !Object.prototype.hasOwnProperty.call(MIME_BY_EXTENSION, declaredExt)) {",
+            "        if (false) {",
+        ]],
+    },
+    {
+        id: 'AS18',
+        target: 'assets',
+        why: 'a name that disagrees with its bytes is accepted (a JPEG called .png)',
+        edits: [[
+            "        if (declaredExt && MIME_BY_EXTENSION[declaredExt] !== mime) {",
+            "        if (false) {",
+        ]],
+    },
+    {
+        id: 'AS19',
+        target: 'assets',
+        why: 'refsOf() counts a pasted URL as an asset reference',
+        edits: [[
+            "                if (!value || typeof value !== 'object' || value.kind !== 'upload') return;",
+            "                if (!value || typeof value !== 'object') return;",
+        ]],
+    },
+    {
+        id: 'AS20',
+        target: 'assets',
+        why: 'a typed-array view is read whole, ignoring its byteOffset (a Buffer pool leaks in)',
+        edits: [[
+            "            const view = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);\n            return view;",
+            "            return new Uint8Array(value.buffer);",
+        ]],
+    },
+    {
+        id: 'AS21',
+        target: 'assets',
+        why: 'module-level state is introduced (a mutable table)',
+        edits: [[
+            "    const PREFIX_LENGTHS = [6, 8, 16];",
+            "    let PREFIX_LENGTHS = [6, 8, 16];",
+        ]],
+    },
+    {
+        id: 'AS22',
+        target: 'assets',
+        why: 'the limits table is cached in module state instead of read from the argument',
+        edits: [[
+            "        const table = limits && limits.attachments;",
+            "        const table = attachmentLimits.__cache || (attachmentLimits.__cache = limits && limits.attachments);",
+        ]],
+    },
+    {
+        id: 'AS23',
+        target: 'assets',
+        why: 'an empty file stops being an explicit "no bytes" refusal',
+        edits: [[
+            "        if (!bytes || !bytes.length) {\n            return {\n                ok: false, reason: 'no-bytes', declaredExt: filenameExtension(name),",
+            "        if (!bytes) {\n            return {\n                ok: false, reason: 'no-bytes', declaredExt: filenameExtension(name),",
+        ]],
+    },
+    {
+        id: 'AS24',
+        target: 'assets',
+        why: 'the refusal stops saying what the file actually is',
+        edits: [[
+            "        if (ascii(bytes, 0, 5) === '%PDF-') return 'a PDF document';",
+            "        if (ascii(bytes, 0, 5) === '%PDF-') return 'a file';",
+        ]],
+    },
+    {
+        id: 'AS25',
+        target: 'assets',
+        why: 'the de-collision prefix stops coming from the content hash, so two assets share one name',
+        edits: [[
+            "        const source = /^[0-9a-f]+$/.test(sha) ? sha : fallback;",
+            "        const source = '0'.repeat(16);",
+        ]],
+    },
 ];
 
 function sha1(file) {
@@ -1275,6 +1508,7 @@ function main() {
             NERO_INSPECTOR_SRC: process.env.NERO_INSPECTOR_SRC,
             NERO_ACTIONBAR_SRC: process.env.NERO_ACTIONBAR_SRC,
             NERO_VALIDATE_SRC: process.env.NERO_VALIDATE_SRC,
+            NERO_ASSETS_SRC: process.env.NERO_ASSETS_SRC,
         };
         envPatch[target.env] = file;
         const run = spawnSync(process.execPath, [harness], {
