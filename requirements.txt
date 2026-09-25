@@ -10,3 +10,5 @@ thefuzz==0.22.1
 python-Levenshtein==0.25.0
 arabic-reshaper==3.0.1
 python-bidi==0.6.11
+uharfbuzz==0.56.2
+freetype-py==2.5.1
