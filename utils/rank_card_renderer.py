@@ -155,7 +155,7 @@ COLORS = {
     # both are rename-able by the guild owner.
     "currency_pearl": (0xDD, 0xF7, 0xFF),       # coins slot  -- icy pearl
     "currency_pearl_glow": (0x9D, 0xEB, 0xFF),  # coins slot  -- subtle glow
-    "currency_shell": (0xCC, 0xCC, 0xF7),       # diamonds slot -- periwinkle (was coral shell)
+    "currency_shell": (0xD6, 0xB4, 0xFC),       # diamonds slot -- label color per latest request (was coral shell 0xFFB8A8)
     "currency_shell_glow": (0xFF, 0x8F, 0xA3),  # diamonds slot -- subtle glow
 }
 
@@ -267,6 +267,27 @@ def amira_typo(size):
     # produces isolated-form codepoints this font doesn't carry for every
     # letter (e.g. isolated teh marbuta) -- raqm avoids that entirely by
     # shaping the real base codepoints.
+    #
+    # If raqm isn't available in THIS process (PIL.ImageFont.core.HAVE_RAQM
+    # is False -- e.g. Pillow built/installed without libraqm on this
+    # platform), requesting layout_engine=RAQM here does not fail: Pillow
+    # silently downgrades to Layout.BASIC and draws the raw logical-order
+    # string with no bidi reordering and no shaping, which for RTL text
+    # reads back-to-front (confirmed: reproduces exactly as the reported
+    # "لؤلؤة" -> "ةؤلؤل" symptom). Detect that condition explicitly here
+    # rather than let it happen silently -- see currency_name_style, which
+    # pre-reorders the text with get_display() ONLY on this branch so the
+    # two stay in sync and RAQM-available rendering below is unchanged.
+    if not ImageFont.core.HAVE_RAQM:
+        log.warning(
+            "rank_card_renderer: raqm unavailable in this process -- Arabic "
+            "currency labels will use the bidi-reorder-only BASIC-layout "
+            "fallback (letters render correctly ordered but not cursively "
+            "joined, since BASIC applies no GSUB shaping). Install "
+            "libraqm/libfribidi in this environment for full shaping."
+        )
+        return ImageFont.truetype(FONT_PATHS["amira_typo"], size,
+                                  layout_engine=ImageFont.Layout.BASIC)
     return ImageFont.truetype(FONT_PATHS["amira_typo"], size,
                               layout_engine=ImageFont.Layout.RAQM)
 
@@ -358,7 +379,31 @@ def currency_name_style(name: str, base_font_fn, base_size: int):
     """
     if _is_arabic_text(name):
         size = round(base_size * _ARABIC_CURRENCY_SIZE_BUMP)
-        return amira_typo(size), name, True
+        text_to_draw = name
+        if not ImageFont.core.HAVE_RAQM:
+            # Matches the BASIC-layout branch amira_typo() falls back to
+            # above -- BASIC applies no bidi reordering of its own, so it
+            # must be given text that's already in visual order.
+            #
+            # Deliberately get_display() ONLY, no arabic_reshaper: this
+            # font's Arabic Presentation Forms-B coverage is incomplete
+            # (verified against its cmap: 89/144 codepoints present,
+            # missing isolated teh marbuta U+FE93 among others), so
+            # reshaping to presentation forms produces a missing-glyph box
+            # on some words -- including this exact currency name. Bidi
+            # reordering alone only ever uses base codepoints, which are
+            # fully covered, at the cost of letters not being cursively
+            # joined (BASIC has no GSUB shaping either way, so joining
+            # isn't achievable in this fallback regardless).
+            try:
+                from bidi.algorithm import get_display
+                text_to_draw = get_display(name)
+            except Exception:
+                log.exception(
+                    "rank_card_renderer: get_display() fallback failed for "
+                    "Arabic currency name %r -- drawing raw logical string, "
+                    "which will render out of order.", name)
+        return amira_typo(size), text_to_draw, True
     return base_font_fn(base_size), name, False
 
 
@@ -1564,12 +1609,7 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
             glow_color = (COLORS["currency_pearl_glow"] if i == 2
                          else COLORS["currency_shell_glow"])
             glow_kwargs = dict(glow=glow_color, blur=4, glow_alpha=0.35)
-        # Currency names only: nudged up a few px from the shared y+116
-        # baseline the fixed English labels (MESSAGES/VOICE TIME/GAMES WON)
-        # still use below -- keeps this adjustment isolated to the two
-        # dynamic currency labels rather than shifting the whole stat row.
-        label_y = y + (110 if is_currency_label else 116)
-        _draw_condensed(img, (x + w / 2 - lw_nat * 0.66 / 2, label_y), _lab_painter,
+        _draw_condensed(img, (x + w / 2 - lw_nat * 0.66 / 2, y + 116), _lab_painter,
                         ratio=0.66, **glow_kwargs)
 
 
