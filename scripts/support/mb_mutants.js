@@ -74,6 +74,12 @@ const TARGETS = {
         label: 'dashboard/static/js/embed/assets.js',
         harness: path.join(ROOT, 'scripts', 'test_message_builder_assets.js'),
     },
+    assetstore: {
+        file: path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'asset-store.js'),
+        env: 'NERO_ASSET_STORE_SRC',
+        label: 'dashboard/static/js/embed/asset-store.js',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_asset_store.js'),
+    },
 };
 const HARNESS = path.join(ROOT, 'scripts', 'test_message_builder_page.js');
 
@@ -1394,6 +1400,251 @@ const MUTANTS = [
             "        const source = '0'.repeat(16);",
         ]],
     },
+
+    // ── step 7b: the asset byte store + object URLs ────────────────
+    {
+        id: 'ASB1',
+        target: 'assetstore',
+        why: "the stored bytes are the caller's buffer, so a later write into it changes the asset",
+        edits: [[
+            "        const copy = new Uint8Array(view.length);\n        copy.set(view);\n        return copy.buffer;",
+            "        return view.buffer;",
+        ]],
+    },
+    {
+        id: 'ASB2',
+        target: 'assetstore',
+        why: "an empty file is stored as if it were an image",
+        edits: [[
+            "                if (!view || !view.length) return Promise.resolve(refuse(assetId, 'no-bytes'));",
+            "                if (!view) return Promise.resolve(refuse(assetId, 'no-bytes'));",
+        ]],
+    },
+    {
+        id: 'ASB3',
+        target: 'assetstore',
+        why: "the id is trusted instead of computed, so one id can hold any bytes",
+        edits: [[
+            "                const expected = core.assetIdFromSha(sha256);\n                if (!expected || expected !== assetId) {",
+            "                const expected = assetId;\n                if (!expected) {",
+        ]],
+    },
+    {
+        id: 'ASB4',
+        target: 'assetstore',
+        why: "two different assets of the same length count as the same asset",
+        edits: [[
+            "                    const duplicate = !!(found.ok && found.entry.sha256 === sha256 &&\n                        found.entry.byteLength === entry.byteLength);",
+            "                    const duplicate = !!(found.ok &&\n                        found.entry.byteLength === entry.byteLength);",
+        ]],
+    },
+    {
+        id: 'ASB5',
+        target: 'assetstore',
+        why: "a duplicate is rewritten every time instead of being recognised",
+        edits: [[
+            "                    const duplicate = !!(found.ok && found.entry.sha256 === sha256 &&\n                        found.entry.byteLength === entry.byteLength);",
+            "                    const duplicate = false;",
+        ]],
+    },
+    {
+        id: 'ASB6',
+        target: 'assetstore',
+        why: "bytes that only reached memory are reported as already saved",
+        edits: [[
+            "                        if (found.source !== 'memory') return described;",
+            "                        return described;",
+        ]],
+    },
+    {
+        id: 'ASB7',
+        target: 'assetstore',
+        why: "a failed read is reported as a missing asset (the two states become one)",
+        edits: [[
+            "                        if (!available()) return { ok: false, reason: storageReason() };\n                        stats.misses++;\n                        return { ok: false, reason: 'missing' };",
+            "                        stats.misses++;\n                        return { ok: false, reason: 'missing' };",
+        ]],
+    },
+    {
+        id: 'ASB8',
+        target: 'assetstore',
+        why: "a truncated entry is served as if it were the asset",
+        edits: [[
+            "        if (raw.byteLength !== view.length) return null;          // truncated or padded: not the bytes we stored",
+            "        if (false) return null;                                   // truncated or padded: not the bytes we stored",
+        ]],
+    },
+    {
+        id: 'ASB9',
+        target: 'assetstore',
+        why: "an entry with an unusable digest is accepted",
+        edits: [[
+            "        if (typeof raw.sha256 !== 'string' || !HEX_RE.test(raw.sha256)) return null;",
+            "        if (typeof raw.sha256 !== 'string') return null;",
+        ]],
+    },
+    {
+        id: 'ASB10',
+        target: 'assetstore',
+        why: "an entry stored under another key is served (the key stops meaning anything)",
+        edits: [[
+            "        if (raw.assetId !== assetId) return null;                 // a key pointing at someone else's record",
+            "        if (false) return null;                                   // a key pointing at someone else's record",
+        ]],
+    },
+    {
+        id: 'ASB11',
+        target: 'assetstore',
+        why: "getBytes hands out the store's own bytes, so a caller can corrupt the asset",
+        edits: [[
+            "                    const copy = new Uint8Array(view.length);\n                    copy.set(view);",
+            "                    const copy = view;",
+        ]],
+    },
+    {
+        id: 'ASB12',
+        target: 'assetstore',
+        why: "a verified read serves bytes that no longer hash to their id",
+        edits: [[
+            "                        if (actual !== found.entry.sha256) {",
+            "                        if (false) {",
+        ]],
+    },
+    {
+        id: 'ASB13',
+        target: 'assetstore',
+        why: "a missing asset is answered with a fabricated URL (the broken image this design forbids)",
+        edits: [[
+            "                        stats.urlMisses++;\n                        return refuse(assetId, found.reason);",
+            "                        stats.urlMisses++;\n                        return { ok: true, assetId: assetId, url: 'blob:placeholder', minted: true, cached: false, mime: NEUTRAL_MIME };",
+        ]],
+    },
+    {
+        id: 'ASB14',
+        target: 'assetstore',
+        why: "the URL is re-minted on every lookup of unchanged bytes",
+        edits: [[
+            "                    const cached = urlCache[assetId];\n                    if (cached && cached.mime === mime) {",
+            "                    const cached = urlCache[assetId];\n                    if (false) {",
+        ]],
+    },
+    {
+        id: 'ASB15',
+        target: 'assetstore',
+        why: "re-typing an asset leaves the old URL alive next to the new one",
+        edits: [[
+            "                    if (cached) releaseAsset(assetId);       // a different blob type: the old URL was another resource",
+            "                    if (false) releaseAsset(assetId);        // a different blob type: the old URL was another resource",
+        ]],
+    },
+    {
+        id: 'ASB16',
+        target: 'assetstore',
+        why: "release drops the URL from the cache without revoking it (a leaked object URL)",
+        edits: [[
+            "            revokeUrl(cached.url);\n            delete urlCache[assetId];\n            return { ok: true, assetId: assetId, revoked: true };",
+            "            delete urlCache[assetId];\n            return { ok: true, assetId: assetId, revoked: true };",
+        ]],
+    },
+    {
+        id: 'ASB17',
+        target: 'assetstore',
+        why: "releaseAll revokes only the first outstanding URL",
+        edits: [[
+            "            ids.forEach((id) => {\n                revokeUrl(urlCache[id].url);\n                delete urlCache[id];\n            });",
+            "            ids.slice(0, 1).forEach((id) => {\n                revokeUrl(urlCache[id].url);\n                delete urlCache[id];\n            });",
+        ]],
+    },
+    {
+        id: 'ASB18',
+        target: 'assetstore',
+        why: "teardown revokes nothing",
+        edits: [[
+            "                const released = releaseAllUrls();",
+            "                const released = { ok: true, revoked: 0, assetIds: [] };",
+        ]],
+    },
+    {
+        id: 'ASB19',
+        target: 'assetstore',
+        why: "a destroyed store keeps working (a zombie serving from a closed adapter)",
+        edits: [[
+            "                dead = true;\n                // `retained` is how many byte entries this instance still holds.\n                // A teardown that leaves one behind has leaked a whole image, and\n                // saying the number out loud is what makes that checkable instead\n                // of hoped for.\n                return {\n                    ok: true, revoked: released.revoked, assetIds: released.assetIds,\n                    dropped: dropped, retained: Object.keys(memory).length,\n                };",
+            "                dead = false;\n                // `retained` is how many byte entries this instance still holds.\n                // A teardown that leaves one behind has leaked a whole image, and\n                // saying the number out loud is what makes that checkable instead\n                // of hoped for.\n                return {\n                    ok: true, revoked: released.revoked, assetIds: released.assetIds,\n                    dropped: dropped, retained: Object.keys(memory).length,\n                };",
+        ]],
+    },
+    {
+        id: 'ASB20',
+        target: 'assetstore',
+        why: "teardown keeps the session bytes (an unpersisted asset outlives its session)",
+        edits: [[
+            "                dropped.forEach((id) => { delete memory[id]; });",
+            "                dropped.forEach((id) => { });",
+        ]],
+    },
+    {
+        id: 'ASB21',
+        target: 'assetstore',
+        why: "the adapter is pointed at the document store, so bytes and documents share one store",
+        edits: [[
+            "            primaryStore: STORE_NAME,",
+            "            primaryStore: drafts.V2_STORES[0],",
+        ]],
+    },
+    {
+        id: 'ASB22',
+        target: 'assetstore',
+        why: "storage is treated as usable without asking it",
+        edits: [[
+            "            return typeof storage.isAvailable === 'function' ? !!storage.isAvailable() : true;",
+            "            return true;",
+        ]],
+    },
+    {
+        id: 'ASB23',
+        target: 'assetstore',
+        why: "mode() claims persistence even when there is none",
+        edits: [[
+            "                    mode: has ? 'indexeddb' : 'memory',",
+            "                    mode: 'indexeddb',",
+        ]],
+    },
+    {
+        id: 'ASB24',
+        target: 'assetstore',
+        why: "the stored content type is passed through unnormalised",
+        edits: [[
+            "                    mime: normaliseMime(opts && opts.mime),",
+            "                    mime: (opts && opts.mime) || '',",
+        ]],
+    },
+    {
+        id: 'ASB25',
+        target: 'assetstore',
+        why: "a persisted asset keeps a second copy in memory (two answers to where the bytes are)",
+        edits: [[
+            "                        if (w.persisted) {\n                            // Storage has it: this instance does not need a\n                            // second copy for the rest of the session.\n                            delete memory[assetId];\n                        } else {\n                            memory[assetId] = entry;\n                        }",
+            "                        memory[assetId] = entry;",
+        ]],
+    },
+    {
+        id: 'ASB26',
+        target: 'assetstore',
+        why: "survey() reports every asset as available",
+        edits: [[
+            "                        availability: found.ok ? 'bytes-local' : 'bytes-missing',",
+            "                        availability: 'bytes-local',",
+        ]],
+    },
+    {
+        id: 'ASB27',
+        target: 'assetstore',
+        why: "the URL factory is handed the store's own bytes instead of a copy",
+        edits: [[
+            "                    const forUrl = new Uint8Array(view.length);\n                    forUrl.set(view);",
+            "                    const forUrl = view;",
+        ]],
+    },
 ];
 
 function sha1(file) {
@@ -1509,6 +1760,8 @@ function main() {
             NERO_ACTIONBAR_SRC: process.env.NERO_ACTIONBAR_SRC,
             NERO_VALIDATE_SRC: process.env.NERO_VALIDATE_SRC,
             NERO_ASSETS_SRC: process.env.NERO_ASSETS_SRC,
+            NERO_ASSET_STORE_SRC: process.env.NERO_ASSET_STORE_SRC,
+            NERO_MODEL_SRC: process.env.NERO_MODEL_SRC,
         };
         envPatch[target.env] = file;
         const run = spawnSync(process.execPath, [harness], {
