@@ -143,7 +143,24 @@ const strip = byId(TREE, 'mb2-strip');
 assert(strip && strip.attrs.role === 'status' && strip.attrs['aria-live'] === 'polite',
     'the validation strip is a polite live region', strip && flatText(strip.attrs));
 assert(strip && Object.prototype.hasOwnProperty.call(strip.attrs, 'hidden'),
-    'the validation strip starts hidden (it has nothing to say in step 5)');
+    'the validation strip starts hidden (a blank document is clean, so step 6a has nothing to say)');
+assert(strip && strip.attrs.class === 'mb2-strip',
+    'and it starts with exactly its base class (no tone class before the page has spoken)',
+    strip && flatText(strip.attrs));
+
+// ── the served limits ride in the shell (step 6a, transport L1) ──
+// data-limits must be on the page ROOT (the page reads it there) and it must be
+// the tojson|forceescape pipe: tojson alone leaves the double quotes raw, which
+// would break out of the double-quoted attribute the moment a limits table
+// contained one. This is a source-level assertion on purpose — the JSON itself
+// is asserted by the page harness, which hands the page a real table.
+assert(ROOT_ATTRS['data-limits'] === '{{ limits | tojson | forceescape }}',
+    'the page root carries the served limits, escaped so the attribute cannot break',
+    String(ROOT_ATTRS['data-limits']));
+assert(ROOT_ATTRS['data-limits'].indexOf('limits') !== -1 &&
+       ROOT_ATTRS['data-limits'].indexOf('tojson') !== -1 &&
+       ROOT_ATTRS['data-limits'].indexOf('forceescape') !== -1,
+    'and the expression is the documented tojson|forceescape pipe');
 const status = byId(TREE, 'mb2-bar-status');
 assert(status && status.attrs.role === 'status' && status.attrs['aria-live'] === 'polite',
     'the bar status is a polite live region', status && flatText(status.attrs));
@@ -228,10 +245,10 @@ assert(declaredIds.length >= 9, 'the module declares the full region surface', S
 const SCRIPTS = String(ROOT_ATTRS['data-page-script'] || '');
 const scriptOrder = (SCRIPTS.match(/js\/[^']+?'/g) || []).map(s => s.replace(/'$/, ''));
 const expectedOrder = [
-    'js/embed/model.js', 'js/embed/store.js', 'js/embed/discord-markdown.js',
-    'js/embed/preview.js', 'js/embed/drafts.js', 'js/embed/views/statusbar.js',
-    'js/embed/views/rail.js', 'js/embed/views/inspector.js', 'js/embed/views/actionbar.js',
-    'js/embed/message-builder-page.js',
+    'js/embed/model.js', 'js/embed/store.js', 'js/embed/validate.js',
+    'js/embed/discord-markdown.js', 'js/embed/preview.js', 'js/embed/drafts.js',
+    'js/embed/views/statusbar.js', 'js/embed/views/rail.js', 'js/embed/views/inspector.js',
+    'js/embed/views/actionbar.js', 'js/embed/message-builder-page.js',
 ];
 assert(JSON.stringify(scriptOrder) === JSON.stringify(expectedOrder),
     'data-page-script loads the foundations before the page, in dependency order',
@@ -240,6 +257,15 @@ scriptOrder.forEach(rel => {
     const file = path.join(ROOT, 'dashboard', 'static', rel);
     assert(fs.existsSync(file), 'listed script exists: ' + rel);
 });
+// The validator is a foundation, so it must be loaded BEFORE the page that
+// calls it (the page's foundation() throws without it) and it must publish the
+// one global the page looks for.
+const VALIDATE_PATH = path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'validate.js');
+const VALIDATE_SRC = fs.readFileSync(VALIDATE_PATH, 'utf8');
+assert(/NERO\.embed\.validate\s*=/.test(VALIDATE_SRC),
+    'embed/validate.js publishes NERO.embed.validate');
+assert(scriptOrder.indexOf('js/embed/validate.js') < scriptOrder.indexOf('js/embed/message-builder-page.js'),
+    'and the page is loaded after it');
 
 // The page is loaded LAST by the registry and must not be loadable without the
 // registry (that is what stops it from being silently inlined into the fragment).
@@ -291,6 +317,17 @@ assert(/view\.dirty/.test(STATUS_CODE) && !/store\.isDirty/.test(STATUS_CODE) &&
 assert(!/indexedDB|localStorage|sessionStorage/.test(statusbar) && !/indexedDB|localStorage|sessionStorage/.test(PAGE_SRC),
     'no page/view module opens storage on its own (persistence belongs to drafts.js)');
 
+// ── the strip's stylesheet contract (step 6a) ───────────────────
+// The strip is one region with two tones, in the same mb2-tone-* vocabulary the
+// status bar uses, and it must wrap the issue text instead of widening the shell.
+assert(/\.mb2-strip\.mb2-tone-warn\s*\{[^}]*--warning/.test(CSS_NO_COMMENTS) &&
+       /\.mb2-strip\.mb2-tone-danger\s*\{[^}]*--danger/.test(CSS_NO_COMMENTS),
+    'the strip has a warning and a danger tone, drawn from the shared tone variables');
+assert(/\.mb2-strip\s*\{[^}]*overflow-wrap:\s*anywhere/.test(CSS_NO_COMMENTS),
+    'and a long issue message wraps instead of overflowing the shell');
+assert(!/\.mb2-strip[^{]*\{[^}]*display:\s*block/.test(CSS_NO_COMMENTS),
+    'the strip never overrides the [hidden] rule with a display of its own');
+
 // ── the action bar's contract (step 5d) ──────────────────────────
 // The bar is the one place where a button does something irreversible-ish, so
 // the static contract matters: it exists, it is loaded in order (B above), it
@@ -326,6 +363,15 @@ assert(!!v2Route && /render\("manage\/message_builder\.html"/.test(v2Route[1]),
     'the v2 route renders manage/message_builder.html');
 assert(!!v2Route && /bot_identity=_bot_identity_for_page\(/.test(v2Route[1]),
     'the v2 route passes the guild bot identity (no Discord call from the browser)');
+// Step 6a: the limits table the template renders must come from the server's one
+// authority (utils/discord_limits), not from a literal in the route.
+assert(!!v2Route && /limits=limits_payload\(\)/.test(v2Route[1]),
+    'the v2 route renders the served limits table into the page (transport L1)');
+assert(/^from utils\.discord_limits import limits_payload$/m.test(APP),
+    'and the route imports that table from utils/discord_limits (one authority)');
+assert((APP.match(/limits_payload\(\)/g) || []).length === 1,
+    'the v2 route is the only page in app.py that renders a limits table',
+    String((APP.match(/limits_payload\(\)/g) || []).length));
 const v1Route = /@app\.route\("\/embed-builder"\)[\s\S]*?return render\("manage\/embedbuilder\.html"/.exec(APP);
 assert(!!v1Route, 'the v1 /embed-builder route still renders manage/embedbuilder.html');
 assert(APP.indexOf('"/embed-builder/v2"') !== APP.lastIndexOf('"/embed-builder/v2"') ||

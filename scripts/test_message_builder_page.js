@@ -43,6 +43,17 @@
         JSON hands the page's own payload to the clipboard and reports through
         the one status region, a failed copy opens the fallback dialog, and
         teardown empties the container and releases the subscription.
+     Q. A resolved failure stops being reported (step 5d-3c): undo/discard back
+        to what storage holds clears the failure, an in-flight write does not,
+        and the races around that rule hold.
+     R. Validation (step 6a): the page owns #mb2-strip; the SERVED limits reach
+        the page and are the only numbers used; a document change schedules ONE
+        pass per burst and a load validates immediately; issues land in the
+        store's ui.issues and nowhere else; the strip is hidden while clean and
+        written only when its content actually changes; a missing or partial
+        limits table is an explicit failure rather than a silent pass; the strip
+        never enters the undo stack, never gains children and never becomes a
+        second live region.
 
    Run:  node scripts/test_message_builder_page.js
    ═══════════════════════════════════════════════════════════════ */
@@ -68,11 +79,13 @@ const js = (...parts) => path.join(ROOT_DIR, 'dashboard', 'static', 'js', ...par
 const PAGE_PATH = process.env.NERO_MB_PAGE_SRC || js('embed', 'message-builder-page.js');
 const DRAFTS_PATH = process.env.NERO_DRAFTS_SRC || js('embed', 'drafts.js');
 const STORE_PATH = process.env.NERO_STORE_SRC || js('embed', 'store.js');
+const VALIDATE_PATH = process.env.NERO_VALIDATE_SRC || js('embed', 'validate.js');
 const ACTIONBAR_PATH = process.env.NERO_ACTIONBAR_SRC || js('embed', 'views', 'actionbar.js');
 const FOUNDATION = [
     js('nav-lifecycle.js'),
     js('embed', 'model.js'),
     STORE_PATH,
+    VALIDATE_PATH,
     js('embed', 'discord-markdown.js'),
     js('embed', 'preview.js'),
     DRAFTS_PATH,
@@ -89,7 +102,39 @@ const GUILD = '1111222233334444';
 const OTHER_GUILD = '9999888877776666';
 const RECORD_NOW = 1790284740000;      // the RECORD's clock is fixed; the page's stays real
 
+/**
+ * The served limits the page is given, mirroring
+ * utils/discord_limits.limits_payload() — the table the route now renders into
+ * data-limits. Section R changes numbers in it (proving the page reads THIS
+ * table and has no copy of its own) and section R5 withholds it entirely.
+ */
+function servedLimits() {
+    return {
+        message: { content_max: 2000, embeds_max: 10, embed_total_chars_max: 6000, request_bytes_max: 26214400 },
+        attachments: { count_max: 10, total_bytes_max: 26148864, file_bytes_advisory: 20971520, file_advisory_is_hard: false },
+        embed: {
+            title_max: 256, description_max: 4096, fields_max: 25, field_name_max: 256,
+            field_value_max: 1024, footer_text_max: 2048, author_name_max: 256,
+        },
+        components: {
+            rows_max: 5, buttons_per_row_max: 5, button_label_max: 80, button_url_max: 512,
+            custom_id_max: 100, select_options_max: 25, select_option_label_max: 100,
+            select_option_description_max: 100, select_placeholder_max: 150,
+        },
+    };
+}
+const SERVED_LIMITS = servedLimits();
+
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const rep = (ch, n) => String(ch).repeat(n);
+// The page's validateTimer is {owner, id} or null. A mutant can leave a
+// raw realm Timeout behind instead, and JSON.stringify() cannot express one
+// (it is circular) — so descriptions go through this.
+function timerNote(t) {
+    if (t === null || t === undefined) return String(t);
+    if (typeof t === 'object') return '{owner:' + (t.owner || '?') + '}';
+    return typeof t;
+}
 
 // ── Fixtures ─────────────────────────────────────────────────────
 function blankDocument() {
@@ -154,9 +199,15 @@ function makeEnv(opts) {
     });
 
     const env = { dom, win, sandbox, net, consoleLines, NERO: win.NERO, idb: null, guildId: GUILD };
+    env.limits = opts.limits === undefined ? SERVED_LIMITS : opts.limits;
     env.mount = async function (settleMs) {
         const root = materialize(findById(TEMPLATE_TREE, 'mb2-root'), dom.document);
         root.setAttribute('data-guild-id', env.guildId);
+        // The route renders the served limits into the shell (step 6a, L1); the
+        // harness gives the page the same thing — a JSON string, or whatever a
+        // test deliberately sets (a broken string, or null for "absent").
+        if (typeof env.limits === 'string') root.setAttribute('data-limits', env.limits);
+        else if (env.limits) root.setAttribute('data-limits', JSON.stringify(env.limits));
         env.root = root;
         dom.attach(root);
         env.before = { docListeners: dom.document.listeners.length, winListeners: win.listeners.length };
@@ -324,8 +375,24 @@ async function main() {
                env.el('mb2-inspector-body').getAttribute('data-insp-view') === 'content',
             'the inspector shows exactly the content panel (5c)',
             String(env.el('mb2-inspector-body').children.length));
-        assert(env.el('mb2-strip').hidden === true && env.el('mb2-strip').textContent === '',
-            'the validation strip exists, hidden and empty (step 6 owns its contents)');
+        // 6a: the page now OWNS the strip. A blank document is clean, so the
+        // region stays exactly as the template declared it — hidden, empty and
+        // childless — and the store's issue list is the empty one it booted
+        // with (no dispatch at all, see section R). The old 5a assertion said
+        // "step 6 owns its contents"; this says what step 6 actually did.
+        assert(env.el('mb2-strip').hidden === true && env.el('mb2-strip').textContent === '' &&
+               env.el('mb2-strip').children.length === 0 &&
+               env.el('mb2-strip').getAttribute('class') === 'mb2-strip',
+            'the validation strip is hidden, empty, childless and untinted for a clean document',
+            [env.el('mb2-strip').hidden, JSON.stringify(env.el('mb2-strip').textContent),
+             env.el('mb2-strip').getAttribute('class')].join(' | '));
+        assert(env.store().getUi().issues.length === 0 &&
+               env.inst.validateTimer === null,
+            'and the page validated the blank document once, with nothing left scheduled',
+            [env.store().getUi().issues.length, 'issues', timerNote(env.inst.validateTimer)].join(' '));
+        assert(env.inst.ctx.counters.validateRuns === 1,
+            'exactly one validation run at boot (the load does not schedule a second)',
+            String(env.inst.ctx.counters.validateRuns));
         // 5d fills the container — and only with actions that exist. This is the
         // one 5a placeholder that legitimately flips: it asserted the container
         // was empty until the buttons were real.
@@ -856,8 +923,18 @@ async function main() {
         const pageSrc = fs.readFileSync(PAGE_PATH, 'utf8');
         assert(pageSrc.indexOf('toDiscordPayload') === -1,
             'the page builds no payload in 5a (Copy JSON arrives in 5d)');
-        assert(env.store().getUi().issues.length === 0,
-            'no validation issues are produced in step 5');
+        // 6a replaces the 5a "no validation issues are produced in step 5"
+        // placeholder with the real rule: the store's list IS the validator's
+        // output for the document the store holds — the edit above scheduled one
+        // pass, and that pass produced it.
+        await env.settle(250);
+        const expected = env.NERO.embed.validate.validate(store.getDocument(), env.limits);
+        assert(JSON.stringify(env.store().getUi().issues) === JSON.stringify(expected),
+            'the issue list is the validator\'s own result for the canonical document',
+            JSON.stringify(env.store().getUi().issues));
+        assert(env.inst.ctx.counters.validateRuns === 2,
+            'and the edit above cost exactly one validation pass (boot 1 + burst 1)',
+            String(env.inst.ctx.counters.validateRuns));
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -2423,6 +2500,297 @@ async function main() {
         }
 
         console.log('    (Q: the resolved-failure rule and its races, end to end)');
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    section('R. validation: the served limits, the burst rule and the strip (step 6a)');
+    // ─────────────────────────────────────────────────────────────
+    // The flow this step approved, end to end and nothing wider:
+    //
+    //   data-limits (served) → validate(document, limits) → store.ui.issues → #mb2-strip
+    //
+    // What is asserted here is the page's half: WHEN the engine runs, that the
+    // result goes to the store's ONE issue list, that the strip is written from
+    // that list only when it changes, and that a missing or partial limits table
+    // is an explicit failure rather than a quiet "nothing to check".
+    {
+        // ── R1: boot ──
+        const env = makeEnv();
+        installIdb(env);
+        await env.mount();
+        const strip = env.el('mb2-strip');
+        assert(strip.hidden === true && strip.textContent === '' && strip.children.length === 0,
+            'R1: a clean boot leaves the strip hidden, empty and childless');
+        assert(env.inst.ctx.counters.validateRuns === 1,
+            'R1: exactly one validation pass at boot', String(env.inst.ctx.counters.validateRuns));
+        assert(env.inst.limits && env.inst.limits.embed.title_max === 256 && env.inst.limitsError === null,
+            'R1: the served table was read from the page shell (data-limits)',
+            JSON.stringify({ error: env.inst.limitsError }));
+        assert(env.net.calls === 0, 'R1: and no network call was made to get it');
+        assert(env.store().getUi().issues.length === 0,
+            'R1: the store holds the empty issue list it booted with (no dispatch for "still clean")');
+
+        // ── R2: one pass per burst, and the result is the validator's ──
+        const content = env.inst.inspector.control('content');
+        const type = (text) => {
+            content.value = text;
+            env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+        };
+        for (let i = 0; i < 10; i++) type(rep('x', 1900 + i));      // ten keystrokes, still legal
+        await env.settle(250);
+        assert(env.inst.ctx.counters.validateRuns === 2,
+            'R2: ten keystrokes cost ONE validation pass (boot 1 → burst 2)',
+            String(env.inst.ctx.counters.validateRuns));
+        assert(strip.hidden === true && strip.textContent === '',
+            'R2: and a legal burst leaves the strip exactly as it was',
+            JSON.stringify({ hidden: strip.hidden, text: strip.textContent }));
+
+        // The same burst, now over the limit: the strip appears with the count,
+        // the server's wording and the danger tone.
+        const before = env.dom.ops.textContentSet;
+        type(rep('x', env.limits.message.content_max + 1));
+        await env.settle(250);
+        assert(env.inst.ctx.counters.validateRuns === 3,
+            'R2: the over-limit keystroke cost one more pass (still per burst, not per keystroke)',
+            String(env.inst.ctx.counters.validateRuns));
+        assert(strip.hidden === false && strip.textContent ===
+               '1 problem — Message content is 2001 characters; Discord\'s limit is 2000.',
+            'R2: the strip shows the count and the issue, with the server\'s wording',
+            JSON.stringify(strip.textContent));
+        assert(strip.getAttribute('class') === 'mb2-strip mb2-tone-danger',
+            'R2: an error tints the strip danger (the status bar\'s own tone vocabulary)',
+            strip.getAttribute('class'));
+        assert(env.dom.ops.textContentSet - before === 1,
+            'R2: appearing cost exactly one text write',
+            String(env.dom.ops.textContentSet - before));
+        assert(env.inst.ctx.counters.validateRuns === 3 &&
+               JSON.stringify(env.store().getUi().issues) ===
+               JSON.stringify(env.NERO.embed.validate.validate(env.store().getDocument(), env.limits)),
+            'R2: and the store\'s list is exactly what the engine returned for that document',
+            JSON.stringify(env.store().getUi().issues));
+
+        // ── R3: updates when the issue changes, disappears when it is fixed ──
+        const count = () => env.dom.ops.textContentSet;
+        let mark = count();
+        type(rep('x', env.limits.message.content_max + 2));
+        await env.settle(250);
+        assert(strip.textContent === '1 problem — Message content is 2002 characters; Discord\'s limit is 2000.' &&
+               count() - mark === 1,
+            'R3: a changed issue message rewrites the strip once',
+            JSON.stringify({ text: strip.textContent, writes: count() - mark }));
+        mark = count();
+        type(rep('x', env.limits.message.content_max));
+        await env.settle(250);
+        assert(strip.hidden === true && strip.textContent === '' && strip.getAttribute('class') === 'mb2-strip' &&
+               count() - mark === 1,
+            'R3: fixing it hides the strip again (the text is cleared once)',
+            JSON.stringify({ hidden: strip.hidden, text: strip.textContent, writes: count() - mark }));
+        mark = count();
+        type(rep('x', env.limits.message.content_max - 1));   // a real change, still legal
+        await env.settle(250);
+        assert(count() - mark === 0 && env.inst.ctx.counters.validateRuns === 6,
+            'R3: an unchanged result writes nothing at all (change-guarded, but the pass still ran)',
+            JSON.stringify({ writes: count() - mark, runs: env.inst.ctx.counters.validateRuns }));
+        assert(env.dom.warnings.length === 0, 'R3: and nothing was ever overwritten in the strip',
+            env.dom.warnings.join(' | '));
+
+        // ── R4: the page uses the SERVED numbers, not copies ──
+        const store = env.store();
+        const depth = store.historyDepth().size;
+        const beforeIssues = store.getUi().issues;
+        type('a legal 10 characters');
+        await env.settle(250);
+        assert(store.getUi().issues === beforeIssues,
+            'R4: a pass that changes nothing does not even dispatch (the list reference is untouched)');
+        assert(store.historyDepth().size === depth,
+            'R4: and ui/setIssues never enters the undo stack', String(store.historyDepth().size));
+        env.unmount();
+    }
+    {
+        // A different limits table must change the OUTCOME — the only proof that
+        // the numbers are read and not baked into the page or the engine.
+        const limits = servedLimits();
+        limits.message.content_max = 20;
+        limits.embed.title_max = 5;
+        const env = makeEnv({ limits: limits });
+        installIdb(env);
+        await env.mount();
+        const content = env.inst.inspector.control('content');
+        content.value = rep('x', 21);
+        env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+        await env.settle(250);
+        assert(env.el('mb2-strip').textContent ===
+               '1 problem — Message content is 21 characters; Discord\'s limit is 20.',
+            'R4: a 21-character message is over a served limit of 20 (the page read the table it was given)',
+            JSON.stringify(env.el('mb2-strip').textContent));
+        // The page's own blank document mints its ids, so read the embed id from
+        // the store rather than assuming one.
+        const embedId = env.store().getDocument().embeds[0].id;
+        env.inst.store.dispatch({ type: 'ui/selectNode', nodeId: embedId });
+        const title = env.inst.inspector.control('title');
+        assert(!!title, 'R4 rig: the embed panel exposes its title control');
+        title.value = '123456';                       // 6 characters against a served title_max of 5
+        env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: title });
+        await env.settle(250);
+        assert(env.el('mb2-strip').textContent ===
+               '2 problems — Message content is 21 characters; Discord\'s limit is 20. (1 more)',
+            'R4: two issues are summarised as a count plus the first one, in the engine\'s order',
+            JSON.stringify(env.el('mb2-strip').textContent));
+        env.unmount();
+    }
+    {
+        // ── R5: no table, or an incomplete one, is an explicit failure ──
+        const cases = [
+            ['the attribute is missing entirely', null],
+            ['the attribute is not JSON', '{not json'],
+            ['the attribute is not an object', '[1,2,3]'],
+        ];
+        for (const [why, value] of cases) {
+            const env = makeEnv({ limits: value });
+            installIdb(env);
+            await env.mount();
+            const strip = env.el('mb2-strip');
+            assert(env.inst.limits === null && typeof env.inst.limitsError === 'string',
+                'R5 (' + why + '): the page records that it has no limits table',
+                JSON.stringify({ limits: env.inst.limits, error: env.inst.limitsError }));
+            assert(strip.hidden === false && /limits did not reach this page/.test(strip.textContent) &&
+                   strip.getAttribute('class') === 'mb2-strip mb2-tone-danger',
+                'R5 (' + why + '): and the strip says so instead of implying the message is fine',
+                JSON.stringify(strip.textContent));
+            assert(env.store().getUi().issues.length === 1 &&
+                   env.store().getUi().issues[0].code === 'limits.missing',
+                'R5 (' + why + '): with the one explicit issue in the store\'s list',
+                JSON.stringify(env.store().getUi().issues));
+            assert(env.consoleLines.error.length === 0,
+                'R5 (' + why + '): nothing was thrown or logged', env.consoleLines.error.join(' | '));
+            env.unmount();
+        }
+        // A table that is present but missing ONE key is just as unusable: that
+        // key's rule would silently stop existing.
+        const partial = servedLimits();
+        delete partial.embed.fields_max;
+        const env = makeEnv({ limits: partial });
+        installIdb(env);
+        await env.mount();
+        const partialIssues = env.store().getUi().issues;
+        assert(env.inst.limits && env.inst.limits.embed.fields_max === undefined &&
+               partialIssues.length === 1 && partialIssues[0].code === 'limits.missing' &&
+               /limits did not reach this page/.test(env.el('mb2-strip').textContent),
+            'R5 (one key missing): the engine refuses the table rather than skipping that rule',
+            JSON.stringify(env.store().getUi().issues));
+        env.unmount();
+    }
+    {
+        // ── R6: a load validates immediately (a broken draft must not look clean) ──
+        const env = makeEnv();
+        const document_ = filledDocument();
+        document_.embeds[0].title = rep('t', 300);          // over the served 256
+        installIdb(env, seedSpec(env, [makeRecord(env, document_, { documentId: 'doc-filled' })]));
+        await env.mount();
+        assert(env.inst.ctx.counters.validateRuns === 1 && env.inst.validateTimer === null,
+            'R6: a restored draft is validated once, immediately (nothing left scheduled)',
+            [env.inst.ctx.counters.validateRuns, 'runs, timer', timerNote(env.inst.validateTimer)].join(' '));
+        assert(env.el('mb2-strip').hidden === false &&
+               env.el('mb2-strip').textContent ===
+               '1 problem — Embed 1 title is 300 characters; Discord\'s limit is 256.',
+            'R6: so the strip already describes the loaded draft right after mount',
+            JSON.stringify(env.el('mb2-strip').textContent));
+        env.unmount();
+    }
+    {
+        // ── R7: teardown cancels a scheduled pass ──
+        const env = makeEnv();
+        installIdb(env);
+        await env.mount();
+        const content = env.inst.inspector.control('content');
+        content.value = rep('x', 2100);
+        env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+        assert(env.inst.validateTimer !== null, 'R7 rig: the burst scheduled a pass');
+        const runs = env.inst.ctx.counters.validateRuns;
+        env.unmount();
+        assert(env.inst.validateTimer === null, 'R7: teardown cancels the pending pass instead of leaving it armed');
+        await env.settle(300);
+        assert(env.inst.ctx.counters.validateRuns === runs,
+            'R7: and nothing validated after the page was gone',
+            JSON.stringify({ before: runs, after: env.inst.ctx.counters.validateRuns }));
+        assert(env.consoleLines.error.length === 0,
+            'R7: with no error from a callback that fired too late', env.consoleLines.error.join(' | '));
+    }
+    {
+        // ── R8: mounted by hand (no registry ctx), the page still validates ──
+        // The module takes its timer from the registry when there is one; this
+        // is the other branch, and it is the branch a "just call init(root)"
+        // integration would hit. It must behave identically — including reading
+        // the served limits from the shell it was handed.
+        const env = makeEnv();
+        installIdb(env);
+        const root = materialize(findById(TEMPLATE_TREE, 'mb2-root'), env.dom.document);
+        root.setAttribute('data-guild-id', GUILD);
+        root.setAttribute('data-limits', JSON.stringify(servedLimits()));
+        env.dom.attach(root);
+        const inst = env.NERO.embed.messageBuilderPage.init(root, null);
+        await sleep(60);
+        assert(inst && inst.limits && inst.limits.embed.title_max === 256 && inst.ctx === null,
+            'R8: a hand-mounted page reads the served limits the same way, with no registry behind it',
+            JSON.stringify({ limits: !!inst.limits, ctx: inst.ctx }));
+        const content = inst.inspector.control('content');
+        content.value = rep('x', 2001);
+        root.querySelector('#mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+        assert(inst.validateTimer !== null, 'R8 rig: the burst armed a pass on the realm\'s own timer');
+        await sleep(250);
+        const strip = root.querySelector('#mb2-strip');
+        assert(strip.hidden === false && /2001 characters/.test(strip.textContent),
+            'R8: and its own burst still validates and paints the strip',
+            JSON.stringify({ hidden: strip.hidden, text: strip.textContent }));
+        assert(inst.validateTimer === null, 'R8: the hand-mounted timer was consumed, not left armed');
+        assert(env.NERO.embed.messageBuilderPage.destroy() === true,
+            'R8: tearing the hand-mounted page down returns true');
+        await sleep(250);
+        assert(env.consoleLines.error.length === 0,
+            'R8: with nothing logged as an error', env.consoleLines.error.join(' | '));
+    }
+    {
+        // ── R9: hygiene — one region, one writer, one list ──
+        const env = makeEnv();
+        installIdb(env);
+        await env.mount();
+        const inst = env.inst;
+        const content = inst.inspector.control('content');
+        for (let i = 0; i < 5; i++) {
+            content.value = rep('y', 2001 + i);
+            env.el('mb2-inspector-body').dispatch('input', { type: 'input', target: content });
+        }
+        await env.settle(250);
+        // Walk the whole mounted shell: the page may not introduce a live region
+        // of its own, so the only two that exist are the ones the template
+        // declares (the strip and the bar status).
+        const live = [];
+        (function walk(node) {
+            if (node.getAttribute && node.getAttribute('aria-live')) live.push(node.getAttribute('id'));
+            (node.children || []).forEach(walk);
+        })(env.root);
+        assert(live.length === 2 && live.indexOf('mb2-strip') !== -1 && live.indexOf('mb2-bar-status') !== -1,
+            'R9: the page has exactly the two live regions the template declares (no third)',
+            live.join(','));
+        assert(env.el('mb2-strip').children.length === 0,
+            'R9: the strip is text only — the page never builds markup inside it',
+            String(env.el('mb2-strip').children.length));
+        assert(env.el('mb2-bar-status').children.length === 3,
+            'R9: and the status region is untouched by validation (one pill + detail + notice)',
+            String(env.el('mb2-bar-status').children.length));
+        assert(env.el('mb2-bar-actions').children.length === 5,
+            'R9: the action bar still offers the five approved actions (no Validate button)',
+            String(env.el('mb2-bar-actions').children.length));
+        assert(Object.prototype.hasOwnProperty.call(inst, 'issues') === false,
+            'R9: the page keeps NO issue list of its own — the store\'s ui.issues is the one');
+        const pageSrc = fs.readFileSync(PAGE_PATH, 'utf8');
+        assert((pageSrc.match(/type: 'ui\/setIssues'/g) || []).length === 1,
+            'R9: exactly one dispatch site for issues in the whole page module',
+            String((pageSrc.match(/type: 'ui\/setIssues'/g) || []).length));
+        assert(env.net.calls === 0, 'R9: and validation never touches the network');
+        assert(env.inst.ctx.counters.validateRuns === 2,
+            'R9: five keystrokes, one pass', String(env.inst.ctx.counters.validateRuns));
+        env.unmount();
     }
 
     console.log('\nmessage-builder page: ' + pass + ' passed, ' + fail + ' failed');

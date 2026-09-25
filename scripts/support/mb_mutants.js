@@ -62,6 +62,12 @@ const TARGETS = {
         label: 'dashboard/static/js/embed/views/actionbar.js',
         harness: path.join(ROOT, 'scripts', 'test_message_builder_actionbar.js'),
     },
+    validate: {
+        file: path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'validate.js'),
+        env: 'NERO_VALIDATE_SRC',
+        label: 'dashboard/static/js/embed/validate.js',
+        harness: path.join(ROOT, 'scripts', 'test_message_builder_validate.js'),
+    },
 };
 const HARNESS = path.join(ROOT, 'scripts', 'test_message_builder_page.js');
 
@@ -100,7 +106,10 @@ const MUTANTS = [
     {
         id: 'M5',
         why: 'the preview is not subscribed to the store (it only ever paints once)',
-        edits: [["function (s) { return s.document; }", "function (s) { return s.ui; }"]],
+        edits: [[
+            "        inst.unsubs.push(inst.store.subscribe(\n            function (s) { return s.document; },\n            function (document_) { if (!inst.destroyed) preview.updateDocument(document_); }\n        ));",
+            "        inst.unsubs.push(inst.store.subscribe(\n            function (s) { return s.ui; },\n            function (document_) { if (!inst.destroyed) preview.updateDocument(document_); }\n        ));",
+        ]],
     },
     {
         id: 'M6',
@@ -770,6 +779,176 @@ const MUTANTS = [
             "        inst.store.dispatch({ type: 'document/load', document: NERO.embed.model.normalizeDocument(saved), meta: { history: true } });\n        inst.store.markSaved(inst.store.getDocument());",
         ]],
     },
+    // ── step 6a: the validation engine ────────────────────────────────
+    {
+        id: 'V1',
+        target: 'validate',
+        why: 'a missing limit stops being an error (the table is treated as unlimited)',
+        edits: [[
+            "        return { ok: missing.length === 0, missing: missing };",
+            "        return { ok: true, missing: [] };",
+        ]],
+    },
+    {
+        id: 'V2',
+        target: 'validate',
+        why: 'a served limit is hard-coded in the engine instead of read from the table',
+        edits: [[
+            "        if (textLen(e.title) > limits.embed.title_max) {",
+            "        if (textLen(e.title) > 256) {",
+        ]],
+    },
+    {
+        id: 'V3',
+        target: 'validate',
+        why: 'the issue list is module state instead of per-call state (one document\'s issues leak into the next)',
+        edits: [[
+            "        const issues = [];",
+            "        /* module-level scratch */",
+        ], [
+            "    // ── The entry point ──────────────────────────────────────────",
+            "    const issues = [];\n    // ── The entry point ──────────────────────────────────────────",
+        ]],
+    },
+    {
+        id: 'V4',
+        target: 'validate',
+        why: 'every issue is reported as an error (warnings stop being warnings)',
+        edits: [[
+            "        issues.push({\n            code: code,\n            path: path,\n            nodeId: nodeId,\n            severity: severity,\n            message: message,\n        });",
+            "        issues.push({\n            code: code,\n            path: path,\n            nodeId: nodeId,\n            severity: ERROR,\n            message: message,\n        });",
+        ]],
+    },
+    {
+        id: 'V5',
+        target: 'validate',
+        why: 'an issue points at the wire path instead of the node it is about',
+        edits: [[
+            "            nodeId: nodeId,\n            severity: severity,",
+            "            nodeId: path,\n            severity: severity,",
+        ]],
+    },
+    {
+        id: 'V6',
+        target: 'validate',
+        why: 'the per-embed character budget rejects an embed that is exactly at it',
+        edits: [[
+            "        if (total > limits.message.embed_total_chars_max) {",
+            "        if (total >= limits.message.embed_total_chars_max) {",
+        ]],
+    },
+    {
+        id: 'V7',
+        target: 'validate',
+        why: 'an attachment reference is reported as a hard error although phase 1 cannot upload',
+        edits: [[
+            "            push(issues, slot.code + '.attachment-missing', slot.path, slot.nodeId, WARNING, message);",
+            "            push(issues, slot.code + '.attachment-missing', slot.path, slot.nodeId, ERROR, message);",
+        ]],
+    },
+    {
+        id: 'V8',
+        target: 'validate',
+        why: 'an empty embed is reported even when it is the page\'s own single blank one',
+        edits: [[
+            "        if (context.embedCount > 1 && context.messageHasContent && !model.embedHasContent(e)) {",
+            "        if (context.messageHasContent && !model.embedHasContent(e)) {",
+        ]],
+    },
+    {
+        id: 'V9',
+        target: 'validate',
+        why: 'the timestamp check trusts Date.parse (2026-02-31 rolls over and passes)',
+        edits: [[
+            "        if (month < 1 || month > 12) return false;\n        if (day < 1 || day > daysInMonth(year, month)) return false;",
+            "        if (month < 1 || month > 12) return false;",
+        ]],
+    },
+    {
+        id: 'V10',
+        target: 'validate',
+        why: 'too many embeds no longer stops the per-embed checks (the message-level error gets buried)',
+        edits: [[
+            "                'A message can carry at most ' + limits.message.embeds_max + ' embeds; this one has ' + embeds.length + '.');\n            return issues;",
+            "                'A message can carry at most ' + limits.message.embeds_max + ' embeds; this one has ' + embeds.length + '.');",
+        ]],
+    },
+    // ── step 6a: the page's half ─────────────────────────────────────
+    {
+        id: 'VP1',
+        target: 'page',
+        why: 'validation runs synchronously on every keystroke instead of once per burst',
+        edits: [[
+            "        inst.validateTimer = setTimer(inst, function () {\n            inst.validateTimer = null;\n            validateNow(inst);\n        }, VALIDATE_IDLE_MS);\n        return true;",
+            "        inst.validateTimer = null;\n        validateNow(inst);\n        return true;",
+        ]],
+    },
+    {
+        id: 'VP2',
+        target: 'page',
+        why: 'the strip is rewritten on every pass, whether or not its content changed',
+        edits: [[
+            "        if (signature !== inst.issueSignature) {\n            inst.issueSignature = signature;",
+            "        {\n            inst.issueSignature = signature;",
+        ], [
+            "        if (el.textContent !== text) el.textContent = text;",
+            "        el.textContent = text;",
+        ]],
+    },
+    {
+        id: 'VP3',
+        target: 'page',
+        why: 'the store is told the issues again on every pass (a new list for identical issues)',
+        edits: [[
+            "        if (signature !== inst.issueSignature) {\n            inst.issueSignature = signature;",
+            "        {\n            inst.issueSignature = signature;",
+        ]],
+    },
+    {
+        id: 'VP4',
+        target: 'page',
+        why: 'the issues never reach the store (dispatched to the wrong slice)',
+        edits: [[
+            "            inst.store.dispatch({ type: 'ui/setIssues', issues: issues });",
+            "            inst.store.dispatch({ type: 'ui/setMode', mode: 'embeds' });",
+        ]],
+    },
+    {
+        id: 'VP5',
+        target: 'page',
+        why: 'a loaded document is not validated until the next edit (a broken draft looks clean)',
+        edits: [[
+            "        validateNow(inst);\n        return value;",
+            "        return value;",
+        ]],
+    },
+    {
+        id: 'VP6',
+        target: 'page',
+        why: 'teardown leaves the scheduled pass armed',
+        edits: [[
+            "        if (inst.validateTimer !== null) {\n            cancelTimer(inst, inst.validateTimer);\n            inst.validateTimer = null;\n        }\n        inst.unsubs.splice(0).forEach(function (off) {",
+            "        inst.unsubs.splice(0).forEach(function (off) {",
+        ]],
+    },
+    {
+        id: 'VP7',
+        target: 'page',
+        why: 'the strip is never hidden again once it has spoken',
+        edits: [[
+            "            if (!el.hidden) el.hidden = true;",
+            "            /* the strip is never hidden again */",
+        ]],
+    },
+    {
+        id: 'VP8',
+        target: 'page',
+        why: 'the strip drops the count and shows only the first issue',
+        edits: [[
+            "        const text = label + ' — ' + issues[0].message +",
+            "        const text = issues[0].message +",
+        ]],
+    },
 ];
 
 function sha1(file) {
@@ -883,6 +1062,7 @@ function main() {
             NERO_RAIL_SRC: process.env.NERO_RAIL_SRC,
             NERO_INSPECTOR_SRC: process.env.NERO_INSPECTOR_SRC,
             NERO_ACTIONBAR_SRC: process.env.NERO_ACTIONBAR_SRC,
+            NERO_VALIDATE_SRC: process.env.NERO_VALIDATE_SRC,
         };
         envPatch[target.env] = file;
         const run = spawnSync(process.execPath, [harness], {

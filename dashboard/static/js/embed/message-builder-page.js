@@ -6,6 +6,7 @@
 //
 //      embed/model.js            normalized MessageDocument (source of truth)
 //      embed/store.js            document + history + selection + dirty flag
+//      embed/validate.js         pure rules over (document, served limits)
 //      embed/discord-markdown.js the renderer (used BY the preview, not here)
 //      embed/preview.js          the differential preview engine
 //      embed/drafts.js           the persistence boundary (draft session)
@@ -29,11 +30,37 @@
 //     dirty flag, no scheduled write, no extra paint, and the payload the store
 //     holds stays byte-equivalent to the payload that was persisted.
 //
+// STEP 6a — VALIDATION (one pass per edit burst, one region, no new state)
+//     The page owns #mb2-strip and is the only writer of it. The flow is
+//     exactly what the step-6 proposal approved and nothing wider:
+//
+//         served limits (data-limits, L1)
+//           → embed/validate.validate(document, limits)   [pure]
+//           → store.dispatch(ui/setIssues)                [the ONE list]
+//           → #mb2-strip                                  [this file]
+//
+//     * The limits table is SERVER-RENDERED into the page. There is no client
+//       copy and no fallback table: if it is missing or unusable the validator
+//       says so explicitly (one issue) instead of quietly assuming "no limit".
+//     * Validation runs OFF the keystroke path: an edit schedules one pass
+//       (VALIDATE_IDLE_MS) and the pass that runs cancels the schedule it came
+//       from, so a burst of keystrokes costs exactly one pass. Loading a
+//       document validates immediately instead — a restored draft with
+//       problems must not look clean, not even for 150 ms.
+//     * The strip is hidden while there is nothing to say, and every write to
+//       it is change-guarded (text, tone class and `hidden` are each written
+//       only when they differ), so an unchanged result costs zero DOM writes.
+//     * Issues are read back from `store.ui.issues` — the store is the only
+//       place they live. The page keeps no list of its own, only the change
+//       signature that decides whether the store needs telling again.
+//
 // BOOT ORDER (each step matters, and the harness asserts each one)
 //     paint shell → create statusbar → create store → create rail →
-//     create inspector → create actionbar → create session →
-//     subscribe → session.attach(store)  [BEFORE load, see below] →
-//     session.bindLifecycle(window) → render status → resume() [async].
+//     create inspector → create actionbar → create session → read the served
+//     limits → subscribe (document → validate, issues → strip) →
+//     session.attach(store)  [BEFORE load, see below] →
+//     session.bindLifecycle(window) → render status → resume() [async] →
+//     one immediate validation pass.
 //
 //     attach() before load(): attach() clears the session's saved-hash when it
 //     attaches to a store it believes is clean. Attaching first means a draft
@@ -53,7 +80,8 @@
 //
 // NOT IN 5a: rail rows, inspector controls, validation, limits, counters, Send,
 // assets, components/actions/roles, library/revisions. The rail landed in 5b,
-// the inspector in 5c and the action bar (buttons + dialogs) in 5d.
+// the inspector in 5c, the action bar (buttons + dialogs) in 5d and the
+// validator + strip in 6a. Counters and the rail's limit feedback are 6b.
 // Consumed by: manage/message_builder.html (data-page-module="message-builder")
 // Tested by:   scripts/test_message_builder_page.js
 // ═══════════════════════════════════════════════════════════════
@@ -64,6 +92,17 @@ window.NERO.embed = window.NERO.embed || {};
     'use strict';
 
     const MODULE = 'message-builder';
+
+    /**
+     * How long after the last document change the validation pass runs. It is a
+     * burst-collapser, not a debounce on correctness: the pass reads whatever
+     * the document is at the moment it runs, so nothing that happened during
+     * the burst can be missed.
+     */
+    const VALIDATE_IDLE_MS = 150;
+
+    /** The strip's base class; the tone class is added/removed beside it. */
+    const STRIP_CLASS = 'mb2-strip';
 
     // Ids this module is allowed to depend on. The template owns them and
     // scripts/test_message_builder_layout.js asserts the two agree, so a rename
@@ -89,6 +128,7 @@ window.NERO.embed = window.NERO.embed || {};
         const views = f.views || {};
         if (!f.model) throw new Error('message-builder needs embed/model.js loaded first');
         if (!f.store || !f.store.createStore) throw new Error('message-builder needs embed/store.js loaded first');
+        if (!f.validate || !f.validate.validate) throw new Error('message-builder needs embed/validate.js loaded first');
         if (!f.preview || !f.preview.create) throw new Error('message-builder needs embed/preview.js loaded first');
         if (!f.drafts || !f.drafts.create) throw new Error('message-builder needs embed/drafts.js loaded first');
         if (!views.statusbar || !views.statusbar.create) throw new Error('message-builder needs embed/views/statusbar.js loaded first');
@@ -96,10 +136,35 @@ window.NERO.embed = window.NERO.embed || {};
         if (!views.inspector || !views.inspector.create) throw new Error('message-builder needs embed/views/inspector.js loaded first');
         if (!views.actionbar || !views.actionbar.create) throw new Error('message-builder needs embed/views/actionbar.js loaded first');
         return {
-            model: f.model, store: f.store, preview: f.preview, drafts: f.drafts,
+            model: f.model, store: f.store, validate: f.validate, preview: f.preview, drafts: f.drafts,
             statusbar: views.statusbar, rail: views.rail, inspector: views.inspector,
             actionbar: views.actionbar,
         };
+    }
+
+    /**
+     * The served limits table (approved transport L1), read from the page root:
+     * the server rendered `utils/discord_limits.limits_payload()` into
+     * data-limits, so there is ONE authority and no client copy of the numbers.
+     *
+     * A table that is absent or unparsable is NOT "no limits": it is reported as
+     * a failure. The value returned here is either a parsed object (whose keys
+     * embed/validate.js then checks) or null, which the validator turns into the
+     * one explicit issue it has for exactly this case.
+     */
+    function readLimits(root) {
+        const raw = root && typeof root.getAttribute === 'function' ? root.getAttribute('data-limits') : null;
+        if (!raw) return { limits: null, error: 'the page carried no limits table' };
+        let parsed = null;
+        try {
+            parsed = JSON.parse(raw);
+        } catch (e) {
+            return { limits: null, error: 'the limits table was not valid JSON' };
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            return { limits: null, error: 'the limits table was not an object' };
+        }
+        return { limits: parsed, error: null };
     }
 
     function ownerDocument(root) {
@@ -151,6 +216,9 @@ window.NERO.embed = window.NERO.embed || {};
         const f = foundation();
         const doc = ownerDocument(root);
         const win = (typeof window !== 'undefined' && window) || null;
+        // The served limits: read once, at mount, from the shell the server
+        // rendered. Nothing fetches them later and nothing else may hold a copy.
+        const servedLimits = readLimits(root);
 
         const els = {
             root: root,
@@ -180,6 +248,15 @@ window.NERO.embed = window.NERO.embed || {};
             notice: null,
             pointerWritten: false,
             lastWrites: 0,
+            // ── step 6a: validation state (nothing of the document lives here) ──
+            // `limits` is the served table or null; `limitsError` is why it is
+            // null. `issueSignature` is the change guard: the page dispatches
+            // only when the issue list would actually be different, and never
+            // keeps a list of its own — the store owns `ui.issues`.
+            limits: servedLimits.limits,
+            limitsError: servedLimits.error,
+            issueSignature: f.validate.signature([]),
+            validateTimer: null,
             unsubs: [],
             store: null,
             session: null,
@@ -261,6 +338,18 @@ window.NERO.embed = window.NERO.embed || {};
         // unchanged status costs zero DOM writes on a keystroke. (The rail has
         // its own selector-based subscriptions and is not re-rendered by this.)
         inst.unsubs.push(inst.store.subscribe(function () { renderStatus(inst); }));
+        // The validation half of the same idea, on the store's slice selectors:
+        // a document change SCHEDULES one pass (never one per keystroke), and a
+        // changed issue list is what paints the strip. Both callbacks only read
+        // and render — nothing here dispatches from inside a notification pass.
+        inst.unsubs.push(inst.store.subscribe(
+            function (s) { return s.document; },
+            function () { scheduleValidation(inst); }
+        ));
+        inst.unsubs.push(inst.store.subscribe(
+            function (s) { return s.ui.issues; },
+            function () { renderStrip(inst); }
+        ));
 
         inst.session.attach(inst.store);
         if (win && win.addEventListener) inst.session.bindLifecycle(win);
@@ -440,6 +529,11 @@ window.NERO.embed = window.NERO.embed || {};
     function finish(inst, value) {
         inst.booted = true;
         renderStatus(inst);
+        // The one validation pass that is NOT a burst: whatever document the
+        // page ended up with (a restored draft, a preserved-record blank, an
+        // in-memory new one) is checked immediately, and this pass consumes the
+        // schedule the load itself queued — one run, not two.
+        validateNow(inst);
         return value;
     }
 
@@ -510,6 +604,112 @@ window.NERO.embed = window.NERO.embed || {};
         return setCanonical(inst, document_);
     }
 
+    // ── Validation and the strip (step 6a) ───────────────────────
+    /**
+     * A timer that dies with the page. The registry's ctx owns timers for the
+     * whole page life (it clears them on unmount), so a mounted page is not a
+     * second timer owner; a page mounted by hand, without a registry, uses the
+     * realm's own setTimeout/clearTimeout and destroy() cancels them. The handle
+     * records WHO owns it, so a timer is always cancelled through the same API
+     * that created it.
+     */
+    function setTimer(inst, fn, ms) {
+        if (inst.ctx && typeof inst.ctx.timeout === 'function') {
+            return { owner: 'ctx', id: inst.ctx.timeout(fn, ms) };
+        }
+        if (typeof setTimeout !== 'function') return null;
+        return { owner: 'realm', id: setTimeout(fn, ms) };
+    }
+
+    function cancelTimer(inst, timer) {
+        if (!timer) return false;
+        if (timer.owner === 'ctx') {
+            if (inst.ctx && typeof inst.ctx.clearTimeout === 'function') inst.ctx.clearTimeout(timer.id);
+            return true;
+        }
+        if (typeof clearTimeout === 'function') clearTimeout(timer.id);
+        return true;
+    }
+
+    function countValidation(inst) {
+        if (inst.ctx && typeof inst.ctx.counter === 'function') inst.ctx.counter('validateRuns');
+    }
+
+    /**
+     * One validation pass, synchronously: read the store's document, run the
+     * pure validator against the SERVED limits, and tell the store only if the
+     * result differs from what it already holds. It also cancels any pending
+     * pass — a scheduled pass has nothing left to do once this one has run.
+     */
+    function validateNow(inst) {
+        if (!inst || inst.destroyed || !inst.store) return null;
+        if (inst.validateTimer !== null) {
+            cancelTimer(inst, inst.validateTimer);
+            inst.validateTimer = null;
+        }
+        const validator = NERO.embed.validate;
+        const issues = validator.validate(inst.store.getDocument(), inst.limits);
+        countValidation(inst);
+        const signature = validator.signature(issues);
+        if (signature !== inst.issueSignature) {
+            inst.issueSignature = signature;
+            // The store's slice is the ONE issue list; this is the only write.
+            // `ui/*` never enters the undo stack (the store only records
+            // history for document changes), and the subscription above paints
+            // the strip from the same list it now holds.
+            inst.store.dispatch({ type: 'ui/setIssues', issues: issues });
+        }
+        return issues;
+    }
+
+    /** Collapse an edit burst into ONE pass. */
+    function scheduleValidation(inst) {
+        if (!inst || inst.destroyed) return false;
+        if (inst.validateTimer !== null) cancelTimer(inst, inst.validateTimer);
+        inst.validateTimer = setTimer(inst, function () {
+            inst.validateTimer = null;
+            validateNow(inst);
+        }, VALIDATE_IDLE_MS);
+        return true;
+    }
+
+    /**
+     * Paint #mb2-strip from `store.ui.issues`. This is the page's one job for
+     * the region: no view writes it, nothing else creates a live region, and
+     * every write is change-guarded — an unchanged issue list costs zero DOM
+     * writes (the text is only assigned when it differs, the tone class only
+     * when it differs, and `hidden` only on a real transition).
+     *
+     * The class is read and written through the ATTRIBUTE, because the base
+     * class is the one the template declares (`class="mb2-strip"`): the guard
+     * then compares like with like on the first render too, instead of writing
+     * a class the markup already had.
+     */
+    function renderStrip(inst) {
+        if (!inst || inst.destroyed || !inst.els || !inst.els.strip) return false;
+        const el = inst.els.strip;
+        const issues = (inst.store && inst.store.getUi() ? inst.store.getUi().issues : null) || [];
+
+        if (!issues.length) {
+            // Clean: the region goes away rather than announcing an empty line.
+            if (el.textContent !== '') el.textContent = '';
+            if (el.getAttribute('class') !== STRIP_CLASS) el.setAttribute('class', STRIP_CLASS);
+            if (!el.hidden) el.hidden = true;
+            return false;
+        }
+
+        const hasError = issues.some(function (issue) { return issue.severity === 'error'; });
+        const label = issues.length === 1 ? '1 problem' : issues.length + ' problems';
+        const text = label + ' — ' + issues[0].message +
+            (issues.length > 1 ? ' (' + (issues.length - 1) + ' more)' : '');
+        const className = STRIP_CLASS + (hasError ? ' mb2-tone-danger' : ' mb2-tone-warn');
+
+        if (el.textContent !== text) el.textContent = text;
+        if (el.getAttribute('class') !== className) el.setAttribute('class', className);
+        if (el.hidden) el.hidden = false;
+        return true;
+    }
+
     function mountPreview(inst) {
         const preview = NERO.embed.preview.create(inst.els.mount, {
             // One clock per page life: the header time cannot drift while the
@@ -538,6 +738,14 @@ window.NERO.embed = window.NERO.embed || {};
         if (!inst) return false;
         current = null;
         inst.destroyed = true;
+        // A scheduled pass is page work like any other: it dies with the page,
+        // so a teardown during a burst leaves no timer behind (the registry
+        // clears its own timers too, and the destroyed flag stops a callback
+        // that was already in flight).
+        if (inst.validateTimer !== null) {
+            cancelTimer(inst, inst.validateTimer);
+            inst.validateTimer = null;
+        }
         inst.unsubs.splice(0).forEach(function (off) {
             try { off(); } catch (e) { /* an unsubscribe must never block teardown */ }
         });

@@ -20,6 +20,17 @@
        nav-lifecycle.js was written to remove (it never re-executes).
      * any stylesheet decision of its own — see the one <link> below.
 
+   THE LIMITS TABLE (phase 1 step 6a)
+   data-limits carries utils/discord_limits.limits_payload() — the SAME table
+   the server validates with — straight into the page, so the client owns no
+   copy of the numbers and needs no fetch (the boot stays network-free). The
+   pipe is `tojson | forceescape`: tojson makes it JSON, forceescape turns every
+   quote into an entity so the value cannot break out of the double-quoted
+   attribute; the browser decodes it back to JSON before the page reads it.
+   scripts/test_message_builder_layout.js asserts that exact pipe, because
+   dropping forceescape would still LOOK right and would ship a broken page for
+   any limits table containing a quote.
+
    The stylesheet is loaded from INSIDE the content block (not from base.html)
    so it arrives with the fragment that needs it and leaves with it: no other
    page pays for v2 CSS, and base.html stays untouched.
@@ -37,13 +48,16 @@
      class="mb2-shell"
      data-page-module="message-builder"
      data-guild-id="{{ guild_id or '' }}"
-     data-page-script="{{ url_for('static', filename='js/embed/model.js') }} {{ url_for('static', filename='js/embed/store.js') }} {{ url_for('static', filename='js/embed/discord-markdown.js') }} {{ url_for('static', filename='js/embed/preview.js') }} {{ url_for('static', filename='js/embed/drafts.js') }} {{ url_for('static', filename='js/embed/views/statusbar.js') }} {{ url_for('static', filename='js/embed/views/rail.js') }} {{ url_for('static', filename='js/embed/views/inspector.js') }} {{ url_for('static', filename='js/embed/views/actionbar.js') }} {{ url_for('static', filename='js/embed/message-builder-page.js') }}">
+     data-limits="{{ limits | tojson | forceescape }}"
+     data-page-script="{{ url_for('static', filename='js/embed/model.js') }} {{ url_for('static', filename='js/embed/store.js') }} {{ url_for('static', filename='js/embed/validate.js') }} {{ url_for('static', filename='js/embed/discord-markdown.js') }} {{ url_for('static', filename='js/embed/preview.js') }} {{ url_for('static', filename='js/embed/drafts.js') }} {{ url_for('static', filename='js/embed/views/statusbar.js') }} {{ url_for('static', filename='js/embed/views/rail.js') }} {{ url_for('static', filename='js/embed/views/inspector.js') }} {{ url_for('static', filename='js/embed/views/actionbar.js') }} {{ url_for('static', filename='js/embed/message-builder-page.js') }}">
 
     <!-- ── VALIDATION STRIP ───────────────────────────────────────────────
-         One region, one owner (step 6). It exists now, with the semantics it
-         will need, and stays hidden while it has nothing to say: an empty
-         always-visible strip would be a fake affordance. No validator, no
-         limits fetch and no counters are wired to it in step 5a. -->
+         One region, one owner: the page (message-builder-page.js, step 6a).
+         It is hidden while there is nothing to say — an empty always-visible
+         strip would be a fake affordance — and it is the page's only second
+         live region (the status bar owns the other). Its text is written from
+         store.ui.issues, so the issues have exactly one home and the strip
+         exactly one writer. -->
     <p id="mb2-strip" class="mb2-strip" role="status" aria-live="polite" hidden></p>
 
     <div class="mb2-grid">

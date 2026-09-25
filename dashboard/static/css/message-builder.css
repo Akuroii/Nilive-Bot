@@ -90,7 +90,10 @@
     overflow-wrap: anywhere;      /* pasted URLs must not widen the column */
 }
 
-/* ── Validation strip (owner: step 6) ────────────────────────── */
+/* ── Validation strip (owner: the page, step 6a) ─────────────── */
+/* One region, two states: the tone class is what the page swaps when the
+   worst issue changes (the same mb2-tone-* vocabulary the status bar uses).
+   The text inherits --text2 — a long message stays readable. */
 .mb2-strip {
     margin: 0 0 14px;
     padding: 10px 12px;
@@ -100,8 +103,11 @@
     background: var(--bg3);
     color: var(--text2);
     font-size: 13px;
+    overflow-wrap: anywhere;      /* a long issue message must not widen the shell */
 }
 .mb2-strip[hidden] { display: none; }
+.mb2-strip.mb2-tone-warn   { border-left-color: var(--warning); }
+.mb2-strip.mb2-tone-danger { border-left-color: var(--danger); }
 
 /* ── Status / action bar ─────────────────────────────────────── */
 .mb2-bar {

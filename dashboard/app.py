@@ -29,6 +29,7 @@ from dashboard.permissions import (
 from dashboard.api import api_bp
 from utils.xp_calculator import calculate_level_from_xp
 from utils.formatters import format_relative, format_timestamp
+from utils.discord_limits import limits_payload
 
 # staging-db delta: dashboard/app.py never called load_dotenv() itself —
 # it worked anyway in production because Railway injects real env vars
@@ -1078,12 +1079,18 @@ def embed_builder():
 # kind of content, so it must not widen access. `bot_identity` comes from the
 # same helper, so the preview renders the guild's bot identity (name/avatar)
 # without any Discord call from the browser.
+#
+# `limits` is the server's ONE limits table (utils/discord_limits) rendered into
+# the page (step 6a, transport L1): the client validates against the very numbers
+# the send route enforces, it owns no copy of them, and its boot stays
+# network-free. Nothing here reads the database or Discord.
 @app.route("/embed-builder/v2")
 @require_page("embedbuilder")
 def embed_builder_v2():
     ctx = get_current_user_context()
     return render("manage/message_builder.html",
                   bot_identity=_bot_identity_for_page(ctx.get("guild_id")),
+                  limits=limits_payload(),
                   **ctx)
 
 

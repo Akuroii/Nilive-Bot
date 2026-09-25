@@ -22,6 +22,7 @@ this runs in CI before requirements are even installed.
 """
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -285,6 +286,31 @@ def limits_table_tests():
           "first_error_message returns the first message")
     check(S.first_error_message([]) == "Invalid message payload",
           "first_error_message has a fallback")
+
+    # ── The client's half of the same contract (phase 1 step 6a) ──────
+    # dashboard/static/js/embed/validate.js refuses to run without the keys it
+    # lists in REQUIRED_LIMITS (a missing one is an explicit issue, never a
+    # silent "no limit"), and the page is handed this very payload through
+    # data-limits. So the two lists are read from the two files and pinned
+    # together here: renaming a key on either side fails in CI instead of
+    # shipping a page that validates nothing.
+    validate_js = (root := os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                        "dashboard", "static", "js", "embed", "validate.js"))
+    with open(validate_js, encoding="utf-8") as fh:
+        js_source = fh.read()
+    js_keys = re.findall(r"\['([a-z_]+)',\s*'([a-z_]+)'\]", js_source)
+    check(len(js_keys) >= 10,
+          f"the v2 client declares the limits it needs ({len(js_keys)} keys read from validate.js)",
+          str(js_keys))
+    missing = [f"{block}.{key}" for block, key in js_keys if key not in payload.get(block, {})]
+    check(not missing,
+          "every limit the v2 client requires is served by limits_payload()",
+          ", ".join(missing))
+    non_numeric = [f"{block}.{key}" for block, key in js_keys
+                   if not isinstance(payload.get(block, {}).get(key), int)]
+    check(not non_numeric,
+          "and every one of them is an integer (the client compares sizes, not strings)",
+          ", ".join(non_numeric))
 
 
 def main():
