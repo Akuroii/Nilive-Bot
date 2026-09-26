@@ -84,6 +84,8 @@ const ACTIONBAR_PATH = process.env.NERO_ACTIONBAR_SRC || js('embed', 'views', 'a
 const FOUNDATION = [
     js('nav-lifecycle.js'),
     js('embed', 'model.js'),
+    js('embed', 'assets.js'),
+    js('embed', 'asset-store.js'),
     STORE_PATH,
     VALIDATE_PATH,
     js('embed', 'discord-markdown.js'),

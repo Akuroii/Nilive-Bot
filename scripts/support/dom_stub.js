@@ -223,7 +223,9 @@ function createDom() {
                 const seen = new Set();
                 queryGroups(sel).forEach(one => {
                     (function walk(n) {
-                        n.children.forEach(c => {
+                        // Text nodes have no `children`: the walk must skip them, not
+                        // assume every node is an element (the preview adds text nodes).
+                        (n.children || []).forEach(c => {
                             if (matches(c, one) && !seen.has(c.__uid)) { seen.add(c.__uid); out.push(c); }
                             walk(c);
                         });

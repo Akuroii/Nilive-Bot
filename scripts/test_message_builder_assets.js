@@ -65,6 +65,19 @@ function codeOnly(src) {
 }
 const CODE = codeOnly(SRC);
 
+/**
+ * The source of ONE function, from its declaration to the next top-level
+ * declaration. Some rules are about a single function rather than the whole
+ * file (pruneOrphans() must not know about sessions; other functions may).
+ */
+function functionSource(code, name) {
+    const start = code.indexOf('function ' + name + '(');
+    if (start === -1) return '';
+    const rest = code.slice(start + 1);
+    const next = rest.search(/\n {4}(function |const |let )/);
+    return next === -1 ? rest : rest.slice(0, next);
+}
+
 /** Load the module the way the browser would — in a sandbox with nothing. */
 function loadModule(extra) {
     const sandbox = Object.assign({ window: {}, console: console }, extra || {});
@@ -733,11 +746,17 @@ section('I. pruneOrphans(): pure, deterministic, and remote from its input');
         'and a missing map is an empty result, never a throw');
     assert(Object.keys(A.pruneOrphans(assets, [one.assetId, two.assetId], { keep: 'not-a-list' }).assets).length === 2,
         'a nonsense keep option is ignored rather than iterated');
-    // The policy itself lives with the caller: this function must not
-    // know about sessions, drafts or history.
-    assert(CODE.indexOf('session') === -1 && CODE.indexOf('draft') === -1 &&
-           CODE.indexOf('history') === -1,
+    // The policy itself lives with the caller: THIS FUNCTION must not know
+    // about sessions, drafts or history. (Scoped to the function's own source
+    // on purpose: step 7c adds retention(), which legitimately takes the
+    // documents a session can still reach — the rule being checked is about
+    // pruneOrphans(), and a whole-file substring search would confuse the two.)
+    const PRUNE_SRC = functionSource(CODE, 'pruneOrphans');
+    assert(PRUNE_SRC.length > 0 && PRUNE_SRC.indexOf('session') === -1 &&
+           PRUNE_SRC.indexOf('draft') === -1 && PRUNE_SRC.indexOf('history') === -1,
         'pruneOrphans() knows nothing about sessions, drafts or undo history');
+    assert(PRUNE_SRC.indexOf('pruneOrphans') !== -1,
+        'and that scoped check really read the function it names', PRUNE_SRC.length + ' chars');
 }
 
 // ═══════════════════════════════════════════════════════════════

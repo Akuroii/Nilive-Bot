@@ -62,7 +62,7 @@ function makeSandbox() {
     vm.createContext(sandbox);
     // validate.js is part of the rail's world since 6b: the add caps and the
     // badge counts come from ITS measurement (rail.js re-implements nothing).
-    [js('embed', 'model.js'), js('embed', 'store.js'), js('embed', 'validate.js'), RAIL_PATH]
+    [js('embed', 'model.js'), js('embed', 'assets.js'), js('embed', 'store.js'), js('embed', 'validate.js'), RAIL_PATH]
         .forEach(file => {
             vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: path.basename(file) });
         });

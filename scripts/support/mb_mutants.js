@@ -62,6 +62,11 @@ const TARGETS = {
         label: 'dashboard/static/js/embed/views/actionbar.js',
         harness: path.join(ROOT, 'scripts', 'test_message_builder_actionbar.js'),
     },
+    model: {
+        file: path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'model.js'),
+        env: 'NERO_MODEL_SRC',
+        label: 'dashboard/static/js/embed/model.js',
+    },
     validate: {
         file: path.join(ROOT, 'dashboard', 'static', 'js', 'embed', 'validate.js'),
         env: 'NERO_VALIDATE_SRC',
@@ -82,6 +87,10 @@ const TARGETS = {
     },
 };
 const HARNESS = path.join(ROOT, 'scripts', 'test_message_builder_page.js');
+// Step 7c's slice is asserted across five modules at once, so its mutants are
+// judged by the integration harness (which can swap any of the five sources).
+const INTEGRATION = path.join(ROOT, 'scripts', 'test_message_builder_asset_integration.js');
+const HARNESS_VALIDATE = path.join(ROOT, 'scripts', 'test_message_builder_validate.js');
 
 /**
  * A mutant is { id, target, why, edits: [[find, replace], …] }.
@@ -1645,6 +1654,349 @@ const MUTANTS = [
             "                    const forUrl = view;",
         ]],
     },
+
+    // ── step 7c: asset metadata, facts, retention and the page probe ──
+    {
+        id: 'C1',
+        target: 'model',
+        harness: INTEGRATION,
+        why: 'a record is stored BY REFERENCE, so the caller keeps a handle on the document',
+        edits: [[
+            '        const copy = {};\n        Object.keys(record).forEach((key) => { copy[key] = record[key]; });\n',
+            '        const copy = record;\n',
+        ]],
+    },
+    {
+        id: 'C2',
+        target: 'model',
+        harness: INTEGRATION,
+        why: 'a record describing a DIFFERENT file is accepted under this key',
+        edits: [[
+            '        if (record.assetId != null && String(record.assetId) !== id) return doc;\n',
+            '        /* the id check is gone */\n',
+        ]],
+    },
+    {
+        id: 'C3',
+        target: 'model',
+        harness: INTEGRATION,
+        why: 're-storing the SAME record counts as an edit (a history entry for nothing)',
+        edits: [[
+            '        if (stableStringify(next[id]) === stableStringify(copy)) return doc;   // same record: no edit, no history entry\n',
+            '        if (stableStringify(next[id]) === stableStringify({ })) return doc;   // same record: no edit, no history entry\n',
+        ]],
+    },
+    {
+        id: 'C4',
+        target: 'model',
+        harness: INTEGRATION,
+        why: 'a value a draft cannot store (a Blob, an image element) is admitted into the document',
+        edits: [[
+            '            if (!jsonScalar(record[keys[i]])) return false;\n',
+            '            if (!jsonScalar(record[keys[i]]) && keys[i] === "__never__") return false;\n',
+        ]],
+    },
+    {
+        id: 'C5',
+        target: 'model',
+        harness: INTEGRATION,
+        why: 'removing a record the document does not have still counts as an edit',
+        edits: [[
+            '        if (!Object.prototype.hasOwnProperty.call(map, id)) return doc;\n',
+            '        if (!map) return doc;\n',
+        ]],
+    },
+    {
+        id: 'C6',
+        target: 'store',
+        harness: INTEGRATION,
+        why: 'the record map is keyed by the value the CALLER claims, not by the action',
+        edits: [[
+            '            \'asset/add\': (state, a) => ({ document: m.setDocumentAsset(state.document, a.assetId, a.record) }),\n',
+            '            \'asset/add\': (state, a) => ({ document: m.setDocumentAsset(state.document, a.record && a.record.assetId, a.record) }),\n',
+        ]],
+    },
+    {
+        id: 'C7',
+        target: 'store',
+        harness: INTEGRATION,
+        why: 'historyDocuments() hands out the store’s own documents (a caller can rewrite undo)',
+        edits: [[
+            '            return history.map(entry => model.cloneDocument(entry.document));\n',
+            '            return history.map(entry => entry.document);\n',
+        ]],
+    },
+    {
+        id: 'C8',
+        target: 'store',
+        harness: INTEGRATION,
+        why: 'historyDocuments() hides the redo tail, so a retention decision forgets what redo can restore',
+        edits: [[
+            '            return history.map(entry => model.cloneDocument(entry.document));\n',
+            '            return history.slice(0, historyIndex + 1).map(entry => model.cloneDocument(entry.document));\n',
+        ]],
+    },
+    {
+        id: 'C9',
+        target: 'validate',
+        harness: HARNESS_VALIDATE,
+        why: 'the attachment keys are no longer required, so a partial table silently measures nothing',
+        edits: [[
+            '        [\'attachments\', \'count_max\'],\n        [\'attachments\', \'total_bytes_max\'],\n',
+            '',
+        ]],
+    },
+    {
+        id: 'C10',
+        target: 'validate',
+        harness: INTEGRATION,
+        why: 'the count/size rules use numbers baked into the source instead of the served table',
+        edits: [[
+            '        const measured = assets.checkLimits(sizes.count, sizes.total, limits);\n',
+            '        const measured = assets.checkLimits(sizes.count, sizes.total, { attachments: { count_max: 2, total_bytes_max: 8 } });\n',
+        ]],
+    },
+    {
+        id: 'C11',
+        target: 'validate',
+        harness: INTEGRATION,
+        why: 'the count rule measures the wrong half of the pair',
+        edits: [[
+            '            if (measured.count.over) {\n',
+            '            if (measured.bytes.over) {\n',
+        ]],
+    },
+    {
+        id: 'C12',
+        target: 'validate',
+        harness: INTEGRATION,
+        why: 'a record with NO bytes at all is also reported as a size problem',
+        edits: [[
+            '            } else if (!sizes.missing.length && measured.bytes.over) {\n',
+            '            } else if (measured.bytes.over) {\n',
+        ]],
+    },
+    {
+        id: 'C13',
+        target: 'validate',
+        harness: INTEGRATION,
+        why: 'a slot whose file name changed is reported only when the names AGREE',
+        edits: [[
+            '            if (!record || !ref.filename || ref.filename === record.filename) return;\n',
+            '            if (!record || !ref.filename || ref.filename !== record.filename) return;\n',
+        ]],
+    },
+    {
+        id: 'C14',
+        target: 'validate',
+        harness: INTEGRATION,
+        why: 'a damaged stored entry is reported as merely absent',
+        edits: [[
+            '            push(issues, \'assets.bytes-corrupt\', path, nodeId, ERROR,\n',
+            '            push(issues, \'assets.bytes-missing\', path, nodeId, WARNING,\n',
+        ]],
+    },
+    {
+        id: 'C15',
+        target: 'validate',
+        harness: INTEGRATION,
+        why: 'a stored copy with the WRONG digest is called a match',
+        edits: [[
+            '        if (record.sha256 && row.sha256 && String(row.sha256) !== String(record.sha256)) {\n',
+            '        if (record.sha256 && row.sha256 && String(row.sha256) === String(record.sha256)) {\n',
+        ]],
+    },
+    {
+        id: 'C16',
+        target: 'validate',
+        harness: INTEGRATION,
+        why: 'the per-file advisory is treated as a hard block',
+        edits: [[
+            '            verdict.blocked ? ERROR : WARNING,\n',
+            '            ERROR,\n',
+        ]],
+    },
+    {
+        id: 'C17',
+        target: 'validate',
+        harness: INTEGRATION,
+        why: 'an unreadable record is not reported at all',
+        edits: [[
+            '        view.unreadable.forEach(function (entry) {\n',
+            '        [].forEach(function (entry) {\n',
+        ]],
+    },
+    {
+        id: 'C18',
+        target: 'validate',
+        harness: INTEGRATION,
+        why: 'an upload VALUE is judged by name again, on top of the asset rules',
+        edits: [[
+            '        if (slot.upload) return;\n',
+            '        /* the asset rules no longer own upload values */\n',
+        ]],
+    },
+    {
+        id: 'C19',
+        target: 'assets',
+        harness: INTEGRATION,
+        why: 'a reason the rules do not know is read as a MISS instead of "could not tell"',
+        edits: [[
+            '        if (reason) return FACT_STATES.UNAVAILABLE;\n',
+            '        if (reason) return FACT_STATES.MISSING;\n',
+        ]],
+    },
+    {
+        id: 'C20',
+        target: 'assets',
+        harness: INTEGRATION,
+        why: 'a damaged entry is read as absent',
+        edits: [[
+            '        if (CORRUPT_REASONS.indexOf(reason) !== -1) return FACT_STATES.CORRUPT;\n',
+            '        if (CORRUPT_REASONS.indexOf(reason) !== -1) return FACT_STATES.MISSING;\n',
+        ]],
+    },
+    {
+        id: 'C21',
+        target: 'assets',
+        harness: INTEGRATION,
+        why: 'a referenced id with NO row is called missing (an unobserved asset becomes a broken one)',
+        edits: [[
+            '                states[id] = FACT_STATES.UNKNOWN;\n',
+            '                states[id] = FACT_STATES.MISSING;\n',
+        ]],
+    },
+    {
+        id: 'C22',
+        target: 'assets',
+        harness: INTEGRATION,
+        why: 'retention forgets the assets this session made, so an undoable file could be pruned',
+        edits: [[
+            '        (Array.isArray(opts.sessionIds) ? opts.sessionIds : []).forEach((id) => {\n',
+            '        [].forEach((id) => {\n',
+        ]],
+    },
+    {
+        id: 'C23',
+        target: 'assets',
+        harness: INTEGRATION,
+        why: 'retention answers "keep everything" when it cannot prove ownership (fail-open)',
+        edits: [[
+            '            return { ok: false, reason: \'no-documents\', keep: [], refs: [], orphans: [], plan: null };\n',
+            '            return { ok: true, reason: null, keep: [], refs: [], orphans: [], plan: null };\n',
+        ]],
+    },
+    {
+        id: 'C24',
+        target: 'assets',
+        harness: INTEGRATION,
+        why: 'a record with a nested value is accepted (it cannot survive a draft write)',
+        edits: [[
+            '            .filter((key) => RECORD_KEYS.indexOf(key) === -1 && !jsonScalar(value[key]))\n',
+            '            .filter((key) => RECORD_KEYS.indexOf(key) === -1 && typeof value[key] === "function")\n',
+        ]],
+    },
+    {
+        id: 'C25',
+        target: 'assets',
+        harness: INTEGRATION,
+        why: 'a referenced id with no record is DROPPED from the measurement, so the total looks clean',
+        edits: [[
+            '            if (!record) { missing.push(id); return; }\n',
+            '            if (!record) return;\n',
+        ]],
+    },
+    {
+        id: 'C26',
+        target: 'assets',
+        harness: INTEGRATION,
+        why: 'a record that cannot be read is ALSO called unused (one entry, two problems)',
+        edits: [[
+            '            .filter((id) => ids.indexOf(id) === -1 && !broken[id]);\n',
+            '            .filter((id) => ids.indexOf(id) === -1 );\n',
+        ]],
+    },
+    {
+        id: 'C27',
+        target: 'assetstore',
+        harness: INTEGRATION,
+        why: 'a probe reports every id as present (missing bytes never surface)',
+        edits: [[
+            '                        present: found.ok,\n',
+            '                        present: true,\n',
+        ]],
+    },
+    {
+        id: 'C28',
+        target: 'assetstore',
+        harness: INTEGRATION,
+        why: 'a probe drops the reason, so a miss cannot be told from "could not tell"',
+        edits: [[
+            '                        reason: found.ok ? null : found.reason,\n',
+            '                        reason: null,\n',
+        ]],
+    },
+    {
+        id: 'C29',
+        target: 'page',
+        harness: INTEGRATION,
+        why: 'the validator is run without the facts, so byte problems are never reported',
+        edits: [[
+            '        const issues = validator.validate(doc, inst.limits, inst.assetFacts);\n',
+            '        const issues = validator.validate(doc, inst.limits);\n',
+        ]],
+    },
+    {
+        id: 'C30',
+        target: 'page',
+        harness: INTEGRATION,
+        why: 'the page never probes: the facts never describe the document on screen',
+        edits: [[
+            '        if (ids.join(\',\') !== factsSignature) {\n',
+            '        if (ids.join(\',\') === factsSignature && ids.length < 0) {\n',
+        ]],
+    },
+    {
+        id: 'C31',
+        target: 'page',
+        harness: INTEGRATION,
+        why: 'probes are not counted, so a probe storm is invisible',
+        edits: [[
+            '        countProbe(inst);\n',
+            '        void 0;\n',
+        ]],
+    },
+    {
+        id: 'C32',
+        target: 'page',
+        harness: INTEGRATION,
+        why: 'the probe asks about no ids at all (every referenced asset stays unknown)',
+        edits: [[
+            '        return Promise.resolve(inst.assetStore.survey(ids)).then(function (rows) {\n',
+            '        return Promise.resolve(inst.assetStore.survey([])).then(function (rows) {\n',
+        ]],
+    },
+    {
+        id: 'C33',
+        target: 'page',
+        harness: INTEGRATION,
+        why: 'the facts are computed against a different document than the one on screen',
+        edits: [[
+            '            inst.assetFacts = NERO.embed.assets.assetFacts(doc, rows);\n',
+            '            inst.assetFacts = NERO.embed.assets.assetFacts({ embeds: [], assets: {} }, rows);\n',
+        ]],
+    },
+    {
+        id: 'C34',
+        target: 'page',
+        harness: INTEGRATION,
+        why: 'the page stops being the single issue-list writer (nothing paints the strip)',
+        edits: [[
+            '            inst.store.dispatch({ type: \'ui/setIssues\', issues: issues });\n',
+            '            void 0;\n',
+        ]],
+    },
+
 ];
 
 function sha1(file) {

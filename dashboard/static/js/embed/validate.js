@@ -78,6 +78,12 @@ window.NERO.embed = window.NERO.embed || {};
     // media slot send?" — so those answers are never reimplemented here.
     const model = NERO.embed.model;
 
+    // 7c: the asset rules read the record/reference/fact vocabulary from
+    // embed/assets.js — the canonical record shape lives there and nowhere
+    // else. Loaded before this file (data-page-script order in
+    // manage/message_builder.html), and only ever read, never re-implemented.
+    const assets = NERO.embed.assets;
+
     /**
      * The rail's / inspector's node id for the message root. The validator
      * reports a nodeId for every issue so a later step can jump to it, and the
@@ -99,6 +105,11 @@ window.NERO.embed = window.NERO.embed || {};
         ['message', 'content_max'],
         ['message', 'embeds_max'],
         ['message', 'embed_total_chars_max'],
+        // 7c: the two keys the asset count/size rules measure with. They are
+        // REQUIRED for the same reason as the rest: a missing number must be
+        // an explicit failure, never silence and never a client-side guess.
+        ['attachments', 'count_max'],
+        ['attachments', 'total_bytes_max'],
         ['embed', 'title_max'],
         ['embed', 'description_max'],
         ['embed', 'fields_max'],
@@ -132,6 +143,11 @@ window.NERO.embed = window.NERO.embed || {};
 
     function isAttachmentRef(value) {
         return typeof value === 'string' && value.indexOf('attachment://') === 0;
+    }
+
+    /** A media value that carries an uploaded file (rather than a URL). */
+    function isUploadValue(value) {
+        return !!value && typeof value === 'object' && value.kind === 'upload';
     }
 
     function daysInMonth(year, month) {
@@ -220,6 +236,12 @@ window.NERO.embed = window.NERO.embed || {};
      */
     function checkMedia(issues, slot, wire) {
         if (!wire) return;
+        // 7c: an `{kind:'upload'}` slot is described by the asset rules (it
+        // needs a record, and the record needs bytes) — this rule is about
+        // URL values, including the legacy `attachment://name` string, and
+        // firing it on a linked upload would say "no file is being uploaded"
+        // about a file that IS. One problem, one message.
+        if (slot.upload) return;
         if (isAttachmentRef(wire)) {
             const name = wire.slice('attachment://'.length);
             const message = name
@@ -289,7 +311,7 @@ window.NERO.embed = window.NERO.embed || {};
         }
         checkMedia(issues, {
             code: 'embed.author.icon', path: prefix + '.author.icon_url', nodeId: nodeId,
-            label: label + ' author icon',
+            label: label + ' author icon', upload: isUploadValue(author.icon),
         }, authorIcon);
 
         // ── Footer ──
@@ -305,17 +327,17 @@ window.NERO.embed = window.NERO.embed || {};
         }
         checkMedia(issues, {
             code: 'embed.footer.icon', path: prefix + '.footer.icon_url', nodeId: nodeId,
-            label: label + ' footer icon',
+            label: label + ' footer icon', upload: isUploadValue(footer.icon),
         }, footerIcon);
 
         // ── Media ──
         checkMedia(issues, {
             code: 'embed.image', path: prefix + '.image.url', nodeId: nodeId,
-            label: label + ' image',
+            label: label + ' image', upload: isUploadValue(e.image),
         }, model.mediaToWireUrl(e.image));
         checkMedia(issues, {
             code: 'embed.thumbnail', path: prefix + '.thumbnail.url', nodeId: nodeId,
-            label: label + ' thumbnail',
+            label: label + ' thumbnail', upload: isUploadValue(e.thumbnail),
         }, model.mediaToWireUrl(e.thumbnail));
 
         // ── Fields ──
@@ -526,14 +548,266 @@ window.NERO.embed = window.NERO.embed || {};
         };
     }
 
+    // ── Assets (phase 2, step 7c) ────────────────────────────────
+    /**
+     * THE ASSET RULES. They run LAST — after the message and after every embed
+     * — so the first issue a reader sees is still the first problem in reading
+     * order, and they read exactly two inputs:
+     *
+     *   • the DOCUMENT's own metadata, through embed/assets.js: references,
+     *     records, ids, byte counts. No second record model lives here. This
+     *     file owns wording, severity, order and the limits conversation —
+     *     never the vocabulary for what a record or a reference IS.
+     *   • the FACTS the page probed from the byte store. Facts are
+     *     OBSERVATIONS, not document content.
+     *
+     * WHAT THIS CANNOT DO, BY CONSTRUCTION: open storage, read bytes, hash a
+     * file, mint a URL, mutate the document, or mutate the facts. A missing
+     * asset, an unreachable store and an asset nobody has looked at are three
+     * different states: a missing file warns, an unreachable store warns
+     * differently, and an unobserved asset stays SILENT (assuming either way
+     * is how an editor tells someone their image is broken when it is not).
+     *
+     * Client-only rules are marked below: the server's embed_schema.py has no
+     * asset concepts, so nothing here claims to mirror a server message.
+     */
+
+    /** `<label>` for a media slot, from the reference's own slot name. */
+    function slotLabel(ref) {
+        if (!ref) return 'A file slot';
+        if (ref.slot === 'image') return 'An image';
+        if (ref.slot === 'thumbnail') return 'A thumbnail';
+        if (ref.slot === 'author.icon') return 'The author icon';
+        if (ref.slot === 'footer.icon') return 'The footer icon';
+        return 'A file slot';
+    }
+
+    /** Where an asset-level issue points: the first slot that uses it. */
+    function assetPath(refs, assetId) {
+        for (let i = 0; i < refs.length; i++) {
+            if (refs[i].assetId === assetId) return refs[i];
+        }
+        return null;
+    }
+
+    /** 'A file that Discord can show in an embed: .jpg, .jpeg, …' (one table). */
+    function allowedExtensions() {
+        return assets.ALLOWED_EXTENSIONS.map(function (ext) { return '.' + ext; }).join(', ');
+    }
+
+    /**
+     * One referenced asset's metadata: is it described well enough to send?
+     * Everything here is document-only (no facts), so it is checkable the
+     * moment a document loads, before any probe has run.
+     */
+    function checkAssetRecord(issues, view, assetId, limits) {
+        const ref = assetPath(view.refs, assetId);
+        const path = ref ? ref.path : 'assets.' + assetId;
+        const nodeId = ref && ref.embedId ? ref.embedId : CONTENT_NODE;
+        const record = view.records[assetId];
+
+        if (!record) {
+            // A slot points at an asset the document does not describe. The
+            // reference alone can never become an upload: there is no file
+            // name, no type and no size for it anywhere.
+            push(issues, 'assets.record-missing', path, nodeId, ERROR,
+                slotLabel(ref) + ' points at a file this message does not carry. Add the file again.');
+            return;
+        }
+
+        const ext = assets.filenameExtension(record.filename);
+        const known = ext && Object.prototype.hasOwnProperty.call(assets.MIME_BY_EXTENSION, ext);
+        if (!known) {
+            push(issues, 'assets.extension-not-allowed', path, nodeId, ERROR,
+                'Embed images must be one of: ' + allowedExtensions() + ' — "' + record.filename + '" is not.');
+        } else if (record.mime && assets.MIME_BY_EXTENSION[ext] !== record.mime) {
+            push(issues, 'assets.format-mismatch', path, nodeId, WARNING,
+                'The file name says .' + ext + ' but the file is recorded as ' + assets.mimeLabel(record.mime) + '.');
+        } else if (!record.mime) {
+            push(issues, 'assets.mime-unknown', path, nodeId, WARNING,
+                'There is no content type recorded for "' + record.filename + '", so Discord may not show it.');
+        }
+    }
+
+    /**
+     * What the byte store observed, and whether it agrees with the record.
+     * `facts` is the product of assets.assetFacts() (or null): states keyed by
+     * id, rows for the id that were probed. Nothing is hashed here — a plain
+     * probe cannot prove bytes ARE the bytes, so corruption is only ever
+     * reported when the store said so, and the record/row comparison below
+     * catches the disagreements that need no digest at all.
+     */
+    function checkAssetFacts(issues, view, assetId, facts) {
+        const record = view.records[assetId];
+        const ref = assetPath(view.refs, assetId);
+        const path = ref ? ref.path : 'assets.' + assetId;
+        const nodeId = ref && ref.embedId ? ref.embedId : CONTENT_NODE;
+        const name = record && record.filename ? '"' + record.filename + '"' : 'A file in this message';
+        const state = (facts && facts.states) ? facts.states[assetId] : null;
+
+        if (state === assets.FACT_STATES.CORRUPT) {
+            push(issues, 'assets.bytes-corrupt', path, nodeId, ERROR,
+                'The stored copy of ' + name + ' is damaged, so it cannot be attached. Add the file again.');
+            return;                       // a damaged entry has nothing to compare against
+        }
+        if (state === assets.FACT_STATES.MISSING) {
+            push(issues, 'assets.bytes-missing', path, nodeId, WARNING,
+                'The bytes of ' + name + ' are no longer stored in this browser, so it cannot be attached. Add the file again.');
+            return;
+        }
+        if (state === assets.FACT_STATES.UNAVAILABLE) {
+            push(issues, 'assets.bytes-unavailable', path, nodeId, WARNING,
+                'The stored copy of ' + name + ' could not be checked — this browser\'s storage is not available right now.');
+            return;
+        }
+        if (state !== assets.FACT_STATES.LOCAL) return;    // unknown: nothing was observed, so nothing is claimed
+
+        const row = (facts.rows) ? facts.rows[assetId] : null;
+        if (!row || !record) return;
+        if (record.sha256 && row.sha256 && String(row.sha256) !== String(record.sha256)) {
+            push(issues, 'assets.bytes-mismatch', path, nodeId, ERROR,
+                'The stored copy of ' + name + ' is not the file this message describes. Add the file again.');
+            return;
+        }
+        if (typeof record.bytes === 'number' && typeof row.byteLength === 'number' &&
+            row.byteLength !== record.bytes) {
+            push(issues, 'assets.bytes-mismatch', path, nodeId, ERROR,
+                'The stored copy of ' + name + ' is not the file this message describes. Add the file again.');
+            return;
+        }
+        // Only an image type the store actually recognised is worth comparing:
+        // a stored blob with no content type is not evidence of a change.
+        if (record.mime && row.mime && row.mime.indexOf('image/') === 0 && row.mime !== record.mime) {
+            push(issues, 'assets.mime-mismatch', path, nodeId, WARNING,
+                name + ' is recorded as ' + assets.mimeLabel(record.mime) +
+                ' but the stored copy is ' + assets.mimeLabel(row.mime) + '.');
+        }
+    }
+
+    /**
+     * The whole asset conversation, in one deterministic pass.
+     *
+     * Order inside the block (documented because the strip shows the FIRST
+     * issue): records that cannot be read, slots that point at nothing, the
+     * message-level count/size pair, filename agreement, then each referenced
+     * asset by id, then the records nothing uses.
+     */
+    function checkAssets(issues, doc, limits, facts) {
+        const view = assets.assetView(doc);
+        const messageNode = CONTENT_NODE;
+
+        // ── 1. Records the document carries but cannot read ──
+        view.unreadable.forEach(function (entry) {
+            const extra = entry.reason === 'non-json-value'
+                ? ' It holds a value that cannot be saved in a draft.'
+                : '';
+            push(issues, 'assets.record-unreadable', 'assets.' + entry.assetId, messageNode, ERROR,
+                'A file this message carries (' + entry.assetId + ') could not be read.' + extra +
+                ' Remove it and add the file again.');
+        });
+
+        // ── 2. Slots that point at no file at all ──
+        view.unlinked.forEach(function (ref) {
+            push(issues, 'assets.unlinked', ref.path, ref.embedId || messageNode, ERROR,
+                slotLabel(ref) + ' is set to an uploaded file, but no file is attached to it. Choose the file again.');
+        });
+
+        // ── 3. The message-level measurement (count, then size) ──
+        const sizes = assets.assetBytes(view);
+        const measured = assets.checkLimits(sizes.count, sizes.total, limits);
+        if (measured.usable) {
+            if (measured.count.over) {
+                push(issues, 'assets.too-many', 'embeds', messageNode, ERROR,
+                    'A message can carry at most ' + measured.count.max + ' files; this one has ' +
+                    measured.count.used + '. Remove ' + (measured.count.used - measured.count.max) + '.');
+            }
+            if (sizes.unknown.length) {
+                // A record with no byte count: the total cannot be computed.
+                push(issues, 'assets.size-unknown', 'embeds', messageNode, WARNING,
+                    'At least one file in this message has no size recorded, so the total was not checked against Discord\'s limit.');
+            } else if (!sizes.missing.length && measured.bytes.over) {
+                // (A reference with no record at all is already an error above;
+                // adding "the total is unknown" to it would be the same problem
+                // said twice, in a way that reads like a second one.)
+                push(issues, 'assets.total-size', 'embeds', messageNode, ERROR,
+                    'The files in this message add up to ' + assets.describeSize(sizes.total) +
+                    '; Discord accepts at most ' + assets.describeSize(measured.bytes.max) + '.');
+            }
+        }
+
+        // ── 4. Filenames: Discord needs one file per name, and a slot must
+        //     agree with the record about what its file is called. ──
+        const byName = {};
+        view.ids.forEach(function (assetId) {
+            const record = view.records[assetId];
+            if (!record) return;
+            if (!byName[record.filename]) byName[record.filename] = [];
+            byName[record.filename].push(assetId);
+        });
+        Object.keys(byName).sort().forEach(function (name) {
+            if (byName[name].length < 2) return;
+            push(issues, 'assets.filename-clash', 'embeds', messageNode, ERROR,
+                'Two files in this message are both named "' + name +
+                '". Discord needs a different name for each attached file.');
+        });
+        view.refs.forEach(function (ref) {
+            const record = view.records[ref.assetId];
+            if (!record || !ref.filename || ref.filename === record.filename) return;
+            push(issues, 'assets.filename-changed', ref.path, ref.embedId || messageNode, WARNING,
+                'A file slot is named "' + ref.filename + '" but the file it points at is "' +
+                record.filename + '".');
+        });
+
+        // ── 5. Each referenced asset, by id (sorted, so the list is stable) ──
+        // An id the record map holds but cannot read is already reported above:
+        // it must not also be described as "no record for this slot", which
+        // would read as a second, unrelated problem.
+        const unreadableIds = {};
+        view.unreadable.forEach(function (entry) { unreadableIds[entry.assetId] = true; });
+        view.ids.forEach(function (assetId) {
+            if (unreadableIds[assetId]) return;
+            checkAssetRecord(issues, view, assetId, limits);
+            checkAssetFacts(issues, view, assetId, facts || null);
+            checkAssetSize(issues, view, assetId, limits);
+        });
+
+        // ── 6. Records nothing points at ──
+        view.orphans.forEach(function (assetId) {
+            push(issues, 'assets.unused', 'assets.' + assetId, messageNode, WARNING,
+                'A file was added to this message but no image, thumbnail or icon uses it, so it will not be uploaded.');
+        });
+    }
+
+    /**
+     * One file against the served per-file advisory. The number is ADVISORY
+     * unless the server says otherwise (`file_advisory_is_hard`) — only
+     * Discord knows a guild's real ceiling, so a guess here would refuse a
+     * file Discord accepts. The words come from assets.describeSize(), the
+     * decision from assets.checkFileSize(): this file owns neither.
+     */
+    function checkAssetSize(issues, view, assetId, limits) {
+        const record = view.records[assetId];
+        if (!record || typeof record.bytes !== 'number') return;
+        const verdict = assets.checkFileSize(record.bytes, limits);
+        if (!verdict.usable || !verdict.oversized) return;
+        const ref = assetPath(view.refs, assetId);
+        push(issues, 'assets.file-too-large',
+            ref ? ref.path : 'assets.' + assetId,
+            ref && ref.embedId ? ref.embedId : CONTENT_NODE,
+            verdict.blocked ? ERROR : WARNING,
+            'The file "' + record.filename + '" is ' + assets.describeSize(verdict.size) +
+            '; Discord\'s limit for one file is ' + assets.describeSize(verdict.advisoryMax) + '.');
+    }
+
     // ── The entry point ──────────────────────────────────────────
     /**
-     * validate(document, limits) → [issue, …] in a deterministic order:
+     * validate(document, limits, facts) → [issue, …] in a deterministic order:
      * the message first, then embed by embed, each embed's issues in the order
      * the server reports them. An empty array means "nothing to say".
      */
-    function validate(document_, limits) {
+    function validate(document_, limits, facts) {
         if (!model) throw new Error('embed/validate.js needs embed/model.js loaded first');
+        if (!assets) throw new Error('embed/validate.js needs embed/assets.js loaded first');
 
         const check = ensureLimits(limits);
         if (!check.ok) return [limitsIssue()];
@@ -568,6 +842,12 @@ window.NERO.embed = window.NERO.embed || {};
             embedCount: embeds.length,
         };
         for (let i = 0; i < embeds.length; i++) validateEmbed(issues, embeds[i], i, context);
+
+        // 7c: the assets last, so every existing rule keeps its place in the
+        // list. `facts` is the page's probe result (or nothing at all): the
+        // call above never received one and still works, which is what keeps
+        // this an extension of the entry point rather than a new one.
+        checkAssets(issues, doc, limits, facts || null);
         return issues;
     }
 

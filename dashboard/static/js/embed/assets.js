@@ -225,6 +225,20 @@ window.NERO.embed = window.NERO.embed || {};
         return 'not a recognised image';
     }
 
+    /**
+     * Bytes as a short human string: 900 → '900 bytes', 1536 → '1.5 KB'.
+     * The thresholds are about READABILITY, not about any limit — nothing in
+     * this function decides whether a file is acceptable (that is
+     * checkFileSize(), against the served table).
+     */
+    function describeSize(value) {
+        const bytes = (typeof value === 'number' && isFinite(value) && value > 0) ? Math.round(value) : 0;
+        if (bytes < 1024) return bytes + (bytes === 1 ? ' byte' : ' bytes');
+        const kb = bytes / 1024;
+        if (kb < 1024) return (Math.round(kb * 10) / 10) + ' KB';
+        return (Math.round((kb / 1024) * 10) / 10) + ' MB';
+    }
+
     // ── SHA-256 (pure, synchronous, dependency-free) ──────────────
     /**
      * A synchronous SHA-256 over bytes. `crypto.subtle` is async and
@@ -587,15 +601,50 @@ window.NERO.embed = window.NERO.embed || {};
     }
 
     /**
+     * Is this a value a DRAFT can hold? The document is JSON: it is
+     * hashed, serialized and compared for dirty-ness, so a Blob, a
+     * typed array, a nested object or a function inside a record would
+     * either silently change shape on the way to storage or make
+     * drafts.assertSerializable() refuse the write outright. Only
+     * strings, finite numbers, booleans and null pass.
+     */
+    function jsonScalar(value) {
+        const type = typeof value;
+        if (value === null) return true;
+        if (type === 'string' || type === 'boolean') return true;
+        return type === 'number' && isFinite(value);
+    }
+
+    /**
+     * Keys a record carries that this build does not know AND that
+     * cannot survive JSON, sorted. Forward compatibility is for DATA
+     * from a newer phase — never for bytes smuggled into a document.
+     */
+    function foreignUnsafeKeys(value) {
+        if (!value || typeof value !== 'object') return [];
+        return Object.keys(value)
+            .filter((key) => RECORD_KEYS.indexOf(key) === -1 && !jsonScalar(value[key]))
+            .sort();
+    }
+
+    /**
      * A stored asset record read back: the known keys in the fixed
      * order, then any key this build does not know about (sorted) —
      * a newer phase's field is preserved, never dropped by a rebuild.
+     *
+     * The canonical keys are the ones RECORD_KEYS lists, and they are
+     * rebuilt by buildRecord() above: this function NEVER invents a
+     * shape of its own (that is what keeps the record contract in one
+     * place). An unknown key is preserved only when its value is a
+     * JSON scalar; anything else makes the whole record unreadable,
+     * which is reported rather than quietly stored.
      */
     function normalizeRecord(value) {
         if (!value || typeof value !== 'object' || !value.assetId) return null;
         const built = buildRecord(value);
         if (!built.ok) return null;
         const out = built.record;
+        if (foreignUnsafeKeys(value).length) return null;   // bytes in a record are not a record
         Object.keys(value).sort().forEach(key => {
             if (RECORD_KEYS.indexOf(key) !== -1) return;
             out[key] = value[key];
@@ -612,13 +661,28 @@ window.NERO.embed = window.NERO.embed || {};
             .filter(record => !!record);
     }
 
-    /** Asset entries that could not be understood, with the reason. */
+    /**
+     * Asset entries that could not be understood, with the reason:
+     *   missing-record    the key holds nothing at all
+     *   unreadable-record the value is not a record (no id, no name, …)
+     *   non-json-value    the value carries something a document cannot
+     *                     hold (bytes, a nested object, a function) —
+     *                     named separately because "this cannot be saved"
+     *                     is a different conversation from "this is malformed"
+     */
     function assetIssues(document_) {
         const map = (document_ && document_.assets) || null;
         if (!map || typeof map !== 'object') return [];
         const out = [];
         Object.keys(map).sort().forEach(key => {
-            if (!normalizeRecord(map[key])) out.push({ assetId: key, reason: map[key] ? 'unreadable-record' : 'missing-record' });
+            const unsafe = foreignUnsafeKeys(map[key]);
+            if (unsafe.length) {
+                out.push({ assetId: key, reason: 'non-json-value', keys: unsafe });
+                return;
+            }
+            if (!normalizeRecord(map[key])) {
+                out.push({ assetId: key, reason: map[key] ? 'unreadable-record' : 'missing-record' });
+            }
         });
         return out;
     }
@@ -778,6 +842,216 @@ window.NERO.embed = window.NERO.embed || {};
         };
     }
 
+    // ── Availability FACTS (phase 2, step 7c) ─────────────────────
+    /**
+     * A FACT is what the byte store OBSERVED for one asset. It is not
+     * part of the document, it is never inferred from the document, and
+     * it is never cached here: the page probes, the page hands the rows
+     * in, and this module turns them into the one vocabulary the
+     * validation rules speak.
+     *
+     * The five states are deliberately NOT collapsible. "We looked and
+     * there are no bytes" is a different statement from "we could not
+     * look" and from "we did not look at all", and each one produces
+     * different output: a missing file is a warning the user can act on,
+     * an unavailable store is a warning that says the check could not
+     * run, and an unobserved fact says NOTHING — assuming either way is
+     * how a page ends up telling someone their image is broken.
+     *
+     *   bytes-local        observed: the bytes are here (session memory or storage)
+     *   bytes-missing      observed: nothing is stored under that id
+     *   bytes-unavailable  observed: the store could not answer (degraded
+     *                      storage, a failed read, a closed connection)
+     *   bytes-corrupt      observed: something is there and it is not a
+     *                      usable byte entry
+     *   unknown            not observed (no row for this id at all)
+     */
+    const FACT_STATES = Object.freeze({
+        LOCAL: 'bytes-local',
+        MISSING: 'bytes-missing',
+        UNAVAILABLE: 'bytes-unavailable',
+        CORRUPT: 'bytes-corrupt',
+        UNKNOWN: 'unknown',
+    });
+
+    /** The store's "nothing under this id" reasons — the ONLY ones a
+     *  probe result may be read as a miss. */
+    const MISS_REASONS = ['missing', 'missing-entry'];
+    /** The store's "something is there, but not bytes" reason. */
+    const CORRUPT_REASONS = ['corrupt'];
+
+    /**
+     * A probe row → one of FACT_STATES. FAIL CLOSED: only the reasons
+     * above are read as an observation. Any other reason is
+     * `bytes-unavailable` (we could not tell), and a row that claims
+     * "not present" without saying why is `unknown` — a store that
+     * cannot explain itself has not told us anything.
+     */
+    function factState(row) {
+        if (!row || typeof row !== 'object') return FACT_STATES.UNKNOWN;
+        if (row.present === true) return FACT_STATES.LOCAL;
+        const reason = row.reason == null ? '' : String(row.reason);
+        if (CORRUPT_REASONS.indexOf(reason) !== -1) return FACT_STATES.CORRUPT;
+        if (MISS_REASONS.indexOf(reason) !== -1) return FACT_STATES.MISSING;
+        if (reason) return FACT_STATES.UNAVAILABLE;
+        return FACT_STATES.UNKNOWN;
+    }
+
+    /**
+     * The facts for a document: every id it references, the state of
+     * each, and the raw rows. `rows` is what the byte store's survey()
+     * returned — an array of `{assetId, present, reason, …}` — or null
+     * when nothing was probed.
+     *
+     * Two rules that matter more than they look:
+     *   • a referenced id with NO row is `unknown`, never `missing`
+     *     (an incomplete probe is not evidence of absence);
+     *   • the first row for an id wins, so the answer is deterministic
+     *     even if a caller hands the same id in twice.
+     */
+    function assetFacts(document_, rows) {
+        const ids = documentAssetIds(document_);
+        const list = Array.isArray(rows) ? rows : null;
+        const byId = {};
+        (list || []).forEach((row) => {
+            if (!row || typeof row !== 'object') return;
+            const id = row.assetId ? String(row.assetId) : '';
+            if (!id || Object.prototype.hasOwnProperty.call(byId, id)) return;
+            byId[id] = row;
+        });
+        const states = {};
+        const missingRows = [];
+        ids.forEach((id) => {
+            if (Object.prototype.hasOwnProperty.call(byId, id)) {
+                states[id] = factState(byId[id]);
+            } else {
+                states[id] = FACT_STATES.UNKNOWN;
+                missingRows.push(id);
+            }
+        });
+        return { ok: true, supplied: !!list, ids: ids, states: states, rows: byId, missingRows: missingRows };
+    }
+
+    /** The facts for a document nobody has probed yet. */
+    function noFacts(document_) {
+        return assetFacts(document_, null);
+    }
+
+    // ── The metadata view (documents + records, no bytes) ─────────
+    /**
+     * Everything the metadata side of a document says about its assets:
+     * the references (in document order), the distinct ids, the record
+     * each referenced id has (or null), the records that could not be
+     * read at all, the slots that point at no asset, and the records
+     * nothing points at.
+     *
+     * Read-only: the document is inspected, never repaired. Repairing
+     * here would be a second normalization authority, and a validator
+     * that edits what it validates cannot report what it found.
+     */
+    function assetView(document_) {
+        const refs = refsOf(document_);
+        const ids = referencedAssetIds(refs);
+        const map = (document_ && document_.assets && typeof document_.assets === 'object') ? document_.assets : {};
+        const records = {};
+        ids.forEach((id) => {
+            const raw = Object.prototype.hasOwnProperty.call(map, id) ? map[id] : undefined;
+            records[id] = raw === undefined ? null : normalizeRecord(raw);
+        });
+        const unreadable = assetIssues(document_);
+        // A record that cannot be read is reported ONCE, as unreadable — it is
+        // not also "unused", because that second message would describe the
+        // same entry as a second problem.
+        const broken = {};
+        unreadable.forEach((entry) => { broken[entry.assetId] = true; });
+        const orphans = Object.keys(map).sort()
+            .filter((id) => ids.indexOf(id) === -1 && !broken[id]);
+        return {
+            ok: true,
+            refs: refs,
+            ids: ids,
+            records: records,
+            unreadable: unreadable,
+            unlinked: refs.filter((ref) => !ref.assetId),
+            orphans: orphans,
+        };
+    }
+
+    /**
+     * The byte arithmetic behind the count/size rules: how many assets
+     * are referenced, how big they are together, and which ids have no
+     * usable byte count (so the caller can say "not measured" instead of
+     * reporting a total that silently skipped a file).
+     */
+    function assetBytes(view) {
+        const records = (view && view.records) || {};
+        const ids = (view && Array.isArray(view.ids)) ? view.ids : [];
+        let total = 0;
+        const unknown = [];      // a record exists, but it carries no byte count
+        const missing = [];      // no record at all — a different problem, already reported
+        ids.forEach((id) => {
+            const record = records[id];
+            if (!record) { missing.push(id); return; }
+            const size = typeof record.bytes === 'number' && record.bytes >= 0 ? record.bytes : null;
+            if (size === null) unknown.push(id);
+            else total += size;
+        });
+        return {
+            count: ids.length,
+            total: total,
+            unknown: unknown,
+            missing: missing,
+            complete: unknown.length === 0 && missing.length === 0,
+        };
+    }
+
+    // ── Retention / keep-set (pure; NOTHING is deleted here) ──────
+    /**
+     * THE RETENTION KEEP-SET (phase 2 decision 4, as amended by 7c).
+     *
+     * Given every document that could still reach an asset — the
+     * current one, the saved snapshot, each undo/redo entry — plus the
+     * ids this session created, it answers which asset ids must
+     * survive, and which records the target document carries that
+     * nothing points at any more.
+     *
+     * WHAT THIS DOES NOT DO, ON PURPOSE
+     *   • It never deletes BYTES. Removing bytes safely needs a
+     *     cross-draft ownership proof (the 'assets' object store is
+     *     shared by every draft in this database, and 7c has no way to
+     *     enumerate what the other drafts reference), so byte removal
+     *     stays the caller-invoked primitive it always was.
+     *   • It never guesses. With no documents at all it reports
+     *     `ok:false, reason:'no-documents'` and an empty keep-set:
+     *     "I cannot prove what is unreferenced" must never be read as
+     *     "throw it away". A caller that treats a failed analysis as an
+     *     empty one is the bug this shape exists to prevent.
+     */
+    function retention(documents, opts) {
+        opts = opts || {};
+        const docs = (Array.isArray(documents) ? documents : [])
+            .filter((doc) => !!doc && typeof doc === 'object');
+        if (!docs.length) {
+            return { ok: false, reason: 'no-documents', keep: [], refs: [], orphans: [], plan: null };
+        }
+        const refs = [];
+        docs.forEach((doc) => { refsOf(doc).forEach((ref) => refs.push(ref)); });
+        const keep = referencedAssetIds(refs);
+        (Array.isArray(opts.sessionIds) ? opts.sessionIds : []).forEach((id) => {
+            if (id && keep.indexOf(String(id)) === -1) keep.push(String(id));
+        });
+        keep.sort();
+        const target = (opts.records && typeof opts.records === 'object') ? opts.records : null;
+        const orphans = target
+            ? Object.keys(target).sort().filter((id) => keep.indexOf(id) === -1)
+            : [];
+        // The plan is pruneOrphans() and nothing else, so there is ONE
+        // refcount rule in this codebase: this function only decides what
+        // to hand it. Nothing in this build applies the plan.
+        const plan = target ? pruneOrphans(target, keep) : null;
+        return { ok: true, reason: null, keep: keep, refs: refs, orphans: orphans, plan: plan };
+    }
+
     NERO.embed.assets = Object.freeze({
         // identity
         sha256Hex: sha256Hex,
@@ -787,6 +1061,7 @@ window.NERO.embed = window.NERO.embed || {};
         sniffMime: sniffMime,
         mimeLabel: mimeLabel,
         describeBytes: describeBytes,
+        describeSize: describeSize,
         // names
         sanitiseFilename: sanitiseFilename,
         filenameExtension: filenameExtension,
@@ -804,6 +1079,16 @@ window.NERO.embed = window.NERO.embed || {};
         referencedAssetIds: referencedAssetIds,
         documentAssetIds: documentAssetIds,
         pruneOrphans: pruneOrphans,
+        // availability facts + the metadata view (7c: what the page probes,
+        // what the validation rules read — never a second document model)
+        FACT_STATES: FACT_STATES,
+        factState: factState,
+        assetFacts: assetFacts,
+        noFacts: noFacts,
+        assetView: assetView,
+        assetBytes: assetBytes,
+        // retention / keep-set analysis (pure; nothing here deletes bytes)
+        retention: retention,
         // constants (read-only; the tables a later step or the schema
         // contract test may inspect)
         LIMIT_KEYS: LIMIT_KEYS,

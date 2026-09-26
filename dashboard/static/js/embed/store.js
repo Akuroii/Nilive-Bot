@@ -267,6 +267,21 @@ window.NERO.embed = window.NERO.embed || {};
         function canRedo() { return historyIndex < history.length - 1; }
         function historyDepth() { return { size: history.length, index: historyIndex }; }
 
+        /**
+         * The documents the undo stack can still reach, oldest first — the
+         * only way a caller can ask "which assets would an undo bring back?".
+         *
+         * READ-ONLY BY CONSTRUCTION: each entry is a private clone, so a
+         * caller can neither mutate the store's history nor reach the state
+         * object through the result. Entries below the current index are
+         * included on purpose: redo is not the only path (undo-then-redo,
+         * or a later edit that truncates the tail) and a retention decision
+         * that ignored the tail would be wrong the moment somebody undid.
+         */
+        function historyDocuments() {
+            return history.map(entry => model.cloneDocument(entry.document));
+        }
+
         // ── Save state / dirty tracking ───────────────────────────
         /**
          * Confirm a SYNCHRONOUS save: the store is handed the document that was
@@ -347,6 +362,7 @@ window.NERO.embed = window.NERO.embed || {};
             canUndo: canUndo,
             canRedo: canRedo,
             historyDepth: historyDepth,
+            historyDocuments: historyDocuments,
             markSaved: markSaved,
             markSavedHash: markSavedHash,
             isDirty: isDirty,
@@ -372,6 +388,11 @@ window.NERO.embed = window.NERO.embed || {};
             'embed/setAuthor': (state, a) => ({ document: m.setAuthor(state.document, a.embedId, a.patch) }),
             'embed/setFooter': (state, a) => ({ document: m.setFooter(state.document, a.embedId, a.patch) }),
             'embed/setMedia': (state, a) => ({ document: m.setMedia(state.document, a.embedId, a.slot, a.value) }),
+            // 7c: the asset RECORD map, as ordinary document edits. The byte
+            // store is never reached from here — this is metadata only, so an
+            // undo can bring a record back without touching a single byte.
+            'asset/add': (state, a) => ({ document: m.setDocumentAsset(state.document, a.assetId, a.record) }),
+            'asset/remove': (state, a) => ({ document: m.removeDocumentAsset(state.document, a.assetId) }),
             'embed/add': (state, a) => ({ document: m.addEmbed(state.document, a) }),
             'embed/remove': (state, a) => ({ document: m.removeEmbed(state.document, a.embedId) }),
             'embed/move': (state, a) => ({ document: m.moveEmbed(state.document, a.embedId, a.delta) }),

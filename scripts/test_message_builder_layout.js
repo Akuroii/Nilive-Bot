@@ -245,7 +245,8 @@ assert(declaredIds.length >= 9, 'the module declares the full region surface', S
 const SCRIPTS = String(ROOT_ATTRS['data-page-script'] || '');
 const scriptOrder = (SCRIPTS.match(/js\/[^']+?'/g) || []).map(s => s.replace(/'$/, ''));
 const expectedOrder = [
-    'js/embed/model.js', 'js/embed/store.js', 'js/embed/validate.js',
+    'js/embed/model.js', 'js/embed/assets.js', 'js/embed/asset-store.js',
+    'js/embed/store.js', 'js/embed/validate.js',
     'js/embed/discord-markdown.js', 'js/embed/preview.js', 'js/embed/drafts.js',
     'js/embed/views/statusbar.js', 'js/embed/views/rail.js', 'js/embed/views/inspector.js',
     'js/embed/views/actionbar.js', 'js/embed/message-builder-page.js',
@@ -257,6 +258,9 @@ scriptOrder.forEach(rel => {
     const file = path.join(ROOT, 'dashboard', 'static', rel);
     assert(fs.existsSync(file), 'listed script exists: ' + rel);
 });
+// 7c: the asset layer (assets.js + asset-store.js) is a foundation too —
+// validate.js reads the record/reference vocabulary from it and the page
+// probes through it, so both must load before either consumer.
 // The validator is a foundation, so it must be loaded BEFORE the page that
 // calls it (the page's foundation() throws without it) and it must publish the
 // one global the page looks for.

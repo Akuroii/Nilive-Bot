@@ -77,7 +77,7 @@ function makeSandbox() {
     // validate.js since 6b: the inspector's counters and the field cap are ITS
     // measurement, so the harness must load the real thing (and a mutant that
     // breaks it has to show up here).
-    [js('embed', 'model.js'), js('embed', 'store.js'), js('embed', 'validate.js'),
+    [js('embed', 'model.js'), js('embed', 'assets.js'), js('embed', 'store.js'), js('embed', 'validate.js'),
      RAIL_PATH, INSPECTOR_PATH].forEach(file => {
         vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: path.basename(file) });
     });

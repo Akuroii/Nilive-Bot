@@ -65,7 +65,7 @@ const VALIDATE_SRC = fs.readFileSync(VALIDATE_PATH, 'utf8');
 // ── Load the real modules (model + validate) in one sandbox ──────
 const sandbox = { window: { NERO: {} }, console: console };
 vm.createContext(sandbox);
-[js('embed', 'model.js'), VALIDATE_PATH, js('embed', 'views', 'rail.js'), js('embed', 'views', 'inspector.js')]
+[js('embed', 'model.js'), js('embed', 'assets.js'), VALIDATE_PATH, js('embed', 'views', 'rail.js'), js('embed', 'views', 'inspector.js')]
     .forEach(file => vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: path.basename(file) }));
 const NERO = sandbox.window.NERO;
 const model = NERO.embed.model;
@@ -154,6 +154,10 @@ section('A. the module, its contract, and what it must NOT reach for');
         [NERO.embed.views.rail.CONTENT_NODE, NERO.embed.views.inspector.CONTENT_NODE].join('/'));
     assert(eq(V.REQUIRED_LIMITS.map(k => k.join('.')), [
         'message.content_max', 'message.embeds_max', 'message.embed_total_chars_max',
+        // 7c: the asset count/size rules measure with the served attachment
+        // pair, so those two keys are part of the contract as well — a missing
+        // one is an explicit failure, exactly like a missing embed key.
+        'attachments.count_max', 'attachments.total_bytes_max',
         'embed.title_max', 'embed.description_max', 'embed.fields_max', 'embed.field_name_max',
         'embed.field_value_max', 'embed.footer_text_max', 'embed.author_name_max',
     ]), 'the required-keys contract is exactly the keys the rules consume',
@@ -604,7 +608,12 @@ section('G. the documented severity divergences');
 // ═══════════════════════════════════════════════════════════════
 {
     // attachment:// — a warning here (phase 1 cannot upload), an error server-side.
-    const uploaded = doc({ embeds: [embed({ image: { kind: 'upload', filename: 'cat.png', assetId: 'a1' } })] });
+    // This rule owns the WIRE VALUE: a slot whose url is an `attachment://name`
+    // string (what a hand-typed reference normalizes to). An `{kind:'upload'}`
+    // asset is a different input with rules of its own (7c's asset checks report
+    // the record/bytes problem instead of guessing from a name), so this rule
+    // stays silent for it — one problem, one message.
+    const uploaded = doc({ embeds: [embed({ image: { kind: 'url', url: 'attachment://cat.png' } })] });
     const issues = run(uploaded);
     const hit = byCode(issues, 'embed.image.attachment-missing')[0];
     assert(!!hit, 'an attachment reference in a media slot is reported');
@@ -615,6 +624,9 @@ section('G. the documented severity divergences');
     assert(hit && hit.message === 'Embed 1 image points at the attachment "cat.png", but no file with that name is being uploaded — reattach the file before sending.',
         'with the server\'s wording, so the same problem reads the same way',
         hit && hit.message);
+    assert(byCode(run(doc({ embeds: [embed({ image: { kind: 'upload', filename: 'cat.png', assetId: 'a1' } })] })),
+        'embed.image.attachment-missing').length === 0,
+        'and an upload VALUE is not also judged by name here (the asset rules own it)');
 
     // A normalized media slot with the reference but no name (the form the
     // normalizer produces for "attachment://" typed by hand into a draft).

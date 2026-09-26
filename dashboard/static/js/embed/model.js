@@ -544,6 +544,69 @@ window.NERO.embed = window.NERO.embed || {};
             (stableStringify(e[slot]) === stableStringify(next) ? e : Object.assign({}, e, { [slot]: next })));
     }
 
+    // ── Asset metadata records (phase 2, step 7c) ─────────────────
+    /**
+     * Is this a value a DOCUMENT can hold? The document is JSON — hashed,
+     * cloned, written to storage and compared for dirty-ness — so a Blob, a
+     * typed array, a nested object or a function inside an asset record would
+     * either change shape on the way to storage or make the draft writer
+     * (drafts.assertSerializable) refuse the whole write.
+     *
+     * This is an ADMISSION check, not a normalizer: the canonical record shape
+     * is built by embed/assets.js (buildRecord/normalizeRecord), which loads
+     * AFTER this file and is therefore not this file's to duplicate.
+     */
+    function jsonScalar(value) {
+        const type = typeof value;
+        if (value === null) return true;
+        if (type === 'string' || type === 'boolean') return true;
+        return type === 'number' && isFinite(value);
+    }
+
+    function recordAdmissible(record) {
+        if (!record || typeof record !== 'object' || Array.isArray(record)) return false;
+        const keys = Object.keys(record);
+        for (let i = 0; i < keys.length; i++) {
+            if (!jsonScalar(record[keys[i]])) return false;
+        }
+        return true;
+    }
+
+    /**
+     * `document.assets[assetId] = record` as a pure patch. The record is
+     * copied key by key (never aliased), the map is replaced rather than
+     * mutated, and a record that cannot survive a save is REFUSED by returning
+     * the document unchanged — dispatching it is then a no-op, which is the
+     * only honest outcome for an edit that could not be stored. A record
+     * carrying a DIFFERENT id than the key it is stored under is refused too:
+     * two beliefs about one file is exactly the bug this map must not have.
+     */
+    function setDocumentAsset(doc, assetId, record) {
+        if (!assetId || !recordAdmissible(record)) return doc;
+        const id = String(assetId);
+        if (record.assetId != null && String(record.assetId) !== id) return doc;
+        const map = (doc && doc.assets && typeof doc.assets === 'object') ? doc.assets : {};
+        const next = {};
+        Object.keys(map).forEach((key) => { next[key] = map[key]; });
+        const copy = {};
+        Object.keys(record).forEach((key) => { copy[key] = record[key]; });
+        copy.assetId = id;
+        if (stableStringify(next[id]) === stableStringify(copy)) return doc;   // same record: no edit, no history entry
+        next[id] = copy;
+        return Object.assign({}, doc, { assets: next });
+    }
+
+    /** The same, in reverse: a record nothing references is dropped. */
+    function removeDocumentAsset(doc, assetId) {
+        const map = (doc && doc.assets && typeof doc.assets === 'object') ? doc.assets : null;
+        if (!map || !assetId) return doc;
+        const id = String(assetId);
+        if (!Object.prototype.hasOwnProperty.call(map, id)) return doc;
+        const next = {};
+        Object.keys(map).forEach((key) => { if (key !== id) next[key] = map[key]; });
+        return Object.assign({}, doc, { assets: next });
+    }
+
     // ── Structure (the keyed lists the preview reconciles) ────────
     function addEmbed(doc, opts) {
         opts = opts || {};
@@ -679,6 +742,8 @@ window.NERO.embed = window.NERO.embed || {};
         setAuthor: setAuthor,
         setFooter: setFooter,
         setMedia: setMedia,
+        setDocumentAsset: setDocumentAsset,
+        removeDocumentAsset: removeDocumentAsset,
         addEmbed: addEmbed,
         removeEmbed: removeEmbed,
         moveEmbed: moveEmbed,

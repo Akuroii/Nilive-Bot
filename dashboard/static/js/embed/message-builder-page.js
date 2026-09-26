@@ -135,12 +135,19 @@ window.NERO.embed = window.NERO.embed || {};
         if (!f.validate || !f.validate.validate) throw new Error('message-builder needs embed/validate.js loaded first');
         if (!f.preview || !f.preview.create) throw new Error('message-builder needs embed/preview.js loaded first');
         if (!f.drafts || !f.drafts.create) throw new Error('message-builder needs embed/drafts.js loaded first');
+        // 7c: the asset layer is a foundation too — assets.js owns what a
+        // record/reference IS, asset-store.js owns the bytes. Without them the
+        // page cannot answer "are the files this document names actually here?",
+        // and guessing that answer is not an option.
+        if (!f.assets || !f.assets.assetFacts) throw new Error('message-builder needs embed/assets.js loaded first');
+        if (!f.assetStore || !f.assetStore.create) throw new Error('message-builder needs embed/asset-store.js loaded first');
         if (!views.statusbar || !views.statusbar.create) throw new Error('message-builder needs embed/views/statusbar.js loaded first');
         if (!views.rail || !views.rail.create) throw new Error('message-builder needs embed/views/rail.js loaded first');
         if (!views.inspector || !views.inspector.create) throw new Error('message-builder needs embed/views/inspector.js loaded first');
         if (!views.actionbar || !views.actionbar.create) throw new Error('message-builder needs embed/views/actionbar.js loaded first');
         return {
             model: f.model, store: f.store, validate: f.validate, preview: f.preview, drafts: f.drafts,
+            assets: f.assets, assetStore: f.assetStore,
             statusbar: views.statusbar, rail: views.rail, inspector: views.inspector,
             actionbar: views.actionbar,
         };
@@ -261,6 +268,13 @@ window.NERO.embed = window.NERO.embed || {};
             limitsError: servedLimits.error,
             issueSignature: f.validate.signature([]),
             validateTimer: null,
+            // ── step 7c: asset facts (observations, never document state) ──
+            // `assetFacts` is the LAST probe's answer, keyed by the id set it
+            // describes; `assetProbe` is the in-flight probe (one at a time);
+            // `assetProbes` counts them through the registry's ctx, the same
+            // way validateRuns counts passes.
+            assetFacts: f.assets.noFacts({ embeds: [], assets: {} }),
+            assetProbe: null,
             unsubs: [],
             store: null,
             session: null,
@@ -341,6 +355,19 @@ window.NERO.embed = window.NERO.embed || {};
             },
         });
         inst.session = f.drafts.create({ guildId: inst.guildId, now: Date.now });
+
+        // The byte store, on the SAME v2 database through the SAME adapter the
+        // session uses (asset-store.bytesStorage): one persistence boundary,
+        // one retry/timeout/degrade policy, one place that knows the database
+        // name. This page owns no bytes and, in 7c, no object URLs at all —
+        // `urls: null` is deliberate: nothing picks a file yet (7d) and the
+        // preview does not resolve uploads yet (7e), so a URL minted here
+        // would be a URL nobody revokes. The only thing 7c asks of the store
+        // is an OBSERVATION.
+        inst.assetStore = f.assetStore.create({
+            scheduler: storageScheduler(inst),
+            urls: null,
+        });
 
         inst.unsubs.push(inst.session.onState(function (snapshot) { onSessionState(inst, snapshot); }));
         // Coarse store listener on purpose: it fires for markSaved/undo/redo as
@@ -645,6 +672,51 @@ window.NERO.embed = window.NERO.embed || {};
         if (inst.ctx && typeof inst.ctx.counter === 'function') inst.ctx.counter('validateRuns');
     }
 
+    /** Probes, counted the same way passes are — one number per burst. */
+    function countProbe(inst) {
+        if (inst.ctx && typeof inst.ctx.counter === 'function') inst.ctx.counter('assetProbes');
+    }
+
+    /**
+     * The scheduler the byte store's adapter uses for its open timeout. The
+     * registry's ctx owns timers for the whole page life when the page is
+     * mounted through it; a hand-mounted page falls back to the realm's own,
+     * which is exactly what drafts.create() does for the session.
+     */
+    function storageScheduler(inst) {
+        const ctx = inst.ctx;
+        return {
+            setTimeout: function (fn, ms) {
+                return (ctx && typeof ctx.timeout === 'function') ? ctx.timeout(fn, ms) : setTimeout(fn, ms);
+            },
+            clearTimeout: function (id) {
+                return (ctx && typeof ctx.clearTimeout === 'function') ? ctx.clearTimeout(id) : clearTimeout(id);
+            },
+        };
+    }
+
+    /**
+     * Ask the byte store what it knows about the ids a document references,
+     * and cache the answer as FACTS. The document is passed in as the snapshot
+     * the probe belongs to, so the facts describe the ids that were actually
+     * looked up — if the user edits while the probe is in flight, the next
+     * pass sees a different id set and probes again.
+     *
+     * A probe never writes, never hashes and never mints: it reads what the
+     * store holds and reports why when it cannot. A store that cannot answer
+     * is an answer (every fact becomes `bytes-unavailable`), which is why this
+     * promise does not need a failure branch that invents one.
+     */
+    function probeAssets(inst, doc, ids) {
+        if (!inst.assetStore) return Promise.resolve(null);
+        countProbe(inst);
+        return Promise.resolve(inst.assetStore.survey(ids)).then(function (rows) {
+            if (inst.destroyed) return null;
+            inst.assetFacts = NERO.embed.assets.assetFacts(doc, rows);
+            return inst.assetFacts;
+        });
+    }
+
     /**
      * One validation pass, synchronously: read the store's document, run the
      * pure validator against the SERVED limits, and tell the store only if the
@@ -657,8 +729,33 @@ window.NERO.embed = window.NERO.embed || {};
             cancelTimer(inst, inst.validateTimer);
             inst.validateTimer = null;
         }
+        const doc = inst.store.getDocument();
+
+        // 7c: the byte rules need an OBSERVATION of the ids this document
+        // references, and this page is the only thing that can ask for one. So
+        // a pass whose document names a different id set than the facts on
+        // hand probes first and validates when the answer lands. One probe per
+        // change of that set — not per keystroke, not per render — and the
+        // pass it replaces never counted itself as a run, so a burst still
+        // costs exactly one pass and at most one probe.
+        const ids = NERO.embed.assets.documentAssetIds(doc);
+        const factsSignature = inst.assetFacts && Array.isArray(inst.assetFacts.ids)
+            ? inst.assetFacts.ids.join(',') : null;
+        if (ids.join(',') !== factsSignature) {
+            if (!inst.assetProbe) {
+                inst.assetProbe = probeAssets(inst, doc, ids).then(function () {
+                    inst.assetProbe = null;
+                    if (!inst.destroyed) validateNow(inst);
+                }, function () {
+                    inst.assetProbe = null;      // an unexpected throw is treated as "no facts", never as a fact
+                    if (!inst.destroyed) validateNow(inst);
+                });
+            }
+            return null;
+        }
+
         const validator = NERO.embed.validate;
-        const issues = validator.validate(inst.store.getDocument(), inst.limits);
+        const issues = validator.validate(doc, inst.limits, inst.assetFacts);
         countValidation(inst);
         const signature = validator.signature(issues);
         if (signature !== inst.issueSignature) {
@@ -763,6 +860,10 @@ window.NERO.embed = window.NERO.embed || {};
         if (inst.rail) { try { inst.rail.destroy(); } catch (e) { /* already gone */ } }
         if (inst.actionbar) { try { inst.actionbar.destroy(); } catch (e) { /* already gone */ } }
         if (inst.session) { try { inst.session.destroy(); } catch (e) { /* reported above */ } }
+        // The byte store goes with the page: its adapter connection closes and
+        // any in-flight probe resolves into a destroyed instance (which the
+        // probe's own `.then` checks) rather than into a re-render.
+        if (inst.assetStore) { try { inst.assetStore.destroy(); } catch (e) { /* already gone */ } }
         if (inst.preview) { try { inst.preview.destroy(); } catch (e) { /* already gone */ } }
         if (inst.store) { try { inst.store.destroy(); } catch (e) { /* already gone */ } }
         if (inst.statusbar) { try { inst.statusbar.destroy(); } catch (e) { /* already gone */ } }
