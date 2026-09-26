@@ -1495,6 +1495,62 @@ def _draw_gradient_bar(img, x, y, w, h, color_a, color_b):
     img.paste(grad, (int(x), int(y)), mask)
 
 
+def _draw_xp_wave_fill(fw, bar_h, radius, color_a, color_b):
+    """Builds the filled portion of the XP pill as one masked RGBA layer:
+    a horizontal purple gradient with two translucent sine-wave ribbons
+    layered on top (a bright one and a darker one, different wavelength/
+    phase) so the fill reads as flowing liquid rather than a flat tint --
+    the reference's "fluid" character -- instead of the two static
+    corner-blob highlights this replaces. frac/width already resolved by
+    the caller; this only ever draws the actual fw>0 case.
+
+    Rendered supersampled then LANCZOS-downsampled (same trick used
+    elsewhere in this file for AA masks, see _fit_avatar/_load_crystals
+    comments) so the ribbons' diagonal edges stay crisp at the bar's
+    native ~21px height instead of coming out jagged/pixelated."""
+    fw_i = max(1, int(round(fw)))
+    SS = 4
+    fw_s, bh_s = fw_i * SS, bar_h * SS
+
+    base = Image.new("RGBA", (fw_s, bh_s), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(base)
+    for i in range(fw_s):
+        t = i / max(fw_s - 1, 1)
+        col = tuple(int(color_a[c] + (color_b[c] - color_a[c]) * t) for c in range(3))
+        bd.line([(i, 0), (i, bh_s)], fill=(*col, 255))
+
+    def _ribbon(wavelength_px, amplitude_px, phase, thickness_px, color, alpha):
+        layer = Image.new("RGBA", (fw_s, bh_s), (0, 0, 0, 0))
+        cy = bh_s / 2
+        top, bottom = [], []
+        for x in range(0, fw_s + SS, SS):
+            yy = cy + (amplitude_px * SS) * math.sin(
+                2 * math.pi * x / (wavelength_px * SS) + phase)
+            top.append((x, yy - thickness_px * SS / 2))
+            bottom.append((x, yy + thickness_px * SS / 2))
+        if len(top) >= 2:
+            ImageDraw.Draw(layer).polygon(top + bottom[::-1], fill=(*color, alpha))
+        return layer
+
+    # Wavelengths are fixed in real px (not scaled to fw) so the pattern
+    # reads as one continuous flow whatever the current fill width is --
+    # a short bar at 1% shows a small slice of it, a long bar at 99%
+    # shows several cycles, rather than the same two cycles stretched or
+    # squeezed to fit (which is what looks unnatural at very low/high %).
+    bright = _ribbon(wavelength_px=82, amplitude_px=bar_h * 0.30, phase=0.5,
+                     thickness_px=bar_h * 0.60, color=(255, 235, 255), alpha=58)
+    shadow = _ribbon(wavelength_px=150, amplitude_px=bar_h * 0.24, phase=3.3,
+                     thickness_px=bar_h * 0.55, color=(58, 12, 92), alpha=50)
+    base.alpha_composite(shadow)
+    base.alpha_composite(bright)
+
+    fill = base.resize((fw_i, bar_h), Image.LANCZOS)
+    mask = Image.new("L", (fw_i, bar_h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, fw_i, bar_h), radius=radius, fill=255)
+    fill.putalpha(ImageChops.multiply(fill.split()[3], mask))
+    return fill
+
+
 def _draw_xp_bar(img, bar_x, bar_y, bar_w, bar_h, frac):
     """Dark recessed pill track, purple gradient fill with soft diagonal
     internal lighting, and a bright glowing circular thumb at the current
@@ -1518,11 +1574,11 @@ def _draw_xp_bar(img, bar_x, bar_y, bar_w, bar_h, frac):
     track_mask = Image.new("L", (bar_w, bar_h), 0)
     ImageDraw.Draw(track_mask).rounded_rectangle((0, 0, bar_w, bar_h), radius=radius, fill=255)
     img.paste(track, (int(bar_x), int(bar_y)), track_mask)
-    # Thin outline on the empty track so its edge reads clearly against the
-    # panel instead of blending into it.
+    # Thin luminous outline on the empty track so its edge reads clearly
+    # against the panel instead of blending into it.
     ImageDraw.Draw(img).rounded_rectangle(
         (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=radius,
-        outline=(*COLORS["accent"], 60), width=1)
+        outline=(*COLORS["accent"], 90), width=1)
 
     fill_w = bar_w * frac if frac > 0 else 0
 
@@ -1532,27 +1588,12 @@ def _draw_xp_bar(img, bar_x, bar_y, bar_w, bar_h, frac):
             (bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=radius,
             fill=(160, 70, 225, 110)), blur=6)
 
-        _draw_gradient_bar(img, bar_x, bar_y, fill_w, bar_h,
-                           COLORS["xp_bar_fill_a"], COLORS["xp_bar_fill_b"])
-
-        # Internal wave-like lighting: two soft blurred highlight blobs on
-        # a diagonal (bottom-left / top-right), clipped to the fill's own
-        # pill shape -- reproduces the reference's diagonal internal glow
-        # bands (its two radial-gradients) without copying its CSS.
-        if fill_w > 10:
-            fw = int(fill_w)
-            wave = Image.new("RGBA", (fw, bar_h), (0, 0, 0, 0))
-            wd = ImageDraw.Draw(wave)
-            wd.ellipse((-fw * 0.15, bar_h * 0.55, fw * 0.55, bar_h * 2.1),
-                      fill=(255, 255, 255, 70))
-            wd.ellipse((fw * 0.45, -bar_h * 1.4, fw * 1.15, bar_h * 0.55),
-                      fill=(255, 255, 255, 55))
-            wave = wave.filter(ImageFilter.GaussianBlur(bar_h * 0.35))
-            wave_mask = Image.new("L", (fw, bar_h), 0)
-            ImageDraw.Draw(wave_mask).rounded_rectangle((0, 0, fw, bar_h), radius=radius,
-                                                         fill=255)
-            wave.putalpha(ImageChops.multiply(wave.split()[3], wave_mask))
-            img.alpha_composite(wave, (int(bar_x), int(bar_y)))
+        # Layered fluid/sine-wave fill (gradient + two flowing ribbons),
+        # built and masked to the pill shape as one layer, then composited
+        # in a single paste -- see _draw_xp_wave_fill.
+        wave_fill = _draw_xp_wave_fill(fill_w, bar_h, radius,
+                                       COLORS["xp_bar_fill_a"], COLORS["xp_bar_fill_b"])
+        img.alpha_composite(wave_fill, (int(bar_x), int(bar_y)))
 
         # Glassy top sheen band on top of the wave lighting -- dimensional/
         # glass look rather than a flat gradient.
