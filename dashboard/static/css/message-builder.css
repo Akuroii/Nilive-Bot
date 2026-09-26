@@ -415,6 +415,18 @@
 .mb2-insp-row { display: flex; gap: 8px; align-items: flex-end; }
 .mb2-insp-row .mb2-insp-input { flex: 1 1 auto; }
 .mb2-insp-now { flex: 0 0 auto; min-height: 34px; }
+/* 7d: the local-file control. The input, its state line and the Remove button
+   each get their own row inside the field. The state line is plain, quiet text:
+   it is what aria-describedby points at (never a live region — the strip
+   announces), and it is where a problem is READ. No validation tone is applied
+   here, deliberately: the inspector has never painted validation, and a problem
+   the validator found belongs to the strip (5c's contract, kept by 7d). */
+.mb2-insp-upload { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.mb2-insp-file { flex: 1 1 100%; padding: 6px 8px; }
+.mb2-insp-file::file-selector-button { margin-right: 8px; }
+.mb2-insp-filestate { flex: 1 1 100%; font-size: 12px; line-height: 1.4; color: var(--text3); }
+.mb2-insp-fileremove { flex: 0 0 auto; min-height: 30px; }
+.mb2-insp-fileremove[hidden] { display: none; }   /* shown only while a file is attached */
 .mb2-insp-group {
     border: 0;
     border-top: 1px solid var(--border);

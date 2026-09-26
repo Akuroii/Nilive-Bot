@@ -296,6 +296,48 @@ function makeEnv() {
     };
     env.unmount = () => env.NERO.lifecycle.unmount('test');
     env.store = () => env.inst.store;
+    // 7d: the realm's file reader. The stub deliberately has no File/FileReader
+    // support, so the test builds one here and hands it to the page — the page
+    // creates `new inst.win.FileReader()` and reads the chosen file once.
+    function TestFileReader() {
+        const self = this;
+        self.result = null;
+        self.onload = null;
+        self.onerror = null;
+        self.readAsArrayBuffer = function (file) {
+            setTimeout(function () {
+                if (file && file.__fail) { if (self.onerror) self.onerror({ target: self }); return; }
+                self.result = file && file.__bytes ? file.__bytes : null;
+                if (self.onload) self.onload({ target: self });
+            }, 0);
+        };
+    }
+    win.FileReader = TestFileReader;
+    sandbox.FileReader = TestFileReader;
+    function localPick(kind, file) {
+        const body = env.el('mb2-inspector-body');
+        const all = [];
+        (function walk(node) {
+            (node && node.children || []).forEach(function (child) { all.push(child); walk(child); });
+        })(body);
+        const input = all.filter((n) => typeof n.getAttribute === 'function' &&
+            n.getAttribute('data-insp-upload') === kind)[0];
+        if (!input) throw new Error('no file control for ' + kind);
+        input.files = file ? [file] : [];
+        body.dispatch('change', { type: 'change', target: input });
+        return input;
+    }
+    function localInput(kind) {
+        const body = env.el('mb2-inspector-body');
+        const all = [];
+        (function walk(node) {
+            (node && node.children || []).forEach(function (child) { all.push(child); walk(child); });
+        })(body);
+        return all.filter((n) => typeof n.getAttribute === 'function' &&
+            n.getAttribute('data-insp-upload') === kind)[0] || null;
+    }
+    env.localPick = localPick;
+    env.localInput = localInput;
     env.settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms == null ? 20 : ms));
     env.until = async (cond, ms) => {
         const deadline = Date.now() + (ms || 1000);
@@ -429,12 +471,24 @@ section('A. the contract, the boundaries, and what the page must NOT reach for')
     // The page itself: storage, URLs, bytes and the issue list.
     assert(!/indexedDB|openDatabase|idbStorage|IDBKeyRange/.test(CODE.page),
         'the page opens no database of its own (the adapter owns that)');
-    assert(!/\.remove\(|putBytes|assetStore\.remove/.test(CODE.page),
-        'the page cannot delete or write a byte (no remove, no putBytes)');
-    assert(!/createObjectURL|revokeObjectURL|urlFor|outstanding|blob:/.test(CODE.page),
+    // 7d moved the WRITE into the page (the pipeline is file → read → identify →
+    // putBytes → record → reference), so the 7c-era blanket bans on `putBytes`
+    // and `identify(` are now stated as the sharper boundary they always meant:
+    // the page still owns no byte machinery and no digest of its own. It asks
+    // the two modules that own them, once each, and it can still never delete.
+    assert(!/\.remove\s*\(|assetStore\.remove|delete\(|clear\(/.test(CODE.page),
+        'the page has no way to delete a byte (7d deletes nothing)');
+    assert((CODE.page.match(/putBytes/g) || []).length === 1 &&
+           /inst\.assetStore\.putBytes\(/.test(CODE.page),
+        'the page writes bytes ONCE, through the byte store\u2019s own primitive',
+        String((CODE.page.match(/putBytes/g) || []).length));
+    assert(!/createObjectURL|revokeObjectURL|urlFor|outstanding|blob:|FileReaderSync/.test(CODE.page),
         'the page mints no object URL and manages none');
-    assert(!/sha256Hex|identify\(/.test(CODE.page),
-        'the page never hashes a file');
+    assert(!/sha256Hex|sha256\s*\(|crypto\.subtle|digest\(/.test(CODE.page),
+        'the page never computes a digest');
+    assert((CODE.page.match(/A\.identify\(/g) || []).length === 1,
+        'and asks the identity module exactly once per pick',
+        String((CODE.page.match(/A\.identify\(/g) || []).length));
     assert(!/pruneOrphans|retention/.test(CODE.page),
         'the page never prunes: the retention analysis has no automatic caller');
     assert((CODE.page.match(/assetStore\.create\(/g) || []).length === 1 &&
@@ -1539,6 +1593,104 @@ async function sectionL() {
         JSON.stringify(deadRows));
 }
 
+/* ── M. one pick, end to end: the three modules agree ─────────────────────
+   The focus harness (test_message_builder_asset_upload.js) judges the control
+   and the pipeline. THIS section judges the seam: after one real pick through
+   the DOM, the byte store holds exactly one new entry, the document holds one
+   record and one reference, the page probes the new id set ONCE, the facts
+   describe it, the strip stays quiet — and a reload on the same database
+   resolves the file as present. */
+async function sectionM() {
+    const env = await rig({});
+    const A = env.NERO.embed.assets;
+    const idb = env.idb;
+    const before = env.docHash ? null : null;
+    const docBefore = JSON.stringify(env.store().getDocument());
+    const stepsBefore = env.store().historyDepth().size;
+    const passesBefore = env.passes();
+    const probesBefore = env.probes();
+    const writesBefore = env.writeLog();
+
+    const file = {};
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4, 5, 6, 7, 8]);
+    file.name = 'picked.png';
+    file.size = bytes.length;
+    file.type = 'image/png';
+    file.__bytes = bytes;
+    const ident = A.identify(bytes, 'picked.png');
+    assert(ident.ok, 'the fixture is a file the identity rules accept', ident.message);
+
+    // The file controls live in the embed panel, so select the embed first —
+    // the same act a user performs by clicking it in the rail.
+    env.store().dispatch({ type: 'ui/selectNode', nodeId: env.store().getDocument().embeds[0].id });
+    await env.settle(10);
+    assert(!!env.localInput('media.image'), 'the media slot offers a file control');
+    env.localPick('media.image', file);
+    await env.until(function () {
+        const rec = env.store().getDocument().assets[ident.assetId];
+        return !!rec && env.inst.uploadToken === null;
+    }, 3000);
+    await env.until(function () {
+        const ids = A.documentAssetIds(env.store().getDocument());
+        return eq(env.facts().ids, ids) && env.passes() > passesBefore;
+    }, 3000);
+    await env.settle(20);
+
+    assert(JSON.stringify(env.store().getDocument()) !== docBefore,
+        'the pick changes the document');
+    assert(env.store().historyDepth().size === stepsBefore + 1,
+        'by exactly ONE history step', stepsBefore + ' -> ' + env.store().historyDepth().size);
+    assert(env.inst.assetStore.stats().puts === 1,
+        'the byte store was asked to write exactly once',
+        String(env.inst.assetStore.stats().puts));
+    assert(!!env.entries().assets[ident.assetId],
+        'and the bytes are in the database under the id the identity rules minted');
+    assert(env.probes() === probesBefore + 1,
+        'the new id set is probed once (the old set\u2019s facts are not reused)',
+        String(env.probes()));
+    assert(eq(env.facts().ids, [ident.assetId]) && env.facts().states[ident.assetId] === 'bytes-local',
+        'and the facts describe the file that was just stored', JSON.stringify(env.facts().states));
+    assert(eq(codes(env.issues()), []) && env.strip().hidden === true,
+        'a stored file that the rules accept leaves the strip empty',
+        codes(env.issues()).join(','));
+    assert(env.notice() === '' || env.notice().indexOf('session only') === -1,
+        'and nothing claims it was not saved', env.notice());
+    // A pick is an EDIT: the page persists the draft (by design — this is not a
+    // send). It lands through the session's own key, and the reload below is
+    // what proves the file came back from storage rather than from memory.
+    assert(!!env.entries().drafts[env.draftKey('doc-integration')],
+        'the edit is persisted as a draft (and nothing is sent anywhere)');
+    assert(env.writeLog() > writesBefore, 'the page wrote through the adapter, not by hand');
+
+    // The pick survives a reload: save, tear down, come back on the same database.
+    await env.inst.session.saveNow();
+    await env.settle(30);
+    await env.unmount();
+    const reload = makeEnv();
+    reload.useIdb(idb);
+    await reload.mount({});
+    await reload.until(function () {
+        const ids = reload.NERO.embed.assets.documentAssetIds(reload.store().getDocument());
+        return eq(reload.facts().ids, ids) && reload.passes() >= 1;
+    }, 3000);
+    await reload.settle(20);
+    assert(!!reload.store().getDocument().assets[ident.assetId] &&
+           reload.store().getDocument().embeds[0].image.assetId === ident.assetId,
+        'a reload brings the record and the reference back');
+    assert(reload.facts().states[ident.assetId] === 'bytes-local',
+        'with the bytes resolved from storage, not from memory',
+        JSON.stringify(reload.facts().states));
+    reload.store().dispatch({ type: 'ui/selectNode', nodeId: reload.store().getDocument().embeds[0].id });
+    await reload.settle(10);
+    const reloadedInput = reload.localInput('media.image');
+    assert(!!reloadedInput && reloadedInput.getAttribute('accept') === '.gif,.jpeg,.jpg,.png,.webp',
+        'and the control is offered again for the same slot, with the same hint',
+        reloadedInput ? reloadedInput.getAttribute('accept') : 'no control');
+    assert(eq(codes(reload.issues()), []), 'the reloaded message is clean',
+        codes(reload.issues()).join(','));
+    await reload.unmount();
+}
+
 async function main() {
     await sectionG();
     await sectionH();
@@ -1546,6 +1698,7 @@ async function main() {
     await sectionJ();
     await sectionK();
     await sectionL();
+    await sectionM();
     console.log('\nmessage-builder asset integration: ' + pass + ' passed, ' + fail + ' failed');
     if (fail) {
         console.log('FAILURES:');

@@ -110,6 +110,18 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             throw new TypeError('inspector.create needs the document model (embed/model.js)');
         }
 
+        // 7d: the local-file control is OPTIONAL — a caller that passes no
+        // `upload` gets no file inputs at all (the panel is exactly what it was
+        // before 7d). When it IS passed, all three functions are required,
+        // because a half-wired control would end up reading bytes, storing
+        // something, or inventing a record. Which it must not do.
+        const upload = options.upload || null;
+        if (upload && (typeof upload.onPick !== 'function' ||
+                       typeof upload.onRemove !== 'function' ||
+                       typeof upload.stateFor !== 'function')) {
+            throw new TypeError('inspector.create: options.upload needs onPick, onRemove and stateFor');
+        }
+
         const stats = {
             renders: 0,
             nodesCreated: 0,
@@ -120,6 +132,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             attrWrites: 0,
             classWrites: 0,
             disabledWrites: 0,
+            hiddenWrites: 0,
             dispatches: 0,
             rowsCreated: 0,
         };
@@ -195,6 +208,32 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             if (!node || node.disabled === next) return;
             node.disabled = next;
             stats.disabledWrites++;
+        }
+
+        /**
+         * 7d: the Remove button exists in the DOM always and is SHOWN only while
+         * the slot actually holds a file. `hidden` is the property (it reflects
+         * to the attribute in a browser, and hides the control from the
+         * accessibility tree, unlike a zero-opacity trick).
+         */
+        function setHidden(node, on) {
+            const next = !!on;
+            if (!node || node.hidden === next) return;
+            node.hidden = next;
+            stats.hiddenWrites++;
+        }
+
+        /**
+         * 7d: `aria-invalid` follows the VALIDATOR, not this file. It is set from
+         * the same issue the state line shows and removed the moment that issue
+         * is gone, so the control cannot stay marked invalid after a fix, and it
+         * cannot claim a problem no rule reported.
+         */
+        function setAriaInvalid(node, on) {
+            if (!node || typeof node.getAttribute !== 'function') return;
+            const has = node.getAttribute('aria-invalid');
+            if (on && has !== 'true') { node.setAttribute('aria-invalid', 'true'); stats.attrWrites++; }
+            else if (!on && has !== null) { node.removeAttribute('aria-invalid'); stats.attrWrites++; }
         }
 
         // ── 6b: the numbers beside the controls ──────────────────────
@@ -283,6 +322,58 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             return box;
         }
 
+        /**
+         * 7d: one media slot's local-file control — a native `<input type="file">`
+         * (labelled and keyboard-operable: it is the only thing that can choose a
+         * file), a state line, and a Remove button that is shown only while there
+         * is something to remove.
+         *
+         * Three boundaries this control keeps:
+         *   • it never reads bytes and never stores anything. A pick is handed to
+         *     the page (`upload.onPick`), and the state it paints is COMPUTED by
+         *     the page (`upload.stateFor`) — this file owns neither the pipeline
+         *     nor the wording;
+         *   • its `accept` attribute is a hint for the picker, never the decision:
+         *     the page builds it from the asset module's own extension table, and
+         *     the real answer is assets.identify(), run by the page on the bytes;
+         *   • the state line is one static element referenced by
+         *     `aria-describedby` — no live region, no announcement of its own.
+         *     Problems are announced by the page's one strip.
+         */
+        function fileField(parent, key, labelText) {
+            const wrap = el('div', 'mb2-insp-field mb2-insp-upload');
+            wrap.setAttribute('data-insp-upload-field', key);
+            const slug = key.replace(/\./g, '-');
+            const inputId = 'mb2-insp-file-' + slug;
+            const stateId = 'mb2-insp-file-state-' + slug;
+            const label = el('label', 'mb2-insp-label', labelText);
+            label.setAttribute('for', inputId);
+            const input = el('input', 'mb2-insp-input mb2-insp-file');
+            input.type = 'file';
+            input.setAttribute('type', 'file');
+            input.setAttribute('id', inputId);
+            input.setAttribute('data-insp-upload', key);
+            input.setAttribute('autocomplete', 'off');
+            if (upload.accept) input.setAttribute('accept', upload.accept);
+            const state = el('span', 'mb2-insp-filestate');
+            state.setAttribute('id', stateId);
+            state.setAttribute('data-insp-filestate', key);
+            input.setAttribute('aria-describedby', stateId);
+            const remove = el('button', 'mb2-insp-btn mb2-insp-fileremove', 'Remove');
+            remove.setAttribute('type', 'button');
+            remove.setAttribute('data-insp-action', 'remove:' + key);
+            remove.setAttribute('data-insp-remove', key);
+            remove.setAttribute('aria-label', 'Remove the attached file');
+            remove.setAttribute('title', 'Remove the attached file');
+            setHidden(remove, true);
+            wrap.appendChild(label);
+            wrap.appendChild(input);
+            wrap.appendChild(state);
+            wrap.appendChild(remove);
+            parent.appendChild(wrap);
+            return { input: input, state: state, remove: remove };
+        }
+
         function actionButton(parent, action, labelText, ariaLabel, className) {
             const button = el('button', className || 'mb2-insp-btn', labelText);
             button.setAttribute('type', 'button');
@@ -350,6 +441,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         function buildEmbedPanel() {
             const node = el('div', 'mb2-insp-panel');
             const controls = {};
+            const uploads = {};                 // 7d: control key → { input, state, remove }
 
             controls.title = textField(node, 'mb2-insp-title', 'Title', 'title');
             controls.description = textAreaField(node, 'mb2-insp-description', 'Description', 'description', 6);
@@ -370,17 +462,21 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 { type: 'url', placeholder: 'https://example.com' });
             controls['author.icon'] = textField(author, 'mb2-insp-author-icon', 'Icon URL', 'author.icon',
                 { type: 'url', placeholder: 'https://example.com/icon.png' });
+            if (upload) uploads['author.icon'] = fileField(author, 'author.icon', 'Upload icon');
 
             const footer = group(node, 'Footer');
             controls['footer.text'] = textField(footer, 'mb2-insp-footer-text', 'Text', 'footer.text');
             controls['footer.icon'] = textField(footer, 'mb2-insp-footer-icon', 'Icon URL', 'footer.icon',
                 { type: 'url', placeholder: 'https://example.com/icon.png' });
+            if (upload) uploads['footer.icon'] = fileField(footer, 'footer.icon', 'Upload icon');
 
             const media = group(node, 'Media');
             controls['media.image'] = textField(media, 'mb2-insp-image', 'Large image URL', 'media.image',
                 { type: 'url', placeholder: 'https://example.com/image.png' });
+            if (upload) uploads['media.image'] = fileField(media, 'media.image', 'Upload image');
             controls['media.thumbnail'] = textField(media, 'mb2-insp-thumbnail', 'Thumbnail URL', 'media.thumbnail',
                 { type: 'url', placeholder: 'https://example.com/thumb.png' });
+            if (upload) uploads['media.thumbnail'] = fileField(media, 'media.thumbnail', 'Upload thumbnail');
 
             const fields = group(node, 'Fields');
             const list = el('ul', 'mb2-insp-fields');
@@ -411,7 +507,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
 
             return {
                 node: node, controls: controls, fieldList: list,
-                addField: addField, counters: counters,
+                addField: addField, counters: counters, uploads: uploads,
             };
         }
 
@@ -682,10 +778,36 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             return node.value === undefined ? '' : String(node.value);
         }
 
+        /**
+         * 7d: a chosen file. The control hands the File to the page and forgets
+         * it; it never reads, stores or records anything itself.
+         *
+         * Only a `change` is acted on (a browser also fires `input` for a file
+         * field, and reading the same pick twice would run the pipeline twice),
+         * and the field's own value is cleared first, so choosing the SAME file
+         * again still fires — a file input that kept its value would go silent
+         * and look broken. The files are read before the reset either way.
+         */
+        function onFilePicked(target, key) {
+            if (destroyed || !upload) return false;
+            const sel = selection();
+            if (!sel || sel.kind !== 'embed') return false;
+            const files = target.files;
+            const file = files && files.length ? files[0] : null;
+            try { target.value = ''; } catch (e) { /* some browsers keep value read-only */ }
+            if (!file) return false;                     // "no file chosen" is not a pick
+            return !!upload.onPick({ embedId: sel.embed.id, key: key, file: file });
+        }
+
         function onControl(event) {
             if (destroyed) return;
             const target = event && event.target;
             if (!target || typeof target.getAttribute !== 'function') return;
+            const uploadKey = target.getAttribute('data-insp-upload');
+            if (uploadKey) {
+                if (event && event.type === 'change') onFilePicked(target, uploadKey);
+                return;
+            }
             const key = target.getAttribute('data-insp');
             if (!key) return;
             apply(key, controlValue(target));
@@ -696,6 +818,16 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             const sel = selection();
             const fieldId = node && typeof node.getAttribute === 'function'
                 ? node.getAttribute('data-field-id') : null;
+            // 7d: taking a file off a slot. Whether the metadata record goes too
+            // (and that the BYTES never do) is the page's decision, not this
+            // file's: the control reports "remove this slot's file" and nothing
+            // more. It also refuses when the slot holds no file, so the click a
+            // user makes on a hidden-but-present button cannot hit the wrong slot.
+            if (action && action.indexOf('remove:') === 0) {
+                const key = action.slice('remove:'.length);
+                if (!upload || !sel || sel.kind !== 'embed') return false;
+                return !!upload.onRemove({ embedId: sel.embed.id, key: key });
+            }
             switch (action) {
                 case 'selectContent':
                     dispatch({ type: 'ui/selectNode', nodeId: CONTENT_NODE });
@@ -748,6 +880,25 @@ window.NERO.embed.views = window.NERO.embed.views || {};
          * over-state are change-guarded, so a keystroke that changes no counter
          * costs no DOM write.
          */
+        /**
+         * 7d: paint the four file controls. One question per control — the page's
+         * `stateFor` answers with the text to show, whether that text is an ERROR
+         * (it is the validator's own issue when it exists) and whether there is
+         * anything to remove. The view translates none of it: it writes what it
+         * was given, and only when it changed.
+         */
+        function paintUploads(panel, embed) {
+            const uploads = panel && panel.uploads;
+            if (!uploads) return;
+            Object.keys(uploads).forEach(function (key) {
+                const slot = uploads[key];
+                const state = upload.stateFor({ embedId: embed.id, key: key }) || {};
+                setText(slot.state, state.text == null ? '' : state.text);
+                setAriaInvalid(slot.input, !!state.invalid);
+                setHidden(slot.remove, !state.removable);
+            });
+        }
+
         function paintCounts(sel, panel) {
             const counters = panel && panel.counters;
             if (!counters) return;
@@ -794,6 +945,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 syncFieldList(panel.fieldList, embed);
                 const cap = capFacts(store.getState().document).fields[embed.id];
                 setDisabled(panel.addField, !(cap && cap.canAdd));
+                paintUploads(panel, embed);
                 paintCounts(sel, panel);
                 return;
             }
@@ -821,6 +973,11 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         mount.addEventListener('click', onClick);
         unsubs.push(store.subscribe(function (s) { return s.ui.selectedNodeId; }, function () { render(); }));
         unsubs.push(store.subscribe(function (s) { return s.document; }, function () { render(); }));
+        // 7d: the file controls' state line is a projection of the validator's
+        // issues (a slot whose bytes went missing must say so without waiting for
+        // an edit), so an issue change repaints too. It is still the ONE list:
+        // this reads `ui.issues`, it does not keep, build or filter a copy.
+        unsubs.push(store.subscribe(function (s) { return s.ui.issues; }, function () { render(); }));
 
         // First paint: derived from whatever the store already holds.
         render();

@@ -3084,6 +3084,70 @@ async function main() {
             env.consoleLines.error.join(' | '));
     }
 
+    section('T. the 7d upload wiring: the page hands the view a pipeline, not bytes');
+    // ─────────────────────────────────────────────────────────────
+    // The focus harness (test_message_builder_asset_upload.js) judges the pick
+    // from the user's side. THIS section judges what the PAGE owns: one byte
+    // store, one identity call, one write site, one coalesce key per pick, and
+    // a teardown that drops a read still in flight.
+    {
+        const env = makeEnv();
+        installIdb(env);
+        await env.mount();
+        const PAGE_PATH_7D = process.env.NERO_MB_PAGE_SRC || js('embed', 'message-builder-page.js');
+        const code = fs.readFileSync(PAGE_PATH_7D, 'utf8')
+            .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+            .replace(/\/\*[\s\S]*?\*\//g, ' ');
+        assert(/upload:\s*\{[\s\S]{0,120}accept: uploadAccept\(f\)/.test(code) &&
+               /stateFor:/.test(code) && /onPick:/.test(code) && /onRemove:/.test(code),
+            'the page hands the inspector the upload contract (accept + three calls)');
+        assert((code.match(/uploadAccept\(f\)/g) || []).length === 2 &&
+               (code.match(/function uploadAccept\(f\)/g) || []).length === 1,
+            'and builds that hint in exactly one place (one definition, one use)',
+            String((code.match(/uploadAccept\(f\)/g) || []).length));
+        assert(!/accept\s*[:=]\s*['"]\.(png|jpg)/.test(code),
+            'never as a second list written into the page');
+        // Behaviour, not source: the wiring actually reaches the DOM.
+        env.store().dispatch({ type: 'ui/selectNode', nodeId: env.store().getDocument().embeds[0].id });
+        env.inst.inspector.render();
+        const walk = (node, out) => {
+            (node && node.children || []).forEach((child) => { out.push(child); walk(child, out); });
+            return out;
+        };
+        const input = walk(env.el('mb2-inspector-body'), [])
+            .filter((n) => typeof n.getAttribute === 'function' &&
+                n.getAttribute('data-insp-upload') === 'media.image')[0];
+        assert(!!input && input.getAttribute('accept') === '.gif,.jpeg,.jpg,.png,.webp',
+            'the slot really grew a file control with that hint',
+            input ? input.getAttribute('accept') : 'no control');
+        assert(!!input && input.getAttribute('aria-describedby') &&
+               walk(env.el('mb2-inspector-body'), [])
+                   .some((n) => n.getAttribute && n.getAttribute('id') === input.getAttribute('aria-describedby')),
+            'described by a state line that is really in the panel');
+
+        assert((code.match(/inst\.assetStore\.putBytes\(/g) || []).length === 1,
+            'the page has exactly ONE byte write site',
+            String((code.match(/inst\.assetStore\.putBytes\(/g) || []).length));
+        assert((code.match(/A\.identify\(/g) || []).length === 1,
+            'and exactly ONE identity call site',
+            String((code.match(/A\.identify\(/g) || []).length));
+        assert((code.match(/asset\/add/g) || []).length === 1 &&
+               (code.match(/asset\/remove/g) || []).length === 2,
+            'the record actions appear where they are owned: one add, and remove only in '
+            + 'the Remove path and the replacement rule');
+        assert((code.match(/'upload:' \+ (request\.)?embedId \+ ':' \+ key/g) || []).length === 2,
+            'a pick and a Remove share one coalesce-key shape (so each is ONE undo step)',
+            String((code.match(/'upload:' \+ (request\.)?embedId \+ ':' \+ key/g) || []).length));
+        assert(code.indexOf('Coalesce') === -1 && /coalesceKey/.test(code),
+            'the key goes through the store\u2019s own meta field, not a second history mechanism');
+
+        // Teardown: a read that is still in flight belongs to the dead page.
+        env.inst.uploadToken = { fake: true };
+        env.unmount();
+        assert(env.inst.uploadToken === null,
+            'destroying the page drops the in-flight pick instead of letting it land');
+    }
+
     console.log('\nmessage-builder page: ' + pass + ' passed, ' + fail + ' failed');
     if (fail) {
         console.log('Failures:');

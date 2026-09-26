@@ -91,6 +91,10 @@ const HARNESS = path.join(ROOT, 'scripts', 'test_message_builder_page.js');
 // judged by the integration harness (which can swap any of the five sources).
 const INTEGRATION = path.join(ROOT, 'scripts', 'test_message_builder_asset_integration.js');
 const HARNESS_VALIDATE = path.join(ROOT, 'scripts', 'test_message_builder_validate.js');
+// Step 7d's control and pipeline have their own harness: it drives the real
+// file input through the DOM and judges what the document, the history and the
+// byte store look like afterwards, so the 7d mutants are judged there.
+const UPLOAD = path.join(ROOT, 'scripts', 'test_message_builder_asset_upload.js');
 
 /**
  * A mutant is { id, target, why, edits: [[find, replace], …] }.
@@ -1997,6 +2001,214 @@ const MUTANTS = [
         ]],
     },
 
+
+    // ── step 7d: the local-file pick. Judged by the upload harness, which drives
+    //    the control through the DOM and then judges the document, the history,
+    //    the byte store and the control's own words.
+    //    U1..U6 are the write path: the right id, bytes before document, and no
+    //    swallowing. U7/U8 are the transaction's shape (one undo step, record
+    //    before reference). U9/U10 are the two deletions 7d must never do.
+    //    U11..U13 are the "hard-coded or swallowed" family. U14..U16 are the
+    //    async boundary. U17..U19 are the control's own promises.
+    {
+        id: 'U1',
+        target: 'page',
+        harness: UPLOAD,
+        why: "the record is stored under a DIFFERENT asset id than the bytes and the reference",
+        edits: [[
+            "                inst.store.dispatch({\n                    type: 'asset/add', assetId: ident.assetId, record: built.record,\n                    meta: { coalesceKey: coalesce },\n                });\n                applySlotValue(inst, embedId, key, {\n                    kind: 'upload', assetId: ident.assetId, filename: built.record.filename,\n                    mime: built.record.mime, bytes: built.record.bytes,\n                }, coalesce);",
+            "                const wrongRecord = Object.assign({}, built.record, { assetId: ident.assetId + '-wrong' });\n                const coalesce = 'upload:' + embedId + ':' + key;\n                inst.store.dispatch({\n                    type: 'asset/add', assetId: ident.assetId, record: wrongRecord,\n                    meta: { coalesceKey: coalesce },\n                });\n                applySlotValue(inst, embedId, key, {\n                    kind: 'upload', assetId: ident.assetId, filename: built.record.filename,\n                    mime: built.record.mime, bytes: built.record.bytes,\n                }, coalesce);",
+        ]],
+    },
+    {
+        id: 'U2',
+        target: 'page',
+        harness: UPLOAD,
+        why: "a pick stores the bytes under an id that is not the one the rules minted",
+        edits: [[
+            "        return Promise.resolve(inst.assetStore.putBytes(ident.assetId, buffer, { mime: ident.mime }))",
+            "        return Promise.resolve(inst.assetStore.putBytes(ident.assetId + '-x', buffer, { mime: ident.mime }))",
+        ]],
+    },
+    {
+        id: 'U3',
+        target: 'page',
+        harness: UPLOAD,
+        why: "the slot is hard-coded: an image pick writes the thumbnail",
+        edits: [[
+            "                slot: key === 'media.image' ? 'image' : 'thumbnail',",
+            "                slot: 'thumbnail',",
+        ]],
+    },
+    {
+        id: 'U4',
+        target: 'page',
+        harness: UPLOAD,
+        why: "the identity rules are skipped (the file is taken on trust)",
+        edits: [[
+            "        const ident = A.identify(buffer, file && file.name);\n        if (!ident || !ident.ok) {",
+            "        const ident = A.identify(buffer, file && file.name);\n        if (false) {",
+        ]],
+    },
+    {
+        id: 'U5',
+        target: 'page',
+        harness: UPLOAD,
+        why: "the bytes are never stored (the document is edited anyway)",
+        edits: [[
+            "        return Promise.resolve(inst.assetStore.putBytes(ident.assetId, buffer, { mime: ident.mime }))",
+            "        return Promise.resolve({ ok: true, persisted: true, byteLength: buffer.length,\n            mime: ident.mime }).then(function (stored) {",
+        ]],
+    },
+    {
+        id: 'U6',
+        target: 'page',
+        harness: UPLOAD,
+        why: "a FAILED put is swallowed and the document is edited without bytes",
+        edits: [[
+            "                if (!stored || !stored.ok) {\n                    setNotice(inst, {\n                        tone: 'danger',\n                        text: 'That file could not be stored in this browser, so nothing was added to the message.',\n                    });\n                    finishUpload(inst, token);\n                    return null;\n                }",
+            "                if (!stored) return null;",
+        ]],
+    },
+    {
+        id: 'U7',
+        target: 'page',
+        harness: UPLOAD,
+        why: "the two edits stop sharing a coalesce key (a pick becomes TWO undo steps)",
+        edits: [[
+            "        const meta = { coalesceKey: coalesce };",
+            "        const meta = {};   // mutant: no coalesce key",
+        ]],
+    },
+    {
+        id: 'U8',
+        target: 'page',
+        harness: UPLOAD,
+        why: "the reference is written BEFORE the record it points at",
+        edits: [[
+            "                const coalesce = 'upload:' + embedId + ':' + key;\n                inst.store.dispatch({\n                    type: 'asset/add', assetId: ident.assetId, record: built.record,\n                    meta: { coalesceKey: coalesce },\n                });\n                applySlotValue(inst, embedId, key, {\n                    kind: 'upload', assetId: ident.assetId, filename: built.record.filename,\n                    mime: built.record.mime, bytes: built.record.bytes,\n                }, coalesce);",
+            "                const coalesce = 'upload:' + embedId + ':' + key;\n                applySlotValue(inst, embedId, key, {\n                    kind: 'upload', assetId: ident.assetId, filename: built.record.filename,\n                    mime: built.record.mime, bytes: built.record.bytes,\n                }, coalesce);\n                inst.store.dispatch({\n                    type: 'asset/add', assetId: ident.assetId, record: built.record,\n                    meta: { coalesceKey: coalesce },\n                });",
+        ]],
+    },
+    {
+        id: 'U9',
+        target: 'page',
+        harness: UPLOAD,
+        why: "removing one reference deletes a record another slot still uses",
+        edits: [[
+            "        const stillReferenced = NERO.embed.assets.documentAssetIds(inst.store.getDocument())\n            .indexOf(assetId) !== -1;\n        if (!stillReferenced) {\n            inst.store.dispatch({\n                type: 'asset/remove', assetId: assetId, meta: { coalesceKey: coalesce },\n            });\n        }\n        return true;",
+            "        const stillReferenced = NERO.embed.assets.documentAssetIds(inst.store.getDocument())\n            .indexOf(assetId) !== -1;\n        if (true) {\n            inst.store.dispatch({\n                type: 'asset/remove', assetId: assetId, meta: { coalesceKey: coalesce },\n            });\n        }\n        return true;",
+        ]],
+    },
+    {
+        id: 'U10',
+        target: 'page',
+        harness: UPLOAD,
+        why: "removing a reference DELETES THE BYTES too",
+        edits: [[
+            "        const stillReferenced = NERO.embed.assets.documentAssetIds(inst.store.getDocument())\n            .indexOf(assetId) !== -1;\n        if (!stillReferenced) {\n            inst.store.dispatch({\n                type: 'asset/remove', assetId: assetId, meta: { coalesceKey: coalesce },\n            });\n        }\n        return true;",
+            "        const stillReferenced = NERO.embed.assets.documentAssetIds(inst.store.getDocument())\n            .indexOf(assetId) !== -1;\n        if (!stillReferenced) {\n            inst.store.dispatch({\n                type: 'asset/remove', assetId: assetId, meta: { coalesceKey: coalesce },\n            });\n        }\n        inst.assetStore.remove(assetId);\n        return true;",
+        ]],
+    },
+    {
+        id: 'U11',
+        target: 'page',
+        harness: UPLOAD,
+        why: "acceptance is a hard-coded extension test instead of the identity rules",
+        edits: [[
+            "        const ident = A.identify(buffer, file && file.name);\n        if (!ident || !ident.ok) {",
+            "        const ident = A.identify(buffer, file && file.name);\n        const looksLikeAnImage = /\\.(gif|jpe?g|png|webp)$/i.test(String(file && file.name));\n        if (!looksLikeAnImage) {",
+        ]],
+    },
+    {
+        id: 'U12',
+        target: 'page',
+        harness: UPLOAD,
+        why: "a hard-coded size limit refuses a file the served limits allow",
+        edits: [[
+            "        const ident = A.identify(buffer, file && file.name);\n        if (!ident || !ident.ok) {",
+            "        const ident = A.identify(buffer, file && file.name);\n        if (file && file.size > 20971520) {\n            setNotice(inst, { tone: 'warn', text: 'That file is too large to attach.' });\n            finishUpload(inst, token);\n            return null;\n        }\n        if (!ident || !ident.ok) {",
+        ]],
+    },
+    {
+        id: 'U13',
+        target: 'page',
+        harness: UPLOAD,
+        why: "a failed READ is turned into an empty file and the pipeline continues",
+        edits: [[
+            "            if (!read.ok) {\n                setNotice(inst, { tone: 'warn', text: 'That file could not be read, so nothing was added.' });\n                finishUpload(inst, token);\n                return null;\n            }",
+            "            if (!read.ok) {\n                read = { ok: true, buffer: new Uint8Array(0) };\n            }",
+        ]],
+    },
+    {
+        id: 'U14',
+        target: 'page',
+        harness: UPLOAD,
+        why: "a read that lands after the slot changed still overwrites the edit the user made",
+        edits: [[
+            "            const now = uploadSlot(inst, embedId, key);\n            if (!now || NERO.embed.model.stableStringify(now.value) !== startedWith) {",
+            "            const now = uploadSlot(inst, embedId, key);\n            if (!now) {",
+        ]],
+    },
+    {
+        id: 'U15',
+        target: 'page',
+        harness: UPLOAD,
+        why: "a read that lands after teardown still mutates the dead document",
+        edits: [[
+            "        readUpload(inst, request.file).then(function (read) {\n            if (inst.destroyed || inst.uploadToken !== token) return null;\n            const now = uploadSlot(inst, embedId, key);\n            if (!now || NERO.embed.model.stableStringify(now.value) !== startedWith) {",
+            "        readUpload(inst, request.file).then(function (read) {\n            if (inst.destroyed || inst.uploadToken !== token) return null;\n            const now = uploadSlot(inst, embedId, key);\n            if (!now) return null;",
+        ]],
+    },
+    {
+        id: 'U16',
+        target: 'page',
+        harness: UPLOAD,
+        why: "the pick mints its OWN id instead of using the one the identity rules derived (the same bytes would become two records)",
+        // REDEFINED, not deleted: this mutant used to drop the page's own
+        // post-teardown guard in uploadPick. Hand-checked against a mutated copy,
+        // that is EQUIVALENT — the inspector stops delivering events to a
+        // destroyed view, so the page's second guard is defence in depth and
+        // removing it alone cannot change behaviour. The reachable form of
+        // "work outlives the page" is U15 (a read in flight across teardown),
+        // which is caught. The category is therefore stated as what the byte
+        // store's id check exists to stop: an invented identity, i.e. a second
+        // record for bytes that already have one.
+        edits: [[
+            "        const ident = A.identify(buffer, file && file.name);\n        if (!ident || !ident.ok) {",
+            "        const ident = Object.assign({}, A.identify(buffer, file && file.name), {\n            assetId: 'a_' + Math.random().toString(16).slice(2) });\n        if (!ident || !ident.ok) {",
+        ]],
+    },
+    {
+        id: 'U17',
+        target: 'inspector',
+        harness: UPLOAD,
+        why: "the control marks a HEALTHY slot invalid instead of saying nothing",
+        edits: [[
+            "            const has = node.getAttribute('aria-invalid');\n            if (on && has !== 'true') { node.setAttribute('aria-invalid', 'true'); stats.attrWrites++; }\n            else if (!on && has !== null) { node.removeAttribute('aria-invalid'); stats.attrWrites++; }",
+            "            const has = node.getAttribute('aria-invalid');\n            if (on) { node.setAttribute('aria-invalid', 'true'); stats.attrWrites++; }\n            else if (has !== null) { node.setAttribute('aria-invalid', 'false'); stats.attrWrites++; }",
+        ]],
+    },
+    {
+        id: 'U18',
+        target: 'inspector',
+        harness: UPLOAD,
+        why: "the state line is never wired to the input",
+        edits: [[
+            "            input.setAttribute('aria-describedby', stateId);",
+            "            /* mutant: no describedby */",
+        ]],
+    },
+    {
+        id: 'U19',
+        target: 'inspector',
+        harness: UPLOAD,
+        why: "Remove is offered on a slot with no file",
+        edits: [[
+            "                setHidden(slot.remove, !state.removable);",
+            "                setHidden(slot.remove, false);",
+        ]],
+    },
 ];
 
 function sha1(file) {

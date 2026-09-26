@@ -563,13 +563,33 @@ function runAll() {
         // 'validate'/'counter' are replaced by the boundary that actually
         // matters — it never decides legality, never owns the issue list, never
         // parses the limits table and never paints a live region.
-        ['aria-invalid', 'maxlength', 'minlength', 'pattern=', 'Nerrored'].forEach(word => {
+        ['maxlength', 'minlength', 'pattern=', 'Nerrored'].forEach(word => {
             assert(CODE.indexOf(word) === -1, 'no inline error vocabulary: ' + word);
         });
+        // 7d loosens exactly two of the old bans, and the boundary is re-stated
+        // rather than dropped:
+        //   • `aria-invalid` is now WRITTEN, but only through one guarded helper
+        //     and only from the answer the page hands over (`state.invalid`) —
+        //     the control decides nothing, and it never marks itself VALID (the
+        //     attribute is removed, never set to "false").
+        //   • `ui.issues` is now NAMED once — as the subscription slice whose
+        //     change repaints the state line. The list is still not read,
+        //     filtered, built or published here: the page answers, this paints.
+        assert(!/aria-invalid['"]\s*,\s*['"]false/.test(CODE),
+            'the control is never marked VALID — the attribute is removed instead');
+        assert(/function setAriaInvalid/.test(CODE) &&
+               (CODE.match(/aria-invalid/g) || []).length <= 3,
+            'aria-invalid is written in exactly one guarded place',
+            String((CODE.match(/aria-invalid/g) || []).length));
+        assert((CODE.match(/ui\.issues/g) || []).length === 1,
+            'the issue slice is named once (the repaint subscription)',
+            String((CODE.match(/ui\.issues/g) || []).length));
+        assert(!/severity|\.code\b|issues\s*\.\s*filter|issues\s*\.\s*forEach|setIssues/.test(CODE),
+            'and this file neither reads, filters nor publishes issues');
         // The rules and their wording stay in embed/validate.js: this file must
         // not know an issue code or a sentence, only how to ask for numbers.
         ['too-long', 'too-many', 'url-invalid', 'attachment-missing', 'limits.missing',
-         'setIssues', 'ui.issues', "Discord's limit is"].forEach(word => {
+         "Discord's limit is"].forEach(word => {
             assert(CODE.indexOf(word) === -1, 'no rule or issue vocabulary: ' + word);
         });
         assert(!/validate\.validate\s*\(/.test(CODE),

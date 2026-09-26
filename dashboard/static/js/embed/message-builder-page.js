@@ -275,6 +275,11 @@ window.NERO.embed = window.NERO.embed || {};
             // way validateRuns counts passes.
             assetFacts: f.assets.noFacts({ embeds: [], assets: {} }),
             assetProbe: null,
+            // ── step 7d: the file pick in flight (never document state) ──
+            // `uploadToken` is the pick that currently owns the pipeline: a newer
+            // pick replaces it, and any older read that lands afterwards is
+            // discarded without touching the document.
+            uploadToken: null,
             unsubs: [],
             store: null,
             session: null,
@@ -323,6 +328,17 @@ window.NERO.embed = window.NERO.embed || {};
             // One clock for the whole page life — the same one the preview
             // header uses, so "Now" cannot disagree with the rendered time.
             now: function () { return inst.startedAt; },
+            // 7d: the local-file control. The page owns the pipeline (read →
+            // identify → store → record → dispatch) and the words; the view owns
+            // the control and paints exactly what these answer. `accept` is a
+            // picker hint built from the asset module's own table — the decision
+            // is assets.identify() on the bytes.
+            upload: {
+                accept: uploadAccept(f),
+                stateFor: function (request) { return uploadStateFor(inst, request); },
+                onPick: function (request) { return uploadPick(inst, request); },
+                onRemove: function (request) { return uploadRemove(inst, request); },
+            },
         });
         if (!inst.store.getUi().selectedNodeId) {
             // Boot state: the message root is what the inspector will show.
@@ -817,6 +833,302 @@ window.NERO.embed = window.NERO.embed || {};
         return true;
     }
 
+    // ── Local files (step 7d: client-side only) ───────────────────
+    /**
+     * WHAT A PICK IS ALLOWED TO DO, in order, once:
+     *
+     *   File → read once → assets.identify() → assetStore.putBytes()
+     *        → assets.buildRecord() → asset/add → the slot's media edit
+     *
+     * Every step before the document is a GATE: a refusal at any of them leaves
+     * the document exactly as it was (an edit that could not be stored is not an
+     * edit). The two dispatches carry ONE coalesce key, so a pick is one undo
+     * step, and the record always lands BEFORE the reference — the document never
+     * holds a reference to a file it cannot describe.
+     *
+     * What this code never does: mint an object URL, write bytes itself, hash a
+     * file itself, delete bytes, apply retention, or invent a record. Identity
+     * comes from assets.js, bytes from asset-store.js, the shape from
+     * assets.buildRecord(), and the limits from the served table alone.
+     */
+    const UPLOAD_SLOTS = {
+        'media.image': { field: 'image', pathSuffix: 'image' },
+        'media.thumbnail': { field: 'thumbnail', pathSuffix: 'thumbnail' },
+        'author.icon': { field: 'author', pathSuffix: 'author.icon' },
+        'footer.icon': { field: 'footer', pathSuffix: 'footer.icon' },
+    };
+
+    /** The picker's hint, built from the module that owns the extension table. */
+    function uploadAccept(f) {
+        return f.assets.ALLOWED_EXTENSIONS.map(function (ext) { return '.' + ext; }).join(',');
+    }
+
+    /** The slot a control key names, resolved against the CURRENT document. */
+    function uploadSlot(inst, embedId, key) {
+        const spec = UPLOAD_SLOTS[key];
+        if (!spec || !inst || !inst.store) return null;
+        const doc = inst.store.getDocument();
+        const embeds = (doc && doc.embeds) || [];
+        for (let i = 0; i < embeds.length; i++) {
+            if (embeds[i].id !== embedId) continue;
+            const embed = embeds[i];
+            const value = spec.field === 'image' ? embed.image
+                : spec.field === 'thumbnail' ? embed.thumbnail
+                : spec.field === 'author' ? (embed.author && embed.author.icon)
+                : (embed.footer && embed.footer.icon);
+            return {
+                embed: embed, value: value || null,
+                path: 'embeds.' + i + '.' + spec.pathSuffix,
+            };
+        }
+        return null;
+    }
+
+    /** The validator's FIRST issue at one path (its own order, its own words). */
+    function firstIssueAt(issues, path) {
+        for (let i = 0; i < issues.length; i++) {
+            if (issues[i] && issues[i].path === path) return issues[i];
+        }
+        return null;
+    }
+
+    /**
+     * What the control under one slot should say. The page answers because the
+     * page owns the vocabulary: the record (assets.js), the size words
+     * (assets.describeSize), the type words (assets.mimeLabel) and the VALIDATOR's
+     * own sentence when it has one for this slot. The view paints what it is
+     * given and translates nothing.
+     */
+    function uploadStateFor(inst, request) {
+        const key = request && request.key;
+        const slot = uploadSlot(inst, request && request.embedId, key);
+        const ui = inst.store && inst.store.getUi ? inst.store.getUi() : null;
+        const issues = (ui && Array.isArray(ui.issues) ? ui.issues : []);
+        const issue = slot ? firstIssueAt(issues, slot.path) : null;
+        const value = slot ? slot.value : null;
+        const attached = !!(value && value.kind === 'upload' && value.assetId);
+        if (issue) {
+            return { text: issue.message, invalid: issue.severity === 'error', removable: attached };
+        }
+        if (!attached) return { text: 'No file attached', invalid: false, removable: false };
+        const doc = inst.store.getDocument();
+        const record = doc.assets ? doc.assets[String(value.assetId)] : null;
+        const A = NERO.embed.assets;
+        const parts = [(record && record.filename) || value.filename || 'the file'];
+        if (record && typeof record.bytes === 'number') parts.push(A.describeSize(record.bytes));
+        if (record && record.mime) parts.push(A.mimeLabel(record.mime));
+        return { text: 'Attached: ' + parts.join(' · '), invalid: false, removable: true };
+    }
+
+    /**
+     * Read the chosen file ONCE, as bytes. The reader is the realm's own
+     * FileReader; a realm without one, or a read that fails, is an explicit
+     * refusal — never a silent half-upload.
+     */
+    function readUpload(inst, file) {
+        return new Promise(function (resolve) {
+            const Ctor = (inst.win && inst.win.FileReader) ||
+                (typeof FileReader !== 'undefined' ? FileReader : null);
+            if (!Ctor) { resolve({ ok: false, reason: 'no-reader' }); return; }
+            let reader = null;
+            try {
+                reader = new Ctor();
+                reader.onload = function () {
+                    const buffer = reader.result;
+                    if (!buffer) { resolve({ ok: false, reason: 'read-failed' }); return; }
+                    resolve({ ok: true, buffer: buffer });
+                };
+                reader.onerror = function () { resolve({ ok: false, reason: 'read-failed' }); };
+                reader.readAsArrayBuffer(file);
+            } catch (e) {
+                resolve({ ok: false, reason: 'read-failed' });
+            }
+        });
+    }
+
+    /**
+     * The pick is over (landed, refused or thrown): the token goes back to null
+     * so "a pick is in flight" is a state with an end. A read that arrives after
+     * this — a superseded one — no longer matches and is discarded.
+     */
+    function finishUpload(inst, token) {
+        if (inst && inst.uploadToken === token) inst.uploadToken = null;
+    }
+
+    /** Uploads, counted the way passes and probes are — one number per pick. */
+    function countUpload(inst) {
+        if (inst.ctx && typeof inst.ctx.counter === 'function') inst.ctx.counter('uploads');
+    }
+
+    /**
+     * `remove:<key>` — take the file off one slot. The REFERENCE goes first, the
+     * RECORD only when nothing in the document points at it any more, and the
+     * BYTES never: a file nothing references is an orphan the retention analysis
+     * is allowed to describe and nobody is allowed to delete in 7d. Both edits
+     * share one coalesce key, so removing is one undo step like attaching.
+     */
+    function uploadRemove(inst, request) {
+        if (!inst || inst.destroyed || !inst.store) return false;
+        const key = request && request.key;
+        const slot = uploadSlot(inst, request && request.embedId, key);
+        if (!slot || !slot.value || slot.value.kind !== 'upload' || !slot.value.assetId) return false;
+        const assetId = String(slot.value.assetId);
+        const coalesce = 'upload:' + request.embedId + ':' + key;
+        applySlotValue(inst, request.embedId, key, null, coalesce);
+        const stillReferenced = NERO.embed.assets.documentAssetIds(inst.store.getDocument())
+            .indexOf(assetId) !== -1;
+        if (!stillReferenced) {
+            inst.store.dispatch({
+                type: 'asset/remove', assetId: assetId, meta: { coalesceKey: coalesce },
+            });
+        }
+        return true;
+    }
+
+    /** The slot's media edit, whichever of the four slots it is. */
+    function applySlotValue(inst, embedId, key, value, coalesce) {
+        const meta = { coalesceKey: coalesce };
+        if (key === 'media.image' || key === 'media.thumbnail') {
+            inst.store.dispatch({
+                type: 'embed/setMedia', embedId: embedId,
+                slot: key === 'media.image' ? 'image' : 'thumbnail',
+                value: value, meta: meta,
+            });
+            return;
+        }
+        if (key === 'author.icon') {
+            inst.store.dispatch({ type: 'embed/setAuthor', embedId: embedId, patch: { icon: value }, meta: meta });
+            return;
+        }
+        if (key === 'footer.icon') {
+            inst.store.dispatch({ type: 'embed/setFooter', embedId: embedId, patch: { icon: value }, meta: meta });
+        }
+    }
+
+    /**
+     * The pipeline, from the byte store's answer to the document. The record is
+     * built by the module that owns the shape, stored first and referenced
+     * second, and NOTHING is dispatched unless the bytes are in.
+     */
+    function applyUpload(inst, embedId, key, file, buffer, token, replaced) {
+        const A = NERO.embed.assets;
+        const ident = A.identify(buffer, file && file.name);
+        if (!ident || !ident.ok) {
+            setNotice(inst, {
+                tone: 'warn',
+                text: ident && ident.message ? ident.message : 'That file cannot be used as an image.',
+            });
+            finishUpload(inst, token);
+            return null;
+        }
+        return Promise.resolve(inst.assetStore.putBytes(ident.assetId, buffer, { mime: ident.mime }))
+            .then(function (stored) {
+                if (inst.destroyed || inst.uploadToken !== token) return null;
+                if (!stored || !stored.ok) {
+                    setNotice(inst, {
+                        tone: 'danger',
+                        text: 'That file could not be stored in this browser, so nothing was added to the message.',
+                    });
+                    finishUpload(inst, token);
+                    return null;
+                }
+                const built = A.buildRecord({
+                    assetId: ident.assetId, sha256: ident.sha256, mime: ident.mime,
+                    bytes: typeof stored.byteLength === 'number' ? stored.byteLength : null,
+                    originalName: file && file.name ? String(file.name) : '',
+                    filename: ident.filename, availability: 'bytes-local',
+                    createdAt: new Date().toISOString(),
+                });
+                if (!built || !built.ok) {
+                    setNotice(inst, {
+                        tone: 'danger',
+                        text: 'That file could not be described well enough to attach, so nothing was added.',
+                    });
+                    finishUpload(inst, token);
+                    return null;
+                }
+                const coalesce = 'upload:' + embedId + ':' + key;
+                inst.store.dispatch({
+                    type: 'asset/add', assetId: ident.assetId, record: built.record,
+                    meta: { coalesceKey: coalesce },
+                });
+                applySlotValue(inst, embedId, key, {
+                    kind: 'upload', assetId: ident.assetId, filename: built.record.filename,
+                    mime: built.record.mime, bytes: built.record.bytes,
+                }, coalesce);
+                // Replacing a file is a ref REMOVAL like any other: if the id
+                // the slot used to hold has no reference left, its record goes
+                // too — same rule as Remove, same coalesce key, so the whole
+                // pick is still ONE undo step. A record another slot still uses
+                // is never touched, and bytes are never deleted. Without this,
+                // a replaced file would leave an `assets.unused` warning the
+                // user has no way to clear.
+                if (replaced && replaced !== ident.assetId &&
+                        NERO.embed.assets.documentAssetIds(inst.store.getDocument()).indexOf(replaced) === -1) {
+                    inst.store.dispatch({
+                        type: 'asset/remove', assetId: replaced, meta: { coalesceKey: coalesce },
+                    });
+                }
+                if (stored.persisted === false) {
+                    // The store's OWN answer: the bytes are here for this session
+                    // only. Never phrased as saved, because they are not.
+                    setNotice(inst, {
+                        tone: 'warn',
+                        text: 'That file is kept for this session only — this browser’s storage is not available right now.',
+                    });
+                }
+                finishUpload(inst, token);
+                return ident.assetId;
+            });
+    }
+
+    /**
+     * A chosen local file. One pick at a time is honoured by SUPERSEDING: the
+     * newest pick owns a token, and a read that finishes after a newer pick (or
+     * after the slot changed, or after the page died) is discarded without
+     * touching the document — the bytes it may already have stored are
+     * content-addressed duplicates at worst, and 7d deletes nothing.
+     */
+    function uploadPick(inst, request) {
+        if (!inst || inst.destroyed || !inst.assetStore) return false;
+        const key = request && request.key;
+        if (!UPLOAD_SLOTS[key] || !request || !request.file) return false;
+        const slot = uploadSlot(inst, request.embedId, key);
+        if (!slot) return false;
+        countUpload(inst);
+        const token = {};
+        inst.uploadToken = token;
+        const embedId = request.embedId;
+        const startedWith = NERO.embed.model.stableStringify(slot.value);
+        readUpload(inst, request.file).then(function (read) {
+            if (inst.destroyed || inst.uploadToken !== token) return null;
+            const now = uploadSlot(inst, embedId, key);
+            if (!now || NERO.embed.model.stableStringify(now.value) !== startedWith) {
+                setNotice(inst, {
+                    tone: 'warn',
+                    text: 'That file was not added because the slot changed while it was being read.',
+                });
+                finishUpload(inst, token);
+                return null;
+            }
+            if (!read.ok) {
+                setNotice(inst, { tone: 'warn', text: 'That file could not be read, so nothing was added.' });
+                finishUpload(inst, token);
+                return null;
+            }
+            const replaced = now.value && now.value.kind === 'upload' && now.value.assetId
+                ? String(now.value.assetId) : null;
+            return applyUpload(inst, embedId, key, request.file, read.buffer, token, replaced);
+        }).catch(function () {
+            if (!inst.destroyed && inst.uploadToken === token) {
+                setNotice(inst, { tone: 'danger', text: 'That file could not be added. Nothing was changed.' });
+            }
+            finishUpload(inst, token);
+            return null;
+        });
+        return true;
+    }
+
     function mountPreview(inst) {
         const preview = NERO.embed.preview.create(inst.els.mount, {
             // One clock per page life: the header time cannot drift while the
@@ -845,6 +1157,10 @@ window.NERO.embed = window.NERO.embed || {};
         if (!inst) return false;
         current = null;
         inst.destroyed = true;
+        // 7d: an in-flight file read belongs to the page that started it. The
+        // token is dropped so the read's own continuation sees a page that no
+        // longer wants it (the `destroyed` check is the second guard).
+        inst.uploadToken = null;
         // A scheduled pass is page work like any other: it dies with the page,
         // so a teardown during a burst leaves no timer behind (the registry
         // clears its own timers too, and the destroyed flag stops a callback
