@@ -3,6 +3,7 @@ import json
 import csv
 import io
 import datetime
+import time
 import requests as _req
 import aiosqlite
 from flask import jsonify, request, session, abort, Response
@@ -16,6 +17,94 @@ from dashboard.permissions import (
 )
 from dashboard.api import api_bp
 
+# ── Roles/channels TTL cache (phase 1, §7.1) ────────────────────────────────
+#
+# `/api/guild/roles` and `/api/guild/channels` are fetched by every page that
+# uses NeroSelect (members, moderation, tickets, leveling, economy, both
+# builders …) and used to cost one Discord round trip per page view — latency
+# on every load, and a needless share of the rate limit. The locked plan puts
+# ONE server-side TTL cache in front of exactly these two endpoints (§7.1,
+# §10): the response shape does not change, the cache is bypassable, and the
+# change is isolated to this file.
+#
+# What is cached is the RAW Discord payload (the list), not the transformed
+# response: the transform below — sorting, contract keys, icons — still runs on
+# every request, so a cache hit is indistinguishable from a fresh fetch.
+#
+# Deliberately NOT cached: failures. A missing token, a non-200 from Discord or
+# a body that fails to parse keeps the pre-cache behaviour exactly, so a
+# transient Discord error can never be remembered for a minute.
+
+GUILD_LOOKUP_TTL_SECONDS = 60
+
+# (kind, guild_id) -> {"expires_at": monotonic seconds, "data": list}. One
+# process-local dict: this dashboard is a single process, both callers are
+# read-only GETs, and a lost entry on restart is an ordinary cache miss. Two
+# readers racing on one key would both fetch — harmless, and cheaper than a
+# lock on the request path.
+_guild_lookup_cache = {}
+
+
+def _guild_cache_key(kind, guild_id):
+    return (kind, str(guild_id))
+
+
+def _guild_cache_get(kind, guild_id):
+    key = _guild_cache_key(kind, guild_id)
+    entry = _guild_lookup_cache.get(key)
+    if entry is None:
+        return None
+    if time.monotonic() >= entry["expires_at"]:
+        _guild_lookup_cache.pop(key, None)
+        return None
+    # A copy: the caller sorts its own list in place, and the cached one is
+    # what the NEXT request must be served unchanged.
+    return list(entry["data"])
+
+
+def _guild_cache_put(kind, guild_id, data):
+    now = time.monotonic()
+    # Drop expired entries on the way in, so a guild nobody asks about again
+    # does not keep its entry for the life of the process.
+    for key, entry in list(_guild_lookup_cache.items()):
+        if entry["expires_at"] <= now:
+            _guild_lookup_cache.pop(key, None)
+    _guild_lookup_cache[_guild_cache_key(kind, guild_id)] = {
+        "expires_at": now + GUILD_LOOKUP_TTL_SECONDS,
+        "data": data,
+    }
+
+
+def _guild_cache_bypassed():
+    """`?refresh=1` (also true/yes/on) skips the cache for one request.
+
+    An explicit, opt-in bypass: the request goes to Discord and the fresh
+    answer re-seeds the entry. Callers that send no parameter — every page in
+    the app, including v1's — are unaffected.
+    """
+    return str(request.args.get("refresh", "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _guild_collection(kind, guild_id, bot_token, url, refresh=False):
+    """The guild collection behind the two endpoints: at most one fetch per
+    (guild, kind) per TTL window.
+
+    Returns ``(data, error)``. A non-None ``error`` is the same string the
+    endpoint returned before this cache existed, and a failed fetch is never
+    cached — the next request asks Discord again, exactly as it used to.
+    """
+    if not refresh:
+        cached = _guild_cache_get(kind, guild_id)
+        if cached is not None:
+            return cached, None
+    resp = _req.get(url, headers={"Authorization": f"Bot {bot_token}"}, timeout=8)
+    if resp.status_code != 200:
+        return None, f"Discord {resp.status_code}"
+    data = resp.json()
+    _guild_cache_put(kind, guild_id, data)
+    return list(data), None
+
+
 @api_bp.route("/guild/roles")
 @require_api_permission(LEVEL_MODERATOR)
 def get_guild_roles():
@@ -23,14 +112,13 @@ def get_guild_roles():
     bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:
         return jsonify({"results": [], "error": "BOT_TOKEN not set"})
-    resp = _req.get(
+    roles, error = _guild_collection(
+        "roles", guild_id, bot_token,
         f"https://discord.com/api/v10/guilds/{guild_id}/roles",
-        headers={"Authorization": f"Bot {bot_token}"},
-        timeout=8,
+        refresh=_guild_cache_bypassed(),
     )
-    if resp.status_code != 200:
-        return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
-    roles = resp.json()
+    if error:
+        return jsonify({"results": [], "error": error})
     def sort_key(r):
         if r["id"] == str(guild_id): return (2, 0)
         if r.get("managed"):         return (1, -r["position"])
@@ -58,14 +146,13 @@ def get_guild_channels():
     bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:
         return jsonify({"results": [], "error": "BOT_TOKEN not set"})
-    resp = _req.get(
+    channels, error = _guild_collection(
+        "channels", guild_id, bot_token,
         f"https://discord.com/api/v10/guilds/{guild_id}/channels",
-        headers={"Authorization": f"Bot {bot_token}"},
-        timeout=8,
+        refresh=_guild_cache_bypassed(),
     )
-    if resp.status_code != 200:
-        return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
-    channels = resp.json()
+    if error:
+        return jsonify({"results": [], "error": error})
     TYPE_ICON = {0:"💬",2:"🔊",4:"📁",5:"📢",10:"🧵",11:"🧵",12:"🧵",13:"🎙️",15:"📋"}
     TYPE_NAME = {0:"text",2:"voice",4:"category",5:"announcement",13:"stage",15:"forum"}
     categories = {c["id"]: c["name"] for c in channels if c["type"] == 4}
