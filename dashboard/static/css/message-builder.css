@@ -90,6 +90,20 @@
     overflow-wrap: anywhere;      /* pasted URLs must not widen the column */
 }
 
+/* ── Files summary (owner: the page, step 7e) ──────────────────
+   One static line about the files the message will carry. No rows, no
+   verdicts, and no live region: it never announces (the strip does) and it
+   never wears a tone — the numbers are the whole message. Muted like the
+   region title it sits under, and `hidden` until the document names a file. */
+.mb2-files {
+    margin: 0 0 10px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text3);
+    overflow-wrap: anywhere;
+}
+.mb2-files[hidden] { display: none; }
+
 /* ── Validation strip (owner: the page, step 6a) ─────────────── */
 /* One region, two states: the tone class is what the page swaps when the
    worst issue changes (the same mb2-tone-* vocabulary the status bar uses).

@@ -120,6 +120,7 @@ window.NERO.embed = window.NERO.embed || {};
         inspectorBody: 'mb2-inspector-body',
         preview: 'mb2-preview-region',
         mount: 'mb2-mount',
+    files: 'mb2-files',          // 7e: the static files summary, above the preview
         bar: 'mb2-bar',
         status: 'mb2-bar-status',
         actions: 'mb2-bar-actions',
@@ -240,6 +241,7 @@ window.NERO.embed = window.NERO.embed || {};
             inspector: requireElement(root, doc, ID.inspector),
             preview: requireElement(root, doc, ID.preview),
             mount: requireElement(root, doc, ID.mount),
+            files: requireElement(root, doc, ID.files),
             bar: requireElement(root, doc, ID.bar),
             status: requireElement(root, doc, ID.status),
             actions: requireElement(root, doc, ID.actions),
@@ -280,6 +282,16 @@ window.NERO.embed = window.NERO.embed || {};
             // pick replaces it, and any older read that lands afterwards is
             // discarded without touching the document.
             uploadToken: null,
+            // ── step 7e: resolution state (never document state) ──
+            // `resolutionSignature` is what the preview last PAINTED: the
+            // filename→URL pairs the resolver could answer with at that moment.
+            // A pass compares against it and repaints only when the answer
+            // actually changed, so an unchanged resolution costs zero DOM writes.
+            // `assetPass` is the pass in flight (one at a time) and `assetAgain`
+            // is a trigger that arrived while it ran — absorbed, never dropped.
+            resolutionSignature: null,
+            assetPass: null,
+            assetAgain: false,
             unsubs: [],
             store: null,
             session: null,
@@ -373,16 +385,17 @@ window.NERO.embed = window.NERO.embed || {};
         inst.session = f.drafts.create({ guildId: inst.guildId, now: Date.now });
 
         // The byte store, on the SAME v2 database through the SAME adapter the
-        // session uses (asset-store.bytesStorage): one persistence boundary,
-        // one retry/timeout/degrade policy, one place that knows the database
-        // name. This page owns no bytes and, in 7c, no object URLs at all —
-        // `urls: null` is deliberate: nothing picks a file yet (7d) and the
-        // preview does not resolve uploads yet (7e), so a URL minted here
-        // would be a URL nobody revokes. The only thing 7c asks of the store
-        // is an OBSERVATION.
+        // session uses (asset-store.bytesStorage): one persistence boundary, one
+        // retry/timeout/degrade policy, one place that knows the database name.
+        // This page owns no bytes and no object URLs: it hands the store the
+        // browser's own URL factory (7e) and from then on only ever calls
+        // `urlFor` (resolve ahead of the render) and `cachedUrl` (the synchronous
+        // render-path read). A window without that capability gets `null` here,
+        // which the store reports as `urls-unavailable` — an honest "no picture"
+        // instead of a URL nobody could revoke.
         inst.assetStore = f.assetStore.create({
             scheduler: storageScheduler(inst),
-            urls: null,
+            urls: f.assetStore.browserUrls(inst.win),
         });
 
         inst.unsubs.push(inst.session.onState(function (snapshot) { onSessionState(inst, snapshot); }));
@@ -729,6 +742,11 @@ window.NERO.embed = window.NERO.embed || {};
         return Promise.resolve(inst.assetStore.survey(ids)).then(function (rows) {
             if (inst.destroyed) return null;
             inst.assetFacts = NERO.embed.assets.assetFacts(doc, rows);
+                // 7e: the facts are what say which referenced files are readable,
+                // so this is the moment to resolve them — AHEAD of the render, so
+                // the paint that follows (and every later patch) finds its URL in
+                // the store's cache instead of waiting for one.
+                resolveAssets(inst);
             return inst.assetFacts;
         });
     }
@@ -832,6 +850,47 @@ window.NERO.embed = window.NERO.embed || {};
         if (el.hidden) el.hidden = false;
         return true;
     }
+
+    // ── The files summary (step 7e) ───────────────────────────────
+    /**
+     * ONE STATIC LINE about what the message will carry: how many files it
+     * references, how big they are together, and — when a size is not measured —
+     * that one of them is unmeasured rather than quietly dropped from the total.
+     *
+     * It shows NUMBERS, never verdicts: whether a file is acceptable is the
+     * validator's answer and it is printed in the strip. This line must not
+     * disagree with that verdict or repeat it. It counts the FILES the document
+     * references (two slots using one file are one file) and sums only the sizes
+     * that are known, both read from the asset module — no second accounting
+     * lives here, and nothing is inferred from the preview's own state.
+     *
+     * It is not a live region: the strip announces, this line only states. Every
+     * write is change-guarded, so an unrelated keystroke costs zero DOM writes,
+     * and an empty document hides the line instead of showing "0 files".
+     */
+    function renderFiles(inst) {
+        if (!inst || inst.destroyed || !inst.els || !inst.els.files || !inst.store) return false;
+        const el = inst.els.files;
+        const A = NERO.embed.assets;
+        const bytes = A.assetBytes(A.assetView(inst.store.getDocument()));
+        const unmeasured = bytes.unknown.length + bytes.missing.length;
+        if (!bytes.count) {
+            // Nothing referenced: the line goes away rather than stating a zero.
+            if (el.textContent !== '') el.textContent = '';
+            if (!el.hidden) el.hidden = true;
+            return false;
+        }
+        const parts = [bytes.count === 1 ? '1 file' : bytes.count + ' files'];
+        // A known size is shown even when it is zero; an unmeasured one is never
+        // folded into the total, and never silently omitted either.
+        if (bytes.count - unmeasured > 0) parts.push(A.describeSize(bytes.total));
+        if (unmeasured) parts.push(unmeasured === 1 ? '1 unmeasured' : unmeasured + ' unmeasured');
+        const text = parts.join(' · ');
+        if (el.textContent !== text) el.textContent = text;
+        if (el.hidden) el.hidden = false;
+        return true;
+    }
+
 
     // ── Local files (step 7d: client-side only) ───────────────────
     /**
@@ -1069,6 +1128,16 @@ window.NERO.embed = window.NERO.embed || {};
                         type: 'asset/remove', assetId: replaced, meta: { coalesceKey: coalesce },
                     });
                 }
+                // 7d/7e: a re-attached file can be the SAME id — identity is the
+                // content, so picking the same bytes again addresses the same
+                // asset. The id set then does not move, and the last probe's
+                // answer ("those bytes are missing") would stand: a lie the moment
+                // the bytes landed, both in the strip and in the resolution. Only a
+                // CONTRADICTED observation is thrown away; a fresh id is covered by
+                // the probe the id-set change already causes.
+                const observed = inst.assetFacts && inst.assetFacts.states
+                    ? inst.assetFacts.states[ident.assetId] : undefined;
+                if (observed !== undefined && observed !== A.FACT_STATES.LOCAL) staleAssetFacts(inst);
                 if (stored.persisted === false) {
                     // The store's OWN answer: the bytes are here for this session
                     // only. Never phrased as saved, because they are not.
@@ -1129,6 +1198,191 @@ window.NERO.embed = window.NERO.embed || {};
         return true;
     }
 
+    // ── Resolution (step 7e: stored bytes, made visible) ─────────────
+    /**
+     * The reference the resolver seam hands back is the FULL `attachment://name`
+     * string (exactly what v1's own resolver received), so the filename is
+     * everything after the scheme and nothing else.
+     */
+    const ATTACHMENT_PREFIX = 'attachment://';
+
+    function attachmentFilename(raw) {
+        const text = raw == null ? '' : String(raw);
+        return text.slice(0, ATTACHMENT_PREFIX.length).toLowerCase() === ATTACHMENT_PREFIX
+            ? text.slice(ATTACHMENT_PREFIX.length) : '';
+    }
+
+    /** Resolution passes, and the repaints they caused — one number each. */
+    function countResolve(inst) {
+        if (inst.ctx && typeof inst.ctx.counter === 'function') inst.ctx.counter('assetResolves');
+    }
+
+    function countResolveRepaint(inst) {
+        if (inst.ctx && typeof inst.ctx.counter === 'function') inst.ctx.counter('assetRepaints');
+    }
+
+    /**
+     * WHAT THE RESOLVER WOULD ANSWER RIGHT NOW: `filename → blob: URL`, built from
+     * the live document and the byte store's own URL cache.
+     *
+     * The filename is the only key the preview can hand back (`attachment://name`
+     * carries no id), so it is the key here too — and that is exactly why an
+     * ambiguous name fails CLOSED: when two different assets claim one filename
+     * (the validator's `assets.filename-clash`), neither resolves and the slot
+     * shows no image, rather than whichever file happened to be found first. A
+     * reference with no asset id has nothing to resolve and is skipped the same
+     * way the validator reports it as unlinked.
+     *
+     * Synchronous and side-effect free on purpose: it reads the document, the
+     * records and the store's CACHE, and never probes, reads or mints — the URL
+     * was resolved ahead of the render, which is the whole contract with
+     * `cachedUrl`.
+     */
+    function resolutionFor(inst) {
+        const A = NERO.embed.assets;
+        const map = {};
+        if (!inst.store || !inst.assetStore) return map;
+        const byName = {};                       // filename → { id, ambiguous }
+        A.assetView(inst.store.getDocument()).refs.forEach(function (ref) {
+            const name = ref.filename;
+            if (!name || !ref.assetId) return;   // nothing to resolve BY NAME
+            const entry = byName[name] || (byName[name] = { id: ref.assetId, ambiguous: false });
+            if (entry.id !== ref.assetId) entry.ambiguous = true;
+        });
+        Object.keys(byName).forEach(function (name) {
+            const entry = byName[name];
+            if (entry.ambiguous) return;         // never guess between two files
+            const url = inst.assetStore.cachedUrl(entry.id);
+            if (url) map[name] = url;
+        });
+        return map;
+    }
+
+    /** The resolver's answer as ONE comparable value, collision-free. */
+    function resolutionSignature(map) {
+        return JSON.stringify(Object.keys(map).sort().map(function (name) {
+            return [name, map[name]];
+        }));
+    }
+
+    /**
+     * Paint the preview, and remember what the resolver answered for that paint.
+     * Both the document subscription and the resolution pass come through here,
+     * so the signature always describes what is ON SCREEN — which is what makes
+     * "repaint only when the resolution actually changed" true rather than
+     * approximate. The renderer's own patch is change-guarded, so a paint with
+     * nothing new to say writes nothing at all.
+     */
+    function paintPreview(inst) {
+        if (!inst || inst.destroyed || !inst.preview || !inst.store) return false;
+        inst.preview.updateDocument(inst.store.getDocument());
+        inst.resolutionSignature = resolutionSignature(resolutionFor(inst));
+        return true;
+    }
+
+    /**
+     * The synchronous resolver the preview calls for every `attachment://`
+     * reference. It is created ONCE per page life (the renderer captures it at
+     * `create`), so it reads live state on every call instead of a snapshot: by
+     * the time it is asked, the URLs are already in the store's cache.
+     */
+    function resolverFor(inst) {
+        return function resolveImageSrc(raw) {
+            if (inst.destroyed || !inst.assetStore) return '';
+            const name = attachmentFilename(raw);
+            return name ? (resolutionFor(inst)[name] || '') : '';
+        };
+    }
+
+    /**
+     * Paint the resolution if — and only if — it differs from what the preview
+     * already shows. A refused mint (a browser without object URLs, bytes that
+     * turned out to be missing or corrupt) is not a resolution change: the slot
+     * simply has no URL, which is what an unresolved reference looks like too,
+     * and the strip stays the only thing that says why.
+     */
+    function applyResolution(inst, results) {
+        if (!inst || inst.destroyed) return false;
+        // The one thing the strip cannot say, because it is not a validation
+        // verdict: this browser cannot produce object URLs at all, so a stored
+        // file cannot be shown, however healthy its bytes are. The store's own
+        // refusal is the evidence, and the notice is change-guarded like every
+        // other write to that region.
+        const noUrls = (results || []).some(function (r) {
+            return r && r.ok === false && r.reason === 'urls-unavailable';
+        });
+        if (noUrls) {
+            setNotice(inst, {
+                tone: 'warn',
+                text: 'This browser cannot show attached files in the preview, so the pictures stay hidden.',
+            });
+        }
+        if (!inst.preview || !inst.store) return false;
+        const signature = resolutionSignature(resolutionFor(inst));
+        if (signature === inst.resolutionSignature) return false;
+        countResolveRepaint(inst);
+        inst.preview.updateDocument(inst.store.getDocument());
+        inst.resolutionSignature = signature;
+        return true;
+    }
+
+    /**
+     * THE RESOLUTION PASS. Given an observation that says which referenced files
+     * this browser can actually read, it asks the byte store for a URL for each
+     * one that has no cached URL yet — resolved AHEAD of the render, so the
+     * render path itself never awaits anything — and then repaints only if the
+     * resolver's answer changed.
+     *
+     * Costs, stated so they stay true: one pass per probe (plus one after a pick
+     * that could not move the id set), at most one mint per asset per session (a
+     * cached URL is never re-minted — that part belongs to the 7d store), ZERO
+     * mints or byte reads for typing, and zero DOM writes when nothing changed. A
+     * pass that is already running absorbs new triggers instead of stacking, and
+     * no pass runs after teardown.
+     */
+    function resolveAssets(inst) {
+        if (!inst || inst.destroyed || !inst.store || !inst.assetStore) return null;
+        if (inst.assetPass) { inst.assetAgain = true; return inst.assetPass; }
+        const A = NERO.embed.assets;
+        const view = A.assetView(inst.store.getDocument());
+        const states = (inst.assetFacts && inst.assetFacts.states) || {};
+        countResolve(inst);
+        // Only an OBSERVATION can say the bytes are readable. A missing one mints
+        // nothing: the next probe brings the answer, and guessing here would turn
+        // "not looked yet" into "not there".
+        const wanted = view.ids.filter(function (id) {
+            return states[id] === A.FACT_STATES.LOCAL && inst.assetStore.cachedUrl(id) === null;
+        });
+        if (!wanted.length) { applyResolution(inst, null); return null; }
+        const pending = wanted.map(function (id) {
+            const record = view.records[id];
+            return inst.assetStore.urlFor(id, { mime: record ? record.mime : null });
+        });
+        function finish(results) {
+            inst.assetPass = null;
+            if (inst.destroyed) return null;
+            applyResolution(inst, results);
+            if (inst.assetAgain) {               // a trigger arrived mid-pass
+                inst.assetAgain = false;
+                resolveAssets(inst);
+            }
+            return null;
+        }
+        inst.assetPass = Promise.all(pending).then(finish, function () { return finish(null); });
+        return inst.assetPass;
+    }
+
+    /**
+     * The observation on hand no longer describes this id: bytes for an asset the
+     * document already references just landed in the store, and the last probe
+     * (correctly, at the time) had said they were not there. The next pass probes
+     * again, so neither the strip nor the resolution keeps repeating an answer
+     * that stopped being true.
+     */
+    function staleAssetFacts(inst) {
+        inst.assetFacts = NERO.embed.assets.noFacts({ embeds: [], assets: {} });
+        scheduleValidation(inst);
+    }
     function mountPreview(inst) {
         const preview = NERO.embed.preview.create(inst.els.mount, {
             // One clock per page life: the header time cannot drift while the
@@ -1137,12 +1391,17 @@ window.NERO.embed = window.NERO.embed || {};
             botIdentity: readIdentity(inst.win),
             lookups: {},
             lookupsVersion: 0,
+            // 7e: the ONE seam the frozen renderer offers for a stored file.
+            // Everything it knows about assets comes back through this function,
+            // synchronously and from the store’s URL cache.
+            resolveImageSrc: resolverFor(inst),
         });
         inst.preview = preview;
-        preview.updateDocument(inst.store.getDocument());      // first paint: one build
+        paintPreview(inst);       // first paint: one build, resolution recorded with it
+        renderFiles(inst);        // and the summary describes the same document
         inst.unsubs.push(inst.store.subscribe(
             function (s) { return s.document; },
-            function (document_) { if (!inst.destroyed) preview.updateDocument(document_); }
+            function () { paintPreview(inst); renderFiles(inst); }
         ));
         return preview;
     }

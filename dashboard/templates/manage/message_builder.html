@@ -91,6 +91,12 @@
              second renderer. -->
         <aside id="mb2-preview-region" class="mb2-preview" aria-labelledby="mb2-preview-title">
             <h2 class="mb2-region-title" id="mb2-preview-title">Preview</h2>
+            <!-- The files summary (7e): one STATIC line about what the message will
+                 carry. Declared here, like every other id-bearing region, and a
+                 SIBLING of the mount — never inside it: preview.js owns everything
+                 within the mount and reconciles it. Static text, not a live region,
+                 so it can never talk over the strip, which is the only announcer. -->
+            <p id="mb2-files" class="mb2-files" hidden></p>
             <div id="mb2-mount" class="mb2-mount"></div>
         </aside>
     </div>

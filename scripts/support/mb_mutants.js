@@ -95,6 +95,10 @@ const HARNESS_VALIDATE = path.join(ROOT, 'scripts', 'test_message_builder_valida
 // file input through the DOM and judges what the document, the history and the
 // byte store look like afterwards, so the 7d mutants are judged there.
 const UPLOAD = path.join(ROOT, 'scripts', 'test_message_builder_asset_upload.js');
+// Step 7e's resolution seam and files summary are judged by their own harness:
+// it drives the real picks through the frozen renderer's resolver option, so it
+// can tell a resolved URL from an unresolved reference.
+const RESOLUTION = path.join(ROOT, 'scripts', 'test_message_builder_asset_resolution.js');
 
 /**
  * A mutant is { id, target, why, edits: [[find, replace], …] }.
@@ -132,8 +136,8 @@ const MUTANTS = [
         id: 'M5',
         why: 'the preview is not subscribed to the store (it only ever paints once)',
         edits: [[
-            "        inst.unsubs.push(inst.store.subscribe(\n            function (s) { return s.document; },\n            function (document_) { if (!inst.destroyed) preview.updateDocument(document_); }\n        ));",
-            "        inst.unsubs.push(inst.store.subscribe(\n            function (s) { return s.ui; },\n            function (document_) { if (!inst.destroyed) preview.updateDocument(document_); }\n        ));",
+            "        inst.unsubs.push(inst.store.subscribe(\n            function (s) { return s.document; },\n            function () { paintPreview(inst); renderFiles(inst); }\n        ));",
+            "        inst.unsubs.push(inst.store.subscribe(\n            function (s) { return s.ui; },\n            function () { paintPreview(inst); renderFiles(inst); }\n        ));",
         ]],
     },
     {
@@ -916,8 +920,8 @@ const MUTANTS = [
             "        if (signature !== inst.issueSignature) {\n            inst.issueSignature = signature;",
             "        {\n            inst.issueSignature = signature;",
         ], [
-            "        if (el.textContent !== text) el.textContent = text;",
-            "        el.textContent = text;",
+            "        if (el.textContent !== text) el.textContent = text;\n        if (el.getAttribute('class') !== className) el.setAttribute('class', className);",
+            "        el.textContent = text;\n        if (el.getAttribute('class') !== className) el.setAttribute('class', className);",
         ]],
     },
     {
@@ -961,8 +965,8 @@ const MUTANTS = [
         target: 'page',
         why: 'the strip is never hidden again once it has spoken',
         edits: [[
-            "            if (!el.hidden) el.hidden = true;",
-            "            /* the strip is never hidden again */",
+            "            if (el.getAttribute('class') !== STRIP_CLASS) el.setAttribute('class', STRIP_CLASS);\n            if (!el.hidden) el.hidden = true;",
+            "            if (el.getAttribute('class') !== STRIP_CLASS) el.setAttribute('class', STRIP_CLASS);\n            /* the strip is never hidden again */",
         ]],
     },
     {
@@ -2207,6 +2211,193 @@ const MUTANTS = [
         edits: [[
             "                setHidden(slot.remove, !state.removable);",
             "                setHidden(slot.remove, false);",
+        ]],
+    },
+    // ── Step 7e: resolution and the files summary ───────────────────
+    //
+    // The resolver seam has no coverage before 7e, so this block is what keeps
+    // the resolution honest: it may read the store's URL cache but never mint on
+    // the render path, it follows REFERENCES (never the record map), it fails
+    // closed on an ambiguous name, it resolves ahead so typing costs nothing, it
+    // repaints only when the answer changed, it never owns, invents or revokes a
+    // URL, and the summary counts files, sums only what is known, hides nothing.
+    //
+    // EQUIVALENCE NOTE (7e, reported like U16): the obvious "drop the destroyed
+    // guard" mutant for "resolution after teardown" is NOT reachable — the only
+    // input a pass reads is the store's URL cache, and the store clears it when it
+    // is destroyed, so a late pass computes the same empty answer. The OUTCOME is
+    // asserted behaviourally instead (the 7e harness: no pass after teardown, every
+    // URL revoked by the store, the dead mount stays empty), and W14 covers the
+    // reachable neighbour of the same idea: a resolver frozen at mount time.
+    {
+        id: 'W1',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the resolver answers nothing, so a stored file never reaches the preview",
+        edits: [[
+            "            return name ? (resolutionFor(inst)[name] || '') : '';",
+            "            return name ? '' : '';",
+        ]],
+    },
+    {
+        id: 'W2',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "an ambiguous filename fails OPEN: two files sharing one name resolve to whichever was seen first",
+        edits: [[
+            "            if (entry.ambiguous) return;         // never guess between two files",
+            "            if (false) return;                   // never guess between two files",
+        ]],
+    },
+    {
+        id: 'W3',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the resolver echoes the attachment reference instead of the URL the store minted",
+        edits: [[
+            "            const url = inst.assetStore.cachedUrl(entry.id);\n            if (url) map[name] = url;",
+            "            const url = inst.assetStore.cachedUrl(entry.id);\n            if (url) map[name] = 'attachment://' + name;",
+        ]],
+    },
+    {
+        id: 'W4',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the render path MINTS instead of reading the cache (a promise reaches a synchronous resolver)",
+        edits: [[
+            "            const url = inst.assetStore.cachedUrl(entry.id);\n            if (url) map[name] = url;",
+            "            const url = inst.assetStore.urlFor(entry.id, {});\n            if (url) map[name] = url;",
+        ]],
+    },
+    {
+        id: 'W5',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "every document change (so every keystroke) runs a resolution pass",
+        edits: [[
+            "            function () { paintPreview(inst); renderFiles(inst); }",
+            "            function () { paintPreview(inst); renderFiles(inst); resolveAssets(inst); }",
+        ]],
+    },
+    {
+        id: 'W6',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the repaint is skipped exactly when the resolution changed",
+        edits: [[
+            "        const signature = resolutionSignature(resolutionFor(inst));\n        if (signature === inst.resolutionSignature) return false;\n        countResolveRepaint(inst);",
+            "        const signature = resolutionSignature(resolutionFor(inst));\n        if (signature !== inst.resolutionSignature) return false;\n        countResolveRepaint(inst);",
+        ]],
+    },
+    {
+        id: 'W7',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the summary counts slots instead of files, so one file in two slots reads as two files",
+        edits: [[
+            "        const bytes = A.assetBytes(A.assetView(inst.store.getDocument()));",
+            "        const bytes = A.assetBytes(A.assetView(inst.store.getDocument()));\n        bytes.count = A.assetView(inst.store.getDocument()).refs.length;",
+        ]],
+    },
+    {
+        id: 'W8',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the summary drops the unmeasured count, so an unmeasured file reads as measured",
+        edits: [[
+            "        if (unmeasured) parts.push(unmeasured === 1 ? '1 unmeasured' : unmeasured + ' unmeasured');",
+            "        if (false) parts.push(unmeasured === 1 ? '1 unmeasured' : unmeasured + ' unmeasured');",
+        ]],
+    },
+    {
+        id: 'W9',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the summary is rewritten on every document change, guard or not",
+        edits: [[
+            "        const text = parts.join(' · ');\n        if (el.textContent !== text) el.textContent = text;",
+            "        const text = parts.join(' · ');\n        el.textContent = text;",
+        ]],
+    },
+    {
+        id: 'W10',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the summary dresses a number in a validation tone, turning a count into a verdict",
+        edits: [[
+            "        const text = parts.join(' · ');\n        if (el.textContent !== text) el.textContent = text;\n        if (el.hidden) el.hidden = false;",
+            "        const text = parts.join(' · ');\n        if (el.textContent !== text) el.textContent = text;\n        el.setAttribute('class', 'mb2-files mb2-tone-danger');\n        if (el.hidden) el.hidden = false;",
+        ]],
+    },
+    {
+        id: 'W11',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the page reaches for createObjectURL and builds its own Blob",
+        edits: [[
+            "            const url = inst.assetStore.cachedUrl(entry.id);\n            if (url) map[name] = url;",
+            "            const url = inst.win.URL.createObjectURL(new inst.win.Blob(['x'], { type: 'image/png' }));\n            if (url) map[name] = url;",
+        ]],
+    },
+    {
+        id: 'W12',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the pass asks the store for a URL it already has (a cache hit where no work was needed)",
+        edits: [[
+            "            return states[id] === A.FACT_STATES.LOCAL && inst.assetStore.cachedUrl(id) === null;",
+            "            return states[id] === A.FACT_STATES.LOCAL;",
+        ]],
+    },
+    {
+        id: 'W13',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the pass resolves the RECORD map instead of the files the document references " +
+            "(an unreferenced record is asked about)",
+        edits: [[
+            "        const wanted = view.ids.filter(function (id) {\n            return states[id] === A.FACT_STATES.LOCAL && inst.assetStore.cachedUrl(id) === null;\n        });",
+            "        const wanted = Object.keys(view.records).filter(function (id) {\n            return inst.assetStore.cachedUrl(id) === null;\n        });",
+        ]],
+    },
+    {
+        id: 'W14',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the resolver is a snapshot taken at mount instead of a live lookup (a re-attached file never appears)",
+        edits: [[
+            "    function resolverFor(inst) {\n        return function resolveImageSrc(raw) {\n            if (inst.destroyed || !inst.assetStore) return '';\n            const name = attachmentFilename(raw);\n            return name ? (resolutionFor(inst)[name] || '') : '';\n        };\n    }",
+            "    function resolverFor(inst) {\n        const snapshot = resolutionFor(inst);\n        return function resolveImageSrc(raw) {\n            if (inst.destroyed || !inst.assetStore) return '';\n            const name = attachmentFilename(raw);\n            return name ? (snapshot[name] || '') : '';\n        };\n    }",
+        ]],
+    },
+    {
+        id: 'W15',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "an unreferenced file has its URL released mid-session (an undo would flash no image)",
+        edits: [[
+            "        if (!wanted.length) { applyResolution(inst, null); return null; }",
+            "        if (!wanted.length) {\n            Object.keys(view.records).forEach(function (id) {\n                if (view.ids.indexOf(id) === -1) inst.assetStore.release(id);\n            });\n            applyResolution(inst, null);\n            return null;\n        }",
+        ]],
+    },
+    {
+        id: 'W16',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the pass asks the store for bytes its own observation already called gone",
+        edits: [[
+            "            return states[id] === A.FACT_STATES.LOCAL && inst.assetStore.cachedUrl(id) === null;",
+            "            return inst.assetStore.cachedUrl(id) === null;",
+        ]],
+    },
+    {
+        id: 'W17',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the page invents a blob: URL of its own instead of reading the store cache",
+        edits: [[
+            "            const url = inst.assetStore.cachedUrl(entry.id);\n            if (url) map[name] = url;",
+            "            const url = 'blob:' + entry.id;\n            if (url) map[name] = url;",
         ]],
     },
 ];

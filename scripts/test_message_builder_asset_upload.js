@@ -125,6 +125,19 @@ function makeEnv() {
     const win = createWindow();
     win.document = dom.document;
     win.__BOT_IDENTITY__ = { name: 'Nero', avatar: null };
+    // 7e: this rig is a browser that can turn stored bytes into a picture.
+    // The resolution itself is proved in test_message_builder_asset_resolution.js;
+    // here the capability only has to exist so the pick path below is judged in a
+    // normal browser instead of in a degraded one.
+    let mintSeq = 0;
+    win.Blob = function Blob(parts, opts) { this.parts = parts; this.type = opts && opts.type; };
+    win.URL = {
+        createObjectURL(blob) {
+            mintSeq += 1;
+            return 'blob:upload-rig/' + mintSeq + (blob && blob.type ? '#' + blob.type : '');
+        },
+        revokeObjectURL() {},
+    };
     const net = { calls: 0 };
     const sandbox = {
         window: win, document: dom.document, console: console,
@@ -436,11 +449,11 @@ async function main() {
         await env.settled();
         assert(env.issues().length === 0, 'a complete, stored file validates clean',
             JSON.stringify(env.issues().map((i) => i.code)));
-        // 7d resolves nothing on screen: the record is metadata, and the preview
-        // still has no image for it (7e resolves bytes into a picture). What
-        // must be true here is that the slot did not turn into a BROKEN image.
-        assert(env.imgsInPreview() === 0,
-            'the preview renders no image for an upload yet (7e resolves bytes)',
+        // 7e: the stored file is now RESOLVED into the slot — one picture, and
+        // never a broken image, because an unresolved reference renders nothing
+        // at all rather than an empty <img>.
+        assert(env.imgsInPreview() === 1,
+            'the preview renders the stored file it was just given',
             String(env.imgsInPreview()));
         assert(env.el('mb2-mount').textContent.indexOf('broken') === -1,
             'and nothing on screen calls the slot broken');

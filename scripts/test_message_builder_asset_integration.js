@@ -482,8 +482,16 @@ section('A. the contract, the boundaries, and what the page must NOT reach for')
            /inst\.assetStore\.putBytes\(/.test(CODE.page),
         'the page writes bytes ONCE, through the byte store\u2019s own primitive',
         String((CODE.page.match(/putBytes/g) || []).length));
-    assert(!/createObjectURL|revokeObjectURL|urlFor|outstanding|blob:|FileReaderSync/.test(CODE.page),
-        'the page mints no object URL and manages none');
+    // 7e restates this ban rather than deleting it: the page RESOLVES stored
+    // files now, so it legitimately reaches the byte store's two URL entry
+    // points — and nothing else about URLs is allowed in it. It still cannot
+    // mint, revoke, enumerate or build one, and still cannot write `blob:`.
+    assert(/assetStore\.urlFor\(/.test(CODE.page) && /assetStore\.cachedUrl\(/.test(CODE.page),
+        'the page resolves stored files through the byte store\u2019s urlFor/cachedUrl');
+    assert(!/createObjectURL|revokeObjectURL|outstanding|blob:|FileReaderSync/.test(CODE.page),
+        'and still mints, revokes, enumerates and builds no URL of its own');
+    assert(!/new\s+Blob|urlCache|\.release\(|\.releaseAll\(/.test(CODE.page),
+        'no blob construction, no URL cache of its own, and no releasing a URL');
     assert(!/sha256Hex|sha256\s*\(|crypto\.subtle|digest\(/.test(CODE.page),
         'the page never computes a digest');
     assert((CODE.page.match(/A\.identify\(/g) || []).length === 1,
@@ -492,8 +500,8 @@ section('A. the contract, the boundaries, and what the page must NOT reach for')
     assert(!/pruneOrphans|retention/.test(CODE.page),
         'the page never prunes: the retention analysis has no automatic caller');
     assert((CODE.page.match(/assetStore\.create\(/g) || []).length === 1 &&
-           /urls:\s*null,/.test(CODE.page),
-        'the page builds exactly ONE byte store, and asks for no URLs');
+           /urls:\s*f\.assetStore\.browserUrls\(inst\.win\),/.test(CODE.page),
+        'the page builds exactly ONE byte store, and hands it the browser\u2019s own URL factory');
     assert((CODE.page.match(/ui\/setIssues/g) || []).length === 1,
         'the page has exactly ONE issue-list writer');
     assert((CODE.page.match(/countValidation\(inst\);/g) || []).length === 1 &&
