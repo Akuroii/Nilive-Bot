@@ -29,6 +29,7 @@ from dashboard.permissions import (
 from dashboard.api import api_bp
 from utils.xp_calculator import calculate_level_from_xp
 from utils.formatters import format_relative, format_timestamp
+from utils.discord_limits import limits_payload
 
 # staging-db delta: dashboard/app.py never called load_dotenv() itself —
 # it worked anyway in production because Railway injects real env vars
@@ -1016,11 +1017,81 @@ def tickets():
 
 # ── Embed builder ──────────────────────────────────────────────────────────────
 
+def _bot_identity_for_page(guild_id):
+    """
+    The bot's name + avatar for a message preview, read from SQLite only.
+
+    Why it exists: the Embed Builder used to fetch /api/botprofile/config
+    while initialising, and that route calls Discord live
+    (utils/bot_profile.get_live_bot_member — a blocking requests.get with an
+    8s timeout). So the composer could not paint until Discord answered, and
+    when Discord was slow the page just sat there. The same values the
+    dashboard already stores (guild_bot_profile, written by
+    /api/botprofile/config) are enough for a FIRST paint; the page refines
+    them with one non-blocking call after it is interactive.
+
+    Deliberately no Discord call and no new endpoint: the data rides along
+    with the page render, exactly like __CURRENCY__ / __CHECK_ICON__, and
+    contains only what every member of the guild can already see (the bot's
+    nickname in this guild and its avatar URL). Never raises — a preview is
+    not worth failing a page render for.
+    """
+    if not guild_id:
+        return None
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH, timeout=2)
+        try:
+            row = conn.execute(
+                "SELECT nickname, avatar_url FROM guild_bot_profile WHERE guild_id = ?",
+                (guild_id,)).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[BOTIDENTITY] read failed: {e}")
+        return None
+    if not row:
+        return None
+    name, avatar = row[0], row[1]
+    if not name and not avatar:
+        return None
+    return {"name": name or None, "avatar": avatar or None, "source": "stored"}
+
+
 @app.route("/embed-builder")
 @require_page("embedbuilder")
 def embed_builder():
     ctx = get_current_user_context()
-    return render("manage/embedbuilder.html", **ctx)
+    return render("manage/embedbuilder.html",
+                  bot_identity=_bot_identity_for_page(ctx.get("guild_id")),
+                  **ctx)
+
+
+# ── Message Builder v2 (phase 1) ───────────────────────────────────────────────
+# A SECOND route, next to the frozen one — not a replacement. Phase 1 also has
+# no Send: the v2 page edits a normalized MessageDocument, keeps it in a draft
+# of its own (a different IndexedDB database than v1's), and renders the
+# differential preview. The switch/`?legacy=1` decision belongs to the phase
+# that makes v2 the default; until then this route is reachable by URL only and
+# nothing links to it.
+#
+# Same permission key as /embed-builder on purpose: the v2 page edits the same
+# kind of content, so it must not widen access. `bot_identity` comes from the
+# same helper, so the preview renders the guild's bot identity (name/avatar)
+# without any Discord call from the browser.
+#
+# `limits` is the server's ONE limits table (utils/discord_limits) rendered into
+# the page (step 6a, transport L1): the client validates against the very numbers
+# the send route enforces, it owns no copy of them, and its boot stays
+# network-free. Nothing here reads the database or Discord.
+@app.route("/embed-builder/v2")
+@require_page("embedbuilder")
+def embed_builder_v2():
+    ctx = get_current_user_context()
+    return render("manage/message_builder.html",
+                  bot_identity=_bot_identity_for_page(ctx.get("guild_id")),
+                  limits=limits_payload(),
+                  **ctx)
 
 
 # ── Reaction roles ─────────────────────────────────────────────────────────────

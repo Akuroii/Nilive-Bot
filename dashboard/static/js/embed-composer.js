@@ -324,6 +324,15 @@ window.EmbedComposer = (function () {
     //   hideActions — true = the per-card ⧉/🗑 buttons are not
     //                 rendered (single-embed pages like the minigames
     //                 builder — the game has exactly one embed)
+    //   extraFields — OPTIONAL [{ key, label, placeholder? }] rendered as
+    //                 plain text inputs alongside the built-in ones. The
+    //                 value is read from `embed[key]` and written back on
+    //                 input, exactly like title/author, so a page can add
+    //                 fields Discord supports without this module having
+    //                 to grow a branch per field. Used by the Embed
+    //                 Builder for author icon/url, footer icon, embed url
+    //                 and timestamp. Omitting it keeps every existing
+    //                 caller byte-identical (minigames builder).
     //
     // Returns { render() } — call render() after structural changes
     // (add/delete/load/clear). Field inputs mutate the embed objects
@@ -332,6 +341,19 @@ window.EmbedComposer = (function () {
     // ═══════════════════════════════════════════════════════════════
     function mountEditor(opts) {
         const listEl = opts.listEl;
+        const extraFields = opts.extraFields || [];
+
+        function extraFieldsHtml(e, i) {
+            if (!extraFields.length) return '';
+            return extraFields.map(f => `
+                    <div class="form-group">
+                        <label class="form-label">${esc(f.label)}</label>
+                        <input class="form-input" data-efield="${attr(f.key)}" data-idx="${i}"
+                            value="${attr(e[f.key])}"
+                            ${f.type ? `type="${attr(f.type)}"` : ''}
+                            ${f.placeholder ? `placeholder="${attr(f.placeholder)}"` : ''}>
+                    </div>`).join('');
+        }
 
         function render() {
             const embeds = opts.getEmbeds();
@@ -373,6 +395,7 @@ window.EmbedComposer = (function () {
                         <label class="form-label">Footer</label>
                         <input class="form-input" data-field="footer" data-idx="${i}" value="${attr(e.footer)}">
                     </div>
+                    ${extraFieldsHtml(e, i)}
                     <div class="form-group">
                         <label class="form-label">Thumbnail URL</label>
                         <input class="form-input" data-field="thumbnail" data-idx="${i}" value="${attr(e.thumbnail)}" placeholder="https://...">
@@ -403,6 +426,10 @@ window.EmbedComposer = (function () {
         </div>
     `).join('');
             wire();
+            // Instrumentation seam (additive, opt-in): the page counts how
+            // often the WHOLE editor is rebuilt — the measurement behind
+            // "typing must not rebuild the editor".
+            opts.onRender && opts.onRender();
         }
 
         function wire() {
@@ -454,6 +481,19 @@ window.EmbedComposer = (function () {
                         const counter = el.closest('.form-group').querySelector('.text-muted');
                         if (counter) counter.textContent = `(${el.value.length} / 4096)`;
                     }
+                    opts.onChange && opts.onChange();
+                });
+            });
+
+            // opts.extraFields — model keys written straight back (author
+            // icon/url, footer icon, embed url, timestamp). Same contract
+            // as the built-in fields: mutate in place, no re-render.
+            listEl.querySelectorAll('[data-efield]').forEach(el => {
+                el.addEventListener('input', () => {
+                    const i = parseInt(el.dataset.idx);
+                    const embeds = opts.getEmbeds();
+                    if (!embeds[i]) return;
+                    embeds[i][el.dataset.efield] = el.value;
                     opts.onChange && opts.onChange();
                 });
             });
@@ -561,6 +601,85 @@ window.EmbedComposer = (function () {
         return esc(match);
     }
 
+    // ── Code spans and fenced blocks ──────────────────────────────
+    // Discord renders code literally (no bold, no mentions, no emoji) and a
+    // fenced block's opening line is its LANGUAGE, which the client uses for
+    // highlighting and never shows as content.
+    //
+    // ONE left-to-right scan implements that. A scan cannot mistake its own
+    // output for input, which the previous pair of sequential regexes could:
+    // the placeholder a fence left behind got picked up as the body of the
+    // following inline-code pass, so   `` ```x``` ``   put the placeholder's
+    // raw control characters into the preview (string.replace never rescans
+    // its own replacement text, so the restore pass could not fix it).
+    // Scanning once also gives ``double`` spans, nested runs and unclosed
+    // runs the behaviour the client has, because the run length — and
+    // nothing else — decides where code ends.
+    //
+    //   * a run of backticks opens code; it closes at the next run of the
+    //     SAME length, except that a fence may close on a longer run
+    //     (CommonMark's rule, and the one that makes  `` `x` ``  a code span
+    //     holding a backtick instead of two broken halves);
+    //   * a run that never closes stays exactly as typed;
+    //   * onChunk(body, isFence, atLineStart) decides what the code becomes.
+    function scanCode(text, onChunk) {
+        const TICK = 96;                        // '`'
+        let out = '';
+        let i = 0;
+        while (i < text.length) {
+            if (text.charCodeAt(i) !== TICK) { out += text[i]; i += 1; continue; }
+            let run = 1;
+            while (text.charCodeAt(i + run) === TICK) run += 1;
+            const bodyStart = i + run;
+            const isFence = run >= 3;
+            let closeAt = -1;
+            let closeLen = 0;
+            for (let j = bodyStart; j < text.length;) {
+                if (text.charCodeAt(j) !== TICK) { j += 1; continue; }
+                let n = 1;
+                while (text.charCodeAt(j + n) === TICK) n += 1;
+                if (isFence ? n >= run : n === run) { closeAt = j; closeLen = n; break; }
+                j += n;
+            }
+            if (closeAt === -1) {               // unclosed: leave the ticks be
+                out += text.slice(i, bodyStart);
+                i = bodyStart;
+                continue;
+            }
+            const lineStart = text.lastIndexOf('\n', i - 1) + 1;
+            const atLineStart = !text.slice(lineStart, i).trim();
+            out += onChunk(text.slice(bodyStart, closeAt), isFence, atLineStart);
+            i = closeAt + closeLen;
+        }
+        return out;
+    }
+
+    // A fence's opening line is its language, so it is dropped — together
+    // with the newline after it and a trailing one, which would otherwise
+    // leave the block starting or ending on a blank line. Only for a fence
+    // that starts a line: ```x``` typed mid-sentence has no language line
+    // and keeps its content (as it did before this pass).
+    function fencedCodeBody(body) {
+        const firstLine = body.match(/^[^\n]*\n/);
+        if (firstLine && /^[ \t]*[A-Za-z0-9_+#.-]*[ \t]*\r?\n$/.test(firstLine[0])) {
+            body = body.slice(firstLine[0].length);
+        }
+        return body.replace(/^\r?\n/, '').replace(/\r?\n[ \t]*$/, '');
+    }
+
+    // CommonMark: content that both starts and ends with a space (and is not
+    // all spaces) loses one space at each end — that is what makes
+    // `` `x` `` read as a code span holding a backtick.
+    function inlineCodeBody(body) {
+        return (/^[ \t]/.test(body) && /[ \t]$/.test(body) && body.trim())
+            ? body.slice(1, -1) : body;
+    }
+
+    // C0 controls that can never render. They are also the alphabet the
+    // code/token placeholders use, so they are kept out of the source text
+    // and scrubbed from the output as a backstop (see renderDiscordMarkup).
+    const CONTROL_CHARS_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g;
+
     // Discord message-content markdown + mention/emoji rendering —
     // matches what the real client does closely enough for an
     // accurate preview (verbatim logic from the old page, lookups
@@ -569,11 +688,18 @@ window.EmbedComposer = (function () {
         opts = opts || {};
         if (!text) return { html: '', isEmojiOnly: false };
 
+        // A pasted control character is deleted before anything else: it
+        // cannot render (a browser shows a box or nothing), and one shaped
+        // like \u0003…\u0004 would otherwise masquerade as a placeholder of
+        // this function's own making.
+        text = String(text).replace(CONTROL_CHARS_RE, '');
+        if (!text) return { html: '', isEmojiOnly: false };
+
         const lookups = opts.lookups || {};
         const tokens = [];
         let working = text.replace(TOKEN_RE, (match) => {
             tokens.push(match);
-            return `\u0001${tokens.length - 1}\u0002`;
+            return `\u0001${String(tokens.length - 1).padStart(4, '0')}\u0002`;
         });
 
         // Emoji-only-line sizing: Discord renders a message as large emoji
@@ -587,6 +713,30 @@ window.EmbedComposer = (function () {
 
         let escaped = esc(working);
 
+        // ── Code spans and code blocks first, and OUT of the way ──────
+        // Discord does not interpret markdown inside `code` or ```blocks```
+        // — but this renderer used to: a value like
+        //     `**not bold**`
+        // came out bold, i.e. the preview showed one thing and Discord
+        // another. Swap them for placeholders before the markdown pass and
+        // splice them back afterwards; the content is already escaped at
+        // this point, so what goes back in is text, never markup.
+        //
+        // The stash key is fixed-width so the two kinds of placeholder can
+        // never share an index: token 5 is \u0001\u00005\u0002, code chunk 5
+        // is \u0003\u00005\u0004. The old form was `\u0003` + index + `\u0004`
+        // — one character shorter — which is exactly why `` ```x``` ``
+        // matched the INLINE pattern, re-stashing its own placeholder and
+        // leaving \u0003\u00040\u0004 in the output.
+        const codeChunks = [];
+        const stashCode = (html) => {
+            codeChunks.push(html);
+            return `\u0003${String(codeChunks.length - 1).padStart(4, '0')}\u0004`;
+        };
+        escaped = scanCode(escaped, (body, isFence, atLineStart) => isFence
+            ? stashCode(`<pre class="eb-code-block"><code>${fencedCodeBody(body)}</code></pre>`)
+            : stashCode(`<code class="eb-code">${inlineCodeBody(body)}</code>`));
+
         // Markdown — bold before italic so `**x**` isn't half-consumed by
         // the single-asterisk italic pattern first.
         escaped = escaped.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
@@ -599,9 +749,75 @@ window.EmbedComposer = (function () {
             escaped = escaped.replace(EMOJI_UNICODE_RE, (m) => `<span>${m}</span>`);
         }
 
-        escaped = escaped.replace(/\u0001(\d+)\u0002/g, (m, idx) => renderToken(tokens[parseInt(idx)], lookups));
+        // Code back first... The lookup is a direct index, not a search:
+        // every placeholder this pass produced is resolved, and a miss can
+        // only mean a placeholder that came from OUTSIDE (see the scrub
+        // below) — never silently replaced with empty markup.
+        escaped = escaped.replace(/\u0003(\d{4})\u0004/g, (m, idx) => {
+            const chunk = codeChunks[parseInt(idx, 10)];
+            return chunk === undefined ? m : chunk;
+        });
+        // ...then mentions/emoji, whose URLs are generated here (never
+        // user-supplied) and so must NOT be stashed as code.
+        escaped = escaped.replace(/\u0001(\d{4})\u0002/g, (m, idx) => {
+            const token = tokens[parseInt(idx, 10)];
+            return token === undefined ? m : renderToken(token, lookups);
+        });
+
+        // Backstop: nothing of this pass's placeholder alphabet may reach
+        // the DOM. A browser renders these as a box or as nothing, so text
+        // pasted with one inside would otherwise show up as a mystery glyph.
+        escaped = escaped.replace(CONTROL_CHARS_RE, '');
 
         return { html: escaped, isEmojiOnly };
+    }
+
+    // ── Field values Discord accepts as media / links ─────────────
+    // Everything that ends up in `src` or `href` goes through these. A
+    // preview that accepts `javascript:` in a title link is a preview that
+    // can execute whatever was pasted into it, and `<img src>` on a
+    // `attachment://` URL is a guaranteed broken-image icon — the preview
+    // shows nothing for an unresolved attachment reference instead
+    // (Phase 2 resolves it to a real blob/CDN URL through
+    // `data.resolveImageSrc`).
+    function mediaSrc(url) {
+        const u = String(url == null ? '' : url).trim();
+        if (!u) return '';
+        if (/^(https?:|blob:|data:)/i.test(u)) return u;
+        return '';
+    }
+    function safeHref(url) {
+        const u = String(url == null ? '' : url).trim();
+        return /^https?:\/\//i.test(u) ? u : '';
+    }
+    function imgSrc(value, data) {
+        const raw = String(value == null ? '' : value).trim();
+        if (!raw) return '';
+        if (/^attachment:\/\//i.test(raw)) {
+            // Seam for the asset layer (Phase 2): a page may hand in a
+            // resolver; without one, an unresolved attachment reference
+            // renders as "no image" rather than as a broken image.
+            const resolved = (data && typeof data.resolveImageSrc === 'function')
+                ? data.resolveImageSrc(raw) : null;
+            return mediaSrc(resolved);
+        }
+        return mediaSrc(raw);
+    }
+
+    // Discord's own "Today at 6:42 PM" for today's timestamps and a plain
+    // local date-time otherwise. Deliberately an approximation with a
+    // comment saying so: the real client formats per user locale, and the
+    // preview must never claim to be the client down to the last detail.
+    function fmtDiscordTimestamp(value) {
+        if (!value) return '';
+        const d = new Date(value);
+        if (isNaN(d.getTime())) return '';
+        const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const now = new Date();
+        const sameDay = d.getFullYear() === now.getFullYear()
+            && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+        if (sameDay) return `Today at ${time}`;
+        return `${d.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' })} ${time}`;
     }
 
     function fmtPreviewTime() {
@@ -713,11 +929,38 @@ window.EmbedComposer = (function () {
             html += `</div>`;
         }
 
+        // Icon sizing is inline (not a new stylesheet rule) so this stays
+        // an additive change to the shared composer CSS: 16px rounded
+        // avatar for the author, 20px round for the footer, matching what
+        // Discord draws (thumbnail for the author, a circle for the footer).
+        const AUTHOR_ICON_STYLE = 'width:16px;height:16px;border-radius:3px;object-fit:cover;flex-shrink:0;';
+        const FOOTER_ICON_STYLE = 'width:20px;height:20px;border-radius:50%;object-fit:cover;flex-shrink:0;';
+
         const nonEmpty = embeds.filter(embedHasContent);
         for (const e of nonEmpty) {
             html += `<div class="eb-preview-embed" style="border-left-color:${attr(e.color || '#7c5cbf')};">`;
-            if (e.author) html += `<div class="eb-pe-author">${esc(e.author)}</div>`;
-            if (e.title) html += `<div class="eb-pe-title">${esc(e.title)}</div>`;
+            if (e.author || e.authorIcon) {
+                const icon = imgSrc(e.authorIcon, data);
+                const inner = (icon
+                        ? `<img src="${attr(icon)}" alt="" style="${AUTHOR_ICON_STYLE}">`
+                        : '')
+                    + esc(e.author);
+                const href = safeHref(e.authorUrl);
+                html += `<div class="eb-pe-author">`
+                    + (href
+                        ? `<a href="${attr(href)}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none;display:flex;align-items:center;gap:6px;">${inner}</a>`
+                        : inner)
+                    + `</div>`;
+            }
+            if (e.title) {
+                const href = safeHref(e.url);
+                const title = esc(e.title);
+                html += `<div class="eb-pe-title">`
+                    + (href
+                        ? `<a href="${attr(href)}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none;">${title}</a>`
+                        : title)
+                    + `</div>`;
+            }
             if (e.description) html += `<div class="eb-pe-desc">${renderDiscordMarkup(e.description, { lookups }).html}</div>`;
             if (e.fields && e.fields.length) {
                 html += `<div class="eb-pe-fields">`;
@@ -728,9 +971,23 @@ window.EmbedComposer = (function () {
                 </div>`).join('');
                 html += `</div>`;
             }
-            if (e.image) html += `<img class="eb-pe-image" src="${attr(e.image)}" alt="">`;
-            if (e.thumbnail) html += `<img class="eb-pe-thumb" src="${attr(e.thumbnail)}" alt="">`;
-            if (e.footer) html += `<div class="eb-pe-footer">${esc(e.footer)}</div>`;
+            const imageSrc = imgSrc(e.image, data);
+            if (imageSrc) html += `<img class="eb-pe-image" src="${attr(imageSrc)}" alt="">`;
+            const thumbSrc = imgSrc(e.thumbnail, data);
+            if (thumbSrc) html += `<img class="eb-pe-thumb" src="${attr(thumbSrc)}" alt="">`;
+            const footerIconSrc = imgSrc(e.footerIcon, data);
+            const stamp = fmtDiscordTimestamp(e.timestamp);
+            if (e.footer || footerIconSrc || stamp) {
+                // Discord draws the footer as: icon, text, timestamp — the
+                // last two separated by a dot. Same order here.
+                const bits = [];
+                if (footerIconSrc) bits.push(`<img src="${attr(footerIconSrc)}" alt="" style="${FOOTER_ICON_STYLE}">`);
+                if (e.footer) bits.push(`<span>${esc(e.footer)}</span>`);
+                if (stamp) bits.push(`<span>${esc(stamp)}</span>`);
+                html += `<div class="eb-pe-footer">`
+                    + bits.join('<span style="opacity:.6;">&bull;</span>')
+                    + `</div>`;
+            }
             html += `</div>`;
         }
 
@@ -748,13 +1005,31 @@ window.EmbedComposer = (function () {
     // ═══════════════════════════════════════════════════════════════
     // PAYLOAD HELPERS (verbatim shapes from the old page)
     // ═══════════════════════════════════════════════════════════════
+    // Editor shape → Discord payload. Every field Discord supports that
+    // this editor can set is emitted here, and ONLY when set — an empty
+    // string must not become `"footer": {"text": ""}`, which Discord
+    // rejects, and must not become a key that never round-trips.
+    //
+    // The four fields that used to be dropped on this path (author icon,
+    // author url, footer icon, embed url) plus `timestamp` are the reason
+    // a saved template could never hold them: /embedbuilder/send and
+    // /embedbuilder/template/save both serialise whatever this returns.
     function cleanEmbedForPayload(e) {
         const out = {};
         if (e.title) out.title = e.title;
         if (e.description) out.description = e.description;
         if (e.color) { try { out.color = parseInt(e.color.replace('#', ''), 16); } catch (err) {} }
-        if (e.author) out.author = { name: e.author };
-        if (e.footer) out.footer = { text: e.footer };
+        const author = {};
+        if (e.author) author.name = e.author;
+        if (e.authorIcon) author.icon_url = e.authorIcon;
+        if (e.authorUrl) author.url = e.authorUrl;
+        if (Object.keys(author).length) out.author = author;
+        const footer = {};
+        if (e.footer) footer.text = e.footer;
+        if (e.footerIcon) footer.icon_url = e.footerIcon;
+        if (Object.keys(footer).length) out.footer = footer;
+        if (e.url) out.url = e.url;
+        if (e.timestamp) out.timestamp = e.timestamp;
         if (e.image) out.image = { url: e.image };
         if (e.thumbnail) out.thumbnail = { url: e.thumbnail };
         if (e.fields && e.fields.length) {
@@ -782,7 +1057,27 @@ window.EmbedComposer = (function () {
                     : String(e.color))
                 : '#7c5cbf',
             author: (e.author && e.author.name) || e.author || '',
+            // author/footer are objects in the API shape; the editor keeps
+            // each part as its own string so it can round-trip through
+            // cleanEmbedForPayload unchanged. Reading only `.name`/`.text`
+            // here is what silently threw away the icons and the author
+            // link on every save → load → save cycle.
+            //
+            // The `_icon` fallbacks are for the LEGACY flat shape that
+            // embed_templates rows written before this change (and by the
+            // older save path) still hold: {author: 'name', author_icon:
+            // 'url', footer: 'text', footer_icon: 'url'} — the same keys
+            // cogs/embedbuilder.py's build_embed reads. Without them the
+            // icons of every pre-existing saved template were dropped the
+            // moment the template was loaded into the editor.
+            authorIcon: (e.author && e.author.icon_url) || e.author_icon || '',
+            authorUrl: (e.author && e.author.url) || e.author_url || '',
             footer: (e.footer && e.footer.text) || e.footer || '',
+            footerIcon: (e.footer && e.footer.icon_url) || e.footer_icon || '',
+            url: e.url || '',
+            // Stored as ISO (what Discord wants); the editor input converts
+            // to/from local time and never shows an invalid value.
+            timestamp: e.timestamp || '',
             thumbnail: (e.thumbnail && e.thumbnail.url) || e.thumbnail || '',
             image: (e.image && e.image.url) || e.image || '',
             fields: (e.fields || []).map(f => ({
