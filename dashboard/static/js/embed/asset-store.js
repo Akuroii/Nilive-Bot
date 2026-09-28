@@ -433,6 +433,123 @@
             },
 
             /**
+             * Promote this session's memory fallback into storage — the
+             * single recovery pass the page admits on the successful
+             * draft-write edge (phase 2, P2.4). Never throws; the answer
+             * is structured, so the caller never has to guess what was
+             * left behind.
+             *
+             * Candidate set (locked): EXACTLY the ids this instance's
+             * memory fallback still holds. `memory` is only ever filled
+             * by THIS instance's putBytes, so this method can only move
+             * bytes this session itself held: a loaded draft's ids
+             * (stored, never in memory) and another tab's bytes are not
+             * candidates and cannot be.
+             *
+             * Locked order: dead guard → one recover() chance on this
+             * store's own adapter (the drafts.js one-chance primitive,
+             * TRANSIENT-only — a final latch refuses and stays final) →
+             * availability check (an honest no-op that RETAINS memory) →
+             * for each candidate, sorted: read first — storage already
+             * holding these exact bytes means alreadyStored with a ZERO
+             * write — otherwise the existing write() (no second write
+             * path) → memory removal ONLY after successful persistence →
+             * failures RETAINED in memory for a later eligible pass.
+             * This method never deletes: no remove, no GC, no
+             * reconciliation — it can only move bytes from memory to
+             * storage.
+             */
+            promoteMemory: () => {
+                if (dead) return Promise.resolve(refuse(null, 'destroyed'));
+                // This store's own adapter gets exactly one chance to come
+                // back — the same one-chance primitive the draft side
+                // calls on its own adapter. It fires no event and
+                // schedules nothing: it only ever clears a TRANSIENT
+                // latch; a final (boot) latch refuses and stays final.
+                if (storage && typeof storage.recover === 'function' && !available()) {
+                    try { storage.recover(); } catch (e) { stats.failures++; }
+                }
+                if (!available()) {
+                    // Honest no-op: nothing is claimed, nothing is
+                    // written, and memory is retained for a later
+                    // eligible pass.
+                    return Promise.resolve({
+                        ok: true, promoted: [], alreadyStored: [], failed: [], reason: storageReason(),
+                    });
+                }
+                const promoted = [];
+                const alreadyStored = [];
+                const failed = [];
+                const run = (idList) => {
+                    const step = (index) => {
+                        if (index >= idList.length) {
+                            return Promise.resolve({
+                                ok: true, promoted: promoted, alreadyStored: alreadyStored,
+                                failed: failed, reason: null,
+                            });
+                        }
+                        const id = idList[index];
+                        const entry = memory[id];
+                        // Read first: does STORAGE already hold these
+                        // exact bytes (another tab storing the same
+                        // content-addressed id is the case that makes
+                        // this true)? The store's own read() cannot
+                        // answer that for a candidate — it hits memory
+                        // first by design — so the storage half of
+                        // read() is asked directly: the same get +
+                        // readEntry validation, no new I/O surface, and
+                        // a confirmed duplicate costs a ZERO write.
+                        let check;
+                        try {
+                            check = storage.get(id);
+                        } catch (e) {
+                            stats.failures++;
+                            check = null;
+                        }
+                        const proceed = (same) => {
+                            if (same) {
+                                // Already persisted byte-identically:
+                                // drop the memory copy and write
+                                // NOTHING.
+                                delete memory[id];
+                                alreadyStored.push(id);
+                                return step(index + 1);
+                            }
+                            return write(id, entry).then((w) => {
+                                if (w.persisted) {
+                                    delete memory[id];      // ONLY after successful persistence
+                                    promoted.push(id);
+                                } else {
+                                    failed.push({ id: id, reason: w.reason });   // RETAINED in memory
+                                }
+                                return step(index + 1);
+                            });
+                        };
+                        return Promise.resolve(check).then(
+                            (raw) => {
+                                const stored = raw === null || raw === undefined ? null : readEntry(raw, id);
+                                return proceed(!!stored && stored.sha256 === entry.sha256 &&
+                                    stored.byteLength === entry.byteLength);
+                            },
+                            () => {
+                                // The check itself failed: "not
+                                // confirmed stored" — the write path
+                                // decides, and a failed write retains
+                                // the entry.
+                                stats.failures++;
+                                return proceed(false);
+                            }
+                        );
+                    };
+                    return step(0);
+                };
+                // The candidate set (locked): exactly this instance's
+                // memory, and nothing else.
+                const ids = Object.keys(memory).sort();
+                return Promise.resolve(ids).then(run);
+            },
+
+            /**
              * The bytes for an id, as a fresh Uint8Array. The copy is
              * deliberate: a caller cannot corrupt what is stored by
              * writing into what it was handed.

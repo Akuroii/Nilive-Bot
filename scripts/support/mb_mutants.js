@@ -2400,6 +2400,218 @@ const MUTANTS = [
             "            const url = 'blob:' + entry.id;\n            if (url) map[name] = url;",
         ]],
     },
+
+    // ═══════════════════════════════════════════════════════════════
+    // P2.1 — DURABILITY. Judged by the resolution harness, whose section J
+    // measures what a reload restores. Every mutant here breaks one seam the
+    // reload proof leans on, so a green J section means each of those seams was
+    // load-bearing. Two of them (DUR1, DUR3) break the COUNTERS the proof pins
+    // to zero: those mutants catch the guards, not the product.
+    // ═══════════════════════════════════════════════════════════════
+    {
+        id: 'DUR1',
+        target: 'assetstore',
+        harness: RESOLUTION,
+        why: "the store stops counting byte reads, so \"the picture came from the database\" cannot be observed",
+        edits: [[
+            "            stats.reads++;",
+            "            /* reads not counted */",
+        ]],
+    },
+    {
+        id: 'DUR2',
+        target: 'assetstore',
+        harness: RESOLUTION,
+        why: "the store stops counting puts, so the put/writes/duplicates guards are blind",
+        edits: [[
+            "                stats.puts++;",
+            "                /* puts not counted */",
+        ]],
+    },
+    {
+        id: 'DUR3',
+        target: 'assetstore',
+        harness: RESOLUTION,
+        why: "a refused mint is not counted as a urlMiss, so the counter's meaning is unobservable",
+        edits: [[
+            "                    if (!found.ok) {\n                        stats.urlMisses++;\n                        return refuse(assetId, found.reason);\n                    }",
+            "                    if (!found.ok) {\n                        return refuse(assetId, found.reason);\n                    }",
+        ]],
+    },
+    {
+        // FIRST FORM, MEASURED AND REJECTED: a byte-store `memory` hoisted to
+        // module scope (a leak that outlives its instance) is UNEXERCISABLE
+        // here — every environment in this harness gets a fresh realm, so a
+        // variable inside the module's own closure cannot survive a reload and
+        // the mutant could never be caught. That is a property of the rig, and
+        // the reload proof leans on it: "a new page" really is a new realm.
+        // The latch the reload proof DOES depend on is the one below.
+        id: 'DUR4',
+        target: 'assetstore',
+        harness: RESOLUTION,
+        why: "destroy() never latches, so the dead session's byte store would still answer for the reloaded page",
+        edits: [[
+            "                dead = true;",
+            "                dead = false;",
+        ]],
+    },
+    {
+        id: 'DUR5',
+        target: 'assetstore',
+        harness: RESOLUTION,
+        why: "a verified read never verifies, so substituted bytes pass the only checking read there is",
+        edits: [[
+            "                    if (opts && opts.verify) {",
+            "                    if (false) {",
+        ]],
+    },
+    {
+        id: 'DUR6',
+        target: 'assetstore',
+        harness: RESOLUTION,
+        why: "a truncated entry is accepted as the file it claims to be",
+        edits: [[
+            "        if (raw.byteLength !== view.length) return null;          // truncated or padded: not the bytes we stored",
+            "        // length no longer checked",
+        ]],
+    },
+    {
+        id: 'DUR7',
+        target: 'assetstore',
+        harness: RESOLUTION,
+        why: "teardown stops revoking, so the reloaded page could show a URL the dead session minted",
+        edits: [[
+            "                const released = releaseAllUrls();",
+            "                const released = { ok: true, revoked: 0, assetIds: [] };",
+        ]],
+    },
+    {
+        id: 'DUR8',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the probe's answer is thrown away, so nothing the reload observed reaches a slot",
+        edits: [[
+            "            inst.assetFacts = NERO.embed.assets.assetFacts(doc, rows);",
+            "            inst.assetFacts = NERO.embed.assets.assetFacts(doc, []);",
+        ]],
+    },
+    {
+        id: 'DUR9',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the last-draft pointer is ignored on boot, so a reload starts from an empty document",
+        edits: [[
+            "            .then(function () { return session.meta.lastDocumentId(inst.guildId); })",
+            "            .then(function () { return null; })",
+        ]],
+    },
+    {
+        id: 'DUR11',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "the page RE-PUTS every file it resolves (a reconciliation that rewrites what the reload found)",
+        edits: [[
+            "        const pending = wanted.map(function (id) {\n            const record = view.records[id];",
+            "        wanted.forEach(function (id) {\n            inst.assetStore.getBytes(id).then(function (r) {\n                if (r && r.ok) inst.assetStore.putBytes(id, r.bytes, { mime: r.mime });\n            });\n        });\n        const pending = wanted.map(function (id) {\n            const record = view.records[id];",
+        ]],
+    },
+    {
+        id: 'DUR10',
+        target: 'drafts',
+        harness: RESOLUTION,
+        why: "the persisted document loses its asset records, so the bytes outlive the document that named them",
+        edits: [[
+            "            documentHash: model.hashDocument(doc),\n            document: doc,",
+            "            documentHash: model.hashDocument(doc),\n            document: Object.assign({}, doc, { assets: {} }),",
+        ]],
+    },
+    // ── P2.4: the storage-recovery pass (battery 250 → 258) ──────────
+    {
+        id: 'PR1',
+        target: 'assetstore',
+        harness: RESOLUTION,
+        why: "promoteMemory never gives the store's own adapter its one recover() chance — under the K.1 rig-fidelity rule the latch is clearable ONLY through recover(), so it never clears: the pass no-ops, nothing persists, and the K.6 reload loses the bytes",
+        edits: [[
+            "                if (storage && typeof storage.recover === 'function' && !available()) {\n                    try { storage.recover(); } catch (e) { stats.failures++; }\n                }\n",
+            "",
+        ]],
+    },
+    {
+        id: 'PR2',
+        target: 'assetstore',
+        harness: RESOLUTION,
+        why: "unconditional writes (the read-first duplicate check removed) — K.9: the already-stored duplicate receives a redundant write (writes delta 4, not 3; the seeded entry is rewritten)",
+        edits: [[
+            "                                const stored = raw === null || raw === undefined ? null : readEntry(raw, id);\n                                return proceed(!!stored && stored.sha256 === entry.sha256 &&\n                                    stored.byteLength === entry.byteLength);",
+            "                                const stored = raw === null || raw === undefined ? null : readEntry(raw, id);\n                                return proceed(false);",
+        ]],
+    },
+    {
+        id: 'PR3',
+        target: 'assetstore',
+        harness: RESOLUTION,
+        why: "missing memory deletion after a successful write — K.10a: destroy().dropped.length === 0 fails (the four entries are dropped), and K.10b/K.2B: a direct second promoteMemory() call re-writes them (promoted !== [], writes delta 4)",
+        edits: [[
+            "                            return write(id, entry).then((w) => {\n                                if (w.persisted) {\n                                    delete memory[id];      // ONLY after successful persistence\n                                    promoted.push(id);\n                                } else {\n                                    failed.push({ id: id, reason: w.reason });   // RETAINED in memory\n                                }\n                                return step(index + 1);\n                            });",
+            "                            return write(id, entry).then((w) => {\n                                if (w.persisted) {\n                                    promoted.push(id);\n                                } else {\n                                    failed.push({ id: id, reason: w.reason });   // RETAINED in memory\n                                }\n                                return step(index + 1);\n                            });",
+        ]],
+    },
+    {
+        id: 'PR4',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "per-asset probing instead of once per pass — K.3: the assetProbes delta across the pass is 4, not 1",
+        edits: [[
+            "                            const doc = inst.store.getDocument();\n                            const ids = NERO.embed.assets.documentAssetIds(doc);\n                            probeAssets(inst, doc, ids).then(function () {\n                                if (!inst.destroyed) validateNow(inst);\n                            });",
+            "                            const doc = inst.store.getDocument();\n                            (promoted.concat(alreadyStored)).forEach(function (pid) {\n                                probeAssets(inst, doc, [pid]).then(function () {});\n                            });\n                            if (!inst.destroyed) validateNow(inst);",
+        ]],
+    },
+    {
+        id: 'PR5',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "re-minting during the pass (release + urlFor) — K.4: mints delta > 0, revokes delta > 0, and the slot src strings change (URL/node identity not preserved)",
+        edits: [[
+            "                        inst.assetStoreAvailable = inst.assetStore.mode().available;\n                        inst.assetRecoveryPending = failed.length > 0;",
+            "                        inst.assetStoreAvailable = inst.assetStore.mode().available;\n                        inst.assetRecoveryPending = failed.length > 0;\n                        (promoted.concat(alreadyStored)).forEach(function (pid) {\n                            inst.assetStore.release(pid);\n                            inst.assetStore.urlFor(pid).then(function () {});\n                        });",
+        ]],
+    },
+    {
+        id: 'PR6',
+        target: 'assetstore',
+        harness: RESOLUTION,
+        why: "candidate set derived from what STORAGE holds (a document/storage-ID iteration) instead of this instance's memory — K.2B/K.9: the loaded draft's stored asset id (in the DB, never in memory) becomes a candidate and lands in alreadyStored (K.2B: [loaded-id] instead of []; K.9: [loaded-id, pre-seeded-id] instead of exactly [pre-seeded-id])",
+        edits: [
+            [
+                "                const ids = Object.keys(memory).sort();",
+                "                const ids = (function () {\n                    const base = Object.keys(memory).sort();\n                    return Promise.resolve(storage.getAll ? storage.getAll() : []).then(function (rows) {\n                        (rows || []).forEach(function (row) {\n                            if (row && row.assetId && base.indexOf(row.assetId) === -1) base.push(row.assetId);\n                        });\n                        return base.sort();\n                    });\n                })();",
+            ],
+            [
+                "                        const entry = memory[id];",
+                "                        const entry = memory[id] || null;\n                        if (!entry) {\n                            return storage.get(id).then(function (raw) {\n                                const stored = raw === null || raw === undefined ? null : readEntry(raw, id);\n                                if (stored) { alreadyStored.push(id); }\n                                return step(index + 1);\n                            }, function () { return step(index + 1); });\n                        }",
+            ],
+        ],
+    },
+    {
+        id: 'PR7',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "level-triggered recovery (the pass runs on every onState, not on the write edge) — K.8: the in-window keystroke fires onState (typing → changed → notify) while the injected ids are still memory-only, and the level variant promotes them early ⇒ asset-store writes occur BEFORE the next successful save edge ⇒ the K.8 ordering assertion fails",
+        edits: [[
+            "                rememberPointer(inst);      // only ever after a SUCCESSFUL write\n                // P2.4 recovery: the successful draft write is the page's\n                // one existing \"storage is usable again\" signal, and this\n                // edge is the only place the recovery pass may run — never\n                // on typing, never as a level check (C.1). The pre-gate\n                // refresh is a synchronous latch read INSIDE this branch,\n                // not a trigger: a mid-session degradation can leave the\n                // creation-time flag stale-true, and a gate fed by a stale\n                // flag would never admit the pass it exists for.\n                inst.assetStoreAvailable = inst.assetStore.mode().available;\n                if (!inst.assetStoreAvailable || inst.assetRecoveryPending) {\n                    inst.assetStore.promoteMemory().then(function (res) {\n                        // `res` is the structured pass result (or the dead\n                        // refusal); the pass admits no further work when the\n                        // store is gone, and the flag/hint bookkeeping is\n                        // the only state the pass leaves behind.\n                        const failed = (res && res.failed) || [];\n                        const promoted = (res && res.promoted) || [];\n                        const alreadyStored = (res && res.alreadyStored) || [];\n                        inst.assetStoreAvailable = inst.assetStore.mode().available;\n                        inst.assetRecoveryPending = failed.length > 0;\n                        if (inst.assetStoreAvailable && (promoted.length + alreadyStored.length) > 0) {\n                            // THE single post-promotion fact refresh (at\n                            // most one probe per successful recovery\n                            // pass): the probe's resolve-ahead is\n                            // cached-URL-first, so it mints nothing and\n                            // replaces no node — the preview is visually\n                            // unchanged, and the facts stop lying about\n                            // where the bytes live.\n                            const doc = inst.store.getDocument();\n                            const ids = NERO.embed.assets.documentAssetIds(doc);\n                            probeAssets(inst, doc, ids).then(function () {\n                                if (!inst.destroyed) validateNow(inst);\n                            });\n                        }\n                    });\n                }\n            }\n        }",
+            "                rememberPointer(inst);      // only ever after a SUCCESSFUL write\n            }\n                // P2.4 recovery: the successful draft write is the page's\n                // one existing \"storage is usable again\" signal, and this\n                // edge is the only place the recovery pass may run — never\n                // on typing, never as a level check (C.1). The pre-gate\n                // refresh is a synchronous latch read INSIDE this branch,\n                // not a trigger: a mid-session degradation can leave the\n                // creation-time flag stale-true, and a gate fed by a stale\n                // flag would never admit the pass it exists for.\n                inst.assetStoreAvailable = inst.assetStore.mode().available;\n                if (!inst.assetStoreAvailable || inst.assetRecoveryPending) {\n                    inst.assetStore.promoteMemory().then(function (res) {\n                        // `res` is the structured pass result (or the dead\n                        // refusal); the pass admits no further work when the\n                        // store is gone, and the flag/hint bookkeeping is\n                        // the only state the pass leaves behind.\n                        const failed = (res && res.failed) || [];\n                        const promoted = (res && res.promoted) || [];\n                        const alreadyStored = (res && res.alreadyStored) || [];\n                        inst.assetStoreAvailable = inst.assetStore.mode().available;\n                        inst.assetRecoveryPending = failed.length > 0;\n                        if (inst.assetStoreAvailable && (promoted.length + alreadyStored.length) > 0) {\n                            // THE single post-promotion fact refresh (at\n                            // most one probe per successful recovery\n                            // pass): the probe's resolve-ahead is\n                            // cached-URL-first, so it mints nothing and\n                            // replaces no node — the preview is visually\n                            // unchanged, and the facts stop lying about\n                            // where the bytes live.\n                            const doc = inst.store.getDocument();\n                            const ids = NERO.embed.assets.documentAssetIds(doc);\n                            probeAssets(inst, doc, ids).then(function () {\n                                if (!inst.destroyed) validateNow(inst);\n                            });\n                        }\n                    });\n                }\n        }",
+        ]],
+    },
+    {
+        id: 'PR8',
+        target: 'page',
+        harness: RESOLUTION,
+        why: "missing post-promotion probe — K.3: the facts stay stale; the row source assertion (source === 'indexeddb') fails because the pre-pass rows were served from memory (source === 'memory') and also report bytes-local — the availability string alone cannot distinguish, which is why the source field is asserted",
+        edits: [[
+            "                            const doc = inst.store.getDocument();\n                            const ids = NERO.embed.assets.documentAssetIds(doc);\n                            probeAssets(inst, doc, ids).then(function () {\n                                if (!inst.destroyed) validateNow(inst);\n                            });",
+            "                            const doc = inst.store.getDocument();\n                            const ids = NERO.embed.assets.documentAssetIds(doc);\n                            // (the probe is gone)",
+        ]],
+    },
 ];
 
 function sha1(file) {

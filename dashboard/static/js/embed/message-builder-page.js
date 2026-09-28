@@ -277,6 +277,15 @@ window.NERO.embed = window.NERO.embed || {};
             // way validateRuns counts passes.
             assetFacts: f.assets.noFacts({ embeds: [], assets: {} }),
             assetProbe: null,
+            // ── step P2.4: asset recovery (pure bookkeeping, no source of
+            // truth — the store's answer is always re-read on the spot) ──
+            // `assetStoreAvailable` mirrors the store's mode() at store
+            // creation and is re-read at every write edge (the pre-gate
+            // refresh); `assetRecoveryPending` is the admission hint that a
+            // previous pass left entries behind — it is never a candidate
+            // list, and nothing ever enumerates memory from the page.
+            assetStoreAvailable: false,
+            assetRecoveryPending: false,
             // ── step 7d: the file pick in flight (never document state) ──
             // `uploadToken` is the pick that currently owns the pipeline: a newer
             // pick replaces it, and any older read that lands afterwards is
@@ -397,6 +406,11 @@ window.NERO.embed = window.NERO.embed || {};
             scheduler: storageScheduler(inst),
             urls: f.assetStore.browserUrls(inst.win),
         });
+        // P2.4: the availability flag starts from the store's own answer —
+        // a synchronous latch read, zero I/O. From then on it is only ever
+        // re-read on the write edge (the pre-gate refresh); nothing
+        // subscribes to it and no other code path updates it.
+        inst.assetStoreAvailable = inst.assetStore.mode().available;
 
         inst.unsubs.push(inst.session.onState(function (snapshot) { onSessionState(inst, snapshot); }));
         // Coarse store listener on purpose: it fires for markSaved/undo/redo as
@@ -535,6 +549,42 @@ window.NERO.embed = window.NERO.embed || {};
             if (writes > inst.lastWrites) {
                 inst.lastWrites = writes;
                 rememberPointer(inst);      // only ever after a SUCCESSFUL write
+                // P2.4 recovery: the successful draft write is the page's
+                // one existing "storage is usable again" signal, and this
+                // edge is the only place the recovery pass may run — never
+                // on typing, never as a level check (C.1). The pre-gate
+                // refresh is a synchronous latch read INSIDE this branch,
+                // not a trigger: a mid-session degradation can leave the
+                // creation-time flag stale-true, and a gate fed by a stale
+                // flag would never admit the pass it exists for.
+                inst.assetStoreAvailable = inst.assetStore.mode().available;
+                if (!inst.assetStoreAvailable || inst.assetRecoveryPending) {
+                    inst.assetStore.promoteMemory().then(function (res) {
+                        // `res` is the structured pass result (or the dead
+                        // refusal); the pass admits no further work when the
+                        // store is gone, and the flag/hint bookkeeping is
+                        // the only state the pass leaves behind.
+                        const failed = (res && res.failed) || [];
+                        const promoted = (res && res.promoted) || [];
+                        const alreadyStored = (res && res.alreadyStored) || [];
+                        inst.assetStoreAvailable = inst.assetStore.mode().available;
+                        inst.assetRecoveryPending = failed.length > 0;
+                        if (inst.assetStoreAvailable && (promoted.length + alreadyStored.length) > 0) {
+                            // THE single post-promotion fact refresh (at
+                            // most one probe per successful recovery
+                            // pass): the probe's resolve-ahead is
+                            // cached-URL-first, so it mints nothing and
+                            // replaces no node — the preview is visually
+                            // unchanged, and the facts stop lying about
+                            // where the bytes live.
+                            const doc = inst.store.getDocument();
+                            const ids = NERO.embed.assets.documentAssetIds(doc);
+                            probeAssets(inst, doc, ids).then(function () {
+                                if (!inst.destroyed) validateNow(inst);
+                            });
+                        }
+                    });
+                }
             }
         }
         renderStatus(inst);
