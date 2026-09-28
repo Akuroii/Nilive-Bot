@@ -98,34 +98,160 @@ Publishing/send routes · `shop_publications` table · purchase-flow changes · 
 
 ## 3. Implementation record
 
-*(completed after implementation — §4–§7 below are filled on the final worktree)*
-
-### 3.1 Files changed vs baseline `4e2f6c5c`
-
-*(filled in §4)*
+Phase 1 is implemented and validated on top of baseline checkpoint commit
+`4c6489a` (this document's baseline section, committed before any code edit).
+The implementation commit and the commit carrying this completed record are
+listed in §9 — 4 modified files (42 pure additive lines) + 8 new files.
+Nothing outside the Phase 1 scope was touched.
 
 ---
 
-## 4. Files changed vs baseline
+## 4. Files changed vs baseline `4e2f6c5c`
 
-*(filled after implementation)*
+### New files (8)
+
+| File | Lines | What it is |
+|---|---|---|
+| `utils/shop_publisher.py` | 336 | THE fixed token resolver + preview assembly. Pure: no Flask/Discord/DB. `TOKEN_CATALOG` (14 fixed tokens), `normalize_template_doc`, `product_token_values`, `resolve_message`, `purchase_action`, `collect_warnings`, `preview_message`. |
+| `dashboard/api/shop_publisher.py` | 164 | Read-only API: `GET /api/shop-publisher/catalog` (templates + products pre-grouped for the V1 picker + the fixed token catalog) and `POST /api/shop-publisher/preview` (runs the shared resolver). No writes, no audit rows. |
+| `dashboard/templates/manage/shoppublisher.html` | 113 | The Publisher page shell (template picker, product picker, preview mount, purchase-action row, warnings, resolved tokens, token catalog). No inline script; page module via nav-lifecycle. |
+| `dashboard/static/js/shop-publisher.js` | 322 | The page module: pickers (product `<optgroup>`s by the existing `type` only), preview requests with a stale-response guard, purchase action/warnings/token rendering. Interprets NO token. |
+| `dashboard/static/css/shop-publisher.css` | 143 | `sp-*` styles only; reuses the frozen `.eb-preview-box` frame class for the Discord-style preview. |
+| `scripts/test_shop_publisher.py` | 350 | Resolver suite — 59 checks. |
+| `scripts/test_shop_publisher_api.py` | 244 | API suite (real Flask app + permissions + CSRF + scratch DB) — 15 tests. |
+| `scripts/test_shop_publisher_form.js` | 452 | DOM harness booting the REAL page module + REAL frozen preview engine — 47 checks. |
+
+### Modified files (4 — additive only, +42/−0)
+
+| File | Δ | What changed |
+|---|---|---|
+| `dashboard/api/__init__.py` | +6 | One import line + comment registering `dashboard.api.shop_publisher` on the shared blueprint (same pattern as every other submodule). |
+| `dashboard/app.py` | +18 | One route: `GET /shop-publisher` → `manage/shoppublisher.html`, `@require_page("shoppublisher")`, `bot_identity` from the existing helper. |
+| `utils/permissions.py` | +8 | One page key: `"shoppublisher": LEVEL_OWNER` (+ rationale comment). |
+| `dashboard/templates/base.html` | +10 | One nav entry (Systems → Shop Publisher), same shape as every sibling link. |
+
+### Files verified NOT changed (hashes match §1)
+
+`database.py` (no `shop_publications`), `cogs/shop.py` (purchase engine), `utils/shop_validation.py`
+(paid-product validation), `utils/embed_schema.py`, `utils/prestige.py`, every Embed Builder file
+(`dashboard/static/js/embed/*`, `embed-composer.js`, `embed-builder-page.js`, `nav-lifecycle.js`,
+`dashboard/api/embedbuilder.py`, `manage/embedbuilder.html`, `manage/message_builder.html`,
+`utils/discord_limits.py`), `systems/shop.html`, `dashboard/api/economy_shop.py`. `git diff` contains
+only the 4 files above; the untracked set is exactly the 8 new files.
 
 ## 5. Behavior implemented
 
-*(filled after implementation)*
+1. **Template selection** — the picker lists `embed_templates` names for the session guild
+   (whole-message `{content, embeds}` rows; legacy bare-embed rows normalize to one embed via
+   `normalize_template_doc`, the same rule the Embed Builder read path applies).
+2. **Product selection** — the picker lists `shop_items` (the product source of truth), grouped by
+   the existing `type` column into `<optgroup>`s and nothing else. Disabled products stay visible and
+   marked, so their preview warnings are reachable. No new category system anywhere.
+3. **Fixed token resolution** — server-side, one resolver (`utils/shop_publisher.py`):
+   - FIXED: exactly the 14 `product.*` tokens of `TOKEN_CATALOG` (id, name, description, price,
+     price_amount, currency_name, currency_emoji, type, duration, stock, required_level, rarity,
+     icon_url, prestige_tier); the UI's token reference renders the same table.
+   - DETERMINISTIC: pure functions; same template + product + currency → byte-identical output;
+     input never mutated; `{{product.price}}` follows the same charging rule `cogs/shop.py` uses
+     (diamond price wins, else coin price) and the guild's configured currency names/emojis.
+   - NON-PROGRAMMABLE: bare `{{ name }}` lookups only — no expressions, no nesting, no conditions,
+     no filters; resolved values are never re-scanned (no injection); unknown tokens stay verbatim
+     and are reported; resolution is confined to the documented message text surfaces (embed_schema's
+     paths).
+4. **Publisher preview** — the preview shows the resolved content + embeds (rendered by the FROZEN
+   `embed/preview.js` engine, loaded read-only) **plus the purchase action that will actually be
+   published**: a green `🛒 Buy <name>` button carrying `custom_id shop_buy_<id>` — the exact family
+   `cogs/shop.py`'s `on_interaction` already dispatches to `process_purchase()`. The row also names
+   the published style + custom_id so the contract is visible. `purchase_action()` is the descriptor
+   Phase 2 publishes verbatim.
+5. **Preview warnings** — deterministic, pathed, in fixed order: `product_disabled`,
+   `product_out_of_stock`, then per-occurrence `unknown_token` / `empty_value` in document order,
+   then `validation` (Discord-rule breaches of the RESOLVED payload via `utils/embed_schema` —
+   these become Phase 2 publish blockers). The resolved-token table shows every occurrence with its
+   path, value, and unknown/empty markers.
+6. **Phase 1 discipline (the NOTs)** — no publish/send route (no Discord call exists in the
+   Publisher), no `shop_publications`, no purchase-flow change, no `/shop` change (command or admin
+   page), no Prestige change (`tier_label` reused read-only), and **no Free behavior**: zero-price
+   rows render the mechanical `0 <icon> <name>`; the `𝐅𝐫𝐞𝐞` rendering stays Phase 3 and is pinned
+   by an explicit Phase-1-state test.
 
 ## 6. Validation evidence (fresh runs on the final worktree)
 
-*(filled after implementation)*
+| Suite | Result |
+|---|---|
+| `bash scripts/run_js_tests.sh` (node syntax + all harnesses) | **23/23 harnesses PASS** (22 baseline + `test_shop_publisher_form.js`), exit 0 |
+| `scripts/test_shop_publisher.py` (new) | **59/59** |
+| `scripts/test_shop_publisher_api.py` (new) | **15/15** |
+| `scripts/test_shop_publisher_form.js` (new) | **47/47** |
+| `scripts/test_*.py` full CI loop (30 files) | **29/30 PASS** — the only red is the recorded baseline `test_afk.py` **169/170** (`cancel reports the 2 mentions counted`), byte-identical to the baseline failure, deterministic, untouched scope |
+| `python3 -m compileall` (CI import gate) | clean |
+| `git diff --check` | clean |
+
+New-suite highlights: resolver determinism + non-programmability (incl. the no-rescan injection
+proof), byte-identical preview == shared-resolver equality through the real route, purchase-action
+contract (`shop_buy_<id>`), warning order/paths, legacy template rows, CSRF + LEVEL_OWNER gates,
+read-only proof (`mutation_snapshot` + audit_log unchanged), type-only picker grouping, stale-response
+guard, teardown/re-mount cleanliness.
 
 ## 7. Compatibility / regression / performance
 
-*(filled after implementation)*
+**Compatibility (the locked boundaries):**
+- **Embed Builder stability:** zero byte changes to any builder file (§4 list); `test_embed_schema`
+  62/62 and all message-builder/composer/nav-lifecycle/preview harnesses pass unchanged. The
+  Publisher page loads `embed/model.js`, `embed/discord-markdown.js`, `embed/preview.js` read-only
+  via the page-script loader — the same include order the Message Builder uses.
+- **Send-helper extraction (behavior-identity check): NOT TRIGGERED in Phase 1** — there is no send
+  path in Phase 1 at all. The question belongs to Phase 2; the plan's fallback (isolated publisher
+  send path) remains the default unless a behavior-identity check proves extraction safe at that
+  point.
+- **Shop/purchase:** `cogs/shop.py`, `utils/shop_validation.py`, `systems/shop.html`,
+  `dashboard/api/economy_shop.py` untouched; `test_phase1_api`, `test_vi_shop_api`,
+  `test_vi_lifecycle`, `test_vi_shop_form.js`, `test_phase2_backend`, `test_wallet*` all pass.
+  Paid-product validation unchanged (zero-price still rejected outside the existing Prestige VI
+  exception — `test_vi_shop_api`'s zero-price tests pass untouched).
+- **Prestige:** `utils/prestige.py` untouched; `test_prestige`, `test_prestige_api`,
+  `test_phase1_prestige` pass. The resolver reads `tier_label()` only.
+- **Schema:** `database.py` untouched — no migration, no `shop_publications`, no writes of any kind.
+
+**Performance (in-process, scratch DB, median over 200 runs):**
+
+| Path | Median |
+|---|---|
+| `preview_message()` pure resolver | **~24 µs/op** (10k runs; ~30 µs with the prestige-tier token warm) |
+| `GET /api/shop-publisher/catalog` (50 products) | 5.2 ms |
+| `POST /api/shop-publisher/preview` | 7.3 ms |
+| `GET /shop-publisher` (page render) | 6.7 ms |
+
+Page boot costs one catalog call; each selection change costs one preview call. No polling, no
+timers, no background work — same class as the existing dashboard routes.
 
 ## 8. Remaining Phase 2 work
 
-*(filled after implementation)*
+Phase 2 = Preview → Publish → Discord message → existing purchase button/mechanism:
+1. A publish action on this page (channel picker + confirmation) and a
+   `POST /api/shop-publisher/publish` route.
+2. The isolated publisher send path (or the shared Discord send helper **only if** the
+   behavior-identity check proves extraction safe against `dashboard/api/embedbuilder.py`'s send
+   route — fallback is isolation).
+3. Publish must call the SAME `utils/shop_publisher.preview_message()` (preview == publish) and
+   attach the SAME `purchase_action()` descriptor (`shop_buy_<id>`, green `🛒 Buy <name>`) so the
+   existing `cogs/shop.py` `on_interaction` → `process_purchase()` mechanism serves purchases with
+   zero changes to the purchase flow.
+4. `shop_publications` (the minimal Product + Template + Discord Message link) — created in Phase 2
+   only; `CREATE TABLE IF NOT EXISTS`, no migration of existing data.
+5. Blocking policy over the existing warning codes (unknown_token / validation block; product-state
+   warnings policy), audit-log row per publish, and Phase 2 tests (publish contract, publication row
+   shape, purchase-button end-to-end wiring).
 
 ## 9. Commit / checkpoint reference
 
-*(filled after implementation)*
+| Ref | What |
+|---|---|
+| `4e2f6c5c52d5c558288f7bd73ff7c89f22c04833` | Baseline boundary (merge of PR #64; PR #63 = completed Embed Builder boundary) |
+| `4c6489a` | Baseline checkpoint record (this document's §1–§2, committed BEFORE any code edit) |
+| `7d4a6e5` | Phase 1 implementation (4 modified + 8 new files) |
+| record commit | This completed record (the commit that carries this document) |
+
+Branch: `arena/01a0e9df-nilive-bot`. State at record time: all Phase 1 suites green, no new
+regression vs baseline, worktree clean apart from the change set above. **Awaiting review before
+Phase 2 begins.**
