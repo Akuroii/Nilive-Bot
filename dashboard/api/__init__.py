@@ -48,6 +48,11 @@ from flask import Blueprint, jsonify, request, session
 # the multi-embed + content + attachments composer. /api/guild/emojis
 # lives in core.py alongside /api/guild/roles and /api/guild/channels,
 # same pattern, no new submodule needed for it.
+#
+# Shop Publisher (Phase 1) pass: added dashboard.api.shop_publisher — the
+# read-only catalog + token-resolved preview routes for Template + Product
+# publishing (publish/send lands in Phase 2). Same registration pattern as
+# every other submodule below; no existing route changes.
 
 api_bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -83,6 +88,7 @@ from dashboard.api import missions       # noqa: E402,F401
 from dashboard.api import misc           # noqa: E402,F401
 from dashboard.api import moderation     # noqa: E402,F401
 from dashboard.api import mvp            # noqa: E402,F401
+from dashboard.api import shop_publisher  # noqa: E402,F401
 from dashboard.api import tagmissions    # noqa: E402,F401
 from dashboard.api import tagpartners    # noqa: E402,F401
 from dashboard.api import tickets        # noqa: E402,F401

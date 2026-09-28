@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{#
+   Shop Publisher — the page SHELL (Phase 1: template + product -> token
+   resolution -> Publisher preview).
+
+   What lives here and nowhere else:
+     * the regions (template picker, product picker, preview mount, purchase
+       action row, warnings strip, resolved-token table, fixed token catalog)
+       and their stable ids — the page module owns every one of their contents;
+     * the page-module declaration (data-page-module + data-page-script) that
+       nav-lifecycle.js uses to load the foundations IN ORDER and to call
+       init(root, ctx) / destroy(root, ctx);
+     * the one stylesheet of its own, loaded from INSIDE the content block so
+       it arrives with the fragment that needs it and leaves with it (same
+       pattern as message_builder.html) — no other page pays for sp- CSS.
+
+   What deliberately does NOT live here:
+     * any token resolution: tokens resolve SERVER-SIDE in
+       utils/shop_publisher.py (the one fixed resolver, shared with the
+       Phase 2 publish path). The browser renders what the API returns and
+       interprets nothing.
+     * any inline <script> and any on* attribute: htmx swaps #content-area,
+       and an inline script inside a swapped fragment never re-executes —
+       nav-lifecycle.js's page module is the only bootstrap.
+     * any publish/send affordance in Phase 1. The purchase action row shows
+       the button that WILL be published (custom_id shop_buy_<id>, the
+       existing purchase mechanism) as preview output only.
+
+   Namespaces: `sp-` on every class/id of this page. `eb-*` belongs to the
+   frozen v1 composer, `mb-*` to the minigame builder, `mb2-*` to the Message
+   Builder v2 — the preview mount reuses those pages' FROZEN renderer
+   (embed/preview.js + embed/discord-markdown.js + embed/model.js) read-only
+   through the script loader below; none of those files is modified.
+
+   The preview mount is owned by embed/preview.js once created: nothing else
+   may put children inside #sp-preview-mount. The purchase action row is a
+   SIBLING of the mount, never inside it.
+#}
+{% block title %}Shop Publisher{% endblock %}
+{% block content %}
+<span data-page-title="Shop Publisher"></span>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/shop-publisher.css') }}">
+
+<div id="sp-root"
+     class="sp-shell"
+     data-page-module="shop-publisher"
+     data-page-script="{{ url_for('static', filename='js/embed/model.js') }} {{ url_for('static', filename='js/embed/discord-markdown.js') }} {{ url_for('static', filename='js/embed/preview.js') }} {{ url_for('static', filename='js/shop-publisher.js') }}">
+
+    <!-- ── SELECTION ───────────────────────────────────────────────────
+         Template + Product pickers. The product picker groups by the
+         existing `type` column only (locked: no new category system). -->
+    <div class="card">
+        <div class="card-title">🛍️ Shop Publisher</div>
+        <p class="sp-intro">
+            Pick a presentation template and a product. The fixed token catalog
+            resolves server-side, and the preview below is exactly the message
+            and purchase action that will be published.
+        </p>
+        <div class="sp-picker-row">
+            <div class="form-group sp-picker">
+                <label class="form-label" for="sp-template">Template</label>
+                <select class="form-input" id="sp-template">
+                    <option value="">Select a template…</option>
+                </select>
+                <div class="form-hint">Reusable presentations saved in the Embed Builder</div>
+            </div>
+            <div class="form-group sp-picker">
+                <label class="form-label" for="sp-product">Product</label>
+                <select class="form-input" id="sp-product">
+                    <option value="">Select a product…</option>
+                </select>
+                <div class="form-hint">Grouped by the product's existing type</div>
+            </div>
+        </div>
+        <div id="sp-status" class="sp-status" role="status" aria-live="polite"></div>
+    </div>
+
+    <!-- ── PUBLISHER PREVIEW ───────────────────────────────────────────
+         The resolved product presentation. embed/preview.js owns every
+         node inside the mount. -->
+    <div class="card">
+        <div class="card-title">👁️ Publisher preview</div>
+        <div class="sp-preview-frame">
+            <div id="sp-preview-mount" class="sp-preview-mount eb-preview-box"></div>
+            <div id="sp-purchase" class="sp-purchase" hidden></div>
+        </div>
+    </div>
+
+    <!-- ── WARNINGS ──────────────────────────────────────────────────── -->
+    <div class="card">
+        <div class="card-title">⚠️ Preview warnings</div>
+        <div id="sp-warnings" class="sp-warnings" role="status" aria-live="polite">
+            <div class="sp-muted">Select a template and product to see warnings.</div>
+        </div>
+    </div>
+
+    <!-- ── RESOLVED TOKENS ───────────────────────────────────────────── -->
+    <div class="card">
+        <div class="card-title">🔤 Resolved tokens</div>
+        <div id="sp-tokens" class="sp-tokens">
+            <div class="sp-muted">No resolution yet.</div>
+        </div>
+    </div>
+
+    <!-- ── FIXED TOKEN CATALOG ───────────────────────────────────────── -->
+    <div class="card">
+        <div class="card-title">📖 Token catalog (fixed)</div>
+        <div id="sp-token-catalog" class="sp-token-catalog">
+            <div class="sp-muted">Loading…</div>
+        </div>
+    </div>
+</div>
+{% endblock %}
