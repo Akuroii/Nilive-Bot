@@ -92,6 +92,13 @@ INACTIVE_CRYSTAL_PNG_PATH = _asset_path("prestige_crystal_inactive.png", "inactv
 ACTIVE_CRYSTAL_CONTENT_BOX = (0, 691, 2776, 4280)     # x0,y0,x1,y1 in source px
 INACTIVE_CRYSTAL_CONTENT_BOX = (0, 468, 1257, 2233)   # x0,y0,x1,y1 in source px
 
+# Supplied XP-potion artwork (source of truth -- replaces the old hand-drawn
+# flask). Content box measured off the asset itself (alpha>10 threshold) to
+# trim the transparent margin around the round flask before it's resized
+# into the TOTAL XP slot.
+POTION_PNG_PATH = _asset_path("xp_potion.png", "xp_potion.png")
+POTION_CONTENT_BOX = (139, 125, 796, 785)   # x0,y0,x1,y1 in source px
+
 # Supplied stat-row icon artwork (source of truth -- not redrawn/regenerated).
 # Replaces the hand-drawn line icons below for these three keys only; see
 # _load_stat_icon_asset / LINE_ICON_BUILDERS.
@@ -148,6 +155,8 @@ COLORS = {
     "rank_number_b": (146, 78, 232),    # #3 gradient bottom  -- sampled
     "xp_value": (186, 120, 232),        # "1,450" purple      -- sampled
     "label_purple": (140, 100, 180),    # INVENTORY / TOTAL XP headers
+    "xp_panel_label": (0x48, 0x3A, 0x65),  # #483A65 -- "XP PROGRESS" / "TOTAL XP" labels only (exact spec)
+    "xp_total_value": (0x7A, 0x3D, 0x97),  # #7A3D97 -- the TOTAL XP number only (exact spec)
     "gold_label": (168, 142, 116),      # unused now -- currency labels use
                                          # the slot colors below instead
     # Currency-slot colors (deliberately outside the purple/magenta family
@@ -589,6 +598,71 @@ def _draw_condensed(img, xy, painter, ratio=1.0, glow=None, blur=6,
     return crop.size
 
 
+def _format_compact_xp(n: int) -> str:
+    """Display formatting ONLY -- the underlying xp_total the caller passes
+    in is never touched, this just decides how to print it. Deterministic,
+    single-value output (never a range): under 100k, plain comma grouping;
+    100k-999,999 -> whole-number K (floor, not rounded, so 999,999 reads
+    as "999K" rather than rounding up into "1000K"); 1,000,000+ -> M with
+    one decimal place, and >=1B the same in B -- with a trailing ".0"
+    stripped so exact millions/billions print as "1M"/"1B" rather than
+    "1.0M"/"1.0B", matching round K's bare-integer look."""
+    n = int(n)
+    if n < 0:
+        return f"-{_format_compact_xp(-n)}"
+    if n < 100_000:
+        return f"{n:,}"
+    if n < 1_000_000:
+        return f"{n // 1_000}K"
+    if n < 1_000_000_000:
+        val = f"{n / 1_000_000:.1f}".rstrip("0").rstrip(".")
+        return f"{val}M"
+    val = f"{n / 1_000_000_000:.1f}".rstrip("0").rstrip(".")
+    return f"{val}B"
+
+
+def _draw_numeral_ss(img, x, baseline_y, text, font_fn, size, fill, ss=4):
+    """Draws `text` at `size`pt (from `font_fn`) on its own ss-x
+    supersampled local layer, anchored at (x, baseline_y), then
+    downsamples once with LANCZOS -- same one-shared-canvas /
+    one-final-downsample approach as the XP bar and _rounded_panel.
+
+    Why this exists specifically for the TOTAL XP value: at the ~24-32px
+    sizes this row renders at, FreeType's small-size autohinter can snap
+    each glyph's stems/curves to the pixel grid a little differently
+    glyph-to-glyph -- round-bowl digits (3/6/8/9/0) in particular can
+    end up a fractional pixel higher/lower-looking than flat-top/bottom
+    digits, even though every glyph in the string is mathematically
+    drawn from the same anchor="ls" baseline (there's no per-glyph
+    positioning logic here to "fix" -- one draw.text call, one font, one
+    baseline). Rendering at 4x first means that hinting snap happens on
+    a grid 4x finer, so the rounding error shrinks to a quarter-pixel at
+    final size instead of a whole one, and the whole string reads as one
+    optically even line instead of individual digits looking adrift.
+
+    Returns the drawn text's tight bbox in `img`'s coordinate space
+    (left, top, right, bottom), matching draw.textbbox(..., anchor="ls")
+    for the same call, so callers doing layout math (e.g. centering the
+    potion icon on this row) don't need to change."""
+    f_big = font_fn(max(1, round(size * ss)))
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    bx0, by0, bx1, by1 = probe.textbbox((0, 0), text, font=f_big, anchor="ls")
+    pad = ss * 4
+    lw = max(1, (bx1 - bx0) + pad * 2)
+    lh = max(1, (by1 - by0) + pad * 2)
+    layer = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
+    origin_x, origin_y = pad - bx0, pad - by0
+    ImageDraw.Draw(layer).text((origin_x, origin_y), text, font=f_big, fill=fill,
+                               anchor="ls")
+    sw, sh = max(1, round(lw / ss)), max(1, round(lh / ss))
+    layer = layer.resize((sw, sh), Image.LANCZOS)
+    paste_x = x - origin_x / ss
+    paste_y = baseline_y - origin_y / ss
+    img.alpha_composite(layer, (round(paste_x), round(paste_y)))
+    return (paste_x + pad / ss, paste_y + pad / ss,
+            paste_x + (lw - pad) / ss, paste_y + (lh - pad) / ss)
+
+
 def _fit_numeral_font(draw, text, font_fn, max_width, start_size, min_size=14):
     """Pick the largest integer point size (<= start_size) at which `text`
     fits within max_width -- i.e. fit numerals by adjusting the actual font
@@ -610,52 +684,123 @@ def _fit_numeral_font(draw, text, font_fn, max_width, start_size, min_size=14):
     return f, draw.textbbox((0, 0), text, font=f)[2]
 
 
-def _draw_stencil_number(img, draw, xy, text, font, fill, glow=None):
+def _bigger_font(font, scale):
+    """Returns a copy of `font` scaled up by `scale`x for supersampled
+    rendering. font_variant(size=...) alone is NOT enough for a variable
+    font (Outfit/Cinzel here): PIL resets a variable font to its default
+    instance when handed a new size, silently discarding whatever weight
+    axis was set on the original (e.g. an ExtraBold instance would come
+    back as Thin -- this was a real bug caught by visual QA: the RANK
+    number rendered as hollow/thin outlines instead of its actual bold
+    weight). Reapplying the original's own style name after resizing
+    fixes it; wrapped in try/except since static (non-variable) fonts
+    like zilla_bold/stencil have no variation axis to reapply and should
+    just pass through unchanged."""
+    big = font.font_variant(size=max(1, round(font.size * scale)))
+    try:
+        style = font.getname()[1]
+        if style:
+            big.set_variation_by_name(style)
+    except Exception:
+        pass
+    return big
+
+
+def _draw_stencil_number(img, draw, xy, text, font, fill, glow=None, ss=4):
     """Big slab numerals (Level number, badge number) drawn with the repo's
     actual STENCIL.TTF -- the font's own cut notches provide the stencil
     look, so this just draws glyphs (with an optional soft bloom behind
     them), no manual notch-carving. `font` is expected to already be a
     stencil() instance; kept as a parameter (rather than hardcoded) so
-    callers control size."""
+    callers control size.
+
+    Rendered at 4x supersample (via font.font_variant, same face/size
+    scaled up) then LANCZOS-downsampled once, same approach used for the
+    XP bar / rounded panels / TOTAL XP value elsewhere in this file. At
+    native size FreeType's small-size hinting can snap individual glyphs'
+    stems/curves a fractional pixel differently from one another (round
+    digits like 0/3/6/8/9 especially), which is what reads as digits not
+    quite sharing one clean line even though they're all one draw call on
+    one baseline. `xy` keeps the exact same meaning (draw.text's own
+    top-left convention) as the previous native-resolution version, so
+    call sites are unaffected."""
     x, y = xy
+    f_big = _bigger_font(font, ss)
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    bx0, by0, bx1, by1 = probe.textbbox((0, 0), text, font=f_big)
+    if bx1 <= bx0 or by1 <= by0:
+        return
+    pad = ss * (30 if glow else 6)
+    lw, lh = (bx1 - bx0) + pad * 2, (by1 - by0) + pad * 2
+    origin_x, origin_y = pad - bx0, pad - by0
+    paste_x, paste_y = round(x - origin_x / ss), round(y - origin_y / ss)
+
     if glow:
-        _draw_glow_layer(img, lambda d: d.text((x, y), text, font=font, fill=(*glow, 130)),
-                         blur=8)
-    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    ImageDraw.Draw(layer).text((x, y), text, font=font, fill=(*fill, 255))
-    img.alpha_composite(layer)
+        gl = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
+        ImageDraw.Draw(gl).text((origin_x, origin_y), text, font=f_big, fill=(*glow, 130))
+        gl = gl.resize((max(1, round(lw / ss)), max(1, round(lh / ss))), Image.LANCZOS)
+        gl = gl.filter(ImageFilter.GaussianBlur(8))
+        img.alpha_composite(gl, (paste_x, paste_y))
+
+    layer = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).text((origin_x, origin_y), text, font=f_big, fill=(*fill, 255))
+    small = layer.resize((max(1, round(lw / ss)), max(1, round(lh / ss))), Image.LANCZOS)
+    img.alpha_composite(small, (paste_x, paste_y))
 
 
 def _draw_gradient_text(img, draw, xy, text, font, color_top, color_bottom,
-                        tracking=0, glow=None, ratio=1.0):
+                        tracking=0, glow=None, ratio=1.0, ss=4):
     """Vertical two-tone fill (the reference's #3 brightens toward the top)
     plus an optional soft bloom behind it; ratio<1 reproduces the
-    reference's condensed glyph proportions."""
+    reference's condensed glyph proportions.
+
+    Rendered at 4x supersample (font.font_variant of the same face/size)
+    then downsampled once, for the same reason as _draw_stencil_number --
+    this draws the RANK number ("#1"/"#3"/etc.), and native-resolution
+    FreeType hinting was the actual source of digits looking like they
+    don't share a line, not any per-glyph positioning in this function.
+
+    Preserves the exact positioning behavior of the previous version bit
+    for bit (just antialiased better): text is measured/cropped to its
+    own tight ink bbox and that crop is pasted at `xy` directly, the same
+    order of operations the original did at native res -- callers (the
+    one call site's x+28/y+40 offsets) are tuned against that, so this
+    keeps it rather than "fixing" it into a different position."""
     x, y = xy
-    tmp = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    f_big = _bigger_font(font, ss)
+    track_big = tracking * ss
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    rough_w = sum(probe.textbbox((0, 0), ch, font=f_big)[2] + track_big for ch in text)
+    pad = ss * 40
+    scratch_w = max(10, int(rough_w) + pad * 2 + 200)
+    scratch_h = f_big.size * 3 + pad * 2
+    origin_x, origin_y = pad, pad
+
+    tmp = Image.new("RGBA", (scratch_w, scratch_h), (0, 0, 0, 0))
     td = ImageDraw.Draw(tmp)
-    _draw_tracked_text(td, (x, y), text, font, (255, 255, 255, 255), tracking=tracking)
+    _draw_tracked_text(td, (origin_x, origin_y), text, f_big, (255, 255, 255, 255),
+                       tracking=track_big)
     bb = tmp.getbbox()
     if not bb:
         return
-    grad = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    y0, y1 = bb[1], bb[3]
-    for yy in range(y0, y1 + 1):
-        t = (yy - y0) / max(y1 - y0, 1)
+    grad = Image.new("RGBA", (scratch_w, scratch_h), (0, 0, 0, 0))
+    gy0, gy1 = bb[1], bb[3]
+    for yy in range(gy0, gy1 + 1):
+        t = (yy - gy0) / max(gy1 - gy0, 1)
         col = tuple(int(color_top[c] + (color_bottom[c] - color_top[c]) * t) for c in range(3))
         ImageDraw.Draw(grad).line([(bb[0], yy), (bb[2], yy)], fill=(*col, 255))
-    mask = tmp.split()[3]
-    grad.putalpha(mask)
-    crop = grad.crop(bb)
-    if ratio != 1.0:
-        crop = crop.resize((max(1, int(round(crop.width * ratio))), crop.height),
-                           Image.LANCZOS)
+    grad.putalpha(tmp.split()[3])
+    crop_big = grad.crop(bb)
+    final_w = max(1, round(crop_big.width / ss * ratio))
+    final_h = max(1, round(crop_big.height / ss))
+    crop = crop_big.resize((final_w, final_h), Image.LANCZOS)
+
     if glow:
-        gl = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        gl.paste(crop, (x, y), crop)
+        gl = Image.new("RGBA", crop.size, (0, 0, 0, 0))
+        gl.paste(crop, (0, 0), crop)
         gl.putalpha(gl.split()[3].point(lambda a: int(a * 0.45)))
         gl = gl.filter(ImageFilter.GaussianBlur(5))
-        img.alpha_composite(gl)
+        img.alpha_composite(gl, (x, y))
     img.alpha_composite(crop, (x, y))
 
 
@@ -776,7 +921,27 @@ def _rounded_panel(img, draw, box, radius=20, fill=None, outline=None, width=2, 
                              radius=radius + pad, fill=COLORS["panel_glow"])
         glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(14))
         img.alpha_composite(glow_layer)
-    draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
+
+    # Drawn on its own supersampled layer (4x) then downsampled once,
+    # rather than straight onto the final-resolution `draw` -- every
+    # panel on the card (RANK, XP/TOTAL XP, INVENTORY, the stat cards)
+    # shares this one function, and PIL's rounded_rectangle has no
+    # antialiasing of its own: at final resolution a ~16-20px corner
+    # radius only has a handful of pixels to place its curve across, and
+    # comes out visibly stair-stepped. Same fix as the XP bar's own
+    # rendering pass -- one shared local canvas, one final LANCZOS
+    # downsample.
+    x0, y0, x1, y1 = box
+    SS = 4
+    pad = width + 2  # keeps the outline stroke from being clipped by the layer edge
+    w, h = (x1 - x0), (y1 - y0)
+    lw, lh = int(round(w + pad * 2)), int(round(h + pad * 2))
+    layer = Image.new("RGBA", (max(1, lw * SS), max(1, lh * SS)), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rounded_rectangle(
+        (pad * SS, pad * SS, (w + pad) * SS, (h + pad) * SS), radius=radius * SS,
+        fill=fill, outline=outline, width=width * SS)
+    layer = layer.resize((lw, lh), Image.LANCZOS)
+    img.alpha_composite(layer, (int(round(x0 - pad)), int(round(y0 - pad))))
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -1078,11 +1243,12 @@ async def render_rank_card(data: dict) -> io.BytesIO:
     mailbox_im = await _load_mailbox()
     ring_im = await _load_avatar_ring()
     active_crystal_im, inactive_crystal_im = await _load_prestige_crystals()
+    potion_im = await _load_potion_icon()
 
     _draw_name_block(img, draw, data, line_icons_16)
     _draw_rank_prestige_panel(img, draw, data, line_icons_16,
                               active_crystal_im, inactive_crystal_im)
-    _draw_level_xp_panels(img, draw, data)
+    _draw_level_xp_panels(img, draw, data, potion_im)
     _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, line_icons_30)
     _draw_inventory(img, draw, data, line_icons_16, item_icons)
     if mailbox_im is not None:
@@ -1154,6 +1320,24 @@ async def _load_prestige_crystals():
             _load_one(INACTIVE_CRYSTAL_PNG_PATH, INACTIVE_CRYSTAL_CONTENT_BOX))
 
 
+async def _load_potion_icon() -> Image.Image | None:
+    """The real XP-potion artwork, trimmed to its measured content box. On
+    any failure this returns None and the caller falls back to the old
+    hand-drawn flask (_draw_potion_icon) -- same missing-asset pattern as
+    mailbox/avatar-ring/crystals above."""
+    if not os.path.isfile(POTION_PNG_PATH):
+        log.warning("rank_card: xp potion asset not found at %s -- falling back to the "
+                    "hand-drawn flask.", POTION_PNG_PATH)
+        return None
+    try:
+        im = Image.open(POTION_PNG_PATH)
+        im.load()
+        return im.convert("RGBA").crop(POTION_CONTENT_BOX)
+    except Exception as e:
+        log.warning("rank_card: failed to load xp potion asset: %s", e)
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # REGION DRAWERS
 # ─────────────────────────────────────────────────────────────────────────
@@ -1218,8 +1402,10 @@ def _paste_avatar(img, data, avatar_im, ring_im=None):
     badge_r = LAYOUT["avatar_level_badge_r"]
     bx = ax + LAYOUT["avatar_badge_center"][0]
     by = ay + LAYOUT["avatar_badge_center"][1]
-    draw.ellipse((bx - badge_r, by - badge_r, bx + badge_r, by + badge_r),
-                 fill=(14, 8, 22, 235), outline=(170, 130, 220, 200), width=2)
+    # Gradient-rim badge with its own soft magenta glow -- an echo of the
+    # avatar ring it sits on, instead of the flat single-tone outline this
+    # replaces (see _draw_level_badge_ring).
+    _draw_level_badge_ring(img, bx, by, badge_r)
     lvl_text = str(data["level"])
     # Sized to fit inside the badge circle -- levels can run to 3 digits,
     # and the badge font was previously a fixed size regardless of digit
@@ -1231,6 +1417,49 @@ def _paste_avatar(img, data, avatar_im, ring_im=None):
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     _draw_stencil_number(img, draw, (bx - tw / 2 - bbox[0], by - th / 2 - bbox[1]),
                          lvl_text, lvl_font, (230, 220, 240))
+
+
+def _draw_level_badge_ring(img, cx, cy, r, ss=4):
+    """The level badge as a small echo of the avatar ring it sits on top
+    of, instead of a flat single-color outline: a soft magenta glow behind
+    it (same family of color as the ring's own inner glow, sampled off
+    assets/rank_card/avatar_ring.png) and a gradient stroke sweeping
+    through the ring's pink/violet range rather than one flat purple.
+    Built on its own supersampled (4x) local canvas and downsampled once,
+    same approach used for the XP bar / rounded panels elsewhere in this
+    file, so the circle's curve is smooth rather than stepped at this
+    small a radius. Fill stays dark/flat so the level number inside stays
+    legible against it -- only the rim picks up the ring's vibrancy."""
+    margin = r * 0.45
+    W = H = max(1, int(round((r + margin) * 2 * ss)))
+    cxl, cyl = W / 2, H / 2
+    canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(glow).ellipse(
+        (cxl - r * 1.3 * ss, cyl - r * 1.3 * ss, cxl + r * 1.3 * ss, cyl + r * 1.3 * ss),
+        fill=(235, 70, 200, 130))
+    glow = glow.filter(ImageFilter.GaussianBlur(5 * ss))
+    canvas.alpha_composite(glow)
+
+    ImageDraw.Draw(canvas).ellipse(
+        (cxl - r * ss, cyl - r * ss, cxl + r * ss, cyl + r * ss), fill=(15, 8, 23, 240))
+
+    border_w = 3 * ss
+    stops = [(0.0, (235, 150, 235)), (0.5, (190, 90, 225)), (1.0, (120, 40, 170))]
+    grad = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(grad)
+    for xcol in range(W):
+        col = _lerp_stops(stops, xcol / max(W - 1, 1))
+        gd.line([(xcol, 0), (xcol, H)], fill=(*col, 255))
+    stroke_mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(stroke_mask).ellipse(
+        (cxl - r * ss, cyl - r * ss, cxl + r * ss, cyl + r * ss), outline=255, width=border_w)
+    grad.putalpha(stroke_mask)
+    canvas.alpha_composite(grad)
+
+    small = canvas.resize((max(1, round(W / ss)), max(1, round(H / ss))), Image.LANCZOS)
+    img.alpha_composite(small, (round(cx - small.width / 2), round(cy - small.height / 2)))
 
 
 def _draw_name_block(img, draw, data, icons16):
@@ -1398,7 +1627,7 @@ def _draw_diamond_pip(draw, cx, cy, r, color, filled):
         draw.polygon(pts, outline=color, width=2)
 
 
-def _draw_level_xp_panels(img, draw, data):
+def _draw_level_xp_panels(img, draw, data, potion_im=None):
     x, y, w, h = LAYOUT["level_panel"]
     _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
     # LEVEL is a small drop-cap serif heading in the reference, not a
@@ -1434,8 +1663,12 @@ def _draw_level_xp_panels(img, draw, data):
     x, y, w, h = LAYOUT["xp_totalxp_panel"]
     _rounded_panel(img, draw, (x, y, x + w, y + h), radius=16)
 
-    _draw_tracked_text(draw, (x + 14, y + 29), "XP PROGRESS", outfit(19, "SemiBold"),
-                       COLORS["text_muted"], tracking=2)
+    # Both column headers share one label row -- previously "XP PROGRESS"
+    # sat 4px lower than "TOTAL XP" (y+29 vs y+25), a small but visible
+    # misalignment between the two columns' top edges.
+    label_y = y + 26
+    _draw_tracked_text(draw, (x + 14, label_y), "XP PROGRESS", outfit(19, "SemiBold"),
+                       COLORS["xp_panel_label"], tracking=2)
     div_x = x + LAYOUT["xp_divider_x"]
     cur, needed = data["xp_current"], max(data["xp_needed"], 1)
     # Two-tone: current XP purple/emphasized, "/ needed XP" muted. The value
@@ -1452,33 +1685,96 @@ def _draw_level_xp_panels(img, draw, data):
     # px past the glyph edge, so a tight gap read as the value and the
     # "/ needed XP" text overlapping.
     available = (div_x - 10) - (x + 14) - 14 - suffix_w
-    vf, cur_w = _fit_numeral_font(draw, cur_txt, zilla_bold, max(available, 40), 45,
+    # Max glyph height trimmed from 45 to 42px: at 45 the value's own
+    # glyph bbox (measured, not the nominal font size) ran to ~91px below
+    # the panel top -- past where the bar used to start (86px), a real
+    # overlap, not just tight spacing. This still gives large XP values
+    # all the room _fit_numeral_font had before, just capped a touch
+    # lower so there's genuine breathing room above the bar.
+    num_y = y + 46
+    vf, cur_w = _fit_numeral_font(draw, cur_txt, zilla_bold, max(available, 40), 42,
                                   min_size=22)
-    _draw_glow_layer(img, lambda d: d.text((x + 14, y + 50), cur_txt, font=vf,
+    _draw_glow_layer(img, lambda d: d.text((x + 14, num_y), cur_txt, font=vf,
                                             fill=(150, 70, 210, 140)), blur=3)
-    draw.text((x + 14, y + 50), cur_txt, font=vf, fill=COLORS["xp_value"])
-    draw.text((x + 28 + cur_w, y + 58), suffix_txt, font=outfit(22),
+    draw.text((x + 14, num_y), cur_txt, font=vf, fill=COLORS["xp_value"])
+    draw.text((x + 28 + cur_w, num_y + 8), suffix_txt, font=outfit(22),
               fill=COLORS["text_muted"])
 
     draw.line((div_x, y + 14, div_x, y + h - 14), fill=(*COLORS["accent"], 30), width=1)
 
-    bar_x, bar_y, bar_w, bar_h = x + 8, y + 86, w - 20, 21
+    # Bar nudged down from y+86 to y+97 -- the actual fix for the
+    # overlap above: the current-XP value's measured glyph bbox now
+    # bottoms out around y+91, so the bar needs to start past that, not
+    # at a fixed offset chosen before the value was fit to its own bbox.
+    # This is a position change only; the bar's own size/shape/design is
+    # untouched (still x+8/w-20/21 -- same width inset and thickness as
+    # before), and _draw_xp_bar itself is not called any differently.
+    bar_x, bar_y, bar_w, bar_h = x + 8, y + 97, w - 20, 21
     frac = min(cur / needed, 1.0)
     _draw_xp_bar(img, bar_x, bar_y, bar_w, bar_h, frac)
-    draw.text((bar_x + 6, bar_y + bar_h + 6), f"{frac * 100:.1f}% to next level",
+    draw.text((bar_x + 6, bar_y + bar_h + 5), f"{frac * 100:.1f}% to next level",
               font=outfit(19), fill=COLORS["text_muted"])
 
     tx = div_x + 22
-    _draw_tracked_text(draw, (tx, y + 25), "TOTAL XP", outfit(20, "SemiBold"),
-                       COLORS["label_purple"], tracking=2)
-    potion = _draw_potion_icon(27)
-    img.paste(potion, (int(div_x + 19), int(y + 42)), potion)
-    total_txt = f"{data['xp_total']:,}"
+    _draw_tracked_text(draw, (tx, label_y), "TOTAL XP", outfit(20, "SemiBold"),
+                       COLORS["xp_panel_label"], tracking=2)
+
+    # Compact display formatting only -- data["xp_total"] itself is never
+    # touched, see _format_compact_xp. Keeps "23,398" as-is today but
+    # keeps a future 1,200,000 from ever reaching the raw comma-grouped
+    # width this row was actually breaking on.
+    total_txt = _format_compact_xp(data["xp_total"])
     total_x = div_x + 52
     total_available = (x + w) - total_x - 12
-    tf2, _tw = _fit_numeral_font(draw, total_txt, zilla_bold, max(total_available, 40), 38,
-                                 min_size=18)
-    draw.text((total_x, y + 44), total_txt, font=tf2, fill=(205, 200, 215))
+
+    # Baseline-anchored: a fixed BASELINE position means the glyphs sit on
+    # the same line regardless of which font size _fit_numeral_font ends
+    # up choosing (a top-anchored draw would put the text's nominal box
+    # top at a fixed y, but the glyphs' actual distance below that top
+    # depends on the font's internal leading at whatever size got chosen
+    # -- smaller size, smaller leading -- so the row would visibly rise
+    # or fall with value length). Drawn via _draw_numeral_ss (supersampled
+    # + one downsample) rather than a direct draw.text: every glyph in
+    # "582,520" is already produced by one draw.text call on one shared
+    # baseline (anchor="ls") -- there's no per-glyph position to "fix" --
+    # but FreeType's small-size autohinter can still snap round-bowl
+    # digits (3/6/8/9/0) a fractional pixel differently than flat-edged
+    # ones at native ~30px rendering, which is what reads as digits not
+    # quite sharing the line. Rendering at 4x first shrinks that snapping
+    # error to a quarter-pixel before the one final downsample.
+    #
+    # Max size trimmed from 38 to 30 -- large enough to stay the clear
+    # focal point of its column (matches TOTAL XP's own scale relative to
+    # the label/icon beside it), without outweighing the panel the way a
+    # 38-42px value did.
+    total_baseline_y = y + 76
+    tf2, _tw = _fit_numeral_font(draw, total_txt, zilla_bold, max(total_available, 40), 30,
+                                 min_size=16)
+    total_bbox = _draw_numeral_ss(img, total_x, total_baseline_y, total_txt, zilla_bold,
+                                  tf2.size, COLORS["xp_total_value"])
+
+    # Potion icon: the supplied artwork (potion_im, pre-trimmed to its
+    # content box by _load_potion_icon), scaled to a size that reads at
+    # the same visual weight as the old hand-drawn flask and centered on
+    # the TOTAL XP value's own vertical center -- "sits beside the
+    # number" instead of being independently positioned the way the old
+    # fixed (div_x+19, y+42) offset was. Falls back to the old hand-drawn
+    # flask if the asset is missing, same as every other optional asset
+    # in this renderer.
+    icon_cy = (total_bbox[1] + total_bbox[3]) / 2
+    if potion_im is not None:
+        # 27px matches the old hand-drawn flask's own `size` -- "preserve
+        # the intended size of the existing slot" -- scaled by LANCZOS for
+        # a clean downsize from the much larger source asset.
+        target_h = 27
+        aspect = potion_im.width / potion_im.height
+        target_w = max(1, round(target_h * aspect))
+        potion = potion_im.resize((target_w, target_h), Image.LANCZOS)
+    else:
+        potion = _draw_potion_icon(27)
+    icon_x = div_x + 15
+    icon_y = icon_cy - potion.height / 2
+    img.alpha_composite(potion, (round(icon_x), round(icon_y)))
 
 
 def _draw_gradient_bar(img, x, y, w, h, color_a, color_b):
@@ -1495,140 +1791,251 @@ def _draw_gradient_bar(img, x, y, w, h, color_a, color_b):
     img.paste(grad, (int(x), int(y)), mask)
 
 
-def _draw_xp_wave_fill(fw, bar_h, radius, color_a, color_b):
-    """Builds the filled portion of the XP pill as one masked RGBA layer:
-    a horizontal purple gradient with two translucent sine-wave ribbons
-    layered on top (a bright one and a darker one, different wavelength/
-    phase) so the fill reads as flowing liquid rather than a flat tint --
-    the reference's "fluid" character -- instead of the two static
-    corner-blob highlights this replaces. frac/width already resolved by
-    the caller; this only ever draws the actual fw>0 case.
+def _lerp_stops(stops, t):
+    """stops: [(pos0..1, (r,g,b)), ...] sorted by pos. Piecewise-linear
+    interpolate a color at t. Used for the outer frame's horizontal
+    white -> lavender -> violet/pink sweep."""
+    if t <= stops[0][0]:
+        return stops[0][1]
+    if t >= stops[-1][0]:
+        return stops[-1][1]
+    for (p0, c0), (p1, c1) in zip(stops, stops[1:]):
+        if p0 <= t <= p1:
+            local_t = (t - p0) / max(p1 - p0, 1e-6)
+            return tuple(int(c0[c] + (c1[c] - c0[c]) * local_t) for c in range(3))
+    return stops[-1][1]
 
-    Rendered supersampled then LANCZOS-downsampled (same trick used
-    elsewhere in this file for AA masks, see _fit_avatar/_load_crystals
-    comments) so the ribbons' diagonal edges stay crisp at the bar's
-    native ~21px height instead of coming out jagged/pixelated."""
+
+def _draw_xp_wave_fill(canvas, ox, oy, fw, track_h, radius, color_a, color_b):
+    """Paints the filled portion of the XP bar's INNER track directly onto
+    `canvas` at (ox, oy): a horizontal purple gradient with three
+    translucent, broad, low-frequency wave ribbons on top -- a darker
+    violet wave, a brighter lavender wave (different wavelength/phase so
+    they overlap asymmetrically, not identical sine copies), and a softer
+    translucent highlight riding near the top -- so the fill reads as a
+    few large flowing liquid curves rather than tight repeating water
+    texture.
+
+    Takes no resolution decisions of its own: the caller (_draw_xp_bar)
+    already supersamples the whole bar before calling this, so fw/track_h
+    here are already at that larger scale, and every coordinate this
+    function draws is antialiased for free by the caller's single final
+    downsample -- this only draws, it never resizes."""
     fw_i = max(1, int(round(fw)))
-    SS = 4
-    fw_s, bh_s = fw_i * SS, bar_h * SS
+    th_i = max(1, int(round(track_h)))
 
-    base = Image.new("RGBA", (fw_s, bh_s), (0, 0, 0, 0))
+    base = Image.new("RGBA", (fw_i, th_i), (0, 0, 0, 0))
     bd = ImageDraw.Draw(base)
-    for i in range(fw_s):
-        t = i / max(fw_s - 1, 1)
+    for i in range(fw_i):
+        t = i / max(fw_i - 1, 1)
         col = tuple(int(color_a[c] + (color_b[c] - color_a[c]) * t) for c in range(3))
-        bd.line([(i, 0), (i, bh_s)], fill=(*col, 255))
+        bd.line([(i, 0), (i, th_i)], fill=(*col, 255))
 
-    def _ribbon(wavelength_px, amplitude_px, phase, thickness_px, color, alpha):
-        layer = Image.new("RGBA", (fw_s, bh_s), (0, 0, 0, 0))
-        cy = bh_s / 2
+    def _ribbon(wavelength_px, amplitude_px, phase, thickness_px, color, alpha,
+               y_bias_px=0.0):
+        layer = Image.new("RGBA", (fw_i, th_i), (0, 0, 0, 0))
+        cy = th_i / 2 + y_bias_px
         top, bottom = [], []
-        for x in range(0, fw_s + SS, SS):
-            yy = cy + (amplitude_px * SS) * math.sin(
-                2 * math.pi * x / (wavelength_px * SS) + phase)
-            top.append((x, yy - thickness_px * SS / 2))
-            bottom.append((x, yy + thickness_px * SS / 2))
+        for x in range(fw_i):
+            yy = cy + amplitude_px * math.sin(2 * math.pi * x / wavelength_px + phase)
+            top.append((x, yy - thickness_px / 2))
+            bottom.append((x, yy + thickness_px / 2))
         if len(top) >= 2:
             ImageDraw.Draw(layer).polygon(top + bottom[::-1], fill=(*color, alpha))
         return layer
 
-    # Wavelengths are fixed in real px (not scaled to fw) so the pattern
-    # reads as one continuous flow whatever the current fill width is --
-    # a short bar at 1% shows a small slice of it, a long bar at 99%
-    # shows several cycles, rather than the same two cycles stretched or
-    # squeezed to fit (which is what looks unnatural at very low/high %).
-    bright = _ribbon(wavelength_px=82, amplitude_px=bar_h * 0.30, phase=0.5,
-                     thickness_px=bar_h * 0.60, color=(255, 235, 255), alpha=58)
-    shadow = _ribbon(wavelength_px=150, amplitude_px=bar_h * 0.24, phase=3.3,
-                     thickness_px=bar_h * 0.55, color=(58, 12, 92), alpha=50)
-    base.alpha_composite(shadow)
+    # Wavelength/amplitude/thickness are all given in the SAME (already
+    # supersampled) px space as fw/track_h, so they stay proportional to
+    # the bar regardless of the supersampling factor the caller picked.
+    deep = _ribbon(wavelength_px=track_h * 11, amplitude_px=track_h * 0.30, phase=0.6,
+                   thickness_px=track_h * 0.68, color=(58, 14, 96), alpha=70)
+    bright = _ribbon(wavelength_px=track_h * 17, amplitude_px=track_h * 0.24, phase=2.9,
+                     thickness_px=track_h * 0.58, color=(216, 176, 255), alpha=60)
+    sheen_wave = _ribbon(wavelength_px=track_h * 13, amplitude_px=track_h * 0.14, phase=5.1,
+                         thickness_px=track_h * 0.34, color=(255, 255, 255), alpha=35,
+                         y_bias_px=-track_h * 0.20)
+    base.alpha_composite(deep)
     base.alpha_composite(bright)
+    base.alpha_composite(sheen_wave)
 
-    fill = base.resize((fw_i, bar_h), Image.LANCZOS)
-    mask = Image.new("L", (fw_i, bar_h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, fw_i, bar_h), radius=radius, fill=255)
-    fill.putalpha(ImageChops.multiply(fill.split()[3], mask))
-    return fill
+    mask = Image.new("L", (fw_i, th_i), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, fw_i, th_i), radius=radius, fill=255)
+    base.putalpha(ImageChops.multiply(base.split()[3], mask))
+    canvas.alpha_composite(base, (int(round(ox)), int(round(oy))))
 
 
 def _draw_xp_bar(img, bar_x, bar_y, bar_w, bar_h, frac):
-    """Dark recessed pill track, purple gradient fill with soft diagonal
-    internal lighting, and a bright glowing circular thumb at the current
-    progress position -- matches the reference's visual character (dark
-    track / gradient fill / wave lighting / glow thumb / pill geometry)
-    using the existing Nero purple palette rather than the reference's own
-    hex values. frac is the already-computed, real XP fraction (0..1) --
-    no hardcoded percentage."""
-    radius = bar_h // 2
+    """Two nested pill frames, matching the reference's "glass capsule"
+    construction rather than one rounded rectangle:
 
-    # Track: a vertical gradient (slightly darker at the top inner edge)
-    # instead of a flat fill gives a recessed/inset look cheaply.
-    track = Image.new("RGBA", (bar_w, bar_h), (0, 0, 0, 0))
+      outer glow -> outer luminous gradient border -> small recessed gap
+      -> inner track rim -> dark inner track -> wave fill (clipped to the
+      INNER track only, empty track stays visibly dark after the fill) ->
+      leading orb, sized/positioned to stay inside the inner track.
+
+    Rendering approach: every one of those pieces -- both pill masks, the
+    border strokes, the wave fill, every glow, the orb -- is drawn on ONE
+    local canvas supersampled at SS=8x, using SS-scaled coordinates
+    throughout, and NOTHING is resized until the single final LANCZOS
+    downsample back to (bar_w, bar_h) at the very end. That single
+    downsample is the only anti-aliasing step. Earlier passes drew the
+    outline/mask/orb geometry straight at the bar's native ~21px-tall
+    resolution (and, for the wave fill, supersampled only that one piece
+    in isolation before pasting it back into a native-res composite) --
+    at that size, PIL's rounded_rectangle/ellipse have only a handful of
+    pixels to place a curve across and produce visibly stair-stepped
+    edges, and compositing a supersampled piece into an otherwise
+    native-res frame doesn't fix the frame's own hard edges. Building the
+    entire bar in one oversized space first (so every curve has 8x the
+    pixels to fall across) and downsampling exactly once is what actually
+    removes the stair-stepping instead of blurring over it.
+
+    frac is the already-computed, real XP fraction (0..1) -- no
+    hardcoded percentage."""
+    SS = 8
+    bar_w, bar_h = int(bar_w), int(bar_h)
+    W, H = bar_w * SS, bar_h * SS
+
+    outer_radius = (bar_h // 2) * SS
+    # Gap between the outer frame and the inner track -- the reference's
+    # "small visible depth separation" between the two borders. Computed
+    # at native scale first (so the proportions match the earlier pass
+    # exactly) then scaled up.
+    pad_native = max(2, min(3, bar_h // 2 - 3))
+    pad = pad_native * SS
+    inner_w = W - pad * 2
+    inner_h = H - pad * 2
+    inner_radius = max(1, inner_h // 2)
+    inner_x = pad
+    inner_y = pad
+
+    canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+    # Soft outer glow behind the frame -- restrained, a blurred stroke
+    # rather than a filled halo, so it reads as glass edge-light.
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(glow).rounded_rectangle(
+        (0, 0, W - 1, H - 1), radius=outer_radius, outline=(200, 175, 235, 50),
+        width=4 * SS)
+    glow = glow.filter(ImageFilter.GaussianBlur(4 * SS))
+    canvas.alpha_composite(glow)
+
+    # Recessed ring between the two frames: fill the OUTER footprint with
+    # a slightly darker tone first, so the inner track (painted next,
+    # inset by `pad`) reads as sitting inward from it.
+    outer_fill = tuple(max(0, c - 10) for c in COLORS["xp_bar_bg"])
+    outer_mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(outer_mask).rounded_rectangle((0, 0, W, H), radius=outer_radius, fill=255)
+    outer_plate = Image.new("RGBA", (W, H), (*outer_fill, 255))
+    canvas.paste(outer_plate, (0, 0), outer_mask)
+
+    # Inner track: recessed vertical gradient, confined to the inset
+    # inner footprint.
+    track = Image.new("RGBA", (inner_w, inner_h), (0, 0, 0, 0))
     tg = ImageDraw.Draw(track)
-    base = COLORS["xp_bar_bg"]
-    top_shadow = tuple(max(0, c - 14) for c in base)
-    for row in range(bar_h):
-        t = row / max(bar_h - 1, 1)
-        col = tuple(int(top_shadow[c] + (base[c] - top_shadow[c]) * t) for c in range(3))
-        tg.line([(0, row), (bar_w, row)], fill=(*col, 255))
-    track_mask = Image.new("L", (bar_w, bar_h), 0)
-    ImageDraw.Draw(track_mask).rounded_rectangle((0, 0, bar_w, bar_h), radius=radius, fill=255)
-    img.paste(track, (int(bar_x), int(bar_y)), track_mask)
-    # Thin luminous outline on the empty track so its edge reads clearly
-    # against the panel instead of blending into it.
-    ImageDraw.Draw(img).rounded_rectangle(
-        (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=radius,
-        outline=(*COLORS["accent"], 90), width=1)
+    base_col = COLORS["xp_bar_bg"]
+    top_shadow = tuple(max(0, c - 14) for c in base_col)
+    for row in range(inner_h):
+        t = row / max(inner_h - 1, 1)
+        col = tuple(int(top_shadow[c] + (base_col[c] - top_shadow[c]) * t) for c in range(3))
+        tg.line([(0, row), (inner_w, row)], fill=(*col, 255))
+    track_mask = Image.new("L", (inner_w, inner_h), 0)
+    ImageDraw.Draw(track_mask).rounded_rectangle(
+        (0, 0, inner_w, inner_h), radius=inner_radius, fill=255)
+    canvas.paste(track, (inner_x, inner_y), track_mask)
+    # Thin inner rim -- subtler than the outer frame, just enough to
+    # separate the track from its recess.
+    ImageDraw.Draw(canvas).rounded_rectangle(
+        (inner_x, inner_y, inner_x + inner_w, inner_y + inner_h), radius=inner_radius,
+        outline=(*COLORS["accent"], 55), width=max(1, SS // 4))
 
-    fill_w = bar_w * frac if frac > 0 else 0
+    fill_w = inner_w * frac if frac > 0 else 0
 
     if fill_w > 0:
-        # Soft outer purple bloom around the filled portion only.
-        _draw_glow_layer(img, lambda d: d.rounded_rectangle(
-            (bar_x, bar_y, bar_x + fill_w, bar_y + bar_h), radius=radius,
-            fill=(160, 70, 225, 110)), blur=6)
+        # Soft outer purple bloom around the filled portion only, kept
+        # inside the outer frame's footprint.
+        bloom = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(bloom).rounded_rectangle(
+            (inner_x, inner_y, inner_x + fill_w, inner_y + inner_h), radius=inner_radius,
+            fill=(160, 70, 225, 95))
+        bloom = bloom.filter(ImageFilter.GaussianBlur(5 * SS))
+        canvas.alpha_composite(bloom)
 
-        # Layered fluid/sine-wave fill (gradient + two flowing ribbons),
-        # built and masked to the pill shape as one layer, then composited
-        # in a single paste -- see _draw_xp_wave_fill.
-        wave_fill = _draw_xp_wave_fill(fill_w, bar_h, radius,
-                                       COLORS["xp_bar_fill_a"], COLORS["xp_bar_fill_b"])
-        img.alpha_composite(wave_fill, (int(bar_x), int(bar_y)))
+        # Layered fluid/sine-wave fill (gradient + broad flowing ribbons),
+        # painted straight onto the shared canvas -- see _draw_xp_wave_fill.
+        _draw_xp_wave_fill(canvas, inner_x, inner_y, fill_w, inner_h, inner_radius,
+                           COLORS["xp_bar_fill_a"], COLORS["xp_bar_fill_b"])
 
         # Glassy top sheen band on top of the wave lighting -- dimensional/
         # glass look rather than a flat gradient.
-        if fill_w > 6:
-            sheen = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        if fill_w > 6 * SS:
+            sheen = Image.new("RGBA", (W, H), (0, 0, 0, 0))
             sd = ImageDraw.Draw(sheen)
-            inset = max(2, bar_h // 5)
+            s_inset = max(2, inner_h // 5)
             sd.rounded_rectangle(
-                (bar_x + inset, bar_y + 2, bar_x + fill_w - inset, bar_y + bar_h * 0.48),
-                radius=(bar_h * 0.46) / 2, fill=(255, 255, 255, 45))
-            sheen = sheen.filter(ImageFilter.GaussianBlur(1.5))
-            img.alpha_composite(sheen)
+                (inner_x + s_inset, inner_y + SS, inner_x + fill_w - s_inset,
+                 inner_y + inner_h * 0.48),
+                radius=(inner_h * 0.46) / 2, fill=(255, 255, 255, 40))
+            sheen = sheen.filter(ImageFilter.GaussianBlur(1.3 * SS))
+            canvas.alpha_composite(sheen)
+
+    # Outer luminous frame -- drawn after the fill so it always sits on
+    # top, framing the whole capsule. Gradient sweep: white/silver at the
+    # start, soft lavender through the middle, violet -> pink toward the
+    # end. Painted as a horizontal color sweep masked down to just the
+    # pill's outline.
+    border_w = 2 * SS
+    stops = [(0.0, (248, 248, 255)), (0.45, (206, 182, 236)), (1.0, (214, 116, 196))]
+    grad = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(grad)
+    for x in range(W):
+        col = _lerp_stops(stops, x / max(W - 1, 1))
+        gd.line([(x, 0), (x, H)], fill=(*col, 255))
+    stroke_mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(stroke_mask).rounded_rectangle(
+        (0, 0, W - 1, H - 1), radius=outer_radius, outline=255, width=border_w)
+    grad.putalpha(stroke_mask)
+    canvas.alpha_composite(grad)
 
     # Thumb: bright glowing circular marker at the current progress
-    # position. Clamped so its glow never clips outside the pill's rounded
-    # caps at either 0% or 100%.
-    thumb_r = bar_h * 0.62
-    inset_r = thumb_r * 0.55
-    thumb_cx = max(bar_x + inset_r, min(bar_x + fill_w, bar_x + bar_w - inset_r))
-    thumb_cy = bar_y + bar_h / 2
+    # position, sized and clamped to stay INSIDE the inner track (its
+    # soft bloom may extend past the track, the solid orb itself does
+    # not).
+    thumb_r = inner_h * 0.40
+    inset_r = thumb_r * 0.7
+    thumb_cx = max(inner_x + inset_r, min(inner_x + fill_w, inner_x + inner_w - inset_r))
+    thumb_cy = inner_y + inner_h / 2
 
     # Layered glow, largest/softest first -- mirrors the reference's
     # stacked box-shadow (wide soft violet halo, tighter bright halo,
-    # crisp white core).
-    _draw_glow_layer(img, lambda d: d.ellipse(
-        (thumb_cx - thumb_r * 2.1, thumb_cy - thumb_r * 2.1,
-         thumb_cx + thumb_r * 2.1, thumb_cy + thumb_r * 2.1),
-        fill=(190, 110, 255, 130)), blur=7)
-    _draw_glow_layer(img, lambda d: d.ellipse(
-        (thumb_cx - thumb_r * 1.3, thumb_cy - thumb_r * 1.3,
-         thumb_cx + thumb_r * 1.3, thumb_cy + thumb_r * 1.3),
-        fill=(255, 255, 255, 200)), blur=3)
-    ImageDraw.Draw(img).ellipse(
+    # crisp white core), all still on the shared supersampled canvas so
+    # the final circle comes out smoothly antialiased rather than jagged.
+    outer_halo = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(outer_halo).ellipse(
+        (thumb_cx - thumb_r * 2.3, thumb_cy - thumb_r * 2.3,
+         thumb_cx + thumb_r * 2.3, thumb_cy + thumb_r * 2.3),
+        fill=(190, 110, 255, 120))
+    outer_halo = outer_halo.filter(ImageFilter.GaussianBlur(6 * SS))
+    canvas.alpha_composite(outer_halo)
+
+    inner_halo = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(inner_halo).ellipse(
+        (thumb_cx - thumb_r * 1.4, thumb_cy - thumb_r * 1.4,
+         thumb_cx + thumb_r * 1.4, thumb_cy + thumb_r * 1.4),
+        fill=(255, 255, 255, 190))
+    inner_halo = inner_halo.filter(ImageFilter.GaussianBlur(2.5 * SS))
+    canvas.alpha_composite(inner_halo)
+
+    ImageDraw.Draw(canvas).ellipse(
         (thumb_cx - thumb_r, thumb_cy - thumb_r, thumb_cx + thumb_r, thumb_cy + thumb_r),
         fill=(255, 255, 255, 255))
+
+    # The single final downsample -- every mask/gradient/border/orb/glow
+    # above was drawn at 8x, so this one LANCZOS pass is where all of it
+    # gets antialiased at once, instead of each piece being resized (or
+    # not resized at all) separately.
+    final = canvas.resize((bar_w, bar_h), Image.LANCZOS)
+    img.alpha_composite(final, (int(bar_x), int(bar_y)))
 
 
 def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
@@ -1692,7 +2099,14 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
         # effectively no gap between them. The label below stays put; only
         # the number moves, opening a small, subtle gap above the label
         # without disturbing the label's own position or the icon above.
-        draw.text((x + w / 2 - nat_w / 2, y + 72), value, font=vf, fill=(215, 215, 222))
+        # Rendered via _draw_stencil_number (supersampled 4x + one
+        # downsample, despite the name it just draws with whatever font
+        # it's given) rather than a direct draw.text -- at this row's
+        # ~16-32px size, native-resolution hinting could snap round-bowl
+        # digits (e.g. "36"'s 6) a fractional pixel differently from
+        # flat-edged ones, reading as if they don't share the line.
+        _draw_stencil_number(img, draw, (x + w / 2 - nat_w / 2, y + 72), value, vf,
+                             (215, 215, 222))
         # Configurable currency names can be Arabic (utils/currency.py puts
         # no restriction on what an admin types) -- MESSAGES/VOICE TIME/
         # GAMES WON are fixed English labels and never go through this,
