@@ -151,8 +151,9 @@ COLORS = {
     "ring": (150, 90, 207),
     "line_icon": (178, 126, 226),       # purple line-art icon stroke
     "name_text": (215, 191, 232),       # SHADOW lettering -- sampled
-    "rank_number_a": (198, 161, 234),   # #3 gradient top     -- sampled
-    "rank_number_b": (146, 78, 232),    # #3 gradient bottom  -- sampled
+    "rank_number_a": (198, 161, 234),   # "RANK" label color -- sampled
+    "rank_number_top": (232, 208, 250),    # #1/#3 gradient top -- brighter, more pop
+    "rank_number_bottom": (122, 46, 208),  # #1/#3 gradient bottom -- deeper, more contrast
     "xp_value": (186, 120, 232),        # "1,450" purple      -- sampled
     "label_purple": (140, 100, 180),    # INVENTORY / TOTAL XP headers
     "xp_panel_label": (0x48, 0x3A, 0x65),  # #483A65 -- "XP PROGRESS" / "TOTAL XP" labels only (exact spec)
@@ -1537,9 +1538,18 @@ def _draw_rank_prestige_panel(img, draw, data, icons16,
     rank_txt = f"#{data['rank']}"
     rank_font, _rw = _fit_numeral_font(draw, rank_txt, lambda s: outfit(s, "ExtraBold"),
                                        w - 56, 76, min_size=34)
-    _draw_gradient_text(img, draw, (x + 28, y + 40), rank_txt,
-                        rank_font, COLORS["rank_number_a"],
-                        COLORS["rank_number_b"], glow=(150, 80, 230))
+    # y nudged from y+40 to y+52: _draw_gradient_text crops its render to
+    # the glyphs' own tight ink bbox and pastes that crop directly at the
+    # xy given here (see that function's docstring) -- which means this y
+    # is effectively where the numeral's ink TOP lands, not a normal
+    # top-anchored draw.text position that would still carry the font's
+    # own ascent "leading" above the ink. At y+40 that put the "1"/"3"'s
+    # ink almost flush against the "RANK" label above it (~1px gap,
+    # visually touching). +12px restores real breathing room between the
+    # label and the number.
+    _draw_gradient_text(img, draw, (x + 28, y + 52), rank_txt,
+                        rank_font, COLORS["rank_number_top"],
+                        COLORS["rank_number_bottom"], glow=(150, 80, 230))
 
     # Two-tone: "TOP" muted, the percentage itself brighter -- matches the
     # reference's emphasis treatment.
