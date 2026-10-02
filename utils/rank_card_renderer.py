@@ -59,6 +59,16 @@ def _asset_path(asset_sub: str, root_fallback: str) -> str:
 
 MAILBOX_PNG_PATH = _asset_path("mailbox.png", "mailbox_trimmed.png")
 
+# Footer "Mail Box" tag (lower-left). All three pieces are supplied artwork
+# and are used as-is -- nothing is redrawn or traced:
+#   * frame  -- the supplied SVG (an Affinity export: one embedded raster
+#               plus an embedded luminance mask; parsed directly, see
+#               _load_mailbox_frame_svg)
+#   * Nero   -- the supplied PNG, only ever scaled down
+#   * text   -- the supplied Varsity font
+MAILBOX_FRAME_SVG_PATH = _asset_path("mailbox_frame.svg", "Mailbox_frame.svg")
+NERO_ICON_PNG_PATH = _asset_path("nero_icon.png", "Nero_icon_3d.png")
+
 # Supplied avatar-ring artwork (source of truth -- not redrawn/regenerated).
 # The file's own inner circle (where the avatar sits) is off-center within
 # the PNG and smaller than the file's full bounding box, since the tendrils
@@ -109,6 +119,12 @@ STAT_ICON_GAMES_PNG_PATH = _asset_path("stat_icon_games.png", "stat_icon_games.p
 FONT_PATHS = {
     "cinzel": _asset_path(os.path.join("fonts", "Cinzel-Variable.ttf"), "Cinzel-Variable.ttf"),
     "zilla_bold": _asset_path(os.path.join("fonts", "ZillaSlab-Bold.ttf"), "ZillaSlab-Bold.ttf"),
+    # "Mail Box" footer tag text ONLY (supplied font, used unmodified).
+    "varsity": _asset_path(os.path.join("fonts", "varsity_regular.ttf"), "varsity_regular.ttf"),
+    # XP numerals ONLY (XP PROGRESS value / "of needed" / TOTAL XP value).
+    # Not used anywhere else on the card.
+    "fortuner": _asset_path(os.path.join("fonts", "FortunerHeavyPersonalUse.otf"),
+                            "FortunerHeavyPersonalUse.otf"),
     "outfit": _asset_path(os.path.join("fonts", "Outfit-Variable.ttf"), "Outfit-Variable.ttf"),
     "amiri_regular": _asset_path(os.path.join("fonts", "Amiri-Regular.ttf"), "Amiri-Regular.ttf"),
     "amiri_bold": _asset_path(os.path.join("fonts", "Amiri-Bold.ttf"), "Amiri-Bold.ttf"),
@@ -156,8 +172,16 @@ COLORS = {
     "rank_number_bottom": (122, 46, 208),  # #1/#3 gradient bottom -- deeper, more contrast
     "xp_value": (186, 120, 232),        # "1,450" purple      -- sampled
     "label_purple": (140, 100, 180),    # INVENTORY / TOTAL XP headers
-    "xp_panel_label": (0x48, 0x3A, 0x65),  # #483A65 -- "XP PROGRESS" / "TOTAL XP" labels only (exact spec)
-    "xp_total_value": (0x7A, 0x3D, 0x97),  # #7A3D97 -- the TOTAL XP number only (exact spec)
+    # "XP PROGRESS" / "TOTAL XP" labels only. Was #483A65 -- too dark on the
+    # panel. Lighter lavender, still clearly below the XP numerals.
+    "xp_panel_label": (156, 140, 198),
+    "xp_panel_label_glow": (196, 140, 236),  # very subtle pink-lavender tint
+    # TOTAL XP number only. Was #7A3D97; lifted so the heavy stencil face
+    # holds together at its smaller size, still well under the hero value.
+    "xp_total_value": (150, 88, 194),
+    # "/ needed XP" readout: lavender-grey, quieter than the hero but
+    # legible in the stencil face at ~24px.
+    "xp_suffix": (154, 138, 190),
     "gold_label": (168, 142, 116),      # unused now -- currency labels use
                                          # the slot colors below instead
     # Currency-slot colors (deliberately outside the purple/magenta family
@@ -257,6 +281,18 @@ def cinzel_semibold(size):
 
 def zilla_bold(size):
     return _font("zilla_bold", size)
+
+
+def fortuner(size):
+    """Heavy display face used only for the XP numerals. Falls back to the
+    previous Zilla Slab Bold if the file is missing so a bad deploy can
+    never take /rank down. NOTE: Fortuner's cap height is ~0.64 em vs
+    Zilla's ~0.69, so equal visual height needs a slightly larger size."""
+    try:
+        return ImageFont.truetype(FONT_PATHS["fortuner"], size)
+    except OSError:
+        log.warning("rank_card_renderer: Fortuner font missing, using Zilla")
+        return zilla_bold(size)
 
 
 def stencil(size):
@@ -622,6 +658,30 @@ def _format_compact_xp(n: int) -> str:
     return f"{val}B"
 
 
+def _format_compact_progress(n: int) -> str:
+    """Display-only compact form for the XP PROGRESS pair ("23.4K" /
+    "31.2K"). Separate from _format_compact_xp on purpose: TOTAL XP keeps
+    its own established formatting. Under 1,000 prints plain; K / M / B
+    use one decimal with a trailing ".0" stripped. Rounds to nearest and
+    promotes when rounding reaches the next unit (999,960 -> "1M", not
+    "1000K")."""
+    n = int(n)
+    if n < 0:
+        return f"-{_format_compact_progress(-n)}"
+    if n < 1_000:
+        return str(n)
+    for div, suffix, nxt in ((1_000, "K", 1_000_000),
+                             (1_000_000, "M", 1_000_000_000),
+                             (1_000_000_000, "B", None)):
+        if nxt is None or n < nxt:
+            val = round(n / div, 1)
+            if nxt is not None and val * div >= nxt:
+                continue
+            txt = f"{val:.1f}".rstrip("0").rstrip(".")
+            return f"{txt}{suffix}"
+    return f"{n:,}"
+
+
 def _draw_numeral_ss(img, x, baseline_y, text, font_fn, size, fill, ss=4):
     """Draws `text` at `size`pt (from `font_fn`) on its own ss-x
     supersampled local layer, anchored at (x, baseline_y), then
@@ -662,6 +722,25 @@ def _draw_numeral_ss(img, x, baseline_y, text, font_fn, size, fill, ss=4):
     img.alpha_composite(layer, (round(paste_x), round(paste_y)))
     return (paste_x + pad / ss, paste_y + pad / ss,
             paste_x + (lw - pad) / ss, paste_y + (lh - pad) / ss)
+
+
+def _ss_words_width(draw, words, font, gap):
+    """Total width of `words` set with an explicit `gap` between them
+    (Fortuner's own word space is far too wide for a compact readout)."""
+    return sum(draw.textbbox((0, 0), w, font=font)[2] for w in words) \
+        + gap * (len(words) - 1)
+
+
+def _draw_ss_words(img, x, baseline_y, words, font_fn, size, fill, gap, ss=4):
+    """Draws each word via _draw_numeral_ss on one shared baseline with an
+    explicit gap instead of the font's word-space. Returns the right edge."""
+    cursor = x
+    right = x
+    for i, wd in enumerate(words):
+        bb = _draw_numeral_ss(img, cursor, baseline_y, wd, font_fn, size, fill, ss=ss)
+        right = bb[2]
+        cursor = right + gap
+    return right
 
 
 def _fit_numeral_font(draw, text, font_fn, max_width, start_size, min_size=14):
@@ -1676,58 +1755,64 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
     # Both column headers share one label row -- previously "XP PROGRESS"
     # sat 4px lower than "TOTAL XP" (y+29 vs y+25), a small but visible
     # misalignment between the two columns' top edges.
-    label_y = y + 26
-    _draw_tracked_text(draw, (x + 14, label_y), "XP PROGRESS", outfit(19, "SemiBold"),
-                       COLORS["xp_panel_label"], tracking=2)
+    # Shared row grid for BOTH columns (panel-relative): label -> hero
+    # value on one baseline -> bar -> supporting line. Rebalanced so top
+    # and bottom padding match (the old layout ended ~3px above the
+    # panel's bottom edge).
+    label_y = y + 15
+    hero_baseline = y + 71
+    label_font = outfit(19, "SemiBold")
+    lbl_glow = (*COLORS["xp_panel_label_glow"], 46)
+
+    def _label(lx, text, font):
+        # Faint tinted bloom first, crisp lavender text on top.
+        _draw_glow_layer(img, lambda d: _draw_tracked_text(
+            d, (lx, label_y), text, font, lbl_glow, tracking=2), blur=3)
+        _draw_tracked_text(draw, (lx, label_y), text, font,
+                           COLORS["xp_panel_label"], tracking=2)
+
+    _label(x + 14, "XP PROGRESS", label_font)
     div_x = x + LAYOUT["xp_divider_x"]
     cur, needed = data["xp_current"], max(data["xp_needed"], 1)
-    # Two-tone: current XP purple/emphasized, "/ needed XP" muted. The value
-    # is fit to the space actually available before the divider (rather
-    # than drawn at a fixed size and squeezed) so large XP totals don't
-    # distort -- see _fit_numeral_font.
-    cur_txt = f"{cur:,}"
-    suffix_txt = f"/ {needed:,} XP"
-    suffix_font = outfit(22)
-    suffix_w = draw.textbbox((0, 0), suffix_txt, font=suffix_font)[2]
-    # Budget leaves extra room (14px, not just a hairline) before the
-    # suffix -- at full/near-full glyph size there's less natural slack
-    # than the old squeezed version had, and the glow's blur bleeds a few
-    # px past the glyph edge, so a tight gap read as the value and the
-    # "/ needed XP" text overlapping.
-    available = (div_x - 10) - (x + 14) - 14 - suffix_w
-    # Max glyph height trimmed from 45 to 42px: at 45 the value's own
-    # glyph bbox (measured, not the nominal font size) ran to ~91px below
-    # the panel top -- past where the bar used to start (86px), a real
-    # overlap, not just tight spacing. This still gives large XP values
-    # all the room _fit_numeral_font had before, just capped a touch
-    # lower so there's genuine breathing room above the bar.
-    num_y = y + 46
-    vf, cur_w = _fit_numeral_font(draw, cur_txt, zilla_bold, max(available, 40), 42,
-                                  min_size=22)
-    _draw_glow_layer(img, lambda d: d.text((x + 14, num_y), cur_txt, font=vf,
-                                            fill=(150, 70, 210, 140)), blur=3)
-    draw.text((x + 14, num_y), cur_txt, font=vf, fill=COLORS["xp_value"])
-    draw.text((x + 28 + cur_w, num_y + 8), suffix_txt, font=outfit(22),
-              fill=COLORS["text_muted"])
+
+    # Hierarchy: current XP is the hero (Fortuner Heavy, compact); the
+    # "/ needed XP" readout is the same face but much smaller and muted,
+    # on the hero's baseline. Display formatting only: cur / needed / frac
+    # below are untouched.
+    cur_txt = _format_compact_progress(cur)
+    suffix_words = ["/", _format_compact_progress(needed), "XP"]
+    # Suffix face switch: True = Fortuner (cohesive with the hero, busier at
+    # small size); False = Outfit Medium (cleaner, quieter). Layout adapts.
+    XP_SUFFIX_FORTUNER = True
+    if XP_SUFFIX_FORTUNER:
+        suffix_fn, SUF_SIZE, SUF_GAP = fortuner, 24, 7
+    else:
+        suffix_fn, SUF_SIZE, SUF_GAP = (lambda sz: outfit(sz, "Medium")), 19, 6
+    HERO_GAP = 14
+    suffix_font = suffix_fn(SUF_SIZE)
+    suffix_w = _ss_words_width(draw, suffix_words, suffix_font, SUF_GAP)
+    available = (div_x - 10) - (x + 14) - HERO_GAP - suffix_w
+    vf, cur_w = _fit_numeral_font(draw, cur_txt, fortuner, max(available, 40), 45,
+                                  min_size=24)
+    _draw_glow_layer(img, lambda d: d.text((x + 14, hero_baseline), cur_txt, font=vf,
+                                            fill=(150, 70, 210, 140), anchor="ls"),
+                     blur=3)
+    hero_bb = _draw_numeral_ss(img, x + 14, hero_baseline, cur_txt, fortuner, vf.size,
+                               COLORS["xp_value"])
+    _draw_ss_words(img, hero_bb[2] + HERO_GAP, hero_baseline, suffix_words, suffix_fn,
+                   SUF_SIZE, COLORS["xp_suffix"], SUF_GAP)
 
     draw.line((div_x, y + 14, div_x, y + h - 14), fill=(*COLORS["accent"], 30), width=1)
 
-    # Bar nudged down from y+86 to y+97 -- the actual fix for the
-    # overlap above: the current-XP value's measured glyph bbox now
-    # bottoms out around y+91, so the bar needs to start past that, not
-    # at a fixed offset chosen before the value was fit to its own bbox.
-    # This is a position change only; the bar's own size/shape/design is
-    # untouched (still x+8/w-20/21 -- same width inset and thickness as
-    # before), and _draw_xp_bar itself is not called any differently.
-    bar_x, bar_y, bar_w, bar_h = x + 8, y + 97, w - 20, 21
+    # Bar: unchanged (size/shape/design and the same _draw_xp_bar call).
+    bar_x, bar_y, bar_w, bar_h = x + 8, y + 84, w - 20, 21
     frac = min(cur / needed, 1.0)
     _draw_xp_bar(img, bar_x, bar_y, bar_w, bar_h, frac)
-    draw.text((bar_x + 6, bar_y + bar_h + 5), f"{frac * 100:.1f}% to next level",
-              font=outfit(19), fill=COLORS["text_muted"])
+    draw.text((bar_x + 6, bar_y + bar_h + 8), f"{frac * 100:.1f}% to next level",
+              font=outfit(17), fill=COLORS["text_muted"])
 
     tx = div_x + 22
-    _draw_tracked_text(draw, (tx, label_y), "TOTAL XP", outfit(20, "SemiBold"),
-                       COLORS["xp_panel_label"], tracking=2)
+    _label(tx, "TOTAL XP", outfit(20, "SemiBold"))
 
     # Compact display formatting only -- data["xp_total"] itself is never
     # touched, see _format_compact_xp. Keeps "23,398" as-is today but
@@ -1757,10 +1842,10 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
     # focal point of its column (matches TOTAL XP's own scale relative to
     # the label/icon beside it), without outweighing the panel the way a
     # 38-42px value did.
-    total_baseline_y = y + 76
-    tf2, _tw = _fit_numeral_font(draw, total_txt, zilla_bold, max(total_available, 40), 30,
-                                 min_size=16)
-    total_bbox = _draw_numeral_ss(img, total_x, total_baseline_y, total_txt, zilla_bold,
+    total_baseline_y = hero_baseline
+    tf2, _tw = _fit_numeral_font(draw, total_txt, fortuner, max(total_available, 40), 36,
+                                 min_size=18)
+    total_bbox = _draw_numeral_ss(img, total_x, total_baseline_y, total_txt, fortuner,
                                   tf2.size, COLORS["xp_total_value"])
 
     # Potion icon: the supplied artwork (potion_im, pre-trimmed to its
@@ -2264,18 +2349,238 @@ def _draw_mailbox(img, mailbox_im):
     img.alpha_composite(mb, (left, top))
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# FOOTER "MAIL BOX" TAG  (supplied SVG frame + supplied Nero PNG + Varsity)
+# ─────────────────────────────────────────────────────────────────────────
+
+MAILBOX_TAG = {
+    # Placement on the 1280x853 canvas. The OUTER RING's left edge and its
+    # vertical centre are what get pinned (the ring is the tag's visual
+    # anchor); the rest follows from the frame's own geometry.
+    "ring_left": 24,
+    "ring_cy": 795.5,
+    # Uniform scale of the supplied frame art (never stretched):
+    # 1.0 = the SVG's native 877x346 raster.
+    "scale": 0.28,
+    # Nero, as fractions of the disc diameter: width of Nero's solid body
+    # relative to the disc, and an optical offset of its centre from the
+    # disc centre (+y = down). Nero's ears give it top-weight, so a small
+    # downward nudge keeps them off the inner ring.
+    "nero_fill": 0.82,
+    "nero_dx": 0.0,
+    "nero_dy": 0.03,
+    "text": "Mail Box",
+    # Gap between the ring's outer right edge / the plate's right end and
+    # the text, in card px.
+    "text_pad_l": 9,
+    "text_pad_r": 9,
+    # Optical vertical nudge of the text (card px, +down).
+    "text_dy": 0.0,
+    # Faint bloom behind the lettering (0 = off).
+    "text_glow": 0.28,
+}
+
+# Geometry measured directly off the supplied frame art (the 877x346
+# embedded raster; alpha-run scans). Rings + disc are concentric.
+_TAG_ART_W, _TAG_ART_H = 877, 346
+_TAG_ART_CENTER = (165.0, 165.0)    # shared centre of rings and disc
+_TAG_ART_OUTER_R = 165.0            # outer ring radius (art x 1..329)
+_TAG_ART_DISC_D = 260.0             # flat disc diameter (art 35..295)
+_TAG_ART_PLATE_X = (329.0, 870.0)   # ring's right edge -> plate's inner right end
+_TAG_ART_PLATE_CY = 164.5           # plate (pill) vertical centre
+
+# Lettering colour sweep, left -> right across the ink: pink -> lavender
+# (peaks on the "B") -> pink-violet. Sampled from the reference screenshot's
+# bright glyph cores (not its anti-aliased edges).
+MAILBOX_TEXT_GRADIENT = (
+    (0.00, (241, 60, 223)),
+    (0.30, (226, 122, 238)),
+    (0.575, (213, 181, 255)),
+    (0.78, (224, 128, 253)),
+    (1.00, (236, 92, 255)),
+)
+
+_MAILBOX_TAG_CACHE = None   # None = not built yet; False = unavailable; else (sprite, x, y)
+
+
+def _load_mailbox_frame_svg(path: str) -> Image.Image:
+    """Return the supplied SVG frame as a native-resolution RGBA image.
+
+    The SVG is an Affinity export that wraps ONE embedded raster (the
+    artwork) in a luminance <mask> (a second embedded raster) at a
+    fractional offset. Parsed here rather than rasterised by an SVG library
+    so no new dependency is needed; the maths is exactly SVG's (verified
+    against resvg: mean per-channel difference 0.006/255). Only
+    translate-type transforms are supported -- anything else raises, and
+    the caller falls back to the old tag instead of drawing it wrong.
+    The SVG's clip rect only trims ~0.2px off the art's bottom edge and is
+    ignored."""
+    import re
+    import base64
+    from xml.etree import ElementTree as ET
+
+    root = ET.parse(path).getroot()
+    SVG = "{http://www.w3.org/2000/svg}"
+    XL = "{http://www.w3.org/1999/xlink}"
+    parent = {c: p for p in root.iter() for c in p}
+
+    def translation(el):
+        tx = ty = 0.0
+        while el is not None:
+            tr = el.get("transform")
+            if tr:
+                m = re.fullmatch(r"\s*matrix\(([^)]*)\)\s*", tr)
+                if not m:
+                    raise ValueError(f"unsupported transform {tr!r}")
+                a, b, c, d, e, f = [float(v) for v in re.split(r"[\s,]+", m.group(1).strip())]
+                if (a, b, c, d) != (1.0, 0.0, 0.0, 1.0):
+                    raise ValueError(f"non-translate transform {tr!r}")
+                tx += e
+                ty += f
+            el = parent.get(el)
+        return tx, ty
+
+    def decode(img_el):
+        href = img_el.get(XL + "href") or img_el.get("href") or ""
+        m = re.match(r"data:image/png;base64,(.*)", href, re.S)
+        if not m:
+            raise ValueError("image is not an embedded PNG")
+        return Image.open(io.BytesIO(base64.b64decode(m.group(1))))
+
+    by_id = {el.get("id"): el for el in root.iter(SVG + "image") if el.get("id")}
+    use = next(root.iter(SVG + "use"))
+    art_el = by_id[(use.get(XL + "href") or use.get("href")).lstrip("#")]
+    mask_el = next(next(root.iter(SVG + "mask")).iter(SVG + "image"))
+
+    art = decode(art_el).convert("RGBA")
+    mask_src = decode(mask_el)
+    if (float(use.get("width", "0").rstrip("px")), float(use.get("height", "0").rstrip("px"))) \
+            != (float(art.width), float(art.height)):
+        raise ValueError("<use> rescales the artwork; not supported")
+    if mask_src.mode == "RGBA":
+        mask = ImageChops.multiply(mask_src.convert("L"), mask_src.getchannel("A"))
+    else:
+        mask = mask_src.convert("L")           # luminance mask
+
+    ux, uy = translation(use)
+    ox = float(use.get("x", 0)) + ux           # art origin, in viewBox space
+    oy = float(use.get("y", 0)) + uy
+    mx, my = translation(mask_el)              # mask origin, in viewBox space
+    # Sample the mask at the art's (fractional) position, bilinear.
+    mask_on_art = mask.transform(art.size, Image.AFFINE,
+                                 (1, 0, ox - mx, 0, 1, oy - my), Image.BILINEAR)
+    art.putalpha(ImageChops.multiply(art.getchannel("A"), mask_on_art))
+    return art
+
+
+def _render_mailbox_text(text: str, font_path: str, size: int, ss: int = 8):
+    """Varsity lettering with the pink -> lavender -> pink sweep. Returns
+    (RGBA sprite tight to the ink, ink_w, ink_h) at 1x. Supersampled `ss`x
+    then reduced once so the font's thin inline strokes stay clean."""
+    font = ImageFont.truetype(font_path, size * ss)
+    pad = 4 * ss
+    probe = Image.new("L", (int(font.getlength(text)) + 2 * pad, size * ss * 2), 0)
+    ImageDraw.Draw(probe).text((pad, size * ss * 1.4), text, font=font, fill=255, anchor="ls")
+    bb = probe.getbbox()
+    mask = probe.crop(bb)
+    w, h = mask.size
+    grad = Image.new("RGB", (w, 1))
+    stops = MAILBOX_TEXT_GRADIENT
+    for x in range(w):
+        t = x / max(w - 1, 1)
+        for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+            if t <= t1:
+                k = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+                grad.putpixel((x, 0), tuple(int(round(c0[i] + (c1[i] - c0[i]) * k)) for i in range(3)))
+                break
+    grad = grad.resize((w, h))
+    big = grad.convert("RGBA")
+    big.putalpha(mask)
+    out_w, out_h = max(1, round(w / ss)), max(1, round(h / ss))
+    return big.resize((out_w, out_h), Image.LANCZOS), out_w, out_h
+
+
+def _build_mailbox_tag():
+    """Compose the static tag sprite once (it has no per-user data).
+    Returns (sprite, x, y) in canvas px, or None if any asset is missing/bad."""
+    cfg = MAILBOX_TAG
+    try:
+        frame = _load_mailbox_frame_svg(MAILBOX_FRAME_SVG_PATH)
+        nero = Image.open(NERO_ICON_PNG_PATH).convert("RGBA")
+        font_path = FONT_PATHS["varsity"]
+        if not os.path.isfile(font_path):
+            raise FileNotFoundError(font_path)
+    except Exception as e:
+        log.warning("rank_card: Mail Box tag assets unavailable (%s) -- using the "
+                    "fallback tag.", e)
+        return None
+
+    sc = cfg["scale"]
+    sw, sh = round(_TAG_ART_W * sc), round(_TAG_ART_H * sc)
+    sprite = frame.resize((sw, sh), Image.LANCZOS)          # alpha-aware resize
+
+    cx, cy = _TAG_ART_CENTER[0] * sc, _TAG_ART_CENTER[1] * sc
+    disc_d = _TAG_ART_DISC_D * sc
+
+    # --- Nero: the supplied PNG, scaled only. Sized off its solid body
+    # (alpha>30) so the PNG's transparent margin doesn't shrink it.
+    solid = nero.getchannel("A").point(lambda v: 255 if v > 30 else 0).getbbox()
+    nero = nero.crop(solid)
+    nw = max(1, round(disc_d * cfg["nero_fill"]))
+    nh = max(1, round(nw * nero.height / nero.width))
+    nero = nero.resize((nw, nh), Image.LANCZOS)
+    nx = round(cx + cfg["nero_dx"] * disc_d - nw / 2)
+    ny = round(cy + cfg["nero_dy"] * disc_d - nh / 2)
+
+    # --- Text: sized to fill the plate between the pads (width-limited;
+    # Varsity is wide, so height is never the constraint here).
+    plate_l = _TAG_ART_PLATE_X[0] * sc + cfg["text_pad_l"]
+    plate_r = _TAG_ART_PLATE_X[1] * sc - cfg["text_pad_r"]
+    em_w = ImageFont.truetype(font_path, 1000).getlength(cfg["text"]) / 1000.0
+    size = max(8, int(round((plate_r - plate_l) / em_w)))
+    txt, tw, th = _render_mailbox_text(cfg["text"], font_path, size)
+    tx = round((plate_l + plate_r) / 2 - tw / 2)
+    ty = round(_TAG_ART_PLATE_CY * sc - th / 2 + cfg["text_dy"])
+
+    if cfg["text_glow"] > 0:
+        glow = Image.new("RGBA", sprite.size, (0, 0, 0, 0))
+        glow.alpha_composite(txt, (tx, ty))
+        glow = glow.filter(ImageFilter.GaussianBlur(2.2))
+        glow.putalpha(glow.getchannel("A").point(lambda a: int(a * cfg["text_glow"])))
+        sprite.alpha_composite(glow)
+    sprite.alpha_composite(txt, (tx, ty))
+    sprite.alpha_composite(nero, (nx, ny))
+
+    x0 = round(cfg["ring_left"] - 1 * sc)                     # ring's left edge = art x 1
+    y0 = round(cfg["ring_cy"] - cy)
+    return sprite, x0, y0
+
+
+def _get_mailbox_tag():
+    global _MAILBOX_TAG_CACHE
+    if _MAILBOX_TAG_CACHE is None:
+        built = _build_mailbox_tag()
+        _MAILBOX_TAG_CACHE = built if built is not None else False
+    return _MAILBOX_TAG_CACHE or None
+
+
 def _draw_footer(img, draw):
     fy = LAYOUT["footer_y"]
-    # Left tag: paw + tracked MAILBOX, pointed right end -- as in the
-    # reference's lower-left corner.
-    tag = [(62, fy), (250, fy), (270, fy + 22), (250, fy + 44), (62, fy + 44),
-           (40, fy + 22)]
-    draw.polygon(tag, fill=(12, 6, 26, 200))
-    draw.line(tag + [tag[0]], fill=(60, 40, 90, 70), width=1)
-    paw = _draw_paw_icon(40)
-    img.paste(paw, (46, fy + 3), paw)
-    _draw_tracked_text(draw, (100, fy + 22), "MAILBOX", outfit(16, "SemiBold"),
-                       (120, 95, 150), tracking=6, anchor="lm")
+    # Left tag: the supplied Mail Box frame + Nero + Varsity lettering (built
+    # once, cached). If any of those assets is missing the previous paw tag is
+    # drawn instead so /rank never breaks.
+    mb_tag = _get_mailbox_tag()
+    if mb_tag is not None:
+        img.alpha_composite(mb_tag[0], (mb_tag[1], mb_tag[2]))
+    else:
+        tag = [(62, fy), (250, fy), (270, fy + 22), (250, fy + 44), (62, fy + 44),
+               (40, fy + 22)]
+        draw.polygon(tag, fill=(12, 6, 26, 200))
+        draw.line(tag + [tag[0]], fill=(60, 40, 90, 70), width=1)
+        paw = _draw_paw_icon(40)
+        img.paste(paw, (46, fy + 3), paw)
+        _draw_tracked_text(draw, (100, fy + 22), "MAILBOX", outfit(16, "SemiBold"),
+                           (120, 95, 150), tracking=6, anchor="lm")
 
     # Centered arabic line flanked by 4-point sparkles (the reference has
     # no tofu boxes -- the stars are drawn, not typed). Pillow has no
