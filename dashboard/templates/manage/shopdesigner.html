@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block title %}Shop Designer{% endblock %}
+{% block content %}
+<span data-page-title="Shop Designer"></span>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/shop-designer.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/shop-publisher.css') }}">
+
+<div id="sd-root"
+     class="sd-shell"
+     data-page-module="shop-designer"
+     data-limits="{{ limits | tojson | forceescape }}"
+     data-page-script="{{ url_for('static', filename='js/embed/model.js') }} {{ url_for('static', filename='js/embed/assets.js') }} {{ url_for('static', filename='js/embed/store.js') }} {{ url_for('static', filename='js/embed/validate.js') }} {{ url_for('static', filename='js/embed/discord-markdown.js') }} {{ url_for('static', filename='js/embed/preview.js') }} {{ url_for('static', filename='js/embed/views/rail.js') }} {{ url_for('static', filename='js/embed/views/inspector.js') }} {{ url_for('static', filename='js/shop-publisher.js') }} {{ url_for('static', filename='js/shop-publications.js') }} {{ url_for('static', filename='js/shop-designer.js') }}">
+    <header class="card sd-header">
+        <div class="card-title">🛍️ Shop Designer</div>
+        <p class="sd-intro">Build and preview a complete Shop design. Product details remain live and read-only; saved designs store configuration only.</p>
+    </header>
+
+    <div class="sd-workbench">
+        <aside class="card sd-context" aria-labelledby="sd-context-title">
+            <div class="sd-section-heading">
+                <h2 id="sd-context-title">Designs</h2>
+            </div>
+            <label class="sd-field-label" for="sd-design-select">Saved designs</label>
+            <select id="sd-design-select" class="form-input" aria-describedby="sd-design-status sd-design-empty">
+                <option value="">Loading saved designs…</option>
+            </select>
+            <div id="sd-design-empty" class="sd-muted" role="status" aria-live="polite" hidden></div>
+            <label class="sd-field-label" for="sd-design-name">Design name</label>
+            <input id="sd-design-name" class="form-input" type="text" maxlength="100" placeholder="My Shop design" autocomplete="off">
+            <div class="sd-design-actions">
+                <button id="sd-design-save" class="btn btn-primary" type="button">Save design</button>
+                <button id="sd-design-load" class="btn btn-secondary" type="button" disabled>Load</button>
+                <button id="sd-design-delete" class="btn btn-secondary" type="button" disabled>Delete</button>
+            </div>
+            <span id="sd-dirty" class="sd-dirty" hidden>Unsaved changes</span>
+            <div id="sd-design-status" class="sd-design-status" role="status" aria-live="polite">Loading saved designs…</div>
+            <div id="sd-current-design" class="sd-current-design sd-muted">New unsaved design</div>
+            <section class="sd-publications" aria-labelledby="sd-publications-title">
+                <h3 id="sd-publications-title">Publications</h3>
+                <label class="sd-field-label" for="sd-publication-channel">Discord channel ID</label>
+                <input id="sd-publication-channel" class="form-input" inputmode="numeric" placeholder="Text/news channel ID">
+                <button id="sd-publication-publish" class="btn btn-primary" type="button">Publish saved Design</button>
+                <div id="sd-publication-status" class="sd-muted" role="status" aria-live="polite"></div>
+                <ul id="sd-publication-list" aria-label="Design publications"></ul>
+            </section>
+        </aside>
+
+        <main class="sd-main-workspace" aria-label="Shop design workspace">
+            <div class="sd-grid">
+                <section class="card sd-catalog" aria-labelledby="sd-catalog-title">
+                    <div class="sd-section-heading">
+                        <h2 id="sd-catalog-title">Product catalog</h2>
+                        <label class="sd-filter-label" for="sd-category">Category filter</label>
+                        <select id="sd-category" class="form-input">
+                            <option value="">All categories</option>
+                        </select>
+                    </div>
+                    <div id="sd-catalog-status" class="sd-muted" role="status" aria-live="polite">Loading live catalog…</div>
+                    <ul id="sd-available" class="sd-product-list" aria-label="Available products"></ul>
+                </section>
+
+                <section class="card sd-roster-card" aria-labelledby="sd-roster-title">
+                    <div class="sd-section-heading">
+                        <h2 id="sd-roster-title">Ordered product roster</h2>
+                        <span id="sd-roster-count" class="sd-count">0 products</span>
+                    </div>
+                    <p class="sd-muted">Products appear in this order in the draft. Reordering changes only the in-memory roster.</p>
+                    <ol id="sd-roster" class="sd-roster-list" aria-label="Ordered root product IDs"></ol>
+                    <div id="sd-roster-empty" class="sd-empty">Add products from the live catalog to begin.</div>
+                </section>
+            </div>
+
+            <section id="sd-presentation" class="card sd-presentation" aria-labelledby="sd-presentation-title">
+                <div class="sd-section-heading">
+                    <div>
+                        <h2 id="sd-presentation-title">Presentation</h2>
+                        <p class="sd-muted">Message content and embeds; the combined draft is resolved in the complete-design preview below.</p>
+                    </div>
+                    <label class="sd-filter-label" for="sd-mode">Mode</label>
+                    <select id="sd-mode" class="form-input">
+                        <option value="per_product">Per product</option>
+                        <option value="frame">Frame</option>
+                    </select>
+                </div>
+                <div class="sd-template-row">
+                    <label class="sd-filter-label" for="sd-template">Start from template</label>
+                    <select id="sd-template" class="form-input"><option value="">Blank presentation</option></select>
+                </div>
+                <div id="sd-validation" class="sd-muted" role="status" aria-live="polite"></div>
+                <div class="sd-editor-grid">
+                    <nav class="sd-embed-rail" aria-label="Embed structure">
+                        <h3>Embeds</h3>
+                        <div id="sd-embed-rail"></div>
+                    </nav>
+                </div>
+            </section>
+
+            <section id="sd-action" class="card sd-action" aria-labelledby="sd-action-title">
+                <div class="sd-section-heading">
+                    <div>
+                        <h2 id="sd-action-title">Purchase action</h2>
+                        <p id="sd-action-help" class="sd-muted">Map rostered root products to green buttons. This only configures the in-memory action and never executes a purchase.</p>
+                    </div>
+                </div>
+                <div class="sd-action-add-row">
+                    <label class="sd-filter-label" for="sd-action-kind">Action kind</label>
+                    <select id="sd-action-kind" class="form-input">
+                        <option value="buttons">Buttons</option>
+                        <option value="product_select">Product Select</option>
+                        <option value="option_select">Option Select</option>
+                    </select>
+                    <label id="sd-action-entry-label" class="sd-filter-label" for="sd-action-product">Rostered product</label>
+                    <select id="sd-action-product" class="form-input"></select>
+                    <button id="sd-action-add" class="btn btn-secondary" type="button">Add button</button>
+                </div>
+                <div id="sd-action-option-root-row" class="sd-action-add-row" hidden>
+                    <label class="sd-filter-label" for="sd-action-option-root">Root product</label>
+                    <select id="sd-action-option-root" class="form-input"></select>
+                    <span class="sd-muted">Options are loaded from this root’s direct family and the root itself is never a choice.</span>
+                </div>
+                <div id="sd-action-select-settings" class="sd-action-add-row" hidden>
+                    <label class="sd-filter-label" for="sd-action-placeholder">Select placeholder</label>
+                    <input id="sd-action-placeholder" class="form-input" type="text" maxlength="150" placeholder="Select…">
+                </div>
+                <ol id="sd-action-entries" class="sd-action-list" aria-label="Ordered purchase action entries"></ol>
+                <div class="sd-action-footer">
+                    <button id="sd-action-validate" class="btn btn-secondary" type="button">Validate action</button>
+                    <span class="sd-muted">Uses the existing read-only Shop design pipeline; no publication.</span>
+                </div>
+                <div id="sd-action-validation" class="sd-muted" role="status" aria-live="polite">Add rostered products to configure an action.</div>
+            </section>
+
+            <section id="sd-preview" class="card sd-preview" aria-labelledby="sd-preview-title">
+                <div class="sd-section-heading">
+                    <div>
+                        <h2 id="sd-preview-title">Complete-design preview</h2>
+                        <p class="sd-muted">Resolved by the existing Shop preview pipeline. Read-only; no purchase is executed.</p>
+                    </div>
+                    <span id="sd-preview-status" class="sd-muted" role="status" aria-live="polite">Configure products and a purchase action, then validate to preview.</span>
+                </div>
+                <div class="sp-preview-frame">
+                    <div id="sd-preview-mount" class="sp-preview-mount eb-preview-box"></div>
+                    <div id="sd-preview-purchase" class="sp-purchase" hidden></div>
+                </div>
+                <div class="sd-preview-details">
+                    <section class="sd-preview-detail" aria-labelledby="sd-preview-warnings-title">
+                        <h3 id="sd-preview-warnings-title">Preview warnings</h3>
+                        <div id="sd-preview-warnings" class="sp-warnings" role="status" aria-live="polite">
+                            <div class="sp-muted">No preview yet.</div>
+                        </div>
+                    </section>
+                    <section class="sd-preview-detail" aria-labelledby="sd-preview-tokens-title">
+                        <h3 id="sd-preview-tokens-title">Resolved tokens</h3>
+                        <div id="sd-preview-tokens" class="sp-tokens">
+                            <div class="sp-muted">No resolution yet.</div>
+                        </div>
+                    </section>
+                </div>
+            </section>
+            <div id="sd-status" class="sd-status" role="status" aria-live="polite"></div>
+        </main>
+
+        <aside id="sd-inspector-panel" class="card sd-inspector-panel" aria-labelledby="sd-inspector-title">
+            <div class="sd-section-heading"><h2 id="sd-inspector-title">Context inspector</h2></div>
+            <div id="sd-context-inspector" class="sd-context-inspector" aria-live="polite">
+                Select a product or action entry to see its context here. Existing controls remain in the center workspace.
+            </div>
+            <section class="sd-presentation-inspector" aria-labelledby="sd-presentation-inspector-title">
+                <h3 id="sd-presentation-inspector-title">Presentation properties</h3>
+                <div id="sd-embed-inspector"></div>
+            </section>
+        </aside>
+    </div>
+</div>
+{% endblock %}

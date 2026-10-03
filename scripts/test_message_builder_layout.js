@@ -373,9 +373,11 @@ assert(!!v2Route && /limits=limits_payload\(\)/.test(v2Route[1]),
     'the v2 route renders the served limits table into the page (transport L1)');
 assert(/^from utils\.discord_limits import limits_payload$/m.test(APP),
     'and the route imports that table from utils/discord_limits (one authority)');
-assert((APP.match(/limits_payload\(\)/g) || []).length === 1,
-    'the v2 route is the only page in app.py that renders a limits table',
-    String((APP.match(/limits_payload\(\)/g) || []).length));
+const shopDesignerRoute = /@app\.route\("\/shop-designer"\)\s*\n@require_page\("shoppublisher"\)\s*\ndef shop_designer\(\):([\s\S]*?)\n\n/.exec(APP);
+assert(!!shopDesignerRoute && /render\("manage\/shopdesigner\.html"/.test(shopDesignerRoute[1]),
+    'the Shop Designer route renders manage/shopdesigner.html');
+assert(!!shopDesignerRoute && /limits=limits_payload\(\)/.test(shopDesignerRoute[1]),
+    'Shop Designer reuses the canonical V2 limits payload for its shared validator');
 const v1Route = /@app\.route\("\/embed-builder"\)[\s\S]*?return render\("manage\/embedbuilder\.html"/.exec(APP);
 assert(!!v1Route, 'the v1 /embed-builder route still renders manage/embedbuilder.html');
 assert(APP.indexOf('"/embed-builder/v2"') !== APP.lastIndexOf('"/embed-builder/v2"') ||
