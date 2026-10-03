@@ -280,6 +280,45 @@
             </table>
         </div>
     </div>
+
+    <div class="card">
+        <div class="card-title">🛒 Add Level Reward — Shop</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Claimed from /level. Does not charge, write a purchase, or consume stock.
+            Custom, title, potion, and temporary role products only.
+        </p>
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Level required</label>
+                <input class="form-input" id="shop-reward-level"
+                       type="number" min="1" placeholder="e.g. 10" style="width:130px;">
+            </div>
+            <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px;">
+                <label class="form-label">Shop product</label>
+                <select class="form-input" id="shop-reward-item" style="width:100%;">
+                    <option value="">Loading…</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Quantity</label>
+                <input class="form-input" id="shop-reward-quantity"
+                       type="number" min="1" value="1" style="width:110px;">
+            </div>
+            <button class="btn btn-primary" onclick="addShopReward()">Add Reward</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">🎁 Level Rewards — Shop</div>
+        <div class="table-wrap">
+            <table class="table">
+                <thead><tr><th>Level</th><th>Product</th><th>Quantity</th><th></th></tr></thead>
+                <tbody id="shop-rewards-tbody">
+                    <tr><td colspan="4" class="empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
 </div>
 
 <!-- BONUS ROLES TAB -->
@@ -784,7 +823,74 @@ async function deletePrestigeRole(id) {
     else showToast('Error', 'error');
 }
 
+function shopText(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+    });
+}
+
+async function loadShopRewards() {
+    const res = await fetch('/api/leveling/shop-rewards');
+    if (!res.ok) return;
+    const data = await res.json();
+    const select = document.getElementById('shop-reward-item');
+    const products = data.products || [];
+    select.innerHTML = products.length
+        ? products.map(p => `<option value="${p.id}">${shopText(p.name)} (${shopText(p.type)})</option>`).join('')
+        : '<option value="">No eligible Shop products</option>';
+    const tbody = document.getElementById('shop-rewards-tbody');
+    if (!data.rewards || !data.rewards.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">No Shop rewards configured yet</td></tr>';
+        return;
+    }
+    tbody.innerHTML = data.rewards.map(r => `
+        <tr>
+            <td><span class="badge badge-accent">Level ${r.level}</span></td>
+            <td>${shopText(r.name || ('Product ' + r.item_id))}</td>
+            <td>${r.quantity}x</td>
+            <td>
+                <button class="btn btn-sm btn-danger"
+                    onclick="showConfirm('Delete Level ${r.level} Shop reward?', () => deleteShopReward(${r.id}))">
+                    Delete
+                </button>
+            </td>
+        </tr>`).join('');
+}
+
+async function addShopReward() {
+    const level = document.getElementById('shop-reward-level').value;
+    const itemId = document.getElementById('shop-reward-item').value;
+    const quantity = document.getElementById('shop-reward-quantity').value;
+    if (!level || !itemId || !quantity) {
+        showToast('Select a level, product, and quantity', 'warning');
+        return;
+    }
+    const res = await fetch('/api/leveling/shop-reward', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+            level: parseInt(level), item_id: parseInt(itemId),
+            quantity: parseInt(quantity),
+        }),
+    });
+    const data = await res.json();
+    if (data.success) {
+        showToast('Shop reward added!');
+        document.getElementById('shop-reward-level').value = '';
+        loadShopRewards();
+    } else {
+        showToast(data.error || 'Error adding reward', 'error');
+    }
+}
+
+async function deleteShopReward(id) {
+    const res = await fetch(`/api/leveling/shop-reward/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) { showToast('Reward deleted', 'info'); loadShopRewards(); }
+    else showToast('Error', 'error');
+}
+
 loadCurrencyRewards();
+loadShopRewards();
 loadBonusRoles();
 loadBlacklist();
 loadPrestigeRoles();

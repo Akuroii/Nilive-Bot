@@ -16,7 +16,15 @@ from database import DB_PATH
 LEASE_SECONDS = 60
 TRACK_ROLE = "role"
 TRACK_CURRENCY = "currency"
+TRACK_SHOP = "shop"
 BACKFILL_NAME = "legacy_fulfilled_no_payout"
+SHOP_REWARD_TYPES = ("custom", "title", "potion", "temp_role")
+_INVENTORY_TYPE = {
+    "custom": "shop_custom",
+    "title": "title",
+    "potion": "potion",
+    "temp_role": "temp_role",
+}
 # Metadata only. Not part of identity, eligibility, reserve, or payout.
 SOURCE_SETXP = "setxp"
 SOURCE_DASHBOARD = "dashboard"
@@ -139,12 +147,57 @@ async def _definitions(db: aiosqlite.Connection, guild_id: int) -> dict:
         key = (int(level), TRACK_CURRENCY, currency)
         slot = identities.setdefault(key, {"currency": currency, "amount": 0})
         slot["amount"] += int(amount)
+    cursor = await db.execute("""
+        SELECT r.level, r.item_id, r.quantity, s.name, s.type,
+               s.role_id, s.duration_hours, s.xp_boost_multiplier
+        FROM leveling_shop_rewards r
+        JOIN shop_items s ON s.id = r.item_id AND s.guild_id = r.guild_id
+        WHERE r.guild_id = ?
+    """, (guild_id,))
+    for level, item_id, quantity, name, item_type, role_id, duration_hours, multiplier in await cursor.fetchall():
+        if item_type not in SHOP_REWARD_TYPES or not name:
+            continue
+        if not quantity or int(quantity) < 1:
+            continue
+        raw = {
+            "item_id": int(item_id),
+            "name": name,
+            "type": item_type,
+            "quantity": int(quantity),
+        }
+        if item_type == "temp_role":
+            if not role_id or not duration_hours or int(duration_hours) <= 0:
+                continue
+            raw["role_id"] = int(role_id)
+            raw["duration_hours"] = int(duration_hours)
+        elif item_type == "potion":
+            if not multiplier or float(multiplier) <= 1 or not duration_hours:
+                continue
+            from utils.potion_engine import EFFECT_XP_BOOST, build_metadata
+            raw["metadata"] = build_metadata(
+                EFFECT_XP_BOOST, float(multiplier), int(duration_hours))
+        identities[(int(level), TRACK_SHOP, str(int(item_id)))] = raw
     return identities
 
 
 def _payload(track: str, raw: dict, multipliers: dict | None) -> str:
     if track == TRACK_ROLE:
         return json.dumps({"role_id": int(raw["role_id"])})
+    if track == TRACK_SHOP:
+        # Frozen at entitlement creation. Claim delivery must not re-read
+        # shop_items, so price, stock, and purchase gates are omitted.
+        body = {
+            "item_id": int(raw["item_id"]),
+            "name": raw["name"],
+            "type": raw["type"],
+            "quantity": int(raw["quantity"]),
+        }
+        if raw["type"] == "temp_role":
+            body["role_id"] = int(raw["role_id"])
+            body["duration_hours"] = int(raw["duration_hours"])
+        if raw.get("metadata"):
+            body["metadata"] = raw["metadata"]
+        return json.dumps(body)
     amount = int(raw["amount"])
     if multipliers is not None:
         amount = _freeze_amount(amount, raw["currency"], multipliers)
@@ -316,6 +369,54 @@ async def deliver_role(member, role_id: int, reason: str) -> None:
     await member.add_roles(role, reason=reason)
 
 
+async def _grant_inventory(db, guild_id: int, user_id: int, payload: dict,
+                          metadata: dict | None = None) -> None:
+    from utils.inventory import give_item
+    item_type = _INVENTORY_TYPE[payload["type"]]
+    await give_item(
+        guild_id, user_id, payload["name"],
+        quantity=int(payload["quantity"]),
+        item_type=item_type,
+        metadata=metadata if metadata is not None else payload.get("metadata"),
+        source="level_claim", db=db)
+
+
+async def _ensure_temp_role_units(claim_id: int, guild_id: int, user_id: int,
+                                  role_id: int, quantity: int,
+                                  duration_hours: int) -> str:
+    """Write exactly `quantity` expiry rows for this claim. A retry inserts none."""
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "SELECT unit_index, expires_at FROM temp_roles "
+                "WHERE claim_id=? ORDER BY unit_index",
+                (claim_id,))
+            existing = await cursor.fetchall()
+            have = {row[0] for row in existing}
+            if existing and existing[0][1]:
+                expires_at = existing[0][1]
+            else:
+                expires_at = (
+                    _now() + timedelta(hours=int(duration_hours))
+                ).isoformat()
+            for index in range(int(quantity)):
+                if index in have:
+                    continue
+                await db.execute("""
+                    INSERT OR IGNORE INTO temp_roles
+                        (guild_id, user_id, role_id, expires_at, source,
+                         claim_id, unit_index)
+                    VALUES (?, ?, ?, ?, 'level_claim', ?, ?)
+                """, (guild_id, user_id, int(role_id), expires_at,
+                      claim_id, index))
+            await db.commit()
+            return expires_at
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+
+
 async def claim_available(guild_id: int, user_id: int, *,
                           member=None, bot=None,
                           claim_ids: list[int] | None = None) -> dict:
@@ -332,8 +433,10 @@ async def claim_available(guild_id: int, user_id: int, *,
         "failed": [],
         "delivered_currency": 0,
         "delivered_roles": 0,
+        "delivered_shop": 0,
     }
     roles = []
+    temp_roles = []
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
@@ -344,23 +447,34 @@ async def claim_available(guild_id: int, user_id: int, *,
             owned = await _owned_rows(db, token)
             result["owned"] = len(owned)
             for row in owned:
-                if row["track"] != TRACK_CURRENCY:
+                if row["track"] == TRACK_ROLE:
                     roles.append(row)
+                    continue
+                if row["track"] == TRACK_SHOP and row["payload"].get("type") == "temp_role":
+                    temp_roles.append(row)
                     continue
                 await db.execute(f"SAVEPOINT claim_{row['id']}")
                 try:
-                    from utils.economy_safe import safe_credit
-                    payload = row["payload"]
-                    await safe_credit(
-                        guild_id, user_id, int(payload["amount"]),
-                        currency=payload["currency"],
-                        reason=f"Level {row['reward_level']} reward",
-                        source="level_claim", db=db)
+                    if row["track"] == TRACK_CURRENCY:
+                        from utils.economy_safe import safe_credit
+                        payload = row["payload"]
+                        await safe_credit(
+                            guild_id, user_id, int(payload["amount"]),
+                            currency=payload["currency"],
+                            reason=f"Level {row['reward_level']} reward",
+                            source="level_claim", db=db)
+                    elif row["track"] == TRACK_SHOP:
+                        await _grant_inventory(db, guild_id, user_id, row["payload"])
+                    else:
+                        raise RuntimeError(f"unknown claim track {row['track']}")
                     if not await _mark(db, row["id"], token, "fulfilled"):
                         raise RuntimeError("lost claim ownership before fulfillment")
                     await db.execute(f"RELEASE SAVEPOINT claim_{row['id']}")
                     result["fulfilled"].append(row["id"])
-                    result["delivered_currency"] += 1
+                    if row["track"] == TRACK_CURRENCY:
+                        result["delivered_currency"] += 1
+                    else:
+                        result["delivered_shop"] += 1
                 except Exception as e:
                     await db.execute(
                         f"ROLLBACK TO SAVEPOINT claim_{row['id']}")
@@ -395,6 +509,54 @@ async def claim_available(guild_id: int, user_id: int, *,
                 if await _mark(db, row["id"], token, "fulfilled"):
                     result["fulfilled"].append(row["id"])
                     result["delivered_roles"] += 1
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+    for row in temp_roles:
+        payload = row["payload"]
+        try:
+            if member is None:
+                raise RuntimeError("Member not available for role delivery")
+            await deliver_role(
+                member, int(payload["role_id"]),
+                f"Level {row['reward_level']} reward")
+            expires_at = await _ensure_temp_role_units(
+                row["id"], guild_id, user_id, int(payload["role_id"]),
+                int(payload["quantity"]), int(payload["duration_hours"]))
+        except Exception as e:
+            async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    if await _mark(db, row["id"], token, "failed", str(e)):
+                        result["failed"].append(row["id"])
+                    await db.commit()
+                except Exception:
+                    await db.execute("ROLLBACK")
+                    raise
+            continue
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute(f"SAVEPOINT claim_{row['id']}")
+                try:
+                    await _grant_inventory(
+                        db, guild_id, user_id, payload,
+                        metadata={
+                            "role_id": int(payload["role_id"]),
+                            "expires_at": expires_at,
+                            "duration_hours": int(payload["duration_hours"]),
+                        })
+                    if not await _mark(db, row["id"], token, "fulfilled"):
+                        raise RuntimeError("lost claim ownership before fulfillment")
+                    await db.execute(f"RELEASE SAVEPOINT claim_{row['id']}")
+                    result["fulfilled"].append(row["id"])
+                    result["delivered_shop"] += 1
+                except Exception as e:
+                    await db.execute(f"ROLLBACK TO SAVEPOINT claim_{row['id']}")
+                    if await _mark(db, row["id"], token, "failed", str(e)):
+                        result["failed"].append(row["id"])
                 await db.commit()
             except Exception:
                 await db.execute("ROLLBACK")

@@ -136,9 +136,6 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
         embed.set_footer(
             text=f"Claim All also collects {other_ready} earlier reward(s).")
     defs = await current_level_definitions(guild.id, level)
-    if not defs:
-        embed.description = "No rewards are configured for your current level."
-        return embed
     currency = await get_currency_config(guild.id)
     lines = []
     for item in defs:
@@ -150,12 +147,29 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             label = currency["coins" if code == "balance" else "diamonds"]["name"]
             amount = claim["payload"]["amount"] if claim else item["payload"]["amount"]
             text = f"{_compact_qty(amount)} {label}"
+        elif item["track"] == "shop":
+            payload = claim["payload"] if claim else item["payload"]
+            text = f"{_compact_qty(payload['quantity'])} {payload['name']}"
         else:
             role = guild.get_role(int(item["payload"]["role_id"]))
             text = role.mention if role else f"role {item['payload']['role_id']}"
         if claim and claim.get("last_error") and status == "failed":
             text += f" — failed, can retry"
         lines.append(f"{text} · {status}")
+    # A deleted Shop product leaves the frozen claim, not a live definition.
+    shown = {(item["reward_level"], item["track"], item["reward_ref"]) for item in defs}
+    for claim in claims:
+        key = (claim["reward_level"], claim["track"], claim["reward_ref"])
+        if claim["reward_level"] != level or claim["track"] != "shop" or key in shown:
+            continue
+        payload = claim["payload"]
+        text = f"{_compact_qty(payload['quantity'])} {payload['name']}"
+        if claim.get("last_error") and claim["status"] == "failed":
+            text += " — failed, can retry"
+        lines.append(f"{text} · {claim['status']}")
+    if not lines:
+        embed.description = "No rewards are configured for your current level."
+        return embed
     embed.add_field(name="This level", value="\n".join(lines)[:1024], inline=False)
     return embed
 
