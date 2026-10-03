@@ -247,6 +247,8 @@ class Leveling(commands.Cog):
                                       flags: dict):
         try:
             config = await get_leveling_config(guild.id)
+            if not config.get("enabled", 1):
+                return
             if not config.get("voice_xp_enabled", 1):
                 return
 

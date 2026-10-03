@@ -478,7 +478,7 @@ async def record_activities(bot, guild_id: int, user_id: int,
     # prestige multiplier lookups in reward_engine take.
     for d in newly_completed:
         try:
-            from utils.reward_engine import give_reward
+            from utils.reward_engine import give_reward, xp_grant_skipped
             result = await give_reward(
                 bot, guild_id, user_id, d["reward_type"],
                 amount=d["reward_value"] if d["reward_type"] in ("coins", "diamonds", "xp") else None,
@@ -488,7 +488,7 @@ async def record_activities(bot, guild_id: int, user_id: int,
                 reason=f"Mission complete: {d['name']}",
                 source="mission",
             )
-            if not result.get("success"):
+            if not result.get("success") and not xp_grant_skipped(result):
                 print(f"[MISSIONS] Reward grant failed for mission "
                       f"{d['id']} ({d['name']}) guild={guild_id} "
                       f"user={user_id}: {result.get('error')}")

@@ -7,7 +7,7 @@ import traceback
 import discord
 from utils import minigame_store as store
 from utils.formatters import snapshot_user
-from utils.reward_engine import give_reward
+from utils.reward_engine import give_reward, xp_grant_skipped
 from utils.emoji import CHECK_EMOJI
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -413,7 +413,12 @@ class MinigameEngine:
                     reason="Minigame reward (%s)"
                            % (self.snapshot.get("name") or "?"),
                     source="minigame")
-                if not res or not res.get("success"):
+                if xp_grant_skipped(res):
+                    # XP was not written. status stays "won": finish_run
+                    # copies that status into winner_id, which /rank win
+                    # counts read. A skipped XP grant is not a loss.
+                    pass
+                elif not res or not res.get("success"):
                     entry["status"] = "failed"
                     entry["error"] = str((res or {}).get("error")
                                          or "grant failed")[:300]

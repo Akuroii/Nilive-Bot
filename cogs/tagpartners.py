@@ -17,7 +17,7 @@ from discord.ext import commands
 import aiosqlite
 
 from database import DB_PATH
-from utils.reward_engine import give_reward, RewardError
+from utils.reward_engine import give_reward, RewardError, xp_grant_skipped
 
 
 class TagPartners(commands.Cog):
@@ -72,6 +72,10 @@ class TagPartners(commands.Cog):
                   f"partner={partner_guild_id}: {e}")
             return
 
+        if xp_grant_skipped(result):
+            # XP was not given, so the one-time log must stay empty and a
+            # later join can still grant once Leveling is back on.
+            return
         if not result.get("success"):
             print(f"[TAGPARTNERS] reward failed guild={member.guild.id} "
                   f"user={member.id}: {result.get('error')}")

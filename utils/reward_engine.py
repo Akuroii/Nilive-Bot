@@ -5,13 +5,30 @@ from database import DB_PATH
 from utils.economy_safe import safe_credit, safe_deduct, InsufficientBalance
 from utils.permissions import check_bot_role_position
 from utils.xp_calculator import (
-    xp_progress, check_and_award_level_rewards,
+    xp_progress, get_leveling_config, check_and_award_level_rewards,
     check_and_award_level_currency_rewards,
 )
 
 
 class RewardError(Exception):
     pass
+
+
+LEVELING_DISABLED_REASON = "leveling_disabled"
+
+
+def xp_grant_skipped(result) -> bool:
+    """True when XP was withheld because leveling_config.enabled is off.
+
+    This is not a delivery failure. Callers must not log it as one, send a
+    failure DM, or record the XP reward as given.
+    """
+    return (
+        isinstance(result, dict)
+        and result.get("success") is False
+        and result.get("skipped") is True
+        and result.get("reason") == LEVELING_DISABLED_REASON
+    )
 
 
 async def _log_xp_ledger(guild_id: int, user_id: int, amount: int,
@@ -92,6 +109,15 @@ async def give_reward(bot: discord.Client,
         if amount is None:
             raise RewardError("xp reward requires 'amount'")
         amount = int(amount)
+        # Missing leveling_config stays enabled (get_leveling_config default).
+        # OFF writes nothing and does not run level-up rewards.
+        config = await get_leveling_config(guild_id)
+        if not config.get("enabled", 1):
+            return {
+                "success": False,
+                "skipped": True,
+                "reason": LEVELING_DISABLED_REASON,
+            }
 
         # CONCURRENCY FIX (dark-fixes pass): this used to be a plain
         # read (SELECT xp, level) followed by a separate write
