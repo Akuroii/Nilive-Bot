@@ -125,9 +125,8 @@ FONT_PATHS = {
     "cinzel": _asset_path(os.path.join("fonts", "Cinzel-Variable.ttf"), "Cinzel-Variable.ttf"),
     "zilla_bold": _asset_path(os.path.join("fonts", "ZillaSlab-Bold.ttf"), "ZillaSlab-Bold.ttf"),
     # XP numerals ONLY (XP PROGRESS value / "of needed" / TOTAL XP value).
-    # Not used anywhere else on the card.
-    "fortuner": _asset_path(os.path.join("fonts", "FortunerHeavyPersonalUse.otf"),
-                            "FortunerHeavyPersonalUse.otf"),
+    # Supplied Varsity, used unmodified; not used anywhere else on the card.
+    "varsity": _asset_path(os.path.join("fonts", "varsity_regular.ttf"), "varsity_regular.ttf"),
     "outfit": _asset_path(os.path.join("fonts", "Outfit-Variable.ttf"), "Outfit-Variable.ttf"),
     "amiri_regular": _asset_path(os.path.join("fonts", "Amiri-Regular.ttf"), "Amiri-Regular.ttf"),
     "amiri_bold": _asset_path(os.path.join("fonts", "Amiri-Bold.ttf"), "Amiri-Bold.ttf"),
@@ -177,7 +176,7 @@ COLORS = {
     "label_purple": (140, 100, 180),    # INVENTORY / TOTAL XP headers
     # "XP PROGRESS" / "TOTAL XP" labels only. Was #483A65 -- too dark on the
     # panel. Lighter lavender, still clearly below the XP numerals.
-    "xp_panel_label": (156, 140, 198),
+    "xp_panel_label": (178, 162, 220),
     "xp_panel_label_glow": (196, 140, 236),  # very subtle pink-lavender tint
     # TOTAL XP number only. Was #7A3D97; lifted so the heavy stencil face
     # holds together at its smaller size, still well under the hero value.
@@ -286,15 +285,16 @@ def zilla_bold(size):
     return _font("zilla_bold", size)
 
 
-def fortuner(size):
-    """Heavy display face used only for the XP numerals. Falls back to the
-    previous Zilla Slab Bold if the file is missing so a bad deploy can
-    never take /rank down. NOTE: Fortuner's cap height is ~0.64 em vs
-    Zilla's ~0.69, so equal visual height needs a slightly larger size."""
+def varsity(size):
+    """Supplied Varsity (collegiate small-caps), used only for the XP
+    numerals. Falls back to Zilla Slab Bold if the file is missing so a bad
+    deploy can never take /rank down. Cap height is 0.70 em (digits and
+    capitals share it), so the sizes used for the XP numerals are chosen to
+    keep the cap heights the XP hierarchy already had."""
     try:
-        return ImageFont.truetype(FONT_PATHS["fortuner"], size)
+        return ImageFont.truetype(FONT_PATHS["varsity"], size)
     except OSError:
-        log.warning("rank_card_renderer: Fortuner font missing, using Zilla")
+        log.warning("rank_card_renderer: Varsity font missing, using Zilla")
         return zilla_bold(size)
 
 
@@ -729,7 +729,7 @@ def _draw_numeral_ss(img, x, baseline_y, text, font_fn, size, fill, ss=4):
 
 def _ss_words_width(draw, words, font, gap):
     """Total width of `words` set with an explicit `gap` between them
-    (Fortuner's own word space is far too wide for a compact readout)."""
+    (Varsity's own word space is too wide for a compact readout)."""
     return sum(draw.textbbox((0, 0), w, font=font)[2] for w in words) \
         + gap * (len(words) - 1)
 
@@ -1154,7 +1154,10 @@ def _line_icon_diamond(size):
 # the files are static across renders.
 # ─────────────────────────────────────────────────────────────────────────
 
-_STAT_ICON_DISPLAY_SIZE = 40
+# Display box for ALL five stat icons (the three supplied assets and the two
+# currency icons are each loaded straight from source at this size, so there
+# is no bitmap up-scaling). 47 = the previous 40 + 17.5%.
+_STAT_ICON_DISPLAY_SIZE = 47
 _STAT_ICON_MARGIN = 0.14  # fraction of the trimmed content's longer side
 
 
@@ -1545,6 +1548,27 @@ def _draw_level_badge_ring(img, cx, cy, r, ss=4):
     img.alpha_composite(small, (round(cx - small.width / 2), round(cy - small.height / 2)))
 
 
+def _aa_rounded_rect(img, box, radius, fill=None, outline=None, width=1, ss=8):
+    """Antialiased drop-in for ImageDraw.rounded_rectangle on the final
+    canvas (same inclusive-box geometry, radius and outline width). The
+    plain call is aliased, so a pill's curved ends stair-step. Drawn on a
+    local supersampled layer and reduced with an exact-coverage BOX filter
+    (no ringing, no blur of the interior). Colours are used at full opacity:
+    the card is flattened with convert("RGB"), which discards alpha, so the
+    pixels that have always been output are exactly these RGB values --
+    this only adds smooth coverage at the edge."""
+    x0, y0, x1, y1 = [int(round(v)) for v in box]
+    pad = 2
+    w, h = (x1 - x0 + 1), (y1 - y0 + 1)
+    opaque = lambda c: None if c is None else (c[0], c[1], c[2], 255)
+    layer = Image.new("RGBA", ((w + 2 * pad) * ss, (h + 2 * pad) * ss), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rounded_rectangle(
+        (pad * ss, pad * ss, (w + pad) * ss - 1, (h + pad) * ss - 1),
+        radius=radius * ss, fill=opaque(fill), outline=opaque(outline), width=width * ss)
+    layer = layer.resize((w + 2 * pad, h + 2 * pad), Image.BOX)
+    img.alpha_composite(layer, (x0 - pad, y0 - pad))
+
+
 def _draw_name_block(img, draw, data, icons16):
     x, y, w, h = LAYOUT["name"]
     username = data.get("username") or f"User {data['user_id']}"
@@ -1572,16 +1596,16 @@ def _draw_name_block(img, draw, data, icons16):
     if title:
         px, py, pw, ph = LAYOUT["title_pill"]
         # outer pill: dark fill + faint border; inner pill hugs the content
-        draw.rounded_rectangle((px, py, px + pw, py + ph), radius=ph // 2,
-                               fill=(10, 5, 26, 230), outline=(90, 60, 140, 70), width=1)
+        _aa_rounded_rect(img, (px, py, px + pw, py + ph), ph // 2,
+                         fill=(10, 5, 26, 230), outline=(90, 60, 140, 70), width=1)
         label = title["item_name"].upper()
         tf = outfit(17, "SemiBold")
         tl_w = _text_size(draw, label, tf, tracking=3)[0]
         icon_w = 16
         inner_x0 = px + 15
         inner_x1 = min(px + pw - 6, inner_x0 + 10 + icon_w + 6 + tl_w + 12)
-        draw.rounded_rectangle((inner_x0, py + 7, inner_x1, py + ph - 7),
-                               radius=(ph - 14) // 2, fill=(26, 20, 40, 210))
+        _aa_rounded_rect(img, (inner_x0, py + 7, inner_x1, py + ph - 7),
+                         (ph - 14) // 2, fill=(26, 20, 40, 210))
         if icons16.get("crown") is not None:
             cr = icons16["crown"].resize((icon_w, icon_w))
             img.paste(cr, (int(inner_x0 + 10), int(py + ph / 2 - icon_w / 2)), cr)
@@ -1778,31 +1802,26 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
     div_x = x + LAYOUT["xp_divider_x"]
     cur, needed = data["xp_current"], max(data["xp_needed"], 1)
 
-    # Hierarchy: current XP is the hero (Fortuner Heavy, compact); the
-    # "/ needed XP" readout is the same face but much smaller and muted,
-    # on the hero's baseline. Display formatting only: cur / needed / frac
-    # below are untouched.
+    # Hierarchy (unchanged): current XP is the hero; "/ needed XP" is the
+    # same face but much smaller and muted, on the hero's baseline. One
+    # family (Varsity) for the whole numeric treatment. Sizes keep the cap
+    # heights of the previous treatment (hero ~29px, suffix ~15px); only the
+    # face changed. Display formatting only: cur / needed / frac below are
+    # untouched.
     cur_txt = _format_compact_progress(cur)
     suffix_words = ["/", _format_compact_progress(needed), "XP"]
-    # Suffix face switch: True = Fortuner (cohesive with the hero, busier at
-    # small size); False = Outfit Medium (cleaner, quieter). Layout adapts.
-    XP_SUFFIX_FORTUNER = True
-    if XP_SUFFIX_FORTUNER:
-        suffix_fn, SUF_SIZE, SUF_GAP = fortuner, 24, 7
-    else:
-        suffix_fn, SUF_SIZE, SUF_GAP = (lambda sz: outfit(sz, "Medium")), 19, 6
-    HERO_GAP = 14
-    suffix_font = suffix_fn(SUF_SIZE)
+    HERO_SIZE, SUF_SIZE, SUF_GAP, HERO_GAP = 41, 22, 7, 14
+    suffix_font = varsity(SUF_SIZE)
     suffix_w = _ss_words_width(draw, suffix_words, suffix_font, SUF_GAP)
     available = (div_x - 10) - (x + 14) - HERO_GAP - suffix_w
-    vf, cur_w = _fit_numeral_font(draw, cur_txt, fortuner, max(available, 40), 45,
+    vf, cur_w = _fit_numeral_font(draw, cur_txt, varsity, max(available, 40), HERO_SIZE,
                                   min_size=24)
     _draw_glow_layer(img, lambda d: d.text((x + 14, hero_baseline), cur_txt, font=vf,
                                             fill=(150, 70, 210, 140), anchor="ls"),
                      blur=3)
-    hero_bb = _draw_numeral_ss(img, x + 14, hero_baseline, cur_txt, fortuner, vf.size,
+    hero_bb = _draw_numeral_ss(img, x + 14, hero_baseline, cur_txt, varsity, vf.size,
                                COLORS["xp_value"])
-    _draw_ss_words(img, hero_bb[2] + HERO_GAP, hero_baseline, suffix_words, suffix_fn,
+    _draw_ss_words(img, hero_bb[2] + HERO_GAP, hero_baseline, suffix_words, varsity,
                    SUF_SIZE, COLORS["xp_suffix"], SUF_GAP)
 
     draw.line((div_x, y + 14, div_x, y + h - 14), fill=(*COLORS["accent"], 30), width=1)
@@ -1846,9 +1865,9 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
     # the label/icon beside it), without outweighing the panel the way a
     # 38-42px value did.
     total_baseline_y = hero_baseline
-    tf2, _tw = _fit_numeral_font(draw, total_txt, fortuner, max(total_available, 40), 36,
+    tf2, _tw = _fit_numeral_font(draw, total_txt, varsity, max(total_available, 40), 33,
                                  min_size=18)
-    total_bbox = _draw_numeral_ss(img, total_x, total_baseline_y, total_txt, fortuner,
+    total_bbox = _draw_numeral_ss(img, total_x, total_baseline_y, total_txt, varsity,
                                   tf2.size, COLORS["xp_total_value"])
 
     # Potion icon: the supplied artwork (potion_im, pre-trimmed to its
@@ -2136,6 +2155,29 @@ def _draw_xp_bar(img, bar_x, bar_y, bar_w, bar_h, frac):
     img.alpha_composite(final, (int(bar_x), int(bar_y)))
 
 
+def _optical_icon_offset(ic, max_shift=3):
+    """(dx, dy) in px that moves an icon's OPTICAL centre onto the centre of
+    its display box. Optical centre = midpoint of the opaque bounding-box
+    centre and the alpha-weighted centroid, so wide-but-top-heavy or
+    narrow-and-tall glyphs (crown, microphone, custom emoji) sit visually
+    centred rather than merely bbox-centred. Clamped so an odd image can
+    never wander far from its slot."""
+    a = ic.getchannel("A")
+    w, h = ic.size
+    bb = a.point(lambda v: 255 if v > 24 else 0).getbbox()
+    cols = list(a.resize((w, 1), Image.BOX).getdata())
+    rows = list(a.resize((1, h), Image.BOX).getdata())
+    tx, ty = sum(cols), sum(rows)
+    if not bb or tx <= 0 or ty <= 0:
+        return 0, 0
+    cx = sum((i + 0.5) * v for i, v in enumerate(cols)) / tx
+    cy = sum((j + 0.5) * v for j, v in enumerate(rows)) / ty
+    ox = ((bb[0] + bb[2]) / 2 + cx) / 2
+    oy = ((bb[1] + bb[3]) / 2 + cy) / 2
+    clamp = lambda v: max(-max_shift, min(max_shift, int(round(v))))
+    return clamp(w / 2 - ox), clamp(h / 2 - oy)
+
+
 def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
     coins_cfg = data["currency"]["coins"]
     diamonds_cfg = data["currency"]["diamonds"]
@@ -2180,6 +2222,8 @@ def _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, icons30):
             # box grows outward from that same center rather than shifting
             # the row down.
             icon_x, icon_y = int(x + w / 2 - isz / 2), int(y + 40 - isz / 2)
+            odx, ody = _optical_icon_offset(ic)
+            icon_x, icon_y = icon_x + odx, icon_y + ody
             # reference icons carry a soft bloom
             gl = Image.new("RGBA", img.size, (0, 0, 0, 0))
             gl.paste(ic, (icon_x, icon_y), ic)
