@@ -64,6 +64,10 @@ def shop_input(data):
         raise ShopValidationError("A Shop item object is required.")
     result = dict(data)
     result["name"] = text(data.get("name"), "Name", required=True)
+    option_parent = data.get("option_of_id")
+    result["option_of_id"] = (
+        None if option_parent in (None, "")
+        else integer(option_parent, "Option parent ID", minimum=1))
     kind = text(data.get("type"), "Item type", required=True)
     if kind not in {"role", "temp_role", "xp_boost", "prestige", "potion", "title", "custom"}:
         raise ShopValidationError("Invalid Shop item type.")

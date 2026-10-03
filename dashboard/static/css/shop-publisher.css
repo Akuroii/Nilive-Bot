@@ -1,0 +1,200 @@
+/* ═══════════════════════════════════════════════════════════════
+   Shop Publisher (Phase 1) — sp-* styles only.
+
+   Namespace discipline (same rule as the other builders): `eb-*` belongs to
+   the frozen v1 composer (embed-composer.css, loaded globally by base.html),
+   `mb-*` to the minigame builder, `mb2-*` to the Message Builder v2. Nothing
+   in this file restates any of their rules — the preview mount reuses the
+   existing `.eb-preview-box` class for the Discord-style frame and the frozen
+   embed/preview.js renderer emits the eb-* preview markup it always has.
+
+   Loaded from inside the page's content block (shop-publisher.html), so no
+   other page pays for it.
+   ═══════════════════════════════════════════════════════════════ */
+
+.sp-shell { display: flex; flex-direction: column; gap: 16px; }
+
+.sp-intro { color: var(--text2); font-size: 13px; margin: 0 0 16px; }
+
+.sp-picker-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+@media (max-width: 800px) {
+    .sp-picker-row { grid-template-columns: 1fr; }
+}
+.sp-picker { min-width: 0; }
+
+.sp-status { margin-top: 12px; font-size: 13px; color: var(--text2); min-height: 18px; }
+.sp-status.sp-status-error { color: #e5534b; }
+.sp-status.sp-status-ok { color: var(--text2); }
+
+/* ── Preview + purchase action ─────────────────────────────────── */
+.sp-preview-frame { display: flex; flex-direction: column; gap: 12px; }
+.sp-preview-mount { min-height: 60px; }
+
+.sp-purchase {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+}
+.sp-purchase-label { font-size: 11px; font-weight: 600; letter-spacing: .04em;
+                     text-transform: uppercase; color: var(--text3); }
+.sp-purchase-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* The published button, styled as the Discord button it will be. */
+.sp-buy-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: #248046;
+    color: #fff;
+    border: none;
+    border-radius: 3px;
+    padding: 8px 16px;
+    font-size: 14px;
+    font-weight: 500;
+    font-family: inherit;
+    line-height: 1;
+    cursor: default;
+}
+.sp-buy-button .sp-buy-emoji { font-size: 16px; line-height: 1; }
+/* A free entry is published with the exact 𝐅𝐫𝐞𝐞 label (locked spelling). */
+.sp-buy-button.sp-buy-free { background: #4e5058; }
+
+/* The published Select Menu, styled as the Discord select it will be. */
+.sp-select-mock {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 240px;
+    background: var(--bg3, #1e1f22);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 6px 8px;
+}
+.sp-select-placeholder {
+    color: var(--text2);
+    font-size: 13px;
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--border);
+}
+.sp-select-option {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 4px 6px;
+    border-radius: 3px;
+    font-size: 13px;
+}
+.sp-select-option:hover { background: var(--bg4); }
+.sp-select-desc { color: var(--text2); font-size: 12px; }
+
+.sp-purchase-meta { font-size: 12px; color: var(--text2); }
+.sp-purchase-meta code {
+    background: var(--bg4);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 11px;
+}
+
+/* ── Warnings ──────────────────────────────────────────────────── */
+.sp-warnings { display: flex; flex-direction: column; gap: 8px; }
+.sp-warning {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    border-left: 3px solid #d29922;
+    background: var(--bg3);
+    border-radius: 0 6px 6px 0;
+    padding: 8px 12px;
+    font-size: 13px;
+}
+.sp-warning[data-code="product_disabled"],
+.sp-warning[data-code="product_out_of_stock"] { border-left-color: #e5534b; }
+.sp-warning[data-code="validation"] { border-left-color: #e5534b; }
+.sp-warning[data-code="unknown_token"] { border-left-color: #d29922; }
+.sp-warning[data-code="empty_value"] { border-left-color: var(--accent); }
+
+.sp-warning-code {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--text2);
+    background: var(--bg4);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 6px;
+}
+.sp-warning-path {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--text3);
+    flex-shrink: 0;
+}
+.sp-warning-message { color: var(--text); min-width: 0; }
+.sp-ok { color: var(--text2); font-size: 13px; }
+
+/* ── Resolved tokens + catalog tables ──────────────────────────── */
+.sp-tokens table, .sp-token-catalog table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+.sp-tokens th, .sp-tokens td,
+.sp-token-catalog th, .sp-token-catalog td {
+    text-align: left;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    word-break: break-word;
+}
+.sp-tokens th, .sp-token-catalog th {
+    color: var(--text2);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+.sp-token-name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.sp-token-empty { color: var(--text3); font-style: italic; }
+.sp-token-unknown .sp-token-name { color: #d29922; }
+.sp-muted { color: var(--text3); font-size: 13px; }
+
+/* ── Category integration (Slice 2) ───────────────────────────── */
+.sp-badge {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text2);
+    font-size: 11px;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+}
+
+/* ── Design Draft Persistence ─────────────────────────────────── */
+.sp-design-row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+}
+.sp-design-actions { margin: 4px 0 10px; }
+.sp-dirty {
+    color: #d29922;
+    font-size: 12px;
+    align-self: center;
+}

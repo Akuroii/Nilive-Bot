@@ -89,6 +89,14 @@ PAGE_PERMISSIONS = {
     # dashboard/api/embedbuilder.py.
     "embedbuilder":       LEVEL_OWNER,
 
+    # Shop Publisher (Phase 1 preview / Phase 2 publish): reads
+    # embed_templates + shop_items and previews the resolved product
+    # presentation; Phase 2 sends live Discord messages from the same
+    # surface. Gated at LEVEL_OWNER like the Embed Builder it consumes
+    # and the send path it will grow, so it can never widen access to
+    # either surface.
+    "shoppublisher":      LEVEL_OWNER,
+
     "reactionroles":      LEVEL_ADMIN,
     "triggers":           LEVEL_ADMIN,
     "customcommands":     LEVEL_ADMIN,
