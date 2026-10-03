@@ -73,9 +73,11 @@ MAILBOX_PNG_PATH = _asset_path("mailbox.png", "mailbox_trimmed.png")
 MAILBOX_FRAME_SVG_PATH = _asset_path("mailbox_frame.svg", "Mailbox_frame.svg")
 NERO_ICON_PNG_PATH = _asset_path("nero_icon.png", "Nero_icon_3d.png")
 MAILBOX_WORDMARK_PNG_PATH = _asset_path("mailbox_wordmark.png", "mailbox_wordmark.png")
-# Footer sparkle emoji (flanks the Arabic tagline). Supplied artwork, 3200x3200
-# RGBA; shipped byte-identical (never re-encoded) and only ever downsampled,
-# from the full original resolution, at render time.
+
+# Supplied sparkle artwork (source of truth) flanking the footer Arabic line.
+# Used as-is: only trimmed to its own alpha bounding box and scaled down --
+# never redrawn, recoloured or glowed. Footer position/size were fitted to the
+# supplied reference crop (see _get_footer_sparkle / _draw_footer).
 SPARKLE_EMOJI_PNG_PATH = _asset_path("sparkle_emoji.png", "sparkle_emoji.png")
 
 # Supplied avatar-ring artwork (source of truth -- not redrawn/regenerated).
@@ -2626,57 +2628,40 @@ def _get_mailbox_tag():
     return _MAILBOX_TAG_CACHE or None
 
 
-SPARKLE_EMOJI = {
-    # Displayed tip-to-tip size of the emoji's main star (card px): the size
-    # of the reference. The emoji's glow, orbit arcs and mini-sparkles extend
-    # beyond it inside the sprite.
-    "star_px": 32.0,
-    # Sprite canvas, ODD on purpose: the star's crossing point then lands on a
-    # pixel CENTRE, exactly where the old vector sparkle's anchor sat.
-    "sprite_px": 39,
-    # Optical nudges from the old sparkle's anchor point (card px).
-    "dx": 0.0,
-    "dy": 0.0,
-}
-# Measured on the supplied art (alpha > 128): the star's crossing point and
-# its mean tip-to-tip size, in source px. The bounding-box centre is NOT used
-# (the vertical tips are longer, so it sits ~23 source px off the true centre).
-_SPARKLE_STAR_CENTER = (1599.8, 1589.5)
-_SPARKLE_STAR_SIZE = 2204.0
-_SPARKLE_CACHE = None   # None = not built; False = unavailable; else sprite
+# Footer sparkle: visible-art size in card px, fitted to the reference crop
+# (art content box ~32x34 px). Built once from the supplied PNG and cached.
+FOOTER_SPARKLE_SIZE = (32, 34)
+_FOOTER_SPARKLE_CACHE = None   # None = not built yet; False = unavailable; else RGBA sprite
 
 
-def _build_sparkle_emoji():
-    """Final-size sprite from the full-resolution emoji: two exact
-    area-average (BOX) reductions, source -> 4x working -> final, with the
-    star's crossing point mapped to the centre of the (odd-sized) sprite's
-    middle pixel. On this art a LANCZOS
-    final overshot edges by ~20/255 (~5% over-sharpened) versus an
-    area-coverage reference; BOX matches that reference to ~3/255, so edges
-    stay crisp without ringing or blur, alpha/colour are preserved (Pillow
-    premultiplies RGBA resizes) and nothing is ever JPEG/re-encoded."""
-    cfg = SPARKLE_EMOJI
-    try:
-        src = Image.open(SPARKLE_EMOJI_PNG_PATH).convert("RGBA")
-    except Exception as e:
-        log.warning("rank_card: sparkle emoji unavailable (%s) -- using the "
-                    "vector sparkle.", e)
-        return None
-    n = int(cfg["sprite_px"])
-    k = cfg["star_px"] / _SPARKLE_STAR_SIZE            # card px per source px
-    half = (n / 2.0) / k
-    cx, cy = _SPARKLE_STAR_CENTER
-    box = (cx - half, cy - half, cx + half, cy + half)
-    work = src.resize((n * 4, n * 4), Image.BOX, box=box)
-    return work.resize((n, n), Image.BOX)
+def _get_footer_sparkle():
+    """Final-size footer sparkle from the supplied high-resolution artwork.
 
-
-def _get_sparkle_emoji():
-    global _SPARKLE_CACHE
-    if _SPARKLE_CACHE is None:
-        built = _build_sparkle_emoji()
-        _SPARKLE_CACHE = built if built is not None else False
-    return _SPARKLE_CACHE or None
+    Same two-step exact area-average (BOX) reduction the prestige pips use:
+    trimmed art -> 2x working render -> final size. Pillow premultiplies alpha
+    for RGBA resizes, so the soft orbit rings keep their colour. Cached."""
+    global _FOOTER_SPARKLE_CACHE
+    if _FOOTER_SPARKLE_CACHE is None:
+        sprite = False
+        try:
+            if os.path.isfile(SPARKLE_EMOJI_PNG_PATH):
+                src = Image.open(SPARKLE_EMOJI_PNG_PATH)
+                src.load()
+                src = src.convert("RGBA")
+                box = src.getchannel("A").getbbox()
+                if box:
+                    src = src.crop(box)
+                    fw, fh = FOOTER_SPARKLE_SIZE
+                    work = src.resize((fw * 2, fh * 2), Image.BOX)
+                    sprite = work.resize((fw, fh), Image.BOX)
+            else:
+                log.warning("rank_card: sparkle asset not found at %s", SPARKLE_EMOJI_PNG_PATH)
+        except Exception as e:
+            log.warning("rank_card: failed to load sparkle asset %s: %s",
+                        SPARKLE_EMOJI_PNG_PATH, e)
+            sprite = False
+        _FOOTER_SPARKLE_CACHE = sprite
+    return _FOOTER_SPARKLE_CACHE or None
 
 
 def _draw_footer(img, draw):
@@ -2720,13 +2705,14 @@ def _draw_footer(img, draw):
     fglow = fglow.filter(ImageFilter.GaussianBlur(4))
     img.alpha_composite(fglow)
     draw.text((cx - tw / 2, fy + 6), text, font=f, fill=(170, 150, 210))
-    # The supplied sparkle emoji replaces the two vector sparkles, at the same
-    # anchor points; the vector sparkle is the fallback if the asset is missing.
-    sparkle = _get_sparkle_emoji()
-    for sx in (cx - tw / 2 - 32, cx + tw / 2 + 32):
-        if sparkle is not None:
-            half_n = sparkle.width // 2      # index of the centre pixel
-            img.alpha_composite(sparkle, (int(round(sx + SPARKLE_EMOJI["dx"])) - half_n,
-                                          int(round(fy + 22 + SPARKLE_EMOJI["dy"])) - half_n))
-        else:
-            _draw_sparkle_star(img, draw, sx, fy + 22, 12, (200, 170, 230))
+    # The supplied sparkle artwork flanks the line (reference crop). If the
+    # asset is missing/unreadable the previous drawn 4-point stars are used,
+    # so /rank never breaks.
+    sparkle = _get_footer_sparkle()
+    if sparkle is not None:
+        for sx in (cx - tw / 2 - 33, cx + tw / 2 + 33):
+            img.alpha_composite(sparkle, (round(sx - sparkle.width / 2),
+                                          round(fy + 22 - sparkle.height / 2)))
+    else:
+        _draw_sparkle_star(img, draw, cx - tw / 2 - 32, fy + 22, 12, (200, 170, 230))
+        _draw_sparkle_star(img, draw, cx + tw / 2 + 32, fy + 22, 12, (200, 170, 230))
