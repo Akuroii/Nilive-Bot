@@ -17,6 +17,8 @@ LEASE_SECONDS = 60
 TRACK_ROLE = "role"
 TRACK_CURRENCY = "currency"
 TRACK_SHOP = "shop"
+TRACK_BOOST = "boost"
+BOOST_REF = "xp_boost"
 BACKFILL_NAME = "legacy_fulfilled_no_payout"
 SHOP_REWARD_TYPES = ("custom", "title", "potion", "temp_role")
 _INVENTORY_TYPE = {
@@ -177,6 +179,19 @@ async def _definitions(db: aiosqlite.Connection, guild_id: int) -> dict:
             raw["metadata"] = build_metadata(
                 EFFECT_XP_BOOST, float(multiplier), int(duration_hours))
         identities[(int(level), TRACK_SHOP, str(int(item_id)))] = raw
+    cursor = await db.execute("""
+        SELECT level, multiplier, duration_hours
+        FROM leveling_boost_rewards WHERE guild_id=?
+    """, (guild_id,))
+    for level, multiplier, duration_hours in await cursor.fetchall():
+        if not multiplier or float(multiplier) <= 1:
+            continue
+        if not duration_hours or int(duration_hours) < 1:
+            continue
+        identities[(int(level), TRACK_BOOST, BOOST_REF)] = {
+            "multiplier": float(multiplier),
+            "duration_hours": int(duration_hours),
+        }
     return identities
 
 
@@ -198,6 +213,13 @@ def _payload(track: str, raw: dict, multipliers: dict | None) -> str:
         if raw.get("metadata"):
             body["metadata"] = raw["metadata"]
         return json.dumps(body)
+    if track == TRACK_BOOST:
+        # Frozen at entitlement creation. Claim delivery must not re-read
+        # leveling_boost_rewards.
+        return json.dumps({
+            "multiplier": float(raw["multiplier"]),
+            "duration_hours": int(raw["duration_hours"]),
+        })
     amount = int(raw["amount"])
     if multipliers is not None:
         amount = _freeze_amount(amount, raw["currency"], multipliers)
@@ -434,6 +456,7 @@ async def claim_available(guild_id: int, user_id: int, *,
         "delivered_currency": 0,
         "delivered_roles": 0,
         "delivered_shop": 0,
+        "delivered_boost": 0,
     }
     roles = []
     temp_roles = []
@@ -465,6 +488,13 @@ async def claim_available(guild_id: int, user_id: int, *,
                             source="level_claim", db=db)
                     elif row["track"] == TRACK_SHOP:
                         await _grant_inventory(db, guild_id, user_id, row["payload"])
+                    elif row["track"] == TRACK_BOOST:
+                        from utils.xp_calculator import grant_xp_boost
+                        payload = row["payload"]
+                        await grant_xp_boost(
+                            guild_id, user_id, float(payload["multiplier"]),
+                            int(payload["duration_hours"]),
+                            source=f"level_claim:{row['id']}", db=db)
                     else:
                         raise RuntimeError(f"unknown claim track {row['track']}")
                     if not await _mark(db, row["id"], token, "fulfilled"):
@@ -473,6 +503,8 @@ async def claim_available(guild_id: int, user_id: int, *,
                     result["fulfilled"].append(row["id"])
                     if row["track"] == TRACK_CURRENCY:
                         result["delivered_currency"] += 1
+                    elif row["track"] == TRACK_BOOST:
+                        result["delivered_boost"] += 1
                     else:
                         result["delivered_shop"] += 1
                 except Exception as e:

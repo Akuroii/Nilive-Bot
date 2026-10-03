@@ -150,20 +150,26 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
         elif item["track"] == "shop":
             payload = claim["payload"] if claim else item["payload"]
             text = f"{_compact_qty(payload['quantity'])} {payload['name']}"
+        elif item["track"] == "boost":
+            payload = claim["payload"] if claim else item["payload"]
+            text = f"{float(payload['multiplier']):g}x XP · {int(payload['duration_hours'])}h"
         else:
             role = guild.get_role(int(item["payload"]["role_id"]))
             text = role.mention if role else f"role {item['payload']['role_id']}"
         if claim and claim.get("last_error") and status == "failed":
             text += f" — failed, can retry"
         lines.append(f"{text} · {status}")
-    # A deleted Shop product leaves the frozen claim, not a live definition.
+    # A deleted Shop product or boost config leaves the frozen claim.
     shown = {(item["reward_level"], item["track"], item["reward_ref"]) for item in defs}
     for claim in claims:
         key = (claim["reward_level"], claim["track"], claim["reward_ref"])
-        if claim["reward_level"] != level or claim["track"] != "shop" or key in shown:
+        if claim["reward_level"] != level or claim["track"] not in ("shop", "boost") or key in shown:
             continue
         payload = claim["payload"]
-        text = f"{_compact_qty(payload['quantity'])} {payload['name']}"
+        if claim["track"] == "boost":
+            text = f"{float(payload['multiplier']):g}x XP · {int(payload['duration_hours'])}h"
+        else:
+            text = f"{_compact_qty(payload['quantity'])} {payload['name']}"
         if claim.get("last_error") and claim["status"] == "failed":
             text += " — failed, can retry"
         lines.append(f"{text} · {claim['status']}")

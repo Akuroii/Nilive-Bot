@@ -739,6 +739,22 @@ async def init_db():
         """)
 
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS leveling_boost_rewards (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id       INTEGER NOT NULL,
+                level          INTEGER NOT NULL,
+                multiplier     REAL NOT NULL,
+                duration_hours INTEGER NOT NULL,
+                created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (guild_id, level)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_leveling_boost_rewards_guild
+            ON leveling_boost_rewards(guild_id)
+        """)
+
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_reset_config (
                 guild_id   INTEGER PRIMARY KEY,
                 enabled    INTEGER DEFAULT 0,
@@ -783,6 +799,13 @@ async def init_db():
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_lab_expires
             ON leveling_active_boosts(expires_at)
+        """)
+        # Level-claim boosts only. Shop and potion rows use other source
+        # values, so this index does not limit those inserts.
+        await db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_lab_level_claim_source
+            ON leveling_active_boosts(source)
+            WHERE source LIKE 'level_claim:%'
         """)
 
         # Daily / Streak (persisted): replaces the old in-memory

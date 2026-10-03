@@ -242,6 +242,86 @@ def delete_leveling_currency_reward(reward_id: int):
     return jsonify({"success": True})
 
 
+@api_bp.route("/leveling/boost-rewards", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_boost_rewards():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, level, multiplier, duration_hours
+                FROM leveling_boost_rewards
+                WHERE guild_id = ? ORDER BY level ASC
+            """, (guild_id,))
+            return await cursor.fetchall()
+
+    rows = run_async(fetch())
+    return jsonify({"rewards": [{
+        "id": r[0], "level": r[1], "multiplier": r[2], "duration_hours": r[3],
+    } for r in rows]})
+
+
+@api_bp.route("/leveling/boost-reward", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_leveling_boost_reward():
+    guild_id = get_session_guild_id()
+    data = request.json or {}
+    try:
+        level = int(data.get("level"))
+        duration_hours = int(data.get("duration_hours"))
+        multiplier = float(data.get("multiplier"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Level, multiplier, and duration must be numbers"})
+    if isinstance(data.get("duration_hours"), float) or isinstance(data.get("level"), float):
+        return jsonify({"success": False, "error": "Level and duration must be whole numbers"})
+    if level < 1 or duration_hours < 1 or multiplier <= 1:
+        return jsonify({
+            "success": False,
+            "error": "Level and duration must be at least 1, and the multiplier must be above 1",
+        })
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            try:
+                await db.execute("""
+                    INSERT INTO leveling_boost_rewards
+                        (guild_id, level, multiplier, duration_hours)
+                    VALUES (?, ?, ?, ?)
+                """, (guild_id, level, multiplier, duration_hours))
+                await db.commit()
+            except Exception as exc:
+                await db.execute("ROLLBACK")
+                if "UNIQUE" in str(exc).upper():
+                    return "That level already has an XP boost reward."
+                raise
+            return None
+
+    error = run_async(save())
+    if error:
+        return jsonify({"success": False, "error": error})
+    log_action(guild_id,
+               f"Added level {level} XP boost reward: {multiplier}x for {duration_hours}h",
+               "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/boost-reward/<int:reward_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_leveling_boost_reward(reward_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_boost_rewards WHERE id=? AND guild_id=?",
+                (reward_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+
 _SHOP_REWARD_TYPES = ("custom", "title", "potion", "temp_role")
 
 
