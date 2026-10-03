@@ -1949,6 +1949,10 @@ async def init_db():
         except Exception as e:
             print(f"[MIGRATION] developer legacy row cleanup: {e}")
 
+    from utils.level_claims import backfill_legacy_claims, ensure_tables
+    await ensure_tables()
+    await backfill_legacy_claims()
+
     print("✅ Database initialized — all tables ready")
     print(f"✅ Developer bypass active for user ID: {OWNER_DISCORD_ID} "
           f"(guild-blind, never written to dashboard_users)")

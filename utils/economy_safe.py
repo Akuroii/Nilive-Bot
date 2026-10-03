@@ -17,13 +17,14 @@ def _check_currency(currency: str) -> str:
 async def _log_ledger(guild_id: int, user_id: int, currency: str,
                        amount: int, balance_after: int, type: str,
                        reason: str, source: str,
-                       related_user_id: int = None):
+                       related_user_id: int = None,
+                       db: aiosqlite.Connection | None = None):
     try:
         from utils.ledger import log_transaction
         await log_transaction(
             guild_id, user_id, currency, amount, balance_after,
             type=type, reason=reason, source=source,
-            related_user_id=related_user_id)
+            related_user_id=related_user_id, db=db)
     except Exception as e:
         print(f"[LEDGER] Failed to log transaction "
               f"(guild={guild_id} user={user_id} currency={currency}): {e}")
@@ -117,17 +118,35 @@ async def safe_deduct(guild_id: int, user_id: int, amount: int,
 
 async def safe_credit(guild_id: int, user_id: int, amount: int,
                        currency: str = "balance",
-                       reason: str = "Credit", source: str = "system"):
+                       reason: str = "Credit", source: str = "system",
+                       db: aiosqlite.Connection | None = None):
+    """Credit a wallet. An optional caller-owned transaction is not committed.
+
+    Existing callers keep the standalone connection/commit behavior.
+    A passed connection joins that transaction, including the ledger row,
+    matching log_transaction(..., db=).
+    """
     currency = _check_currency(currency)
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(f"""
+
+    async def apply(connection):
+        await connection.execute(f"""
             INSERT INTO economy (guild_id, user_id, {currency}) VALUES (?, ?, ?)
             ON CONFLICT(guild_id, user_id) DO UPDATE SET {currency} = {currency} + ?
         """, (guild_id, user_id, amount, amount))
-        new_row = await (await db.execute(
+        return await (await connection.execute(
             f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
             (guild_id, user_id))).fetchone()
-        await db.commit()
+
+    if db is not None:
+        new_row = await apply(db)
+        await _log_ledger(guild_id, user_id, currency, amount,
+                           new_row[0] if new_row else None,
+                           "credit", reason, source, db=db)
+        return new_row[0] if new_row else 0
+
+    async with aiosqlite.connect(DB_PATH) as connection:
+        new_row = await apply(connection)
+        await connection.commit()
 
     await _log_ledger(guild_id, user_id, currency, amount,
                        new_row[0] if new_row else None,

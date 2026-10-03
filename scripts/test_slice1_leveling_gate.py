@@ -545,11 +545,16 @@ async def main():
     paid = await give_reward(
         bot_for(guild_for(person(OTHER))), GUILD, OTHER, "xp", amount=20,
         reason="now levels", source="test")
+    pending = rows(
+        "SELECT status, payload_json FROM level_reward_claims "
+        "WHERE guild_id=? AND user_id=?", (GUILD, OTHER))
     check(
-        "10 level-up currency reward still pays when enabled",
+        "10 level-up creates a pending entitlement and does not auto-pay",
         paid.get("success") is True and paid.get("leveled_up") is True
-        and level_of(OTHER) == (110, 1, 0) and wallet_of(OTHER)[0] == 777,
-        f"result={paid} levels={level_of(OTHER)} wallet={wallet_of(OTHER)}")
+        and level_of(OTHER) == (110, 1, 0) and wallet_of(OTHER)[0] == 0
+        and pending and pending[0][0] == "pending" and "777" in pending[0][1],
+        f"result={paid} levels={level_of(OTHER)} wallet={wallet_of(OTHER)} "
+        f"claims={pending}")
 
     print("ALL SLICE 1 CHECKS PASSED")
 
