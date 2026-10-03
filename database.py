@@ -1024,6 +1024,159 @@ async def init_db():
         except Exception as e:
             print(f"[MIGRATION] shop_items.icon_url/rarity: {e}")
 
+        # Shop Publisher Step 1 (Slice 1): flat, guild-scoped presentation
+        # categories. shop_categories holds NO commerce data (no price/
+        # stock/duration/type) and shop_items.category_id is the ONLY link
+        # between a product and its category — membership is presentation
+        # metadata and NEVER implies publication. Nullable and never a
+        # foreign key (this schema has none); deleting a category NULLs the
+        # links (dashboard/api/shop_categories.py). V1 is flat: one category
+        # per product, no hierarchy, no multi-category.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS shop_categories (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id          INTEGER NOT NULL,
+                name              TEXT NOT NULL,
+                emoji             TEXT DEFAULT '🎫',
+                enabled           INTEGER DEFAULT 1,
+                sort_order        INTEGER DEFAULT 0,
+                created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sc_guild
+            ON shop_categories(guild_id)
+        """)
+
+        # Design Draft Persistence: saved Shop Designer drafts. Orchestration/
+        # presentation configuration ONLY — never commerce truth (shop_items
+        # stays the source), never category data, never resolved output or
+        # publication state. design_json holds the Step 0 Design draft
+        # {presentation, products, action}; its presentation is the design's
+        # own snapshot (normalized at save) and source_template_name is
+        # provenance only — never dereferenced after save. Hard-delete MVP;
+        # no revisions or version history.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS shop_designs (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id             INTEGER NOT NULL,
+                name                 TEXT NOT NULL,
+                source_template_name TEXT,
+                design_json          TEXT NOT NULL,
+                created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sd_guild
+            ON shop_designs(guild_id)
+        """)
+
+        # Publication identity/state only. The live message is always rebuilt
+        # from shop_designs + current shop_items; never persist commerce or
+        # rendered payload snapshots here. No Design/channel uniqueness:
+        # each explicit Publish creates a separate association.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS shop_publications (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id            INTEGER NOT NULL,
+                design_id           INTEGER NOT NULL,
+                channel_id          INTEGER NOT NULL,
+                message_id          INTEGER,
+                status              TEXT NOT NULL DEFAULT 'pending',
+                last_error          TEXT,
+                created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_published_at   TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sp_guild_design
+            ON shop_publications(guild_id, design_id)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sp_guild_channel
+            ON shop_publications(guild_id, channel_id)
+        """)
+
+        try:
+            cursor = await db.execute("PRAGMA table_info(shop_items)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "category_id" not in cols:
+                await db.execute(
+                    "ALTER TABLE shop_items ADD COLUMN "
+                    "category_id INTEGER")
+                await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] shop_items.category_id: {e}")
+
+        # Shop Designer Step 1: explicit one-level product family. Existing
+        # rows remain roots (NULL); names are never used to infer options.
+        # Triggers enforce the relationship because SQLite foreign-key
+        # enforcement is connection-local and existing callers do not all
+        # enable PRAGMA foreign_keys.
+        cursor = await db.execute("PRAGMA table_info(shop_items)")
+        cols = [c[1] for c in await cursor.fetchall()]
+        if "option_of_id" not in cols:
+            await db.execute(
+                "ALTER TABLE shop_items ADD COLUMN "
+                "option_of_id INTEGER DEFAULT NULL")
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_si_guild_option
+            ON shop_items(guild_id, option_of_id)
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS shop_item_option_insert_guard
+            BEFORE INSERT ON shop_items
+            WHEN NEW.option_of_id IS NOT NULL
+            BEGIN
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM shop_items p
+                    WHERE p.id = NEW.option_of_id
+                      AND p.guild_id = NEW.guild_id
+                      AND p.option_of_id IS NULL
+                ) THEN RAISE(ABORT, 'option parent must be a same-guild root') END;
+            END
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS shop_item_option_update_guard
+            BEFORE UPDATE OF id, option_of_id, guild_id ON shop_items
+            BEGIN
+                SELECT CASE WHEN NEW.option_of_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM shop_items p
+                    WHERE p.id = NEW.option_of_id
+                      AND p.id != NEW.id
+                      AND p.guild_id = NEW.guild_id
+                      AND p.option_of_id IS NULL
+                ) THEN RAISE(ABORT, 'option parent must be a different same-guild root') END;
+                SELECT CASE WHEN NEW.option_of_id IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM shop_items child
+                    WHERE child.option_of_id = OLD.id
+                ) THEN RAISE(ABORT, 'a product with options cannot become an option') END;
+                SELECT CASE WHEN NEW.id != OLD.id AND EXISTS (
+                    SELECT 1 FROM shop_items child
+                    WHERE child.option_of_id = OLD.id
+                ) THEN RAISE(ABORT, 'a root with options cannot change id') END;
+                SELECT CASE WHEN NEW.guild_id != OLD.guild_id AND EXISTS (
+                    SELECT 1 FROM shop_items child
+                    WHERE child.option_of_id = OLD.id
+                ) THEN RAISE(ABORT, 'a root with options cannot change guild') END;
+            END
+        """)
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS shop_item_option_delete_guard
+            BEFORE DELETE ON shop_items
+            WHEN EXISTS (
+                SELECT 1 FROM shop_items child
+                WHERE child.option_of_id = OLD.id
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'root products with options cannot be deleted');
+            END
+        """)
+        await db.commit()
+
         # Rank Card foundation: item_catalog is the single, source-
         # agnostic place the future card renderer (and /inventory)
         # resolve an item's icon/rarity/value from — keyed by

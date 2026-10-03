@@ -1,0 +1,556 @@
+/* ═══════════════════════════════════════════════════════════════
+   NERO DASHBOARD — message-builder.css
+   Message Builder v2 (phase 1) — the shell's own stylesheet.
+
+   SCOPE
+   -----
+   Loaded by manage/message_builder.html only (a <link> inside the page's
+   content block), so nothing here can reach the frozen v1 builder or any other
+   page. Two rules follow from that and are asserted by
+   scripts/test_message_builder_layout.js:
+
+     * no `eb-*` selector: that namespace belongs to the frozen v1 composer and
+       lives in embed-composer.css. v2 uses mb2- / #mb2-.
+     * no override of a shared class from main.css (.card, .btn, .form-input,
+       .modal …). v2 styles its SHELL and leaves shared components alone.
+
+   LAYOUT MODEL
+   ------------
+   Three columns (rail · inspector · preview) that degrade to two and then to
+   one. Sizing rules that keep the page from ever overflowing horizontally:
+   every flexible track is minmax(0, …), every grid child is min-width:0 (a
+   grid item's default min-width is auto, which is what actually causes "the
+   whole page scrolls sideways" bugs), and long unbroken values (URLs in embed
+   fields) wrap with overflow-wrap:anywhere rather than forcing the column
+   wider. No fixed shell width is set anywhere.
+
+   The topbar is sticky at top:0 and ~53px tall, so the sticky preview offsets
+   itself below it via one variable; when the preview stops being a side column
+   (narrower widths) it becomes a top pane instead of a static block — the
+   preview is never hidden, at any width.
+   ═══════════════════════════════════════════════════════════════ */
+
+.mb2-shell {
+    --mb2-sticky-top: calc(53px + 12px);
+    --mb2-radius: 12px;
+    display: block;
+    min-width: 0;
+    padding-bottom: 8px;          /* the sticky bar's own space */
+}
+
+/* ── Regions ─────────────────────────────────────────────────── */
+.mb2-grid {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr) 380px;
+    gap: 20px;
+    align-items: start;
+    min-width: 0;
+}
+
+.mb2-rail,
+.mb2-inspector,
+.mb2-preview {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--mb2-radius);
+    padding: 16px;
+    min-width: 0;                 /* see LAYOUT MODEL */
+}
+
+.mb2-region-title {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin: 0 0 12px;
+}
+
+.mb2-rail-body,
+.mb2-inspector-body {
+    min-width: 0;
+}
+
+/* The inspector is focusable (tabindex="-1") so a structural change can move
+   focus into it; that must not draw a ring by itself. */
+.mb2-inspector:focus { outline: none; }
+.mb2-shell :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── Preview: sticky, scrolls internally, never rebuilt ───────── */
+.mb2-preview {
+    position: sticky;
+    top: var(--mb2-sticky-top);
+    align-self: start;
+    max-height: calc(100vh - var(--mb2-sticky-top) - 24px);
+    overflow: auto;
+}
+
+.mb2-mount {
+    min-width: 0;
+    overflow-wrap: anywhere;      /* pasted URLs must not widen the column */
+}
+
+/* ── Files summary (owner: the page, step 7e) ──────────────────
+   One static line about the files the message will carry. No rows, no
+   verdicts, and no live region: it never announces (the strip does) and it
+   never wears a tone — the numbers are the whole message. Muted like the
+   region title it sits under, and `hidden` until the document names a file. */
+.mb2-files {
+    margin: 0 0 10px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text3);
+    overflow-wrap: anywhere;
+}
+.mb2-files[hidden] { display: none; }
+
+/* ── Validation strip (owner: the page, step 6a) ─────────────── */
+/* One region, two states: the tone class is what the page swaps when the
+   worst issue changes (the same mb2-tone-* vocabulary the status bar uses).
+   The text inherits --text2 — a long message stays readable. */
+.mb2-strip {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    background: var(--bg3);
+    color: var(--text2);
+    font-size: 13px;
+    overflow-wrap: anywhere;      /* a long issue message must not widen the shell */
+}
+.mb2-strip[hidden] { display: none; }
+.mb2-strip.mb2-tone-warn   { border-left-color: var(--warning); }
+.mb2-strip.mb2-tone-danger { border-left-color: var(--danger); }
+
+/* ── 6b counters (inspector.js owns these elements) ─────────────
+   `used / max` under the control it belongs to, and a tone that only changes
+   when the number is PAST the limit. aria-hidden is set by the script: the
+   strip announces problems, a counter must not talk over a keystroke. */
+.mb2-count {
+    display: block;
+    margin-top: 4px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text2);
+    opacity: .75;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.mb2-count-over { color: var(--danger); opacity: 1; font-weight: 600; }
+.mb2-count-total {
+    margin: 10px 0 0;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+    text-align: left;
+}
+.mb2-count.mb2-count-fields {
+    display: inline-block;
+    margin: 0 0 0 8px;
+    vertical-align: middle;
+}
+/* Visually hidden, still read: the badge's meaning for assistive tech. Written
+   without overflow:hidden so the shell's overflow rules stay exactly as they
+   were (the layout harness pins them). */
+.mb2-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+/* ── Status / action bar ─────────────────────────────────────── */
+.mb2-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 20;
+    margin-top: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--mb2-radius);
+}
+
+.mb2-bar-status {
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+    font-size: 13px;
+}
+
+.mb2-bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.mb2-status-pill {
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.mb2-status-detail {
+    color: var(--text3);
+    font-size: 12px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.mb2-tone-ok .mb2-status-pill      { color: var(--success); }
+.mb2-tone-warn .mb2-status-pill    { color: var(--warning); }
+.mb2-tone-danger .mb2-status-pill  { color: var(--danger); }
+.mb2-tone-muted .mb2-status-pill   { color: var(--text3); }
+
+/* ── Action bar buttons (actionbar.js owns everything inside the container) ──
+   The disabled style keys off :disabled — the button's real property — because
+   a disabled control must look disabled, not merely be one. */
+.mb2-bar-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 34px;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg3);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.mb2-bar-btn:hover:not(:disabled) { border-color: var(--accent); }
+.mb2-bar-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.mb2-bar-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── Dialogs (the clipboard fallback today; confirmations in 5d-2) ──
+   Fixed to the viewport so the overlay never participates in the bar's flex
+   row, and dead centre with a bounded panel. No body scroll lock and no
+   overflow:hidden anywhere: the page keeps scrolling and the panel scrolls
+   internally if its content is taller than the viewport. */
+.mb2-dialog-overlay {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.55);
+}
+.mb2-dialog {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    max-width: 620px;
+    max-height: 100%;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--mb2-radius);
+    background: var(--bg2);
+    overflow: auto;
+}
+.mb2-dialog-title { margin: 0; font-size: 15px; color: var(--text); }
+.mb2-dialog-body {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text2);
+    overflow-wrap: anywhere;
+}
+.mb2-dialog-content { display: flex; flex-direction: column; min-width: 0; }
+.mb2-dialog-json {
+    width: 100%;
+    min-height: 160px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg3);
+    color: var(--text2);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    margin: 0;
+    resize: vertical;
+}
+.mb2-dialog-json:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mb2-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.mb2-dialog-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 34px;
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg3);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.mb2-dialog-btn:hover { border-color: var(--accent); }
+.mb2-dialog-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The destructive choice is labelled in words; the tone only reinforces it. */
+.mb2-dialog-btn-danger { border-color: var(--danger); color: var(--danger); }
+.mb2-dialog-btn-danger:hover { border-color: var(--danger); }
+
+/* ── Structure rail (rail.js owns everything inside #mb2-rail-body) ──
+   Rows are flat in the DOM with aria-level for the hierarchy; the indent is
+   visual only, so the tree stays navigable by keyboard and readable by a
+   screen reader. Selected and focused are deliberately different states: the
+   selection is store state (it drives the inspector in 5c), focus is where the
+   keyboard is. */
+.mb2-rail-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 6px 8px;
+    margin-bottom: 2px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text2);
+    font-size: 13px;
+}
+.mb2-rail-row:hover { background: var(--bg4); color: var(--text); }
+.mb2-rail-row-embed { padding-left: 16px; }
+.mb2-rail-row-field { padding-left: 30px; font-size: 12px; }
+.mb2-rail-row-selected {
+    background: var(--bg3);
+    border-color: var(--accent);
+    color: var(--text);
+}
+.mb2-rail-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.mb2-rail-row-selected .mb2-rail-label { font-weight: 600; }
+.mb2-rail-actions {
+    display: flex;
+    gap: 2px;
+    flex: 0 0 auto;
+    opacity: 0;
+    transition: opacity .12s;
+}
+.mb2-rail-row:hover .mb2-rail-actions,
+.mb2-rail-row:focus-within .mb2-rail-actions,
+.mb2-rail-row-selected .mb2-rail-actions { opacity: 1; }
+.mb2-rail-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text2);
+    font-size: 12px;
+    line-height: 1;
+    padding: 3px 6px;
+    cursor: pointer;
+    min-width: 24px;
+}
+.mb2-rail-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.mb2-rail-btn:disabled { opacity: .35; cursor: default; }
+/* ── 6b: the rail's facts — the embeds count and the issue badges ──────
+   Numbers beside the rows, never verdicts of their own: the tone class is the
+   same mb2-tone-* vocabulary the strip and the status bar use, and the badge is
+   hidden (not emptied) when its node has nothing to report. [hidden] is left
+   alone so the attribute keeps winning over display. */
+.mb2-rail-count {
+    font-size: 11px;
+    color: var(--text2);
+    opacity: .7;
+    white-space: nowrap;
+}
+.mb2-rail-badge {
+    display: inline-block;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg3);
+    font-size: 11px;
+    line-height: 16px;
+    white-space: nowrap;
+}
+.mb2-rail-badge[hidden] { display: none; }
+.mb2-rail-badge.mb2-tone-warn { border-color: var(--warning); color: var(--warning); }
+.mb2-rail-badge.mb2-tone-danger { border-color: var(--danger); color: var(--danger); }
+.mb2-rail-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ── Inspector (inspector.js owns everything inside #mb2-inspector-body) ──
+   Direct controls, no decoration: one labelled control per property, grouped
+   with fieldsets. Every rule here is about touch target size, wrapping and
+   focus — none of it is validation state, which step 6 owns. */
+.mb2-insp-panel { display: block; }
+.mb2-insp-field { margin-bottom: 12px; min-width: 0; }
+.mb2-insp-label,
+.mb2-insp-legend {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .02em;
+    color: var(--text2);
+    margin-bottom: 4px;
+}
+.mb2-insp-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 10px;
+    min-height: 34px;              /* touch target */
+}
+.mb2-insp-input:focus { border-color: var(--accent); }
+.mb2-insp-input::placeholder { color: var(--text3); }
+.mb2-insp-textarea { resize: vertical; min-height: 72px; line-height: 1.45; }
+.mb2-insp-color { width: 56px; height: 34px; padding: 2px; cursor: pointer; }
+.mb2-insp-row { display: flex; gap: 8px; align-items: flex-end; }
+.mb2-insp-row .mb2-insp-input { flex: 1 1 auto; }
+.mb2-insp-now { flex: 0 0 auto; min-height: 34px; }
+/* 7d: the local-file control. The input, its state line and the Remove button
+   each get their own row inside the field. The state line is plain, quiet text:
+   it is what aria-describedby points at (never a live region — the strip
+   announces), and it is where a problem is READ. No validation tone is applied
+   here, deliberately: the inspector has never painted validation, and a problem
+   the validator found belongs to the strip (5c's contract, kept by 7d). */
+.mb2-insp-upload { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.mb2-insp-file { flex: 1 1 100%; padding: 6px 8px; }
+.mb2-insp-file::file-selector-button { margin-right: 8px; }
+.mb2-insp-filestate { flex: 1 1 100%; font-size: 12px; line-height: 1.4; color: var(--text3); }
+.mb2-insp-fileremove { flex: 0 0 auto; min-height: 30px; }
+.mb2-insp-fileremove[hidden] { display: none; }   /* shown only while a file is attached */
+.mb2-insp-group {
+    border: 0;
+    border-top: 1px solid var(--border);
+    margin: 0 0 14px;
+    padding: 12px 0 0;
+    min-width: 0;
+}
+.mb2-insp-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text2);
+    margin-bottom: 12px;
+    cursor: pointer;
+    min-height: 32px;
+}
+.mb2-insp-checkbox { width: 16px; height: 16px; accent-color: var(--accent); flex: 0 0 auto; }
+.mb2-insp-checktext { min-width: 0; }
+.mb2-insp-btn {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text2);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+    padding: 8px 10px;
+    min-height: 32px;
+    cursor: pointer;
+}
+.mb2-insp-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+/* 6b: the add-field button is disabled exactly at the served fields cap, and a
+   control that cannot act must LOOK like it cannot act (the :disabled property,
+   not a colour that pretends). */
+.mb2-insp-btn:disabled { opacity: .45; cursor: not-allowed; }
+.mb2-insp-fields {
+    list-style: none;
+    margin: 0 0 10px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.mb2-insp-fieldrow { display: flex; gap: 6px; align-items: stretch; }
+.mb2-insp-fieldbtn {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: left;
+    /* long field names wrap rather than widening the column */
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+.mb2-insp-remove { flex: 0 0 auto; }
+.mb2-insp-contextrow { margin-bottom: 12px; align-items: center; }
+.mb2-insp-context {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--text2);
+    overflow-wrap: anywhere;
+}
+.mb2-insp-hint { font-size: 12px; color: var(--text3); margin: 4px 0 0; }
+.mb2-insp-empty { font-size: 13px; color: var(--text2); margin: 0 0 10px; }
+
+/* ── Responsive ──────────────────────────────────────────────── */
+/* Two columns: the preview stops being a side column and becomes a sticky top
+   pane (order:-1) with a bounded height instead of being dropped. */
+@media (max-width: 1360px) {
+    .mb2-grid { grid-template-columns: 220px minmax(0, 1fr); }
+    .mb2-preview {
+        grid-column: 1 / -1;
+        order: -1;
+        max-height: 42vh;
+    }
+}
+
+/* One column. The rail turns into a horizontal, scroll-snapping strip so it
+   stays reachable without eating the viewport before the inspector. */
+@media (max-width: 768px) {
+    .mb2-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+    .mb2-rail { position: static; }
+    .mb2-rail-body {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        scroll-snap-type: x proximity;
+        -webkit-overflow-scrolling: touch;
+    }
+    .mb2-rail-body > * { scroll-snap-align: start; flex: 0 0 auto; }
+    .mb2-rail-row { margin-bottom: 0; }
+    .mb2-rail-row-embed, .mb2-rail-row-field { padding-left: 8px; }
+    .mb2-rail-actions { opacity: 1; }
+    /* Stacked layout: the inspector is the only editing surface on screen, so
+       its rows keep the full width and the colour/Now controls stay tappable. */
+    .mb2-insp-row { align-items: stretch; }
+    .mb2-preview { max-height: 36vh; }
+    .mb2-bar { align-items: flex-start; }
+}
+
+@media (max-width: 480px) {
+    .mb2-rail,
+    .mb2-inspector,
+    .mb2-preview { padding: 12px; }
+    .mb2-bar { gap: 8px; }
+    .mb2-bar-status { flex-direction: column; gap: 2px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mb2-shell *,
+    .mb2-shell *::before,
+    .mb2-shell *::after { transition: none !important; animation: none !important; }
+}

@@ -3,9 +3,11 @@
    Embed Builder page logic — attachment preview resolution
 
    This harness runs the REAL functions out of
-   dashboard/templates/manage/embedbuilder.html (extracted from the
-   Jinja template, not a copy) against real embed-composer.js, so a
-   change to either side that breaks the other gets caught here:
+   dashboard/static/js/embed-builder-page.js (extracted from the page
+   module, not a copy) against real embed-composer.js, so a change to
+   either side that breaks the other gets caught here. The functions
+   moved out of the Jinja template in the Phase 0 lifecycle work; the
+   assertions did not change:
 
      * looksLikeImage — files whose File.type is empty are still images
      * the sync resolver must never return a stale/bogus URL
@@ -40,49 +42,63 @@ async function until(fn, ms = 4500) {
 
 const ROOT = path.join(__dirname, '..');
 const COMPOSER = fs.readFileSync(path.join(ROOT, 'dashboard', 'static', 'js', 'embed-composer.js'), 'utf8');
-const TEMPLATE = fs.readFileSync(
-    path.join(ROOT, 'dashboard', 'templates', 'manage', 'embedbuilder.html'), 'utf8');
+// The page logic used to live inline in manage/embedbuilder.html; Phase 0
+// moved it into its own module (so it loads once, mounts/destroys with the
+// page, and is never emitted twice by the template). The harness follows
+// the code: same real functions, new home.
+const PAGE_SRC = fs.readFileSync(
+    path.join(ROOT, 'dashboard', 'static', 'js', 'embed-builder-page.js'), 'utf8');
 
-// ── Pull the page's attachment helpers out of the template ──────────
-// Declared one per block, terminated by the next top-level declaration
-// — no copies, so renaming/adding a guard here fails loudly instead of
-// silently testing a stale fork of the code.
-const DECL_RE = /^(const|let|function) ([A-Za-z_$][\w$]*)/gm;
-function extractPageBlock(decl) {
-    const start = TEMPLATE.indexOf('\n' + decl);
-    if (start < 0) throw new Error(`embedbuilder.html no longer contains "${decl}" — update this harness`);
-    let end = TEMPLATE.length;
-    DECL_RE.lastIndex = start + 1;
-    let m;
-    while ((m = DECL_RE.exec(TEMPLATE))) {
-        // the first hit IS the declaration itself (start is the \n before it)
-        if (m.index > start + 1) { end = m.index; break; }
+// ── Pull the page's attachment helpers out of that module ───────────
+// Boundary scan instead of a line regex, because these declarations are
+// nested inside the page module's init() and are no longer top-level: a
+// declaration runs to the end of its statement (or the closing brace of a
+// function), skipping over strings, comments and balanced brackets. No
+// copies of the logic live here, so renaming a guard fails loudly instead
+// of silently testing a stale fork.
+function extractDecl(decl) {
+    const finder = new RegExp('^[ \\t]*' + decl.replace(/\$/g, '\\$&'), 'm');
+    const hit = finder.exec(PAGE_SRC);
+    if (!hit) throw new Error(`embed-builder-page.js no longer contains "${decl}" — update this harness`);
+    const start = hit.index + (hit[0].length - hit[0].replace(/^[ \t]*/, '').length);
+    const isFunction = /\bfunction\b/.test(decl);
+    let depth = 0, quote = null, comment = null;
+    for (let i = start; i < PAGE_SRC.length; i++) {
+        const c = PAGE_SRC[i], next = PAGE_SRC[i + 1];
+        if (comment === 'line') { if (c === '\n') comment = null; continue; }
+        if (comment === 'block') { if (c === '*' && next === '/') { comment = null; i++; } continue; }
+        if (quote) { if (c === '\\') { i++; continue; } if (c === quote) quote = null; continue; }
+        if (c === '/' && next === '/') { comment = 'line'; i++; continue; }
+        if (c === '/' && next === '*') { comment = 'block'; i++; continue; }
+        if (c === '"' || c === "'" || c === '`') { quote = c; continue; }
+        if (c === '(' || c === '[' || c === '{') depth++;
+        else if (c === ')' || c === ']' || c === '}') {
+            depth--;
+            if (isFunction && c === '}' && depth === 0) return PAGE_SRC.slice(start, i + 1);
+        } else if (c === ';' && depth === 0) return PAGE_SRC.slice(start, i + 1);
     }
-    if (end === TEMPLATE.length && !TEMPLATE.slice(start).length) {
-        throw new Error(`could not find the end of "${decl}"`);
-    }
-    return TEMPLATE.slice(start + 1, end).trimEnd() + '\n';
+    throw new Error(`could not find the end of "${decl}"`);
 }
 
 const DECLS = [
-    'const IMAGE_EXT_RE',
-    'const IMAGE_MIME_BY_EXT',
+    'var IMAGE_EXT_RE',
+    'var IMAGE_MIME_BY_EXT',
     'function looksLikeImage',
     'function imageMimeFor',
     'function attachmentPreviewHint',
-    'let _previewRefreshQueued',
-    'function _queuePreviewRefresh',
+    'var _previewRefreshQueued',
+    'function queuePreviewRefresh',
     'function refreshAttachmentPreview',
     'function getAttachmentPreviewUrl',
     'function revokeAttachmentPreview',
     'function revokeAllAttachmentPreviews',
 ];
-const PAGE = Array.from(new Set(DECLS.map(extractPageBlock))).join('\n');
+const PAGE = Array.from(new Set(DECLS.map(extractDecl))).join('\n');
 // Fail loudly if the extraction silently produced an empty block — a harness
 // that tests nothing is worse than no harness.
 for (const d of DECLS) {
-    if (!PAGE.includes(d.replace(/^(const|let|function) /, ''))) {
-        throw new Error(`harness could not extract "${d}" from the template`);
+    if (!PAGE.includes(d.replace(/^(var|const|let|function) /, ''))) {
+        throw new Error(`harness could not extract "${d}" from the page module`);
     }
 }
 
@@ -119,6 +135,19 @@ function build({ blobLoads }) {
         function renderAttachments(){ renderAttachmentsCalls++; }
         function renderPreview(){ renderPreviewCalls++; }
         function showToast(){}
+        // The page module's own environment: every timer/listener/URL it
+        // takes goes through this context, and the attachment helpers only
+        // ever use it for counters + debug traces. A minimal double keeps
+        // the extracted functions running verbatim.
+        function now(){ return Date.now(); }
+        var ctx = {
+            counters: {},
+            debug: function(){},
+            isDestroyed: function(){ return false; },
+            counter: function(k){ ctx.counters[k] = (ctx.counters[k]||0)+1; },
+            timeout: function(fn, ms){ return setTimeout(fn, ms); },
+            clearTimeout: function(id){ clearTimeout(id); },
+        };
     `, sandbox);
     vm.runInContext(
         '(function(){' + PAGE +
