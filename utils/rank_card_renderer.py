@@ -59,15 +59,20 @@ def _asset_path(asset_sub: str, root_fallback: str) -> str:
 
 MAILBOX_PNG_PATH = _asset_path("mailbox.png", "mailbox_trimmed.png")
 
-# Footer "Mail Box" tag (lower-left). All three pieces are supplied artwork
-# and are used as-is -- nothing is redrawn or traced:
-#   * frame  -- the supplied SVG (an Affinity export: one embedded raster
-#               plus an embedded luminance mask; parsed directly, see
-#               _load_mailbox_frame_svg)
-#   * Nero   -- the supplied PNG, only ever scaled down
-#   * text   -- the supplied Varsity font
+# Footer "Mail Box" tag (lower-left). Every piece is supplied artwork and is
+# used as-is -- nothing is redrawn, traced or typeset:
+#   * frame    -- the supplied SVG (an Affinity export: one embedded raster
+#                 plus an embedded luminance mask; parsed directly, see
+#                 _load_mailbox_frame_svg)
+#   * Nero     -- the supplied PNG, only ever scaled down
+#   * wordmark -- the supplied MAIL BOX wordmark (pixel letters, gradient,
+#                 outline and glow all baked into the artwork; 936x217). It is
+#                 only ever scaled uniformly and positioned -- never typeset,
+#                 recoloured or glowed again. (The supplied .svg is a thin
+#                 wrapper around this very same PNG, so the PNG is the asset.)
 MAILBOX_FRAME_SVG_PATH = _asset_path("mailbox_frame.svg", "Mailbox_frame.svg")
 NERO_ICON_PNG_PATH = _asset_path("nero_icon.png", "Nero_icon_3d.png")
+MAILBOX_WORDMARK_PNG_PATH = _asset_path("mailbox_wordmark.png", "mailbox_wordmark.png")
 
 # Supplied avatar-ring artwork (source of truth -- not redrawn/regenerated).
 # The file's own inner circle (where the avatar sits) is off-center within
@@ -119,8 +124,6 @@ STAT_ICON_GAMES_PNG_PATH = _asset_path("stat_icon_games.png", "stat_icon_games.p
 FONT_PATHS = {
     "cinzel": _asset_path(os.path.join("fonts", "Cinzel-Variable.ttf"), "Cinzel-Variable.ttf"),
     "zilla_bold": _asset_path(os.path.join("fonts", "ZillaSlab-Bold.ttf"), "ZillaSlab-Bold.ttf"),
-    # "Mail Box" footer tag text ONLY (supplied font, used unmodified).
-    "varsity": _asset_path(os.path.join("fonts", "varsity_regular.ttf"), "varsity_regular.ttf"),
     # XP numerals ONLY (XP PROGRESS value / "of needed" / TOTAL XP value).
     # Not used anywhere else on the card.
     "fortuner": _asset_path(os.path.join("fonts", "FortunerHeavyPersonalUse.otf"),
@@ -2350,7 +2353,7 @@ def _draw_mailbox(img, mailbox_im):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# FOOTER "MAIL BOX" TAG  (supplied SVG frame + supplied Nero PNG + Varsity)
+# FOOTER "MAIL BOX" TAG  (supplied SVG frame + Nero PNG + MAIL BOX wordmark)
 # ─────────────────────────────────────────────────────────────────────────
 
 MAILBOX_TAG = {
@@ -2366,18 +2369,15 @@ MAILBOX_TAG = {
     # relative to the disc, and an optical offset of its centre from the
     # disc centre (+y = down). Nero's ears give it top-weight, so a small
     # downward nudge keeps them off the inner ring.
-    "nero_fill": 0.82,
+    "nero_fill": 0.865,
     "nero_dx": 0.0,
     "nero_dy": 0.03,
-    "text": "Mail Box",
-    # Gap between the ring's outer right edge / the plate's right end and
-    # the text, in card px.
-    "text_pad_l": 9,
-    "text_pad_r": 9,
-    # Optical vertical nudge of the text (card px, +down).
-    "text_dy": 0.0,
-    # Faint bloom behind the lettering (0 = off).
-    "text_glow": 0.28,
+    # Wordmark: ink width = plate width minus these gaps (card px). The
+    # wordmark keeps its own aspect ratio; only scale/position are set here.
+    "wordmark_pad_l": 8,
+    "wordmark_pad_r": 8,
+    # Optical vertical nudge of the wordmark (card px, +down).
+    "wordmark_dy": 0.0,
 }
 
 # Geometry measured directly off the supplied frame art (the 877x346
@@ -2389,16 +2389,12 @@ _TAG_ART_DISC_D = 260.0             # flat disc diameter (art 35..295)
 _TAG_ART_PLATE_X = (329.0, 870.0)   # ring's right edge -> plate's inner right end
 _TAG_ART_PLATE_CY = 164.5           # plate (pill) vertical centre
 
-# Lettering colour sweep, left -> right across the ink: pink -> lavender
-# (peaks on the "B") -> pink-violet. Sampled from the reference screenshot's
-# bright glyph cores (not its anti-aliased edges).
-MAILBOX_TEXT_GRADIENT = (
-    (0.00, (241, 60, 223)),
-    (0.30, (226, 122, 238)),
-    (0.575, (213, 181, 255)),
-    (0.78, (224, 128, 253)),
-    (1.00, (236, 92, 255)),
-)
+# Wordmark geometry, in the artwork's own 936x217 px: the letters' box
+# INCLUDING their dark outline (measured; max-channel <= 30). The artwork's
+# soft glow lies outside this box (~14 px margin), which is why placement is
+# based on the letters and not on the image bounds.
+_WM_VIEWBOX = (936.0, 217.0)
+_WM_INK = (14.0, 25.0, 908.0, 187.0)    # x0, y0, x1, y1
 
 _MAILBOX_TAG_CACHE = None   # None = not built yet; False = unavailable; else (sprite, x, y)
 
@@ -2473,33 +2469,6 @@ def _load_mailbox_frame_svg(path: str) -> Image.Image:
     return art
 
 
-def _render_mailbox_text(text: str, font_path: str, size: int, ss: int = 8):
-    """Varsity lettering with the pink -> lavender -> pink sweep. Returns
-    (RGBA sprite tight to the ink, ink_w, ink_h) at 1x. Supersampled `ss`x
-    then reduced once so the font's thin inline strokes stay clean."""
-    font = ImageFont.truetype(font_path, size * ss)
-    pad = 4 * ss
-    probe = Image.new("L", (int(font.getlength(text)) + 2 * pad, size * ss * 2), 0)
-    ImageDraw.Draw(probe).text((pad, size * ss * 1.4), text, font=font, fill=255, anchor="ls")
-    bb = probe.getbbox()
-    mask = probe.crop(bb)
-    w, h = mask.size
-    grad = Image.new("RGB", (w, 1))
-    stops = MAILBOX_TEXT_GRADIENT
-    for x in range(w):
-        t = x / max(w - 1, 1)
-        for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
-            if t <= t1:
-                k = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
-                grad.putpixel((x, 0), tuple(int(round(c0[i] + (c1[i] - c0[i]) * k)) for i in range(3)))
-                break
-    grad = grad.resize((w, h))
-    big = grad.convert("RGBA")
-    big.putalpha(mask)
-    out_w, out_h = max(1, round(w / ss)), max(1, round(h / ss))
-    return big.resize((out_w, out_h), Image.LANCZOS), out_w, out_h
-
-
 def _build_mailbox_tag():
     """Compose the static tag sprite once (it has no per-user data).
     Returns (sprite, x, y) in canvas px, or None if any asset is missing/bad."""
@@ -2507,9 +2476,7 @@ def _build_mailbox_tag():
     try:
         frame = _load_mailbox_frame_svg(MAILBOX_FRAME_SVG_PATH)
         nero = Image.open(NERO_ICON_PNG_PATH).convert("RGBA")
-        font_path = FONT_PATHS["varsity"]
-        if not os.path.isfile(font_path):
-            raise FileNotFoundError(font_path)
+        wordmark = Image.open(MAILBOX_WORDMARK_PNG_PATH).convert("RGBA")
     except Exception as e:
         log.warning("rank_card: Mail Box tag assets unavailable (%s) -- using the "
                     "fallback tag.", e)
@@ -2532,23 +2499,23 @@ def _build_mailbox_tag():
     nx = round(cx + cfg["nero_dx"] * disc_d - nw / 2)
     ny = round(cy + cfg["nero_dy"] * disc_d - nh / 2)
 
-    # --- Text: sized to fill the plate between the pads (width-limited;
-    # Varsity is wide, so height is never the constraint here).
-    plate_l = _TAG_ART_PLATE_X[0] * sc + cfg["text_pad_l"]
-    plate_r = _TAG_ART_PLATE_X[1] * sc - cfg["text_pad_r"]
-    em_w = ImageFont.truetype(font_path, 1000).getlength(cfg["text"]) / 1000.0
-    size = max(8, int(round((plate_r - plate_l) / em_w)))
-    txt, tw, th = _render_mailbox_text(cfg["text"], font_path, size)
-    tx = round((plate_l + plate_r) / 2 - tw / 2)
-    ty = round(_TAG_ART_PLATE_CY * sc - th / 2 + cfg["text_dy"])
-
-    if cfg["text_glow"] > 0:
-        glow = Image.new("RGBA", sprite.size, (0, 0, 0, 0))
-        glow.alpha_composite(txt, (tx, ty))
-        glow = glow.filter(ImageFilter.GaussianBlur(2.2))
-        glow.putalpha(glow.getchannel("A").point(lambda a: int(a * cfg["text_glow"])))
-        sprite.alpha_composite(glow)
-    sprite.alpha_composite(txt, (tx, ty))
+    # --- Wordmark: the supplied artwork, scaled uniformly (never stretched)
+    # so its letters fill the plate between the pads. Gradient, outline and
+    # glow are baked into the artwork and left exactly as supplied --
+    # nothing is added over it.
+    ink_x0, ink_y0, ink_x1, ink_y1 = _WM_INK
+    plate_l = _TAG_ART_PLATE_X[0] * sc + cfg["wordmark_pad_l"]
+    plate_r = _TAG_ART_PLATE_X[1] * sc - cfg["wordmark_pad_r"]
+    k = (plate_r - plate_l) / (ink_x1 - ink_x0)          # card px per artwork px
+    wm_w = max(1, round(_WM_VIEWBOX[0] * k))
+    wm_h = max(1, round(_WM_VIEWBOX[1] * k))
+    wordmark = wordmark.resize((wm_w, wm_h), Image.LANCZOS)   # Pillow premultiplies RGBA
+    # Place so the LETTER box is centred in the plate (the artwork carries a
+    # glow margin that must not shift the lettering).
+    ink_cx, ink_cy = (ink_x0 + ink_x1) / 2 * k, (ink_y0 + ink_y1) / 2 * k
+    wx = round((plate_l + plate_r) / 2 - ink_cx)
+    wy = round(_TAG_ART_PLATE_CY * sc + cfg["wordmark_dy"] - ink_cy)
+    sprite.alpha_composite(wordmark, (wx, wy))
     sprite.alpha_composite(nero, (nx, ny))
 
     x0 = round(cfg["ring_left"] - 1 * sc)                     # ring's left edge = art x 1
@@ -2566,7 +2533,7 @@ def _get_mailbox_tag():
 
 def _draw_footer(img, draw):
     fy = LAYOUT["footer_y"]
-    # Left tag: the supplied Mail Box frame + Nero + Varsity lettering (built
+    # Left tag: the supplied Mail Box frame + Nero + MAIL BOX wordmark (built
     # once, cached). If any of those assets is missing the previous paw tag is
     # drawn instead so /rank never breaks.
     mb_tag = _get_mailbox_tag()
