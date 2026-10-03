@@ -5,13 +5,29 @@ from database import DB_PATH
 from utils.economy_safe import safe_credit, safe_deduct, InsufficientBalance
 from utils.permissions import check_bot_role_position
 from utils.xp_calculator import (
-    xp_progress, check_and_award_level_rewards,
-    check_and_award_level_currency_rewards,
+    xp_progress, get_leveling_config,
 )
 
 
 class RewardError(Exception):
     pass
+
+
+LEVELING_DISABLED_REASON = "leveling_disabled"
+
+
+def xp_grant_skipped(result) -> bool:
+    """True when XP was withheld because leveling_config.enabled is off.
+
+    This is not a delivery failure. Callers must not log it as one, send a
+    failure DM, or record the XP reward as given.
+    """
+    return (
+        isinstance(result, dict)
+        and result.get("success") is False
+        and result.get("skipped") is True
+        and result.get("reason") == LEVELING_DISABLED_REASON
+    )
 
 
 async def _log_xp_ledger(guild_id: int, user_id: int, amount: int,
@@ -92,6 +108,24 @@ async def give_reward(bot: discord.Client,
         if amount is None:
             raise RewardError("xp reward requires 'amount'")
         amount = int(amount)
+        # Missing leveling_config stays enabled (get_leveling_config default).
+        # OFF writes nothing and does not run level-up rewards.
+        config = await get_leveling_config(guild_id)
+        if not config.get("enabled", 1):
+            return {
+                "success": False,
+                "skipped": True,
+                "reason": LEVELING_DISABLED_REASON,
+            }
+        from utils.level_claims import record_crossing, snapshot_multipliers
+        member = None
+        guild = None
+        if bot is not None and hasattr(bot, "get_guild"):
+            guild = bot.get_guild(guild_id)
+        if guild is not None and hasattr(guild, "get_member"):
+            member = guild.get_member(user_id)
+        multipliers = await snapshot_multipliers(
+            guild_id, user_id, member=member, bot=bot)
 
         # CONCURRENCY FIX (dark-fixes pass): this used to be a plain
         # read (SELECT xp, level) followed by a separate write
@@ -127,6 +161,11 @@ async def give_reward(bot: discord.Client,
                     DO UPDATE SET xp = ?, level = ?
                 """, (guild_id, user_id, new_xp, new_level,
                       new_xp, new_level))
+                # Entitlements use xp_progress, not the stored level column.
+                # Auto-grant stays off; the member claims the snapshot later.
+                await record_crossing(
+                    db, guild_id, user_id, old_xp, new_xp, multipliers,
+                    source=source)
                 await db.commit()
             except Exception:
                 await db.execute("ROLLBACK")
@@ -135,21 +174,6 @@ async def give_reward(bot: discord.Client,
         await _log_xp_ledger(guild_id, user_id, amount, new_xp, reason, source)
 
         leveled_up = new_level > old_level
-        if leveled_up:
-            guild = bot.get_guild(guild_id)
-            member = guild.get_member(user_id) if guild else None
-            if guild and member:
-                await check_and_award_level_rewards(
-                    bot, member, guild_id, old_level, new_level)
-                # Phase 5 / Leveling expansion: coin/diamond grants at
-                # configured levels, alongside the role grants above.
-                # Same trigger point (a real level-up), same resolved
-                # guild/member — see utils/xp_calculator.py for why
-                # this is a separate table/function from the role
-                # rewards call just above.
-                await check_and_award_level_currency_rewards(
-                    bot, member, guild_id, old_level, new_level)
-
         return {"success": True, "reward_type": "xp", "amount": amount,
                 "new_xp": new_xp, "old_level": old_level,
                 "new_level": new_level, "leveled_up": leveled_up}

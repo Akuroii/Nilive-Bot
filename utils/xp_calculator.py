@@ -148,20 +148,70 @@ async def get_active_boost_multiplier(guild_id: int, user_id: int) -> float:
 
 
 async def grant_xp_boost(guild_id: int, user_id: int, multiplier: float,
-                          duration_hours: int, source: str = "shop") -> str:
+                          duration_hours: int, source: str = "shop",
+                          db: aiosqlite.Connection | None = None) -> str:
+    """Insert one active boost. Shop and potion callers keep the old path.
+
+    A passed connection is not committed. A level_claim source is
+    idempotent: an existing row is returned unchanged, including its expiry.
+    """
     if duration_hours <= 0:
         raise ValueError("duration_hours must be positive")
-    expires_at = (
-        datetime.now(timezone.utc) + timedelta(hours=duration_hours)
-    ).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO leveling_active_boosts
-                (guild_id, user_id, multiplier, expires_at, source)
-            VALUES (?, ?, ?, ?, ?)
-        """, (guild_id, user_id, multiplier, expires_at, source))
-        await db.commit()
-    return expires_at
+    claim_source = str(source).startswith("level_claim:")
+
+    async def apply(connection) -> str:
+        if claim_source:
+            cursor = await connection.execute(
+                "SELECT expires_at FROM leveling_active_boosts WHERE source=?",
+                (source,))
+            existing = await cursor.fetchone()
+            if existing and existing[0]:
+                return existing[0]
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(hours=duration_hours)
+        ).isoformat()
+        try:
+            await connection.execute("""
+                INSERT INTO leveling_active_boosts
+                    (guild_id, user_id, multiplier, expires_at, source)
+                VALUES (?, ?, ?, ?, ?)
+            """, (guild_id, user_id, multiplier, expires_at, source))
+        except Exception as exc:
+            if not claim_source or "UNIQUE" not in str(exc).upper():
+                raise
+            cursor = await connection.execute(
+                "SELECT expires_at FROM leveling_active_boosts WHERE source=?",
+                (source,))
+            existing = await cursor.fetchone()
+            if existing and existing[0]:
+                return existing[0]
+            raise
+        return expires_at
+
+    if db is not None:
+        return await apply(db)
+    if not claim_source:
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(hours=duration_hours)
+        ).isoformat()
+        async with aiosqlite.connect(DB_PATH) as connection:
+            await connection.execute("""
+                INSERT INTO leveling_active_boosts
+                    (guild_id, user_id, multiplier, expires_at, source)
+                VALUES (?, ?, ?, ?, ?)
+            """, (guild_id, user_id, multiplier, expires_at, source))
+            await connection.commit()
+        return expires_at
+
+    async with aiosqlite.connect(DB_PATH) as connection:
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            result = await apply(connection)
+            await connection.commit()
+            return result
+        except Exception:
+            await connection.execute("ROLLBACK")
+            raise
 
 
 def calculate_voice_xp(minutes: float, voice_xp_per_minute: int) -> int:

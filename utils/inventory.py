@@ -9,35 +9,48 @@ class InsufficientItems(Exception):
 
 async def give_item(guild_id: int, user_id: int, item_name: str,
                      quantity: int = 1, item_type: str = "custom",
-                     metadata: dict = None, source: str = "system") -> int:
+                     metadata: dict = None, source: str = "system",
+                     db: aiosqlite.Connection | None = None) -> int:
+    """Add inventory quantity. An optional caller-owned transaction is not committed.
+
+    Existing callers keep the standalone connection/commit behavior.
+    A passed connection joins that transaction, matching safe_credit(..., db=).
+    """
     if quantity <= 0:
         raise ValueError("quantity must be positive")
     meta_json = json.dumps(metadata) if metadata else None
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
+    async def apply(connection):
+        await connection.execute("""
+            INSERT INTO inventory_items
+                (guild_id, user_id, item_name, item_type,
+                 quantity, metadata, source, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id, user_id, item_name) DO UPDATE SET
+                quantity   = quantity + ?,
+                item_type  = excluded.item_type,
+                metadata   = COALESCE(excluded.metadata, inventory_items.metadata),
+                updated_at = CURRENT_TIMESTAMP
+        """, (guild_id, user_id, item_name, item_type,
+              quantity, meta_json, source, quantity))
+        cursor = await connection.execute("""
+            SELECT quantity FROM inventory_items
+            WHERE guild_id=? AND user_id=? AND item_name=?
+        """, (guild_id, user_id, item_name))
+        row = await cursor.fetchone()
+        return row[0] if row else quantity
+
+    if db is not None:
+        return await apply(db)
+
+    async with aiosqlite.connect(DB_PATH) as connection:
+        await connection.execute("BEGIN IMMEDIATE")
         try:
-            await db.execute("""
-                INSERT INTO inventory_items
-                    (guild_id, user_id, item_name, item_type,
-                     quantity, metadata, source, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(guild_id, user_id, item_name) DO UPDATE SET
-                    quantity   = quantity + ?,
-                    item_type  = excluded.item_type,
-                    metadata   = COALESCE(excluded.metadata, inventory_items.metadata),
-                    updated_at = CURRENT_TIMESTAMP
-            """, (guild_id, user_id, item_name, item_type,
-                  quantity, meta_json, source, quantity))
-            cursor = await db.execute("""
-                SELECT quantity FROM inventory_items
-                WHERE guild_id=? AND user_id=? AND item_name=?
-            """, (guild_id, user_id, item_name))
-            row = await cursor.fetchone()
-            await db.commit()
-            return row[0] if row else quantity
+            result = await apply(connection)
+            await connection.commit()
+            return result
         except Exception:
-            await db.execute("ROLLBACK")
+            await connection.execute("ROLLBACK")
             raise
 
 

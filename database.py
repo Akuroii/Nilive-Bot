@@ -723,6 +723,38 @@ async def init_db():
         """)
 
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS leveling_shop_rewards (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id   INTEGER NOT NULL,
+                level      INTEGER NOT NULL,
+                item_id    INTEGER NOT NULL,
+                quantity   INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, level, item_id)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_lsr_guild
+            ON leveling_shop_rewards(guild_id)
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS leveling_boost_rewards (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id       INTEGER NOT NULL,
+                level          INTEGER NOT NULL,
+                multiplier     REAL NOT NULL,
+                duration_hours INTEGER NOT NULL,
+                created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (guild_id, level)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_leveling_boost_rewards_guild
+            ON leveling_boost_rewards(guild_id)
+        """)
+
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_reset_config (
                 guild_id   INTEGER PRIMARY KEY,
                 enabled    INTEGER DEFAULT 0,
@@ -767,6 +799,13 @@ async def init_db():
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_lab_expires
             ON leveling_active_boosts(expires_at)
+        """)
+        # Level-claim boosts only. Shop and potion rows use other source
+        # values, so this index does not limit those inserts.
+        await db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_lab_level_claim_source
+            ON leveling_active_boosts(source)
+            WHERE source LIKE 'level_claim:%'
         """)
 
         # Daily / Streak (persisted): replaces the old in-memory
@@ -1311,6 +1350,27 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_tr_expires
             ON temp_roles(expires_at)
         """)
+        # Level-claim temp-role units. Shop purchases leave both columns
+        # NULL, so their inserts and the expiry cleanup are unchanged.
+        # A partial unique index lets a claim retry see units it already
+        # wrote without blocking those NULL shop rows.
+        try:
+            cursor = await db.execute("PRAGMA table_info(temp_roles)")
+            cols = [c[1] for c in await cursor.fetchall()]
+            if "claim_id" not in cols:
+                await db.execute(
+                    "ALTER TABLE temp_roles ADD COLUMN claim_id INTEGER")
+            if "unit_index" not in cols:
+                await db.execute(
+                    "ALTER TABLE temp_roles ADD COLUMN unit_index INTEGER")
+            await db.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_temp_roles_claim_unit
+                ON temp_roles(claim_id, unit_index)
+                WHERE claim_id IS NOT NULL
+            """)
+            await db.commit()
+        except Exception as e:
+            print(f"[MIGRATION] temp_roles.claim_id: {e}")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS transaction_ledger (
@@ -1948,6 +2008,10 @@ async def init_db():
                       f"bypass, not a DB row.")
         except Exception as e:
             print(f"[MIGRATION] developer legacy row cleanup: {e}")
+
+    from utils.level_claims import backfill_legacy_claims, ensure_tables
+    await ensure_tables()
+    await backfill_legacy_claims()
 
     print("✅ Database initialized — all tables ready")
     print(f"✅ Developer bypass active for user ID: {OWNER_DISCORD_ID} "

@@ -1813,7 +1813,7 @@ COMMAND_CATEGORIES = {
         "addcoins", "removecoins", "adddiamonds", "removediamonds",
     ],
     "Leveling": [
-        "rank", "leaderboard", "setxp", "resetxp",
+        "rank", "leaderboard", "level", "setxp", "resetxp",
         "resetleaderboard", "prestige",
     ],
     "Shop & Inventory": [
@@ -1895,6 +1895,7 @@ COMMAND_METADATA = {
     "event_list": {"desc": "List recent events", "params": []},
     "rank": {"desc": "View your rank card", "params": ["member"]},
     "leaderboard": {"desc": "View the XP leaderboard", "params": []},
+    "level": {"desc": "View and claim level rewards", "params": []},
     "setxp": {"desc": "Set XP for a member (admin)", "params": ["member", "xp"]},
     "resetxp": {"desc": "Reset a member's XP and level back to 0 (admin)", "params": ["member"]},
     "resetleaderboard": {"desc": "Force an immediate leaderboard reset for this server (admin)", "params": []},
@@ -2650,22 +2651,39 @@ def api_edit_member():
     coins     = max(0, int(data.get("coins", 0)))
     diamonds  = max(0, int(data.get("diamonds", 0)))
     new_level = calculate_level_from_xp(xp)
+    from utils.level_claims import (
+        SOURCE_DASHBOARD, record_crossing, snapshot_multipliers,
+    )
+    multipliers = run_async(snapshot_multipliers(guild_id, int(user_id)))
 
     async def update():
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO levels (guild_id, user_id, xp, level)
-                VALUES (?,?,?,?)
-                ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET xp=?, level=?
-            """, (guild_id, user_id, xp, new_level, xp, new_level))
-            await db.execute("""
-                INSERT INTO economy (guild_id, user_id, balance, diamonds)
-                VALUES (?,?,?,?)
-                ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET balance=?, diamonds=?
-            """, (guild_id, user_id, coins, diamonds, coins, diamonds))
-            await db.commit()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+                    (guild_id, user_id))
+                row = await cursor.fetchone()
+                old_xp = row[0] if row else 0
+                await db.execute("""
+                    INSERT INTO levels (guild_id, user_id, xp, level)
+                    VALUES (?,?,?,?)
+                    ON CONFLICT(guild_id, user_id)
+                    DO UPDATE SET xp=?, level=?
+                """, (guild_id, user_id, xp, new_level, xp, new_level))
+                await record_crossing(
+                    db, guild_id, int(user_id), old_xp, xp, multipliers,
+                    source=SOURCE_DASHBOARD)
+                await db.execute("""
+                    INSERT INTO economy (guild_id, user_id, balance, diamonds)
+                    VALUES (?,?,?,?)
+                    ON CONFLICT(guild_id, user_id)
+                    DO UPDATE SET balance=?, diamonds=?
+                """, (guild_id, user_id, coins, diamonds, coins, diamonds))
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
 
     run_async(update())
     log_action(guild_id, f"Edited member {user_id}: xp={xp} coins={coins} diamonds={diamonds}",

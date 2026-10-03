@@ -94,6 +94,133 @@ async def perform_leaderboard_reset(guild_id: int, period: str):
     return len(rows)
 
 
+def _compact_qty(amount: int) -> str:
+    return f"{int(amount)}x"
+
+
+async def _level_embed(guild, member, page: str) -> discord.Embed:
+    from utils.currency import get_currency_config
+    from utils.level_claims import (
+        current_level_definitions, list_claims, progress_level,
+    )
+    from utils.xp_calculator import xp_progress
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+            (guild.id, member.id))
+        row = await cursor.fetchone()
+    xp = row[0] if row else 0
+    level, current, needed = xp_progress(xp)
+    claims = await list_claims(guild.id, member.id)
+    by_key = {(c["reward_level"], c["track"], c["reward_ref"]): c for c in claims}
+    if page == "stats":
+        pending = sum(1 for c in claims if c["status"] in ("pending", "failed"))
+        embed = discord.Embed(title="Level stats", color=0x7c5cbf)
+        embed.add_field(name="Level", value=str(progress_level(xp)))
+        embed.add_field(name="Total XP", value=f"{xp:,}")
+        embed.add_field(name="Progress", value=f"{current:,}/{needed:,}")
+        embed.add_field(name="Ready to claim", value=str(pending))
+        embed.add_field(name="Fulfilled", value=str(
+            sum(1 for c in claims if c["status"] == "fulfilled")))
+        return embed
+
+    embed = discord.Embed(
+        title=f"Level {level}",
+        description="Rewards configured for your current level.",
+        color=0x7c5cbf)
+    other_ready = sum(
+        1 for c in claims
+        if c["reward_level"] != level and c["status"] in ("pending", "failed"))
+    if other_ready:
+        embed.set_footer(
+            text=f"Claim All also collects {other_ready} earlier reward(s).")
+    defs = await current_level_definitions(guild.id, level)
+    currency = await get_currency_config(guild.id)
+    lines = []
+    for item in defs:
+        key = (item["reward_level"], item["track"], item["reward_ref"])
+        claim = by_key.get(key)
+        status = claim["status"] if claim else "not crossed"
+        if item["track"] == "currency":
+            code = item["payload"]["currency"]
+            label = currency["coins" if code == "balance" else "diamonds"]["name"]
+            amount = claim["payload"]["amount"] if claim else item["payload"]["amount"]
+            text = f"{_compact_qty(amount)} {label}"
+        elif item["track"] == "shop":
+            payload = claim["payload"] if claim else item["payload"]
+            text = f"{_compact_qty(payload['quantity'])} {payload['name']}"
+        elif item["track"] == "boost":
+            payload = claim["payload"] if claim else item["payload"]
+            text = f"{float(payload['multiplier']):g}x XP · {int(payload['duration_hours'])}h"
+        else:
+            role = guild.get_role(int(item["payload"]["role_id"]))
+            text = role.mention if role else f"role {item['payload']['role_id']}"
+        if claim and claim.get("last_error") and status == "failed":
+            text += f" — failed, can retry"
+        lines.append(f"{text} · {status}")
+    # A deleted Shop product or boost config leaves the frozen claim.
+    shown = {(item["reward_level"], item["track"], item["reward_ref"]) for item in defs}
+    for claim in claims:
+        key = (claim["reward_level"], claim["track"], claim["reward_ref"])
+        if claim["reward_level"] != level or claim["track"] not in ("shop", "boost") or key in shown:
+            continue
+        payload = claim["payload"]
+        if claim["track"] == "boost":
+            text = f"{float(payload['multiplier']):g}x XP · {int(payload['duration_hours'])}h"
+        else:
+            text = f"{_compact_qty(payload['quantity'])} {payload['name']}"
+        if claim.get("last_error") and claim["status"] == "failed":
+            text += " — failed, can retry"
+        lines.append(f"{text} · {claim['status']}")
+    if not lines:
+        embed.description = "No rewards are configured for your current level."
+        return embed
+    embed.add_field(name="This level", value="\n".join(lines)[:1024], inline=False)
+    return embed
+
+
+class LevelRewardView(discord.ui.View):
+    def __init__(self, bot, guild_id: int, user_id: int):
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.guild_id = guild_id
+        self.user_id = user_id
+
+    async def _refresh(self, interaction, page: str):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This level card belongs to someone else.", ephemeral=True)
+            return
+        embed = await _level_embed(interaction.guild, interaction.user, page)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Level", style=discord.ButtonStyle.primary, row=0)
+    async def show_level(self, interaction, button):
+        await self._refresh(interaction, "level")
+
+    @discord.ui.button(label="Stats", style=discord.ButtonStyle.secondary, row=0)
+    async def show_stats(self, interaction, button):
+        await self._refresh(interaction, "stats")
+
+    @discord.ui.button(label="Claim All", style=discord.ButtonStyle.primary, row=1)
+    async def claim_all(self, interaction, button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This level card belongs to someone else.", ephemeral=True)
+            return
+        # Role delivery is outside SQLite and can exceed the 3s ack window.
+        await interaction.response.defer()
+        from utils.level_claims import claim_available
+        result = await claim_available(
+            self.guild_id, self.user_id, member=interaction.user, bot=self.bot)
+        embed = await _level_embed(interaction.guild, interaction.user, "level")
+        got = len(result["fulfilled"])
+        missed = len(result["failed"])
+        embed.set_footer(text=f"Claimed {got}. Retryable failures: {missed}.")
+        await interaction.edit_original_response(embed=embed, view=self)
+
+
 class Leveling(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -247,6 +374,8 @@ class Leveling(commands.Cog):
                                       flags: dict):
         try:
             config = await get_leveling_config(guild.id)
+            if not config.get("enabled", 1):
+                return
             if not config.get("voice_xp_enabled", 1):
                 return
 
@@ -449,15 +578,33 @@ class Leveling(commands.Cog):
         # which assume xp >= 0.
         xp = max(0, xp)
         new_level, _, _ = xp_progress(xp)
+        from utils.level_claims import (
+            SOURCE_SETXP, record_crossing, snapshot_multipliers,
+        )
+        multipliers = await snapshot_multipliers(
+            interaction.guild.id, member.id, member=member, bot=self.bot)
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO levels (guild_id, user_id, xp, level)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET xp = ?, level = ?
-            """, (interaction.guild.id, member.id, xp, new_level,
-                  xp, new_level))
-            await db.commit()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+                    (interaction.guild.id, member.id))
+                row = await cursor.fetchone()
+                old_xp = row[0] if row else 0
+                await db.execute("""
+                    INSERT INTO levels (guild_id, user_id, xp, level)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(guild_id, user_id)
+                    DO UPDATE SET xp = ?, level = ?
+                """, (interaction.guild.id, member.id, xp, new_level,
+                      xp, new_level))
+                await record_crossing(
+                    db, interaction.guild.id, member.id, old_xp, xp,
+                    multipliers, source=SOURCE_SETXP)
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
         await interaction.response.send_message(
             f"Set {member.mention}'s XP to {xp:,} (Level {new_level}).",
             ephemeral=True)
@@ -506,6 +653,19 @@ class Leveling(commands.Cog):
         await interaction.followup.send(
             f"{CHECK_EMOJI} Leaderboard reset — {count} member(s) archived "
             f"and zeroed.")
+
+    # ─── LEVEL REWARDS ──────────────────────────────────
+    @app_commands.command(name="level",
+                          description="View and claim your level rewards")
+    async def level(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Use this command in a server.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        embed = await _level_embed(interaction.guild, interaction.user, "level")
+        view = LevelRewardView(self.bot, interaction.guild.id, interaction.user.id)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ─── PRESTIGE STATE / READ-ONLY VIEW ─────────────────
     # The old XP/level-gated "/prestige reset" command has been retired

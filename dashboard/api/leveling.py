@@ -242,6 +242,196 @@ def delete_leveling_currency_reward(reward_id: int):
     return jsonify({"success": True})
 
 
+@api_bp.route("/leveling/boost-rewards", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_boost_rewards():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, level, multiplier, duration_hours
+                FROM leveling_boost_rewards
+                WHERE guild_id = ? ORDER BY level ASC
+            """, (guild_id,))
+            return await cursor.fetchall()
+
+    rows = run_async(fetch())
+    return jsonify({"rewards": [{
+        "id": r[0], "level": r[1], "multiplier": r[2], "duration_hours": r[3],
+    } for r in rows]})
+
+
+@api_bp.route("/leveling/boost-reward", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_leveling_boost_reward():
+    guild_id = get_session_guild_id()
+    data = request.json or {}
+    try:
+        level = int(data.get("level"))
+        duration_hours = int(data.get("duration_hours"))
+        multiplier = float(data.get("multiplier"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Level, multiplier, and duration must be numbers"})
+    if isinstance(data.get("duration_hours"), float) or isinstance(data.get("level"), float):
+        return jsonify({"success": False, "error": "Level and duration must be whole numbers"})
+    if level < 1 or duration_hours < 1 or multiplier <= 1:
+        return jsonify({
+            "success": False,
+            "error": "Level and duration must be at least 1, and the multiplier must be above 1",
+        })
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            try:
+                await db.execute("""
+                    INSERT INTO leveling_boost_rewards
+                        (guild_id, level, multiplier, duration_hours)
+                    VALUES (?, ?, ?, ?)
+                """, (guild_id, level, multiplier, duration_hours))
+                await db.commit()
+            except Exception as exc:
+                await db.execute("ROLLBACK")
+                if "UNIQUE" in str(exc).upper():
+                    return "That level already has an XP boost reward."
+                raise
+            return None
+
+    error = run_async(save())
+    if error:
+        return jsonify({"success": False, "error": error})
+    log_action(guild_id,
+               f"Added level {level} XP boost reward: {multiplier}x for {duration_hours}h",
+               "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/boost-reward/<int:reward_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_leveling_boost_reward(reward_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_boost_rewards WHERE id=? AND guild_id=?",
+                (reward_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+_SHOP_REWARD_TYPES = ("custom", "title", "potion", "temp_role")
+
+
+@api_bp.route("/leveling/shop-rewards", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_shop_rewards():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT r.id, r.level, r.item_id, r.quantity, s.name, s.type
+                FROM leveling_shop_rewards r
+                LEFT JOIN shop_items s
+                  ON s.id = r.item_id AND s.guild_id = r.guild_id
+                WHERE r.guild_id = ?
+                ORDER BY r.level ASC, r.id ASC
+            """, (guild_id,))
+            rewards = await cursor.fetchall()
+            cursor = await db.execute("""
+                SELECT id, name, type, role_id, duration_hours, enabled
+                FROM shop_items
+                WHERE guild_id = ? AND type IN ('custom', 'title', 'potion', 'temp_role')
+                ORDER BY name ASC, id ASC
+            """, (guild_id,))
+            products = await cursor.fetchall()
+            return rewards, products
+
+    rewards, products = run_async(fetch())
+    return jsonify({
+        "rewards": [{
+            "id": r[0], "level": r[1], "item_id": r[2], "quantity": r[3],
+            "name": r[4], "type": r[5],
+        } for r in rewards],
+        "products": [{
+            "id": p[0], "name": p[1], "type": p[2],
+            "role_id": p[3], "duration_hours": p[4], "enabled": p[5],
+        } for p in products],
+    })
+
+
+@api_bp.route("/leveling/shop-reward", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_leveling_shop_reward():
+    guild_id = get_session_guild_id()
+    data = request.json or {}
+    try:
+        level = int(data.get("level"))
+        item_id = int(data.get("item_id"))
+        quantity = int(data.get("quantity"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Level, product, and quantity must be numbers"})
+    if level <= 0 or item_id <= 0 or quantity < 1:
+        return jsonify({"success": False, "error": "Level, product, and quantity must be at least 1"})
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT type, role_id, duration_hours, xp_boost_multiplier
+                FROM shop_items WHERE id=? AND guild_id=?
+            """, (item_id, guild_id))
+            item = await cursor.fetchone()
+            if not item:
+                return "That Shop product is not in this server."
+            item_type, role_id, duration_hours, multiplier = item
+            if item_type not in _SHOP_REWARD_TYPES:
+                return "Only custom, title, potion, and temporary role products can be level rewards."
+            if item_type == "temp_role" and (not role_id or not duration_hours or int(duration_hours) <= 0):
+                return "That temporary role product needs a role and a positive duration."
+            if item_type == "potion" and (not multiplier or float(multiplier) <= 1 or not duration_hours):
+                return "That potion needs an effect multiplier above 1 and a positive duration."
+            try:
+                await db.execute("""
+                    INSERT INTO leveling_shop_rewards
+                        (guild_id, level, item_id, quantity)
+                    VALUES (?, ?, ?, ?)
+                """, (guild_id, level, item_id, quantity))
+                await db.commit()
+            except Exception as exc:
+                await db.execute("ROLLBACK")
+                if "UNIQUE" in str(exc).upper():
+                    return "That product is already a reward at this level."
+                raise
+            return None
+
+    error = run_async(save())
+    if error:
+        return jsonify({"success": False, "error": error})
+    log_action(guild_id,
+               f"Added level {level} shop reward: item {item_id} x{quantity}",
+               "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/shop-reward/<int:reward_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_leveling_shop_reward(reward_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_shop_rewards WHERE id=? AND guild_id=?",
+                (reward_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+
 @api_bp.route("/leveling/reset-config", methods=["GET"])
 @require_api_permission(LEVEL_ADMIN)
 def get_leveling_reset_config():

@@ -10,6 +10,7 @@ from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
 from utils.currency import get_currency_config, currency_amount
 from utils.emoji import CHECK_EMOJI
+from utils.reward_engine import xp_grant_skipped
 
 
 async def give_reward(bot: discord.Client,
@@ -56,7 +57,7 @@ async def give_reward(bot: discord.Client,
             reason="Event reward",
             source="event",
         )
-    if not result.get("success"):
+    if not result.get("success") and not xp_grant_skipped(result):
         print(f"[EVENTS] Reward grant failed: {result.get('error')}")
     return result
 
@@ -105,13 +106,26 @@ class ButtonRaceView(discord.ui.View):
                   snap["display_name"]))
             await db.commit()
 
-        await give_reward(
+        result = await give_reward(
             interaction.client,
             interaction.guild,
             interaction.user,
             self.reward_type,
             self.reward_value,
             self.reward_duration)
+
+        if xp_grant_skipped(result):
+            await interaction.response.send_message(
+                "You won this event, but Leveling is off so no XP was added "
+                f"({len(self.winners)}/{self.max_winners})",
+                ephemeral=True)
+            if len(self.winners) >= self.max_winners:
+                self.finished = True
+                for item in self.children:
+                    item.disabled = True
+                await interaction.message.edit(view=self)
+                await interaction.channel.send("🏁 Event ended.")
+            return
 
         cur = await get_currency_config(interaction.guild.id)
         cc, cd = cur["coins"], cur["diamonds"]

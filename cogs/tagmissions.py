@@ -19,7 +19,7 @@ from discord.ext import commands, tasks
 import aiosqlite
 
 from database import DB_PATH
-from utils.reward_engine import give_reward, RewardError
+from utils.reward_engine import give_reward, RewardError, xp_grant_skipped
 
 
 class TagMissionConfirmView(discord.ui.View):
@@ -211,8 +211,10 @@ class TagMissions(commands.Cog):
 
             if member:
                 primary = member.primary_guild
-                if (primary and primary.identity_enabled
-                        and primary.identity_guild_id == guild_id):
+                wearing = (primary and primary.identity_enabled
+                           and primary.identity_guild_id == guild_id)
+                dm_text = failure_message
+                if wearing:
                     try:
                         result = await give_reward(
                             self.bot, guild_id, user_id,
@@ -225,6 +227,13 @@ class TagMissions(commands.Cog):
                         )
                         if result.get("success"):
                             outcome = "rewarded"
+                            dm_text = success_message
+                        elif xp_grant_skipped(result):
+                            # Kept the tag, so the existing rewarded count
+                            # still includes them. Do not DM that the XP
+                            # was sent, and do not send the tag-removed DM.
+                            outcome = "rewarded"
+                            dm_text = None
                         else:
                             print(f"[TAGMISSIONS] mission {mission_id} reward "
                                   f"failed user={user_id}: {result.get('error')}")
@@ -232,11 +241,11 @@ class TagMissions(commands.Cog):
                         print(f"[TAGMISSIONS] mission {mission_id} reward "
                               f"config error: {e}")
 
-                try:
-                    await member.send(
-                        success_message if outcome == "rewarded" else failure_message)
-                except discord.Forbidden:
-                    pass
+                if dm_text:
+                    try:
+                        await member.send(dm_text)
+                    except discord.Forbidden:
+                        pass
 
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("""
