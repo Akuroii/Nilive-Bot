@@ -384,12 +384,28 @@ def delete_shop_item(item_id: int):
 
     async def delete():
         async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM shop_items "
+                "WHERE guild_id = ? AND option_of_id = ? LIMIT 1",
+                (guild_id, item_id))
+            if await cursor.fetchone():
+                return False
             await db.execute(
                 "DELETE FROM shop_items WHERE id = ? AND guild_id = ?",
                 (item_id, guild_id))
             await db.commit()
+        return True
 
-    run_async(delete())
+    try:
+        deleted = run_async(delete())
+    except aiosqlite.IntegrityError:
+        # The database trigger is authoritative if a child was concurrently
+        # added after the read above.
+        return jsonify({"success": False,
+                        "error": "A root product with options cannot be deleted."}), 409
+    if not deleted:
+        return jsonify({"success": False,
+                        "error": "A root product with options cannot be deleted."}), 409
     return ""
 
 
@@ -403,6 +419,19 @@ def add_shop_item():
         data = shop_input(raw)
     except ShopValidationError as exc:
         return jsonify({"success": False, "error": str(exc)}), 400
+
+    option_parent_id = data["option_of_id"]
+    if option_parent_id is not None:
+        async def validate_option_parent():
+            async with aiosqlite.connect(DB_PATH) as db:
+                cursor = await db.execute(
+                    "SELECT id FROM shop_items "
+                    "WHERE id = ? AND guild_id = ? AND option_of_id IS NULL",
+                    (option_parent_id, guild_id))
+                return await cursor.fetchone()
+        if not run_async(validate_option_parent()):
+            return jsonify({"success": False,
+                            "error": "Option parent must be a root product in this guild."}), 400
 
     max_stock_val = data["max_stock"]
     current_stock_val = max_stock_val
@@ -430,8 +459,9 @@ def add_shop_item():
                      role_id, duration_hours, featured,
                      required_level, required_role_id,
                      max_stock, current_stock, enabled, price_diamonds,
-                     icon_url, rarity, prestige_tier, xp_boost_multiplier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                     icon_url, rarity, prestige_tier, xp_boost_multiplier,
+                     option_of_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
             """, (
                 guild_id,
                 item_name,
@@ -459,6 +489,7 @@ def add_shop_item():
                 # multiplier)"). Potions reuse the same column, so this
                 # had to be corrected rather than worked around.
                 xp_boost_multiplier_val,
+                option_parent_id,
             ))
             await db.commit()
 
@@ -468,7 +499,11 @@ def add_shop_item():
             guild_id, item_name, icon_url=icon_url, rarity=rarity,
             value_currency=value_currency, value_amount=value_amount)
 
-    run_async(save())
+    try:
+        run_async(save())
+    except aiosqlite.IntegrityError:
+        return jsonify({"success": False,
+                        "error": "Option parent must be a root product in this guild."}), 400
     log_action(guild_id, f"Added shop item: {data.get('name')}", "shop")
     return jsonify({"success": True})
 

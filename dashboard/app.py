@@ -1322,6 +1322,35 @@ def shop():
                   free_vi_ids=free_vi_ids, **ctx)
 
 
+# ── Shop Publisher (Phase 1) ────────────────────────────────────────────────
+# The Publisher page: pick an embed_templates presentation + a shop_items
+# product, resolve the fixed token catalog server-side (utils/shop_publisher),
+# and preview the message plus the purchase action that will be published.
+# Phase 1 has no publish/send; that lands in Phase 2 on the same page.
+#
+# Same pattern as the Embed Builder routes: `bot_identity` comes from the same
+# helper so the preview header renders the guild's bot identity without a
+# Discord call from the browser. No database writes happen on this route.
+@app.route("/shop-publisher")
+@require_page("shoppublisher")
+def shop_publisher():
+    ctx = get_current_user_context()
+    return render("manage/shoppublisher.html",
+                  bot_identity=_bot_identity_for_page(ctx.get("guild_id")),
+                  **ctx)
+
+
+# Region A of the Shop Designer is a separate, read-only catalog workspace.
+# Reuse the existing Shop Publisher owner permission; this route introduces
+# no catalog writes, persistence, preview, action, or purchase behavior.
+@app.route("/shop-designer")
+@require_page("shoppublisher")
+def shop_designer():
+    return render("manage/shopdesigner.html",
+                  limits=limits_payload(),
+                  **get_current_user_context())
+
+
 # ── Events ─────────────────────────────────────────────────────────────────────
 
 @app.route("/events")

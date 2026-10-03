@@ -606,6 +606,7 @@ class Shop(commands.Cog):
                        price_diamonds, xp_boost_multiplier, prestige_tier
                 FROM shop_items
                 WHERE guild_id = ? AND enabled = 1
+                  AND option_of_id IS NULL
                 ORDER BY featured DESC, price ASC
             """, (interaction.guild.id,))
             items = await cursor.fetchall()
@@ -671,11 +672,38 @@ class Shop(commands.Cog):
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
-        if (interaction.type == discord.InteractionType.component
-                and interaction.data.get("custom_id", "").startswith(
-                    "shop_buy_")):
-            item_id = int(
-                interaction.data["custom_id"].replace("shop_buy_", ""))
+        if interaction.type != discord.InteractionType.component:
+            return
+
+        data = interaction.data if isinstance(interaction.data, dict) else {}
+        custom_id = data.get("custom_id", "")
+        if not isinstance(custom_id, str):
+            return
+
+        select_prefix = "shop_buy_sel_"
+        if custom_id.startswith(select_prefix):
+            # context_id identifies the Select component; the selected value
+            # remains the existing shop_buy_<item_id> purchase handle.
+            context_id = custom_id[len(select_prefix):]
+            if not context_id.isascii() or not context_id.isdigit():
+                return
+
+            values = data.get("values")
+            if not isinstance(values, list) or len(values) != 1:
+                return
+            value = values[0]
+            value_prefix = "shop_buy_"
+            if not isinstance(value, str) or not value.startswith(value_prefix):
+                return
+            item_id_text = value[len(value_prefix):]
+            if not item_id_text.isascii() or not item_id_text.isdigit():
+                return
+
+            await process_purchase(interaction, int(item_id_text))
+            return
+
+        if custom_id.startswith("shop_buy_"):
+            item_id = int(custom_id.replace("shop_buy_", ""))
             await process_purchase(interaction, item_id)
 
     # ─── INVENTORY ──────────────────────────────────────

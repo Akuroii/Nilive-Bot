@@ -267,6 +267,27 @@
         <span class="nav-icon">🛒</span>
         <span class="nav-text">Shop</span>
     </a>
+    <a href="/shop-designer"
+       hx-get="/shop-designer"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🧩</span>
+        <span class="nav-text">Shop Designer</span>
+    </a>
+    <a href="/shop-publisher"
+       hx-get="/shop-publisher"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link nav-link-legacy"
+       aria-label="Legacy Shop Publisher — compatibility page">
+        <span class="nav-icon">📣</span>
+        <span class="nav-text">Shop Publisher · Legacy</span>
+    </a>
     <a href="/events"
        hx-get="/events"
        hx-target="#content-area"
@@ -597,6 +618,7 @@
 }
 .nav-link:hover { background: var(--bg4); color: var(--text); }
 .nav-link.active { background: var(--accent); color: #fff; }
+.nav-link-legacy { opacity: .62; }
 .nav-icon { font-size: 15px; width: 18px; text-align: center; flex-shrink: 0; }
 .staging-banner {
     background: var(--warning);
