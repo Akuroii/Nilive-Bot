@@ -194,7 +194,7 @@ COLORS = {
     "label_purple": (140, 100, 180),    # INVENTORY / TOTAL XP headers
     # "XP PROGRESS" / "TOTAL XP" labels only. Was #483A65 -- too dark on the
     # panel. Lighter lavender, still clearly below the XP numerals.
-    "xp_panel_label": (188, 176, 218),
+    "xp_panel_label": (178, 162, 220),
     "xp_panel_label_glow": (196, 140, 236),  # very subtle pink-lavender tint
     # TOTAL XP number only. Was #7A3D97; lifted so the heavy stencil face
     # holds together at its smaller size, still well under the hero value.
