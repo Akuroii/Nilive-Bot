@@ -161,7 +161,7 @@
                             {{ item[2] or '—' }}
                         </td>
                         <td>
-                            {% if item[0] in free_vi_ids %}
+                            {% if item[0] in free_item_ids %}
                             Free
                             {% elif item[9] %}
                             {{ currency_icon(currency.diamonds.emoji) }} {{ "{:,}".format(item[9]) }}
@@ -364,10 +364,17 @@ async function addItem() {
     const boostMult = parseFloat(
         document.getElementById('item-boost-mult').value) || 0;
     const prestigeTier = document.getElementById('item-prestige-tier');
+    // An explicitly typed 0 is the Free listing (no coin charge). A BLANK
+    // field must never be collapsed into 0 by `|| 0`: that would silently
+    // create a Free item out of an unfinished form. Only plain digits are a
+    // price; anything else (blank, sign, junk) stays null and is handled by
+    // the checks below, or ignored where the field is documented as ignored
+    // (a Diamond price is set).
+    const priceRaw = (document.getElementById('item-price').value || '').trim();
+    const priceValue = /^\d+$/.test(priceRaw) ? parseInt(priceRaw, 10) : null;
     const payload = {
         name:          document.getElementById('item-name').value,
-        price:         parseInt(
-            document.getElementById('item-price').value) || 0,
+        price:         priceValue === null ? 0 : priceValue,
         price_diamonds: priceDiamonds > 0 ? priceDiamonds : null,
         type:          type,
         role_id:       ['xp_boost', 'prestige', 'potion', 'title'].indexOf(type) === -1
@@ -398,7 +405,17 @@ async function addItem() {
         payload.required_level = 0;
         payload.duration_hours = null;
     }
-    if (!payload.name || (!freeVI && !payload.price && !payload.price_diamonds)) {
+    if (!payload.name) {
+        showToast('Enter name and a coin or diamond price', 'danger');
+        return;
+    }
+    // Non-Prestige items (Prestige keeps its own rule below): a Coin price is
+    // required unless a Diamond price is set — the existing precedence, where
+    // the Coin field is documented as ignored. A blank or non-numeric field is
+    // rejected rather than read as 0, so an unfinished form can never silently
+    // create a Free item; a typed 0 with no Diamond price IS the Free listing.
+    if (!freeVI && type !== 'prestige' && payload.price_diamonds === null
+            && priceValue === null) {
         showToast('Enter name and a coin or diamond price', 'danger');
         return;
     }

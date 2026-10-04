@@ -334,7 +334,11 @@ def shop_items_partial():
         vi = r[4] == "prestige" and r[12] == 6
         if vi:
             dur = "While boosting; activation required"
-        price_str = "Free" if vi else (f"{_gem_icon} {price_diamonds:,}"
+        # Free = zero charge (explicit 0 coin price, no diamond price), plus
+        # VI by its own rule. Only the PRICE cell treats a normal Free item as
+        # Free; the duration cell below stays VI-only.
+        free = vi or (not price_diamonds and r[3] == 0)
+        price_str = "Free" if free else (f"{_gem_icon} {price_diamonds:,}"
                      if price_diamonds else f"{_coin_icon} {r[3]:,}")
         rarity = r[11] or "common"
         rarity_class = RARITY_BADGE.get(rarity, "badge")

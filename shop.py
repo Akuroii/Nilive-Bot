@@ -306,9 +306,15 @@ async def process_purchase(interaction: discord.Interaction,
         await interaction.response.send_message("Item not found.", ephemeral=True)
         return
     max_stock, curr_stock = stock_row
-    if pay_amount is None or not isinstance(pay_amount, int) or pay_amount <= 0:
+    # Price validation, unchanged in what it refuses: a NULL/negative/
+    # non-integer charge is still a misconfigured listing, never a free one.
+    # Free is detected explicitly as pay_amount == 0 (never `<= 0`, never
+    # truthiness) and is the ONLY difference in what follows: no balance is
+    # read or written for it.
+    if pay_amount is None or not isinstance(pay_amount, int) or pay_amount < 0:
         await interaction.response.send_message("Paid Shop items require a positive price.", ephemeral=True)
         return
+    free = pay_amount == 0
 
     # P1 #11 FIX: previously stock and balance were checked with
     # plain SELECTs, then both decremented in separate UPDATEs
@@ -318,35 +324,45 @@ async def process_purchase(interaction: discord.Interaction,
     # buyer without enough balance still get charged into a negative
     # number. Now stock is claimed atomically first; if the balance
     # deduction that follows fails, the stock claim is released.
+    # A Free item claims stock exactly like a paid one — free is not
+    # unmetered, it only removes the charge.
     stock_ok = await safe_decrement_stock(iid)
     if not stock_ok:
         await interaction.response.send_message(
             "This item is out of stock.", ephemeral=True)
         return
 
-    try:
-        await safe_deduct(guild_id, user_id, pay_amount,
-                           currency=pay_currency,
-                           reason=f"Shop purchase: {name}", source="shop")
-    except InsufficientBalance:
-        if max_stock:
+    # Only the deduction is skipped for a Free item — the same way the
+    # Prestige VI branch above never reaches it. safe_deduct() keeps its own
+    # "amount must be positive" contract untouched; it is simply not called
+    # when there is nothing to charge. No balance row, ledger entry or
+    # rollback trigger is involved in the Free case, so the stock claim
+    # needs no compensating release here (the release below exists solely
+    # to undo a *failed deduction*, which cannot happen at zero).
+    if not free:
+        try:
+            await safe_deduct(guild_id, user_id, pay_amount,
+                               currency=pay_currency,
+                               reason=f"Shop purchase: {name}", source="shop")
+        except InsufficientBalance:
+            if max_stock:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE shop_items SET current_stock = current_stock + 1 WHERE id=?",
+                        (iid,))
+                    await db.commit()
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    "UPDATE shop_items SET current_stock = current_stock + 1 WHERE id=?",
-                    (iid,))
-                await db.commit()
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                f"SELECT {pay_currency} FROM economy WHERE guild_id=? AND user_id=?",
-                (guild_id, user_id))
-            row = await cursor.fetchone()
-        bal = row[0] if row else 0
-        cur = await get_currency_config(guild_id)
-        cinfo = for_currency(cur, pay_currency)
-        await interaction.response.send_message(
-            f"You need {pay_amount:,} {cinfo['emoji']} but only have {bal:,}.",
-            ephemeral=True)
-        return
+                cursor = await db.execute(
+                    f"SELECT {pay_currency} FROM economy WHERE guild_id=? AND user_id=?",
+                    (guild_id, user_id))
+                row = await cursor.fetchone()
+            bal = row[0] if row else 0
+            cur = await get_currency_config(guild_id)
+            cinfo = for_currency(cur, pay_currency)
+            await interaction.response.send_message(
+                f"You need {pay_amount:,} {cinfo['emoji']} but only have {bal:,}.",
+                ephemeral=True)
+            return
 
     snap       = snapshot_user(interaction.user)
     expires_at = None
@@ -355,6 +371,10 @@ async def process_purchase(interaction: discord.Interaction,
             datetime.now(timezone.utc) +
             timedelta(hours=duration_hours)).isoformat()
 
+    # Free items record the normal receipt with a zero value, exactly as the
+    # Prestige VI activation does: price_paid = 0 with the same currency key a
+    # paid purchase of this listing would have used. No ledger row is written
+    # because no ledger movement occurred.
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO purchase_history
@@ -464,11 +484,12 @@ async def process_purchase(interaction: discord.Interaction,
 
     cur = await get_currency_config(guild_id)
     cinfo = for_currency(cur, pay_currency)
+    # Zero reads as Free, never as "0 Coins". Paid wording is unchanged.
+    price_line = ("**Free**" if free
+                  else f"**{pay_amount:,}** {cinfo['emoji']} {cinfo['name']}")
     embed = discord.Embed(
         title=f"{CHECK_EMOJI} Purchase successful",
-        description=(
-            f"You bought **{name}** for **{pay_amount:,}** "
-            f"{cinfo['emoji']} {cinfo['name']}."),
+        description=f"You bought **{name}** for {price_line}.",
         color=0x57F287)
     if itype == "xp_boost" and boost_expires_at:
         embed.add_field(
@@ -640,7 +661,11 @@ class Shop(commands.Cog):
             else:
                 dur_info = f" • {dur}h temp" if dur else ""
             lvl_info  = f" • Req. Level {req_lvl}" if req_lvl else ""
-            price_str = "Free" if vi else (f"{price_diamonds:,} {cd['emoji']}" if price_diamonds
+            # Free = zero charge: no diamond price and an explicit coin price
+            # of 0, plus Prestige VI by its own rule. Explicit comparison, not
+            # truthiness, so nothing else can drift into looking free.
+            free = vi or (not price_diamonds and price == 0)
+            price_str = "Free" if free else (f"{price_diamonds:,} {cd['emoji']}" if price_diamonds
                          else f"{price:,} {cc['emoji']} {cc['name']}")
             embed.add_field(
                 name=f"{'⭐ ' if featured else ''}{name} — {price_str}",
@@ -654,8 +679,16 @@ class Shop(commands.Cog):
             vi = itype == "prestige" and prestige_tier == 6
             if not vi and max_s and not curr_s:
                 continue
+            # Label only — the custom_id (the purchase handle) is untouched.
+            free = vi or (not price_diamonds and price == 0)
+            if vi:
+                btn_label = f"Activate {name} — Free"
+            elif free:
+                btn_label = f"Buy {name} — Free"
+            else:
+                btn_label = f"Buy {name}"
             btn = discord.ui.Button(
-                label=f"Activate {name} — Free" if vi else f"Buy {name}",
+                label=btn_label,
                 style=discord.ButtonStyle.green,
                 custom_id=f"shop_buy_{iid}")
             if (itype == "prestige" and prestige_tier

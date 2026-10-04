@@ -42,10 +42,21 @@ class ListingApiTests(unittest.TestCase):
         self.assertEqual(rows("SELECT guild_id,type,price,prestige_tier,current_stock "
                               "FROM shop_items"), [(GUILD, "prestige", 0, 6, None)])
 
-    def test_nonprestige_zero_price_listing_is_rejected(self):
-        response = self.post(dict(name="Earnable title", type="title", price=0))
-        self.assertIs(response.get_json()["success"], False)
-        self.assertEqual(rows("SELECT type,price FROM shop_items"), [])
+    def test_nonprestige_zero_price_listing_is_accepted_as_a_free_item(self):
+        # Superseded rule: this used to assert zero was invalid outside
+        # Prestige. Free is now a first-class normal listing (price = 0 with no
+        # Diamond price) — the value must persist exactly as 0, and nothing
+        # else about the row may be reinterpreted.
+        response = self.post(dict(name="Earnable title", type="title", price=0,
+                                  max_stock=3, required_level=7))
+        self.assertIs(response.get_json()["success"], True)
+        self.assertEqual(rows("SELECT type,price,max_stock,required_level,price_diamonds "
+                              "FROM shop_items"), [("title", 0, 3, 7, None)])
+        # The paid path is untouched: a positive price still persists as-is.
+        self.assertIs(self.post(dict(name="Earnable title 2", type="title",
+                                     price=250)).get_json()["success"], True)
+        self.assertEqual(rows("SELECT price FROM shop_items WHERE name='Earnable title 2'"),
+                         [(250,)])
 
     def test_csrf_still_required(self):
         before = mutation_snapshot()

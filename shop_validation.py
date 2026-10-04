@@ -93,8 +93,14 @@ def shop_input(data):
     else:
         tier = None if tier in (None, "", 0, "0") else integer(tier, "Prestige tier", minimum=1, maximum=6)
     result["prestige_tier"] = tier
-    if kind != "prestige" and not (result["price_diamonds"] or result["price"]):
-        raise ShopValidationError("Paid Shop items require a positive price.")
+    # Free rule (normal items): an explicit coin price of 0 with no diamond
+    # price is a legitimate Free listing — the same zero-charge meaning
+    # utils/shop_publisher.is_free() derives, and the same 0 that Prestige VI
+    # already stores. Nothing to reject here: `integer(..., "Price")` above
+    # already refuses None/missing, negative, fractional, boolean and
+    # malformed input, and a price_diamonds > 0 still makes the item paid in
+    # Diamonds (precedence unchanged). Prestige keeps its own terms: I–V stay
+    # >= 1, VI stays exactly 0 via prestige_terms().
     multiplier = data.get("xp_boost_multiplier")
     if multiplier in (None, ""):
         multiplier = None

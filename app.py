@@ -1317,9 +1317,14 @@ def shop():
 
     items = run_async(get_items())
     ctx   = get_current_user_context()
+    # VI keeps its own boosting-specific duration text (free_vi_ids), while the
+    # PRICE cell reads Free for any zero-charge listing: VI, or a normal item
+    # whose explicit coin price is 0 with no diamond price.
     free_vi_ids = {row[0] for row in items if row[4] == "prestige" and row[-1] == 6}
+    free_item_ids = {row[0] for row in items
+                     if row[0] in free_vi_ids or (not row[9] and row[3] == 0)}
     return render("systems/shop.html", items=[row[:-1] for row in items],
-                  free_vi_ids=free_vi_ids, **ctx)
+                  free_vi_ids=free_vi_ids, free_item_ids=free_item_ids, **ctx)
 
 
 # ── Shop Publisher (Phase 1) ────────────────────────────────────────────────

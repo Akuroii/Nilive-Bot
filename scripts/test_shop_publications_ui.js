@@ -15,7 +15,10 @@ const ids = {};
     node.id = id; ids[id] = node; root.appendChild(node);
 });
 ids['sd-design-select'].value = 'A';
-ids['sd-publication-channel'].value = '500';
+// A realistic 19-digit Discord snowflake: outside JS's 2^53 safe-integer range,
+// so any Number() coercion of it corrupts the trailing digits.
+const SNOWFLAKE = '1088248319982006322';
+ids['sd-publication-channel'].value = SNOWFLAKE;
 doc.body.appendChild(root);
 win.__CSRF_TOKEN__ = 'csrf';
 const confirmations = [];
@@ -211,5 +214,75 @@ function assert(ok, label) { if (!ok) throw new Error('FAIL: ' + label); console
     assert(confirmations.length === confirmCountBeforeU + 1 &&
         calls.filter(c => c.url === '/api/shop-publisher/publications/publish').length === publishCountBeforeU,
         'the uncertain Publish warning remains scoped to Design U and its channel');
+
+    // Snowflake safety: a real Discord channel ID must reach the publish POST
+    // as the exact digit string. This is the regression for the guard that
+    // coerced the input with Number() and rejected every real snowflake.
+    confirmAccept = true;
+    ids['sd-design-select'].value = 'S';
+    ids['sd-design-select'].dispatch('change');
+    const reqS = deferred.shift();
+    reqS.resolve({success: true, publications: []});
+    await tick();
+    assert(String(Number(SNOWFLAKE)) !== SNOWFLAKE,
+        'fixture is a realistic snowflake beyond JS Number precision');
+    ids['sd-publication-channel'].value = '  ' + SNOWFLAKE + ' '; // trim() case
+    const publishCallsBeforeSnowflake = calls.filter(c => c.url === '/api/shop-publisher/publications/publish').length;
+    ids['sd-publication-publish'].click();
+    const publishCallsAfterSnowflake = calls.filter(c => c.url === '/api/shop-publisher/publications/publish');
+    assert(publishCallsAfterSnowflake.length === publishCallsBeforeSnowflake + 1,
+        'a 19-digit snowflake channel ID reaches the publish request');
+    const snowflakeCall = publishCallsAfterSnowflake[publishCallsAfterSnowflake.length - 1];
+    const snowflakePost = deferred.shift();
+    assert(snowflakePost && snowflakePost.url === '/api/shop-publisher/publications/publish',
+        'the snowflake publish request is the one now in flight');
+    const snowflakeBody = JSON.parse(snowflakeCall.init.body);
+    assert(snowflakeBody.channel_id === SNOWFLAKE,
+        'the exact snowflake string is sent as channel_id, unchanged');
+    assert(typeof snowflakeBody.channel_id === 'string' && /^\d{17,20}$/.test(snowflakeBody.channel_id),
+        'channel_id travels as a digit string, never a Number/BigInt coercion');
+    assert(snowflakeCall.init.body.indexOf(SNOWFLAKE) !== -1,
+        'the literal snowflake digits appear in the raw request body');
+    // The API echoes channel_id as a JSON number, so the client-side value is
+    // this same already-rounded form — the one the exact-string flow must
+    // still recognize (see the pending-duplication guard below).
+    snowflakePost.resolve({success: true, publication: {id: 70, channel_id: Number(SNOWFLAKE),
+        status: 'published', message_id: 770}});
+    await tick();
+    const snowflakeList = deferred.shift();
+    snowflakeList.resolve({success: true, publications: [{id: 70, channel_id: Number(SNOWFLAKE),
+        status: 'published', message_id: 770}]});
+    await tick(); await tick();
+
+    // Invalid input protection is unchanged: empty, short, mention-wrapped,
+    // suffixed and over-long values must never reach the publish request.
+    ['', '500', '<#' + SNOWFLAKE + '>', SNOWFLAKE + 'x', '108824831998200632201'].forEach(value => {
+        const publishCallsBeforeInvalid = calls.filter(c => c.url === '/api/shop-publisher/publications/publish').length;
+        ids['sd-publication-channel'].value = value;
+        ids['sd-publication-status'].textContent = '';
+        ids['sd-publication-publish'].click();
+        assert(calls.filter(c => c.url === '/api/shop-publisher/publications/publish').length === publishCallsBeforeInvalid,
+            'invalid channel input ' + JSON.stringify(value) + ' never reaches the publish request');
+        assert(ids['sd-publication-status'].textContent === 'Select a saved Design and enter a valid channel ID.',
+            'invalid channel input ' + JSON.stringify(value) + ' keeps the existing validation message');
+    });
+    // The pending-duplication guard must survive the exact-string change: the
+    // list API serializes channel_id as a JSON number, so the client sees it
+    // already rounded past 2^53 (Number(SNOWFLAKE) here is that same value).
+    ids['sd-design-select'].value = 'P';
+    ids['sd-design-select'].dispatch('change');
+    const reqP = deferred.shift();
+    reqP.resolve({success: true, publications: [{id: 80, channel_id: Number(SNOWFLAKE),
+        status: 'pending', message_id: null}]});
+    await tick();
+    ids['sd-publication-channel'].value = SNOWFLAKE;
+    confirmAccept = false;
+    const confirmCountBeforePending = confirmations.length;
+    const publishCountBeforePending = calls.filter(c => c.url === '/api/shop-publisher/publications/publish').length;
+    ids['sd-publication-publish'].click();
+    assert(confirmations.length === confirmCountBeforePending + 1 &&
+        calls.filter(c => c.url === '/api/shop-publisher/publications/publish').length === publishCountBeforePending,
+        'the pending-duplication warning still fires for a snowflake channel');
+    confirmAccept = true;
     console.log('All Publication UI regression checks passed.');
 }()).catch(error => { console.error(error); process.exitCode = 1; });

@@ -31,7 +31,10 @@ window.NERO = window.NERO || {};
         var fields = [];
         fields.push('Type: ' + (product.type || 'other'));
         if (product.price_diamonds !== null && product.price_diamonds !== undefined) fields.push('Diamonds: ' + product.price_diamonds);
-        if (product.price !== null && product.price !== undefined) fields.push('Coins: ' + product.price);
+        // Zero charge reads as Free, never "Coins: 0" — the same rule the
+        // /shop page, the admin catalog table and the publisher use.
+        if (product.price === 0 && !(product.price_diamonds > 0)) fields.push('Free');
+        else if (product.price !== null && product.price !== undefined) fields.push('Coins: ' + product.price);
         fields.push(product.max_stock === null || product.max_stock === undefined ? 'Stock: unlimited' :
             'Stock: ' + (product.current_stock == null ? 0 : product.current_stock) + '/' + product.max_stock);
         if (product.prestige_tier !== null && product.prestige_tier !== undefined) fields.push('Prestige tier: ' + product.prestige_tier);
