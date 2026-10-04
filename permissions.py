@@ -1,0 +1,170 @@
+import aiosqlite
+from database import DB_PATH
+
+LEVEL_OWNER     = "owner"
+LEVEL_ADMIN     = "admin"
+LEVEL_MODERATOR = "moderator"
+
+LEVEL_RANK = {
+    LEVEL_OWNER:     3,
+    LEVEL_ADMIN:     2,
+    LEVEL_MODERATOR: 1,
+}
+
+
+async def get_user_permission_level(guild_id: int, user_id: int) -> str | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT permission_level FROM dashboard_users
+            WHERE guild_id = ? AND user_id = ? AND enabled = 1
+        """, (guild_id, user_id))
+        row = await cursor.fetchone()
+    return row[0] if row else None
+
+
+async def is_owner(guild_id: int, user_id: int) -> bool:
+    level = await get_user_permission_level(guild_id, user_id)
+    return level == LEVEL_OWNER
+
+
+async def is_admin_or_above(guild_id: int, user_id: int) -> bool:
+    level = await get_user_permission_level(guild_id, user_id)
+    return LEVEL_RANK.get(level, 0) >= LEVEL_RANK[LEVEL_ADMIN]
+
+
+async def is_moderator_or_above(guild_id: int, user_id: int) -> bool:
+    level = await get_user_permission_level(guild_id, user_id)
+    return LEVEL_RANK.get(level, 0) >= LEVEL_RANK[LEVEL_MODERATOR]
+
+
+def check_hierarchy(actor, target) -> tuple[bool, str]:
+    if target.guild.owner_id == actor.id:
+        return True, "Actor is guild owner"
+    if actor.top_role.position <= target.top_role.position:
+        return False, (
+            f"Your highest role ({actor.top_role.name}) must be above "
+            f"target's highest role ({target.top_role.name})"
+        )
+    return True, "OK"
+
+
+async def can_moderate(actor, target, guild_id: int) -> tuple[bool, str]:
+    if await is_owner(guild_id, actor.id):
+        return True, "Dashboard owner bypass"
+    if actor.guild.owner_id == actor.id:
+        return True, "Guild owner bypass"
+    return check_hierarchy(actor, target)
+
+
+def check_bot_role_position(guild, role) -> tuple[bool, str]:
+    bot_member = guild.me
+    if bot_member is None:
+        return False, "⚠️ Could not find Nero in this server"
+    if role.position >= bot_member.top_role.position:
+        return False, (
+            f"⚠️ Nero's role must be above @{role.name} to assign it. "
+            f"Go to Server Settings > Roles and drag Nero above @{role.name}."
+        )
+    return True, "OK"
+
+
+PAGE_PERMISSIONS = {
+    "overview":           LEVEL_MODERATOR,
+    "members_view":       LEVEL_MODERATOR,
+    "members_edit":       LEVEL_ADMIN,
+    "members_delete":     LEVEL_OWNER,
+    "audit_log":          LEVEL_ADMIN,
+
+    "moderation_view":    LEVEL_MODERATOR,
+    "moderation_action":  LEVEL_MODERATOR,
+    "moderation_edit":    LEVEL_ADMIN,
+    "moderation_delete":  LEVEL_OWNER,
+    "tickets":            LEVEL_MODERATOR,
+
+    # Embed Builder v2: content + up to 10 embeds + real attachments,
+    # sent LIVE to any channel the bot can see via a direct Discord API
+    # call — this is meaningfully more powerful than the old "build one
+    # embed, save it as a template" tool (LEVEL_ADMIN), so it's gated
+    # at LEVEL_OWNER now, matching every other route in
+    # dashboard/api/embedbuilder.py.
+    "embedbuilder":       LEVEL_OWNER,
+
+    # Shop Publisher (Phase 1 preview / Phase 2 publish): reads
+    # embed_templates + shop_items and previews the resolved product
+    # presentation; Phase 2 sends live Discord messages from the same
+    # surface. Gated at LEVEL_OWNER like the Embed Builder it consumes
+    # and the send path it will grow, so it can never widen access to
+    # either surface.
+    "shoppublisher":      LEVEL_OWNER,
+
+    "reactionroles":      LEVEL_ADMIN,
+    "triggers":           LEVEL_ADMIN,
+    "customcommands":     LEVEL_ADMIN,
+
+    "mvp":                LEVEL_ADMIN,
+    "leveling":           LEVEL_ADMIN,
+    "economy":            LEVEL_ADMIN,
+    "shop":                LEVEL_ADMIN,
+    "events":             LEVEL_ADMIN,
+    "leaderboards":       LEVEL_MODERATOR,
+
+    "ledger":             LEVEL_ADMIN,
+    "inventory_view":     LEVEL_ADMIN,
+
+    # Event Stack Builder dashboard page (dark-fixes pass #13). Same
+    # tier as shop/events — tier/config CRUD is an admin action,
+    # nothing here needs owner-only.
+    "minigames":          LEVEL_ADMIN,
+
+    # Missions (Phase 6, built ahead of the Trade-verification gate —
+    # see utils/mission_engine.py header). Same tier as minigames:
+    # mission definition CRUD is an admin action.
+    "missions":           LEVEL_ADMIN,
+
+    # Trade history page (dark-fixes pass #17). Read-only, same tier
+    # as ledger/inventory — viewing member trade history is an admin-
+    # level concern, not owner-only.
+    "trade":              LEVEL_ADMIN,
+
+    "general_settings":   LEVEL_OWNER,
+    "welcome":            LEVEL_ADMIN,
+    "boost":              LEVEL_ADMIN,
+    "botprofile":         LEVEL_ADMIN,
+    "announcements":      LEVEL_ADMIN,
+
+    # CREATOR pass: replaces the old read-only "Announcements" page
+    # with a real CRUD hub for YouTube/Twitch. Same tier as the page
+    # it replaces — adding/removing a watched channel/streamer is an
+    # admin action, not owner-only. "announcements" key kept above so
+    # the old /config/announcements URL (now just a redirect to
+    # /creator) still resolves a permission level rather than 403ing
+    # on a missing dict key.
+    "creator":            LEVEL_ADMIN,
+
+    "commands":           LEVEL_OWNER,
+    "dashboard_access":   LEVEL_OWNER,
+
+    "reports":            LEVEL_MODERATOR,
+    "health":             LEVEL_OWNER,
+
+    # Server Tags — Tag-Loyalty Missions + Cross-Server Join Reward.
+    # Same tier as minigames/missions: reward-tier CRUD is an admin
+    # action, not owner-only.
+    "tagmissions":        LEVEL_ADMIN,
+    "tagpartners":        LEVEL_ADMIN,
+
+    # Backups page. Deliberately still LEVEL_OWNER here (the page-load
+    # gate) — the bot-wide, cross-guild check lives one level deeper,
+    # in dashboard.permissions.require_bot_owner / require_bot_owner_api,
+    # which every /backups route/API also stacks on top of this.
+    "backups":            LEVEL_OWNER,
+}
+
+
+def get_required_level(page: str) -> str:
+    return PAGE_PERMISSIONS.get(page, LEVEL_OWNER)
+
+
+def user_can_access_page(user_level: str, page: str) -> bool:
+    required = get_required_level(page)
+    return LEVEL_RANK.get(user_level, 0) >= LEVEL_RANK.get(required, 3)
