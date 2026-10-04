@@ -1,94 +1,69 @@
-from flask import jsonify, request
-from dashboard.utils.async_utils import run_async
-from dashboard.permissions import (
-    get_session_guild_id, log_action, require_api_permission, LEVEL_ADMIN,
-)
-from dashboard.api import api_bp
-
-# ── Bot Profile (real per-server nickname + avatar + banner + bio) ─────────
-#
-# All four fields go in ONE call to Discord's "Modify Current Member"
-# endpoint (PATCH /guilds/{id}/members/@me), which accepts
-# nick/avatar/banner/bio for whichever token calls it — bot tokens
-# included. avatar/banner must be base64 data URIs, so
-# utils/bot_profile.py downloads whatever URL is pasted here and
-# re-encodes it before sending.
-#
-# Applied directly from this Flask process via the bot token — same
-# pattern dashboard/api/core.py already uses for role/channel lookups
-# — so there's no dependency on the bot's gateway connection being up.
+import discord
+from discord.ext import commands
+from discord import app_commands
+from utils.bot_profile import get_guild_bot_profile, apply_bot_profile_via_rest
 
 
-@api_bp.route("/botprofile/config", methods=["GET"])
-@require_api_permission(LEVEL_ADMIN)
-def get_botprofile_config():
-    guild_id = get_session_guild_id()
+class BotProfile(commands.Cog):
+    """
+    Per-server bot identity: nickname, avatar, banner, and bio, all
+    scoped to a single guild via Discord's "Modify Current Member"
+    endpoint. The write path (Save button) lives in
+    dashboard/api/botprofile.py and calls Discord's REST API directly
+    with the bot token — same pattern dashboard/api/core.py already
+    uses for role/channel lookups — so it applies instantly with no
+    dependency on this cog or the bot's gateway connection.
 
-    async def fetch():
-        from utils.bot_profile import get_guild_bot_profile
-        return await get_guild_bot_profile(guild_id)
+    This cog's only job: if the bot is removed from a server and later
+    re-invited, Discord resets its guild member row (nick/avatar/
+    banner/bio all reset) — on_guild_join reapplies whatever was last
+    configured, same "reapply stored config on join" pattern
+    cogs/welcome.py already uses for auto-role.
+    """
 
-    stored = run_async(fetch())
+    def __init__(self, bot):
+        self.bot = bot
 
-    from utils.bot_profile import get_live_bot_member
-    live = get_live_bot_member(guild_id)
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild):
+        try:
+            profile = await get_guild_bot_profile(guild.id)
+            if not any([profile.get("nickname"), profile.get("avatar_url"),
+                        profile.get("banner_url"), profile.get("bio")]):
+                return  # nothing configured for this guild — nothing to restore
+            result = apply_bot_profile_via_rest(
+                guild.id,
+                profile.get("nickname"),
+                profile.get("avatar_url"),
+                profile.get("banner_url"),
+                profile.get("bio"),
+            )
+            if not result.get("success"):
+                print(f"[BOTPROFILE] Failed to restore profile for "
+                      f"guild {guild.id}: {result.get('errors')}")
+        except Exception as e:
+            print(f"[BOTPROFILE] on_guild_join error for guild {guild.id}: {e}")
 
-    return jsonify({"stored": stored, "live": live})
-
-
-@api_bp.route("/botprofile/config", methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def save_botprofile_config():
-    guild_id = get_session_guild_id()
-    data     = request.json or {}
-
-    nickname   = (data.get("nickname") or "").strip() or None
-    avatar_url = (data.get("avatar_url") or "").strip() or None
-    banner_url = (data.get("banner_url") or "").strip() or None
-    bio        = (data.get("bio") or "").strip() or None
-
-    if nickname and len(nickname) > 32:
-        return jsonify({"success": False,
-                        "error": "Nickname must be 32 characters or fewer (Discord's limit)"})
-    if bio and len(bio) > 190:
-        return jsonify({"success": False,
-                        "error": "Bio must be 190 characters or fewer"})
-
-    from utils.bot_profile import apply_bot_profile_via_rest, save_guild_bot_profile
-    result = apply_bot_profile_via_rest(guild_id, nickname, avatar_url, banner_url, bio)
-
-    async def save():
-        await save_guild_bot_profile(guild_id, nickname, avatar_url, banner_url, bio)
-
-    run_async(save())
-
-    log_action(guild_id,
-               f"Updated bot profile (nickname={nickname or 'default'})",
-               "botprofile")
-
-    return jsonify({
-        "success": result["success"],
-        "applied": result.get("applied", []),
-        "errors": result.get("errors", {}),
-    })
+    @app_commands.command(name="botprofile_view",
+                          description="View this server's configured bot profile")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def botprofile_view(self, interaction: discord.Interaction):
+        profile = await get_guild_bot_profile(interaction.guild.id)
+        embed = discord.Embed(
+            title=f"🪪 Bot Profile — {interaction.guild.name}",
+            description=("This is the bot's real, per-server Discord identity — "
+                         "set only for this server, via Discord's guild member "
+                         "profile fields."),
+            color=0x7c5cbf)
+        embed.add_field(name="Nickname", value=profile.get("nickname") or "*(none set)*", inline=True)
+        embed.add_field(name="Bio", value=profile.get("bio") or "*(none set)*", inline=False)
+        if profile.get("avatar_url"):
+            embed.set_thumbnail(url=profile["avatar_url"])
+        if profile.get("banner_url"):
+            embed.set_image(url=profile["banner_url"])
+        embed.set_footer(text="Manage this from the dashboard → Config → Bot Profile")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@api_bp.route("/botprofile/reset", methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def reset_botprofile():
-    guild_id = get_session_guild_id()
-
-    from utils.bot_profile import apply_bot_profile_via_rest, save_guild_bot_profile
-    result = apply_bot_profile_via_rest(guild_id, None, None, None, None)
-
-    async def save():
-        await save_guild_bot_profile(guild_id, None, None, None, None)
-
-    run_async(save())
-    log_action(guild_id, "Reset bot profile to default", "botprofile")
-
-    return jsonify({
-        "success": result["success"],
-        "applied": result.get("applied", []),
-        "errors": result.get("errors", {}),
-    })
+async def setup(bot):
+    await bot.add_cog(BotProfile(bot))

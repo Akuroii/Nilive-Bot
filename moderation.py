@@ -1,452 +1,665 @@
-import os
-import json
-import csv
-import io
-import datetime
-import requests as _req
+import discord
+from discord.ext import commands, tasks
+from discord import app_commands
 import aiosqlite
-from flask import jsonify, request, session, abort, Response
-from markupsafe import escape as _esc
+from datetime import datetime, timedelta
 from database import DB_PATH
-from dashboard.utils.async_utils import run_async
-from dashboard.auth import login_required, current_user_id, current_user
-from dashboard.permissions import (
-    get_session_guild_id, log_action, require_api_permission,
-    LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
-)
-from dashboard.api import api_bp
-
-# ── Moderation ────────────────────────────────────────────────────────────────
-
-@api_bp.route("/moderation/logs")
-@require_api_permission(LEVEL_MODERATOR)
-def moderation_logs_partial():
-    guild_id      = get_session_guild_id()
-    action_filter = request.args.get("action", "")
-    page          = int(request.args.get("page", 1))
-    per_page      = 25
-    offset        = (page - 1) * per_page
-
-    async def fetch():
-        async with aiosqlite.connect(DB_PATH) as db:
-            if action_filter:
-                cursor = await db.execute("""
-                    SELECT id, user_display_name, user_avatar_url,
-                           moderator_display_name, action, reason,
-                           source, created_at
-                    FROM moderation_logs
-                    WHERE guild_id = ? AND deleted = 0 AND action = ?
-                    ORDER BY created_at DESC LIMIT ? OFFSET ?
-                """, (guild_id, action_filter, per_page, offset))
-            else:
-                cursor = await db.execute("""
-                    SELECT id, user_display_name, user_avatar_url,
-                           moderator_display_name, action, reason,
-                           source, created_at
-                    FROM moderation_logs
-                    WHERE guild_id = ? AND deleted = 0
-                    ORDER BY created_at DESC LIMIT ? OFFSET ?
-                """, (guild_id, per_page, offset))
-            return await cursor.fetchall()
-
-    rows   = run_async(fetch())
-    colors = {
-        "ban":"danger","kick":"warning","timeout":"warning",
-        "warn":"accent","unban":"success","lock":"danger",
-    }
-    html = ""
-    for r in rows:
-        # SECURITY FIX (dark-fixes pass, CRITICAL — stored XSS): every
-        # value below except the numeric id and the hardcoded badge
-        # color can be attacker-influenced (a member's Discord display
-        # name is fully attacker-controlled, and moderation reasons are
-        # free text typed by staff who could themselves be compromised
-        # or malicious). This response bypasses Jinja's autoescaping
-        # entirely (it's a hand-built string returned straight to an
-        # htmx innerHTML swap), so anything containing raw HTML/JS here
-        # used to execute directly in an admin's browser the next time
-        # they opened the Moderation Logs tab. Every interpolated field
-        # that isn't a guaranteed-numeric id or a hardcoded literal is
-        # now passed through markupsafe.escape() before being placed
-        # in the HTML string.
-        avatar = _esc(r[2] or "https://cdn.discordapp.com/embed/avatars/0.png")
-        color  = colors.get(str(r[4]).lower(), "accent")
-        html  += (
-            f"<tr>"
-            f"<td><div class='user-cell'>"
-            f"<img src='{avatar}' class='avatar-sm'>"
-            f"<span>{_esc(r[1])}</span></div></td>"
-            f"<td>{_esc(r[3])}</td>"
-            f"<td><span class='badge badge-{color}'>{_esc(r[4])}</span></td>"
-            f"<td>{_esc(r[5]) if r[5] else '—'}</td>"
-            f"<td><span class='badge badge-source'>{_esc(r[6])}</span></td>"
-            f"<td class='text-muted'>{str(r[7])[:10] if r[7] else '—'}</td>"
-            f"</tr>"
-        )
-    return html or "<tr><td colspan='6' class='empty'>No logs found</td></tr>"
+from utils.permissions import can_moderate, check_bot_role_position
+from utils.formatters import snapshot_user, now_iso, format_duration, parse_duration
 
 
-@api_bp.route("/moderation/edit-reason/<int:log_id>", methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def api_mod_edit_reason(log_id: int):
-    guild_id = get_session_guild_id()
-    reason   = request.json.get("reason", "").strip()
-    if not reason:
-        return jsonify({"success": False, "error": "Reason required"})
+async def log_mod_action(guild_id: int, user: discord.Member,
+                          moderator: discord.Member, action: str,
+                          reason: str, source: str = "bot",
+                          duration_minutes: int = None,
+                          expires_at: str = None):
+    """
+    Logs a moderation action to BOTH mod_logs (legacy) and
+    moderation_logs (new Blueprint table with snapshots).
+    Rule 1 — Snapshot Rule applied here.
 
-    async def update():
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                UPDATE moderation_logs
-                SET reason = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND guild_id = ?
-            """, (reason, log_id, guild_id))
-            await db.commit()
+    P1 #13 FIX: previously this function stored duration_minutes
+    but never computed expires_at. The dashboard's "Active
+    Punishments" tab filters on expires_at (WHERE expires_at IS
+    NULL OR expires_at > now), so every timeout ever issued via
+    /timeout showed up as permanently active, even ones that had
+    long since expired. Now expires_at is derived from
+    duration_minutes automatically for timeout/temp_ban actions
+    unless the caller supplies it explicitly (e.g. the dashboard
+    quick-action endpoint, which already computes its own).
+    """
+    user_snap = snapshot_user(user)
+    mod_snap  = snapshot_user(moderator)
+    ts        = now_iso()
 
-    run_async(update())
-    log_action(guild_id, f"Edited reason for log #{log_id}", "moderation")
-    return jsonify({"success": True})
+    if expires_at is None and duration_minutes and action in ("timeout", "temp_ban"):
+        expires_at = (
+            datetime.utcnow() + timedelta(minutes=duration_minutes)
+        ).isoformat()
 
-
-@api_bp.route("/moderation/delete-log/<int:log_id>", methods=["DELETE"])
-@require_api_permission(LEVEL_OWNER)
-def api_mod_delete_log(log_id: int):
-    guild_id = get_session_guild_id()
-
-    async def soft_delete():
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                UPDATE moderation_logs SET deleted = 1
-                WHERE id = ? AND guild_id = ?
-            """, (log_id, guild_id))
-            await db.commit()
-
-    run_async(soft_delete())
-    log_action(guild_id, f"Deleted mod log #{log_id}", "moderation")
-    return jsonify({"success": True})
-
-
-@api_bp.route("/moderation/export")
-@require_api_permission(LEVEL_MODERATOR)
-def api_mod_export():
-    guild_id = get_session_guild_id()
-    date_from = request.args.get("date_from", "")
-    date_to   = request.args.get("date_to", "")
-
-    async def get_logs():
-        async with aiosqlite.connect(DB_PATH) as db:
-            where  = ["guild_id = ?", "deleted = 0"]
-            params = [guild_id]
-            if date_from:
-                where.append("created_at >= ?"); params.append(date_from)
-            if date_to:
-                where.append("created_at <= ?"); params.append(date_to + " 23:59:59")
-            cur = await db.execute(f"""
-                SELECT id, user_display_name, user_id, action, reason,
-                       moderator_display_name, source, evidence_url, created_at
-                FROM moderation_logs WHERE {' AND '.join(where)}
-                ORDER BY created_at DESC
-            """, params)
-            return await cur.fetchall()
-
-    rows = run_async(get_logs())
-    si   = io.StringIO()
-    writer = csv.writer(si)
-    writer.writerow(["ID","User","UserID","Action","Reason","Moderator","Source","Evidence","Date"])
-    writer.writerows(rows)
-    return Response(
-        si.getvalue(),
-        mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=mod_logs_{guild_id}.csv"},
-    )
+    async with aiosqlite.connect(DB_PATH) as db:
+        # New moderation_logs table (Blueprint)
+        await db.execute("""
+            INSERT INTO moderation_logs
+                (guild_id, user_id, user_display_name, user_avatar_url,
+                 moderator_id, moderator_display_name, action, reason,
+                 source, duration_minutes, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            guild_id,
+            user_snap["id"], user_snap["display_name"], user_snap["avatar_url"],
+            mod_snap["id"],  mod_snap["display_name"],
+            action, reason, source, duration_minutes, expires_at, ts,
+        ))
+        # Legacy mod_logs table (keep for backwards compat)
+        await db.execute("""
+            INSERT INTO mod_logs
+                (guild_id, action, moderator_id, target_id, reason,
+                 timestamp, user_display_name, user_avatar_url,
+                 moderator_display_name, source, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            guild_id, action,
+            mod_snap["id"], user_snap["id"],
+            reason, ts,
+            user_snap["display_name"], user_snap["avatar_url"],
+            mod_snap["display_name"], source, duration_minutes,
+        ))
+        await db.commit()
 
 
-@api_bp.route("/moderation/quick-action", methods=["POST"])
-@require_api_permission(LEVEL_MODERATOR)
-def api_mod_quick_action():
-    guild_id    = get_session_guild_id()
-    data        = request.json
-    action      = data.get("action")
-    target_id   = data.get("user_id")
-    reason      = data.get("reason", "No reason provided")
-    evidence    = data.get("evidence_url", "")
-    duration    = data.get("duration_seconds")
-    delete_days = data.get("delete_message_days", 0)
-    bot_token   = os.getenv("DISCORD_TOKEN", "")
-    user        = current_user()
-    mod_name    = user.get("username", "Dashboard") if user else "Dashboard"
-    mod_id      = current_user_id()
+async def check_warning_thresholds(guild: discord.Guild,
+                                    member: discord.Member,
+                                    moderator: discord.Member):
+    """
+    After a new warning is issued, checks if the member has hit
+    a warning threshold and auto-escalates the action.
+    Reads from: warning_thresholds table
+    Configured on: dashboard Moderation page
 
-    if not bot_token:
-        return jsonify({"success": False, "error": "Bot token not configured"})
+    PHASE 2 FIX: action == "temp_ban" was previously a silent no-op —
+    the dashboard let admins configure it, but this function only
+    handled kick/ban/timeout/add_role, so a temp_ban threshold just
+    never did anything when reached. Now it bans the member and
+    writes an expires_at row to temp_bans; Moderation.scheduled_unban_check
+    (below) polls that table and lifts the ban when it's due, the
+    same pattern already used for temp_roles in cogs/shop.py.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Count current warnings
+        cursor = await db.execute("""
+            SELECT COUNT(*) FROM warnings
+            WHERE guild_id = ? AND user_id = ?
+        """, (guild.id, member.id))
+        warn_count = (await cursor.fetchone())[0]
 
-    # HARDENING (dark-fixes pass): target_id must be a real Discord
-    # snowflake before it's formatted into a Discord API URL or a
-    # DB write — previously an arbitrary string could be submitted
-    # here and would be silently coerced/used as-is downstream.
-    try:
-        target_id = int(target_id)
-    except (TypeError, ValueError):
-        return jsonify({"success": False, "error": "user_id must be a valid Discord ID"})
+        # Get matching thresholds
+        cursor = await db.execute("""
+            SELECT action, duration_minutes, role_id
+            FROM warning_thresholds
+            WHERE guild_id = ? AND warn_count = ? AND enabled = 1
+        """, (guild.id, warn_count))
+        thresholds = await cursor.fetchall()
 
-    if duration is not None:
+    for action, duration_minutes, role_id in thresholds:
         try:
-            duration = int(duration)
-        except (TypeError, ValueError):
-            return jsonify({"success": False, "error": "duration_seconds must be a number"})
-        if duration <= 0 or duration > 60 * 60 * 24 * 28:
-            return jsonify({"success": False, "error": "duration_seconds out of range (max 28 days)"})
-
-    try:
-        delete_days = max(0, min(int(delete_days or 0), 7))
-    except (TypeError, ValueError):
-        delete_days = 0
-
-    headers = {"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"}
-    base    = "https://discord.com/api/v10"
-    result  = {"success": True, "message": ""}
-
-    try:
-        if action == "ban":
-            resp = _req.put(
-                f"{base}/guilds/{guild_id}/bans/{target_id}",
-                headers=headers,
-                json={"delete_message_days": int(delete_days), "reason": reason},
-            )
-            result["message"] = f"Banned <@{target_id}>"
-        elif action == "kick":
-            resp = _req.delete(
-                f"{base}/guilds/{guild_id}/members/{target_id}",
-                headers=headers, params={"reason": reason},
-            )
-            result["message"] = f"Kicked <@{target_id}>"
-        elif action == "timeout":
-            until = (
-                datetime.datetime.utcnow()
-                + datetime.timedelta(seconds=int(duration or 300))
-            ).isoformat() + "Z"
-            resp = _req.patch(
-                f"{base}/guilds/{guild_id}/members/{target_id}",
-                headers=headers,
-                json={"communication_disabled_until": until, "reason": reason},
-            )
-            result["message"] = f"Timed out <@{target_id}>"
-        elif action == "unban":
-            resp = _req.delete(
-                f"{base}/guilds/{guild_id}/bans/{target_id}",
-                headers=headers,
-            )
-            result["message"] = f"Unbanned <@{target_id}>"
-        elif action == "remove_timeout":
-            resp = _req.patch(
-                f"{base}/guilds/{guild_id}/members/{target_id}",
-                headers=headers,
-                json={"communication_disabled_until": None},
-            )
-            result["message"] = f"Removed timeout for <@{target_id}>"
-        elif action == "warn":
-            resp = type("R", (), {"status_code": 200})()
-            result["message"] = f"Warned <@{target_id}>"
-        elif action == "massban":
-            user_ids = data.get("user_ids", [])
-            # HARDENING (dark-fixes pass): cap batch size and validate
-            # each id — an unbounded list here could hammer Discord's
-            # ban endpoint hundreds of times in a single request,
-            # risking a rate-limit ban on the bot's own IP.
-            if not isinstance(user_ids, list) or len(user_ids) == 0:
-                return jsonify({"success": False, "error": "user_ids must be a non-empty list"})
-            if len(user_ids) > 25:
-                return jsonify({"success": False,
-                                "error": "massban is capped at 25 users per request"})
-            failed   = []
-            for uid in user_ids:
-                try:
-                    uid = int(uid)
-                except (TypeError, ValueError):
-                    failed.append(uid)
-                    continue
-                r = _req.put(
-                    f"{base}/guilds/{guild_id}/bans/{uid}",
-                    headers=headers, json={"reason": reason},
-                )
-                if r.status_code not in (200, 204):
-                    failed.append(uid)
-            result["message"] = f"Massbanned {len(user_ids)-len(failed)}/{len(user_ids)} users"
-            if failed:
-                result["failed"] = failed
-            resp = type("R", (), {"status_code": 200})()
-        else:
-            return jsonify({"success": False, "error": f"Unknown action: {action}"})
-
-        if hasattr(resp, "status_code") and resp.status_code not in (200, 201, 204):
-            return jsonify({"success": False, "error": f"Discord API error {resp.status_code}"})
-
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
-    async def log_mod():
-        expires = None
-        if action == "timeout" and duration:
-            expires = (
-                datetime.datetime.utcnow()
-                + datetime.timedelta(seconds=int(duration))
-            ).isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
-            if action == "warn":
-                await db.execute("""
-                    INSERT INTO warnings
-                        (guild_id, user_id, moderator_id, reason, moderator_display_name)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (guild_id, target_id, mod_id, reason, mod_name))
-            await db.execute("""
-                INSERT INTO moderation_logs
-                    (guild_id, user_id, moderator_id, moderator_display_name,
-                     action, reason, source, evidence_url, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'dashboard', ?, ?)
-            """, (guild_id, target_id, mod_id, mod_name,
-                  action, reason, evidence, expires))
-            await db.commit()
-
-    run_async(log_mod())
-    log_action(guild_id, f"Quick action: {action} on {target_id}", "moderation",
-               target_id=int(target_id) if target_id else None)
-    return jsonify(result)
+            reason = f"Auto: reached {warn_count} warnings"
+            if action == "kick":
+                await member.kick(reason=reason)
+                await log_mod_action(guild.id, member, moderator,
+                                     "kick", reason, "auto-threshold")
+            elif action == "ban":
+                await member.ban(reason=reason)
+                await log_mod_action(guild.id, member, moderator,
+                                     "ban", reason, "auto-threshold")
+            elif action == "temp_ban" and duration_minutes:
+                await member.ban(reason=reason)
+                expires_at = (
+                    datetime.utcnow() + timedelta(minutes=duration_minutes)
+                ).isoformat()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("""
+                        INSERT INTO temp_bans
+                            (guild_id, user_id, expires_at, reason, source)
+                        VALUES (?, ?, ?, ?, 'auto-threshold')
+                    """, (guild.id, member.id, expires_at, reason))
+                    await db.commit()
+                await log_mod_action(guild.id, member, moderator,
+                                     "temp_ban", reason, "auto-threshold",
+                                     duration_minutes, expires_at)
+            elif action == "timeout" and duration_minutes:
+                await member.timeout(
+                    timedelta(minutes=duration_minutes), reason=reason)
+                await log_mod_action(guild.id, member, moderator,
+                                     "timeout", reason, "auto-threshold",
+                                     duration_minutes)
+            elif action == "add_role" and role_id:
+                role = guild.get_role(role_id)
+                if role:
+                    can, warn = check_bot_role_position(guild, role)
+                    if can:
+                        await member.add_roles(role, reason=reason)
+                    else:
+                        print(f"[ROLE WARNING] {warn}")
+        except Exception as e:
+            print(f"[THRESHOLD ERROR] {e}")
 
 
-@api_bp.route("/moderation/warning-thresholds", methods=["GET"])
-@require_api_permission(LEVEL_MODERATOR)
-def get_warning_thresholds():
-    guild_id = get_session_guild_id()
+class Moderation(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.scheduled_unban_check.start()
 
-    async def fetch():
+    def cog_unload(self):
+        self.scheduled_unban_check.cancel()
+
+    # ─── TEMP BAN EXPIRY (Phase 2 fix) ──────────────────
+    @tasks.loop(minutes=10)
+    async def scheduled_unban_check(self):
+        """
+        Lifts bans placed by a temp_ban warning threshold once their
+        expires_at has passed. Mirrors cogs/shop.py's
+        temp_role_cleanup: only deletes the temp_bans row once the
+        unban actually succeeds (or the ban is already gone), and
+        isolates each row in its own try/except so one bad entry
+        can't kill the whole loop and silently stop every future
+        temp-ban expiry from ever being checked again.
+        """
+        now = datetime.utcnow().isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT id, warn_count, action, duration_minutes, role_id, enabled
-                FROM warning_thresholds WHERE guild_id = ?
-                ORDER BY warn_count ASC
-            """, (guild_id,))
-            return await cursor.fetchall()
+                SELECT id, guild_id, user_id FROM temp_bans
+                WHERE expires_at <= ?
+            """, (now,))
+            expired = await cursor.fetchall()
 
-    rows = run_async(fetch())
-    return jsonify([{
-        "id": r[0], "warn_count": r[1], "action": r[2],
-        "duration_minutes": r[3], "role_id": r[4], "enabled": r[5],
-    } for r in rows])
+        for entry_id, guild_id, user_id in expired:
+            try:
+                guild = self.bot.get_guild(guild_id)
+                if not guild:
+                    # Bot isn't in this guild (right now, at least) —
+                    # leave the row so it's retried once it rejoins,
+                    # rather than losing track of the obligation.
+                    continue
 
+                unban_ok = True
+                try:
+                    await guild.unban(
+                        discord.Object(id=user_id),
+                        reason="Temp ban expired")
+                except discord.NotFound:
+                    # Already unbanned manually — nothing to do,
+                    # still safe to clear the row.
+                    pass
+                except Exception as e:
+                    print(f"[MOD] Failed to lift temp ban for "
+                          f"{user_id} in {guild_id}: {e}")
+                    unban_ok = False  # keep the row, retry next cycle
 
-@api_bp.route("/moderation/warning-thresholds", methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def save_warning_threshold():
-    guild_id = get_session_guild_id()
-    data     = request.json
+                if unban_ok:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "DELETE FROM temp_bans WHERE id = ?",
+                            (entry_id,))
+                        await db.commit()
+            except Exception as e:
+                print(f"[MOD] scheduled_unban_check error for "
+                      f"entry {entry_id}: {e}")
 
-    async def save():
-        async with aiosqlite.connect(DB_PATH) as db:
-            if data.get("id"):
+    @scheduled_unban_check.before_loop
+    async def before_unban_check(self):
+        await self.bot.wait_until_ready()
+
+    # ─── KICK ───────────────────────────────────────────
+    @app_commands.command(name="kick", description="Kick a member")
+    @app_commands.checks.has_permissions(kick_members=True)
+    async def kick(self, interaction: discord.Interaction,
+                   member: discord.Member, reason: str = "No reason provided"):
+        allowed, msg = await can_moderate(
+            interaction.user, member, interaction.guild.id)
+        if not allowed:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+        await member.kick(reason=reason)
+        await log_mod_action(interaction.guild.id, member,
+                             interaction.user, "kick", reason)
+        embed = discord.Embed(
+            title="Member Kicked",
+            description=f"{member.mention} has been kicked.",
+            color=0xED4245)
+        embed.add_field(name="Reason", value=reason)
+        embed.add_field(name="Moderator", value=interaction.user.mention)
+        await interaction.response.send_message(embed=embed)
+
+    # ─── BAN ────────────────────────────────────────────
+    @app_commands.command(name="ban", description="Ban a member")
+    @app_commands.checks.has_permissions(ban_members=True)
+    async def ban(self, interaction: discord.Interaction,
+                  member: discord.Member, reason: str = "No reason provided",
+                  delete_days: int = 0, duration: str = None):
+        allowed, msg = await can_moderate(
+            interaction.user, member, interaction.guild.id)
+        if not allowed:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+        
+        # Handle temporary ban if duration is provided
+        if duration:
+            try:
+                duration_seconds = parse_duration(duration)
+                duration_minutes = duration_seconds // 60
+                expires_at = (datetime.utcnow() + timedelta(seconds=duration_seconds)).isoformat()
+            except ValueError as e:
+                await interaction.response.send_message(
+                    f"Invalid duration: {e}", ephemeral=True)
+                return
+            
+            # Ban the user via Discord API
+            await member.ban(reason=reason,
+                             delete_message_days=min(delete_days, 7))
+            
+            # Insert into temp_bans table for automatic unban
+            async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("""
-                    UPDATE warning_thresholds
-                    SET warn_count=?, action=?, duration_minutes=?, role_id=?, enabled=?
-                    WHERE id=? AND guild_id=?
-                """, (data["warn_count"], data["action"],
-                      data.get("duration_minutes"), data.get("role_id"),
-                      int(data.get("enabled", 1)),
-                      data["id"], guild_id))
-            else:
-                await db.execute("""
-                    INSERT INTO warning_thresholds
-                        (guild_id, warn_count, action, duration_minutes, role_id)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (guild_id, int(data.get("warn_count", 3)),
-                      data.get("action", "timeout"),
-                      data.get("duration_minutes") or None,
-                      data.get("role_id") or None))
-            await db.commit()
+                    INSERT INTO temp_bans
+                        (guild_id, user_id, expires_at, reason, source)
+                    VALUES (?, ?, ?, ?, 'command')
+                """, (interaction.guild.id, member.id, expires_at, reason))
+                await db.commit()
+            
+            # Log as temp_ban with duration info
+            await log_mod_action(interaction.guild.id, member,
+                                 interaction.user, "temp_ban", reason, 
+                                 duration_minutes=duration_minutes, expires_at=expires_at)
+            
+            embed = discord.Embed(
+                title="Member Temporarily Banned",
+                description=f"{member.mention} has been temporarily banned.",
+                color=0xFEE75C)
+            embed.add_field(name="Reason", value=reason)
+            embed.add_field(name="Duration", value=format_duration(duration_minutes))
+            embed.add_field(name="Moderator", value=interaction.user.mention)
+            await interaction.response.send_message(embed=embed)
+        else:
+            # Permanent ban (original behavior)
+            await member.ban(reason=reason,
+                             delete_message_days=min(delete_days, 7))
+            await log_mod_action(interaction.guild.id, member,
+                                 interaction.user, "ban", reason)
+            embed = discord.Embed(
+                title="Member Banned",
+                description=f"{member.mention} has been banned.",
+                color=0xED4245)
+            embed.add_field(name="Reason", value=reason)
+            embed.add_field(name="Moderator", value=interaction.user.mention)
+            await interaction.response.send_message(embed=embed)
 
-    run_async(save())
-    log_action(guild_id,
-               f"Saved threshold: {data.get('warn_count')} warns -> {data.get('action')}",
-               "moderation")
-    return jsonify({"success": True})
+    # ─── UNBAN ──────────────────────────────────────────
+    @app_commands.command(name="unban", description="Unban a user by ID")
+    @app_commands.checks.has_permissions(ban_members=True)
+    async def unban(self, interaction: discord.Interaction,
+                    user_id: str, reason: str = "No reason provided"):
+        await interaction.response.defer()
+        try:
+            user = await self.bot.fetch_user(int(user_id))
+            await interaction.guild.unban(user, reason=reason)
+            await log_mod_action(interaction.guild.id, user,
+                                 interaction.user, "unban", reason)
+            await interaction.followup.send(
+                f"Unbanned {user.mention}. Reason: {reason}")
+        except discord.NotFound:
+            await interaction.followup.send("User not found or not banned.")
+        except ValueError:
+            await interaction.followup.send("Invalid user ID.")
 
+    # ─── TIMEOUT ────────────────────────────────────────
+    @app_commands.command(name="timeout",
+                          description="Timeout a member")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def timeout(self, interaction: discord.Interaction,
+                      member: discord.Member,
+                      minutes: int = 10,
+                      reason: str = "No reason provided"):
+        allowed, msg = await can_moderate(
+            interaction.user, member, interaction.guild.id)
+        if not allowed:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+        await member.timeout(timedelta(minutes=minutes), reason=reason)
+        await log_mod_action(interaction.guild.id, member,
+                             interaction.user, "timeout", reason,
+                             duration_minutes=minutes)
+        embed = discord.Embed(
+            title="Member Timed Out",
+            description=f"{member.mention} timed out for {format_duration(minutes)}.",
+            color=0xFEE75C)
+        embed.add_field(name="Reason", value=reason)
+        embed.add_field(name="Moderator", value=interaction.user.mention)
+        await interaction.response.send_message(embed=embed)
 
-@api_bp.route("/moderation/warning-thresholds/<int:tid>", methods=["DELETE"])
-@require_api_permission(LEVEL_ADMIN)
-def delete_warning_threshold(tid: int):
-    guild_id = get_session_guild_id()
+    # ─── UNTIMEOUT ──────────────────────────────────────
+    @app_commands.command(name="untimeout",
+                          description="Remove a timeout from a member")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def untimeout(self, interaction: discord.Interaction,
+                        member: discord.Member,
+                        reason: str = "No reason provided"):
+        await member.timeout(None, reason=reason)
+        await log_mod_action(interaction.guild.id, member,
+                             interaction.user, "untimeout", reason)
+        await interaction.response.send_message(
+            f"Removed timeout from {member.mention}.")
 
-    async def delete():
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "DELETE FROM warning_thresholds WHERE id=? AND guild_id=?",
-                (tid, guild_id))
-            await db.commit()
+    # ─── WARN ───────────────────────────────────────────
+    @app_commands.command(name="warn", description="Warn a member")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def warn(self, interaction: discord.Interaction,
+                   member: discord.Member,
+                   reason: str = "No reason provided"):
+        allowed, msg = await can_moderate(
+            interaction.user, member, interaction.guild.id)
+        if not allowed:
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
 
-    run_async(delete())
-    return jsonify({"success": True})
+        user_snap = snapshot_user(member)
+        mod_snap  = snapshot_user(interaction.user)
 
-
-@api_bp.route("/moderation/auto-escalation", methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def api_toggle_auto_escalation():
-    guild_id = get_session_guild_id()
-    enabled  = request.json.get("enabled", True)
-
-    async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                INSERT INTO guild_settings_kv (guild_id, key, value)
-                VALUES (?, 'auto_escalation_enabled', ?)
-                ON CONFLICT(guild_id, key) DO UPDATE SET value=excluded.value
-            """, (guild_id, "1" if enabled else "0"))
+                INSERT INTO warnings
+                    (guild_id, user_id, moderator_id, reason, timestamp,
+                     user_display_name, user_avatar_url,
+                     moderator_display_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                interaction.guild.id,
+                user_snap["id"], mod_snap["id"],
+                reason, now_iso(),
+                user_snap["display_name"], user_snap["avatar_url"],
+                mod_snap["display_name"],
+            ))
+            cursor = await db.execute("""
+                SELECT COUNT(*) FROM warnings
+                WHERE guild_id = ? AND user_id = ?
+            """, (interaction.guild.id, member.id))
+            warn_count = (await cursor.fetchone())[0]
             await db.commit()
 
-    run_async(save())
-    return jsonify({"success": True})
+        await log_mod_action(interaction.guild.id, member,
+                             interaction.user, "warn", reason)
 
+        embed = discord.Embed(
+            title="Member Warned",
+            description=f"{member.mention} has been warned.",
+            color=0xFEE75C)
+        embed.add_field(name="Reason", value=reason)
+        embed.add_field(name="Total Warnings", value=str(warn_count))
+        embed.add_field(name="Moderator", value=interaction.user.mention)
+        await interaction.response.send_message(embed=embed)
 
-@api_bp.route("/moderation/clear-warnings", methods=["POST"])
-@require_api_permission(LEVEL_MODERATOR)
-def api_clear_warnings():
-    guild_id  = get_session_guild_id()
-    target_id = request.json.get("user_id")
-    count     = request.json.get("count")
+        # Check thresholds after warning
+        await check_warning_thresholds(
+            interaction.guild, member, interaction.user)
 
-    async def clear():
+    # ─── WARNINGS ───────────────────────────────────────
+    @app_commands.command(name="warnings",
+                          description="View warnings for a member")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def warnings(self, interaction: discord.Interaction,
+                       member: discord.Member):
         async with aiosqlite.connect(DB_PATH) as db:
-            if count:
-                cur = await db.execute("""
-                    SELECT rowid FROM warnings
-                    WHERE guild_id=? AND user_id=?
-                    ORDER BY timestamp ASC LIMIT ?
-                """, (guild_id, target_id, int(count)))
-                for (rid,) in await cur.fetchall():
-                    await db.execute("DELETE FROM warnings WHERE rowid=?", (rid,))
-            else:
-                await db.execute(
-                    "DELETE FROM warnings WHERE guild_id=? AND user_id=?",
-                    (guild_id, target_id))
-            await db.commit()
+            cursor = await db.execute("""
+                SELECT reason, timestamp, moderator_display_name
+                FROM warnings
+                WHERE guild_id = ? AND user_id = ?
+                ORDER BY timestamp DESC LIMIT 10
+            """, (interaction.guild.id, member.id))
+            rows = await cursor.fetchall()
 
-    run_async(clear())
-    log_action(guild_id, f"Cleared warnings for {target_id}", "moderation",
-               target_id=int(target_id) if target_id else None)
-    return jsonify({"success": True})
+        if not rows:
+            await interaction.response.send_message(
+                f"{member.mention} has no warnings.", ephemeral=True)
+            return
 
+        embed = discord.Embed(
+            title=f"Warnings — {member.display_name}",
+            color=0xFEE75C)
+        for i, (reason, ts, mod_name) in enumerate(rows, 1):
+            embed.add_field(
+                name=f"#{i} — {ts[:10] if ts else 'Unknown'}",
+                value=f"**Reason:** {reason}\n**By:** {mod_name or 'Unknown'}",
+                inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@api_bp.route("/moderation/delete-warning/<int:warning_id>", methods=["DELETE"])
-@require_api_permission(LEVEL_OWNER)
-def api_delete_warning(warning_id: int):
-    guild_id = get_session_guild_id()
-
-    async def delete():
+    # ─── CLEAR WARNINGS ─────────────────────────────────
+    @app_commands.command(name="clearwarnings",
+                          description="Clear all warnings for a member")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def clearwarnings(self, interaction: discord.Interaction,
+                             member: discord.Member):
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "DELETE FROM warnings WHERE rowid = ? AND guild_id = ?",
-                (warning_id, guild_id))
+            await db.execute("""
+                DELETE FROM warnings
+                WHERE guild_id = ? AND user_id = ?
+            """, (interaction.guild.id, member.id))
             await db.commit()
+        await interaction.response.send_message(
+            f"Cleared all warnings for {member.mention}.")
 
-    run_async(delete())
-    log_action(guild_id, f"Deleted warning #{warning_id}", "moderation")
-    return jsonify({"success": True})
+    # ─── PURGE ──────────────────────────────────────────
+    @app_commands.command(name="purge",
+                          description="Delete messages in bulk")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def purge(self, interaction: discord.Interaction,
+                    amount: int = 10,
+                    member: discord.Member = None):
+        await interaction.response.defer(ephemeral=True)
+        if amount < 1 or amount > 100:
+            await interaction.followup.send(
+                "Amount must be between 1 and 100.", ephemeral=True)
+            return
+        # CONFIRMED LIMITATION (guard): forum channels have no message
+        # list to bulk-delete — discord.ForumChannel has no .purge at
+        # all, so this used to die with AttributeError. Report the
+        # limitation instead of crashing.
+        if not hasattr(interaction.channel, "purge"):
+            await interaction.followup.send(
+                "Bulk message deletion isn't supported in this channel "
+                "type.", ephemeral=True)
+            return
+        # CONFIRMED BUG FIX: `check=None` is NOT the same as omitting
+        # `check`. discord.py only substitutes its match-everything
+        # default when the argument is the MISSING sentinel; a literal
+        # None reached PurgeIterator's `if self.check(message)` as a
+        # non-callable and every no-member purge crashed with
+        # "'NoneType' object is not callable". A real predicate keeps
+        # the old intent ("no member filter") with unchanged purge
+        # behaviour (same limit, same bulk flag, same reply).
+        check = (lambda m: m.author == member) if member else (lambda m: True)
+        deleted = await interaction.channel.purge(
+            limit=amount, check=check)
+        await interaction.followup.send(
+            f"Deleted {len(deleted)} messages.", ephemeral=True)
+
+    # ─── LOCK ───────────────────────────────────────────
+    @app_commands.command(name="lock",
+                          description="Lock a channel")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def lock(self, interaction: discord.Interaction,
+                   reason: str = "No reason provided"):
+        # CONFIRMED BUG FIX: threads and forum posts have no permission
+        # overwrites of their own (discord.Thread has neither
+        # overwrites_for nor set_permissions) — the overwrite dance
+        # below crashed with AttributeError on them. Locking a thread is
+        # the native `locked` flag; guild channels keep the exact
+        # original overwrite behaviour.
+        if isinstance(interaction.channel, discord.Thread):
+            await interaction.channel.edit(locked=True, reason=reason)
+        else:
+            overwrite = interaction.channel.overwrites_for(
+                interaction.guild.default_role)
+            overwrite.send_messages = False
+            await interaction.channel.set_permissions(
+                interaction.guild.default_role,
+                overwrite=overwrite, reason=reason)
+        await log_mod_action(interaction.guild.id, interaction.user,
+                             interaction.user, "lock", reason)
+        embed = discord.Embed(
+            title="🔒 Channel Locked",
+            description=f"{interaction.channel.mention} has been locked.",
+            color=0xED4245)
+        embed.add_field(name="Reason", value=reason)
+        await interaction.response.send_message(embed=embed)
+
+    # ─── UNLOCK ─────────────────────────────────────────
+    @app_commands.command(name="unlock",
+                          description="Unlock a channel")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def unlock(self, interaction: discord.Interaction,
+                     reason: str = "No reason provided"):
+        # Same thread/forum-post fix as /lock above: the native `locked`
+        # flag for threads, unchanged overwrite behaviour elsewhere.
+        if isinstance(interaction.channel, discord.Thread):
+            await interaction.channel.edit(locked=False, reason=reason)
+        else:
+            overwrite = interaction.channel.overwrites_for(
+                interaction.guild.default_role)
+            overwrite.send_messages = None
+            await interaction.channel.set_permissions(
+                interaction.guild.default_role,
+                overwrite=overwrite, reason=reason)
+        embed = discord.Embed(
+            title="🔓 Channel Unlocked",
+            description=f"{interaction.channel.mention} has been unlocked.",
+            color=0x57F287)
+        embed.add_field(name="Reason", value=reason)
+        await interaction.response.send_message(embed=embed)
+
+    # ─── SLOWMODE ───────────────────────────────────────
+    @app_commands.command(name="slowmode",
+                          description="Set slowmode in a channel")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def slowmode(self, interaction: discord.Interaction,
+                       seconds: int = 0):
+        await interaction.channel.edit(slowmode_delay=seconds)
+        if seconds == 0:
+            await interaction.response.send_message(
+                "Slowmode disabled.")
+        else:
+            await interaction.response.send_message(
+                f"Slowmode set to {seconds} seconds.")
+
+    # ─── MOD LOGS ───────────────────────────────────────
+    @app_commands.command(name="modlogs",
+                          description="View mod logs for a member")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def modlogs(self, interaction: discord.Interaction,
+                      member: discord.Member):
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT action, reason, moderator_display_name,
+                       created_at, source
+                FROM moderation_logs
+                WHERE guild_id = ? AND user_id = ? AND deleted = 0
+                ORDER BY created_at DESC LIMIT 10
+            """, (interaction.guild.id, member.id))
+            rows = await cursor.fetchall()
+
+        if not rows:
+            await interaction.response.send_message(
+                f"No mod logs found for {member.mention}.",
+                ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"Mod Logs — {member.display_name}",
+            color=0x7c5cbf)
+        for action, reason, mod_name, ts, source in rows:
+            embed.add_field(
+                name=f"{action.upper()} — {ts[:10] if ts else '?'}",
+                value=(f"**Reason:** {reason or 'None'}\n"
+                       f"**By:** {mod_name or 'Unknown'}\n"
+                       f"**Source:** {source}"),
+                inline=False)
+        await interaction.response.send_message(embed=embed,
+                                                ephemeral=True)
+
+    # ─── MASSBAN ────────────────────────────────────────
+    @app_commands.command(name="massban",
+                          description="Ban multiple users by ID")
+    @app_commands.checks.has_permissions(ban_members=True)
+    async def massban(self, interaction: discord.Interaction,
+                      user_ids: str,
+                      reason: str = "Mass ban"):
+        await interaction.response.defer()
+        ids     = [i.strip() for i in user_ids.split(",") if i.strip()]
+        banned  = []
+        failed  = []
+        for uid in ids:
+            try:
+                user = await self.bot.fetch_user(int(uid))
+                await interaction.guild.ban(user, reason=reason)
+                await log_mod_action(
+                    interaction.guild.id, user,
+                    interaction.user, "ban", reason, "massban")
+                banned.append(str(uid))
+            except Exception:
+                failed.append(str(uid))
+        embed = discord.Embed(title="Mass Ban Complete", color=0xED4245)
+        embed.add_field(name="Banned",
+                        value=", ".join(banned) or "None")
+        if failed:
+            embed.add_field(name="Failed",
+                            value=", ".join(failed))
+        await interaction.followup.send(embed=embed)
+
+    # ─── LOCKDOWN ───────────────────────────────────────
+    @app_commands.command(name="lockdown",
+                          description="Lock all channels in the server")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def lockdown(self, interaction: discord.Interaction,
+                       reason: str = "Server lockdown"):
+        await interaction.response.defer()
+        locked = 0
+        for channel in interaction.guild.text_channels:
+            try:
+                overwrite = channel.overwrites_for(
+                    interaction.guild.default_role)
+                overwrite.send_messages = False
+                await channel.set_permissions(
+                    interaction.guild.default_role,
+                    overwrite=overwrite)
+                locked += 1
+            except Exception:
+                pass
+        embed = discord.Embed(
+            title="🔒 Server Lockdown",
+            description=f"Locked {locked} channels.",
+            color=0xED4245)
+        embed.add_field(name="Reason", value=reason)
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="unlockdown",
+                          description="Unlock all channels in the server")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def unlockdown(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        unlocked = 0
+        for channel in interaction.guild.text_channels:
+            try:
+                overwrite = channel.overwrites_for(
+                    interaction.guild.default_role)
+                overwrite.send_messages = None
+                await channel.set_permissions(
+                    interaction.guild.default_role,
+                    overwrite=overwrite)
+                unlocked += 1
+            except Exception:
+                pass
+        await interaction.followup.send(
+            f"🔓 Unlocked {unlocked} channels.")
 
 
+async def setup(bot):
+    await bot.add_cog(Moderation(bot))

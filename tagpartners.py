@@ -1,125 +1,100 @@
+"""
+Server Tag features — Feature 2: Cross-Server Join Reward.
+
+On join, checks the new member's Discord "server tag" (Member.primary_guild,
+added in discord.py 2.6.0) against this guild's configured partner-server
+list (dashboard-managed, tag_partner_rewards). A match grants a one-time
+reward via the shared reward_engine; tag_join_reward_log makes it one-time
+per (guild, partner, user) so a leave-and-rejoin can't farm it.
+
+Deliberately its own cog with its own on_member_join listener, separate
+from cogs/welcome.py's — same multi-listener pattern main.py/botprofile.py
+already use for on_guild_join. No shared state with cogs/tagmissions.py
+(Feature 1) — separate tables, separate listener, per spec.
+"""
+import discord
+from discord.ext import commands
 import aiosqlite
-from flask import jsonify, request
 
 from database import DB_PATH
-from dashboard.utils.async_utils import run_async
-from dashboard.permissions import (
-    get_session_guild_id, log_action, require_api_permission,
-    LEVEL_ADMIN,
-)
-from dashboard.api import api_bp
-
-# ── Server Tag Partners (Feature 2) ─────────────────────────────────────────
-# Config-only CRUD -- the actual join-time check lives in
-# cogs/tagpartners.py's on_member_join listener, not here.
-
-VALID_REWARD_TYPES = {"coins", "diamonds", "xp", "role"}
+from utils.reward_engine import give_reward, RewardError, xp_grant_skipped
 
 
-@api_bp.route("/tagpartners/list", methods=["GET"])
-@require_api_permission(LEVEL_ADMIN)
-def api_tagpartners_list():
-    guild_id = get_session_guild_id()
+class TagPartners(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
 
-    async def fetch():
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        if member.bot:
+            return
+
+        primary = member.primary_guild
+        if not primary or not primary.identity_enabled or not primary.identity_guild_id:
+            return
+
+        partner_guild_id = primary.identity_guild_id
+
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT id, partner_guild_id, partner_label, reward_type,
-                       reward_amount, reward_role_id, welcome_message, enabled
-                FROM tag_partner_rewards WHERE guild_id = ?
-                ORDER BY created_at DESC
-            """, (guild_id,))
-            rows = await cursor.fetchall()
-            cols = [d[0] for d in cursor.description]
-            return [dict(zip(cols, r)) for r in rows]
+                SELECT reward_type, reward_amount, reward_role_id, welcome_message
+                FROM tag_partner_rewards
+                WHERE guild_id = ? AND partner_guild_id = ? AND enabled = 1
+            """, (member.guild.id, partner_guild_id))
+            config_row = await cursor.fetchone()
 
-    return jsonify(run_async(fetch()))
+        if not config_row:
+            return
 
+        reward_type, reward_amount, reward_role_id, welcome_message = config_row
 
-@api_bp.route("/tagpartners/save", methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def api_tagpartners_save():
-    guild_id = get_session_guild_id()
-    data = request.json or {}
-
-    try:
-        partner_guild_id = int(data.get("partner_guild_id", 0))
-    except (TypeError, ValueError):
-        return jsonify({"success": False,
-                         "error": "Partner server ID must be a number."}), 400
-
-    if not partner_guild_id:
-        return jsonify({"success": False,
-                         "error": "Partner server ID is required."}), 400
-
-    if partner_guild_id == guild_id:
-        return jsonify({"success": False,
-                         "error": ("Partner server can't be this server — "
-                                   "that's the Tag Mission feature, not a "
-                                   "partner reward.")}), 400
-
-    reward_type = data.get("reward_type", "coins")
-    if reward_type not in VALID_REWARD_TYPES:
-        return jsonify({"success": False,
-                         "error": f"Unknown reward type: {reward_type}"}), 400
-
-    if reward_type in ("role",) and not data.get("reward_role_id"):
-        return jsonify({"success": False,
-                         "error": "This reward type requires a role."}), 400
-    if reward_type in ("coins", "diamonds", "xp") and not data.get("reward_amount"):
-        return jsonify({"success": False,
-                         "error": "This reward type requires an amount."}), 400
-
-    row_id = data.get("id")
-    params = (
-        data.get("partner_label") or None,
-        reward_type,
-        str(data.get("reward_amount")) if data.get("reward_amount") else None,
-        data.get("reward_role_id") or None,
-        data.get("welcome_message") or None,
-        int(bool(data.get("enabled", True))),
-    )
-
-    async def save():
         async with aiosqlite.connect(DB_PATH) as db:
-            if row_id:
-                await db.execute("""
-                    UPDATE tag_partner_rewards SET
-                        partner_guild_id=?, partner_label=?, reward_type=?,
-                        reward_amount=?, reward_role_id=?, welcome_message=?,
-                        enabled=?
-                    WHERE id=? AND guild_id=?
-                """, (partner_guild_id, *params, row_id, guild_id))
-            else:
-                await db.execute("""
-                    INSERT INTO tag_partner_rewards
-                        (guild_id, partner_guild_id, partner_label, reward_type,
-                         reward_amount, reward_role_id, welcome_message, enabled)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (guild_id, partner_guild_id, *params))
+            cursor = await db.execute("""
+                SELECT 1 FROM tag_join_reward_log
+                WHERE guild_id = ? AND partner_guild_id = ? AND user_id = ?
+            """, (member.guild.id, partner_guild_id, member.id))
+            already_rewarded = await cursor.fetchone()
+
+        if already_rewarded:
+            return
+
+        try:
+            result = await give_reward(
+                self.bot, member.guild.id, member.id,
+                reward_type=reward_type,
+                amount=reward_amount,
+                role_id=reward_role_id,
+                reason="Cross-server tag partner reward",
+                source="tag_partner",
+            )
+        except RewardError as e:
+            print(f"[TAGPARTNERS] reward config error guild={member.guild.id} "
+                  f"partner={partner_guild_id}: {e}")
+            return
+
+        if xp_grant_skipped(result):
+            # XP was not given, so the one-time log must stay empty and a
+            # later join can still grant once Leveling is back on.
+            return
+        if not result.get("success"):
+            print(f"[TAGPARTNERS] reward failed guild={member.guild.id} "
+                  f"user={member.id}: {result.get('error')}")
+            return
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT OR IGNORE INTO tag_join_reward_log
+                    (guild_id, partner_guild_id, user_id)
+                VALUES (?, ?, ?)
+            """, (member.guild.id, partner_guild_id, member.id))
             await db.commit()
 
-    try:
-        run_async(save())
-    except aiosqlite.IntegrityError:
-        return jsonify({"success": False,
-                         "error": "A reward for that partner server already exists."}), 400
-
-    log_action(guild_id, f"Saved tag partner reward: {partner_guild_id}", "tagpartners")
-    return jsonify({"success": True})
+        if welcome_message:
+            try:
+                await member.send(welcome_message)
+            except discord.Forbidden:
+                pass  # DMs closed — reward is already granted regardless
 
 
-@api_bp.route("/tagpartners/<int:row_id>", methods=["DELETE"])
-@require_api_permission(LEVEL_ADMIN)
-def api_tagpartners_delete(row_id: int):
-    guild_id = get_session_guild_id()
-
-    async def delete():
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "DELETE FROM tag_partner_rewards WHERE id=? AND guild_id=?",
-                (row_id, guild_id))
-            await db.commit()
-
-    run_async(delete())
-    return jsonify({"success": True})
+async def setup(bot):
+    await bot.add_cog(TagPartners(bot))

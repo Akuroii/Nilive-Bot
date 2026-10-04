@@ -1,77 +1,467 @@
-import aiosqlite
-from flask import jsonify, request
+import discord
+from discord.ext import commands
+from discord import app_commands
 from database import DB_PATH
-from dashboard.utils.async_utils import run_async
-from dashboard.permissions import (
-    get_session_guild_id, log_action, require_api_permission, LEVEL_ADMIN,
+from utils.trade_engine import (
+    ensure_trade_table, execute_trade, _empty_offer, TradeError,
+    MAX_ITEM_LINES_PER_SIDE,
 )
-from dashboard.api import api_bp
+from utils.inventory import has_item, get_inventory
+from utils.economy_safe import get_balance
+from utils.currency import (
+    get_currency_config, for_currency, currency_label, currency_amount,
+)
+from utils.emoji import CHECK_EMOJI, as_partial_emoji as _as_button_emoji
 
-# ── Trade (dashboard read-only page) ────────────────────────────────────────
+TRADE_TIMEOUT_SECONDS = 600  # 10 minutes
+
+# guild-scoped active-session guard — one open trade per pair of users
+# at a time, mirroring how cogs/reactionroles.py/etc keep transient UI
+# state in memory rather than the DB (the DB only ever sees the final
+# completed trade, via trade_history).
+_active_trades: dict[tuple[int, frozenset], "TradeSession"] = {}
+
+
+class TradeSession:
+    def __init__(self, guild_id: int, user_a: discord.Member, user_b: discord.Member):
+        self.guild_id = guild_id
+        self.user_a = user_a
+        self.user_b = user_b
+        self.offers: dict[int, dict] = {
+            user_a.id: _empty_offer(),
+            user_b.id: _empty_offer(),
+        }
+        self.ready: set[int] = set()
+        self.message: discord.Message | None = None
+        self.finished = False
+
+    def other(self, user_id: int) -> discord.Member:
+        return self.user_b if user_id == self.user_a.id else self.user_a
+
+    def key(self) -> tuple[int, frozenset]:
+        return (self.guild_id, frozenset({self.user_a.id, self.user_b.id}))
+
+    def reset_ready(self):
+        self.ready.clear()
+
+    async def build_embed(self, cur: dict) -> discord.Embed:
+        embed = discord.Embed(
+            title="🤝 Trade Offer",
+            description="Both sides add what they are offering, then click **Ready**. "
+                        "Changing your offer clears both Ready states.",
+            color=0x57F287 if len(self.ready) == 2 else 0x7c5cbf)
+        cc, cd = cur["coins"], cur["diamonds"]
+        # Offer lines resolve name + emoji from the same config the buttons
+        # and the dashboard use, so a renamed currency reads identically
+        # everywhere in this panel.
+        for user in (self.user_a, self.user_b):
+            offer = self.offers[user.id]
+            lines = []
+            if offer["coins"]:
+                lines.append(f"{cc['emoji']} {offer['coins']:,} {cc['name']}")
+            if offer["diamonds"]:
+                lines.append(f"{cd['emoji']} {offer['diamonds']:,} {cd['name']}")
+            for name, qty in offer["items"].items():
+                lines.append(f"🎁 {name} ×{qty}")
+            if not lines:
+                lines.append("*(nothing offered yet)*")
+            ready_mark = f" {CHECK_EMOJI}" if user.id in self.ready else ""
+            embed.add_field(
+                name=f"{user.display_name}'s offer{ready_mark}",
+                value="\n".join(lines), inline=True)
+        return embed
+
+
+class AddCoinsModal(discord.ui.Modal):
+    amount = discord.ui.TextInput(label="Amount", placeholder="e.g. 500", required=True)
+
+    def __init__(self, view: "TradeView"):
+        # Title carries the configured currency name. `discord.ui.Modal`'s
+        # title is a normal instance attribute, so it can be set per-open —
+        # the decorator form cannot, because it is evaluated once at class
+        # definition and would freeze the default name server-wide.
+        info = for_currency(view.cur, "coins")
+        super().__init__(title=f"Offer {info['name']}")
+        self.view_ref = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amt = int(self.amount.value)
+        except ValueError:
+            await interaction.response.send_message("Enter a whole number.", ephemeral=True)
+            return
+        if amt < 0:
+            await interaction.response.send_message("Amount cannot be negative.", ephemeral=True)
+            return
+        bal = await get_balance(self.view_ref.session.guild_id, interaction.user.id, currency="balance")
+        if amt > bal:
+            cur = self.view_ref.cur
+            cc = cur["coins"]
+            await interaction.response.send_message(
+                f"You only have {bal:,} {cc['emoji']} — cannot offer {amt:,}.",
+                ephemeral=True)
+            return
+        self.view_ref.session.offers[interaction.user.id]["coins"] = amt
+        self.view_ref.session.reset_ready()
+        await self.view_ref.refresh(interaction)
+
+
+class AddDiamondsModal(discord.ui.Modal):
+    amount = discord.ui.TextInput(label="Amount", placeholder="e.g. 10", required=True)
+
+    def __init__(self, view: "TradeView"):
+        info = for_currency(view.cur, "diamonds")
+        super().__init__(title=f"Offer {info['name']}")
+        self.view_ref = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amt = int(self.amount.value)
+        except ValueError:
+            await interaction.response.send_message("Enter a whole number.", ephemeral=True)
+            return
+        if amt < 0:
+            await interaction.response.send_message("Amount cannot be negative.", ephemeral=True)
+            return
+        gems = await get_balance(self.view_ref.session.guild_id, interaction.user.id, currency="diamonds")
+        if amt > gems:
+            cur = self.view_ref.cur
+            cd = cur["diamonds"]
+            await interaction.response.send_message(
+                f"You only have {gems:,} {cd['emoji']} — cannot offer {amt:,}.",
+                ephemeral=True)
+            return
+        self.view_ref.session.offers[interaction.user.id]["diamonds"] = amt
+        self.view_ref.session.reset_ready()
+        await self.view_ref.refresh(interaction)
+
+
+# ─── Item picker (replaces free-text item-name entry) ───────────────────
 #
-# Trade System (utils/trade_engine.py, cogs/trade.py) shipped pass #15,
-# Discord-side only. This is the optional dashboard follow-up flagged in
-# STATUS.md/memory since pass #15 — a read-only history view, same shape
-# as dashboard/api/misc.py's /ledger and /inventory routes. Reuses
-# utils.trade_engine.get_trade_history() rather than re-declaring the
-# query here, same principle as every other "dashboard API wraps an
-# existing engine function" route in this project
-# (dashboard/api/leveling.py's prestige routes, dashboard/api/minigames.py).
+# Previously "Offer Item" opened a modal with a raw text field for the
+# item name — a member had to know/type the exact name (case, spacing,
+# etc. all had to match inventory_items.item_name exactly, since
+# has_item() does a literal lookup). This is the carry-forward gap
+# flagged since pass #15 ("Item autocomplete/picker for Trade UI — not
+# yet built"). Discord slash-command autocomplete only works on command
+# options, not modal text inputs, so a modal can't offer live
+# suggestions — the fix is a Select menu instead: fetch the member's
+# actual inventory first, list what they hold as pickable options, and
+# only ask for a quantity (via a small modal) once they've picked a
+# real item they own. This makes offering a nonexistent/misspelled item
+# structurally impossible instead of just validated-and-rejected.
 #
-# No write routes here on purpose — trades are only ever created through
-# the /trade Discord UI's atomic execute_trade() (live balance/inventory
-# re-validation happens inside that transaction). A dashboard "create/edit
-# trade" surface would need to reimplement that same re-validation to be
-# safe, which is out of scope for what Dark asked for (history view only).
-#
-# dark-fixes pass #18 (username resolver rollout, task #4 of 6): trades
-# only ever stored user_a/user_b as raw IDs — no snapshot, same "ID only"
-# bucket as Economy. One batched resolve_users() call per request covering
-# both sides of every trade on the page, returned alongside the trade rows
-# as `user_map` so the client renders it in a single pass instead of
-# firing a lookup per row. Mirrors dashboard/api/economy_shop.py's
-# server-rendered pattern, except this page renders client-side (JS
-# builds the table from fetch()), so the map travels in the JSON payload
-# and dashboard.js's userIdentityHtml() (the JS twin of
-# dashboard/utils/user_identity.py) renders it — same visual component,
-# different render path.
+# Discord caps a Select at 25 options — if a member holds more than 25
+# distinct items, this shows their 25 highest-quantity ones. That's a
+# real (if unlikely) limitation for very item-heavy inventories; not
+# solved here since it would need pagination UI, which is out of scope
+# for this pass.
+
+class ItemQuantityModal(discord.ui.Modal):
+    quantity = discord.ui.TextInput(label="Quantity", default="1", required=True)
+
+    def __init__(self, view: "TradeView", item_name: str, available_qty: int):
+        super().__init__(title=f"Offer: {item_name}"[:45])
+        self.view_ref = view
+        self.item_name = item_name
+        self.quantity.placeholder = f"You have {available_qty}"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            qty = int(self.quantity.value)
+        except ValueError:
+            await interaction.response.send_message("Quantity must be a whole number.", ephemeral=True)
+            return
+        if qty <= 0:
+            await interaction.response.send_message("Quantity must be positive.", ephemeral=True)
+            return
+        # Re-checked live (not just against the snapshot the Select was
+        # built from) — the same "trust nothing older than this click"
+        # rule execute_trade() itself follows at execution time.
+        owns = await has_item(self.view_ref.session.guild_id, interaction.user.id, self.item_name, qty)
+        if not owns:
+            await interaction.response.send_message(
+                f"You don't have {qty}x **{self.item_name}** to offer.", ephemeral=True)
+            return
+        offer = self.view_ref.session.offers[interaction.user.id]
+        if self.item_name not in offer["items"] and len(offer["items"]) >= MAX_ITEM_LINES_PER_SIDE:
+            await interaction.response.send_message(
+                f"Max {MAX_ITEM_LINES_PER_SIDE} distinct items per side.", ephemeral=True)
+            return
+        offer["items"][self.item_name] = qty
+        self.view_ref.session.reset_ready()
+        await self.view_ref.refresh(interaction)
 
 
-@api_bp.route("/trade/history")
-@require_api_permission(LEVEL_ADMIN)
-def api_trade_history():
-    guild_id = get_session_guild_id()
-    user_id  = request.args.get("user_id")
-    limit    = min(int(request.args.get("limit", 100)), 500)
+class ItemPickerSelect(discord.ui.Select):
+    def __init__(self, view: "TradeView", items: list[dict]):
+        options = [
+            discord.SelectOption(
+                label=f"{it['item_name']} (×{it['quantity']})"[:100],
+                value=it["item_name"][:100],
+                description=it.get("item_type") or None,
+            )
+            for it in items
+        ]
+        super().__init__(placeholder="Choose an item to offer...", options=options)
+        self.view_ref = view
+        self._qty_by_name = {it["item_name"]: it["quantity"] for it in items}
 
-    async def fetch():
+    async def callback(self, interaction: discord.Interaction):
+        item_name = self.values[0]
+        available = self._qty_by_name.get(item_name, 0)
+        await interaction.response.send_modal(
+            ItemQuantityModal(self.view_ref, item_name, available))
+
+
+class ItemPickerView(discord.ui.View):
+    def __init__(self, trade_view: "TradeView", items: list[dict]):
+        super().__init__(timeout=60)
+        self.add_item(ItemPickerSelect(trade_view, items))
+
+
+class AddItemModal(discord.ui.Modal, title="Offer an Item"):
+    """
+    Manual-entry fallback — kept for the >25-distinct-items case (where
+    a Select can't list everything) and for anyone who'd rather just
+    type the exact name. The picker above is the default path from the
+    "Offer Item" button; this is reached only when there are too many
+    items to list.
+    """
+    item_name = discord.ui.TextInput(label="Item name (exact)", required=True)
+    quantity = discord.ui.TextInput(label="Quantity", default="1", required=True)
+
+    def __init__(self, view: "TradeView"):
+        super().__init__()
+        self.view_ref = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            qty = int(self.quantity.value)
+        except ValueError:
+            await interaction.response.send_message("Quantity must be a whole number.", ephemeral=True)
+            return
+        if qty <= 0:
+            await interaction.response.send_message("Quantity must be positive.", ephemeral=True)
+            return
+        name = str(self.item_name.value).strip()
+        owns = await has_item(self.view_ref.session.guild_id, interaction.user.id, name, qty)
+        if not owns:
+            await interaction.response.send_message(
+                f"You don't have {qty}x **{name}** to offer.", ephemeral=True)
+            return
+        offer = self.view_ref.session.offers[interaction.user.id]
+        if name not in offer["items"] and len(offer["items"]) >= MAX_ITEM_LINES_PER_SIDE:
+            await interaction.response.send_message(
+                f"Max {MAX_ITEM_LINES_PER_SIDE} distinct items per side.", ephemeral=True)
+            return
+        offer["items"][name] = qty
+        self.view_ref.session.reset_ready()
+        await self.view_ref.refresh(interaction)
+
+
+class TradeView(discord.ui.View):
+    def __init__(self, session: TradeSession, cur: dict):
+        super().__init__(timeout=TRADE_TIMEOUT_SECONDS)
+        self.session = session
+        self.cur = cur
+        # Apply the guild's configured currency names to the two offer
+        # buttons. Discord requires a button's emoji to be a real,
+        # bot-usable emoji — an emoji the bot cannot reach renders as the
+        # literal token text — so a unicode/plain name falls back to no
+        # glyph rather than showing something broken.
+        for button, key in ((self.offer_coins, "coins"),
+                            (self.offer_diamonds, "diamonds")):
+            info = for_currency(cur, key)
+            button.label = f"Offer {info['name']}"
+            button.emoji = _as_button_emoji(info["emoji"])
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id not in (self.session.user_a.id, self.session.user_b.id):
+            await interaction.response.send_message(
+                "This is not your trade.", ephemeral=True)
+            return False
+        if self.session.finished:
+            await interaction.response.send_message(
+                "This trade has already ended.", ephemeral=True)
+            return False
+        return True
+
+    async def refresh(self, interaction: discord.Interaction):
+        embed = await self.session.build_embed(self.cur)
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        self.session.finished = True
+        _active_trades.pop(self.session.key(), None)
+        for item in self.children:
+            item.disabled = True
+        if self.session.message:
+            try:
+                await self.session.message.edit(
+                    content="⌛ Trade timed out — no changes were made.", view=self)
+            except Exception:
+                pass
+
+    # Labels/emoji here are PLACEHOLDERS: `discord.ui.button` arguments are
+    # evaluated once, at class-definition time, so they cannot hold a
+    # per-guild currency name. __init__ overwrites both from the resolved
+    # config on every render (same pattern as the Wallet's currency tabs).
+    @discord.ui.button(label="Offer", style=discord.ButtonStyle.secondary)
+    async def offer_coins(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddCoinsModal(self))
+
+    @discord.ui.button(label="Offer", style=discord.ButtonStyle.secondary)
+    async def offer_diamonds(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddDiamondsModal(self))
+
+    @discord.ui.button(label="Offer Item", emoji="🎁", style=discord.ButtonStyle.secondary)
+    async def offer_item(self, interaction: discord.Interaction, button: discord.ui.Button):
+        items = await get_inventory(self.session.guild_id, interaction.user.id, include_empty=False)
+        if not items:
+            await interaction.response.send_message(
+                "You don't have any items to offer.", ephemeral=True)
+            return
+        if len(items) > 25:
+            # Select is capped at 25 options — fall back to manual
+            # entry rather than silently hiding items past the 25th.
+            await interaction.response.send_modal(AddItemModal(self))
+            return
+        view = ItemPickerView(self, items)
+        await interaction.response.send_message(
+            "Pick an item to offer:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Clear My Offer", emoji="🔄", style=discord.ButtonStyle.secondary)
+    async def clear_offer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.session.offers[interaction.user.id] = _empty_offer()
+        self.session.reset_ready()
+        await self.refresh(interaction)
+
+    @discord.ui.button(label="Ready", emoji=CHECK_EMOJI,
+                       style=discord.ButtonStyle.success)
+    async def ready(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.session.ready.add(interaction.user.id)
+
+        if len(self.session.ready) < 2:
+            await self.refresh(interaction)
+            return
+
+        # Both ready — execute atomically. interaction_check already
+        # gated who can click; execute_trade re-validates live balances
+        # inside its own transaction regardless (offers can go stale
+        # between "both readied up" and now).
+        a_id, b_id = self.session.user_a.id, self.session.user_b.id
+        result = await execute_trade(
+            self.session.guild_id, a_id, self.session.offers[a_id],
+            b_id, self.session.offers[b_id],
+            reason="Player trade")
+
+        self.session.finished = True
+        _active_trades.pop(self.session.key(), None)
+        for item in self.children:
+            item.disabled = True
+
+        if not result.get("success"):
+            embed = discord.Embed(
+                title="❌ Trade failed",
+                description=result.get("error", "Something changed — trade could not complete."),
+                color=0xED4245)
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+
+        embed = await self.session.build_embed(self.cur)
+        embed.title = f"{CHECK_EMOJI} Trade complete"
+        embed.color = 0x57F287
+        embed.set_footer(text=f"Trade #{result['trade_id']}")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.session.finished = True
+        _active_trades.pop(self.session.key(), None)
+        for item in self.children:
+            item.disabled = True
+        embed = discord.Embed(
+            description=f"Trade cancelled by {interaction.user.mention}.",
+            color=0xED4245)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+class Trade(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    async def cog_load(self):
+        await ensure_trade_table()
+
+    @app_commands.command(name="trade", description="Start a trade with another member")
+    async def trade(self, interaction: discord.Interaction, member: discord.Member):
+        if member.id == interaction.user.id:
+            await interaction.response.send_message("You cannot trade with yourself.", ephemeral=True)
+            return
+        if member.bot:
+            await interaction.response.send_message("You cannot trade with a bot.", ephemeral=True)
+            return
+
+        guild_id = interaction.guild.id
+        key = (guild_id, frozenset({interaction.user.id, member.id}))
+        if key in _active_trades:
+            await interaction.response.send_message(
+                "There is already an open trade between you two. Finish or let it time out first.",
+                ephemeral=True)
+            return
+
+        session = TradeSession(guild_id, interaction.user, member)
+        _active_trades[key] = session
+        cur = await get_currency_config(guild_id)
+        view = TradeView(session, cur)
+        embed = await session.build_embed(cur)
+
+        await interaction.response.send_message(
+            content=f"{interaction.user.mention} 🤝 {member.mention}",
+            embed=embed, view=view)
+        session.message = await interaction.original_response()
+
+    @app_commands.command(name="trade_history", description="View your recent trades")
+    async def trade_history(self, interaction: discord.Interaction, member: discord.Member = None):
         from utils.trade_engine import get_trade_history
-        uid = int(user_id) if user_id else None
-        return await get_trade_history(guild_id, uid, limit=limit)
+        target = member or interaction.user
+        rows = await get_trade_history(interaction.guild.id, target.id, limit=10)
+        if not rows:
+            await interaction.response.send_message(
+                f"No trade history for {target.mention}.", ephemeral=True)
+            return
 
-    rows = run_async(fetch())
+        cur = await get_currency_config(interaction.guild.id)
+        embed = discord.Embed(title=f"📜 Trade History — {target.display_name}", color=0x7c5cbf)
+        for r in rows:
+            a_id, b_id = r["user_a"], r["user_b"]
+            offer_a, offer_b = r["offer_a"], r["offer_b"]
 
-    # Snowflake safety: user IDs travel to the client as STRINGS, not JSON
-    # numbers. Discord snowflakes (~1.7e18) exceed JS's
-    # Number.MAX_SAFE_INTEGER (2^53), so if user_a/user_b were serialized
-    # as numbers, JSON.parse() would silently corrupt their trailing
-    # digits (704453350384730200 → …240) and the userMap[t.user_a]
-    # lookup in trade.html would never match the user_map keys (whose
-    # digits ARE exact — Python int keys stringify losslessly in JSON).
-    # Every client-side consumer of this payload uses the value only for
-    # display + map lookup, so string form is safe everywhere.
-    rows = [{**t, "user_a": str(t["user_a"]), "user_b": str(t["user_b"])}
-            for t in rows]
+            def summarize(offer):
+                # Historical rows store only the stable keys ('coins' /
+                # 'diamonds') plus amounts — never a currency name — so a
+                # past trade re-labels itself with whatever the guild's
+                # currency is called NOW. Renaming never invalidates
+                # history.
+                parts = []
+                if offer.get("coins"):
+                    parts.append(currency_amount(cur, "coins", offer["coins"]))
+                if offer.get("diamonds"):
+                    parts.append(currency_amount(cur, "diamonds", offer["diamonds"]))
+                for name, qty in offer.get("items", {}).items():
+                    parts.append(f"{name}×{qty}")
+                return ", ".join(parts) or "nothing"
 
-    async def resolve():
-        from utils.discord_user_cache import resolve_users
-        ids = set()
-        for t in rows:
-            ids.add(t["user_a"])
-            ids.add(t["user_b"])
-        if not ids:
-            return {}
-        return await resolve_users(guild_id, list(ids))
+            embed.add_field(
+                name=f"#{r['id']} — {str(r['created_at'])[:16]}",
+                value=f"<@{a_id}> gave {summarize(offer_a)}\n<@{b_id}> gave {summarize(offer_b)}",
+                inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    user_map = run_async(resolve())
-    return jsonify({"trades": rows, "guild_id": guild_id, "user_map": user_map})
+
+async def setup(bot):
+    await bot.add_cog(Trade(bot))

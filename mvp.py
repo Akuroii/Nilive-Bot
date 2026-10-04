@@ -1,114 +1,354 @@
-import os
-import json
-import csv
-import io
-import datetime
-import requests as _req
+import discord
+from discord.ext import commands
+from discord import app_commands
 import aiosqlite
-from flask import jsonify, request, session, abort, Response
-from markupsafe import escape as _esc
+from datetime import datetime, timezone
+from discord.ext import tasks
 from database import DB_PATH
-from dashboard.utils.async_utils import run_async
-from dashboard.auth import login_required, current_user_id, current_user
-from dashboard.permissions import (
-    get_session_guild_id, log_action, require_api_permission,
-    LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
-)
-from dashboard.api import api_bp
+from utils.formatters import snapshot_user, now_iso
+from utils.timezone import get_cairo_daily_key
+from utils.emoji import CHECK_EMOJI
 
-# ── MVP ───────────────────────────────────────────────────────────────────────
 
-@api_bp.route("/mvp/scores")
-@require_api_permission(LEVEL_ADMIN)
-def mvp_scores_partial():
-    from utils.timezone import get_cairo_daily_key
-    guild_id = get_session_guild_id()
-    today    = get_cairo_daily_key()
+async def get_mvp_config(guild_id: int) -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT * FROM mvp_config WHERE guild_id = ?", (guild_id,))
+        row = await cursor.fetchone()
+        if row:
+            cols = [d[0] for d in cursor.description]
+            return dict(zip(cols, row))
+    return {
+        "enabled": 1, "cycle_hours": 6,
+        "mvp_role_id": None, "announce_channel_id": None,
+        "chat_word_weight": 1.0, "voice_minute_weight": 2.0,
+    }
 
-    async def fetch():
+
+class MVP(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.mvp_cycle_task.start()
+
+    def cog_unload(self):
+        self.mvp_cycle_task.cancel()
+
+    # ─── SCORE MESSAGES (Phase 3 / E1: now driven by the Activity
+    # Engine's activity_message event instead of its own on_message
+    # listener — word_count used to be computed here independently
+    # of cogs/leveling.py's identical computation on the same
+    # message; now it's computed once, centrally, in
+    # cogs/activity_engine.py and passed to both.) ─────────────────
+    @commands.Cog.listener()
+    async def on_activity_message(self, message: discord.Message,
+                                   word_count: int):
+        if message.author.bot or not message.guild:
+            return
+        config = await get_mvp_config(message.guild.id)
+        if not config.get("enabled", 1):
+            return
+
+        weight = float(config.get("chat_word_weight", 1.0))
+        score  = word_count * weight
+        today  = get_cairo_daily_key()
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO mvp_scores
+                    (guild_id, user_id, date, message_score, total_score)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, user_id, date) DO UPDATE SET
+                    message_score = message_score + ?,
+                    total_score   = total_score + ?
+            """, (message.guild.id, message.author.id, today,
+                  score, score, score, score))
+            await db.commit()
+
+    # ─── SCORE VOICE (Phase 3 / E1: now driven by the Activity
+    # Engine's activity_voice_tick event instead of MVP's own
+    # join/leave session timer.
+    #
+    # Worth flagging: this also fixes a real gap MVP had on its own —
+    # the old on_voice_state_update/_credit_voice_score session timer
+    # had NO anti-farming guards at all (unlike leveling's poll loop),
+    # so a member could sit alone, deafened, or in the AFK channel
+    # and still rack up MVP voice score. The engine's tick already
+    # excludes all of that before MVP ever sees the tick, so this is
+    # a side-effect security/fairness improvement, not just a
+    # refactor. The old voice_sessions-based join/leave bookkeeping
+    # is gone entirely — a tick-based model doesn't need it. ────────
+    @commands.Cog.listener()
+    async def on_activity_voice_tick(self, guild: discord.Guild,
+                                      member: discord.Member,
+                                      flags: dict):
+        try:
+            config = await get_mvp_config(guild.id)
+            if not config.get("enabled", 1):
+                return
+
+            weight = float(config.get("voice_minute_weight", 2.0))
+            score  = 1 * weight  # one tick == one minute
+            today  = get_cairo_daily_key()
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("""
+                    INSERT INTO mvp_scores
+                        (guild_id, user_id, date,
+                         voice_minutes, total_score)
+                    VALUES (?, ?, ?, 1, ?)
+                    ON CONFLICT(guild_id, user_id, date) DO UPDATE SET
+                        voice_minutes = voice_minutes + 1,
+                        total_score   = total_score   + ?
+                """, (guild.id, member.id, today, score, score))
+                await db.commit()
+        except Exception as e:
+            print(f"[MVP] voice tick error for member {member.id} "
+                  f"in guild {guild.id}: {e}")
+
+    # ─── MVP CYCLE TASK ──────────────────────────────────
+    @tasks.loop(minutes=30)
+    async def mvp_cycle_task(self):
+        """
+        Checks every 30 min if a cycle has elapsed.
+        Cycle length is configurable per guild (default 6hrs).
+        """
+        for guild in self.bot.guilds:
+            try:
+                config = await get_mvp_config(guild.id)
+                if not config.get("enabled", 1):
+                    continue
+
+                cycle_hours = int(config.get("cycle_hours", 6))
+                now         = datetime.now(timezone.utc)
+                today       = get_cairo_daily_key(now)
+
+                # Find top scorer today
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cursor = await db.execute("""
+                        SELECT user_id, total_score FROM mvp_scores
+                        WHERE guild_id = ? AND date = ?
+                        ORDER BY total_score DESC LIMIT 1
+                    """, (guild.id, today))
+                    top = await cursor.fetchone()
+
+                    # Check last MVP history to see if cycle elapsed
+                    hist_cursor = await db.execute("""
+                        SELECT cycle_end FROM mvp_history
+                        WHERE guild_id = ?
+                        ORDER BY created_at DESC LIMIT 1
+                    """, (guild.id,))
+                    last = await hist_cursor.fetchone()
+
+                if last:
+                    last_end = datetime.fromisoformat(last[0])
+                    if last_end.tzinfo is None:
+                        last_end = last_end.replace(tzinfo=timezone.utc)
+                    elapsed = (now - last_end).total_seconds() / 3600
+                    if elapsed < cycle_hours:
+                        continue
+
+                if not top:
+                    continue
+
+                mvp_user_id, mvp_score = top
+                mvp_member = guild.get_member(mvp_user_id)
+                if not mvp_member:
+                    continue
+
+                snap = snapshot_user(mvp_member)
+                # cycle_start anchored to Cairo midnight but stored as UTC ISO
+                from utils.timezone import CAIRO_TZ
+                _cairo_today = now.astimezone(CAIRO_TZ).date()
+                cycle_start = datetime(_cairo_today.year, _cairo_today.month, _cairo_today.day, tzinfo=CAIRO_TZ).astimezone(timezone.utc)
+
+                # Save to history
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute("""
+                        INSERT INTO mvp_history
+                            (guild_id, user_id, user_display_name,
+                             cycle_start, cycle_end, score)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (guild.id, mvp_user_id,
+                          snap["display_name"],
+                          cycle_start.isoformat(),
+                          now.isoformat(),
+                          int(mvp_score)))
+                    await db.commit()
+
+                # Assign MVP role
+                mvp_role_id = config.get("mvp_role_id")
+                if mvp_role_id:
+                    mvp_role = guild.get_role(int(mvp_role_id))
+                    if mvp_role:
+                        # Remove from all current holders
+                        for m in guild.members:
+                            if mvp_role in m.roles and m.id != mvp_user_id:
+                                try:
+                                    await m.remove_roles(
+                                        mvp_role,
+                                        reason="MVP cycle reset")
+                                except Exception:
+                                    pass
+                        # Give to new MVP
+                        try:
+                            await mvp_member.add_roles(
+                                mvp_role, reason="MVP of the cycle")
+                        except Exception:
+                            pass
+
+                # Announce
+                channel_id = config.get("announce_channel_id")
+                if channel_id:
+                    channel = guild.get_channel(int(channel_id))
+                    if channel:
+                        embed = discord.Embed(
+                            title="🏆 New MVP.",
+                            description=(
+                                f"{mvp_member.mention} is the MVP "
+                                f"of this cycle with "
+                                f"**{int(mvp_score):,}** points."),
+                            color=0xFFD700)
+                        if mvp_member.display_avatar:
+                            embed.set_thumbnail(
+                                url=mvp_member.display_avatar.url)
+                        embed.set_footer(
+                            text=f"Next cycle in {cycle_hours} hours")
+                        try:
+                            await channel.send(embed=embed)
+                        except Exception:
+                            pass
+
+            except Exception as e:
+                print(f"[MVP CYCLE] Error for guild {guild.id}: {e}")
+
+    @mvp_cycle_task.before_loop
+    async def before_mvp_task(self):
+        await self.bot.wait_until_ready()
+
+    # ─── SLASH COMMANDS ──────────────────────────────────
+    @app_commands.command(name="mvp_scores",
+                          description="View today's MVP scores")
+    async def mvp_scores(self, interaction: discord.Interaction):
+        today = get_cairo_daily_key()
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT user_id, message_score, voice_minutes, total_score
                 FROM mvp_scores
                 WHERE guild_id = ? AND date = ?
-                ORDER BY total_score DESC LIMIT 20
-            """, (guild_id, today))
-            return await cursor.fetchall()
+                ORDER BY total_score DESC LIMIT 10
+            """, (interaction.guild.id, today))
+            rows = await cursor.fetchall()
 
-    rows = run_async(fetch())
+        if not rows:
+            await interaction.response.send_message(
+                "No scores today yet.", ephemeral=True)
+            return
 
-    async def resolve():
-        from utils.discord_user_cache import resolve_users
-        return await resolve_users(guild_id, [r[0] for r in rows])
+        embed = discord.Embed(title="🏆 Today's MVP Scores",
+                              color=0xFFD700)
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (uid, msg, voice, total) in enumerate(rows, 1):
+            medal  = medals[i-1] if i <= 3 else f"#{i}"
+            member = interaction.guild.get_member(uid)
+            name   = member.display_name if member else f"User {uid}"
+            embed.add_field(
+                name=f"{medal} {name}",
+                value=(f"💬 {msg:.1f} pts | "
+                       f"🎙️ {voice:.1f} min | "
+                       f"**{total:.1f} total**"),
+                inline=False)
+        await interaction.response.send_message(embed=embed)
 
-    user_map = run_async(resolve()) if rows else {}
-
-    from dashboard.utils.user_identity import render_user_identity_html
-    html = ""
-    for i, r in enumerate(rows, 1):
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"#{i}"
-        u = user_map.get(r[0], {})
-        identity_html = render_user_identity_html(
-            r[0], u.get("display_name"), u.get("username"), u.get("avatar_url"))
-        html += (
-            f"<tr><td>{medal}</td>"
-            f"<td>{identity_html}</td>"
-            f"<td>{r[1]:.1f}</td>"
-            f"<td>{r[2]:.1f}</td>"
-            f"<td><strong>{r[3]:.1f}</strong></td></tr>"
-        )
-    return html or "<tr><td colspan='5' class='empty'>No activity today yet</td></tr>"
-
-
-@api_bp.route("/mvp/config", methods=["GET"])
-@require_api_permission(LEVEL_ADMIN)
-def get_mvp_config_api():
-    guild_id = get_session_guild_id()
-
-    async def fetch():
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "SELECT * FROM mvp_config WHERE guild_id = ?", (guild_id,))
-            row = await cursor.fetchone()
-            if row:
-                return dict(zip([d[0] for d in cursor.description], row))
-        return {}
-
-    return jsonify({"config": run_async(fetch())})
-
-
-@api_bp.route("/mvp/config", methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def save_mvp_config_api():
-    guild_id = get_session_guild_id()
-    data     = request.json
-
-    async def save():
+    @app_commands.command(name="mvp_setup",
+                          description="Configure MVP system")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def mvp_setup(self, interaction: discord.Interaction,
+                        mvp_role: discord.Role = None,
+                        announce_channel: discord.TextChannel = None,
+                        cycle_hours: int = 6,
+                        chat_weight: float = 1.0,
+                        voice_weight: float = 2.0):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO mvp_config
-                    (guild_id, cycle_hours, mvp_role_id,
-                     announce_channel_id, chat_word_weight,
+                    (guild_id, mvp_role_id, announce_channel_id,
+                     cycle_hours, chat_word_weight,
                      voice_minute_weight, enabled)
                 VALUES (?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(guild_id) DO UPDATE SET
-                    cycle_hours         = excluded.cycle_hours,
                     mvp_role_id         = excluded.mvp_role_id,
                     announce_channel_id = excluded.announce_channel_id,
+                    cycle_hours         = excluded.cycle_hours,
                     chat_word_weight    = excluded.chat_word_weight,
                     voice_minute_weight = excluded.voice_minute_weight
             """, (
-                guild_id,
-                int(data.get("cycle_hours", 6)),
-                data.get("mvp_role_id") or None,
-                data.get("announce_channel_id") or None,
-                float(data.get("chat_word_weight", 1.0)),
-                float(data.get("voice_minute_weight", 2.0)),
+                interaction.guild.id,
+                mvp_role.id if mvp_role else None,
+                announce_channel.id if announce_channel else None,
+                cycle_hours,
+                chat_weight,
+                voice_weight,
             ))
             await db.commit()
 
-    run_async(save())
-    log_action(guild_id, "Updated MVP config", "mvp")
-    return jsonify({"success": True})
+        embed = discord.Embed(title="MVP System Configured",
+                              color=0x57F287)
+        embed.add_field(name="Cycle", value=f"Every {cycle_hours}h")
+        embed.add_field(name="Chat Weight", value=f"{chat_weight}x")
+        embed.add_field(name="Voice Weight", value=f"{voice_weight}x")
+        if mvp_role:
+            embed.add_field(name="MVP Role", value=mvp_role.mention)
+        if announce_channel:
+            embed.add_field(name="Announce", value=announce_channel.mention)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="mvp_force",
+                          description="Force a new MVP cycle now (admin)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def mvp_force(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        config = await get_mvp_config(interaction.guild.id)
+        today  = get_cairo_daily_key()
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT user_id, total_score FROM mvp_scores
+                WHERE guild_id = ? AND date = ?
+                ORDER BY total_score DESC LIMIT 1
+            """, (interaction.guild.id, today))
+            top = await cursor.fetchone()
+
+        if not top:
+            await interaction.followup.send("No scores yet today.")
+            return
+
+        uid, score  = top
+        member      = interaction.guild.get_member(uid)
+        if not member:
+            await interaction.followup.send("MVP user not found.")
+            return
+
+        snap = snapshot_user(member)
+        now  = datetime.now(timezone.utc)
+        from utils.timezone import CAIRO_TZ
+        cairo_today = now.astimezone(CAIRO_TZ).date()
+        cycle_start_cairo = __import__('datetime', fromlist=['datetime']).datetime(cairo_today.year, cairo_today.month, cairo_today.day, tzinfo=CAIRO_TZ).astimezone(timezone.utc)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO mvp_history
+                    (guild_id, user_id, user_display_name,
+                     cycle_start, cycle_end, score)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (interaction.guild.id, uid,
+                  snap["display_name"],
+                  cycle_start_cairo.isoformat(),
+                  now.isoformat(), int(score)))
+            await db.commit()
+
+        await interaction.followup.send(
+            f"{CHECK_EMOJI} Forced MVP: {member.mention} with {int(score):,} pts")
 
 
+async def setup(bot):
+    await bot.add_cog(MVP(bot))

@@ -1,814 +1,613 @@
+import json
+import random
+import traceback
+from datetime import datetime, timezone
+
 import aiosqlite
-from flask import jsonify, request, session
+import discord
+from discord.ext import commands, tasks
+from discord import app_commands
+
 from database import DB_PATH
-from dashboard.utils.async_utils import run_async
-from dashboard.permissions import (
-    get_session_guild_id, log_action, require_api_permission,
-    LEVEL_ADMIN,
-)
-from dashboard.api import api_bp
+from utils import minigame_store as store
+from utils import minigame_engine as engine
+from utils.timezone import get_cairo_daily_key, get_cairo_weekly_key, CAIRO_TZ
+from utils.emoji import CHECK_EMOJI
 
-# ── Minigames v2 API (Phase 4) ───────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# MINIGAMES v2 — the Discord surface (Phase 3 of the approved
+# MINIGAMES_V2_PLAN.md).
 #
-# The v1 tier-based API (GET/POST/DELETE /minigames/tiers, /tier) is
-# RETIRED: v2's data model is categories → templates → rewards
-# (utils/minigame_store.py), which is also what the spawn engine
-# (cogs/minigames.py, Phase 2/3) already consumes. This module is the
-# dashboard's write-ownership surface (plan §19: categories,
-# templates, rewards and spawn requests are written ONLY here — the
-# bot writes bag/log/counter state).
+# What this cog owns (plan §1, §21-Phase 3):
+#   * the weekly pacing loop — `daily_check_loop` + compute_daily_probability
+#     KEPT VERBATIM (D5: it decides only WHETHER an automatic spawn happens);
+#   * the recursive weighted selection + shuffle-bag pop (plan §4/§5);
+#   * the shared spawn path `spawn_game()` — auto / manual / test all go
+#     through it (plan §8/§9/§14): snapshot → run row → real engine →
+#     post → (auto only) weekly counter bump AFTER a successful post;
+#   * `spawn_request_loop` (10s) — executes dashboard/slash spawn requests
+#     (plan §9/§19: atomic claim, real engine, no fake implementation);
+#   * the startup sweep — open run rows finalized as aborted_restart with a
+#     best-effort embed note (plan §14, no-forfeit: no rewards);
+#   * the v2 slash commands (/minigames_setup kept, /minigames_spawn new,
+#     /minigames_stats kept) — the tier commands are RETIRED (plan §8).
 #
-# Conventions (same as the rest of dashboard/api):
-#   * guild id comes ONLY from the session (get_session_guild_id) —
-#     a client-supplied guild_id is never trusted (IDOR guard);
-#   * every route is @require_api_permission(LEVEL_ADMIN);
-#   * validation/business errors return HTTP 200 + {"success": False,
-#     "error": ...} — the dashboard's ajaxSave/fetch handlers key off
-#     the JSON flag; only decorator-level failures (401/403/CSRF) use
-#     HTTP status codes. The one exception is DELETE
-#     /minigames/categories/<id>, which returns 409 when the category
-#     still has content (plan §10: "409 if it has direct templates or
-#     subcategories").
-#   * mutations are audited with log_action(guild_id, action,
-#     "minigames", ...).
-#
-# Importing utils/minigame_store is safe from the Flask process: it is
-# aiosqlite-only (no discord import), and ensure_tables() is a pure,
-# idempotent CREATE TABLE IF NOT EXISTS guard (the dashboard process
-# runs database.py's central init, not the cog's cog_load).
+# Deliberately does NOT import from other cogs (project rule). Reward
+# granting goes through utils/reward_engine.py via the engine (the one
+# shared engine every reward path in this project already uses). All
+# minigame SQL lives in utils/minigame_store.py; all game logic lives in
+# utils/minigame_engine.py (Phase 2).
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── Weekly pacing tuning (kept verbatim from v1 — D5) ──────────────────
+MIN_DAILY_PROB   = 0.10   # floor while still behind pace
+MAX_DAILY_PROB   = 0.60   # ceiling while still behind pace
+BONUS_DAILY_PROB = 0.15   # flat chance once weekly minimum is already met
+
+CHECK_LOOP_MINUTES = 30
+REQUEST_POLL_SECONDS = 10
+# A process that just started has NO live in-memory games — its first
+# ready may sweep every open row. A RECONNECT (same process) gets the
+# plan's 5-minute grace window so a still-healthy in-memory run is never
+# touched.
+STARTUP_SWEEP_GRACE_MINUTES = 5
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Validation helpers (plan §17 — the server is the enforcement point;
-# the builder UI mirrors these limits so a normal user never sees a
-# rejection, but a crafted API call still cannot store a broken game).
-# ═══════════════════════════════════════════════════════════════════
+def _monday_of(d) -> str:
+    # Legacy name kept for import compat; now returns Cairo Saturday
+    return get_cairo_weekly_key(d)
 
-_DISCORD_LIMITS = {
-    "title": 256, "description": 4096, "author": 256, "footer": 256,
-    "field_name": 256, "field_value": 1024, "max_fields": 25,
-}
+def _saturday_of_cairo(d) -> str:
+    return get_cairo_weekly_key(d)
 
 
-def _validate_embed(embed) -> str | None:
-    """Return a user-facing error string, or None when the embed is
-    Discord-legal. `embed` is the API shape (author/footer/image/
-    thumbnail may be dicts or strings — both are accepted and stored
-    as sent; the engine normalizes before posting)."""
-    if embed is None:
+def compute_daily_probability(events_so_far: int, weekday: int,
+                               min_target: int, max_target: int) -> tuple[float, bool]:
+    """
+    weekday: 0=Saturday ... 6=Friday for Cairo week (transformed from datetime.weekday()).
+    Returns (probability, force_fire).
+
+    - Already at/above weekly max -> 0% (no bonus firing past the cap).
+    - Last day of the week (Sunday) and still short of the minimum ->
+      force fire regardless of probability.
+    - Otherwise still behind the minimum -> probability scales with
+      how many events are still needed vs. how many days are left,
+      clamped to [MIN_DAILY_PROB, MAX_DAILY_PROB].
+    - Minimum already met but max not reached -> flat small bonus
+      chance (BONUS_DAILY_PROB) to occasionally exceed the minimum.
+    """
+    remaining_days = 7 - weekday  # today counts as 1
+
+    if events_so_far >= max_target:
+        return 0.0, False
+
+    needed_min = max(0, min_target - events_so_far)
+
+    if remaining_days <= 1 and needed_min > 0:
+        return 1.0, True
+
+    if needed_min > 0:
+        prob = needed_min / remaining_days
+        prob = max(MIN_DAILY_PROB, min(MAX_DAILY_PROB, prob))
+        return prob, False
+
+    return BONUS_DAILY_PROB, False
+
+
+# ── Recursive weighted selection (plan §4) + shuffle bags (plan §5) ────
+
+def _effective_playable(node: dict) -> int:
+    """
+    Count of playable (enabled + auto_spawn) templates reachable at or
+    below this node UNDER THE ANCESTOR-ENABLED RULE: a disabled node
+    contributes 0 for its whole branch (D10 — pure rotation exclusion,
+    nothing is modified). `direct_playable` / `children` come from
+    store.get_categories_tree().
+    """
+    if not node.get("enabled"):
+        return 0
+    total = node.get("direct_playable", 0)
+    for child in node.get("children", []):
+        total += _effective_playable(child)
+    return total
+
+
+def _pick_option(options: list[tuple]) -> tuple:
+    """Weighted pick over (kind, target, weight) options — weights are
+    clamped to >=1, relative only (D8: no template-level weights in v1)."""
+    weights = [max(1, int(o[2] or 1)) for o in options]
+    i = random.choices(range(len(options)), weights=weights, k=1)[0]
+    return options[i]
+
+
+async def select_template(guild_id: int) -> dict | None:
+    """
+    The recursive weighted traversal of plan §4:
+
+      * A node is a candidate iff enabled AND it has >=1 playable
+        template somewhere below (counted with the ancestor-enabled
+        rule) — empty/disabled branches NEVER consume a selection.
+      * At any node, its DIRECT playable templates (as one bag-option,
+        weight = the node's weight) compete with its eligible
+        subcategories (weight = each subcategory's own weight).
+      * A bag hit pops the node's shuffle bag (without replacement,
+        persisted, staleness-guarded — plan §5); a sub hit recurses.
+
+    Returns a FRESH full template read (the §14 snapshot source) or
+    None when nothing is eligible.
+    """
+    tree = await store.get_categories_tree(guild_id)
+    if not tree:
         return None
-    if not isinstance(embed, dict):
-        return "embed must be an object"
 
-    # title/description are always strings; author/footer may arrive
-    # as plain strings OR as API-shape dicts ({name} / {text}) — the
-    # composer's cleanEmbedForPayload produces the dict form.
-    for key in ("title", "description", "author", "footer"):
-        v = embed.get(key, "")
-        if v is None:
-            continue
-        limit = _DISCORD_LIMITS[key]
-        if isinstance(v, str):
-            if len(v) > limit:
-                return f"embed {key} exceeds Discord's {limit}-character limit"
-        elif key in ("author", "footer") and isinstance(v, dict):
-            inner = v.get("name" if key == "author" else "text", "")
-            if not isinstance(inner, str):
-                return f"embed {key} must be a string or an object"
-            if len(inner) > limit:
-                return f"embed {key} exceeds Discord's {limit}-character limit"
-        else:
-            return f"embed {key} must be a string"
+    async def walk(node: dict):
+        options: list[tuple] = []
+        if node.get("direct_playable", 0) > 0:
+            options.append(("bag", node, node.get("weight", 1)))
+        for child in node.get("children", []):
+            if _effective_playable(child) > 0:
+                options.append(("sub", child, child.get("weight", 1)))
+        if not options:
+            return None
+        kind, target, _weight = _pick_option(options)
+        if kind == "sub":
+            return await walk(target)
+        ids = await store.get_direct_playable_ids(guild_id, node["id"])
+        tid, _remaining = await store.pop_bag(guild_id, node["id"], ids)
+        if tid is None:
+            return None
+        return await store.get_template(guild_id, tid)
 
-    color = embed.get("color")
-    if color is not None and color != "":
-        if isinstance(color, bool) or not isinstance(color, int) or not (0 <= color <= 0xFFFFFF):
-            return "embed color must be an integer 0..16777215"
-
-    fields = embed.get("fields") or []
-    if not isinstance(fields, list) or len(fields) > _DISCORD_LIMITS["max_fields"]:
-        return f"embed may have at most {_DISCORD_LIMITS['max_fields']} fields"
-    for i, f in enumerate(fields):
-        if not isinstance(f, dict):
-            return f"embed field {i + 1} must be an object"
-        for fk, key in (("name", "field_name"), ("value", "field_value")):
-            v = f.get(fk, "")
-            if v is None:
-                v = ""
-            if not isinstance(v, str):
-                return f"embed field {i + 1} {fk} must be a string"
-            if len(v) > _DISCORD_LIMITS[key]:
-                return (f"embed field {i + 1} {fk} exceeds Discord's "
-                        f"{_DISCORD_LIMITS[key]}-character limit")
-    return None
-
-
-def _validate_rewards(rows, label="rewards") -> str | None:
-    """Reward pool rows (plan §7/§17). Empty list is VALID (D11)."""
-    from utils.minigame_store import VALID_REWARD_TYPES
-    if rows is None:
+    roots = [("root", r, r.get("weight", 1)) for r in tree
+             if _effective_playable(r) > 0]
+    if not roots:
         return None
-    if not isinstance(rows, list):
-        return f"{label} must be a list"
-    for i, row in enumerate(rows):
-        if not isinstance(row, dict):
-            return f"{label}[{i + 1}] must be an object"
-        rtype = row.get("reward_type") or row.get("type")
-        if rtype not in VALID_REWARD_TYPES:
-            return (f"{label}[{i + 1}] reward_type must be one of: "
-                    f"{', '.join(VALID_REWARD_TYPES)}")
-        value = row.get("reward_value", row.get("value"))
-        if value is None or str(value).strip() == "":
-            return f"{label}[{i + 1}] reward_value is required"
-        if len(str(value)) > 200:
-            return f"{label}[{i + 1}] reward_value is too long"
-        weight = row.get("weight")
-        if weight is not None:
+    _kind, root, _weight = _pick_option(roots)
+    return await walk(root)
+
+
+# ── THE COG ─────────────────────────────────────────────────────────────
+
+class Minigames(commands.Cog):
+    """Minigames v2 — the bot side of the category/template system."""
+
+    def __init__(self, bot):
+        self.bot = bot
+        # log_id → live engine. The engines keep themselves alive via
+        # their timer tasks; this registry is for observability and
+        # bounded memory (finished entries are pruned on every poll tick
+        # — a finished engine is referenced by its closed log row).
+        self.live_games: dict[int, engine.MinigameEngine] = {}
+        # False until the first on_ready of THIS process has swept.
+        self._sweep_done = False
+        self.daily_check_loop.start()
+        self.spawn_request_loop.start()
+
+    def cog_unload(self):
+        self.daily_check_loop.cancel()
+        self.spawn_request_loop.cancel()
+
+    async def cog_load(self):
+        await store.ensure_tables()
+
+    # ── Startup sweep (plan §14) ───────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        await self._startup_sweep()
+
+    async def _startup_sweep(self):
+        """
+        Finalize run rows that are 'running' but have no live in-memory
+        engine behind them (plan §14): a fresh process sweeps EVERY open
+        row (a new process has no live games — applying the 5-minute
+        grace here would leave runs started <5min before a crash stuck
+        forever); a reconnect (same process, live games may still be
+        healthy) only touches rows older than the grace window.
+        Idempotent: the sweep only sees rows with ended_at IS NULL, and
+        finish_run sets ended_at.
+        """
+        grace = 0 if not self._sweep_done else STARTUP_SWEEP_GRACE_MINUTES
+        self._sweep_done = True
+        for row in await store.get_open_runs(max_age_minutes=grace):
             try:
-                if int(weight) < 1:
-                    return f"{label}[{i + 1}] weight must be >= 1"
-            except (TypeError, ValueError):
-                return f"{label}[{i + 1}] weight must be an integer"
-        dur = row.get("duration_hours")
-        if dur is not None:
+                await store.finish_run(row["id"], "aborted_restart")
+            except Exception as e:
+                print(f"[MINIGAMES] sweep: closing run {row['id']} failed: {e}")
+                continue
+            print(f"[MINIGAMES] sweep: run {row['id']} (guild {row['guild_id']}) "
+                  f"finalized as aborted_restart — no rewards")
+            await self._notify_aborted(row)
+
+    async def _notify_aborted(self, row: dict):
+        """Best-effort '⚠️ bot restarted' note on the original message.
+        Never blocks the sweep, never touches rewards (there are none —
+        the row was closed before this runs)."""
+        try:
+            guild = self.bot.get_guild(row["guild_id"])
+            if guild is None or not row.get("channel_id") or not row.get("message_id"):
+                return
+            channel = guild.get_channel(int(row["channel_id"]))
+            if channel is None:
+                return
+            msg = await channel.fetch_message(int(row["message_id"]))
+            embed = msg.embeds[0] if msg.embeds else discord.Embed(description="")
+            base = embed.description or ""
+            embed.description = (base + "\n\n⚠️ **Game ended — bot "
+                                   "restarted**")[:4096]
+            await msg.edit(embed=embed)
+        except Exception as e:
+            print(f"[MINIGAMES] sweep: abort notice for run {row['id']} "
+                  f"failed (row still closed): {e}")
+
+    # ── Channel resolution (plan §8 step 4 / §17 edge matrix) ─────────
+
+    @staticmethod
+    def _resolve_channel(guild: discord.Guild, template: dict,
+                         config: dict) -> tuple[discord.TextChannel | None, str | None]:
+        """
+        Template override first, then the guild default (a deleted
+        override falls back to the default — plan §17). Returns
+        (channel, error).
+        """
+        candidates = [template.get("channel_id"), config.get("channel_id")]
+        tried: set[int] = set()
+        for cid in candidates:
             try:
-                if int(dur) <= 0:
-                    return f"{label}[{i + 1}] duration_hours must be positive"
+                cid = int(cid) if cid else None
             except (TypeError, ValueError):
-                return f"{label}[{i + 1}] duration_hours must be an integer"
-    return None
+                cid = None
+            if not cid or cid in tried:
+                continue
+            tried.add(cid)
+            ch = guild.get_channel(cid)
+            if isinstance(ch, (discord.TextChannel, discord.Thread)):
+                return ch, None
+        if tried:
+            return None, ("no valid spawn channel — the template's channel "
+                          "is missing and the configured guild default is "
+                          "missing too")
+        return None, "no spawn channel configured (run /minigames_setup)"
 
+    # ── Shared spawn path (plan §8/§9/§14) ─────────────────────────────
 
-def _num(value, lo, hi, label) -> str | None:
-    """Finite number within [lo, hi]; returns error or None."""
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        return f"{label} must be a number"
-    if v != v or v in (float("inf"), float("-inf")):  # NaN / inf
-        return f"{label} must be a number"
-    if v < lo or v > hi:
-        return f"{label} must be between {lo:g} and {hi:g}"
-    return None
+    async def spawn_game(self, guild: discord.Guild, template: dict,
+                         mode: str) -> tuple[bool, str | None]:
+        """
+        THE shared spawn path for auto / manual / test:
+          1. resolve + validate the channel (BEFORE the run row — a
+             channel failure leaves no phantom row, plan §17);
+          2. SNAPSHOT the template (deep copies — plan §14: after start,
+             nothing reads the template again);
+          3. open the run row (auditable even if the post fails);
+          4. real engine → post message + arm timers;
+          5. store the message id, register the live engine.
+        Returns (ok, error). The weekly counter is NOT touched here —
+        the auto caller bumps it only on success (D5).
+        """
+        config = await store.get_config(guild.id)
+        channel, ch_err = self._resolve_channel(guild, template, config)
+        if channel is None:
+            return False, ch_err
 
+        category = await store.get_category(guild.id, template["category_id"])
+        snapshot = {
+            "guild_id": guild.id,
+            "template_id": template["id"],
+            "name": template["name"],
+            "game_type": template["game_type"],
+            "category_id": template["category_id"],
+            "category_name": (category or {}).get("name")
+                              or template["name"],
+            # §14 deep copies — fresh JSON parses on purpose:
+            "embed": json.loads(json.dumps(template.get("embed") or {})),
+            "config": json.loads(json.dumps(template.get("config") or {})),
+            "rewards": json.loads(json.dumps(template.get("rewards") or [])),
+            "channel_id": channel.id,
+        }
 
-def _validate_game_config(game_type: str, config) -> str | None:
-    """Per-type game settings (plan §11.2/§17). `config` is the dict
-    that will be stored as config_json; only the keys the engine reads
-    are validated, anything else passes through untouched."""
-    from utils.minigame_store import VALID_GAME_TYPES
-    if game_type not in VALID_GAME_TYPES:
-        return f"game_type must be one of: {', '.join(VALID_GAME_TYPES)}"
-    if config is None:
-        return None
-    if not isinstance(config, dict):
-        return "game config must be an object"
+        log_id = await store.start_run(
+            guild.id, template["id"], template["name"],
+            template["category_id"], snapshot["category_name"],
+            template["game_type"], mode, channel.id)
 
-    if game_type == "quick_click":
-        b = config.get("buttons")
-        if b is not None:
-            try:
-                b = int(b)
-            except (TypeError, ValueError):
-                return "buttons must be an integer"
-            if not (2 <= b <= 6):
-                return "buttons must be between 2 and 6"
-        err = _num(config.get("reveal_min"), 1, 600, "reveal_min")
-        if err:
-            return err
-        err = _num(config.get("reveal_max"), 1, 600, "reveal_max")
-        if err:
-            return err
-        err = _num(config.get("wait_after"), 0, 600, "wait_after")
-        if err:
-            return err
         try:
-            if config.get("reveal_min") is not None and config.get("reveal_max") is not None \
-                    and float(config["reveal_max"]) < float(config["reveal_min"]):
-                return "reveal_max must be >= reveal_min"
-        except (TypeError, ValueError):
-            pass
-        return None
+            game = engine.make_engine(snapshot, mode, log_id, bot=self.bot)
+            message = await game.start(channel)
+        except ValueError as e:
+            # Unplayable template (e.g. no answers) — pref light refusal.
+            await store.finish_run(log_id, "failed")
+            return False, f"template cannot be spawned: {e}"
+        except Exception as e:
+            print(f"[MINIGAMES] guild={guild.id} run {log_id} post failed: {e}")
+            await store.finish_run(log_id, "failed")
+            return False, "failed to post the game message"
 
-    if game_type == "wheel":
-        return _num(config.get("join_seconds"), 5, 600, "join_seconds")
+        await store.set_run_message(log_id, message.id)
+        self.live_games[log_id] = game
+        return True, None
 
-    if game_type in ("math", "colors", "emoji"):
-        answers = config.get("answers")
-        if not isinstance(answers, list) or not (2 <= len(answers) <= 6):
-            return "answers must be a list of 2 to 6 options"
-        for i, a in enumerate(answers):
-            if not isinstance(a, str) or a.strip() == "":
-                return f"answer {i + 1} must be non-empty text"
-            if len(a) > 80:
-                return f"answer {i + 1} exceeds Discord's 80-character button limit"
-        correct = config.get("correct")
-        try:
-            correct = int(correct)
-        except (TypeError, ValueError):
-            return "correct must be a number"
-        if not (0 <= correct < len(answers)):
-            return "select which answer is correct"
-        return _num(config.get("seconds"), 5, 600, "seconds")
+    # ── Automatic spawn (plan §8) ──────────────────────────────────────
 
-    if game_type == "rps":
-        err = _num(config.get("seating_seconds"), 5, 600, "seating_seconds")
-        if err:
-            return err
-        return _num(config.get("choice_seconds"), 5, 600, "choice_seconds")
+    async def _auto_spawn(self, guild: discord.Guild, config: dict,
+                          forced: bool) -> bool:
+        template = await select_template(guild.id)
+        if not template:
+            print(f"[MINIGAMES] guild={guild.id} no eligible template — "
+                  f"nothing spawns, counter NOT incremented, retried at "
+                  f"the next daily check")
+            return False
+        ok, err = await self.spawn_game(guild, template, "auto")
+        if not ok:
+            print(f"[MINIGAMES] guild={guild.id} auto spawn of "
+                  f"'{template['name']}' failed: {err} — counter NOT "
+                  f"incremented, retried at the next daily check")
+            return False
+        # D5: the weekly counter increments ONLY after the message posts.
+        await store.bump_events_this_week(guild.id)
+        return True
 
-    return None
+    @tasks.loop(minutes=CHECK_LOOP_MINUTES)
+    async def daily_check_loop(self):
+        await self._daily_check_iteration()
 
+    async def _daily_check_iteration(self):
+        """The pacing iteration (extracted so tests can drive one pass
+        without waiting 30 minutes — the loop body is unchanged)."""
+        now   = datetime.now(timezone.utc)
+        today = get_cairo_daily_key(now)
+        monday = get_cairo_weekly_key(now)
 
-def _validate_colors_image(game_type: str, embed) -> str | None:
-    """§11.2: the Colors game's image (required) lives in the embed —
-    the engine posts the embed plus the answer buttons as one
-    message, so the image the players see IS the embed's image."""
-    if game_type != "colors" or not isinstance(embed, dict):
-        return None
-    image = embed.get("image")
-    url = image.get("url") if isinstance(image, dict) else image
-    if not url or not isinstance(url, str) or not url.startswith(("http://", "https://")):
-        return "the Colors game needs an image — set a valid image URL in the Embed section"
-    return None
-
-
-# ═══════════════════════════════════════════════════════════════════
-# CONFIG
-# ═══════════════════════════════════════════════════════════════════
-
-@api_bp.route("/minigames/config", methods=["GET"])
-@require_api_permission(LEVEL_ADMIN)
-def get_minigames_config_api():
-    guild_id = get_session_guild_id()
-
-    async def fetch():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        return await store.get_config(guild_id)
-
-    return jsonify({"config": run_async(fetch())})
-
-
-@api_bp.route("/minigames/config", methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def save_minigames_config_api():
-    guild_id = get_session_guild_id()
-    data = request.json or {}
-
-    fields = {}
-    if "enabled" in data:
-        fields["enabled"] = int(bool(data["enabled"]))
-    if "channel_id" in data:
-        fields["channel_id"] = data["channel_id"]
-    if "min_events_per_week" in data:
-        try:
-            fields["min_events_per_week"] = int(data["min_events_per_week"])
-        except (TypeError, ValueError):
-            return jsonify({"success": False,
-                            "error": "min_events_per_week must be a number"})
-    if "max_events_per_week" in data:
-        try:
-            fields["max_events_per_week"] = int(data["max_events_per_week"])
-        except (TypeError, ValueError):
-            return jsonify({"success": False,
-                            "error": "max_events_per_week must be a number"})
-    if "global_default_rewards" in data:
-        fields["global_default_rewards"] = data["global_default_rewards"]
-
-    err = _validate_rewards(fields.get("global_default_rewards"),
-                            "global_default_rewards")
-    if err:
-        return jsonify({"success": False, "error": err})
-    min_ev = fields.get("min_events_per_week")
-    max_ev = fields.get("max_events_per_week")
-    if min_ev is not None and min_ev < 1:
-        return jsonify({"success": False,
-                        "error": "min_events_per_week must be at least 1"})
-    if min_ev is not None and max_ev is not None and max_ev < min_ev:
-        return jsonify({"success": False,
-                        "error": "max_events_per_week must be >= min_events_per_week"})
-
-    async def save():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        return await store.save_config(guild_id, **fields)
-
-    cfg = run_async(save())
-    log_action(guild_id, "Updated minigames config", "minigames")
-    return jsonify({"success": True, "config": cfg})
-
-
-# ═══════════════════════════════════════════════════════════════════
-# CATEGORIES
-# ═══════════════════════════════════════════════════════════════════
-
-@api_bp.route("/minigames/categories", methods=["GET"])
-@require_api_permission(LEVEL_ADMIN)
-def get_minigames_categories_api():
-    guild_id = get_session_guild_id()
-
-    async def fetch():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        return await store.get_categories_tree(guild_id)
-
-    return jsonify({"tree": run_async(fetch())})
-
-
-@api_bp.route("/minigames/categories", methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def create_minigame_category_api():
-    guild_id = get_session_guild_id()
-    data = request.json or {}
-
-    parent_id = data.get("parent_id")
-    if parent_id in ("", "null", "none"):
-        parent_id = None
-
-    async def create():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        return await store.create_category(
-            guild_id, data.get("name", ""), parent_id=parent_id,
-            weight=data.get("weight", 1), emoji=data.get("emoji"),
-            color=data.get("color"),
-            default_rewards=data.get("default_rewards"))
-
-    try:
-        cat = run_async(create())
-    except ValueError as exc:
-        return jsonify({"success": False, "error": str(exc)})
-    log_action(guild_id, f"Created minigame category '{cat['name']}'",
-               "minigames", target_id=cat["id"], target_name=cat["name"])
-    return jsonify({"success": True, "category": cat})
-
-
-@api_bp.route("/minigames/categories/<int:category_id>", methods=["PATCH"])
-@require_api_permission(LEVEL_ADMIN)
-def update_minigame_category_api(category_id: int):
-    guild_id = get_session_guild_id()
-    data = request.json or {}
-
-    fields = {}
-    for key in ("name", "weight", "parent_id", "emoji", "color",
-                "default_rewards", "enabled"):
-        if key in data:
-            fields[key] = data[key]
-    if "parent_id" in fields and fields["parent_id"] in ("", "null", "none"):
-        fields["parent_id"] = None
-
-    err = _validate_rewards(fields.get("default_rewards"), "default_rewards")
-    if err:
-        return jsonify({"success": False, "error": err})
-
-    async def update():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        return await store.update_category(guild_id, category_id, fields)
-
-    try:
-        cat = run_async(update())
-    except ValueError as exc:
-        return jsonify({"success": False, "error": str(exc)})
-    if cat is None:
-        return jsonify({"success": False, "error": "category not found"})
-    log_action(guild_id, f"Updated minigame category '{cat['name']}'",
-               "minigames", target_id=category_id, target_name=cat["name"])
-    return jsonify({"success": True, "category": cat})
-
-
-@api_bp.route("/minigames/categories/<int:category_id>", methods=["DELETE"])
-@require_api_permission(LEVEL_ADMIN)
-def delete_minigame_category_api(category_id: int):
-    guild_id = get_session_guild_id()
-
-    async def delete():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        return await store.delete_category(guild_id, category_id)
-
-    ok, msg = run_async(delete())
-    if not ok:
-        # 409 is the one deliberate HTTP-status use in this module —
-        # plan §10: deleting a category with content is a conflict the
-        # UI must surface as "move/delete its content first".
-        return jsonify({"success": False, "error": msg}), 409
-    log_action(guild_id, f"Deleted minigame category #{category_id}",
-               "minigames", target_id=category_id)
-    return jsonify({"success": True})
-
-
-# ═══════════════════════════════════════════════════════════════════
-# TEMPLATES
-# ═══════════════════════════════════════════════════════════════════
-
-def _template_fields_from_payload(data, guild_id, require_name: bool):
-    """Shared create/update payload → (store fields, error). The store
-    raises ValueError on its own invariants; these helpers catch the
-    per-type / embed / rewards rules so the error text is friendly."""
-    fields = {}
-    name = data.get("name")
-    if require_name or name is not None:
-        fields["name"] = name
-    if "category_id" in data and data["category_id"] not in (None, ""):
-        fields["category_id"] = data["category_id"]
-    if "game_type" in data:
-        fields["game_type"] = data["game_type"]
-    if "enabled" in data:
-        fields["enabled"] = bool(data["enabled"])
-    if "auto_spawn" in data:
-        fields["auto_spawn"] = bool(data["auto_spawn"])
-    if "embed" in data:
-        fields["embed"] = data["embed"] or {}
-    if "config" in data:
-        fields["config"] = data["config"] or {}
-    if "channel_id" in data:
-        fields["channel_id"] = data["channel_id"]
-    if "rewards" in data:
-        fields["rewards"] = data["rewards"]
-
-    # Cross-field validation needs the EFFECTIVE game type (payload
-    # value, or the stored one on update).
-    game_type = fields.get("game_type")
-    embed = fields.get("embed")
-    config = fields.get("config")
-    if game_type and "config" in data:
-        err = _validate_game_config(game_type, config)
-        if err:
-            return None, err
-    if "embed" in data:
-        err = _validate_embed(embed)
-        if err:
-            return None, err
-    if game_type and "embed" in data:
-        err = _validate_colors_image(game_type, embed)
-        if err:
-            return None, err
-    if "rewards" in data:
-        err = _validate_rewards(fields.get("rewards"))
-        if err:
-            return None, err
-    return fields, None
-
-
-@api_bp.route("/minigames/templates", methods=["GET"])
-@require_api_permission(LEVEL_ADMIN)
-def list_minigame_templates_api():
-    guild_id = get_session_guild_id()
-    category_id = request.args.get("category_id")
-    category_id = int(category_id) if category_id not in (None, "") else None
-    include_disabled = request.args.get("include_disabled", "1") not in ("0", "false")
-
-    async def fetch():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        rows = await store.list_templates(guild_id, category_id=category_id,
-                                          include_disabled=include_disabled)
-        # Live-run / queued flags (plan §10 list: "live-run flag") — a
-        # template whose snapshot is running must show it, and an
-        # in-flight spawn request must show as queued.
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT template_id FROM minigames_log "
-                "WHERE guild_id = ? AND ended_at IS NULL AND status = 'running'",
-                (guild_id,))
-            live = {r[0] for r in await cursor.fetchall()}
-            in_flight = await store.get_in_flight_requests(guild_id)
-        queued = {r["template_id"] for r in in_flight}
-        for row in rows:
-            row["live_run"] = row["id"] in live
-            row["queued"] = row["id"] in queued
-        return rows
+                "SELECT guild_id FROM minigames_config WHERE enabled = 1")
+            guild_ids = [r[0] for r in await cursor.fetchall()]
 
-    return jsonify({"templates": run_async(fetch())})
+        for guild_id in guild_ids:
+            try:
+                guild = self.bot.get_guild(guild_id)
+                if not guild:
+                    continue
 
+                config = await store.get_config(guild_id)
 
-@api_bp.route("/minigames/templates", methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def create_minigame_template_api():
-    guild_id = get_session_guild_id()
-    data = request.json or {}
+                # Weekly reset — new week started since last recorded
+                # week_start_date.
+                if config.get("week_start_date") != monday:
+                    await store.mark_week(
+                        guild_id, monday, config.get("last_check_date"),
+                        events_this_week=0)
+                    config["events_this_week"] = 0
+                    config["week_start_date"] = monday
 
-    category_id = data.get("category_id")
-    if not category_id:
-        return jsonify({"success": False, "error": "pick a category"})
+                # Already rolled today for this guild.
+                if config.get("last_check_date") == today:
+                    continue
 
-    fields, err = _template_fields_from_payload(data, guild_id, require_name=True)
-    if err:
-        return jsonify({"success": False, "error": err})
-    if not (fields.get("name") or "").strip():
-        return jsonify({"success": False, "error": "give the template a name"})
-    if "game_type" not in fields:
-        return jsonify({"success": False, "error": "pick a game type"})
+                min_target = int(config.get("min_events_per_week") or 5)
+                max_target = int(config.get("max_events_per_week") or 10)
+                events_so_far = int(config.get("events_this_week") or 0)
+                # Cairo week: Saturday=0..Friday=6 -> reuse same remaining formula
+                cairo_weekday = (now.astimezone(CAIRO_TZ).weekday() - 5) % 7
+                prob, force = compute_daily_probability(
+                    events_so_far, cairo_weekday, min_target, max_target)
 
-    # Prefill chain (plan §7): omitted rewards → the category's default
-    # preset → the global preset. An EXPLICIT empty list means "no
-    # pool" and is never prefilled (D11).
-    if "rewards" not in fields:
-        async def prefill():
-            from utils import minigame_store as store
-            await store.ensure_tables()
-            cat = await store.get_category(guild_id, category_id)
-            rewards = list(cat.get("default_rewards") or []) if cat else []
-            if not rewards:
-                cfg = await store.get_config(guild_id)
-                rewards = list(cfg.get("global_default_rewards") or [])
-            return rewards
-        fields["rewards"] = run_async(prefill())
+                roll_success = force or (random.random() < prob)
 
-    async def create():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        return await store.create_template(
-            guild_id, category_id, fields["name"], fields["game_type"],
-            enabled=fields.get("enabled", True),
-            auto_spawn=fields.get("auto_spawn", True),
-            embed=fields.get("embed") or {},
-            config=fields.get("config") or {},
-            channel_id=fields.get("channel_id"),
-            rewards=fields.get("rewards"))
+                await store.mark_week(guild_id, monday, today)
 
-    try:
-        tpl = run_async(create())
-    except ValueError as exc:
-        return jsonify({"success": False, "error": str(exc)})
-    log_action(guild_id, f"Created minigame template '{tpl['name']}'",
-               "minigames", target_id=tpl["id"], target_name=tpl["name"])
-    return jsonify({"success": True, "template": tpl})
+                if roll_success:
+                    await self._auto_spawn(guild, config, forced=force)
 
+            except Exception as e:
+                print(f"[MINIGAMES] daily_check_loop error for guild {guild_id}: {e}")
 
-@api_bp.route("/minigames/templates/<int:template_id>", methods=["GET"])
-@require_api_permission(LEVEL_ADMIN)
-def get_minigame_template_api(template_id: int):
-    guild_id = get_session_guild_id()
+    @daily_check_loop.before_loop
+    async def before_daily_check(self):
+        await self.bot.wait_until_ready()
 
-    async def fetch():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        return await store.get_template(guild_id, template_id)
+    # ── Spawn request queue (plan §9/§19) ──────────────────────────────
 
-    return jsonify({"template": run_async(fetch())})
+    @tasks.loop(seconds=REQUEST_POLL_SECONDS)
+    async def spawn_request_loop(self):
+        if not self.bot.is_ready():
+            return
+        try:
+            await self._process_spawn_requests()
+        except Exception as e:
+            print(f"[MINIGAMES] spawn_request_loop error: {e}")
+            traceback.print_exc()
 
+    async def _process_spawn_requests(self):
+        # Bounded memory: drop finished engines from the registry (their
+        # log rows are already closed — the row is the record).
+        if self.live_games:
+            self.live_games = {k: v for k, v in self.live_games.items()
+                               if not v.finished}
 
-@api_bp.route("/minigames/templates/<int:template_id>", methods=["PATCH"])
-@require_api_permission(LEVEL_ADMIN)
-def update_minigame_template_api(template_id: int):
-    guild_id = get_session_guild_id()
-    data = request.json or {}
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT DISTINCT guild_id FROM minigame_spawn_requests "
+                "WHERE status = 'pending'")
+            guild_ids = [r[0] for r in await cursor.fetchall()]
 
-    async def run():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        existing = await store.get_template(guild_id, template_id)
-        if existing is None:
-            return None, "template not found", None
-        # Validate against the EFFECTIVE values (payload wins, stored
-        # fills in), so a partial PATCH can't smuggle in a broken
-        # game-type/config/embed combination.
-        effective_type = data.get("game_type") or existing["game_type"]
-        effective_embed = data.get("embed") if "embed" in data else existing.get("embed")
-        effective_config = data.get("config") if "config" in data else existing.get("config")
-        if "game_type" in data:
-            err = _validate_game_config(effective_type, effective_config)
-            if err:
-                return None, err, None
-        if "embed" in data or "game_type" in data:
-            err = _validate_embed(effective_embed)
-            if err:
-                return None, err, None
-            err = _validate_colors_image(effective_type, effective_embed)
-            if err:
-                return None, err, None
-        fields, err = _template_fields_from_payload(data, guild_id, require_name=False)
+        for gid in guild_ids:
+            guild = self.bot.get_guild(gid)
+            if guild is None:
+                # The bot is not in this guild — the request can never
+                # run. Close its pending rows instead of letting them
+                # rot (the dashboard surfaces the error, plan §9).
+                for req in await store.get_in_flight_requests(gid):
+                    if req["status"] == "pending":
+                        await store.finish_request(
+                            req["id"], False, "bot is not in this guild")
+                continue
+
+            req = await store.claim_next_request(gid)
+            if not req:
+                continue
+            try:
+                template = await store.get_template(gid, req["template_id"])
+                if template is None:
+                    await store.finish_request(
+                        req["id"], False, "template no longer exists")
+                    continue
+                # D12: test → always; manual (specific template) → the
+                # template's own enabled toggle (category state is
+                # irrelevant).
+                if req["mode"] == "manual" and not template.get("enabled"):
+                    await store.finish_request(
+                        req["id"], False, "template is disabled")
+                    continue
+                ok, err = await self.spawn_game(guild, template, req["mode"])
+                await store.finish_request(req["id"], ok, err)
+            except Exception as e:
+                print(f"[MINIGAMES] request {req['id']} (guild {gid}) "
+                      f"failed: {e}")
+                traceback.print_exc()
+                try:
+                    await store.finish_request(req["id"], False, str(e)[:400])
+                except Exception:
+                    pass
+
+    # ─── SLASH COMMANDS ───────────────────────────────────────────────
+
+    @app_commands.command(name="minigames_setup",
+                          description="Configure the minigames spawn system (channel + weekly range)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def minigames_setup(self, interaction: discord.Interaction,
+                              channel: discord.TextChannel,
+                              min_events: int = 5,
+                              max_events: int = 10,
+                              enabled: bool = True):
+        if min_events < 1 or max_events < min_events:
+            await interaction.response.send_message(
+                "min_events must be >= 1 and max_events must be >= min_events.",
+                ephemeral=True)
+            return
+        await store.save_config(
+            interaction.guild.id,
+            enabled=int(bool(enabled)),
+            channel_id=channel.id,
+            min_events_per_week=min_events,
+            max_events_per_week=max_events)
+
+        embed = discord.Embed(title="Minigames Configured",
+                              color=0x57F287 if enabled else 0xED4245)
+        embed.add_field(name="Status", value="Enabled" if enabled else "Disabled")
+        embed.add_field(name="Spawn channel", value=channel.mention)
+        embed.add_field(name="Weekly range", value=f"{min_events}–{max_events} events")
+        embed.add_field(name="Note",
+                        value="Categories, templates and rewards are managed "
+                              "in the dashboard.",
+                        inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="minigames_spawn",
+                          description="Spawn a minigame right now (manual — admin)")
+    @app_commands.describe(
+        template_id="Optional: force a specific template by ID. "
+                    "Omit to let the rotation pick a game.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def minigames_spawn(self, interaction: discord.Interaction,
+                              template_id: int | None = None):
+        await interaction.response.defer(ephemeral=True)
+        requester = f"slash:{interaction.user.id}"
+        ok, message = await self._command_spawn(
+            interaction.guild, template_id, requester)
+        await interaction.followup.send(message, ephemeral=True)
+
+    async def _command_spawn(self, guild: discord.Guild,
+                             template_id: int | None,
+                             requester: str) -> tuple[bool, str]:
+        """
+        Manual spawn from a slash command (plan §8/§9): ONE shared path
+        — the request queue. spawn_request_loop executes it with the real
+        engine (~10s latency, the accepted D4 queue delay). D12: a
+        specific template must be enabled (category state irrelevant);
+        no template → the §4 recursive selection. Never touches the
+        weekly counter.
+        """
+        if template_id is not None:
+            tpl = await store.get_template(guild.id, template_id)
+            if tpl is None:
+                return False, "❌ No such template in this server."
+            if not tpl.get("enabled"):
+                return False, "❌ That template is disabled."
+        else:
+            tpl = await select_template(guild.id)
+            if tpl is None:
+                return False, ("❌ Nothing eligible right now — no enabled "
+                               "template with automatic rotation on.")
+        _rid, err = await store.create_spawn_request(
+            guild.id, tpl["id"], "manual", requested_by=requester)
         if err:
-            return None, err, None
-        # Re-validate config with the EFFECTIVE type when the payload
-        # carried a config but not a game_type (the helper above only
-        # checks when the payload names both).
-        if "config" in data and "game_type" not in data:
-            err = _validate_game_config(effective_type, effective_config)
-            if err:
-                return None, err, None
-        return await store.update_template(guild_id, template_id, fields), None, existing
+            return False, f"❌ {err}."
+        return True, f"{CHECK_EMOJI} Queued **{tpl['name']}** — it will appear in a " \
+                     "moment."
 
-    try:
-        tpl, err, _existing = run_async(run())
-    except ValueError as exc:
-        return jsonify({"success": False, "error": str(exc)})
-    if err:
-        return jsonify({"success": False, "error": err})
-    if tpl is None:
-        return jsonify({"success": False, "error": "template not found"})
-    log_action(guild_id, f"Updated minigame template '{tpl['name']}'",
-               "minigames", target_id=template_id, target_name=tpl["name"])
-    return jsonify({"success": True, "template": tpl})
+    @app_commands.command(name="minigames_stats",
+                          description="View this week's minigames progress")
+    async def minigames_stats(self, interaction: discord.Interaction):
+        config = await store.get_config(interaction.guild.id)
+        now = datetime.now(timezone.utc)
+        # Cairo week: Saturday start
+        cairo_weekday = (now.astimezone(CAIRO_TZ).weekday() - 5) % 7
+        weekday = cairo_weekday
+        remaining_days = 7 - weekday
+        min_t = int(config.get("min_events_per_week") or 5)
+        max_t = int(config.get("max_events_per_week") or 10)
+        so_far = int(config.get("events_this_week") or 0)
+        prob, force = compute_daily_probability(so_far, weekday, min_t, max_t)
 
-
-@api_bp.route("/minigames/templates/<int:template_id>/duplicate",
-              methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def duplicate_minigame_template_api(template_id: int):
-    guild_id = get_session_guild_id()
-    data = request.json or {}
-    new_name = (data.get("new_name") or "").strip() or None
-
-    async def dup():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        return await store.duplicate_template(guild_id, template_id, new_name)
-
-    try:
-        tpl = run_async(dup())
-    except ValueError as exc:
-        return jsonify({"success": False, "error": str(exc)})
-    if tpl is None:
-        return jsonify({"success": False, "error": "template not found"})
-    log_action(guild_id, f"Duplicated minigame template → '{tpl['name']}'",
-               "minigames", target_id=tpl["id"], target_name=tpl["name"])
-    return jsonify({"success": True, "template": tpl})
+        embed = discord.Embed(title="🎲 Minigames — This Week", color=0x7c5cbf)
+        embed.add_field(name="Status", value="Enabled" if config.get("enabled") else "Disabled")
+        embed.add_field(name="Automatic spawns so far", value=f"{so_far} / {min_t}–{max_t}")
+        embed.add_field(name="Days left in week", value=str(remaining_days))
+        embed.add_field(
+            name="Today's spawn chance",
+            value="Forced (minimum not met)" if force else f"{prob*100:.0f}%")
+        embed.add_field(
+            name="Manual spawns",
+            value="via /minigames_spawn or the dashboard (never counted "
+                  "toward the weekly range)",
+            inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@api_bp.route("/minigames/templates/<int:template_id>", methods=["DELETE"])
-@require_api_permission(LEVEL_ADMIN)
-def delete_minigame_template_api(template_id: int):
-    guild_id = get_session_guild_id()
-
-    async def delete():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        tpl = await store.get_template(guild_id, template_id)
-        ok = await store.delete_template(guild_id, template_id)
-        return tpl, ok
-
-    tpl, ok = run_async(delete())
-    if not ok:
-        return jsonify({"success": False, "error": "template not found"})
-    # Safe while a run is in progress — the running game keeps its
-    # snapshot (plan §14); the row is only what future spawns read.
-    log_action(guild_id, f"Deleted minigame template '{tpl['name']}'",
-               "minigames", target_id=template_id, target_name=tpl["name"])
-    return jsonify({"success": True})
-
-
-# ═══════════════════════════════════════════════════════════════════
-# SPAWN (test / manual) — queue-based, plan §9/§16/§19
-# ═══════════════════════════════════════════════════════════════════
-
-@api_bp.route("/minigames/templates/<int:template_id>/spawn",
-              methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def spawn_minigame_template_api(template_id: int):
-    guild_id = get_session_guild_id()
-    data = request.json or {}
-    mode = (data.get("mode") or "").lower().strip()
-    if mode not in ("manual", "test"):
-        return jsonify({"success": False,
-                        "error": "mode must be 'manual' or 'test'"})
-
-    async def run():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        tpl = await store.get_template(guild_id, template_id)
-        if tpl is None:
-            return None, "template not found"
-        # D12 (plan §9): test spawn is ALWAYS allowed — it is the
-        # build-then-test flow; manual spawn requires the template to
-        # be Enabled. Auto-rotation is irrelevant to direct spawns.
-        if mode == "manual" and not tpl["enabled"]:
-            return None, "this game is disabled — enable it first (or use Test Spawn)"
-        return tpl, None
-
-    tpl, err = run_async(run())
-    if err:
-        return jsonify({"success": False, "error": err})
-
-    # Broken-template guard, mirrored from the bot's preflight (D12 /
-    # §16): don't queue a spawn that the engine would refuse.
-    cfg = tpl.get("config") or {}
-    if tpl["game_type"] in ("math", "colors", "emoji") and not cfg.get("answers"):
-        return jsonify({"success": False,
-                        "error": "this game has no answers configured — fix its settings first"})
-
-    requester = (session.get("user") or {}).get("username") or str(
-        (session.get("user") or {}).get("id") or "?")
-
-    async def enqueue():
-        from utils import minigame_store as store
-        return await store.create_spawn_request(
-            guild_id, template_id, mode, requested_by=requester)
-
-    request_id, queue_err = run_async(enqueue())
-    if queue_err:
-        return jsonify({"success": False, "error": queue_err})
-    log_action(guild_id, f"Queued {mode} spawn: '{tpl['name']}'",
-               "minigames", target_id=template_id, target_name=tpl["name"])
-    return jsonify({"success": True, "request_id": request_id,
-                    "mode": mode, "template_name": tpl["name"]})
-
-
-@api_bp.route("/minigames/spawn-requests", methods=["GET"])
-@require_api_permission(LEVEL_ADMIN)
-def get_minigame_spawn_requests_api():
-    guild_id = get_session_guild_id()
-
-    async def fetch():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        reqs = await store.get_in_flight_requests(guild_id)
-        if not reqs:
-            return []
-        async with aiosqlite.connect(DB_PATH) as db:
-            names = {}
-            for r in reqs:
-                cur = await db.execute(
-                    "SELECT name FROM minigame_templates "
-                    "WHERE id = ? AND guild_id = ?",
-                    (r["template_id"], guild_id))
-                row = await cur.fetchone()
-                names[r["template_id"]] = row[0] if row else None
-        for r in reqs:
-            r["template_name"] = names.get(r["template_id"])
-        return reqs
-
-    return jsonify({"requests": run_async(fetch())})
-
-
-# ═══════════════════════════════════════════════════════════════════
-# HISTORY (extended log — replaces the retired /minigames/log)
-# ═══════════════════════════════════════════════════════════════════
-
-@api_bp.route("/minigames/history", methods=["GET"])
-@require_api_permission(LEVEL_ADMIN)
-def get_minigames_history_api():
-    guild_id = get_session_guild_id()
-    try:
-        limit = int(request.args.get("limit", 50))
-    except (TypeError, ValueError):
-        limit = 50
-    category_id = request.args.get("category_id")
-    category_id = int(category_id) if category_id not in (None, "") else None
-
-    async def fetch():
-        from utils import minigame_store as store
-        await store.ensure_tables()
-        rows = await store.get_history(guild_id, limit=limit,
-                                       category_id=category_id)
-        if not rows:
-            return rows
-        async with aiosqlite.connect(DB_PATH) as db:
-            names = {}
-            tids = {r.get("template_id") for r in rows if r.get("template_id")}
-            if tids:
-                cur = await db.execute(
-                    "SELECT id, name FROM minigame_templates WHERE id IN "
-                    "({})".format(",".join("?" * len(tids))), tuple(tids))
-                for tid, name in await cur.fetchall():
-                    names[tid] = name
-            catnames = {}
-            cids = {r.get("category_id") for r in rows if r.get("category_id")}
-            if cids:
-                cur = await db.execute(
-                    "SELECT id, name FROM minigame_categories WHERE id IN "
-                    "({})".format(",".join("?" * len(cids))), tuple(cids))
-                for cid, name in await cur.fetchall():
-                    catnames[cid] = name
-        for r in rows:
-            # The stored template_name/category_name are SNAPSHOTS taken
-            # when the run opened (plan §14) — they survive template /
-            # category deletion and renames. Fall back to a live join
-            # only for rows written before those columns existed.
-            if not r.get("template_name"):
-                r["template_name"] = names.get(r.get("template_id"))
-            if not r.get("category_name"):
-                r["category_name"] = catnames.get(r.get("category_id"))
-        return rows
-
-    return jsonify({"history": run_async(fetch())})
-
-
-# ═══════════════════════════════════════════════════════════════════
-# LIVE PREVIEW — engine component rows (plan §12)
+# ── RETIRED (Phase 6 — migration verified, Phase 5 retirement pass) ──
+# The Phase 4/6 compatibility window is CLOSED:
+#   - VALID_TIERS and get_tiers() — the old dashboard page/API that
+#     read them was replaced in Phase 4 (dashboard/api/minigames.py is
+#     now store-based); nothing in production imported them anymore.
+#   - the ensure_tables()/get_config() aliases — every remaining
+#     caller uses utils.minigame_store directly.
+# The tier SYSTEM (slash commands, MinigameClaimView, legacy
+# claim/spawn flow) was removed in Phase 3 (plan §8).
 #
-# The builder's preview must show the EXACT component rows the engine
-# posts — so instead of re-implementing them in JS, the builder asks
-# the server, and the server asks the ENGINE (the single source of
-# truth, utils/minigame_engine.initial_component_rows — a pure,
-# discord-free data function). Preview and real message cannot
-# diverge because they consume the same JSON.
-# ═══════════════════════════════════════════════════════════════════
+# KEPT on purpose:
+#   - the legacy TABLES (minigames_tiers / minigames_config /
+#     minigames_log with their v1 columns) — never dropped, so
+#     redeploying the old code finds its data intact (plan §3.4);
+#   - get_user_win_count() — a LIVE consumer: utils/rank_card_data.py
+#     reads the legacy winner_id column, which v2 rows also fill via
+#     the first-winner mapping.
+# Do not rebuild removed shims.
+# ═══════════════════════════════════════════════════════════════════════
 
-@api_bp.route("/minigames/preview-rows", methods=["POST"])
-@require_api_permission(LEVEL_ADMIN)
-def preview_minigame_rows_api():
-    data = request.json or {}
-    game_type = data.get("game_type")
-    config = data.get("config") or {}
-    if not isinstance(config, dict):
-        return jsonify({"success": False, "error": "config must be an object"})
-    try:
-        from utils import minigame_engine as engine
-        rows = engine.initial_component_rows(game_type, config)
-    except ValueError as exc:
-        return jsonify({"success": False, "error": str(exc)})
-    return jsonify({"rows": rows, "game_type": game_type})
+async def get_user_win_count(guild_id: int, user_id: int) -> int:
+    """
+    Rank Card foundation: minigames_log records winner_id per run —
+    used by utils/rank_card_data.py. (Kept: it reads the LEGACY column,
+    which v2 rows also fill via the first-winner mapping.)
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM minigames_log WHERE guild_id = ? AND winner_id = ?",
+            (guild_id, user_id))
+        row = await cursor.fetchone()
+    return row[0] if row else 0
+
+
+async def setup(bot):
+    await bot.add_cog(Minigames(bot))
