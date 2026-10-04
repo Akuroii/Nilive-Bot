@@ -143,8 +143,9 @@ FONT_PATHS = {
     "cinzel": _asset_path(os.path.join("fonts", "Cinzel-Variable.ttf"), "Cinzel-Variable.ttf"),
     "zilla_bold": _asset_path(os.path.join("fonts", "ZillaSlab-Bold.ttf"), "ZillaSlab-Bold.ttf"),
     # XP numerals ONLY (XP PROGRESS value / "of needed" / TOTAL XP value).
-    # Supplied Varsity, used unmodified; not used anywhere else on the card.
-    "varsity": _asset_path(os.path.join("fonts", "varsity_regular.ttf"), "varsity_regular.ttf"),
+    # Supplied Fortuner Heavy, used unmodified; not used anywhere else on the card.
+    "fortuner": _asset_path(os.path.join("fonts", "FortunerHeavyPersonalUse.otf"),
+                            "FortunerHeavyPersonalUse.otf"),
     "outfit": _asset_path(os.path.join("fonts", "Outfit-Variable.ttf"), "Outfit-Variable.ttf"),
     "amiri_regular": _asset_path(os.path.join("fonts", "Amiri-Regular.ttf"), "Amiri-Regular.ttf"),
     "amiri_bold": _asset_path(os.path.join("fonts", "Amiri-Bold.ttf"), "Amiri-Bold.ttf"),
@@ -303,16 +304,17 @@ def zilla_bold(size):
     return _font("zilla_bold", size)
 
 
-def varsity(size):
-    """Supplied Varsity (collegiate small-caps), used only for the XP
-    numerals. Falls back to Zilla Slab Bold if the file is missing so a bad
-    deploy can never take /rank down. Cap height is 0.70 em (digits and
-    capitals share it), so the sizes used for the XP numerals are chosen to
-    keep the cap heights the XP hierarchy already had."""
+def fortuner(size):
+    """Supplied Fortuner Heavy, used only for the XP numerals. Falls back to
+    Zilla Slab Bold if the file is missing so a bad deploy can never take
+    /rank down. Cap height is 0.639 em (digits and capitals share it), so
+    the sizes used for the XP numerals are the previous Varsity sizes
+    scaled by 0.700/0.639 -- that keeps the cap heights (and therefore the
+    XP hierarchy) exactly what they were."""
     try:
-        return ImageFont.truetype(FONT_PATHS["varsity"], size)
+        return ImageFont.truetype(FONT_PATHS["fortuner"], size)
     except OSError:
-        log.warning("rank_card_renderer: Varsity font missing, using Zilla")
+        log.warning("rank_card_renderer: Fortuner font missing, using Zilla")
         return zilla_bold(size)
 
 
@@ -1852,24 +1854,24 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
 
     # Hierarchy (unchanged): current XP is the hero; "/ needed XP" is the
     # same face but much smaller and muted, on the hero's baseline. One
-    # family (Varsity) for the whole numeric treatment. Sizes keep the cap
+    # family (Fortuner) for the whole numeric treatment. Sizes keep the cap
     # heights of the previous treatment (hero ~29px, suffix ~15px); only the
     # face changed. Display formatting only: cur / needed / frac below are
     # untouched.
     cur_txt = _format_compact_progress(cur)
     suffix_words = ["/", _format_compact_progress(needed), "XP"]
-    HERO_SIZE, SUF_SIZE, SUF_GAP, HERO_GAP = 41, 22, 7, 14
-    suffix_font = varsity(SUF_SIZE)
+    HERO_SIZE, SUF_SIZE, SUF_GAP, HERO_GAP = 45, 24, 7, 14
+    suffix_font = fortuner(SUF_SIZE)
     suffix_w = _ss_words_width(draw, suffix_words, suffix_font, SUF_GAP)
     available = (div_x - 10) - (x + 14) - HERO_GAP - suffix_w
-    vf, cur_w = _fit_numeral_font(draw, cur_txt, varsity, max(available, 40), HERO_SIZE,
-                                  min_size=24)
+    vf, cur_w = _fit_numeral_font(draw, cur_txt, fortuner, max(available, 40), HERO_SIZE,
+                                  min_size=26)
     _draw_glow_layer(img, lambda d: d.text((x + 14, hero_baseline), cur_txt, font=vf,
                                             fill=(150, 70, 210, 140), anchor="ls"),
                      blur=3)
-    hero_bb = _draw_numeral_ss(img, x + 14, hero_baseline, cur_txt, varsity, vf.size,
+    hero_bb = _draw_numeral_ss(img, x + 14, hero_baseline, cur_txt, fortuner, vf.size,
                                COLORS["xp_value"])
-    _draw_ss_words(img, hero_bb[2] + HERO_GAP, hero_baseline, suffix_words, varsity,
+    _draw_ss_words(img, hero_bb[2] + HERO_GAP, hero_baseline, suffix_words, fortuner,
                    SUF_SIZE, COLORS["xp_suffix"], SUF_GAP)
 
     draw.line((div_x, y + 14, div_x, y + h - 14), fill=(*COLORS["accent"], 30), width=1)
@@ -1913,9 +1915,9 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
     # the label/icon beside it), without outweighing the panel the way a
     # 38-42px value did.
     total_baseline_y = hero_baseline
-    tf2, _tw = _fit_numeral_font(draw, total_txt, varsity, max(total_available, 40), 33,
-                                 min_size=18)
-    total_bbox = _draw_numeral_ss(img, total_x, total_baseline_y, total_txt, varsity,
+    tf2, _tw = _fit_numeral_font(draw, total_txt, fortuner, max(total_available, 40), 36,
+                                 min_size=20)
+    total_bbox = _draw_numeral_ss(img, total_x, total_baseline_y, total_txt, fortuner,
                                   tf2.size, COLORS["xp_total_value"])
 
     # Potion icon: the supplied artwork (potion_im, pre-trimmed to its
@@ -2390,8 +2392,10 @@ def _draw_inventory(img, draw, data, icons16, item_icons=None):
         col, row = i % cols, i // cols
         sx = ox + col * (sw + gx)
         sy = oy + row * (sh + gy)
-        draw.rounded_rectangle((sx, sy, sx + sw, sy + sh), radius=12,
-                               fill=(30, 24, 46, 170), outline=(*COLORS["accent"], 22), width=1)
+        # Antialiased (same box/radius/colours as the plain call it replaces,
+        # which stair-stepped the corners) -- see _aa_rounded_rect.
+        _aa_rounded_rect(img, (sx, sy, sx + sw, sy + sh), 12,
+                         fill=(30, 24, 46, 170), outline=(*COLORS["accent"], 22), width=1)
         if i < len(items):
             icon_im = item_icons[i] if i < len(item_icons) else None
             _draw_inventory_item(img, draw, sx, sy, sw, sh, items[i], icon_im)
@@ -2407,8 +2411,8 @@ def _draw_inventory_item(img, draw, sx, sy, sw, sh, item, icon_im=None):
         ic = ImageOps.fit(icon_im, (56, 56), Image.LANCZOS)
         img.paste(ic, (int(sx + sw / 2 - 28), int(sy + sh / 2 - 28)), ic)
     else:
-        draw.rounded_rectangle((sx + 7, sy + 7, sx + sw - 7, sy + sh - 7), radius=8,
-                               fill=(58, 38, 88, 190))
+        _aa_rounded_rect(img, (sx + 7, sy + 7, sx + sw - 7, sy + sh - 7), 8,
+                         fill=(58, 38, 88, 190))
     qty = item.get("quantity", 1)
     if qty and qty > 1:
         draw.text((sx + sw - 7, sy + sh - 7), f"x{qty}",
