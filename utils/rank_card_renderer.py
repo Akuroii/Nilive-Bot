@@ -1874,7 +1874,10 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
     _draw_ss_words(img, hero_bb[2] + HERO_GAP, hero_baseline, suffix_words, fortuner,
                    SUF_SIZE, COLORS["xp_suffix"], SUF_GAP)
 
-    draw.line((div_x, y + 14, div_x, y + h - 14), fill=(*COLORS["accent"], 30), width=1)
+    # Ends at the numerals' baseline, leaving a small gap above the XP bar
+    # (bar top = y + 84) instead of running through/past it. Top edge, x,
+    # width and colour unchanged.
+    draw.line((div_x, y + 14, div_x, y + 72), fill=(*COLORS["accent"], 30), width=1)
 
     # Bar: unchanged (size/shape/design and the same _draw_xp_bar call).
     bar_x, bar_y, bar_w, bar_h = x + 8, y + 84, w - 20, 21
