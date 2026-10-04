@@ -1,0 +1,34 @@
+{#
+    Shared "Username (big) / User ID (small)" cell.
+    Used by pages that only ever stored a raw user_id — Economy, Trade
+    History, Missions, Tickets — resolved live via
+    utils/discord_user_cache.py. Not used on pages that intentionally
+    keep a point-in-time name snapshot (Moderation Logs, Purchase
+    History, MVP History, Warnings).
+
+    Params:
+      user_id      — required. Always shown, smaller, under the name.
+      display_name — resolved server nickname / global name, if any.
+      username     — resolved global username, fallback if no display_name.
+      avatar_url    — resolved avatar URL, if any. Omit avatar entirely
+                       when compact=True.
+      compact      — True hides the avatar for dense tables.
+#}
+{% macro user_identity(user_id, display_name=None, username=None, avatar_url=None, compact=False) %}
+<div class="user-identity{% if compact %} user-identity-compact{% endif %}">
+    {% if not compact %}
+        {% set label = display_name or username or ('User ' ~ user_id) %}
+        {% if avatar_url %}
+        <img src="{{ avatar_url }}" class="user-identity-avatar"
+             onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+        <div class="user-identity-avatar-fallback" style="display:none;">{{ label[0]|upper }}</div>
+        {% else %}
+        <div class="user-identity-avatar-fallback">{{ label[0]|upper }}</div>
+        {% endif %}
+    {% endif %}
+    <div class="user-identity-text">
+        <div class="user-identity-name">{{ display_name or username or ('User ' ~ user_id) }}</div>
+        <div class="user-identity-id">{{ user_id }}</div>
+    </div>
+</div>
+{% endmacro %}

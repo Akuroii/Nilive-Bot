@@ -1,552 +1,720 @@
-import discord
-from discord.ext import commands, tasks
-from discord import app_commands
-import aiosqlite
-import time
+import os
+import json
+import csv
 import io
-from datetime import datetime, timezone, timedelta
+import datetime
+import requests as _req
+import aiosqlite
+from flask import jsonify, request, session, abort, Response
+from markupsafe import escape as _esc
 from database import DB_PATH
-from utils.xp_calculator import (
-    calculate_message_xp, calculate_voice_xp,
-    xp_progress, get_leveling_config,
-    is_role_blacklisted,
+from dashboard.utils.async_utils import run_async
+from dashboard.auth import login_required, current_user_id, current_user
+from dashboard.permissions import (
+    get_session_guild_id, log_action, require_api_permission,
+    LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
 )
-from utils.emoji import CHECK_EMOJI
+from dashboard.api import api_bp
 
+# ── Leveling ──────────────────────────────────────────────────────────────────
 
-# ─── Phase 5 / Leveling expansion — reset config helpers ────────────────
-async def get_reset_config(guild_id: int) -> dict:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT enabled, period, last_reset FROM leveling_reset_config "
-            "WHERE guild_id = ?", (guild_id,))
-        row = await cursor.fetchone()
-    if not row:
-        return {"enabled": 0, "period": "weekly", "last_reset": None}
-    return {"enabled": row[0], "period": row[1], "last_reset": row[2]}
+@api_bp.route("/leveling/leaderboard")
+@require_api_permission(LEVEL_ADMIN)
+def leveling_leaderboard_partial():
+    guild_id = get_session_guild_id()
 
+    # Finalized Prestige: legacy levels.prestige above the permanent max is
+    # treated as V for ranking/badge display (never rewritten).
+    from utils.prestige import MAX_PERMANENT_TIER
 
-def _period_hours(period: str) -> int:
-    return 24 * 30 if period == "monthly" else 24 * 7
-
-
-async def perform_leaderboard_reset(guild_id: int, period: str):
-    """
-    Snapshots the full current leaderboard into
-    leveling_leaderboard_history (so a reset preserves the completed
-    cycle instead of destroying it), then zeroes xp/level for every
-    member of THIS guild only. Per-guild isolated throughout — every
-    query is scoped to guild_id, matching every other reset/cleanup
-    task in the project (cogs/mvp.py's cycle task, cogs/shop.py's
-    temp_role_cleanup).
-
-    CRITICAL FIX (dark-fixes pass): this used to run as four
-    separate, unguarded statements — a SELECT, up to N history
-    INSERTs, an UPDATE zeroing every member, and an upsert into
-    leveling_reset_config — with no transaction wrapping the group.
-    This function permanently destroys XP data (that's the entire
-    point of a reset), so a crash or connection drop partway through
-    the loop used to be able to leave the guild in a half-archived,
-    half-zeroed state with no way to detect or recover from it: some
-    members' history rows written, others not, and the zeroing UPDATE
-    possibly applied to some but not all rows depending on exactly
-    where the failure landed.
-
-    The whole operation — snapshot, zero, and the reset_config
-    bookkeeping row — now runs inside a single BEGIN IMMEDIATE
-    transaction and either commits completely or rolls back
-    completely, the same all-or-nothing guarantee
-    utils/economy_safe.py already gives every coin/diamond mutation.
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute("""
-                SELECT user_id, xp, level FROM levels
-                WHERE guild_id = ? ORDER BY xp DESC
-            """, (guild_id,))
-            rows = await cursor.fetchall()
-
-            for rank, (user_id, xp, level) in enumerate(rows, 1):
-                await db.execute("""
-                    INSERT INTO leveling_leaderboard_history
-                        (guild_id, user_id, xp, level, rank, period, period_end)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (guild_id, user_id, xp, level, rank, period, now))
-
-            await db.execute(
-                "UPDATE levels SET xp = 0, level = 0 WHERE guild_id = ?",
-                (guild_id,))
-
-            await db.execute("""
-                INSERT INTO leveling_reset_config (guild_id, enabled, period, last_reset)
-                VALUES (?, 1, ?, ?)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    period = excluded.period,
-                    last_reset = excluded.last_reset
-            """, (guild_id, period, now))
-
-            await db.commit()
-        except Exception:
-            await db.execute("ROLLBACK")
-            raise
-    return len(rows)
-
-
-class Leveling(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self._xp_cooldowns: dict[tuple, float] = {}
-        self._spam_tracker: dict[tuple, list[float]] = {}
-        # Phase 3 / E1: voice XP is now driven by
-        # cogs/activity_engine.py's activity_voice_tick event (see
-        # on_activity_voice_tick below) instead of this cog running
-        # its own poll loop, so there's no task to start/cancel here
-        # anymore.
-        self.leaderboard_reset_task.start()
-
-    def cog_unload(self):
-        self.leaderboard_reset_task.cancel()
-
-    # ─── SPAM DETECTION (P1 #12) ─────────────────────────
-    # Frequency-based: N messages within X seconds = spam.
-    # Penalizes XP instead of blocking messages (moderation.py
-    # already handles actual mute/timeout enforcement).
-    def _is_spamming(self, guild_id: int, user_id: int,
-                      threshold: int, window_seconds: int) -> bool:
-        key = (guild_id, user_id)
-        now = time.time()
-        times = self._spam_tracker.get(key, [])
-        times = [t for t in times if now - t < window_seconds]
-        times.append(now)
-        self._spam_tracker[key] = times
-        return len(times) >= threshold
-
-    # ─── MESSAGE XP (Phase 3 / E1: now driven by the Activity
-    # Engine's activity_message event instead of its own on_message
-    # listener — word_count used to be computed here independently
-    # of cogs/activity_engine.py's identical computation; now it's
-    # computed once, centrally, and passed in. Everything else below
-    # — the cooldown gate, spam-penalty ordering, multiplier lookup,
-    # XP award, level-up announce — is unchanged from before.) ─────
-    @commands.Cog.listener()
-    async def on_activity_message(self, message: discord.Message,
-                                   word_count: int):
-        if message.author.bot or not message.guild:
-            return
-
-        config = await get_leveling_config(message.guild.id)
-        if not config.get("enabled", 1):
-            return
-
-        guild_id = message.guild.id
-        user_id  = message.author.id
-        key      = (guild_id, user_id)
-        now      = time.time()
-
-        # P1 #12 FIX: spam detection must run on EVERY message,
-        # BEFORE the XP-cooldown gate below — not after it.
-        #
-        # The previous ordering updated self._xp_cooldowns and
-        # returned early whenever a message arrived inside the
-        # cooldown window, which meant that message never reached
-        # _is_spamming() at all. With the default settings
-        # (xp_cooldown_seconds=30, spam_window_seconds=10,
-        # spam_threshold=3), every message that could have counted
-        # toward the spam threshold was filtered out by the cooldown
-        # gate first — it was mathematically impossible to
-        # accumulate 3 tracked messages inside a 10s window when
-        # tracked messages were always >=30s apart. The anti-spam
-        # feature existed in code but could never actually fire.
-        #
-        # Spam tracking now runs independently of the XP cooldown,
-        # so rapid-fire messages get caught regardless of whether
-        # they'd have earned XP anyway.
-        if config.get("spam_detection_enabled", 1):
-            threshold = int(config.get("spam_threshold", 3))
-            window    = int(config.get("spam_window_seconds", 10))
-            if self._is_spamming(guild_id, user_id, threshold, window):
-                penalty = int(config.get("spam_xp_penalty", 10))
-                if penalty > 0:
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute("""
-                            INSERT INTO levels (guild_id, user_id, xp, level)
-                            VALUES (?, ?, 0, 0)
-                            ON CONFLICT(guild_id, user_id)
-                            DO UPDATE SET xp = MAX(0, xp - ?)
-                        """, (guild_id, user_id, penalty))
-                        await db.commit()
-                return
-
-        cooldown = config.get("xp_cooldown_seconds", 30)
-        last     = self._xp_cooldowns.get(key, 0)
-        if now - last < cooldown:
-            return
-        self._xp_cooldowns[key] = now
-
-        role_ids  = [r.id for r in message.author.roles]
-        xp_to_add = await calculate_message_xp(
-            guild_id, role_ids, word_count, user_id=user_id)
-
-        if xp_to_add <= 0:
-            return
-
-        # Phase 3 / E2: XP granting + level-up detection + level
-        # reward roles now go through the shared Reward Engine
-        # instead of this cog doing its own raw INSERT/UPDATE and its
-        # own inline level comparison — the exact same logic used to
-        # be duplicated again below for voice XP. Announcing the
-        # level-up in-channel stays here since that's leveling's own
-        # UI concern, not something the engine should know about.
-        from utils.reward_engine import give_reward
-        result = await give_reward(
-            self.bot, guild_id, user_id, "xp", amount=xp_to_add,
-            reason="Message XP", source="leveling")
-
-        if result.get("leveled_up"):
-            await self._announce_levelup(
-                message, result["new_level"], config)
-
-    async def _announce_levelup(self, message: discord.Message,
-                                 new_level: int, config: dict):
-        if not config.get("levelup_announce", 1):
-            return
-        channel_id = config.get("levelup_channel_id")
-        channel    = (message.guild.get_channel(int(channel_id))
-                      if channel_id else message.channel)
-        if not channel:
-            return
-        custom_msg = config.get("levelup_message")
-        if custom_msg:
-            text = (custom_msg
-                    .replace("{user}", message.author.mention)
-                    .replace("{level}", str(new_level))
-                    .replace("{name}", message.author.display_name))
-            await channel.send(text)
-        else:
-            embed = discord.Embed(
-                description=(f"🎉 {message.author.mention} reached "
-                             f"**Level {new_level}**."),
-                color=0x7c5cbf)
-            await channel.send(embed=embed)
-
-    # ─── VOICE XP (Phase 3 / E1: now driven by the Activity
-    # Engine's activity_voice_tick event instead of running its own
-    # 60s poll loop over every guild/channel/member. The engine
-    # already applies the raw disqualifiers (2+ real members present,
-    # not AFK channel, not deafened) that used to live in this loop;
-    # what's left here is leveling's own POLICY on top of a valid
-    # tick — voice_xp_enabled, the require_unmuted choice, the XP
-    # blacklist, and the actual XP math — exactly as before, just
-    # invoked once per tick instead of leveling running its own
-    # duplicate poll. ──────────────────────────────────────────────
-    @commands.Cog.listener()
-    async def on_activity_voice_tick(self, guild: discord.Guild,
-                                      member: discord.Member,
-                                      flags: dict):
-        try:
-            config = await get_leveling_config(guild.id)
-            if not config.get("voice_xp_enabled", 1):
-                return
-
-            require_unmuted = config.get("voice_require_unmuted", 1)
-            if require_unmuted and (flags.get("self_mute") or flags.get("mute")):
-                return
-
-            # BUGFIX (dark-fixes pass #7): XP blacklist roles were
-            # never checked here — only calculate_message_xp() (via
-            # get_xp_multiplier) consulted leveling_blacklist_roles.
-            # A member given a blacklist role to opt them out of the
-            # leveling system entirely still silently earned XP from
-            # every voice tick. Message XP and voice XP now share the
-            # same blacklist gate; voice XP still does NOT apply
-            # bonus-role multipliers, matching its existing (separate)
-            # design.
-            role_ids = [r.id for r in member.roles]
-            if await is_role_blacklisted(guild.id, role_ids):
-                return
-
-            xp_per_min = config.get("voice_xp_per_minute", 3)
-            xp_gain = calculate_voice_xp(1, xp_per_min)
-            if xp_gain <= 0:
-                return
-
-            # Phase 3 / E2: same reward-engine handoff as message XP
-            # above — no announcement on voice level-ups, matching the
-            # pre-existing behavior (only chat XP announces).
-            from utils.reward_engine import give_reward
-            await give_reward(
-                self.bot, guild.id, member.id, "xp", amount=xp_gain,
-                reason="Voice XP", source="leveling")
-        except Exception as e:
-            print(f"[VOICE XP] Error for member {member.id} in "
-                  f"guild {guild.id}: {e}")
-
-    # ─── LEADERBOARD RESET TASK (Phase 5 / Leveling expansion) ─────
-    # Mirrors cogs/mvp.py's mvp_cycle_task pattern: poll every 30
-    # minutes, compare elapsed time against a stored last_reset per
-    # guild, only act once the configured period has actually passed.
-    # Each guild is isolated in its own try/except so one bad row
-    # can't stop the loop from checking the rest — same defensive
-    # pattern used throughout (shop temp_role_cleanup,
-    # reactionroles expiry_check, moderation scheduled_unban_check).
-    @tasks.loop(minutes=30)
-    async def leaderboard_reset_task(self):
-        now = datetime.now(timezone.utc)
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT guild_id, period, last_reset
-                FROM leveling_reset_config WHERE enabled = 1
-            """)
-            configs = await cursor.fetchall()
-
-        for guild_id, period, last_reset in configs:
-            try:
-                if last_reset:
-                    last_dt = datetime.fromisoformat(last_reset)
-                    if last_dt.tzinfo is None:
-                        last_dt = last_dt.replace(tzinfo=timezone.utc)
-                    elapsed_hours = (now - last_dt).total_seconds() / 3600
-                    if elapsed_hours < _period_hours(period):
-                        continue
-
-                count = await perform_leaderboard_reset(guild_id, period)
-                print(f"[LEVELING RESET] guild={guild_id} period={period} "
-                      f"reset {count} members")
-
-                guild = self.bot.get_guild(guild_id)
-                config = await get_leveling_config(guild_id)
-                channel_id = config.get("levelup_channel_id")
-                if guild and channel_id:
-                    channel = guild.get_channel(int(channel_id))
-                    if channel:
-                        embed = discord.Embed(
-                            title="🔄 Leaderboard Reset",
-                            description=(f"The {period} leaderboard has reset! "
-                                         f"Last cycle's standings are archived — "
-                                         f"everyone starts fresh."),
-                            color=0x7c5cbf)
-                        try:
-                            await channel.send(embed=embed)
-                        except Exception:
-                            pass
-            except Exception as e:
-                print(f"[LEVELING RESET] Error for guild {guild_id}: {e}")
-
-    @leaderboard_reset_task.before_loop
-    async def before_reset_task(self):
-        await self.bot.wait_until_ready()
-
-    # ─── RANK COMMAND (Pillow Image Card) ───────────────
-    @app_commands.command(name="rank",
-                          description="View your rank card")
-    async def rank(self, interaction: discord.Interaction,
-                   member: discord.Member = None):
-        member = member or interaction.user
-        await interaction.response.defer()
-
-        # Cheap existence guard, same as before: distinguish "never earned
-        # XP" from "0 XP" without pulling the full rank-card payload first.
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "SELECT 1 FROM levels WHERE guild_id=? AND user_id=?",
-                (interaction.guild.id, member.id))
-            if not await cursor.fetchone():
-                await interaction.followup.send(
-                    f"{member.mention} has no XP yet.")
-                return
-
-        from utils.rank_card_data import get_rank_card_data
-        from utils.rank_card_renderer import render_rank_card
-
-        try:
-            data = await get_rank_card_data(
-                interaction.guild.id, member.id, member=member)
-            buf = await render_rank_card(data)
-            file = discord.File(buf, filename="rank.png")
-            await interaction.followup.send(file=file)
-        except Exception as e:
-            print(f"[RANK CARD] render failed for {member.id}: {e}")
-            # Fallback: a plain embed so the command still answers if the
-            # renderer (fonts/assets/network) fails for any reason.
-            from utils.prestige import tier_label
-            data = await get_rank_card_data(
-                interaction.guild.id, member.id, member=member)
-            embed = discord.Embed(
-                title=f"Rank — {member.display_name}", color=0x7c5cbf)
-            if member.display_avatar:
-                embed.set_thumbnail(url=member.display_avatar.url)
-            embed.add_field(name="Rank", value=f"#{data['rank']}")
-            embed.add_field(name="Level", value=str(data["level"]))
-            embed.add_field(name="Total XP", value=f"{data['xp_total']:,}")
-            if data["effective_prestige"] > 0:
-                embed.add_field(name="Prestige",
-                                value=f"★{tier_label(data['effective_prestige'])}")
-            embed.add_field(
-                name=f"Progress ({data['xp_current']:,}/{data['xp_needed']:,} XP)",
-                value="", inline=False)
-            await interaction.followup.send(embed=embed)
-
-    # ─── LEADERBOARD ────────────────────────────────────
-    # Phase 5 / Prestige system: sort order is now
-    # prestige DESC, xp DESC (STATUS.md locked decision) instead of
-    # xp DESC alone, so a member who has prestiged always ranks above
-    # a same-or-higher-XP member who hasn't, matching the intent of
-    # prestige as a status tier above the raw XP race.
-    @app_commands.command(name="leaderboard",
-                          description="View the XP leaderboard")
-    async def leaderboard(self, interaction: discord.Interaction):
-        # Finalized Prestige: sort on the clamped permanent tier so a legacy
-        # levels.prestige above the max (old unbounded mechanic) ranks as V.
-        from utils.prestige import MAX_PERMANENT_TIER
+    async def fetch():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT user_id, xp, level, prestige FROM levels
                 WHERE guild_id = ?
-                ORDER BY MIN(prestige, ?) DESC, xp DESC LIMIT 10
-            """, (interaction.guild.id, MAX_PERMANENT_TIER))
-            rows = await cursor.fetchall()
+                ORDER BY MIN(prestige, ?) DESC, xp DESC LIMIT 50
+            """, (guild_id, MAX_PERMANENT_TIER))
+            return await cursor.fetchall()
 
-        if not rows:
-            await interaction.response.send_message(
-                "No XP data yet.", ephemeral=True)
-            return
+    rows = run_async(fetch())
 
-        embed = discord.Embed(title="⭐ XP Leaderboard",
-                              color=0x7c5cbf)
-        medals = ["🥇", "🥈", "🥉"]
-        # Finalized Prestige: display each member's EFFECTIVE tier (VI for
-        # an active Booster). Sort order remains permanent prestige DESC,
-        # xp DESC. Display only — never the source of multipliers.
-        from utils.prestige import get_effective_prestige, is_booster, tier_label
-        for i, (uid, xp, level, prestige) in enumerate(rows, 1):
-            medal  = medals[i-1] if i <= 3 else f"#{i}"
-            member = interaction.guild.get_member(uid)
-            name   = member.display_name if member else f"User {uid}"
-            eff    = await get_effective_prestige(
-                interaction.guild.id, uid,
-                is_booster=is_booster(member) if member else False)
-            if eff > 0:
-                name = f"★{tier_label(eff)} {name}"
-            embed.add_field(
-                name=f"{medal} {name}",
-                value=f"Level {level} • {xp:,} XP",
-                inline=False)
-        await interaction.response.send_message(embed=embed)
+    async def resolve():
+        from utils.discord_user_cache import resolve_users
+        return await resolve_users(guild_id, [r[0] for r in rows])
 
-    # ─── SET XP (admin) ─────────────────────────────────
-    @app_commands.command(name="setxp",
-                          description="Set XP for a member (admin)")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def setxp(self, interaction: discord.Interaction,
-                    member: discord.Member, xp: int):
-        # HARDENING (dark-fixes pass): clamp admin-supplied XP to
-        # non-negative — nothing previously stopped a negative value
-        # from being passed through to xp_progress()/the rank card,
-        # which assume xp >= 0.
-        xp = max(0, xp)
-        new_level, _, _ = xp_progress(xp)
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO levels (guild_id, user_id, xp, level)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET xp = ?, level = ?
-            """, (interaction.guild.id, member.id, xp, new_level,
-                  xp, new_level))
-            await db.commit()
-        await interaction.response.send_message(
-            f"Set {member.mention}'s XP to {xp:,} (Level {new_level}).",
-            ephemeral=True)
+    user_map = run_async(resolve()) if rows else {}
 
-    # ─── RESET XP (admin, Phase 5 / Leveling expansion) ─
-    # Fixes the flagged gap: dashboard/app.py's COMMAND_CATEGORIES has
-    # listed a Leveling "resetxp" entry (Commands dashboard page) with
-    # no matching command anywhere in the codebase. This is that
-    # command — resets one member's xp/level back to 0 in this guild
-    # only. Deliberately does NOT touch leveling_leaderboard_history
-    # (that's only ever written by the scheduled/forced full-guild
-    # reset below) and does NOT archive the member's XP anywhere —
-    # a single-member reset is a moderation correction, not a
-    # leaderboard cycle event.
-    @app_commands.command(name="resetxp",
-                          description="Reset a member's XP and level back to 0 (admin)")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def resetxp(self, interaction: discord.Interaction,
-                      member: discord.Member):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO levels (guild_id, user_id, xp, level)
-                VALUES (?, ?, 0, 0)
-                ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET xp = 0, level = 0
-            """, (interaction.guild.id, member.id))
-            await db.commit()
-        await interaction.response.send_message(
-            f"Reset {member.mention}'s XP and level to 0.",
-            ephemeral=True)
-
-    # ─── RESET LEADERBOARD (admin, Phase 5 / Leveling expansion) ─
-    # Manual/forced equivalent of leaderboard_reset_task — same
-    # perform_leaderboard_reset() call, same archive-then-zero
-    # behavior, just triggered on demand instead of waiting for the
-    # configured weekly/monthly period to elapse. Mirrors
-    # cogs/mvp.py's /mvp_force pattern.
-    @app_commands.command(name="resetleaderboard",
-                          description="Force an immediate leaderboard reset for this server (admin)")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def resetleaderboard(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        reset_config = await get_reset_config(interaction.guild.id)
-        period = reset_config.get("period") or "weekly"
-        count = await perform_leaderboard_reset(interaction.guild.id, period)
-        await interaction.followup.send(
-            f"{CHECK_EMOJI} Leaderboard reset — {count} member(s) archived "
-            f"and zeroed.")
-
-    # ─── PRESTIGE STATE / READ-ONLY VIEW ─────────────────
-    # The old XP/level-gated "/prestige reset" command has been retired
-    # (the finalized Prestige system is Shop-purchased and never resets
-    # XP/Level). This read-only command shows the member's current
-    # Prestige: their permanent tier and their effective tier (which is
-    # VI while they are an active Discord Booster). It performs no writes
-    # and grants nothing.
-    @app_commands.command(name="prestige",
-                          description="View your Prestige state")
-    async def prestige(self, interaction: discord.Interaction):
-        from utils.prestige import (
-            get_permanent_prestige, get_effective_prestige,
-            is_booster, tier_label,
+    from dashboard.utils.user_identity import render_user_identity_html
+    html = ""
+    for i, r in enumerate(rows, 1):
+        prestige = min(r[3] or 0, MAX_PERMANENT_TIER)
+        badge = f"<span class='badge badge-accent'>★{prestige}</span>" if prestige else ""
+        u = user_map.get(r[0], {})
+        identity_html = render_user_identity_html(
+            r[0], u.get("display_name"), u.get("username"), u.get("avatar_url"))
+        html += (
+            f"<tr><td>#{i}</td>"
+            f"<td><div style='display:flex;align-items:center;gap:8px;'>{badge}{identity_html}</div></td>"
+            f"<td><span class='badge badge-accent'>Lv {r[2]}</span></td>"
+            f"<td>{r[1]:,} XP</td></tr>"
         )
-        await interaction.response.defer()
-        permanent = await get_permanent_prestige(
-            interaction.guild.id, interaction.user.id)
-        booster = is_booster(interaction.user)
-        effective = await get_effective_prestige(
-            interaction.guild.id, interaction.user.id, is_booster=booster)
-
-        embed = discord.Embed(
-            title="⭐ Prestige",
-            color=0xFFD700)
-        embed.add_field(
-            name="Permanent Prestige",
-            value=(f"**{tier_label(permanent)}**"
-                   if permanent else "None"),
-            inline=False)
-        embed.add_field(
-            name="Effective Prestige",
-            value=f"**{tier_label(effective)}**",
-            inline=False)
-        if booster:
-            embed.add_field(
-                name="Booster bonus",
-                value=("You're an active Discord Booster — you get "
-                       "effective Prestige VI. When the boost ends you "
-                       "return to your permanent Prestige."),
-                inline=False)
-        await interaction.followup.send(embed=embed)
+    return html or "<tr><td colspan='4' class='empty'>No data yet</td></tr>"
 
 
-async def setup(bot):
-    await bot.add_cog(Leveling(bot))
+@api_bp.route("/leveling/config", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_config_api():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT * FROM leveling_config WHERE guild_id = ?", (guild_id,))
+            row = await cursor.fetchone()
+            if row:
+                return dict(zip([d[0] for d in cursor.description], row))
+        return {}
+
+    return jsonify({"config": run_async(fetch())})
+
+
+@api_bp.route("/leveling/config", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def save_leveling_config_api():
+    guild_id = get_session_guild_id()
+    data     = request.json
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO leveling_config
+                    (guild_id, enabled, xp_per_word,
+                     xp_min_per_message, xp_max_per_message,
+                     xp_cooldown_seconds, voice_xp_enabled,
+                     voice_xp_per_minute, voice_require_unmuted,
+                     spam_detection_enabled, spam_threshold,
+                     spam_xp_penalty, levelup_announce,
+                     levelup_channel_id, levelup_message,
+                     remove_old_reward_role)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    enabled                = excluded.enabled,
+                    xp_per_word            = excluded.xp_per_word,
+                    xp_min_per_message     = excluded.xp_min_per_message,
+                    xp_max_per_message     = excluded.xp_max_per_message,
+                    xp_cooldown_seconds    = excluded.xp_cooldown_seconds,
+                    voice_xp_enabled       = excluded.voice_xp_enabled,
+                    voice_xp_per_minute    = excluded.voice_xp_per_minute,
+                    voice_require_unmuted  = excluded.voice_require_unmuted,
+                    spam_detection_enabled = excluded.spam_detection_enabled,
+                    spam_threshold         = excluded.spam_threshold,
+                    spam_xp_penalty        = excluded.spam_xp_penalty,
+                    levelup_announce       = excluded.levelup_announce,
+                    levelup_channel_id     = excluded.levelup_channel_id,
+                    levelup_message        = excluded.levelup_message,
+                    remove_old_reward_role = excluded.remove_old_reward_role,
+                    updated_at             = CURRENT_TIMESTAMP
+            """, (
+                guild_id,
+                int(data.get("enabled", 1)),
+                int(data.get("xp_per_word", 1)),
+                int(data.get("xp_min_per_message", 5)),
+                int(data.get("xp_max_per_message", 50)),
+                int(data.get("xp_cooldown_seconds", 30)),
+                int(data.get("voice_xp_enabled", 1)),
+                int(data.get("voice_xp_per_minute", 3)),
+                int(data.get("voice_require_unmuted", 1)),
+                int(data.get("spam_detection_enabled", 1)),
+                int(data.get("spam_threshold", 3)),
+                int(data.get("spam_xp_penalty", 10)),
+                int(data.get("levelup_announce", 1)),
+                data.get("levelup_channel_id") or None,
+                data.get("levelup_message") or None,
+                int(data.get("remove_old_reward_role", 0)),
+            ))
+            await db.commit()
+
+    run_async(save())
+    log_action(guild_id, "Updated leveling config", "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/reward", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_leveling_reward():
+    guild_id = get_session_guild_id()
+    data     = request.json
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO leveling_rewards (guild_id, level, role_id)
+                VALUES (?, ?, ?)
+            """, (guild_id, int(data.get("level")), data.get("role_id")))
+            await db.commit()
+
+    run_async(save())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/reward/<int:reward_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_leveling_reward(reward_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_rewards WHERE id=? AND guild_id=?",
+                (reward_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/currency-rewards", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_currency_rewards():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, level, currency, amount
+                FROM leveling_currency_rewards
+                WHERE guild_id = ? ORDER BY level ASC
+            """, (guild_id,))
+            return await cursor.fetchall()
+
+    rows = run_async(fetch())
+    return jsonify({"rewards": [{
+        "id": r[0], "level": r[1], "currency": r[2], "amount": r[3],
+    } for r in rows]})
+
+
+@api_bp.route("/leveling/currency-reward", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_leveling_currency_reward():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+
+    try:
+        level = int(data.get("level"))
+        amount = int(data.get("amount"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Level and amount must be numbers"})
+    if level <= 0 or amount <= 0:
+        return jsonify({"success": False, "error": "Level and amount must be positive"})
+
+    currency = data.get("currency", "balance")
+    if currency not in ("balance", "diamonds"):
+        return jsonify({"success": False, "error": "Currency must be 'balance' or 'diamonds'"})
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO leveling_currency_rewards (guild_id, level, currency, amount)
+                VALUES (?, ?, ?, ?)
+            """, (guild_id, level, currency, amount))
+            await db.commit()
+
+    run_async(save())
+    log_action(guild_id,
+               f"Added level {level} currency reward: {amount} {currency}",
+               "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/currency-reward/<int:reward_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_leveling_currency_reward(reward_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_currency_rewards WHERE id=? AND guild_id=?",
+                (reward_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/boost-rewards", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_boost_rewards():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, level, multiplier, duration_hours
+                FROM leveling_boost_rewards
+                WHERE guild_id = ? ORDER BY level ASC
+            """, (guild_id,))
+            return await cursor.fetchall()
+
+    rows = run_async(fetch())
+    return jsonify({"rewards": [{
+        "id": r[0], "level": r[1], "multiplier": r[2], "duration_hours": r[3],
+    } for r in rows]})
+
+
+@api_bp.route("/leveling/boost-reward", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_leveling_boost_reward():
+    guild_id = get_session_guild_id()
+    data = request.json or {}
+    try:
+        level = int(data.get("level"))
+        duration_hours = int(data.get("duration_hours"))
+        multiplier = float(data.get("multiplier"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Level, multiplier, and duration must be numbers"})
+    if isinstance(data.get("duration_hours"), float) or isinstance(data.get("level"), float):
+        return jsonify({"success": False, "error": "Level and duration must be whole numbers"})
+    if level < 1 or duration_hours < 1 or multiplier <= 1:
+        return jsonify({
+            "success": False,
+            "error": "Level and duration must be at least 1, and the multiplier must be above 1",
+        })
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            try:
+                await db.execute("""
+                    INSERT INTO leveling_boost_rewards
+                        (guild_id, level, multiplier, duration_hours)
+                    VALUES (?, ?, ?, ?)
+                """, (guild_id, level, multiplier, duration_hours))
+                await db.commit()
+            except Exception as exc:
+                await db.execute("ROLLBACK")
+                if "UNIQUE" in str(exc).upper():
+                    return "That level already has an XP boost reward."
+                raise
+            return None
+
+    error = run_async(save())
+    if error:
+        return jsonify({"success": False, "error": error})
+    log_action(guild_id,
+               f"Added level {level} XP boost reward: {multiplier}x for {duration_hours}h",
+               "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/boost-reward/<int:reward_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_leveling_boost_reward(reward_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_boost_rewards WHERE id=? AND guild_id=?",
+                (reward_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+_SHOP_REWARD_TYPES = ("custom", "title", "potion", "temp_role")
+
+
+@api_bp.route("/leveling/shop-rewards", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_shop_rewards():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT r.id, r.level, r.item_id, r.quantity, s.name, s.type
+                FROM leveling_shop_rewards r
+                LEFT JOIN shop_items s
+                  ON s.id = r.item_id AND s.guild_id = r.guild_id
+                WHERE r.guild_id = ?
+                ORDER BY r.level ASC, r.id ASC
+            """, (guild_id,))
+            rewards = await cursor.fetchall()
+            cursor = await db.execute("""
+                SELECT id, name, type, role_id, duration_hours, enabled
+                FROM shop_items
+                WHERE guild_id = ? AND type IN ('custom', 'title', 'potion', 'temp_role')
+                ORDER BY name ASC, id ASC
+            """, (guild_id,))
+            products = await cursor.fetchall()
+            return rewards, products
+
+    rewards, products = run_async(fetch())
+    return jsonify({
+        "rewards": [{
+            "id": r[0], "level": r[1], "item_id": r[2], "quantity": r[3],
+            "name": r[4], "type": r[5],
+        } for r in rewards],
+        "products": [{
+            "id": p[0], "name": p[1], "type": p[2],
+            "role_id": p[3], "duration_hours": p[4], "enabled": p[5],
+        } for p in products],
+    })
+
+
+@api_bp.route("/leveling/shop-reward", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_leveling_shop_reward():
+    guild_id = get_session_guild_id()
+    data = request.json or {}
+    try:
+        level = int(data.get("level"))
+        item_id = int(data.get("item_id"))
+        quantity = int(data.get("quantity"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Level, product, and quantity must be numbers"})
+    if level <= 0 or item_id <= 0 or quantity < 1:
+        return jsonify({"success": False, "error": "Level, product, and quantity must be at least 1"})
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT type, role_id, duration_hours, xp_boost_multiplier
+                FROM shop_items WHERE id=? AND guild_id=?
+            """, (item_id, guild_id))
+            item = await cursor.fetchone()
+            if not item:
+                return "That Shop product is not in this server."
+            item_type, role_id, duration_hours, multiplier = item
+            if item_type not in _SHOP_REWARD_TYPES:
+                return "Only custom, title, potion, and temporary role products can be level rewards."
+            if item_type == "temp_role" and (not role_id or not duration_hours or int(duration_hours) <= 0):
+                return "That temporary role product needs a role and a positive duration."
+            if item_type == "potion" and (not multiplier or float(multiplier) <= 1 or not duration_hours):
+                return "That potion needs an effect multiplier above 1 and a positive duration."
+            try:
+                await db.execute("""
+                    INSERT INTO leveling_shop_rewards
+                        (guild_id, level, item_id, quantity)
+                    VALUES (?, ?, ?, ?)
+                """, (guild_id, level, item_id, quantity))
+                await db.commit()
+            except Exception as exc:
+                await db.execute("ROLLBACK")
+                if "UNIQUE" in str(exc).upper():
+                    return "That product is already a reward at this level."
+                raise
+            return None
+
+    error = run_async(save())
+    if error:
+        return jsonify({"success": False, "error": error})
+    log_action(guild_id,
+               f"Added level {level} shop reward: item {item_id} x{quantity}",
+               "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/shop-reward/<int:reward_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_leveling_shop_reward(reward_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_shop_rewards WHERE id=? AND guild_id=?",
+                (reward_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/reset-config", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_reset_config():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT enabled, period, last_reset
+                FROM leveling_reset_config WHERE guild_id = ?
+            """, (guild_id,))
+            row = await cursor.fetchone()
+        if not row:
+            return {"enabled": 0, "period": "weekly", "last_reset": None}
+        return {"enabled": row[0], "period": row[1], "last_reset": row[2]}
+
+    return jsonify({"config": run_async(fetch())})
+
+
+@api_bp.route("/leveling/reset-config", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def save_leveling_reset_config():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+    period   = data.get("period", "weekly")
+    if period not in ("weekly", "monthly"):
+        return jsonify({"success": False, "error": "Period must be 'weekly' or 'monthly'"})
+    enabled = int(bool(data.get("enabled")))
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT last_reset FROM leveling_reset_config WHERE guild_id = ?",
+                (guild_id,))
+            existing = await cursor.fetchone()
+            last_reset = existing[0] if existing and existing[0] else \
+                datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+            await db.execute("""
+                INSERT INTO leveling_reset_config (guild_id, enabled, period, last_reset)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    period  = excluded.period
+            """, (guild_id, enabled, period, last_reset))
+            await db.commit()
+
+    run_async(save())
+    log_action(guild_id,
+               f"{'Enabled' if enabled else 'Disabled'} {period} leaderboard reset",
+               "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/force-reset", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def force_leveling_reset():
+    guild_id = get_session_guild_id()
+
+    async def run():
+        from cogs.leveling import perform_leaderboard_reset, get_reset_config
+        cfg = await get_reset_config(guild_id)
+        period = cfg.get("period") or "weekly"
+        count = await perform_leaderboard_reset(guild_id, period)
+        return count
+
+    count = run_async(run())
+    log_action(guild_id, f"Forced leaderboard reset ({count} members)", "leveling")
+    return jsonify({"success": True, "count": count})
+
+
+@api_bp.route("/leveling/bonus-roles", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_bonus_roles():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, role_id, multiplier FROM leveling_bonus_roles
+                WHERE guild_id = ? ORDER BY multiplier DESC
+            """, (guild_id,))
+            return await cursor.fetchall()
+
+    rows = run_async(fetch())
+    return jsonify({"roles": [
+        {"id": r[0], "role_id": r[1], "multiplier": r[2]} for r in rows]})
+
+
+@api_bp.route("/leveling/bonus-role", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_bonus_role():
+    guild_id = get_session_guild_id()
+    data     = request.json
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO leveling_bonus_roles (guild_id, role_id, multiplier)
+                VALUES (?, ?, ?)
+            """, (guild_id, data.get("role_id"), float(data.get("multiplier", 1.5))))
+            await db.commit()
+
+    run_async(save())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/bonus-role/<int:role_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_bonus_role(role_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_bonus_roles WHERE id=? AND guild_id=?",
+                (role_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/blacklist", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_blacklist():
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, role_id FROM leveling_blacklist_roles
+                WHERE guild_id = ?
+            """, (guild_id,))
+            return await cursor.fetchall()
+
+    rows = run_async(fetch())
+    return jsonify({"roles": [{"id": r[0], "role_id": r[1]} for r in rows]})
+
+
+@api_bp.route("/leveling/blacklist", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_blacklist():
+    guild_id = get_session_guild_id()
+    data     = request.json
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO leveling_blacklist_roles (guild_id, role_id)
+                VALUES (?, ?)
+            """, (guild_id, data.get("role_id")))
+            await db.commit()
+
+    run_async(save())
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/blacklist/<int:entry_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_blacklist(entry_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM leveling_blacklist_roles WHERE id=? AND guild_id=?",
+                (entry_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+
+# ── Prestige (finalized Prestige system) ────────────────────────────────────
+#
+# Same LEVEL_ADMIN gate + guild-scoped CRUD shape as the leveling
+# reward/bonus-role/blacklist routes directly above. All state and rule
+# enforcement (purchase, sequential progression, effective/booster VI,
+# multipliers) live in utils/prestige.py. These routes are only the
+# dashboard CRUD surface for prestige_config (enabled + per-tier
+# multipliers) and prestige_roles (tier -> role_id mapping).
+
+@api_bp.route("/leveling/prestige-config", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_prestige_config_api():
+    from utils.prestige import get_prestige_config as _get_prestige_config
+    guild_id = get_session_guild_id()
+    return jsonify({"config": run_async(_get_prestige_config(guild_id))})
+
+
+@api_bp.route("/leveling/prestige-config", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def save_prestige_config_api():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+    enabled  = int(bool(data.get("enabled", True)))
+
+    # Optional per-tier multipliers, keyed by tier number (1..6). Each is
+    # {"coins": float, "diamonds": float}. Blank/invalid entries are skipped
+    # so a partial save never clobbers a tier with garbage.
+    tiers = None
+    raw_tiers = data.get("tiers")
+    if isinstance(raw_tiers, dict):
+        tiers = {}
+        for k, v in raw_tiers.items():
+            try:
+                tier = int(k)
+            except (TypeError, ValueError):
+                continue
+            if tier not in (1, 2, 3, 4, 5, 6):
+                continue
+            if not isinstance(v, dict):
+                continue
+            try:
+                tiers[tier] = {
+                    "coins": max(0.0, float(v.get("coins", 1.0))),
+                    "diamonds": max(0.0, float(v.get("diamonds", 1.0))),
+                }
+            except (TypeError, ValueError):
+                continue
+
+    from utils.prestige import set_prestige_multipliers
+
+    async def save():
+        await set_prestige_multipliers(guild_id, enabled=enabled, tiers=tiers)
+
+    run_async(save())
+    log_action(guild_id,
+               f"Updated prestige config: enabled={bool(enabled)}",
+               "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/prestige-roles", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_prestige_roles_api():
+    from utils.prestige import get_prestige_roles as _get_prestige_roles
+    guild_id = get_session_guild_id()
+    return jsonify({"roles": run_async(_get_prestige_roles(guild_id))})
+
+
+@api_bp.route("/leveling/prestige-role", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_prestige_role_api():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+    try:
+        tier = int(data.get("tier"))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "tier must be a number"})
+    role_id = data.get("role_id")
+    if tier <= 0 or not role_id:
+        return jsonify({"success": False, "error": "tier and role_id are required"})
+
+    async def save():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO prestige_roles (guild_id, tier, role_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, tier) DO UPDATE SET
+                    role_id = excluded.role_id
+            """, (guild_id, tier, role_id))
+            await db.commit()
+
+    run_async(save())
+    log_action(guild_id, f"Set prestige tier {tier} role", "leveling")
+    return jsonify({"success": True})
+
+
+@api_bp.route("/leveling/prestige-role/<int:entry_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def delete_prestige_role_api(entry_id: int):
+    guild_id = get_session_guild_id()
+
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM prestige_roles WHERE id=? AND guild_id=?",
+                (entry_id, guild_id))
+            await db.commit()
+
+    run_async(delete())
+    return jsonify({"success": True})
+
+

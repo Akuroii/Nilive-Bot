@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nero Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+<!-- Shared embed composer styles (per-embed editor card + Discord
+     preview chrome + engine component rows) — used by both
+     manage/embedbuilder.html and systems/minigame_builder.html. -->
+<link rel="stylesheet" href="{{ url_for('static', filename='css/embed-composer.css') }}">
+<!-- SECURITY FIX (dark-fixes pass #2, CDN SRI): pins this CSS to the
+     exact bytes of select2@4.1.0-rc.0 (hash computed from the real
+     published npm package, not guessed). If jsDelivr's CDN is ever
+     compromised and starts serving a modified file, the browser
+     refuses to apply it instead of silently loading attacker-modified
+     CSS/JS into every dashboard session. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css"
+      integrity="sha384-OXVF05DQEe311p6ohU11NwlnX08FzMCsyoXzGOaL+83dKAb3qS17yZJxESl8YrJQ"
+      crossorigin="anonymous">
+<style>
+.select2-container--default .select2-selection--single,
+.select2-container--default .select2-selection--multiple {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+}
+.select2-container--default .select2-selection--single .select2-selection__rendered { color: var(--text); padding: 0 12px; }
+.select2-container--default .select2-results__option { background: var(--bg3); color: var(--text2); padding: 8px 12px; }
+.select2-container--default .select2-results__option--highlighted { background: var(--accent); color: #fff; }
+.select2-dropdown { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; }
+.select2-search--dropdown .select2-search__field { background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 10px; }
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator { display: inline-block; }
+.htmx-request.htmx-indicator { display: inline-block; }
+#global-spinner {
+    width: 16px; height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<!-- SECURITY (CSRF hardening, this pass): token is minted server-side per
+     session (see dashboard/auth.py create_session) and exposed here so
+     dashboard.js's fetch()/htmx patch can attach it to every state-changing
+     request automatically. Never write this into a URL or log it. -->
+<script>window.__CSRF_TOKEN__ = {{ session.get('csrf_token', '') | tojson }};</script>
+<!-- Currency display config (name + icon) for client-side rendering, from
+     the same server-side resolver every Jinja block uses — see
+     dashboard/utils/currency_ctx.py. JS that builds currency labels for
+     rows fetched via fetch() (ledger, members, rewards) reads this instead
+     of hardcoding a name or emoji. Economy owns these values; this page
+     only mirrors them. -->
+<script>window.__CURRENCY__ = {{ (currency if currency is defined else None) | tojson }};</script>
+<!-- The success/check indicator as HTML (Discord's `<a:check:id>` markup is
+     a message feature — a browser needs the CDN image). Rendered server-side
+     from the one resolver in utils/emoji.py so client-side status lines and
+     toasts show the same check as the Discord-side replies. -->
+<script>window.__CHECK_ICON__ = {{ check_icon | tojson }};</script>
+{% if bot_identity %}
+<!-- Bot name + avatar for message previews, rendered WITH the page instead
+     of fetched. The Embed Builder used to call /api/botprofile/config during
+     initialisation, which does a live Discord round-trip (up to 8s) inside
+     the request that page was waiting on — so a slow Discord meant a blank
+     composer. This is only emitted for pages that ask for it (see
+     dashboard/app.py's _bot_identity_for_page) and holds nothing secret:
+     the bot's nickname in this guild and its avatar URL, both already
+     visible to every member of the server. -->
+<script>window.__BOT_IDENTITY__ = {{ bot_identity | tojson }};</script>
+{% endif %}
+{{ check_icon_css }}
+<!-- Baseline alignment for configured currency icons rendered as CDN
+     images (dashboard/utils/currency_ctx.py:icon_css). A browser cannot
+     render `<:name:id>` / `<a:name:id>` markup, so a custom currency icon
+     is an <img> exactly like the check icon above. -->
+{{ currency_icon_css }}
+<button class="hamburger" onclick="toggleSidebar()"
+    style="display:none;position:fixed;top:14px;left:14px;z-index:200;
+           background:var(--bg2);border:1px solid var(--border);
+           border-radius:8px;padding:8px;cursor:pointer;flex-direction:column;gap:4px;">
+    <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
+    <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
+    <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
+</button>
+<div class="sidebar">
+    <div style="padding:20px 18px 16px;border-bottom:1px solid var(--border);
+                display:flex;align-items:center;gap:12px;">
+        <div style="width:38px;height:38px;border-radius:50%;background:var(--accent);
+                    display:flex;align-items:center;justify-content:center;
+                    font-weight:700;font-size:16px;color:#fff;flex-shrink:0;">N</div>
+        <div>
+            <div style="font-weight:700;font-size:16px;color:var(--text)">Nero</div>
+            <div style="font-size:11px;color:var(--text3)">Dashboard</div>
+        </div>
+    </div>
+    {% if guild_id %}
+    <div style="padding:10px 12px;border-bottom:1px solid var(--border);">
+        <a href="{{ url_for('server_select') }}"
+           style="display:flex;align-items:center;gap:8px;padding:8px 10px;
+                  border-radius:8px;background:var(--bg3);border:1px solid var(--border);
+                  text-decoration:none;color:var(--text2);font-size:12px;
+                  transition:all .15s;">
+            <span style="font-size:14px;">🖥️</span>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                Server: {{ guild_name or guild_id }}
+            </span>
+            <span style="color:var(--text3);font-size:11px;">↗</span>
+        </a>
+    </div>
+    {% endif %}
+    <nav style="flex:1;padding:12px 10px;overflow-y:auto;">
+<div class="nav-section">
+    <div class="nav-section-title">General</div>
+    <a href="/"
+       hx-get="/"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🏠</span>
+        <span class="nav-text">Overview</span>
+    </a>
+    <a href="/members"
+       hx-get="/members"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">👥</span>
+        <span class="nav-text">Members</span>
+    </a>
+    <a href="/audit-log"
+       hx-get="/audit-log"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">📝</span>
+        <span class="nav-text">Audit Log</span>
+    </a>
+    <a href="/reports"
+       hx-get="/reports"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🚩</span>
+        <span class="nav-text">Reports</span>
+    </a>
+</div>
+<div class="nav-section">
+    <div class="nav-section-title">Manage</div>
+    <a href="/moderation"
+       hx-get="/moderation"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🛡️</span>
+        <span class="nav-text">Moderation</span>
+    </a>
+    <a href="/tickets"
+       hx-get="/tickets"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🎫</span>
+        <span class="nav-text">Tickets</span>
+    </a>
+    <a href="/embed-builder"
+       hx-get="/embed-builder"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">📦</span>
+        <span class="nav-text">Embed Builder</span>
+    </a>
+    <a href="/reaction-roles"
+       hx-get="/reaction-roles"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🎭</span>
+        <span class="nav-text">Reaction Roles</span>
+    </a>
+    <a href="/triggers"
+       hx-get="/triggers"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">⚡</span>
+        <span class="nav-text">Triggers</span>
+    </a>
+    <a href="/custom-commands"
+       hx-get="/custom-commands"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">💬</span>
+        <span class="nav-text">Custom Commands</span>
+    </a>
+</div>
+<div class="nav-section">
+    <div class="nav-section-title">Systems</div>
+    <a href="/mvp"
+       hx-get="/mvp"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🏆</span>
+        <span class="nav-text">MVP System</span>
+    </a>
+    <a href="/leveling"
+       hx-get="/leveling"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">⭐</span>
+        <span class="nav-text">Leveling</span>
+    </a>
+    <a href="/economy"
+       hx-get="/economy"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">💰</span>
+        <span class="nav-text">Economy</span>
+    </a>
+    <a href="/shop"
+       hx-get="/shop"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🛒</span>
+        <span class="nav-text">Shop</span>
+    </a>
+    <a href="/shop-designer"
+       hx-get="/shop-designer"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🧩</span>
+        <span class="nav-text">Shop Designer</span>
+    </a>
+    <a href="/shop-publisher"
+       hx-get="/shop-publisher"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link nav-link-legacy"
+       aria-label="Legacy Shop Publisher — compatibility page">
+        <span class="nav-icon">📣</span>
+        <span class="nav-text">Shop Publisher · Legacy</span>
+    </a>
+    <a href="/events"
+       hx-get="/events"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🎯</span>
+        <span class="nav-text">Events</span>
+    </a>
+    <a href="/minigames"
+       hx-get="/minigames"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🎲</span>
+        <span class="nav-text">Minigames</span>
+    </a>
+    <a href="/missions"
+       hx-get="/missions"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🗺️</span>
+        <span class="nav-text">Missions</span>
+    </a>
+    <a href="/tag-missions"
+       hx-get="/tag-missions"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🏷️</span>
+        <span class="nav-text">Tag Missions</span>
+    </a>
+    <a href="/tag-partners"
+       hx-get="/tag-partners"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🤝</span>
+        <span class="nav-text">Tag Partners</span>
+    </a>
+    <a href="/ledger"
+       hx-get="/ledger"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">📒</span>
+        <span class="nav-text">Ledger</span>
+    </a>
+    <a href="/inventory"
+       hx-get="/inventory"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🎒</span>
+        <span class="nav-text">Inventory</span>
+    </a>
+    <a href="/trade"
+       hx-get="/trade"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🤝</span>
+        <span class="nav-text">Trade History</span>
+    </a>
+</div>
+<div class="nav-section">
+    <div class="nav-section-title">Config</div>
+    <a href="/config/general"
+       hx-get="/config/general"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">⚙️</span>
+        <span class="nav-text">General Settings</span>
+    </a>
+    <a href="/config/welcome"
+       hx-get="/config/welcome"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">👋</span>
+        <span class="nav-text">Welcome & Leave</span>
+    </a>
+    <a href="/config/boost"
+       hx-get="/config/boost"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🔰</span>
+        <span class="nav-text">Boost Roles</span>
+    </a>
+    <a href="/config/botprofile"
+       hx-get="/config/botprofile"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🪪</span>
+        <span class="nav-text">Bot Profile</span>
+    </a>
+    <a href="/creator"
+       hx-get="/creator"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🎬</span>
+        <span class="nav-text">Creator Hub</span>
+    </a>
+    <a href="/commands"
+       hx-get="/commands"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🎮</span>
+        <span class="nav-text">Commands</span>
+    </a>
+    <a href="/config/access"
+       hx-get="/config/access"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🔐</span>
+        <span class="nav-text">Dashboard Access</span>
+    </a>
+    <a href="/backups"
+       hx-get="/backups"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">💾</span>
+        <span class="nav-text">Backups</span>
+    </a>
+    <a href="/health"
+       hx-get="/health"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon">🩺</span>
+        <span class="nav-text">System Health</span>
+    </a>
+</div>
+    </nav>
+    <div style="padding:12px;border-top:1px solid var(--border);
+                display:flex;align-items:center;gap:10px;">
+        {% if user and user.avatar %}
+        <img src="https://cdn.discordapp.com/avatars/{{ user.id }}/{{ user.avatar }}.png"
+             class="avatar-md">
+        {% else %}
+        <div style="width:36px;height:36px;border-radius:50%;background:var(--accent);
+                    display:flex;align-items:center;justify-content:center;
+                    font-weight:700;color:#fff;font-size:14px;flex-shrink:0;">
+            {{ user.username[0].upper() if user else '?' }}
+        </div>
+        {% endif %}
+        <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;font-weight:600;color:var(--text);
+                        overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                {{ user.username if user else 'Unknown' }}
+            </div>
+            <div style="font-size:11px;color:var(--text3);text-transform:capitalize;">
+                {{ user_level or 'guest' }}
+            </div>
+        </div>
+        <a href="{{ url_for('logout') }}"
+           style="padding:5px 10px;border-radius:6px;background:transparent;
+                  border:1px solid var(--border);color:var(--text3);font-size:11px;
+                  text-decoration:none;transition:all .15s;"
+           onmouseover="this.style.background='var(--danger)';this.style.color='#fff';this.style.borderColor='var(--danger)'"
+           onmouseout="this.style.background='transparent';this.style.color='var(--text3)';this.style.borderColor='var(--border)'">
+            Out
+        </a>
+    </div>
+</div>
+<div class="main-content">
+    {% if is_staging %}
+    <div class="staging-banner">🧪 STAGING ENVIRONMENT — changes here do not affect production data</div>
+    {% endif %}
+    <div class="topbar">
+        <div style="display:flex;align-items:center;gap:12px;">
+            <div class="topbar-title" id="page-title">{% block title %}Dashboard{% endblock %}</div>
+            <div class="htmx-indicator" id="global-spinner"></div>
+        </div>
+        <div class="topbar-actions">
+            <div class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                <div class="theme-toggle-thumb"></div>
+            </div>
+        </div>
+    </div>
+    <div class="page-content" id="content-area">
+        {% block content %}{% endblock %}
+    </div>
+</div>
+<div id="edit-modal" class="modal-overlay" style="display:none;">
+    <div class="modal">
+        <div class="modal-title">Edit Member — <span id="edit-uid-label" style="color:var(--accent)"></span></div>
+        <div class="form-group">
+            <label class="form-label">XP</label>
+            <input class="form-input" id="edit-xp" type="number" min="0">
+        </div>
+        <div class="form-group">
+            <label class="form-label">{{ currency.coins.name }}</label>
+            <input class="form-input" id="edit-coins" type="number" min="0">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" onclick="closeEditModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="saveEditModal()">Save</button>
+        </div>
+        <div id="edit-modal-status" style="margin-top:10px;font-size:12px;"></div>
+    </div>
+</div>
+<!-- SECURITY FIX (dark-fixes pass #2, CDN SRI): same reasoning as the
+     select2 CSS link above — all three hashes computed from the exact
+     published npm package bytes for their pinned versions. -->
+<script src="https://unpkg.com/htmx.org@1.9.10"
+        integrity="sha384-D1Kt99CQMDuVetoL1lrYwg5t+9QdHe7NLX/SoJYkXDFfX37iInKRy5xLSi8nO7UC"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"
+        integrity="sha384-1H217gwSVyLSIfaLxHbE7dRb3v4mYCKbpQvzx0cegeju1MVsGrX5xXxAvs/HgeFs"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"
+        integrity="sha384-d3UHjPdzJkZuk5H3qKYMLRyWLAQBJbby2yr2Q58hXXtAGF8RSNO9jpLDlKKPv5v3"
+        crossorigin="anonymous"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+<script src="{{ url_for('static', filename='js/nero-select.js') }}"></script>
+<script src="{{ url_for('static', filename='js/nero-alias-input.js') }}"></script>
+<!-- Page-module registry (init/destroy per page). Pages opt in with
+     data-page-module + data-page-script on their own root element; without
+     that marker this file does nothing at all. It is loaded AFTER
+     dashboard.js/nero-select.js on purpose: its mount runs after
+     reInitDashboardComponents(), so a page module can rely on its
+     NeroSelect/NeroAlias widgets already being initialised. -->
+<script src="{{ url_for('static', filename='js/nav-lifecycle.js') }}"></script>
+<script>
+    htmx.config.globalViewTransitions = false;
+    htmx.config.defaultSwapStyle = 'innerHTML';
+    document.body.addEventListener('htmx:afterSwap', function(evt) {
+        if (window.$ && $.fn.select2) {
+            $(evt.detail.target).find('.select2-widget').select2({
+                theme: 'default',
+                width: '100%'
+            });
+        }
+        evt.detail.target.querySelectorAll('script').forEach(function(oldScript) {
+            const newScript = document.createElement('script');
+            [...oldScript.attributes].forEach(a => newScript.setAttribute(a.name, a.value));
+            newScript.textContent = oldScript.textContent;
+            oldScript.parentNode.replaceChild(newScript, oldScript);
+        });
+        const path = window.location.pathname;
+        document.querySelectorAll('.nav-link').forEach(function(a) {
+            const href = a.getAttribute('href');
+            a.classList.toggle('active', href === path || (href === '/' && path === '/'));
+        });
+    });
+    document.querySelectorAll('.nav-link').forEach(function(a) {
+        a.addEventListener('click', function() {
+            document.querySelectorAll('.nav-link').forEach(n => n.classList.remove('active'));
+            a.classList.add('active');
+        });
+    });
+    (function() {
+        const path = window.location.pathname;
+        document.querySelectorAll('.nav-link').forEach(function(a) {
+            if (a.getAttribute('href') === path) {
+                a.classList.add('active');
+            }
+        });
+    })();
+</script>
+{% block scripts %}{% endblock %}
+<style>
+.sidebar {
+    width: var(--sidebar-w);
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    height: 100vh;
+    z-index: 100;
+    overflow: hidden;
+}
+.nav-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text2);
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 1px;
+    transition: all .12s;
+}
+.nav-link:hover { background: var(--bg4); color: var(--text); }
+.nav-link.active { background: var(--accent); color: #fff; }
+.nav-link-legacy { opacity: .62; }
+.nav-icon { font-size: 15px; width: 18px; text-align: center; flex-shrink: 0; }
+.staging-banner {
+    background: var(--warning);
+    color: #000;
+    font-size: 12px;
+    font-weight: 700;
+    text-align: center;
+    padding: 6px 12px;
+    letter-spacing: .02em;
+}
+</style>
+</body>
+</html>

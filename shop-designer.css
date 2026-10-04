@@ -1,0 +1,152 @@
+.sd-shell { --mb2-radius: 12px; --sd-sticky-top: calc(53px + 16px); display: grid; gap: 12px; }
+.sd-header .sd-intro { margin: 6px 0 0; color: var(--text2); }
+.sd-workbench { display: grid; grid-template-columns: minmax(225px, .72fr) minmax(560px, 2fr) minmax(255px, .82fr); gap: 12px; align-items: start; }
+.sd-context, .sd-inspector-panel { display: grid; gap: 11px; min-width: 0; position: sticky; top: var(--sd-sticky-top); max-height: calc(100vh - var(--sd-sticky-top) - 16px); overflow-y: auto; align-content: start; }
+.sd-context h2, .sd-inspector-panel h2 { margin: 0; font-size: 16px; }
+.sd-main-workspace { display: grid; gap: 12px; min-width: 0; }
+.sd-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.sd-section-heading h2 { margin: 0; font-size: 17px; }
+.sd-filter-label, .sd-field-label { color: var(--text2); font-size: 13px; }
+.sd-field-label { display: block; }
+.sd-filter-label + select { max-width: 260px; }
+.sd-muted { color: var(--text3); font-size: 13px; }
+.sd-context select, .sd-context input { width: 100%; min-width: 0; }
+.sd-publications { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color, rgba(255,255,255,.12)); display: grid; gap: .5rem; }
+.sd-publications h3 { margin: 0; font-size: 1rem; }
+.sd-publications ul { margin: 0; padding-left: 1.1rem; }
+.sd-publications li { margin: .4rem 0; overflow-wrap: anywhere; }
+.sd-publications li button { margin-left: .45rem; }
+.sd-design-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.sd-design-actions #sd-design-save { grid-column: 1 / -1; }
+.sd-dirty { color: var(--warning, #d29922); font-size: 12px; font-weight: 600; }
+.sd-design-status { min-height: 20px; color: var(--text2); font-size: 12px; overflow-wrap: anywhere; }
+.sd-design-status.sd-error { color: var(--danger, #f85149); }
+.sd-current-design { border-top: 1px solid var(--border); padding-top: 9px; overflow-wrap: anywhere; }
+.sd-context-inspector { color: var(--text2); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.sd-context-inspector strong { color: var(--text); }
+.sd-context-inspector .sd-inspector-meta { display: grid; gap: 5px; margin-top: 8px; color: var(--text3); font-size: 12px; }
+.sd-presentation-inspector { min-width: 0; border-top: 1px solid var(--border); padding-top: 12px; }
+.sd-presentation-inspector h3 { margin: 0 0 10px; font-size: 14px; }
+.sd-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 12px; align-items: start; min-width: 0; }
+.sd-section-heading h2 { margin: 0; font-size: 17px; }
+.sd-product-list, .sd-roster-list { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 9px; }
+.sd-product, .sd-roster-item { border: 1px solid transparent; border-radius: 8px; padding: 8px 10px; background: var(--bg3); }
+.sd-product-main, .sd-roster-main { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.sd-product-identity { flex: 1; min-width: 0; }
+.sd-product-name { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.sd-product-id, .sd-product-meta { color: var(--text3); font-size: 12px; }
+.sd-product-meta { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 6px; }
+.sd-type { color: var(--text2); text-transform: capitalize; }
+.sd-category { color: var(--text2); font-size: 12px; }
+.sd-product-actions, .sd-roster-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.sd-product-actions button, .sd-roster-actions button { white-space: nowrap; }
+.sd-roster-index { color: var(--text3); font-size: 12px; min-width: 22px; }
+.sd-roster-name { flex: 1; min-width: 0; }
+.sd-count { color: var(--text2); font-size: 12px; }
+.sd-empty { color: var(--text3); padding: 16px 4px; font-size: 13px; }
+.sd-status { min-height: 20px; color: var(--text2); font-size: 13px; }
+.sd-status.sd-error { color: var(--danger, #f85149); }
+.sd-action { display: grid; gap: 12px; }
+.sd-action h2 { margin: 0; font-size: 17px; }
+.sd-action-add-row, .sd-action-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sd-action-add-row select { min-width: 220px; max-width: 360px; }
+.sd-action-entry { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 10px; align-items: end; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg2); }
+.sd-action-entry-heading { display: grid; grid-template-columns: 24px 1fr; gap: 2px 8px; align-items: center; min-width: 0; }
+.sd-action-index { color: var(--text3); }
+.sd-action-product { overflow-wrap: anywhere; }
+.sd-action-product-id { grid-column: 2; color: var(--text3); font-size: 12px; }
+.sd-action-field-label { display: grid; gap: 5px; color: var(--text2); font-size: 12px; }
+.sd-action-input { min-width: 0; }
+.sd-action-entry-heading, .sd-action-controls { grid-column: 1 / -1; }
+.sd-action-controls { display: flex; gap: 5px; justify-content: flex-end; }
+.sd-action-button { white-space: nowrap; }
+.sd-preview { display: grid; gap: 14px; }
+.sd-preview h2, .sd-preview h3 { margin: 0; font-size: 16px; }
+.sd-preview-details { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.sd-preview-detail { min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg2); }
+.sd-preview-detail h3 { margin-bottom: 10px; }
+.sd-presentation { display: grid; gap: 14px; min-width: 0; }
+.sd-presentation h2 { margin: 0; font-size: 16px; }
+.sd-template-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sd-template-row select, #sd-mode { max-width: 280px; }
+.sd-editor-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-items: start; }
+.sd-embed-rail { min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg2); }
+.sd-embed-rail h3 { margin: 0 0 10px; }
+.sd-presentation [role="tree"] { display: grid; gap: 5px; }
+.sd-presentation [role="treeitem"] { overflow-wrap: anywhere; }
+
+@media (max-width: 1440px) {
+    .sd-workbench { grid-template-columns: minmax(210px, .7fr) minmax(0, 2fr); }
+    .sd-inspector-panel { position: static; max-height: none; overflow: visible; grid-column: 1 / -1; }
+    .sd-inspector-panel .sd-presentation-inspector { border-top: 0; padding-top: 0; }
+}
+@media (max-width: 900px) {
+    .sd-workbench { grid-template-columns: 1fr; }
+    .sd-context, .sd-inspector-panel { position: static; max-height: none; overflow: visible; grid-column: auto; }
+    .sd-grid { grid-template-columns: 1fr; }
+    .sd-action-entry { grid-template-columns: 1fr 1fr; }
+    .sd-action-entry-heading, .sd-action-controls { grid-column: 1 / -1; }
+    .sd-preview-details { grid-template-columns: 1fr; }
+}
+@media (max-width: 520px) {
+    .sd-action-entry { grid-template-columns: 1fr; }
+}
+
+/* ── Approved UI corrections ─────────────────────────────────────────────
+   Spacing: the global .card carries margin-bottom:20px, which stacked on the
+   grid gap (16px) produced ~36px gutters. Scoped to this page only. */
+.sd-shell .card { margin-bottom: 0; padding: 16px 18px; }
+
+/* Product meta as chips (these classes are emitted by shop-designer.js). */
+.sd-product-meta-item, .sd-category { display: inline-flex; align-items: center; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg3); color: var(--text2); font-size: 11px; line-height: 1.5; }
+
+/* Compact row controls: main.css .btn forces a 44px touch target, which is
+   too tall for three buttons inside a ~240px row. Scoped overrides only. */
+.sd-shell .sd-product-actions .btn, .sd-shell .sd-roster-button, .sd-shell .sd-action-button { min-height: 32px; padding: 4px 10px; font-size: 12px; }
+
+/* Product row selection (click a row to inspect it; buttons keep their own action). */
+.sd-product, .sd-roster-item { cursor: pointer; transition: border-color .12s, background-color .12s; }
+.sd-product:hover, .sd-roster-item:hover { background: var(--bg4); }
+.sd-product.sd-selected, .sd-roster-item.sd-selected { border-color: var(--accent); background: var(--bg4); background: color-mix(in srgb, var(--accent) 16%, var(--bg3)); box-shadow: inset 3px 0 0 var(--accent); }
+
+/* Badge for an action entry whose product is no longer in the roster (display only). */
+.sd-action-orphan { grid-column: 2; justify-self: start; padding: 1px 8px; border: 1px solid var(--warning, #d29922); border-radius: 999px; color: var(--warning, #d29922); font-size: 11px; font-weight: 600; }
+
+/* The shared rail disables the only embed's remove control (the model never
+   allows zero embeds). message-builder.css dims it; make it read as unavailable. */
+.sd-shell .mb2-rail-btn:disabled { cursor: not-allowed; border-style: dashed; background: transparent; }
+
+/* ── Polish pass (CSS only; reuses the existing color tokens) ──────────── */
+/* Hierarchy: compact section titles with a small accent marker on workspace cards. */
+.sd-shell .sd-section-heading { padding-bottom: 8px; border-bottom: 1px solid var(--border); margin-bottom: 2px; }
+.sd-shell .sd-section-heading h2 { font-size: 14px; font-weight: 600; letter-spacing: .01em; }
+.sd-main-workspace .sd-section-heading h2::before { content: ""; display: inline-block; width: 3px; height: 14px; margin-right: 8px; border-radius: 2px; background: var(--accent); vertical-align: -2px; }
+.sd-shell .sd-section-heading p { margin: 3px 0 0; font-size: 12px; }
+.sd-shell .sd-publications h3, .sd-shell .sd-embed-rail h3, .sd-shell .sd-presentation-inspector h3, .sd-shell .sd-preview-detail h3 { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text2); }
+.sd-roster-card { border-color: var(--border); border-color: color-mix(in srgb, var(--accent) 30%, var(--border)); }
+.sd-inspector-panel { border-top: 2px solid var(--accent); }
+
+/* Surfaces: nested groups sit one step above the card, borders only where they group. */
+.sd-action-entry, .sd-embed-rail, .sd-preview-detail { background: var(--bg3); }
+
+/* Product meta chips: tighter rhythm; category gets the accent tint. */
+.sd-product-meta { gap: 4px 6px; margin-top: 5px; }
+.sd-product-id { margin-top: 1px; }
+.sd-category { border-color: var(--border); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); color: var(--text); background: var(--bg4); background: color-mix(in srgb, var(--accent) 14%, var(--bg3)); }
+
+/* Inspector as a contextual editor: a titled header block, then a grouped property well. */
+.sd-context-inspector { padding: 10px 12px; border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; background: var(--bg3); }
+.sd-context-inspector strong { display: block; font-size: 14px; }
+.sd-context-inspector .sd-inspector-meta { margin-top: 4px; gap: 3px; }
+.sd-presentation-inspector { border-top: 0; padding-top: 0; }
+#sd-embed-inspector { padding: 10px 12px; border-radius: 8px; background: var(--bg3); }
+
+/* Compact, consistent controls. */
+.sd-shell .btn { min-height: 34px; padding: 6px 14px; font-size: 13px; }
+.sd-shell .form-input { min-height: 34px; padding: 6px 10px; font-size: 13px; }
+.sd-shell .sd-product-actions .btn, .sd-shell .sd-roster-button, .sd-shell .sd-action-button { min-height: 30px; padding: 3px 10px; font-size: 12px; }
+.sd-shell [data-roster-action="remove"], .sd-shell [data-action-operation="remove"] { color: var(--danger, #f85149); border-color: color-mix(in srgb, var(--danger, #f85149) 40%, var(--border)); }
+.sd-shell [data-roster-action="remove"]:hover:not(:disabled), .sd-shell [data-action-operation="remove"]:hover:not(:disabled) { background: color-mix(in srgb, var(--danger, #f85149) 16%, var(--bg4)); }
+.sd-shell .btn:disabled, .sd-shell .btn[disabled] { opacity: .4; cursor: not-allowed; }
+.sd-shell select:disabled, .sd-shell input:disabled { opacity: .55; cursor: not-allowed; }
+.sd-shell :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

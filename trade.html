@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Trade History{% endblock %}
+{% block content %}
+<span data-page-title="Trade History"></span>
+
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0">🤝 Trade History</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input class="form-input" id="trade-user" placeholder="Filter by User ID..." style="max-width:200px;">
+            <button class="btn btn-secondary" onclick="loadTrades()">🔄 Refresh</button>
+        </div>
+    </div>
+    <p class="text-muted text-sm" style="margin-bottom:16px;">
+        Read-only log of completed trades between members. Every trade is a fully atomic
+        two-way swap of {{ currency.coins.name }}, {{ currency.diamonds.name }}, and items — balances and inventory were re-verified
+        live at the moment of execution, not just when the offer was built. Trades can only
+        be created through the <code>/trade</code> Discord command; there is nothing to
+        edit or reverse here.
+    </p>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr><th>ID</th><th>Member A gave</th><th>Member B gave</th><th>Date</th></tr>
+            </thead>
+            <tbody id="trade-tbody">
+                <tr><td colspan="4" class="empty">Loading…</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+function summarizeOffer(offer) {
+    const parts = [];
+    if (offer.coins) parts.push(currencyAmount('coins', offer.coins));
+    if (offer.diamonds) parts.push(currencyAmount('diamonds', offer.diamonds));
+    if (offer.items) {
+        for (const [name, qty] of Object.entries(offer.items)) {
+            parts.push(`🎁 ${name} ×${qty}`);
+        }
+    }
+    return parts.length ? parts.join(', ') : '<span class="text-muted">nothing</span>';
+}
+
+async function loadTrades() {
+    const userId = document.getElementById('trade-user').value.trim();
+    const params = new URLSearchParams();
+    if (userId) params.set('user_id', userId);
+    params.set('limit', 100);
+
+    const res  = await fetch('/api/trade/history?' + params.toString());
+    const data = await res.json();
+    const tbody = document.getElementById('trade-tbody');
+    if (!data.trades || !data.trades.length) {
+        tbody.innerHTML = "<tr><td colspan='4' class='empty'>No trades recorded yet</td></tr>";
+        return;
+    }
+
+    // dark-fixes pass #18 (username resolver rollout, task #4 of 6):
+    // data.user_map is keyed by user_id and t.user_a/t.user_b travel
+    // as STRINGS — the API stringifies them because Discord snowflakes
+    // exceed JS's 2^53 number precision, so a JSON number would arrive
+    // with corrupted trailing digits and this lookup would silently
+    // miss (falling back to the "User <id>" no-avatar cell). userIdentityHtml()
+    // is the JS twin of dashboard/utils/user_identity.py — same
+    // escaping, same markup, just rendered client-side since this
+    // page builds its table from fetch() rather than server templates.
+    //
+    // UPDATED: now rendered full-size (avatar included, compact=false)
+    // to match the rest of the dashboard's "Username (big) / User ID
+    // (small)" pattern (Economy, Members, Ledger, Missions, Tickets),
+    // with the "gave <offer>" line stacked underneath instead of
+    // trailing inline — same layout used elsewhere whenever an
+    // identity cell needs a second line of context.
+    const userMap = data.user_map || {};
+    tbody.innerHTML = data.trades.map(t => {
+        const a = userMap[t.user_a] || {};
+        const b = userMap[t.user_b] || {};
+        const aName = a.display_name || a.username;
+        const bName = b.display_name || b.username;
+        return `
+        <tr>
+            <td><strong>#${t.id}</strong></td>
+            <td>
+                <div style="display:flex;flex-direction:column;gap:6px;">
+                    ${userIdentityHtml(t.user_a, aName, a.avatar_url, false)}
+                    <span class="text-muted text-sm">gave ${summarizeOffer(t.offer_a)}</span>
+                </div>
+            </td>
+            <td>
+                <div style="display:flex;flex-direction:column;gap:6px;">
+                    ${userIdentityHtml(t.user_b, bName, b.avatar_url, false)}
+                    <span class="text-muted text-sm">gave ${summarizeOffer(t.offer_b)}</span>
+                </div>
+            </td>
+            <td class="text-muted">${t.created_at ? t.created_at.slice(0,16) : '—'}</td>
+        </tr>`;
+    }).join('');
+}
+
+document.getElementById('trade-user').addEventListener('keydown', e => {
+    if (e.key === 'Enter') loadTrades();
+});
+
+loadTrades();
+</script>
+{% endblock %}
+{% endblock %}

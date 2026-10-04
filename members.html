@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "macros/user_identity.html" import user_identity %}
+{% block title %}Members{% endblock %}
+{% block content %}
+
+<div class="card">
+    <div class="card-header">
+        <div class="card-title" style="margin:0">👥 Member Manager</div>
+        <input class="form-input" id="search-input"
+               placeholder="Search by User ID..."
+               oninput="filterMembers()"
+               style="max-width:260px;">
+    </div>
+    <div class="table-wrap">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>User ID</th>
+                    <th>Level</th>
+                    <th>XP</th>
+                    <th>{{ currency_icon(currency.coins.emoji) }} {{ currency.coins.name }}</th>
+                    <th>{{ currency_icon(currency.diamonds.emoji) }} {{ currency.diamonds.name }}</th>
+                    {% if is_admin %}<th>Actions</th>{% endif %}
+                </tr>
+            </thead>
+            <tbody id="members-tbody">
+                {% for m in members %}
+                {% set u = user_map.get(m.user_id, {}) %}
+                <tr class="member-row" data-id="{{ m.user_id }}">
+                    <td>{{ user_identity(m.user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
+                    <td><span class="badge badge-accent">Level {{ m.level }}</span></td>
+                    <td>{{ "{:,}".format(m.xp) }} XP</td>
+                    <td>{{ currency_icon(currency.coins.emoji) }} {{ "{:,}".format(m.coins) }}</td>
+                    <td>{{ currency_icon(currency.diamonds.emoji) }} {{ "{:,}".format(m.diamonds) }}</td>
+                    {% if is_admin %}
+                    <td>
+                        <button class="btn btn-sm btn-secondary"
+                            onclick="openEditModal('{{ m.user_id }}', {{ m.xp }}, {{ m.coins }}, {{ m.diamonds }})">
+                            Edit
+                        </button>
+                    </td>
+                    {% endif %}
+                </tr>
+                {% else %}
+                <tr><td colspan="6" class="empty">No members found</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{% block scripts %}
+<script>
+function filterMembers() {
+    const q = document.getElementById('search-input').value.toLowerCase();
+    document.querySelectorAll('.member-row').forEach(row => {
+        row.style.display = row.dataset.id.includes(q) ? '' : 'none';
+    });
+}
+</script>
+{% endblock %}
+{% endblock %}

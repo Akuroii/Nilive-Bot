@@ -1,18 +1,26 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import aiosqlite
-from database import DB_PATH
-
-LEVEL_OWNER     = "owner"
-LEVEL_ADMIN     = "admin"
-LEVEL_MODERATOR = "moderator"
-
-LEVEL_RANK = {
-    LEVEL_OWNER:     3,
-    LEVEL_ADMIN:     2,
-    LEVEL_MODERATOR: 1,
-}
+from functools import wraps
+from flask import session, redirect, url_for, abort, jsonify
+from database import DB_PATH, OWNER_DISCORD_ID
+from dashboard.utils.async_utils import run_async
+from utils.permissions import (
+    LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
+    LEVEL_RANK, user_can_access_page, get_required_level,
+)
 
 
-async def get_user_permission_level(guild_id: int, user_id: int) -> str | None:
+async def _get_permission_level(guild_id: int, user_id: int) -> str | None:
+    # Guild-blind developer bypass — checked before touching
+    # dashboard_users at all, so the trusted developer never needs a
+    # row (and therefore never appears in Current Access) in any
+    # guild. See is_trusted_super_admin() below for the trust set.
+    if is_trusted_super_admin(user_id):
+        return LEVEL_OWNER
+
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT permission_level FROM dashboard_users
@@ -22,149 +30,200 @@ async def get_user_permission_level(guild_id: int, user_id: int) -> str | None:
     return row[0] if row else None
 
 
-async def is_owner(guild_id: int, user_id: int) -> bool:
-    level = await get_user_permission_level(guild_id, user_id)
-    return level == LEVEL_OWNER
+async def _log_audit(guild_id: int, user_id: int, display_name: str,
+                     action: str, page: str, details: str = None,
+                     target_id: int = None, target_name: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO audit_log
+            (guild_id, user_id, user_display_name, target_id, target_name,
+             action, details, page, ip_address)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (guild_id, user_id, display_name, target_id, target_name,
+              action, details, page, None))
+        await db.commit()
 
 
-async def is_admin_or_above(guild_id: int, user_id: int) -> bool:
-    level = await get_user_permission_level(guild_id, user_id)
-    return LEVEL_RANK.get(level, 0) >= LEVEL_RANK[LEVEL_ADMIN]
+def log_action(guild_id: int, action: str, page: str,
+               details: str = None, target_id: int = None,
+               target_name: str = None):
+    user         = session.get("user", {})
+    user_id      = int(user.get("id", 0))
+    display_name = user.get("username", "Unknown")
+    run_async(_log_audit(guild_id, user_id, display_name,
+                         action, page, details, target_id, target_name))
 
 
-async def is_moderator_or_above(guild_id: int, user_id: int) -> bool:
-    level = await get_user_permission_level(guild_id, user_id)
-    return LEVEL_RANK.get(level, 0) >= LEVEL_RANK[LEVEL_MODERATOR]
+def get_session_guild_id() -> int | None:
+    return session.get("guild_id")
 
 
-def check_hierarchy(actor, target) -> tuple[bool, str]:
-    if target.guild.owner_id == actor.id:
-        return True, "Actor is guild owner"
-    if actor.top_role.position <= target.top_role.position:
-        return False, (
-            f"Your highest role ({actor.top_role.name}) must be above "
-            f"target's highest role ({target.top_role.name})"
-        )
-    return True, "OK"
+def set_session_guild(guild_id: int):
+    session["guild_id"] = guild_id
 
 
-async def can_moderate(actor, target, guild_id: int) -> tuple[bool, str]:
-    if await is_owner(guild_id, actor.id):
-        return True, "Dashboard owner bypass"
-    if actor.guild.owner_id == actor.id:
-        return True, "Guild owner bypass"
-    return check_hierarchy(actor, target)
+def require_page(page_name: str):
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            from dashboard.auth import is_session_valid, refresh_session_if_needed
+            if not is_session_valid():
+                return redirect(url_for("login"))
+            refresh_session_if_needed()
+            user     = session.get("user", {})
+            user_id  = int(user.get("id", 0))
+            guild_id = get_session_guild_id()
+            if not guild_id:
+                return redirect(url_for("server_select"))
+            user_level = run_async(_get_permission_level(guild_id, user_id))
+            if not user_level:
+                abort(403)
+            if not user_can_access_page(user_level, page_name):
+                abort(403)
+            session["user_level"] = user_level
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
 
 
-def check_bot_role_position(guild, role) -> tuple[bool, str]:
-    bot_member = guild.me
-    if bot_member is None:
-        return False, "⚠️ Could not find Nero in this server"
-    if role.position >= bot_member.top_role.position:
-        return False, (
-            f"⚠️ Nero's role must be above @{role.name} to assign it. "
-            f"Go to Server Settings > Roles and drag Nero above @{role.name}."
-        )
-    return True, "OK"
+def require_api_permission(min_level: str):
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            from dashboard.auth import is_session_valid, refresh_session_if_needed
+            if not is_session_valid():
+                return jsonify({"success": False, "error": "Not authenticated"}), 401
+            refresh_session_if_needed()
+            user     = session.get("user", {})
+            user_id  = int(user.get("id", 0))
+            guild_id = get_session_guild_id()
+            if not guild_id:
+                return jsonify({"success": False, "error": "No server selected"}), 400
+            user_level = run_async(_get_permission_level(guild_id, user_id))
+            if not user_level:
+                return jsonify({"success": False, "error": "Forbidden"}), 403
+            if LEVEL_RANK.get(user_level, 0) < LEVEL_RANK.get(min_level, 0):
+                return jsonify({
+                    "success": False,
+                    "error": f"This action requires {min_level} access or higher.",
+                }), 403
+            session["user_level"] = user_level
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
 
 
-PAGE_PERMISSIONS = {
-    "overview":           LEVEL_MODERATOR,
-    "members_view":       LEVEL_MODERATOR,
-    "members_edit":       LEVEL_ADMIN,
-    "members_delete":     LEVEL_OWNER,
-    "audit_log":          LEVEL_ADMIN,
-
-    "moderation_view":    LEVEL_MODERATOR,
-    "moderation_action":  LEVEL_MODERATOR,
-    "moderation_edit":    LEVEL_ADMIN,
-    "moderation_delete":  LEVEL_OWNER,
-    "tickets":            LEVEL_MODERATOR,
-
-    # Embed Builder v2: content + up to 10 embeds + real attachments,
-    # sent LIVE to any channel the bot can see via a direct Discord API
-    # call — this is meaningfully more powerful than the old "build one
-    # embed, save it as a template" tool (LEVEL_ADMIN), so it's gated
-    # at LEVEL_OWNER now, matching every other route in
-    # dashboard/api/embedbuilder.py.
-    "embedbuilder":       LEVEL_OWNER,
-
-    # Shop Publisher (Phase 1 preview / Phase 2 publish): reads
-    # embed_templates + shop_items and previews the resolved product
-    # presentation; Phase 2 sends live Discord messages from the same
-    # surface. Gated at LEVEL_OWNER like the Embed Builder it consumes
-    # and the send path it will grow, so it can never widen access to
-    # either surface.
-    "shoppublisher":      LEVEL_OWNER,
-
-    "reactionroles":      LEVEL_ADMIN,
-    "triggers":           LEVEL_ADMIN,
-    "customcommands":     LEVEL_ADMIN,
-
-    "mvp":                LEVEL_ADMIN,
-    "leveling":           LEVEL_ADMIN,
-    "economy":            LEVEL_ADMIN,
-    "shop":                LEVEL_ADMIN,
-    "events":             LEVEL_ADMIN,
-    "leaderboards":       LEVEL_MODERATOR,
-
-    "ledger":             LEVEL_ADMIN,
-    "inventory_view":     LEVEL_ADMIN,
-
-    # Event Stack Builder dashboard page (dark-fixes pass #13). Same
-    # tier as shop/events — tier/config CRUD is an admin action,
-    # nothing here needs owner-only.
-    "minigames":          LEVEL_ADMIN,
-
-    # Missions (Phase 6, built ahead of the Trade-verification gate —
-    # see utils/mission_engine.py header). Same tier as minigames:
-    # mission definition CRUD is an admin action.
-    "missions":           LEVEL_ADMIN,
-
-    # Trade history page (dark-fixes pass #17). Read-only, same tier
-    # as ledger/inventory — viewing member trade history is an admin-
-    # level concern, not owner-only.
-    "trade":              LEVEL_ADMIN,
-
-    "general_settings":   LEVEL_OWNER,
-    "welcome":            LEVEL_ADMIN,
-    "boost":              LEVEL_ADMIN,
-    "botprofile":         LEVEL_ADMIN,
-    "announcements":      LEVEL_ADMIN,
-
-    # CREATOR pass: replaces the old read-only "Announcements" page
-    # with a real CRUD hub for YouTube/Twitch. Same tier as the page
-    # it replaces — adding/removing a watched channel/streamer is an
-    # admin action, not owner-only. "announcements" key kept above so
-    # the old /config/announcements URL (now just a redirect to
-    # /creator) still resolves a permission level rather than 403ing
-    # on a missing dict key.
-    "creator":            LEVEL_ADMIN,
-
-    "commands":           LEVEL_OWNER,
-    "dashboard_access":   LEVEL_OWNER,
-
-    "reports":            LEVEL_MODERATOR,
-    "health":             LEVEL_OWNER,
-
-    # Server Tags — Tag-Loyalty Missions + Cross-Server Join Reward.
-    # Same tier as minigames/missions: reward-tier CRUD is an admin
-    # action, not owner-only.
-    "tagmissions":        LEVEL_ADMIN,
-    "tagpartners":        LEVEL_ADMIN,
-
-    # Backups page. Deliberately still LEVEL_OWNER here (the page-load
-    # gate) — the bot-wide, cross-guild check lives one level deeper,
-    # in dashboard.permissions.require_bot_owner / require_bot_owner_api,
-    # which every /backups route/API also stacks on top of this.
-    "backups":            LEVEL_OWNER,
-}
+def get_current_user_context() -> dict:
+    user       = session.get("user", {})
+    user_id    = int(user.get("id", 0))
+    guild_id   = get_session_guild_id()
+    guild_name = session.get("guild_name", "")
+    user_level = session.get("user_level")
+    if not user_level and guild_id:
+        user_level = run_async(_get_permission_level(guild_id, user_id))
+    return {
+        "user":         user,
+        "user_level":   user_level or "",
+        "guild_id":     guild_id,
+        "guild_name":   guild_name,
+        "is_owner":     user_level == LEVEL_OWNER,
+        "is_admin":     LEVEL_RANK.get(user_level, 0) >= LEVEL_RANK[LEVEL_ADMIN],
+        "is_moderator": LEVEL_RANK.get(user_level, 0) >= LEVEL_RANK[LEVEL_MODERATOR],
+    }
 
 
-def get_required_level(page: str) -> str:
-    return PAGE_PERMISSIONS.get(page, LEVEL_OWNER)
+def _trusted_backup_user_ids() -> set[int]:
+    """
+    backup_log/BACKUP_DIR are bot-wide — one backup snapshots the
+    ENTIRE database, every guild at once — but require_page("backups")
+    / require_api_permission(LEVEL_OWNER) alone only check LEVEL_OWNER
+    *within whichever guild happens to be selected in the current
+    session*. A LEVEL_OWNER in ANY one guild could otherwise read AND
+    trigger backups covering every OTHER guild's data too.
+
+    This is the fix: a check that ignores guild_id entirely.
+    OWNER_DISCORD_ID (database.py — the real bot owner, already used
+    for the Discord-side /backup_now and /backup_list owner-only
+    commands) is always trusted. BACKUP_TRUSTED_USER_IDS (env var,
+    comma-separated Discord IDs) can add more without a code change.
+    Deliberately scoped to backups only — every other LEVEL_OWNER page
+    (health, commands, general_settings, dashboard_access) keeps its
+    existing guild-scoped-only check, unchanged. The same latent gap
+    still applies to those pages; out of scope here.
+    """
+    ids = {OWNER_DISCORD_ID}
+    extra = os.getenv("BACKUP_TRUSTED_USER_IDS", "")
+    for part in extra.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return ids
 
 
-def user_can_access_page(user_level: str, page: str) -> bool:
-    required = get_required_level(page)
-    return LEVEL_RANK.get(user_level, 0) >= LEVEL_RANK.get(required, 3)
+def require_bot_owner(f):
+    """Page-route variant — stacks on top of require_page("backups"), which
+    already handled login/guild-selection/guild-scoped-LEVEL_OWNER before
+    this ever runs. Renders the existing 403 page on failure, same as
+    require_page itself."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        user = session.get("user", {})
+        try:
+            user_id = int(user.get("id", 0))
+        except (TypeError, ValueError):
+            user_id = 0
+        if user_id not in _trusted_backup_user_ids():
+            abort(403)
+        return f(*args, **kwargs)
+    return decorated
+
+
+def require_bot_owner_api(f):
+    """API-route variant — stacks on top of require_api_permission(LEVEL_OWNER).
+    Returns JSON, same shape as require_api_permission's own 403s."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        user = session.get("user", {})
+        try:
+            user_id = int(user.get("id", 0))
+        except (TypeError, ValueError):
+            user_id = 0
+        if user_id not in _trusted_backup_user_ids():
+            return jsonify({
+                "success": False,
+                "error": "This action is restricted to the bot owner.",
+            }), 403
+        return f(*args, **kwargs)
+    return decorated
+
+
+def _trusted_super_admin_user_ids() -> set[int]:
+    """
+    Guild-blind trust set for the developer bypass — grants full
+    LEVEL_OWNER access in every guild with no dashboard_users row
+    anywhere, so the developer never shows up in Current Access.
+    Same shape as _trusted_backup_user_ids() above, kept as its own
+    function since backup-trust and full-dashboard-trust are
+    different privilege scopes that won't always be the same people.
+    OWNER_DISCORD_ID (database.py — Dark's real Discord ID) is always
+    trusted. SUPER_ADMIN_USER_IDS (env var, comma-separated) can add
+    more without a code change.
+    """
+    ids = {OWNER_DISCORD_ID}
+    extra = os.getenv("SUPER_ADMIN_USER_IDS", "")
+    for part in extra.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return ids
+
+
+def is_trusted_super_admin(user_id: int) -> bool:
+    """
+    Public check for callers outside this module (e.g.
+    dashboard/app.py's select_guild(), which needs to know "is this
+    the developer bypass account" before it has a guild_id to check
+    permissions against yet). _get_permission_level() above is the
+    other consumer of this trust set.
+    """
+    return user_id in _trusted_super_admin_user_ids()
