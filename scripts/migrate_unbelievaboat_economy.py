@@ -246,8 +246,9 @@ async def build_plan(db, records: list[tuple[int, int, int]]) -> dict:
         (TARGET_GUILD_ID,))).fetchone()
     guild_rows, guild_total = int(row[0]), int(row[1])
     if guild_rows == 0:
-        blockers.append("target guild has NO economy rows in this database "
-                        "(wrong database / wrong environment?)")
+        warnings.append("target guild has NO existing economy rows in this database "
+                        "(valid for a first migration: every user becomes a CREATE; "
+                        "check Database/Environment above if unexpected)")
     anomalies = await (await db.execute(
         "SELECT COUNT(*) FROM economy WHERE guild_id = ? "
         "AND (balance IS NULL OR typeof(balance) != 'integer' OR balance < 0)",
