@@ -158,16 +158,22 @@
         });
         button.addEventListener('click', function () {
             if (publishInFlight) return;
-            var designId = select.value, channelId = Number(channel.value);
+            // Snowflake safety: Discord channel IDs exceed JS's safe-integer
+            // range, so the exact digit string is validated and sent as-is.
+            var designId = select.value, channelRaw = (channel.value || '').trim();
             if (publicationListState !== 'loaded' || publicationListDesign !== designId) {
                 syncPublishButton();
                 status.textContent = 'Wait for this Design’s Publication list to load successfully before publishing.';
                 return;
             }
-            if (!designId || !Number.isSafeInteger(channelId) || channelId <= 0) { status.textContent = 'Select a saved Design and enter a valid channel ID.'; return; }
+            if (!designId || !/^\d{17,20}$/.test(channelRaw)) { status.textContent = 'Select a saved Design and enter a valid channel ID.'; return; }
             var requestGeneration = listGeneration;
-            var contextKey = publishContextKey(designId, channelId);
-            if ((uncertainPublishContexts[contextKey] || pendingChannels[String(channelId)]) &&
+            var contextKey = publishContextKey(designId, channelRaw);
+            // The list API serializes channel_id as a JSON number, which JS
+            // rounds past 2^53, so match the exact string and that rounded
+            // numeric form: the pending-duplication guard must still fire.
+            var pendingKey = pendingChannels[channelRaw] ? channelRaw : String(Number(channelRaw));
+            if ((uncertainPublishContexts[contextKey] || pendingChannels[pendingKey]) &&
                     !window.confirm('A Publication for this Design and channel is pending or has an uncertain outcome. Sending again can create another message. Deliberately create a separate Publication anyway?')) return;
             publishInFlight = true;
             syncPublishButton();
@@ -175,7 +181,7 @@
             function publish(token) {
                 if (!isCurrentContext(designId, requestGeneration)) return Promise.resolve();
                 return request('/api/shop-publisher/publications/publish', 'POST', {
-                    design_id: Number(designId), channel_id: channelId, warning_token: token
+                    design_id: Number(designId), channel_id: channelRaw, warning_token: token
                 }).then(function (result) {
                     if (result.uncertain) uncertainPublishContexts[contextKey] = true;
                     if (result.publication && result.publication.status === 'published') {
