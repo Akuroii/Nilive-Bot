@@ -63,8 +63,17 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.lookupUser = lookupUser;
+
 function lookupUser() {
     const uid = document.getElementById('inv-user').value.trim();
     if (!uid) { showToast('Enter a User ID', 'warning'); return; }
@@ -73,6 +82,7 @@ function lookupUser() {
 document.getElementById('inv-user').addEventListener('keydown', e => {
     if (e.key === 'Enter') lookupUser();
 });
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

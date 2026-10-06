@@ -152,8 +152,54 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.switchTab = switchTab;
+__neroGlobal.esc = esc;
+__neroGlobal.mgSave = mgSave;
+__neroGlobal.addRewardRow = addRewardRow;
+__neroGlobal.mgRewardRowChanged = mgRewardRowChanged;
+__neroGlobal.readRewardRows = readRewardRows;
+__neroGlobal.renderGlobalPresets = renderGlobalPresets;
+__neroGlobal.loadMinigamesConfig = loadMinigamesConfig;
+__neroGlobal.saveMinigamesConfig = saveMinigamesConfig;
+__neroGlobal.saveGlobalPresets = saveGlobalPresets;
+__neroGlobal.loadCatsTab = loadCatsTab;
+__neroGlobal.refreshCatsTab = refreshCatsTab;
+__neroGlobal.renderBreadcrumbs = renderBreadcrumbs;
+__neroGlobal.selectCategory = selectCategory;
+__neroGlobal.renderTree = renderTree;
+__neroGlobal.toggleNode = toggleNode;
+__neroGlobal.openBuilderForCategory = openBuilderForCategory;
+__neroGlobal.populateParentSelect = populateParentSelect;
+__neroGlobal.toggleCategoryForm = toggleCategoryForm;
+__neroGlobal.editCategory = editCategory;
+__neroGlobal.saveCategoryForm = saveCategoryForm;
+__neroGlobal.toggleCategoryField = toggleCategoryField;
+__neroGlobal.deleteCategory = deleteCategory;
+__neroGlobal.toggleTemplateField = toggleTemplateField;
+__neroGlobal.duplicateTemplate = duplicateTemplate;
+__neroGlobal.deleteTemplate = deleteTemplate;
+__neroGlobal.queueSpawn = queueSpawn;
+__neroGlobal.testSpawn = testSpawn;
+__neroGlobal.manualSpawn = manualSpawn;
+__neroGlobal.startSpawnPolling = startSpawnPolling;
+__neroGlobal.stopSpawnPolling = stopSpawnPolling;
+__neroGlobal.renderHistoryFilter = renderHistoryFilter;
+__neroGlobal.fmtWhen = fmtWhen;
+__neroGlobal.winnerNames = winnerNames;
+__neroGlobal.rewardsSummary = rewardsSummary;
+__neroGlobal.loadHistory = loadHistory;
+__neroGlobal.historyDetailHtml = historyDetailHtml;
+__neroGlobal.toggleHistDetail = toggleHistDetail;
+
 'use strict';
 const MG_TYPES = {
     quick_click: { icon: '⚡', name: 'Quick Click' },
@@ -169,10 +215,20 @@ const MG_TYPES = {
 // The TEXT variant, not currencyLabel(): these labels land in the reward
 // type <select> below, and an <option> may only contain text — a custom
 // currency icon has to degrade to its emoji name there.
-const REWARD_TYPE_LABELS = {
-    xp: '⭐ XP', coins: currencyLabelText('coins'), diamonds: currencyLabelText('diamonds'),
-    item: '📦 Item', role: '🏷️ Permanent Role', temp_role: '⏳ Temporary Role',
-};
+// Built on first use, not at load: currencyLabelText() lives in dashboard.js,
+// which is loaded after this page script, and calling it here would throw and
+// abort the rest of the script (mgState, switchTab, loadMinigamesConfig).
+let __rewardTypeLabels = null;
+function rewardTypeLabels() {
+    if (!__rewardTypeLabels) {
+        const REWARD_TYPE_LABELS = {
+            xp: '⭐ XP', coins: currencyLabelText('coins'), diamonds: currencyLabelText('diamonds'),
+            item: '📦 Item', role: '🏷️ Permanent Role', temp_role: '⏳ Temporary Role',
+        };
+        __rewardTypeLabels = REWARD_TYPE_LABELS;
+    }
+    return __rewardTypeLabels;
+}
 const MG_STATUS_LABELS = {
     completed: 'Completed', no_winner: 'No winner', canceled: 'Canceled',
     aborted: 'Aborted', aborted_restart: 'Aborted (restart)', running: 'Running',
@@ -246,7 +302,7 @@ function addRewardRow(containerId, row, showDuration) {
     div.className = 'mb-reward-row';
     div.innerHTML = `
         <select class="form-input mg-rw-type" onchange="mgRewardRowChanged(this)">
-            ${Object.entries(REWARD_TYPE_LABELS).map(([k, v]) =>
+            ${Object.entries(rewardTypeLabels()).map(([k, v]) =>
                 `<option value="${k}" ${row && row.reward_type === k ? 'selected' : ''}>${v}</option>`).join('')}
         </select>
         <input class="form-input mg-rw-value" placeholder="Amount, item name, or role ID"
@@ -452,7 +508,7 @@ function renderTree() {
                 ${presets.length ? `
                     <div class="text-sm text-muted" style="margin-bottom:6px;">Default reward preset for new games:</div>
                     <div style="margin-bottom:8px;font-size:13px;">${presets.map(p =>
-                        `<span class="badge" style="margin-right:6px;">${REWARD_TYPE_LABELS[p.reward_type] || esc(p.reward_type)}: ${esc(p.reward_value)} (w${p.weight || 1})</span>`).join('')}</div>` : ''}
+                        `<span class="badge" style="margin-right:6px;">${rewardTypeLabels()[p.reward_type] || esc(p.reward_type)}: ${esc(p.reward_value)} (w${p.weight || 1})</span>`).join('')}</div>` : ''}
                 ${templatesFor(node)}
             </div>
             ${node.children && node.children.length ?
@@ -744,7 +800,7 @@ function historyDetailHtml(r) {
         parts.push('<b>Winners:</b>');
         parts.push(ws.map(w => {
             const rw = (w.rewards || []).map(x =>
-                `${REWARD_TYPE_LABELS[x.reward_type] || esc(x.reward_type)}: ${esc(x.reward_value)}`).join(', ');
+                `${rewardTypeLabels()[x.reward_type] || esc(x.reward_type)}: ${esc(x.reward_value)}`).join(', ');
             return `<div style="margin:2px 0;">🏆 ${esc(w.display_name || w.name || String(w.id))} ${rw ? '— ' + rw : ''}</div>`;
         }).join(''));
     } else if (r.result_text) {
@@ -763,6 +819,7 @@ function toggleHistDetail(i) {
 // ═══════════════════════════════════════════════════════════════════
 loadMinigamesConfig();
 loadCatsTab();
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

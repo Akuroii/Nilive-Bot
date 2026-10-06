@@ -40,6 +40,11 @@ async def perform_leaderboard_reset(guild_id: int, period: str):
     task in the project (cogs/mvp.py's cycle task, cogs/shop.py's
     temp_role_cleanup).
 
+    Scheduling note: the reset_config write below only ever UPDATES an
+    existing row (never inserts one). A manual /resetleaderboard must not
+    arm the scheduled auto-reset for a guild that never configured it —
+    see the comment on the statement itself.
+
     CRITICAL FIX (dark-fixes pass): this used to run as four
     separate, unguarded statements — a SELECT, up to N history
     INSERTs, an UPDATE zeroing every member, and an upsert into
@@ -79,13 +84,19 @@ async def perform_leaderboard_reset(guild_id: int, period: str):
                 "UPDATE levels SET xp = 0, level = 0 WHERE guild_id = ?",
                 (guild_id,))
 
+            # Only an EXISTING reset-config row is updated. This used to be an
+            # upsert that wrote enabled=1, so a manual /resetleaderboard silently
+            # enrolled a guild that had never configured a scheduled reset into
+            # the 7/30-day auto-reset loop (leaderboard_reset_task picks up every
+            # row with enabled=1). A guild that did configure one keeps its
+            # period/last_reset bookkeeping exactly as before; a guild that did
+            # not is left unconfigured (get_reset_config already reports
+            # enabled=0 for a missing row).
             await db.execute("""
-                INSERT INTO leveling_reset_config (guild_id, enabled, period, last_reset)
-                VALUES (?, 1, ?, ?)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    period = excluded.period,
-                    last_reset = excluded.last_reset
-            """, (guild_id, period, now))
+                UPDATE leveling_reset_config
+                SET period = ?, last_reset = ?
+                WHERE guild_id = ?
+            """, (period, now, guild_id))
 
             await db.commit()
         except Exception:
@@ -98,10 +109,83 @@ def _compact_qty(amount: int) -> str:
     return f"{int(amount)}x"
 
 
+# ─── Claim All button state (presentation only) ─────────────────────────
+# "Claimable" here is exactly the set the /level card already reports as
+# "Ready to claim": a claim row that is pending, or failed and therefore
+# retryable by the next Claim All. Nothing about eligibility, reservation or
+# delivery changes — the claim engine (utils/level_claims.py) remains the only
+# thing that decides what may actually be claimed; this just decides whether
+# the button is drawn green+enabled or gray+disabled. Rows that are fulfilled
+# (terminal) or mid-lease ('processing') are not offered.
+_CLAIMABLE_STATUSES = ("pending", "failed")
+
+
+def _has_claimable(claims) -> bool:
+    return any((c or {}).get("status") in _CLAIMABLE_STATUSES
+               for c in (claims or []))
+
+
+def _claim_age(value) -> str:
+    """'3d ago' for a claim timestamp; '' when it is missing or unparsable."""
+    if not value:
+        return ""
+    try:
+        then = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return ""
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    seconds = (datetime.now(timezone.utc) - then).total_seconds()
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
+
+
+def _claim_reward_text(guild, claim, currency) -> str:
+    """One claim rendered for the Stats view — the frozen payload, not config."""
+    payload = claim["payload"] or {}
+    track, level = claim["track"], claim["reward_level"]
+    if track == "currency":
+        code = payload.get("currency")
+        label = currency["coins" if code == "balance" else "diamonds"]["name"]
+        return f"L{level} · {_compact_qty(payload.get('amount', 0))} {label}"
+    if track == "shop":
+        return f"L{level} · {_compact_qty(payload.get('quantity', 0))} {payload.get('name', 'item')}"
+    if track == "boost":
+        return (f"L{level} · {float(payload.get('multiplier', 1)):g}x XP · "
+                f"{int(payload.get('duration_hours', 0))}h")
+    role = guild.get_role(int(payload.get("role_id", 0) or 0)) if guild else None
+    return f"L{level} · {role.mention if role else 'role reward'}"
+
+
+def claim_result_footer(result: dict) -> str:
+    """The Claim All footer, including any Level role that was reconciled.
+
+    A restored role is not a fulfilled claim (nothing was paid, the claim was
+    already fulfilled) and not a failure, so it would otherwise be invisible in
+    the footer even though the member just received a role.
+    """
+    got = len(result.get("fulfilled") or [])
+    missed = len(result.get("failed") or [])
+    text = f"Claimed {got}. Retryable failures: {missed}."
+    reconciled = result.get("reconciled") or {}
+    restored = len(reconciled.get("restored") or [])
+    unrecoverable = len(reconciled.get("failed") or [])
+    if restored:
+        text += f" Level role restored: {restored}."
+    if unrecoverable:
+        text += f" Level role{'s' if unrecoverable > 1 else ''} that could not be restored: {unrecoverable}."
+    return text
+
+
 async def _level_embed(guild, member, page: str) -> discord.Embed:
     from utils.currency import get_currency_config
     from utils.level_claims import (
-        current_level_definitions, list_claims, progress_level,
+        current_level_definitions, list_claims,
     )
     from utils.xp_calculator import xp_progress
 
@@ -115,14 +199,46 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
     claims = await list_claims(guild.id, member.id)
     by_key = {(c["reward_level"], c["track"], c["reward_ref"]): c for c in claims}
     if page == "stats":
-        pending = sum(1 for c in claims if c["status"] in ("pending", "failed"))
+        # Reward/claim history, not a second copy of the progression numbers
+        # (Level / Total XP / Progress already fill the Level page). Everything
+        # below comes from the existing level_reward_claims rows.
+        currency = await get_currency_config(guild.id)
+        by_status = {}
+        for claim in claims:
+            by_status.setdefault(claim["status"], []).append(claim)
+        fulfilled = by_status.get("fulfilled", [])
+        waiting = by_status.get("pending", []) + by_status.get("failed", [])
+        failed = by_status.get("failed", [])
+        newest = max((c for c in fulfilled if c.get("fulfilled_at")),
+                     key=lambda c: c["fulfilled_at"], default=None)
+        oldest = min((c for c in waiting if c.get("created_at")),
+                     key=lambda c: c["created_at"], default=None)
         embed = discord.Embed(title="Level stats", color=0x7c5cbf)
-        embed.add_field(name="Level", value=str(progress_level(xp)))
-        embed.add_field(name="Total XP", value=f"{xp:,}")
-        embed.add_field(name="Progress", value=f"{current:,}/{needed:,}")
-        embed.add_field(name="Ready to claim", value=str(pending))
-        embed.add_field(name="Fulfilled", value=str(
-            sum(1 for c in claims if c["status"] == "fulfilled")))
+        claimed_txt = f"{len(fulfilled)} of {len(claims)} crossed rewards"
+        if newest:
+            claimed_txt += (f"\nLatest: {_claim_reward_text(guild, newest, currency)} · "
+                            f"{_claim_age(newest['fulfilled_at'])}")
+        embed.add_field(name="Claimed", value=claimed_txt, inline=False)
+        waiting_txt = (f"{len(by_status.get('pending', []))} pending · "
+                       f"{len(failed)} retryable failure(s)")
+        if oldest:
+            waiting_txt += (f"\nOldest: {_claim_reward_text(guild, oldest, currency)} · "
+                            f"{_claim_age(oldest['created_at'])}")
+        elif not waiting:
+            waiting_txt = "Nothing waiting — every crossed reward is delivered."
+        embed.add_field(name="Waiting", value=waiting_txt, inline=False)
+        if failed:
+            first = failed[0]
+            reason = (first.get("last_error") or "no error recorded").strip()
+            embed.add_field(name="Last failure",
+                            value=f"{_claim_reward_text(guild, first, currency)} — {reason[:200]}",
+                            inline=False)
+        next_up = max(waiting, key=lambda c: c["reward_level"], default=None)
+        embed.add_field(
+            name="Highest unclaimed",
+            value=(f"{_claim_reward_text(guild, next_up, currency)} ({next_up['status']})"
+                   if next_up else "nothing crossed yet"),
+            inline=False)
         return embed
 
     embed = discord.Embed(
@@ -181,17 +297,33 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
 
 
 class LevelRewardView(discord.ui.View):
-    def __init__(self, bot, guild_id: int, user_id: int):
+    def __init__(self, bot, guild_id: int, user_id: int, *,
+                 claimable: bool = False):
         super().__init__(timeout=180)
         self.bot = bot
         self.guild_id = guild_id
         self.user_id = user_id
+        self.set_claimable(claimable)
+
+    def set_claimable(self, claimable: bool) -> None:
+        """Green+enabled when something can be claimed, gray+disabled when not.
+
+        Self-contained UI state: it changes the button's colour and
+        `disabled` flag (both re-serialized on every edit_message), never the
+        claim engine, the schema, or what Claim All attempts.
+        """
+        self.claim_all.style = (discord.ButtonStyle.success if claimable
+                                else discord.ButtonStyle.secondary)
+        self.claim_all.disabled = not claimable
 
     async def _refresh(self, interaction, page: str):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "This level card belongs to someone else.", ephemeral=True)
             return
+        from utils.level_claims import list_claims
+        claims = await list_claims(self.guild_id, self.user_id)
+        self.set_claimable(_has_claimable(claims))
         embed = await _level_embed(interaction.guild, interaction.user, page)
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -211,14 +343,25 @@ class LevelRewardView(discord.ui.View):
             return
         # Role delivery is outside SQLite and can exceed the 3s ack window.
         await interaction.response.defer()
-        from utils.level_claims import claim_available
+        from utils.level_claims import claim_available, list_claims
         result = await claim_available(
             self.guild_id, self.user_id, member=interaction.user, bot=self.bot)
+        self.set_claimable(_has_claimable(
+            await list_claims(self.guild_id, self.user_id)))
         embed = await _level_embed(interaction.guild, interaction.user, "level")
-        got = len(result["fulfilled"])
-        missed = len(result["failed"])
-        embed.set_footer(text=f"Claimed {got}. Retryable failures: {missed}.")
+        embed.set_footer(text=claim_result_footer(result))
         await interaction.edit_original_response(embed=embed, view=self)
+
+
+# The approved anti-spam warning, sent as a REPLY to the offending message and
+# as an embed, at most once per spam window per member (see _spam_warning_due):
+# the XP penalty lands on every spamming message, the visible warning does not.
+# The custom emoji is kept in Discord's `<:name:id>` form exactly as approved so
+# it renders wherever the bot has that emoji.
+SPAM_WARNING_TEXT = (
+    "> مع كل احتراماتي لا تسبام <:brick:1556981905218478162>\n"
+    "> -# من لفلك نيهاهاها   XP تم خصم (≖⩊≖)"
+)
 
 
 class Leveling(commands.Cog):
@@ -226,6 +369,10 @@ class Leveling(commands.Cog):
         self.bot = bot
         self._xp_cooldowns: dict[tuple, float] = {}
         self._spam_tracker: dict[tuple, list[float]] = {}
+        # Last time each member was warned about spamming (in-memory, like
+        # _spam_tracker): the penalty applies to every spamming message, the
+        # warning at most once per spam window.
+        self._spam_warn_times: dict[tuple, float] = {}
         # Phase 3 / E1: voice XP is now driven by
         # cogs/activity_engine.py's activity_voice_tick event (see
         # on_activity_voice_tick below) instead of this cog running
@@ -249,6 +396,48 @@ class Leveling(commands.Cog):
         times.append(now)
         self._spam_tracker[key] = times
         return len(times) >= threshold
+
+    # ─── SPAM WARNING ────────────────────────────────────
+    # Frequency-based punishment with a single, playful notification: at most
+    # one warning per member per spam window, so a burst is answered once.
+    def _spam_warning_due(self, guild_id: int, user_id: int,
+                          window_seconds: int) -> bool:
+        key = (guild_id, user_id)
+        now = time.time()
+        last = self._spam_warn_times.get(key)
+        if last is not None and now - last < max(1, window_seconds):
+            return False
+        self._spam_warn_times[key] = now
+        return True
+
+    async def _warn_spam(self, message, window_seconds: int,
+                         deducted: int) -> None:
+        """Reply to the offending message with the approved anti-spam embed.
+
+        A *reply* to that message (not a standalone channel message) so the
+        member sees which message the penalty belongs to, and at most once per
+        spam window per member — the penalty is applied to every spamming
+        message, the visible warning is rate-limited. The embed reports the XP
+        that was actually deducted, which is less than the configured penalty
+        when the XP floor is reached.
+
+        Every failure is swallowed on purpose: the deduction is already
+        committed, so a missing permission, a deleted message or a Discord
+        outage must never roll the XP back or break the XP path. A failed
+        attempt still consumes the window slot (the timestamp is taken before
+        sending), so a channel the bot cannot write to is not retried on every
+        further message of the burst.
+        """
+        if not self._spam_warning_due(message.guild.id, message.author.id,
+                                      window_seconds):
+            return
+        embed = discord.Embed(description=SPAM_WARNING_TEXT)
+        embed.set_footer(text=f"-{deducted} XP")
+        try:
+            await message.reply(embed=embed)
+        except Exception as e:
+            print(f"[SPAM] Warning not sent (guild={message.guild.id} "
+                  f"user={message.author.id}): {e}")
 
     # ─── MESSAGE XP (Phase 3 / E1: now driven by the Activity
     # Engine's activity_message event instead of its own on_message
@@ -279,7 +468,7 @@ class Leveling(commands.Cog):
         # returned early whenever a message arrived inside the
         # cooldown window, which meant that message never reached
         # _is_spamming() at all. With the default settings
-        # (xp_cooldown_seconds=30, spam_window_seconds=10,
+        # (xp_cooldown_seconds=20, spam_window_seconds=10,
         # spam_threshold=3), every message that could have counted
         # toward the spam threshold was filtered out by the cooldown
         # gate first — it was mathematically impossible to
@@ -296,17 +485,24 @@ class Leveling(commands.Cog):
             if self._is_spamming(guild_id, user_id, threshold, window):
                 penalty = int(config.get("spam_xp_penalty", 10))
                 if penalty > 0:
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute("""
-                            INSERT INTO levels (guild_id, user_id, xp, level)
-                            VALUES (?, ?, 0, 0)
-                            ON CONFLICT(guild_id, user_id)
-                            DO UPDATE SET xp = MAX(0, xp - ?)
-                        """, (guild_id, user_id, penalty))
-                        await db.commit()
+                    # Real deduction: floor at zero (XP is never negative and
+                    # no debt is created) and recompute `level` from the
+                    # resulting XP in the same transaction, so the stored
+                    # level can never disagree with the XP curve. A penalty
+                    # may therefore demote the member — that is intentional.
+                    # It is not a crossing, so no entitlement/claim/role is
+                    # touched here (see apply_spam_penalty).
+                    from utils.xp_calculator import apply_spam_penalty
+                    outcome = await apply_spam_penalty(guild_id, user_id, penalty)
+                    # The warning is only sent when the penalty actually took
+                    # XP (a member already at 0 has nothing to be warned
+                    # about), and it reports that real amount.
+                    if outcome["applied"]:
+                        await self._warn_spam(message, window,
+                                              outcome["deducted"])
                 return
 
-        cooldown = config.get("xp_cooldown_seconds", 30)
+        cooldown = config.get("xp_cooldown_seconds", 20)
         last     = self._xp_cooldowns.get(key, 0)
         if now - last < cooldown:
             return
@@ -664,7 +860,10 @@ class Leveling(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
         embed = await _level_embed(interaction.guild, interaction.user, "level")
-        view = LevelRewardView(self.bot, interaction.guild.id, interaction.user.id)
+        from utils.level_claims import list_claims
+        claims = await list_claims(interaction.guild.id, interaction.user.id)
+        view = LevelRewardView(self.bot, interaction.guild.id, interaction.user.id,
+                               claimable=_has_claimable(claims))
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ─── PRESTIGE STATE / READ-ONLY VIEW ─────────────────

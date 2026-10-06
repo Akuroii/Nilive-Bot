@@ -660,8 +660,33 @@
 }
 </style>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.toggleCmd = toggleCmd;
+__neroGlobal.bulkToggle = bulkToggle;
+__neroGlobal.bulkCategory = bulkCategory;
+__neroGlobal.toggleEditPanel = toggleEditPanel;
+__neroGlobal.loadCommandSettings = loadCommandSettings;
+__neroGlobal.saveCommandSettings = saveCommandSettings;
+__neroGlobal.refreshAliasStatus = refreshAliasStatus;
+__neroGlobal.refreshRowChips = refreshRowChips;
+__neroGlobal.openCategoryRestrictModal = openCategoryRestrictModal;
+__neroGlobal.closeCategoryRestrictModal = closeCategoryRestrictModal;
+__neroGlobal.handleModalOverlayClick = handleModalOverlayClick;
+__neroGlobal.applyCategoryRestrict = applyCategoryRestrict;
+__neroGlobal.filterCommands = filterCommands;
+__neroGlobal.setStatusFilter = setStatusFilter;
+__neroGlobal.clearSearch = clearSearch;
+__neroGlobal.resetFilters = resetFilters;
+__neroGlobal.updateStatsCounts = updateStatsCounts;
+
 // ── STATE & CONSTANTS ───────────────────────────────────────────────
 const CATEGORY_COMMANDS = {
     {% for category, cmds in categories.items() %}
@@ -1264,6 +1289,7 @@ function updateStatsCounts() {
     if (elDisabled) elDisabled.textContent = disabled;
     if (elRestricted) elRestricted.textContent = restricted;
 }
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

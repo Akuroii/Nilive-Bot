@@ -69,34 +69,56 @@ async def is_role_blacklisted(guild_id: int, member_role_ids: list[int]) -> bool
     return any(rid in blacklisted_role_ids for rid in member_role_ids)
 
 
+# The effective Leveling config: every setting the engine reads, at the value
+# the engine uses when the guild has no row at all. Values mirror the schema
+# defaults in database.py's leveling_config table (and the .get(...) fallbacks
+# sprinkled through cogs/leveling.py), so this dict is the single definition of
+# "unconfigured". The dashboard's GET /api/leveling/config returns the same
+# merged view, which is why a fresh guild shows the values the bot is actually
+# enforcing instead of OFF/blank.
+LEVELING_CONFIG_DEFAULTS = {
+    "enabled":                1,
+    "xp_per_word":            1,
+    "xp_min_per_message":     5,
+    "xp_max_per_message":     50,
+    "xp_cooldown_seconds":    20,
+    "voice_xp_enabled":       1,
+    "voice_xp_per_minute":    3,
+    "voice_require_unmuted":  1,
+    "spam_detection_enabled": 1,
+    "spam_threshold":         3,
+    "spam_xp_penalty":        10,
+    # Anti-spam window (cogs/leveling.py reads it as spam_window_seconds).
+    # The column was added by migration with DEFAULT 10 and never had a UI;
+    # it is admin-editable now, and this is the value until it is set.
+    "spam_window_seconds":    10,
+    "levelup_announce":       1,
+    "levelup_channel_id":     None,
+    "levelup_message":        None,
+    "remove_old_reward_role": 0,
+}
+
+
 async def get_leveling_config(guild_id: int) -> dict:
+    """The effective Leveling config: the stored row laid over the defaults.
+
+    A guild that never opened/saved the Leveling page has no row and runs on
+    LEVELING_CONFIG_DEFAULTS unchanged. A row written by an older schema keeps
+    the documented default for any column it lacks or holds as NULL, instead of
+    handing callers None (which read as "off" and made the dashboard and the
+    runtime disagree about the same guild)."""
+    config = dict(LEVELING_CONFIG_DEFAULTS)
+    config["guild_id"] = guild_id
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT * FROM leveling_config WHERE guild_id = ?
         """, (guild_id,))
         row = await cursor.fetchone()
         if row:
-            cols = [desc[0] for desc in cursor.description]
-            return dict(zip(cols, row))
-    return {
-        "guild_id":               guild_id,
-        "enabled":                1,
-        "xp_per_word":            1,
-        "xp_min_per_message":     5,
-        "xp_max_per_message":     50,
-        "xp_cooldown_seconds":    30,
-        "voice_xp_enabled":       1,
-        "voice_xp_per_minute":    3,
-        "voice_require_unmuted":  1,
-        "spam_detection_enabled": 1,
-        "spam_xp_penalty":        10,
-        "spam_threshold":         3,
-        "levelup_announce":       1,
-        "levelup_channel_id":     None,
-        "levelup_message":        None,
-        "levelup_embed_data":     None,
-        "remove_old_reward_role": 0,
-    }
+            for key, value in zip([desc[0] for desc in cursor.description], row):
+                if value is not None:
+                    config[key] = value
+    return config
 
 
 async def calculate_message_xp(
@@ -244,6 +266,66 @@ def xp_progress(total_xp: int) -> tuple[int, int, int]:
         level += 1
     needed = xp_for_level(level + 1)
     return level, remaining, needed
+
+
+# ─── Anti-spam penalty ───────────────────────────────────────────────────
+# The spam penalty is a REAL XP deduction: it subtracts from the member's
+# current XP, floors the result at zero (XP is never allowed to go negative,
+# and a penalty never creates a debt the member has to work off), and
+# recomputes `level` from the resulting XP in the same transaction so
+# levels.xp and levels.level can never disagree — the split between the two
+# used to be able to leave a member with a stale level, which the next
+# legitimate XP grant would then silently correct by demoting them.
+#
+# A penalty can therefore legitimately demote a member (see the caller in
+# cogs/leveling.py). That is not a level *crossing*: crossings are increases,
+# and `record_crossing()` only ever inserts entitlement rows for increases, so
+# nothing here touches the claim ledger — no row is created, fulfilled claims
+# are not revoked, and the Level reward roles a member already earned stay on
+# them (with `remove_old_reward_role` ON, nothing is removed on the way down
+# either: enforcement only runs after a delivery). Re-earning the level later
+# is an ordinary crossing, and the claim ledger's
+# UNIQUE(guild_id, user_id, reward_level, track, reward_ref) +
+# INSERT OR IGNORE is what stops that from paying a reward twice.
+#
+# Deliberately NOT logged to the XP transaction ledger: the penalty has never
+# written a ledger row, and adding one would be a separate, visible change to
+# the dashboard's ledger page. (The ledger does support it —
+# `utils/ledger.py` records a negative amount as type="deduct".)
+async def apply_spam_penalty(guild_id: int, user_id: int, penalty: int) -> dict:
+    """Deduct `penalty` XP (floored at zero) and keep `level` consistent.
+
+    Returns {"old_xp", "new_xp", "old_level", "new_level", "deducted",
+    "applied"}; `deducted` is what the member actually lost (the XP floor can
+    make it smaller than `penalty`) and `applied` is False when there was no XP
+    to lose at all (a no-op, never a debt).
+    """
+    penalty = max(0, int(penalty))
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "SELECT xp, level FROM levels WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id))
+            row = await cursor.fetchone()
+            old_xp = int(row[0]) if row else 0
+            old_level = int(row[1]) if row else 0
+            new_xp = max(0, old_xp - penalty)
+            new_level = xp_progress(new_xp)[0]
+            await db.execute("""
+                INSERT INTO levels (guild_id, user_id, xp, level)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id, user_id)
+                DO UPDATE SET xp = ?, level = ?
+            """, (guild_id, user_id, new_xp, new_level, new_xp, new_level))
+            await db.commit()
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+    deducted = old_xp - new_xp
+    return {"old_xp": old_xp, "new_xp": new_xp, "old_level": old_level,
+            "new_level": new_level, "deducted": deducted,
+            "applied": deducted > 0}
 
 
 async def check_and_award_level_rewards(bot, member, guild_id: int,

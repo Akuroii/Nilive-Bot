@@ -113,8 +113,45 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.switchCreatorTab = switchCreatorTab;
+__neroGlobal._esc = _esc;
+__neroGlobal.mentionFieldsHtml = mentionFieldsHtml;
+__neroGlobal.toggleMentionRoleWrap = toggleMentionRoleWrap;
+__neroGlobal.readMentionFields = readMentionFields;
+__neroGlobal.groupPickerHtml = groupPickerHtml;
+__neroGlobal.setWatchGroup = setWatchGroup;
+__neroGlobal.loadYoutubeChannels = loadYoutubeChannels;
+__neroGlobal.renderYoutubeChannels = renderYoutubeChannels;
+__neroGlobal.toggleYtPanel = toggleYtPanel;
+__neroGlobal.addYoutubeChannel = addYoutubeChannel;
+__neroGlobal.deleteYoutubeChannel = deleteYoutubeChannel;
+__neroGlobal.toggleYoutubeChannel = toggleYoutubeChannel;
+__neroGlobal.saveYoutubeVideoSettings = saveYoutubeVideoSettings;
+__neroGlobal.saveYoutubeShortsSettings = saveYoutubeShortsSettings;
+__neroGlobal.saveYoutubeLiveSettings = saveYoutubeLiveSettings;
+__neroGlobal.loadTwitchEntries = loadTwitchEntries;
+__neroGlobal.renderTwitchEntries = renderTwitchEntries;
+__neroGlobal.addTwitchEntry = addTwitchEntry;
+__neroGlobal.deleteTwitchEntry = deleteTwitchEntry;
+__neroGlobal.toggleTwitchEntry = toggleTwitchEntry;
+__neroGlobal.saveTwitchSettings = saveTwitchSettings;
+__neroGlobal.initGroupAddMentionField = initGroupAddMentionField;
+__neroGlobal.loadCreatorGroups = loadCreatorGroups;
+__neroGlobal.renderCreatorGroups = renderCreatorGroups;
+__neroGlobal.addCreatorGroup = addCreatorGroup;
+__neroGlobal.saveCreatorGroup = saveCreatorGroup;
+__neroGlobal.deleteCreatorGroup = deleteCreatorGroup;
+__neroGlobal.toggleCreatorGroup = toggleCreatorGroup;
+
 // ── TAB SWITCHING ──────────────────────────────────────────────
 function switchCreatorTab(name) {
     document.querySelectorAll('.ctab-content').forEach(el => el.style.display = 'none');
@@ -681,6 +718,7 @@ loadCreatorGroups().then(() => {
     loadYoutubeChannels();
     loadTwitchEntries();
 });
+
+})();
 </script>
-{% endblock %}
 {% endblock %}
