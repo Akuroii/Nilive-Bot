@@ -218,8 +218,25 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.switchTicketTab = switchTicketTab;
+__neroGlobal.loadGeneralTicketSettings = loadGeneralTicketSettings;
+__neroGlobal.saveGeneralTicketSettings = saveGeneralTicketSettings;
+__neroGlobal.csv2list = csv2list;
+__neroGlobal.resetCategoryForm = resetCategoryForm;
+__neroGlobal.loadCategories = loadCategories;
+__neroGlobal.editCategory = editCategory;
+__neroGlobal.saveCategory = saveCategory;
+__neroGlobal.deleteCategory = deleteCategory;
+
 function switchTicketTab(name) {
     document.querySelectorAll('.ttab-content').forEach(el => el.style.display = 'none');
     document.getElementById('ttab-content-' + name).style.display = 'block';
@@ -386,6 +403,7 @@ async function deleteCategory(id) {
     if (data.success) { showToast('Category deleted', 'info'); loadCategories(); }
     else showToast('Error', 'error');
 }
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

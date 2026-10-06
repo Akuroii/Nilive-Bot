@@ -5,7 +5,7 @@ import io
 import datetime
 import requests as _req
 import aiosqlite
-from flask import jsonify, request, session, abort, Response
+from flask import jsonify, request, session, abort, Response, current_app
 from markupsafe import escape as _esc
 from database import DB_PATH
 from dashboard.utils.async_utils import run_async
@@ -67,22 +67,90 @@ def get_leveling_config_api():
     guild_id = get_session_guild_id()
 
     async def fetch():
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "SELECT * FROM leveling_config WHERE guild_id = ?", (guild_id,))
-            row = await cursor.fetchone()
-            if row:
-                return dict(zip([d[0] for d in cursor.description], row))
-        return {}
+        # The same effective-config helper the runtime calls, so the page shows
+        # exactly what the bot enforces for this guild (defaults included) —
+        # never a blank row that the UI renders as OFF.
+        from utils.xp_calculator import get_leveling_config
+        return await get_leveling_config(guild_id)
 
     return jsonify({"config": run_async(fetch())})
+
+
+# Whole-number Leveling settings the save handler writes, with the range each
+# one may hold. The form's numeric inputs arrive as strings — and as '' when an
+# admin clears one — and the old code ran int() straight over them, so a blank
+# or "30.5" raised ValueError, Flask answered with an HTML 500, the dashboard's
+# res.json() threw while parsing it and the page reported "Connection error"
+# with nothing written. Bounds mirror the form's own min/max (with headroom so
+# an existing stored value is never rejected): they only turn away numbers the
+# engine cannot mean, e.g. negative XP or a zero-width spam threshold.
+_LEVELING_INT_FIELDS = (
+    # field,                        label,                     default,  min,  max
+    ("enabled",                     "Leveling enabled",              1,    0,     1),
+    ("xp_per_word",                 "XP per word",                   1,    0,   100),
+    ("xp_min_per_message",          "Min XP per message",            5,    0, 100000),
+    ("xp_max_per_message",          "Max XP per message",           50,    0, 100000),
+    ("xp_cooldown_seconds",         "Cooldown (seconds)",           20,    0, 86400),
+    ("voice_xp_enabled",            "Voice XP enabled",              1,    0,     1),
+    ("voice_xp_per_minute",         "XP per minute in voice",        3,    0, 10000),
+    ("voice_require_unmuted",       "Require unmuted to earn voice XP", 1, 0,     1),
+    ("spam_detection_enabled",      "Enable spam detection",         1,    0,     1),
+    ("spam_threshold",              "Spam threshold (messages)",     3,    1, 10000),
+    ("spam_window_seconds",         "Spam window (seconds)",        10,    1,  3600),
+    ("spam_xp_penalty",             "XP penalty per spam",          10,    0, 1000000),
+    ("levelup_announce",            "Announce level ups",            1,    0,     1),
+    # OFF (0, the default) = Level reward roles accumulate as they always did.
+    # ON (1) = the progression is exclusive: delivering a higher Level reward
+    # role removes the superseded lower ones (utils/level_claims.py's
+    # superseded_role_ids/enforce_role_progression). The column has always
+    # existed; this is its read/write surface, not a new setting.
+    ("remove_old_reward_role",      "Remove old reward role when new one is given", 0, 0, 1),
+)
+
+
+def _leveling_config_ints(data):
+    """Validate the whole-number settings before anything is written.
+
+    Returns (values, error): `values` maps field -> int, or `error` is the
+    message to hand back to the dashboard. A key that is absent keeps its
+    default (partial payloads stay valid); a key that is present but blank,
+    fractional or out of range is named in the error."""
+    values = {}
+    for field, label, default, lo, hi in _LEVELING_INT_FIELDS:
+        raw = data.get(field, default)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None, f"{label} is required"
+        if isinstance(raw, float) and not raw.is_integer():
+            return None, f"{label} must be a whole number"
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None, f"{label} must be a whole number"
+        if not lo <= value <= hi:
+            return None, f"{label} must be between {lo} and {hi}"
+        values[field] = value
+    return values, None
 
 
 @api_bp.route("/leveling/config", methods=["POST"])
 @require_api_permission(LEVEL_ADMIN)
 def save_leveling_config_api():
     guild_id = get_session_guild_id()
-    data     = request.json
+    # silent=True: a body that is not JSON must not turn into Flask's HTML 400
+    # that the dashboard can only report as a connection error.
+    data = request.get_json(silent=True)
+    if data is None:
+        # An empty body means "everything at its default". A body we cannot
+        # parse is an error worth showing, not a silent reset to defaults.
+        if request.get_data(cache=True).strip():
+            return jsonify({"success": False, "error": "Request body is not valid JSON"}), 400
+        data = {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Expected a JSON object"}), 400
+
+    values, error = _leveling_config_ints(data)
+    if error:
+        return jsonify({"success": False, "error": error}), 400
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -93,10 +161,10 @@ def save_leveling_config_api():
                      xp_cooldown_seconds, voice_xp_enabled,
                      voice_xp_per_minute, voice_require_unmuted,
                      spam_detection_enabled, spam_threshold,
-                     spam_xp_penalty, levelup_announce,
+                     spam_window_seconds, spam_xp_penalty, levelup_announce,
                      levelup_channel_id, levelup_message,
                      remove_old_reward_role)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                     enabled                = excluded.enabled,
                     xp_per_word            = excluded.xp_per_word,
@@ -108,6 +176,7 @@ def save_leveling_config_api():
                     voice_require_unmuted  = excluded.voice_require_unmuted,
                     spam_detection_enabled = excluded.spam_detection_enabled,
                     spam_threshold         = excluded.spam_threshold,
+                    spam_window_seconds    = excluded.spam_window_seconds,
                     spam_xp_penalty        = excluded.spam_xp_penalty,
                     levelup_announce       = excluded.levelup_announce,
                     levelup_channel_id     = excluded.levelup_channel_id,
@@ -116,26 +185,44 @@ def save_leveling_config_api():
                     updated_at             = CURRENT_TIMESTAMP
             """, (
                 guild_id,
-                int(data.get("enabled", 1)),
-                int(data.get("xp_per_word", 1)),
-                int(data.get("xp_min_per_message", 5)),
-                int(data.get("xp_max_per_message", 50)),
-                int(data.get("xp_cooldown_seconds", 30)),
-                int(data.get("voice_xp_enabled", 1)),
-                int(data.get("voice_xp_per_minute", 3)),
-                int(data.get("voice_require_unmuted", 1)),
-                int(data.get("spam_detection_enabled", 1)),
-                int(data.get("spam_threshold", 3)),
-                int(data.get("spam_xp_penalty", 10)),
-                int(data.get("levelup_announce", 1)),
+                values["enabled"],
+                values["xp_per_word"],
+                values["xp_min_per_message"],
+                values["xp_max_per_message"],
+                values["xp_cooldown_seconds"],
+                values["voice_xp_enabled"],
+                values["voice_xp_per_minute"],
+                values["voice_require_unmuted"],
+                values["spam_detection_enabled"],
+                values["spam_threshold"],
+                values["spam_window_seconds"],
+                values["spam_xp_penalty"],
+                values["levelup_announce"],
                 data.get("levelup_channel_id") or None,
                 data.get("levelup_message") or None,
-                int(data.get("remove_old_reward_role", 0)),
+                values["remove_old_reward_role"],
             ))
             await db.commit()
 
-    run_async(save())
-    log_action(guild_id, "Updated leveling config", "leveling")
+    try:
+        run_async(save())
+    except Exception as exc:
+        # Nothing was stored, so this is the one failure the caller must hear
+        # about — as JSON, not as Flask's HTML 500.
+        current_app.logger.exception("leveling config save failed (guild=%s)", guild_id)
+        return jsonify({
+            "success": False,
+            "error": f"Could not save leveling config: {exc}"[:300],
+        }), 500
+
+    try:
+        log_action(guild_id, "Updated leveling config", "leveling")
+    except Exception:
+        # The config is committed and already live; a failed audit row is not a
+        # failed save, and returning 500 here made the dashboard report an error
+        # for a save that had in fact happened.
+        current_app.logger.exception(
+            "leveling config audit log failed (guild=%s)", guild_id)
     return jsonify({"success": True})
 
 

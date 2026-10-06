@@ -115,8 +115,29 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.msEsc = msEsc;
+__neroGlobal.confirmDeleteMission = confirmDeleteMission;
+__neroGlobal.switchTab = switchTab;
+__neroGlobal.toggleMsDurationField = toggleMsDurationField;
+__neroGlobal.toggleMsChannelField = toggleMsChannelField;
+__neroGlobal.msLoadChannelMap = msLoadChannelMap;
+__neroGlobal.msChannelCell = msChannelCell;
+__neroGlobal.msRowError = msRowError;
+__neroGlobal.loadMissions = loadMissions;
+__neroGlobal.addMission = addMission;
+__neroGlobal.toggleMission = toggleMission;
+__neroGlobal.deleteMission = deleteMission;
+__neroGlobal.loadMissionLog = loadMissionLog;
+
 const MS_TYPE_LABEL = {messages:'Messages', words:'Words', voice_minutes:'Voice min', daily_completions:'Daily missions'};
 const MS_PERIOD_LABEL = {daily:'Daily', weekly:'Weekly', once:'One-time'};
 const MS_COLS = 8;   // columns in the Configured Missions table
@@ -352,6 +373,7 @@ async function loadMissionLog() {
         tbody.innerHTML = msRowError(MS_LOG_COLS, 'Failed to load completions', 'loadMissionLog');
     }
 }
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

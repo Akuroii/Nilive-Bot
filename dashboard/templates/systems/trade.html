@@ -30,8 +30,18 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.summarizeOffer = summarizeOffer;
+__neroGlobal.loadTrades = loadTrades;
+
 function summarizeOffer(offer) {
     const parts = [];
     if (offer.coins) parts.push(currencyAmount('coins', offer.coins));
@@ -105,6 +115,7 @@ document.getElementById('trade-user').addEventListener('keydown', e => {
 });
 
 loadTrades();
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

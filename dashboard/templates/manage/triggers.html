@@ -110,8 +110,19 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.toggleResponseFields = toggleResponseFields;
+__neroGlobal.addTrigger = addTrigger;
+__neroGlobal.deleteTrigger = deleteTrigger;
+
 function toggleResponseFields() {
     const type = document.getElementById('t-type').value;
     document.getElementById('text-field').style.display =
@@ -162,6 +173,7 @@ async function deleteTrigger(id) {
     if (data.success) { showToast('Trigger deleted'); setTimeout(() => location.reload(), 800); }
     else showToast('Error', 'danger');
 }
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

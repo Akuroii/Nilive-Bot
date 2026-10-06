@@ -217,8 +217,22 @@
 }
 </style>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.markDirty = markDirty;
+__neroGlobal.markClean = markClean;
+__neroGlobal.bindCounter = bindCounter;
+__neroGlobal.loadBotProfile = loadBotProfile;
+__neroGlobal.saveBotProfile = saveBotProfile;
+__neroGlobal.resetBotProfile = resetBotProfile;
+
 // live.username, kept in sync from loadBotProfile() so the nickname
 // input's live-typing preview can fall back to the bot's real global
 // name (not a hardcoded string) when the field is cleared.
@@ -415,6 +429,7 @@ async function resetBotProfile() {
         loadBotProfile();
     });
 }
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

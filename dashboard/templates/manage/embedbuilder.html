@@ -129,9 +129,11 @@
     <div class="eb-emoji-hover-bar" id="eb-emoji-hover-bar"><span class="eb-emoji-hover-empty">Pick an emoji…</span></div>
 </div>
 
-{% block scripts %}
 <script src="{{ url_for('static', filename='js/embed-composer.js') }}"></script>
 <script>
+(function () {
+// (no top-level functions: nothing to re-publish for markup handlers)
+
 (function() {
 'use strict';
 
@@ -1187,6 +1189,7 @@ function renderAll() {
 })();
 
 })();
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

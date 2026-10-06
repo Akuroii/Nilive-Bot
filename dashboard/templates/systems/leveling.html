@@ -127,10 +127,15 @@
                         <input class="form-input" type="number" name="spam_threshold" id="cfg-spam-thresh" min="2">
                     </div>
                     <div class="form-group">
+                        <label class="form-label">Spam window (seconds)</label>
+                        <input class="form-input" type="number" name="spam_window_seconds" id="cfg-spam-window" min="1">
+                    </div>
+                    <div class="form-group">
                         <label class="form-label">XP penalty per spam</label>
                         <input class="form-input" type="number" name="spam_xp_penalty" id="cfg-spam-penalty" min="0">
                     </div>
                 </div>
+                <div class="form-hint">Messages within this window count toward the threshold.</div>
             </div>
 
             <div class="card">
@@ -154,6 +159,9 @@
                     <input type="checkbox" name="remove_old_reward_role" id="cfg-remove-old">
                     Remove old reward role when new one is given
                 </label>
+                <div class="form-hint">When on, Level reward roles are exclusive: reaching a
+                    higher reward level replaces the lower Level reward role. Roles that are not
+                    Level rewards are never touched.</div>
             </div>
 
             <div class="card">
@@ -463,8 +471,46 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.switchTab = switchTab;
+__neroGlobal.loadConfig = loadConfig;
+__neroGlobal.saveConfig = saveConfig;
+__neroGlobal.loadResetConfig = loadResetConfig;
+__neroGlobal.saveResetConfig = saveResetConfig;
+__neroGlobal.forceResetNow = forceResetNow;
+__neroGlobal.addReward = addReward;
+__neroGlobal.deleteReward = deleteReward;
+__neroGlobal.loadCurrencyRewards = loadCurrencyRewards;
+__neroGlobal.addCurrencyReward = addCurrencyReward;
+__neroGlobal.deleteCurrencyReward = deleteCurrencyReward;
+__neroGlobal.loadBonusRoles = loadBonusRoles;
+__neroGlobal.addBonus = addBonus;
+__neroGlobal.deleteBonus = deleteBonus;
+__neroGlobal.loadBlacklist = loadBlacklist;
+__neroGlobal.addBlacklist = addBlacklist;
+__neroGlobal.deleteBlacklist = deleteBlacklist;
+__neroGlobal.renderPrestigeMultipliers = renderPrestigeMultipliers;
+__neroGlobal.loadPrestigeConfig = loadPrestigeConfig;
+__neroGlobal.savePrestigeConfig = savePrestigeConfig;
+__neroGlobal.loadPrestigeRoles = loadPrestigeRoles;
+__neroGlobal.addPrestigeRole = addPrestigeRole;
+__neroGlobal.deletePrestigeRole = deletePrestigeRole;
+__neroGlobal.shopText = shopText;
+__neroGlobal.loadShopRewards = loadShopRewards;
+__neroGlobal.addShopReward = addShopReward;
+__neroGlobal.deleteShopReward = deleteShopReward;
+__neroGlobal.loadBoostRewards = loadBoostRewards;
+__neroGlobal.addBoostReward = addBoostReward;
+__neroGlobal.deleteBoostReward = deleteBoostReward;
+
 // ── TAB SWITCHING ──────────────────────────────────────────────
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
@@ -504,6 +550,7 @@ async function loadConfig() {
     set('cfg-voice-unmuted',   c.voice_require_unmuted);
     set('cfg-spam',            c.spam_detection_enabled);
     set('cfg-spam-thresh',     c.spam_threshold);
+    set('cfg-spam-window',     c.spam_window_seconds);
     set('cfg-spam-penalty',    c.spam_xp_penalty);
     set('cfg-announce',        c.levelup_announce);
     set('cfg-levelup-channel', c.levelup_channel_id);
@@ -531,6 +578,7 @@ async function saveConfig(btn) {
         voice_require_unmuted: getVal('cfg-voice-unmuted'),
         spam_detection_enabled:getVal('cfg-spam'),
         spam_threshold:        getVal('cfg-spam-thresh'),
+        spam_window_seconds:   getVal('cfg-spam-window'),
         spam_xp_penalty:       getVal('cfg-spam-penalty'),
         levelup_announce:      getVal('cfg-announce'),
         levelup_channel_id:    getVal('cfg-levelup-channel'),
@@ -746,6 +794,17 @@ async function deleteBlacklist(id) {
 // ── PRESTIGE (finalized Prestige system) ─────────────────────────
 const PRESTIGE_TIER_NAMES = {1:'I', 2:'II', 3:'III', 4:'IV', 5:'V', 6:'VI'};
 
+// The currency display name for a stored key. dashboard.js's currencyNameFor()
+// is the real implementation, but it is loaded after this page script and the
+// first render of the multipliers card (fired by loadPrestigeConfig on page
+// load) would throw and leave the card stuck on "Loading…". Both read the same
+// window.__CURRENCY__ that base.html writes, so use it until dashboard.js is
+// there; every later render takes the dashboard.js branch.
+function currencyName(key) {
+    if (typeof currencyNameFor === 'function') return currencyNameFor(key);
+    return ((window.__CURRENCY__ || {})[key] || {}).name || key;
+}
+
 function renderPrestigeMultipliers(tiers) {
     const wrap = document.getElementById('prestige-multipliers');
     if (!wrap) return;
@@ -757,12 +816,12 @@ function renderPrestigeMultipliers(tiers) {
             <div style="border:1px solid var(--border);border-radius:8px;padding:12px;">
                 <div style="font-weight:600;margin-bottom:8px;">★ ${PRESTIGE_TIER_NAMES[t]}${boosterNote}</div>
                 <div class="form-group" style="margin-bottom:8px;">
-                    <label class="form-label">${currencyNameFor('coins')} ×</label>
+                    <label class="form-label">${currencyName('coins')} ×</label>
                     <input class="form-input prestige-mult" data-tier="${t}" data-cur="coins"
                            type="number" step="0.1" min="0" value="${m.coins}">
                 </div>
                 <div class="form-group" style="margin-bottom:0;">
-                    <label class="form-label">${currencyNameFor('diamonds')} ×</label>
+                    <label class="form-label">${currencyName('diamonds')} ×</label>
                     <input class="form-input prestige-mult" data-tier="${t}" data-cur="diamonds"
                            type="number" step="0.1" min="0" value="${m.diamonds}">
                 </div>
@@ -990,6 +1049,7 @@ loadShopRewards();
 loadBonusRoles();
 loadBlacklist();
 loadPrestigeRoles();
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

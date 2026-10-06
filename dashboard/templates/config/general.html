@@ -87,8 +87,20 @@
     </div>
 </form>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.saveGeneral = saveGeneral;
+__neroGlobal.loadStatusMessages = loadStatusMessages;
+__neroGlobal.addStatusMessage = addStatusMessage;
+__neroGlobal.deleteStatusMessage = deleteStatusMessage;
+
 async function saveGeneral(btn) {
     const form    = document.getElementById('general-form');
     const data    = Object.fromEntries(new FormData(form));
@@ -144,6 +156,7 @@ async function deleteStatusMessage(id) {
 }
 
 loadStatusMessages();
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

@@ -136,9 +136,50 @@
     </div>
 </div>
 
-{% block scripts %}
 <script src="{{ url_for('static', filename='js/embed-composer.js') }}"></script>
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.esc = esc;
+__neroGlobal.markDirty = markDirty;
+__neroGlobal.clearDirty = clearDirty;
+__neroGlobal.schedulePreview = schedulePreview;
+__neroGlobal.refreshPreview = refreshPreview;
+__neroGlobal.renderTypeCards = renderTypeCards;
+__neroGlobal.pickType = pickType;
+__neroGlobal.numInput = numInput;
+__neroGlobal.renderGameSettings = renderGameSettings;
+__neroGlobal.renderMcAnswers = renderMcAnswers;
+__neroGlobal.addMbAnswer = addMbAnswer;
+__neroGlobal.onMcAnswerInput = onMcAnswerInput;
+__neroGlobal.markMcCorrect = markMcCorrect;
+__neroGlobal.onMcQuestionInput = onMcQuestionInput;
+__neroGlobal.onMcImageInput = onMcImageInput;
+__neroGlobal.onConfigInput = onConfigInput;
+__neroGlobal.renderMbRewards = renderMbRewards;
+__neroGlobal.addMbReward = addMbReward;
+__neroGlobal.mbRewardRowChanged = mbRewardRowChanged;
+__neroGlobal.removeMbReward = removeMbReward;
+__neroGlobal.readMbRewards = readMbRewards;
+__neroGlobal.updateRewardSum = updateRewardSum;
+__neroGlobal.renderCategorySelect = renderCategorySelect;
+__neroGlobal.onSpawnInput = onSpawnInput;
+__neroGlobal.onIdentityInput = onIdentityInput;
+__neroGlobal.buildPayload = buildPayload;
+__neroGlobal.clientValidate = clientValidate;
+__neroGlobal.saveTemplate = saveTemplate;
+__neroGlobal.loadTemplate = loadTemplate;
+__neroGlobal.testSpawnFromBuilder = testSpawnFromBuilder;
+__neroGlobal.pollTestDone = pollTestDone;
+__neroGlobal.loadConfigAndTree = loadConfigAndTree;
+__neroGlobal.loadBotIdentity = loadBotIdentity;
+
 'use strict';
 const EC = window.EmbedComposer;
 const TEMPLATE_ID = {{ template_id | default(none) | tojson }};
@@ -158,10 +199,20 @@ const MB_TYPES = [
 // The TEXT variant, not currencyLabel(): these labels land in the reward
 // type <select> below, and an <option> may only contain text — a custom
 // currency icon has to degrade to its emoji name there.
-const REWARD_TYPE_LABELS = {
-    xp: '⭐ XP', coins: currencyLabelText('coins'), diamonds: currencyLabelText('diamonds'),
-    item: '📦 Item', role: '🏷️ Permanent Role', temp_role: '⏳ Temporary Role',
-};
+// Built on first use, not at load: currencyLabelText() lives in dashboard.js,
+// which is loaded after this page script, and calling it here would throw and
+// abort the rest of the script (state, switchTab, the builder's init calls).
+let __rewardTypeLabels = null;
+function rewardTypeLabels() {
+    if (!__rewardTypeLabels) {
+        const REWARD_TYPE_LABELS = {
+            xp: '⭐ XP', coins: currencyLabelText('coins'), diamonds: currencyLabelText('diamonds'),
+            item: '📦 Item', role: '🏷️ Permanent Role', temp_role: '⏳ Temporary Role',
+        };
+        __rewardTypeLabels = REWARD_TYPE_LABELS;
+    }
+    return __rewardTypeLabels;
+}
 // Engine defaults (utils/minigame_engine) — pre-filled so the admin
 // tweaks instead of starting from scratch.
 const MB_TYPE_DEFAULTS = {
@@ -467,7 +518,7 @@ function addMbReward(row) {
     div.className = 'mb-reward-row';
     div.innerHTML = `
         <select class="form-input mb-rw-type" onchange="mbRewardRowChanged(this)">
-            ${Object.entries(REWARD_TYPE_LABELS).map(([k, v]) =>
+            ${Object.entries(rewardTypeLabels()).map(([k, v]) =>
                 `<option value="${k}" ${row && row.reward_type === k ? 'selected' : ''}>${v}</option>`).join('')}
         </select>
         <input class="form-input mb-rw-value" placeholder="Amount, item name, or role ID"
@@ -769,6 +820,7 @@ async function loadBotIdentity() {
     renderMbRewards();
     refreshPreview(true);
 })();
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

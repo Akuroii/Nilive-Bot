@@ -138,8 +138,24 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.updatePreview = updatePreview;
+__neroGlobal.addButton = addButton;
+__neroGlobal.removeButton = removeButton;
+__neroGlobal.renderButtons = renderButtons;
+__neroGlobal.updateCommands = updateCommands;
+__neroGlobal.copyCommands = copyCommands;
+__neroGlobal.savePanel = savePanel;
+__neroGlobal.loadPanels = loadPanels;
+
 let buttons = [];
 const colorMap = { blurple:'#5865F2', gray:'#4e5058', green:'#248046', red:'#da373c' };
 
@@ -281,6 +297,7 @@ async function loadPanels() {
 
 loadPanels();
 updatePreview();
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

@@ -667,7 +667,7 @@ async def init_db():
                 xp_per_word            INTEGER DEFAULT 1,
                 xp_min_per_message     INTEGER DEFAULT 5,
                 xp_max_per_message     INTEGER DEFAULT 50,
-                xp_cooldown_seconds    INTEGER DEFAULT 30,
+                xp_cooldown_seconds    INTEGER DEFAULT 20,
                 voice_xp_enabled       INTEGER DEFAULT 1,
                 voice_xp_per_minute    INTEGER DEFAULT 3,
                 voice_require_unmuted  INTEGER DEFAULT 1,

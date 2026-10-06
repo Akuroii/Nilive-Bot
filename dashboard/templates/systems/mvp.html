@@ -125,8 +125,19 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.switchTab = switchTab;
+__neroGlobal.loadMVPConfig = loadMVPConfig;
+__neroGlobal.saveMVPConfig = saveMVPConfig;
+
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
     document.getElementById('tab-content-' + name).style.display = 'block';
@@ -174,6 +185,7 @@ async function saveMVPConfig(btn) {
     };
     await ajaxSave('/api/mvp/config', payload, btn, 'MVP config saved!');
 }
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

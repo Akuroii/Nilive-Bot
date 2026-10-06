@@ -267,8 +267,21 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.switchTab = switchTab;
+__neroGlobal.isFreeVI = isFreeVI;
+__neroGlobal.applyFreeVIFields = applyFreeVIFields;
+__neroGlobal.toggleItemTypeFields = toggleItemTypeFields;
+__neroGlobal.addItem = addItem;
+
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(
         el => el.style.display = 'none');
@@ -453,6 +466,7 @@ async function addItem() {
         showToast('Error saving', 'danger');
     }
 }
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

@@ -49,14 +49,24 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.filterMembers = filterMembers;
+
 function filterMembers() {
     const q = document.getElementById('search-input').value.toLowerCase();
     document.querySelectorAll('.member-row').forEach(row => {
         row.style.display = row.dataset.id.includes(q) ? '' : 'none';
     });
 }
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

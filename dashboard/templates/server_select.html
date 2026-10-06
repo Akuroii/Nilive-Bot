@@ -74,8 +74,20 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.iconUrl = iconUrl;
+__neroGlobal.serverIconHtml = serverIconHtml;
+__neroGlobal.loadManageServers = loadManageServers;
+__neroGlobal.inviteBot = inviteBot;
+
 // Phase 0 fix: correct file extension for animated icon hashes
 // (a_-prefixed hashes are GIFs on Discord's CDN, everything else is
 // PNG — requesting .png for an animated hash 404s and breaks the img).
@@ -203,6 +215,7 @@ async function inviteBot(guildId, btn) {
 }
 
 loadManageServers();
+
+})();
 </script>
-{% endblock %}
 {% endblock %}

@@ -74,8 +74,17 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.saveBoost = saveBoost;
+
 async function saveBoost(btn) {
     const form = document.getElementById('boost-form');
     const g    = n => $(form.querySelector('[name=' + n + ']')).val() || '';
@@ -90,6 +99,7 @@ async function saveBoost(btn) {
     };
     await ajaxSave('/api/settings/boost', payload, btn, 'Boost settings saved!');
 }
+
+})();
 </script>
-{% endblock %}
 {% endblock %}
