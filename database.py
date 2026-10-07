@@ -50,6 +50,9 @@ OWNER_DISCORD_ID = int(_owner_id_raw)
 
 
 LEVELING_CONFIG_BASELINE_MIGRATION = "message-xp-10s-spam-window-20s-v1"
+# Separate one-shot marker: databases that already recorded the baseline marker
+# above must still receive this threshold migration exactly once.
+LEVELING_SPAM_THRESHOLD_MIGRATION = "spam-threshold-legacy-default-3-to-10-v1"
 LEVELING_CONFIG_CREATE_SQL = """
     CREATE TABLE IF NOT EXISTS leveling_config (
         guild_id                 INTEGER PRIMARY KEY,
@@ -83,8 +86,23 @@ async def migrate_leveling_config(db):
 
     The marker makes the data migration one-shot: existing rows receive the
     approved cooldown/window baselines exactly once, while later bot/dashboard
-    startups never overwrite subsequent administrator edits. Other configured
-    row values, including spam_threshold, are not part of this data migration.
+    startups never overwrite subsequent administrator edits.
+
+    Architecture note (intentional): the legacy ``enabled`` column is no longer
+    a master Leveling switch. It is renamed to ``message_xp_enabled`` and its
+    stored value is carried over unchanged, but it now gates Message XP only.
+    Voice XP, missions, events, minigames, tags and claims are independent XP
+    sources with their own switches. This migration deliberately does not copy
+    a legacy ``enabled=0`` into any other setting and the global gate is not
+    restored.
+
+    A NULL legacy ``enabled`` (the column was nullable) is normalized to 1, the
+    value the runtime already treated it as, so the NOT NULL rebuild cannot fail
+    and abort init_db().
+
+    Separately and once (its own marker), ``spam_threshold`` is moved from the
+    old default of 3 to the new default of 10 only where the stored value is
+    still exactly 3. Any other (administrator-customized) value is preserved.
     The SQL default for spam_threshold is 10 for future rows; any table rebuild
     copies existing per-guild values verbatim.
     """
@@ -112,6 +130,12 @@ async def migrate_leveling_config(db):
             """)
             await db.execute("ALTER TABLE leveling_config DROP COLUMN enabled")
             columns.remove("enabled")
+
+        # Legacy ``enabled`` was nullable and the runtime read NULL as ON (the
+        # default). Normalize it before any NOT NULL table rebuild below.
+        await db.execute(
+            "UPDATE leveling_config SET message_xp_enabled=1 "
+            "WHERE message_xp_enabled IS NULL")
 
         if "spam_window_seconds" not in columns:
             await db.execute(
@@ -168,9 +192,8 @@ async def migrate_leveling_config(db):
             (LEVELING_CONFIG_BASELINE_MIGRATION,))
         if not await cursor.fetchone():
             # These two baselines are intentionally migrated for every existing
-            # guild exactly once. Spam threshold is a separate design setting:
-            # preserve each existing guild's configured value rather than
-            # silently changing it as part of this cooldown/window migration.
+            # guild exactly once. spam_threshold is handled by its own marker
+            # below (legacy default 3 -> 10 only; custom values are kept).
             await db.execute("""
                 UPDATE leveling_config
                    SET xp_cooldown_seconds = 10,
@@ -180,6 +203,23 @@ async def migrate_leveling_config(db):
             await db.execute(
                 "INSERT INTO leveling_config_migrations (migration_name) VALUES (?)",
                 (LEVELING_CONFIG_BASELINE_MIGRATION,))
+
+        cursor = await db.execute(
+            "SELECT 1 FROM leveling_config_migrations WHERE migration_name=?",
+            (LEVELING_SPAM_THRESHOLD_MIGRATION,))
+        if not await cursor.fetchone():
+            # 3 was the old schema default, not a deliberate choice, and with
+            # the 20s window it would flag ordinary chatting. Only rows still
+            # at exactly 3 move to the new default; every other value is kept.
+            await db.execute("""
+                UPDATE leveling_config
+                   SET spam_threshold = 10,
+                       updated_at = CURRENT_TIMESTAMP
+                 WHERE spam_threshold = 3
+            """)
+            await db.execute(
+                "INSERT INTO leveling_config_migrations (migration_name) VALUES (?)",
+                (LEVELING_SPAM_THRESHOLD_MIGRATION,))
 
         await db.commit()
     except Exception:

@@ -135,7 +135,7 @@
                         <input class="form-input" type="number" name="spam_xp_penalty_divisor" id="cfg-spam-penalty" min="100">
                     </div>
                 </div>
-                <div class="form-hint">Frequency default: 10 messages in the configured 20-second window; existing guild values are preserved by migration. Additional signals catch 6 messages in 3 seconds or 5 normalized identical messages in up to 10 seconds. These signals catch short bursts and repeated-content flooding before the general threshold. One incident deduction is at most 1% of current XP, and total deductions are capped at one production-calculated max Message XP award per rolling hour (default 50 XP before multipliers).
+                <div class="form-hint">Frequency default: 10 messages in the configured 20-second window; a legacy threshold of 3 was moved to 10 once; other saved values were preserved. Additional signals catch 6 messages in 3 seconds or 5 normalized identical messages in up to 10 seconds. These signals catch short bursts and repeated-content flooding before the general threshold. One incident deduction is at most 1% of current XP, and total deductions are capped at one production-calculated max Message XP award per rolling hour (default 50 XP before multipliers).
                 </div>
             </div>
 

@@ -99,7 +99,7 @@ The XP penalty transaction serializes on SQLite `BEGIN IMMEDIATE`, sums `levelin
 
 ## Spam detector thresholds and saved-value preservation
 
-The threshold-10 default is retained for new/unconfigured guilds. The marker-backed data migration changes existing guild rows only to a 10-second Message XP cooldown and a 20-second spam window; it does **not** rewrite any guild's `spam_threshold`, so saved values such as 3 remain 3. Production SQL/API/runtime/Dashboard defaults agree at 10. No threshold data migration was added.
+The threshold-10 default applies to new/unconfigured guilds. The marker-backed baseline migration changes existing guild rows to a 10-second Message XP cooldown and a 20-second spam window. A second one-time, separately marked migration moves `spam_threshold` from the old schema default of 3 to 10 only where the stored value is still exactly 3; any other (administrator-customized) value is preserved. Production SQL/API/runtime/Dashboard defaults agree at 10.
 
 | Signal | Current rule | Purpose and necessity |
 |---|---|---|
@@ -112,6 +112,6 @@ The legacy fixed `spam_xp_penalty` column is retained as inert compatibility sto
 
 ## Migration and verification boundary
 
-`database.init_db()` runs the marker-backed one-time data migration: every pre-existing guild row gets `xp_cooldown_seconds=10` and `spam_window_seconds=20`; the saved `spam_threshold` value, all other Leveling choices, and the deprecated fixed-penalty value are preserved. The SQL/API/runtime/Dashboard baselines for new guild rows are cooldown 10s, spam window 20s, and frequency threshold 10. The marker prevents subsequent startup from overwriting later administrator edits. Migration tests use disposable SQLite fixtures; no deployed database was inspected or migrated.
+`database.init_db()` runs the marker-backed one-time data migrations: every pre-existing guild row gets `xp_cooldown_seconds=10` and `spam_window_seconds=20`, and a `spam_threshold` still at the old default of 3 becomes 10 (customized values are kept); all other Leveling choices and the deprecated fixed-penalty value are preserved. The legacy `enabled` column is carried over as `message_xp_enabled` and is intentionally **not** a master switch: it gates Message XP only, while Voice XP, missions, events, minigames, tags and claims are independent XP sources (a legacy `enabled=0` is not copied into any other setting). A NULL legacy `enabled` is normalized to ON. The SQL/API/runtime/Dashboard baselines for new guild rows are cooldown 10s, spam window 20s, and frequency threshold 10. The marker prevents subsequent startup from overwriting later administrator edits. Migration tests use disposable SQLite fixtures; no deployed database was inspected or migrated.
 
 The runtime scenarios and fake Discord callbacks are integration tests against the production handlers and a temporary SQLite database. They are not live Discord verification.
