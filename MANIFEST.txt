@@ -1,0 +1,11 @@
+Leveling fixes for PR #76 follow-up (P1-B, P1-C, P1-A documentation)
+
+Final modified versions of exactly these 5 files (repo-relative paths):
+  database.py
+  scripts/test_leveling_config_migration.py
+  XP_PACING_SIMULATION.md
+  scripts/simulate_xp_pacing.py
+  dashboard/templates/systems/leveling.html
+
+Copy/replace each into your working project at the same path.
+Not committed or pushed. No other files are included.

@@ -21,7 +21,7 @@ def check(label, ok, detail=""):
         raise Fail(label)
 
 
-async def install_legacy_schema():
+async def install_legacy_schema(null_enabled_guild: int | None = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DROP TABLE leveling_config")
         await db.execute("DELETE FROM leveling_config_migrations")
@@ -60,13 +60,20 @@ async def install_legacy_schema():
                  spam_window_seconds, spam_xp_penalty, xp_per_word)
             VALUES (?, 1, 37, 5, 45, 75, 4)
         """, (GUILD + 1,))
+        if null_enabled_guild is not None:
+            # The legacy column was nullable; this row used to abort init_db().
+            await db.execute(
+                "INSERT INTO leveling_config (guild_id, enabled) VALUES (?, NULL)",
+                (null_enabled_guild,))
         await db.commit()
 
 
 async def main():
     await reset_database()
     await install_legacy_schema()
-    from database import LEVELING_CONFIG_BASELINE_MIGRATION, migrate_leveling_config
+    from database import (LEVELING_CONFIG_BASELINE_MIGRATION,
+                          LEVELING_SPAM_THRESHOLD_MIGRATION,
+                          migrate_leveling_config)
 
     async with aiosqlite.connect(DB_PATH) as db:
         await migrate_leveling_config(db)
@@ -78,13 +85,18 @@ async def main():
     baseline = rows("SELECT message_xp_enabled,xp_cooldown_seconds,spam_threshold,"
                     "spam_window_seconds,spam_xp_penalty_divisor,spam_xp_penalty "
                     "FROM leveling_config WHERE guild_id=?", (GUILD,))[0]
-    check("legacy cooldown/window migrate once; spam threshold/fixed value are preserved",
-          baseline == (0, 10, 3, 20, 1000, 10), str(baseline))
+    # enabled=0 is carried over to Message XP only; it is NOT a master switch
+    # and is not copied into any other setting (voice stays at its own value).
+    check("legacy cooldown/window migrate once; threshold 3 -> 10; fixed value kept",
+          baseline == (0, 10, 10, 20, 1000, 10), str(baseline))
+    check("legacy enabled=0 maps to Message XP only, not to Voice XP",
+          rows("SELECT voice_xp_enabled FROM leveling_config WHERE guild_id=?",
+               (GUILD,))[0] == (1,))
     custom = rows("SELECT message_xp_enabled,xp_cooldown_seconds,spam_threshold,"
                   "spam_window_seconds,spam_xp_penalty_divisor,xp_per_word,"
                   "spam_xp_penalty FROM leveling_config WHERE guild_id=?",
                   (GUILD + 1,))[0]
-    check("the baseline migration resets only cooldown/window for every guild",
+    check("baseline resets cooldown/window; customized threshold 5 is preserved",
           custom == (1, 10, 5, 20, 1000, 4, 75), str(custom))
     from utils.xp_calculator import get_leveling_config
     effective_custom = await get_leveling_config(GUILD + 1)
@@ -94,8 +106,10 @@ async def main():
           str(effective_custom))
 
     marker = rows("SELECT migration_name FROM leveling_config_migrations")
-    check("the one-time migration marker is recorded",
-          marker == [(LEVELING_CONFIG_BASELINE_MIGRATION,)], str(marker))
+    check("both one-time migration markers are recorded",
+          sorted(marker) == sorted([(LEVELING_CONFIG_BASELINE_MIGRATION,),
+                                    (LEVELING_SPAM_THRESHOLD_MIGRATION,)]),
+          str(marker))
 
     # Existing deployments need the rebuilt SQL defaults too, not just the
     # helper fallbacks. A guild row inserted later without explicit values now
@@ -116,6 +130,14 @@ async def main():
     check("re-running startup migration never overwrites Dashboard choices",
           after_restart == (31, 7, 40), str(after_restart))
 
+    # Threshold migration is one-shot: an admin who later chooses 3 keeps 3.
+    execute("UPDATE leveling_config SET spam_threshold=3 WHERE guild_id=?", (GUILD,))
+    async with aiosqlite.connect(DB_PATH) as db:
+        await migrate_leveling_config(db)
+    check("a threshold of 3 chosen after the migration is never rewritten",
+          rows("SELECT spam_threshold FROM leveling_config WHERE guild_id=?",
+               (GUILD,))[0] == (3,))
+
     from utils.xp_calculator import LEVELING_CONFIG_DEFAULTS, get_leveling_config
     fresh = await get_leveling_config(GUILD + 99)
     check("unconfigured/new guild effective defaults match SQL baselines",
@@ -124,6 +146,27 @@ async def main():
           and fresh["spam_window_seconds"] == 20
           and LEVELING_CONFIG_DEFAULTS["spam_xp_penalty_divisor"] == 1000,
           str(fresh))
+
+    # Regression (P1-B): a legacy row with enabled=NULL used to raise
+    # "NOT NULL constraint failed: leveling_config.message_xp_enabled" and
+    # abort init_db() for both the bot and the Dashboard.
+    await install_legacy_schema(null_enabled_guild=GUILD + 3)
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await migrate_leveling_config(db)
+        failure = None
+    except Exception as exc:  # noqa: BLE001 - the assertion reports it
+        failure = f"{type(exc).__name__}: {exc}"
+    check("legacy enabled=NULL no longer aborts the migration", failure is None,
+          str(failure))
+    null_row = rows("SELECT message_xp_enabled FROM leveling_config WHERE guild_id=?",
+                    (GUILD + 3,))[0]
+    check("a NULL legacy enabled becomes ON (what the runtime already assumed)",
+          null_row == (1,), str(null_row))
+    others = rows("SELECT message_xp_enabled FROM leveling_config "
+                  "WHERE guild_id IN (?,?) ORDER BY guild_id", (GUILD, GUILD + 1))
+    check("NULL handling leaves the other legacy rows' values untouched",
+          others == [(0,), (1,)], str(others))
 
     print("ALL LEVELING CONFIG MIGRATION CHECKS PASSED")
 
