@@ -19,7 +19,7 @@ from discord.ext import commands, tasks
 import aiosqlite
 
 from database import DB_PATH
-from utils.reward_engine import give_reward, RewardError, xp_grant_skipped
+from utils.reward_engine import give_reward, RewardError
 
 
 class TagMissionConfirmView(discord.ui.View):
@@ -228,12 +228,6 @@ class TagMissions(commands.Cog):
                         if result.get("success"):
                             outcome = "rewarded"
                             dm_text = success_message
-                        elif xp_grant_skipped(result):
-                            # Kept the tag, so the existing rewarded count
-                            # still includes them. Do not DM that the XP
-                            # was sent, and do not send the tag-removed DM.
-                            outcome = "rewarded"
-                            dm_text = None
                         else:
                             print(f"[TAGMISSIONS] mission {mission_id} reward "
                                   f"failed user={user_id}: {result.get('error')}")

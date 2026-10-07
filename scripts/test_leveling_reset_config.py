@@ -5,8 +5,9 @@ leveling_reset_config with enabled=1, so resetting the leaderboard once by
 hand silently enrolled a guild that had never configured a scheduled reset
 into leaderboard_reset_task's 7/30-day loop (it picks up every enabled=1 row).
 
-Also locks down the effective-config behavior the dashboard now relies on:
-xp_cooldown_seconds defaults to 20 (the pacing change) and a stored row wins.
+Also locks down the effective-config behavior the Dashboard now relies on:
+message cooldown defaults to 10 seconds, the independent spam window to 20, preserves the legacy frequency threshold,
+and a stored row wins.
 
 Run from the scripts directory:
     python test_leveling_reset_config.py
@@ -72,12 +73,14 @@ async def main():
     print("== 4. effective leveling config ==")
     from utils.xp_calculator import LEVELING_CONFIG_DEFAULTS, get_leveling_config
     fresh = await get_leveling_config(GUILD + 1)
-    check("default xp_cooldown_seconds is 20 (pacing change)",
-          fresh["xp_cooldown_seconds"] == 20 and LEVELING_CONFIG_DEFAULTS["xp_cooldown_seconds"] == 20,
+    check("default xp_cooldown_seconds is 10",
+          fresh["xp_cooldown_seconds"] == 10 and LEVELING_CONFIG_DEFAULTS["xp_cooldown_seconds"] == 10,
           str(fresh["xp_cooldown_seconds"]))
-    check("defaults covered: spam_window_seconds 10, xp_per_word 1, max 50",
-          fresh["spam_window_seconds"] == 10 and fresh["xp_per_word"] == 1
-          and fresh["xp_max_per_message"] == 50, str(fresh))
+    check("defaults covered: spam window 20, threshold 10, divisor 1000, XP 1–50",
+          fresh["spam_window_seconds"] == 20 and fresh["spam_threshold"] == 10
+          and fresh["spam_xp_penalty_divisor"] == 1000
+          and fresh["xp_per_word"] == 1 and fresh["xp_max_per_message"] == 50,
+          str(fresh))
     # remove_old_reward_role is a live product toggle again: OFF (0, default) =
     # Level reward roles accumulate; ON (1) = exclusive progression roles.
     check("remove_old_reward_role defaults to OFF (roles accumulate)",
@@ -97,7 +100,8 @@ async def main():
     check("a stored row still wins over the defaults",
           stored["xp_cooldown_seconds"] == 45 and stored["xp_per_word"] == 3, str(stored))
     check("columns absent from the row fall back to defaults",
-          stored["spam_window_seconds"] == 10 and stored["xp_max_per_message"] == 50, str(stored))
+          stored["spam_window_seconds"] == 20 and stored["spam_threshold"] == 10
+          and stored["xp_max_per_message"] == 50, str(stored))
 
     failed = [c for c in checks if not c[1]]
     print(f"\nLEVELING RESET/CONFIG: {len(checks) - len(failed)} passed, {len(failed)} failed")

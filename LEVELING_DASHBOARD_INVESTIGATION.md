@@ -3,6 +3,8 @@
 **Scope:** read-only investigation of the Nilive-Bot repository at commit `ddb534a` (branch `arena/01a10d19-nilive-bot`).
 No application code, template, test or config was modified. This report is the only file added.
 
+> Historical snapshot only. Its code-state findings (including the former spam threshold/window defaults) are not current configuration. See `XP_PACING_SIMULATION.md` and the active `dashboard/templates/systems/leveling.html` for the current, tested Leveling defaults and behavior.
+
 **Labels used throughout**
 
 | Label | Meaning |

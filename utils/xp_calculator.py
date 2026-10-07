@@ -1,4 +1,6 @@
 import math
+import time
+import uuid
 import aiosqlite
 from datetime import datetime, timezone, timedelta
 from database import DB_PATH
@@ -77,25 +79,24 @@ async def is_role_blacklisted(guild_id: int, member_role_ids: list[int]) -> bool
 # merged view, which is why a fresh guild shows the values the bot is actually
 # enforcing instead of OFF/blank.
 LEVELING_CONFIG_DEFAULTS = {
-    "enabled":                1,
-    "xp_per_word":            1,
-    "xp_min_per_message":     5,
-    "xp_max_per_message":     50,
-    "xp_cooldown_seconds":    20,
-    "voice_xp_enabled":       1,
-    "voice_xp_per_minute":    3,
-    "voice_require_unmuted":  1,
-    "spam_detection_enabled": 1,
-    "spam_threshold":         3,
-    "spam_xp_penalty":        10,
-    # Anti-spam window (cogs/leveling.py reads it as spam_window_seconds).
-    # The column was added by migration with DEFAULT 10 and never had a UI;
-    # it is admin-editable now, and this is the value until it is set.
-    "spam_window_seconds":    10,
-    "levelup_announce":       1,
-    "levelup_channel_id":     None,
-    "levelup_message":        None,
-    "remove_old_reward_role": 0,
+    "message_xp_enabled":      1,
+    "xp_per_word":             1,
+    "xp_min_per_message":      5,
+    "xp_max_per_message":      50,
+    "xp_cooldown_seconds":     10,
+    "voice_xp_enabled":        1,
+    "voice_xp_per_minute":     3,
+    "voice_require_unmuted":   1,
+    "spam_detection_enabled":  1,
+    "spam_threshold":          10,
+    "spam_window_seconds":     20,
+    # A detected incident deducts at most 1/divisor of current XP, capped at
+    # 1% of the balance per incident. 1000 is the conservative baseline.
+    "spam_xp_penalty_divisor": 1000,
+    "levelup_announce":        1,
+    "levelup_channel_id":      None,
+    "levelup_message":         None,
+    "remove_old_reward_role":  0,
 }
 
 
@@ -116,6 +117,11 @@ async def get_leveling_config(guild_id: int) -> dict:
         row = await cursor.fetchone()
         if row:
             for key, value in zip([desc[0] for desc in cursor.description], row):
+                # Historical fixed penalty is intentionally retained in the
+                # schema for data preservation only; it is not exposed to the
+                # API/runtime after the incident-based policy replaced it.
+                if key == "spam_xp_penalty":
+                    continue
                 if value is not None:
                     config[key] = value
     return config
@@ -126,9 +132,12 @@ async def calculate_message_xp(
     member_role_ids: list[int],
     word_count: int,
     user_id: int = None,
+    *,
+    ignore_message_toggle: bool = False,
 ) -> int:
     config = await get_leveling_config(guild_id)
-    if not config.get("enabled", 1):
+    if (not ignore_message_toggle
+            and not config.get("message_xp_enabled", 1)):
         return 0
     role_multiplier = await get_xp_multiplier(guild_id, member_role_ids)
     if role_multiplier == 0.0:
@@ -147,6 +156,28 @@ async def calculate_message_xp(
                   min(config["xp_max_per_message"], base_xp))
     final_xp = int(base_xp * role_multiplier * boost_multiplier)
     return final_xp
+
+
+async def calculate_max_message_xp(guild_id: int,
+                                   member_role_ids: list[int],
+                                   user_id: int) -> int:
+    """Return this member's largest ordinary message-XP award.
+
+    The spam rolling budget is defined as one production-calculated message
+    reward, not an arbitrary percentage of a Level bar. It uses the configured
+    per-message cap plus the same role and active-boost multipliers as a real
+    message. Spam protection can still run while Message XP is OFF, so this
+    potential-reward calculation deliberately bypasses only that one enable
+    switch; blacklist roles and all XP math remain effective.
+    """
+    config = await get_leveling_config(guild_id)
+    xp_per_word = int(config.get("xp_per_word", 1) or 0)
+    max_per_message = int(config.get("xp_max_per_message", 50) or 0)
+    word_count = (math.ceil(max_per_message / xp_per_word)
+                  if xp_per_word > 0 else 0)
+    return await calculate_message_xp(
+        guild_id, member_role_ids, word_count, user_id=user_id,
+        ignore_message_toggle=True)
 
 
 # ─── Phase 5 / Leveling expansion — XP boost items ──────────────────────
@@ -268,64 +299,251 @@ def xp_progress(total_xp: int) -> tuple[int, int, int]:
     return level, remaining, needed
 
 
-# ─── Anti-spam penalty ───────────────────────────────────────────────────
-# The spam penalty is a REAL XP deduction: it subtracts from the member's
-# current XP, floors the result at zero (XP is never allowed to go negative,
-# and a penalty never creates a debt the member has to work off), and
-# recomputes `level` from the resulting XP in the same transaction so
-# levels.xp and levels.level can never disagree — the split between the two
-# used to be able to leave a member with a stale level, which the next
-# legitimate XP grant would then silently correct by demoting them.
-#
-# A penalty can therefore legitimately demote a member (see the caller in
-# cogs/leveling.py). That is not a level *crossing*: crossings are increases,
-# and `record_crossing()` only ever inserts entitlement rows for increases, so
-# nothing here touches the claim ledger — no row is created, fulfilled claims
-# are not revoked, and the Level reward roles a member already earned stay on
-# them (with `remove_old_reward_role` ON, nothing is removed on the way down
-# either: enforcement only runs after a delivery). Re-earning the level later
-# is an ordinary crossing, and the claim ledger's
-# UNIQUE(guild_id, user_id, reward_level, track, reward_ref) +
-# INSERT OR IGNORE is what stops that from paying a reward twice.
-#
-# Deliberately NOT logged to the XP transaction ledger: the penalty has never
-# written a ledger row, and adding one would be a separate, visible change to
-# the dashboard's ledger page. (The ledger does support it —
-# `utils/ledger.py` records a negative amount as type="deduct".)
-async def apply_spam_penalty(guild_id: int, user_id: int, penalty: int) -> dict:
-    """Deduct `penalty` XP (floored at zero) and keep `level` consistent.
+# ─── Incident-based anti-spam penalty ─────────────────────────────────────
+# The penalty budget, current incident identity, quiet deadline, and warning
+# claim all live in SQLite. BEGIN IMMEDIATE serializes the incident claim with
+# its XP deduction across independent bot processes, not just Cog instances.
+SPAM_PENALTY_ROLLING_WINDOW_SECONDS = 60 * 60
+SPAM_PENALTY_EVENTS_TABLE = "leveling_spam_penalty_events"
+SPAM_INCIDENTS_TABLE = "leveling_spam_incidents"
 
-    Returns {"old_xp", "new_xp", "old_level", "new_level", "deducted",
-    "applied"}; `deducted` is what the member actually lost (the XP floor can
-    make it smaller than `penalty`) and `applied` is False when there was no XP
-    to lose at all (a no-op, never a debt).
+
+async def get_spam_incident_state(guild_id: int, user_id: int, *,
+                                  now: float | None = None) -> dict:
+    """Read the persisted quiet-window state for detector-history reset.
+
+    ``active_until`` is the explicit quiet-window expiry. Every message received
+    while the incident is active refreshes it; detector samples are used only
+    before an incident opens. A row may remain after expiry so its last-warning
+    timestamp can rate-limit warnings for the same member across later incidents.
     """
-    penalty = max(0, int(penalty))
+    timestamp = float(time.time() if now is None else now)
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            f"SELECT incident_id, active_until FROM {SPAM_INCIDENTS_TABLE} "
+            "WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id))
+        row = await cursor.fetchone()
+    if row is None:
+        return {"exists": False, "active": False, "expired": False,
+                "incident_id": None, "active_until": None}
+    active_until = float(row[1])
+    active = active_until > timestamp
+    return {"exists": True, "active": active, "expired": not active,
+            "incident_id": row[0], "active_until": active_until}
+
+
+async def _apply_spam_penalty_in_transaction(db, guild_id: int, user_id: int,
+                                             divisor: int, penalty_cap: int,
+                                             window_seconds: int, timestamp: float,
+                                             incident_id: str | None = None) -> dict:
+    """Apply the established deduction/budget math on the caller's txn."""
+    cutoff = timestamp - window_seconds
+    # Keep this audit/budget table bounded to each member's active rolling
+    # window; expired deductions can no longer affect policy.
+    await db.execute(
+        f"DELETE FROM {SPAM_PENALTY_EVENTS_TABLE} "
+        "WHERE guild_id=? AND user_id=? AND created_at<=?",
+        (guild_id, user_id, cutoff))
+    cursor = await db.execute(
+        f"SELECT COALESCE(SUM(deducted), 0) "
+        f"FROM {SPAM_PENALTY_EVENTS_TABLE} "
+        "WHERE guild_id=? AND user_id=? AND created_at>?",
+        (guild_id, user_id, cutoff))
+    budget_used = int((await cursor.fetchone())[0] or 0)
+    budget_remaining = max(0, penalty_cap - budget_used)
+
+    cursor = await db.execute(
+        "SELECT xp, level FROM levels WHERE guild_id=? AND user_id=?",
+        (guild_id, user_id))
+    row = await cursor.fetchone()
+    old_xp = max(0, int(row[0])) if row else 0
+    old_level = int(row[1]) if row else 0
+    calculated = old_xp // divisor
+    incident_cap = old_xp // 100
+    requested = min(calculated, incident_cap)
+    deducted = min(requested, budget_remaining)
+    new_xp = max(0, old_xp - deducted)
+    new_level = xp_progress(new_xp)[0]
+    await db.execute("""
+        INSERT INTO levels (guild_id, user_id, xp, level)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id)
+        DO UPDATE SET xp = ?, level = ?
+    """, (guild_id, user_id, new_xp, new_level, new_xp, new_level))
+    if deducted:
+        await db.execute(
+            f"INSERT INTO {SPAM_PENALTY_EVENTS_TABLE} "
+            "(guild_id, user_id, created_at, deducted, rolling_cap, incident_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (guild_id, user_id, timestamp, deducted, penalty_cap, incident_id))
+
+    return {
+        "old_xp": old_xp, "new_xp": new_xp,
+        "old_level": old_level, "new_level": new_level,
+        "deducted": deducted, "requested": requested,
+        "divisor": divisor, "applied": deducted > 0,
+        "rolling_cap": penalty_cap,
+        "rolling_window_seconds": window_seconds,
+        "budget_used_before": budget_used,
+        "budget_remaining_before": budget_remaining,
+        "budget_remaining_after": max(0, budget_remaining - deducted),
+        "budget_limited": deducted < requested,
+    }
+
+
+async def apply_spam_penalty(guild_id: int, user_id: int,
+                             divisor: int = 1000, *,
+                             penalty_cap: int | None = 50,
+                             window_seconds: int = SPAM_PENALTY_ROLLING_WINDOW_SECONDS,
+                             now: float | None = None,
+                             incident_detected: bool | None = None,
+                             incident_window_seconds: int | None = None,
+                             warning_window_seconds: int | None = None,
+                             detection_enabled: bool = True) -> dict:
+    """Atomically claim a spam incident and, if new, apply its XP penalty.
+
+    Callers that provide ``incident_detected`` use the durable incident path:
+    the current identity, quiet-window expiry, warning claim, and penalty are
+    read/written under one ``BEGIN IMMEDIATE`` transaction. Concurrent
+    processes therefore observe one incident and at most one deduction. A
+    detected message opens an incident through ``incident_window_seconds``;
+    each subsequent message while that incident is active refreshes the quiet
+    deadline without reapplying the penalty. The warning is claimable once per
+    incident, and its member-wide cooldown is persisted separately in the row.
+
+    Calls that omit ``incident_detected`` retain the direct penalty helper API
+    used by existing maintenance/safety checks; they still share the persistent
+    rolling-hour budget and transactional zero floor, but do not claim an
+    incident. Production calculates ``penalty_cap`` from one maximum Message XP
+    award before opening an incident.
+    """
+    divisor = max(100, int(divisor or 1000))
+    cap = (None if penalty_cap is None else max(0, int(penalty_cap)))
+    budget_window = max(1, int(window_seconds))
+    timestamp = float(time.time() if now is None else now)
+
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
+            if incident_detected is None:
+                if cap is None:
+                    raise ValueError("penalty_cap is required for direct penalties")
+                outcome = await _apply_spam_penalty_in_transaction(
+                    db, guild_id, user_id, divisor, cap, budget_window,
+                    timestamp)
+                await db.commit()
+                return outcome
+
+            incident_window = max(1, int(incident_window_seconds or 20))
+            warning_window = max(
+                1, int(warning_window_seconds or incident_window))
             cursor = await db.execute(
-                "SELECT xp, level FROM levels WHERE guild_id=? AND user_id=?",
+                f"SELECT incident_id, active_until, penalty_attempted, "
+                f"warning_attempted, last_warning_at "
+                f"FROM {SPAM_INCIDENTS_TABLE} "
+                "WHERE guild_id=? AND user_id=?",
                 (guild_id, user_id))
-            row = await cursor.fetchone()
-            old_xp = int(row[0]) if row else 0
-            old_level = int(row[1]) if row else 0
-            new_xp = max(0, old_xp - penalty)
-            new_level = xp_progress(new_xp)[0]
-            await db.execute("""
-                INSERT INTO levels (guild_id, user_id, xp, level)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(guild_id, user_id)
-                DO UPDATE SET xp = ?, level = ?
-            """, (guild_id, user_id, new_xp, new_level, new_xp, new_level))
+            prior = await cursor.fetchone()
+            was_expired = bool(prior and float(prior[1]) <= timestamp)
+
+            if not detection_enabled:
+                if prior and float(prior[1]) > timestamp:
+                    # Turning detection off ends suppression immediately; it
+                    # does not delete the warning history or touch XP.
+                    await db.execute(
+                        f"UPDATE {SPAM_INCIDENTS_TABLE} "
+                        "SET active_until=? WHERE guild_id=? AND user_id=?",
+                        (timestamp, guild_id, user_id))
+                await db.commit()
+                return {
+                    "in_incident": False, "incident_started": False,
+                    "incident_id": prior[0] if prior else None,
+                    "incident_expired": bool(prior), "warning_due": False,
+                    "applied": False, "deducted": 0,
+                }
+
+            if prior and float(prior[1]) > timestamp:
+                # The caller invokes this active-incident path for every member
+                # message, without consulting process-local detector history.
+                active_until = max(float(prior[1]),
+                                   timestamp + incident_window)
+                await db.execute(
+                    f"UPDATE {SPAM_INCIDENTS_TABLE} SET active_until=? "
+                    "WHERE guild_id=? AND user_id=?",
+                    (active_until, guild_id, user_id))
+                await db.commit()
+                return {
+                    "in_incident": True, "incident_started": False,
+                    "incident_id": prior[0], "active_until": active_until,
+                    "incident_expired": False, "warning_due": False,
+                    "applied": False, "deducted": 0,
+                }
+
+            if not incident_detected:
+                await db.commit()
+                return {
+                    "in_incident": False, "incident_started": False,
+                    "incident_id": prior[0] if prior else None,
+                    "active_until": float(prior[1]) if prior else None,
+                    "incident_expired": was_expired, "warning_due": False,
+                    "applied": False, "deducted": 0,
+                }
+
+            if cap is None:
+                # The caller may have observed an active incident just before
+                # another process ended it (for example, detection was turned
+                # off). Let it calculate the production cap, then retry the
+                # atomic claim instead of failing the message callback.
+                await db.commit()
+                return {
+                    "in_incident": False, "incident_started": False,
+                    "incident_id": prior[0] if prior else None,
+                    "incident_expired": was_expired,
+                    "needs_penalty_cap": True, "warning_due": False,
+                    "applied": False, "deducted": 0,
+                }
+
+            incident_id = uuid.uuid4().hex
+            active_until = timestamp + incident_window
+            previous_warning = (
+                float(prior[4]) if prior and prior[4] is not None else None)
+            if prior:
+                await db.execute(
+                    f"UPDATE {SPAM_INCIDENTS_TABLE} SET incident_id=?, "
+                    "active_until=?, penalty_attempted=1, "
+                    "warning_attempted=0 WHERE guild_id=? AND user_id=?",
+                    (incident_id, active_until, guild_id, user_id))
+            else:
+                await db.execute(
+                    f"INSERT INTO {SPAM_INCIDENTS_TABLE} "
+                    "(guild_id, user_id, incident_id, active_until, "
+                    "penalty_attempted, warning_attempted, last_warning_at) "
+                    "VALUES (?, ?, ?, ?, 1, 0, NULL)",
+                    (guild_id, user_id, incident_id, active_until))
+
+            outcome = await _apply_spam_penalty_in_transaction(
+                db, guild_id, user_id, divisor, cap, budget_window,
+                timestamp, incident_id)
+            warning_due = bool(outcome["applied"] and (
+                previous_warning is None
+                or timestamp - previous_warning >= warning_window))
+            last_warning_at = timestamp if warning_due else previous_warning
+            await db.execute(
+                f"UPDATE {SPAM_INCIDENTS_TABLE} SET last_warning_at=?, "
+                "warning_attempted=? WHERE guild_id=? AND user_id=?",
+                (last_warning_at, int(warning_due), guild_id, user_id))
             await db.commit()
+            return {
+                **outcome,
+                "in_incident": True, "incident_started": True,
+                "incident_id": incident_id, "active_until": active_until,
+                "incident_expired": was_expired,
+                "warning_due": warning_due,
+            }
         except Exception:
-            await db.execute("ROLLBACK")
+            await db.rollback()
             raise
-    deducted = old_xp - new_xp
-    return {"old_xp": old_xp, "new_xp": new_xp, "old_level": old_level,
-            "new_level": new_level, "deducted": deducted,
-            "applied": deducted > 0}
 
 
 async def check_and_award_level_rewards(bot, member, guild_id: int,

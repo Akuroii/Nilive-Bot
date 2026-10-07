@@ -70,10 +70,10 @@
                 <div class="card-title">💬 Message XP</div>
                 <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
                     <label class="toggle">
-                        <input type="checkbox" name="enabled" id="cfg-enabled">
+                        <input type="checkbox" name="message_xp_enabled" id="cfg-message-enabled">
                         <span class="toggle-slider"></span>
                     </label>
-                    <span style="font-size:13px;color:var(--text2);">Leveling enabled</span>
+                    <span style="font-size:13px;color:var(--text2);">Message XP enabled</span>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
@@ -124,18 +124,19 @@
                 <div class="form-row">
                     <div class="form-group">
                         <label class="form-label">Spam threshold (messages)</label>
-                        <input class="form-input" type="number" name="spam_threshold" id="cfg-spam-thresh" min="2">
+                        <input class="form-input" type="number" name="spam_threshold" id="cfg-spam-thresh" min="1">
                     </div>
                     <div class="form-group">
                         <label class="form-label">Spam window (seconds)</label>
                         <input class="form-input" type="number" name="spam_window_seconds" id="cfg-spam-window" min="1">
                     </div>
                     <div class="form-group">
-                        <label class="form-label">XP penalty per spam</label>
-                        <input class="form-input" type="number" name="spam_xp_penalty" id="cfg-spam-penalty" min="0">
+                        <label class="form-label">Penalty divisor (1/N of current XP)</label>
+                        <input class="form-input" type="number" name="spam_xp_penalty_divisor" id="cfg-spam-penalty" min="100">
                     </div>
                 </div>
-                <div class="form-hint">Messages within this window count toward the threshold.</div>
+                <div class="form-hint">Frequency default: 10 messages in the configured 20-second window; existing guild values are preserved by migration. Additional signals catch 6 messages in 3 seconds or 5 normalized identical messages in up to 10 seconds. These signals catch short bursts and repeated-content flooding before the general threshold. One incident deduction is at most 1% of current XP, and total deductions are capped at one production-calculated max Message XP award per rolling hour (default 50 XP before multipliers).
+                </div>
             </div>
 
             <div class="card">
@@ -540,7 +541,7 @@ async function loadConfig() {
             setTimeout(() => { $(el).val(String(val || '')).trigger('change.select2'); }, 600);
         } else el.value = val ?? '';
     };
-    set('cfg-enabled',         c.enabled);
+    set('cfg-message-enabled', c.message_xp_enabled);
     set('cfg-xp-per-word',     c.xp_per_word);
     set('cfg-xp-min',          c.xp_min_per_message);
     set('cfg-xp-max',          c.xp_max_per_message);
@@ -551,7 +552,7 @@ async function loadConfig() {
     set('cfg-spam',            c.spam_detection_enabled);
     set('cfg-spam-thresh',     c.spam_threshold);
     set('cfg-spam-window',     c.spam_window_seconds);
-    set('cfg-spam-penalty',    c.spam_xp_penalty);
+    set('cfg-spam-penalty',    c.spam_xp_penalty_divisor);
     set('cfg-announce',        c.levelup_announce);
     set('cfg-levelup-channel', c.levelup_channel_id);
     set('cfg-levelup-msg',     c.levelup_message);
@@ -568,7 +569,7 @@ async function saveConfig(btn) {
         return el.value;
     };
     const payload = {
-        enabled:               getVal('cfg-enabled'),
+        message_xp_enabled:    getVal('cfg-message-enabled'),
         xp_per_word:           getVal('cfg-xp-per-word'),
         xp_min_per_message:    getVal('cfg-xp-min'),
         xp_max_per_message:    getVal('cfg-xp-max'),
@@ -579,7 +580,7 @@ async function saveConfig(btn) {
         spam_detection_enabled:getVal('cfg-spam'),
         spam_threshold:        getVal('cfg-spam-thresh'),
         spam_window_seconds:   getVal('cfg-spam-window'),
-        spam_xp_penalty:       getVal('cfg-spam-penalty'),
+        spam_xp_penalty_divisor:getVal('cfg-spam-penalty'),
         levelup_announce:      getVal('cfg-announce'),
         levelup_channel_id:    getVal('cfg-levelup-channel'),
         levelup_message:       getVal('cfg-levelup-msg'),

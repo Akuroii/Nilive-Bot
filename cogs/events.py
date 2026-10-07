@@ -10,7 +10,6 @@ from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
 from utils.currency import get_currency_config, currency_amount
 from utils.emoji import CHECK_EMOJI
-from utils.reward_engine import xp_grant_skipped
 
 
 async def give_reward(bot: discord.Client,
@@ -57,7 +56,7 @@ async def give_reward(bot: discord.Client,
             reason="Event reward",
             source="event",
         )
-    if not result.get("success") and not xp_grant_skipped(result):
+    if not result.get("success"):
         print(f"[EVENTS] Reward grant failed: {result.get('error')}")
     return result
 
@@ -76,6 +75,17 @@ class ButtonRaceView(discord.ui.View):
         self.reward_duration = reward_duration
         self.winners:  list[int] = []
         self.finished: bool      = False
+
+    async def _finish_if_full(self, interaction) -> None:
+        """Preserve first-N winner semantics regardless of delivery outcome."""
+        if len(self.winners) < self.max_winners:
+            return
+        self.finished = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+        await interaction.channel.send(
+            "🏁 Event ended. All winners have claimed their rewards.")
 
     @discord.ui.button(label="🏁 Claim Reward",
                        style=discord.ButtonStyle.green,
@@ -114,17 +124,11 @@ class ButtonRaceView(discord.ui.View):
             self.reward_value,
             self.reward_duration)
 
-        if xp_grant_skipped(result):
+        if not result.get("success"):
             await interaction.response.send_message(
-                "You won this event, but Leveling is off so no XP was added "
-                f"({len(self.winners)}/{self.max_winners})",
+                "You won, but the reward could not be delivered. Please contact a moderator.",
                 ephemeral=True)
-            if len(self.winners) >= self.max_winners:
-                self.finished = True
-                for item in self.children:
-                    item.disabled = True
-                await interaction.message.edit(view=self)
-                await interaction.channel.send("🏁 Event ended.")
+            await self._finish_if_full(interaction)
             return
 
         cur = await get_currency_config(interaction.guild.id)
@@ -146,14 +150,7 @@ class ButtonRaceView(discord.ui.View):
             f"({len(self.winners)}/{self.max_winners})",
             ephemeral=True)
 
-        if len(self.winners) >= self.max_winners:
-            self.finished = True
-            for item in self.children:
-                item.disabled = True
-            await interaction.message.edit(view=self)
-            await interaction.channel.send(
-                "🏁 Event ended. All winners have claimed "
-                "their rewards.")
+        await self._finish_if_full(interaction)
 
 
 class Events(commands.Cog):

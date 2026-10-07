@@ -125,6 +125,18 @@ def _has_claimable(claims) -> bool:
                for c in (claims or []))
 
 
+async def _claim_button_available(guild_id: int, claims) -> bool:
+    """Also expose Claim All as the explicit exclusive-role reconcile action."""
+    if _has_claimable(claims):
+        return True
+    if not any((claim or {}).get("track") == "role"
+               and (claim or {}).get("status") == "fulfilled"
+               for claim in (claims or [])):
+        return False
+    config = await get_leveling_config(guild_id)
+    return bool(config.get("remove_old_reward_role"))
+
+
 def _claim_age(value) -> str:
     """'3d ago' for a claim timestamp; '' when it is missing or unparsable."""
     if not value:
@@ -165,20 +177,21 @@ def _claim_reward_text(guild, claim, currency) -> str:
 def claim_result_footer(result: dict) -> str:
     """The Claim All footer, including any Level role that was reconciled.
 
-    A restored role is not a fulfilled claim (nothing was paid, the claim was
-    already fulfilled) and not a failure, so it would otherwise be invisible in
-    the footer even though the member just received a role.
+    A restored role is not a newly fulfilled claim (nothing was paid, the claim
+    was already fulfilled), so it would otherwise be invisible in the footer.
+    Role reconciliation errors are also reported separately from claim failures.
     """
     got = len(result.get("fulfilled") or [])
     missed = len(result.get("failed") or [])
     text = f"Claimed {got}. Retryable failures: {missed}."
     reconciled = result.get("reconciled") or {}
     restored = len(reconciled.get("restored") or [])
-    unrecoverable = len(reconciled.get("failed") or [])
+    reconciliation_failures = len(reconciled.get("failed") or [])
     if restored:
         text += f" Level role restored: {restored}."
-    if unrecoverable:
-        text += f" Level role{'s' if unrecoverable > 1 else ''} that could not be restored: {unrecoverable}."
+    if reconciliation_failures:
+        text += (f" Level role reconciliation failure(s): "
+                 f"{reconciliation_failures}.")
     return text
 
 
@@ -303,7 +316,15 @@ class LevelRewardView(discord.ui.View):
         self.bot = bot
         self.guild_id = guild_id
         self.user_id = user_id
+        self.set_page_state("level")
         self.set_claimable(claimable)
+
+    def set_page_state(self, page: str) -> None:
+        """Highlight the page currently shown by the Level/Stats buttons."""
+        self.show_level.style = (discord.ButtonStyle.primary if page == "level"
+                                 else discord.ButtonStyle.secondary)
+        self.show_stats.style = (discord.ButtonStyle.primary if page == "stats"
+                                 else discord.ButtonStyle.secondary)
 
     def set_claimable(self, claimable: bool) -> None:
         """Green+enabled when something can be claimed, gray+disabled when not.
@@ -323,7 +344,8 @@ class LevelRewardView(discord.ui.View):
             return
         from utils.level_claims import list_claims
         claims = await list_claims(self.guild_id, self.user_id)
-        self.set_claimable(_has_claimable(claims))
+        self.set_claimable(await _claim_button_available(self.guild_id, claims))
+        self.set_page_state(page)
         embed = await _level_embed(interaction.guild, interaction.user, page)
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -346,16 +368,17 @@ class LevelRewardView(discord.ui.View):
         from utils.level_claims import claim_available, list_claims
         result = await claim_available(
             self.guild_id, self.user_id, member=interaction.user, bot=self.bot)
-        self.set_claimable(_has_claimable(
-            await list_claims(self.guild_id, self.user_id)))
+        self.set_claimable(await _claim_button_available(
+            self.guild_id, await list_claims(self.guild_id, self.user_id)))
+        self.set_page_state("level")
         embed = await _level_embed(interaction.guild, interaction.user, "level")
         embed.set_footer(text=claim_result_footer(result))
         await interaction.edit_original_response(embed=embed, view=self)
 
 
-# The approved anti-spam warning, sent as a REPLY to the offending message and
-# as an embed, at most once per spam window per member (see _spam_warning_due):
-# the XP penalty lands on every spamming message, the visible warning does not.
+# The approved anti-spam warning, sent as a REPLY to the first message of an
+# incident. The XP deduction and warning are both incident-based; the warning
+# also has an independent per-member window limit.
 # The custom emoji is kept in Discord's `<:name:id>` form exactly as approved so
 # it renders wherever the bot has that emoji.
 SPAM_WARNING_TEXT = (
@@ -364,15 +387,20 @@ SPAM_WARNING_TEXT = (
 )
 
 
+SPAM_BURST_SECONDS = 3
+SPAM_BURST_MESSAGES = 6
+SPAM_REPEAT_MESSAGES = 5
+SPAM_REPEAT_SECONDS = 10
+
+
 class Leveling(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._xp_cooldowns: dict[tuple, float] = {}
-        self._spam_tracker: dict[tuple, list[float]] = {}
-        # Last time each member was warned about spamming (in-memory, like
-        # _spam_tracker): the penalty applies to every spamming message, the
-        # warning at most once per spam window.
-        self._spam_warn_times: dict[tuple, float] = {}
+        self._spam_tracker: dict[tuple, list[tuple[float, str]]] = {}
+        # Incident identity, expiry, penalty claim, and warning throttle are
+        # persisted with XP in SQLite; only this short detector history stays
+        # process-local.
         # Phase 3 / E1: voice XP is now driven by
         # cogs/activity_engine.py's activity_voice_tick event (see
         # on_activity_voice_tick below) instead of this cog running
@@ -383,54 +411,75 @@ class Leveling(commands.Cog):
     def cog_unload(self):
         self.leaderboard_reset_task.cancel()
 
-    # ─── SPAM DETECTION (P1 #12) ─────────────────────────
-    # Frequency-based: N messages within X seconds = spam.
-    # Penalizes XP instead of blocking messages (moderation.py
-    # already handles actual mute/timeout enforcement).
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        """Restore already-earned Level reward roles when a member rejoins.
+
+        This is a membership reconciliation only: it uses the existing claim
+        ledger/reconciliation function, never reserves or pays a reward, and
+        never creates a second reward engine. With ``remove_old_reward_role``
+        off, it restores every fulfilled role because Level roles accumulate;
+        with it on, it restores the highest fulfilled set and replaces lower
+        roles only after that set is present.
+        """
+        if getattr(member, "bot", False):
+            return
+        try:
+            from utils.level_claims import reconcile_role_progression
+            result = await reconcile_role_progression(
+                member, member.guild.id, member.id)
+            if result.get("failed"):
+                print(f"[LEVEL ROLE REJOIN] guild={member.guild.id} "
+                      f"user={member.id}: {result['failed']}")
+        except Exception as exc:
+            # Discord join processing must not fail because a role was deleted,
+            # role hierarchy changed, or the claim database is temporarily down.
+            print(f"[LEVEL ROLE REJOIN] reconciliation failed "
+                  f"guild={member.guild.id} user={member.id}: {exc}")
+
+    # ─── INCIDENT-BASED SPAM DETECTION ────────────────────
+    # Track independently of the XP cooldown. Normal message counts are
+    # evaluated over the separately configured 20s window; clear bursts and
+    # repeated identical content are additional signals, not extra penalties.
     def _is_spamming(self, guild_id: int, user_id: int,
-                      threshold: int, window_seconds: int) -> bool:
+                      threshold: int, window_seconds: int,
+                      content: str = "", *, now: float | None = None) -> bool:
         key = (guild_id, user_id)
-        now = time.time()
-        times = self._spam_tracker.get(key, [])
-        times = [t for t in times if now - t < window_seconds]
-        times.append(now)
-        self._spam_tracker[key] = times
-        return len(times) >= threshold
+        now = time.time() if now is None else now
+        window = max(1, int(window_seconds))
+        threshold = max(1, int(threshold))
+        signature = " ".join(str(content or "").casefold().split())
+        records = [
+            (timestamp, prior_signature)
+            for timestamp, prior_signature in self._spam_tracker.get(key, [])
+            if 0 <= now - timestamp < window
+        ]
+        records.append((now, signature))
+        self._spam_tracker[key] = records
+
+        rapid_count = sum(now - timestamp <= SPAM_BURST_SECONDS
+                          for timestamp, _ in records)
+        repeated_count = sum(
+            bool(signature) and prior_signature == signature
+            and now - timestamp <= min(SPAM_REPEAT_SECONDS, window)
+            for timestamp, prior_signature in records
+        )
+        return (len(records) >= threshold
+                or rapid_count >= SPAM_BURST_MESSAGES
+                or repeated_count >= SPAM_REPEAT_MESSAGES)
 
     # ─── SPAM WARNING ────────────────────────────────────
-    # Frequency-based punishment with a single, playful notification: at most
-    # one warning per member per spam window, so a burst is answered once.
-    def _spam_warning_due(self, guild_id: int, user_id: int,
-                          window_seconds: int) -> bool:
-        key = (guild_id, user_id)
-        now = time.time()
-        last = self._spam_warn_times.get(key)
-        if last is not None and now - last < max(1, window_seconds):
-            return False
-        self._spam_warn_times[key] = now
-        return True
-
-    async def _warn_spam(self, message, window_seconds: int,
-                         deducted: int) -> None:
+    # The incident transaction persists the warning claim and member-wide
+    # cooldown before Discord is called, so an independent process cannot send
+    # another warning for the same incident.
+    async def _warn_spam(self, message, deducted: int) -> None:
         """Reply to the offending message with the approved anti-spam embed.
 
-        A *reply* to that message (not a standalone channel message) so the
-        member sees which message the penalty belongs to, and at most once per
-        spam window per member — the penalty is applied to every spamming
-        message, the visible warning is rate-limited. The embed reports the XP
-        that was actually deducted, which is less than the configured penalty
-        when the XP floor is reached.
-
-        Every failure is swallowed on purpose: the deduction is already
-        committed, so a missing permission, a deleted message or a Discord
-        outage must never roll the XP back or break the XP path. A failed
-        attempt still consumes the window slot (the timestamp is taken before
-        sending), so a channel the bot cannot write to is not retried on every
-        further message of the burst.
+        The deduction and warning claim are committed before sending. A missing
+        permission, deleted message, or Discord outage must never roll XP back;
+        the durable claim also prevents every later message from retrying the
+        same warning after a restart.
         """
-        if not self._spam_warning_due(message.guild.id, message.author.id,
-                                      window_seconds):
-            return
         embed = discord.Embed(description=SPAM_WARNING_TEXT)
         embed.set_footer(text=f"-{deducted} XP")
         try:
@@ -453,57 +502,111 @@ class Leveling(commands.Cog):
             return
 
         config = await get_leveling_config(message.guild.id)
-        if not config.get("enabled", 1):
-            return
-
         guild_id = message.guild.id
         user_id  = message.author.id
         key      = (guild_id, user_id)
         now      = time.time()
 
-        # P1 #12 FIX: spam detection must run on EVERY message,
-        # BEFORE the XP-cooldown gate below — not after it.
-        #
-        # The previous ordering updated self._xp_cooldowns and
-        # returned early whenever a message arrived inside the
-        # cooldown window, which meant that message never reached
-        # _is_spamming() at all. With the default settings
-        # (xp_cooldown_seconds=20, spam_window_seconds=10,
-        # spam_threshold=3), every message that could have counted
-        # toward the spam threshold was filtered out by the cooldown
-        # gate first — it was mathematically impossible to
-        # accumulate 3 tracked messages inside a 10s window when
-        # tracked messages were always >=30s apart. The anti-spam
-        # feature existed in code but could never actually fire.
-        #
-        # Spam tracking now runs independently of the XP cooldown,
-        # so rapid-fire messages get caught regardless of whether
-        # they'd have earned XP anyway.
+        # Spam detection is independent of both Message XP's switch and its
+        # cooldown. The short detector history is used only before an incident
+        # opens. Active incident identity and its quiet deadline are persisted;
+        # each message refreshes that deadline without consulting local samples.
         if config.get("spam_detection_enabled", 1):
-            threshold = int(config.get("spam_threshold", 3))
-            window    = int(config.get("spam_window_seconds", 10))
-            if self._is_spamming(guild_id, user_id, threshold, window):
-                penalty = int(config.get("spam_xp_penalty", 10))
-                if penalty > 0:
-                    # Real deduction: floor at zero (XP is never negative and
-                    # no debt is created) and recompute `level` from the
-                    # resulting XP in the same transaction, so the stored
-                    # level can never disagree with the XP curve. A penalty
-                    # may therefore demote the member — that is intentional.
-                    # It is not a crossing, so no entitlement/claim/role is
-                    # touched here (see apply_spam_penalty).
-                    from utils.xp_calculator import apply_spam_penalty
-                    outcome = await apply_spam_penalty(guild_id, user_id, penalty)
-                    # The warning is only sent when the penalty actually took
-                    # XP (a member already at 0 has nothing to be warned
-                    # about), and it reports that real amount.
-                    if outcome["applied"]:
-                        await self._warn_spam(message, window,
-                                              outcome["deducted"])
-                return
+            from utils.xp_calculator import (
+                apply_spam_penalty, calculate_max_message_xp,
+                get_spam_incident_state,
+            )
+            threshold = int(config.get("spam_threshold", 10))
+            window = max(1, int(config.get("spam_window_seconds", 20)))
+            persisted = await get_spam_incident_state(
+                guild_id, user_id, now=now)
+            if persisted["active"]:
+                # No local detector sample is needed once an incident is open.
+                # Persist every in-window message as activity so the 20s quiet
+                # deadline is the same after a restart or in another process.
+                outcome = await apply_spam_penalty(
+                    guild_id, user_id,
+                    incident_detected=False,
+                    incident_window_seconds=window,
+                    warning_window_seconds=window,
+                    now=now)
+                if outcome["in_incident"]:
+                    return
+                # A concurrent setting change may have closed it after the
+                # read. Refresh before collecting new pre-incident samples.
+                persisted = await get_spam_incident_state(
+                    guild_id, user_id, now=now)
+            if persisted["expired"]:
+                # Clear pre-expiry detector samples once, not on every message
+                # while the last persisted row remains expired. Samples newer
+                # than the stored deadline belong to a possible new episode.
+                deadline = persisted["active_until"]
+                prior_samples = self._spam_tracker.get(key, [])
+                if deadline is not None and any(
+                        sample_time <= deadline
+                        for sample_time, _ in prior_samples):
+                    self._spam_tracker.pop(key, None)
+            detected = self._is_spamming(
+                guild_id, user_id, threshold, window,
+                getattr(message, "content", ""), now=now)
+            if detected:
+                penalty_cap = None
+                if not persisted["active"]:
+                    penalty_cap = await calculate_max_message_xp(
+                        guild_id,
+                        [role.id for role in getattr(message.author, "roles", [])],
+                        user_id)
+                outcome = await apply_spam_penalty(
+                    guild_id, user_id,
+                    config.get("spam_xp_penalty_divisor", 1000),
+                    penalty_cap=penalty_cap,
+                    incident_detected=True,
+                    incident_window_seconds=window,
+                    warning_window_seconds=window,
+                    now=now)
+                if outcome.get("needs_penalty_cap"):
+                    penalty_cap = await calculate_max_message_xp(
+                        guild_id,
+                        [role.id for role in getattr(message.author, "roles", [])],
+                        user_id)
+                    outcome = await apply_spam_penalty(
+                        guild_id, user_id,
+                        config.get("spam_xp_penalty_divisor", 1000),
+                        penalty_cap=penalty_cap,
+                        incident_detected=True,
+                        incident_window_seconds=window,
+                        warning_window_seconds=window,
+                        now=now)
+                incident_started = outcome["incident_started"]
+                if outcome["in_incident"]:
+                    if (incident_started and outcome["applied"]
+                            and outcome["warning_due"]):
+                        await self._warn_spam(message, outcome["deducted"])
+                    return
+        else:
+            self._spam_tracker.pop(key, None)
+            from utils.xp_calculator import (
+                apply_spam_penalty, get_spam_incident_state,
+            )
+            persisted = await get_spam_incident_state(
+                guild_id, user_id, now=now)
+            if persisted["active"]:
+                # End any persisted suppression when spam detection is disabled;
+                # this only updates incident expiry and never changes XP.
+                await apply_spam_penalty(
+                    guild_id, user_id,
+                    incident_detected=False,
+                    incident_window_seconds=max(
+                        1, int(config.get("spam_window_seconds", 20))),
+                    detection_enabled=False,
+                    now=now)
 
-        cooldown = config.get("xp_cooldown_seconds", 20)
-        last     = self._xp_cooldowns.get(key, 0)
+        # The 10-second Message XP cooldown is independent of the 20-second
+        # spam window and does not gate voice, claims, or other XP sources.
+        if not config.get("message_xp_enabled", 1):
+            return
+        cooldown = max(0, int(config.get("xp_cooldown_seconds", 10)))
+        last = self._xp_cooldowns.get(key, 0)
         if now - last < cooldown:
             return
         self._xp_cooldowns[key] = now
@@ -570,8 +673,6 @@ class Leveling(commands.Cog):
                                       flags: dict):
         try:
             config = await get_leveling_config(guild.id)
-            if not config.get("enabled", 1):
-                return
             if not config.get("voice_xp_enabled", 1):
                 return
 
@@ -863,7 +964,8 @@ class Leveling(commands.Cog):
         from utils.level_claims import list_claims
         claims = await list_claims(interaction.guild.id, interaction.user.id)
         view = LevelRewardView(self.bot, interaction.guild.id, interaction.user.id,
-                               claimable=_has_claimable(claims))
+                               claimable=await _claim_button_available(
+                                   interaction.guild.id, claims))
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ─── PRESTIGE STATE / READ-ONLY VIEW ─────────────────

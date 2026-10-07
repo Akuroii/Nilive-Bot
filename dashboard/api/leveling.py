@@ -86,18 +86,18 @@ def get_leveling_config_api():
 # engine cannot mean, e.g. negative XP or a zero-width spam threshold.
 _LEVELING_INT_FIELDS = (
     # field,                        label,                     default,  min,  max
-    ("enabled",                     "Leveling enabled",              1,    0,     1),
+    ("message_xp_enabled",          "Message XP enabled",            1,    0,     1),
     ("xp_per_word",                 "XP per word",                   1,    0,   100),
     ("xp_min_per_message",          "Min XP per message",            5,    0, 100000),
     ("xp_max_per_message",          "Max XP per message",           50,    0, 100000),
-    ("xp_cooldown_seconds",         "Cooldown (seconds)",           20,    0, 86400),
+    ("xp_cooldown_seconds",         "Cooldown (seconds)",           10,    0, 86400),
     ("voice_xp_enabled",            "Voice XP enabled",              1,    0,     1),
     ("voice_xp_per_minute",         "XP per minute in voice",        3,    0, 10000),
     ("voice_require_unmuted",       "Require unmuted to earn voice XP", 1, 0,     1),
     ("spam_detection_enabled",      "Enable spam detection",         1,    0,     1),
-    ("spam_threshold",              "Spam threshold (messages)",     3,    1, 10000),
-    ("spam_window_seconds",         "Spam window (seconds)",        10,    1,  3600),
-    ("spam_xp_penalty",             "XP penalty per spam",          10,    0, 1000000),
+    ("spam_threshold",              "Spam threshold (messages)",    10,    1, 10000),
+    ("spam_window_seconds",         "Spam window (seconds)",        20,    1,  3600),
+    ("spam_xp_penalty_divisor",     "XP penalty divisor (1/N)",   1000,  100, 1000000),
     ("levelup_announce",            "Announce level ups",            1,    0,     1),
     # OFF (0, the default) = Level reward roles accumulate as they always did.
     # ON (1) = the progression is exclusive: delivering a higher Level reward
@@ -156,17 +156,17 @@ def save_leveling_config_api():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO leveling_config
-                    (guild_id, enabled, xp_per_word,
+                    (guild_id, message_xp_enabled, xp_per_word,
                      xp_min_per_message, xp_max_per_message,
                      xp_cooldown_seconds, voice_xp_enabled,
                      voice_xp_per_minute, voice_require_unmuted,
                      spam_detection_enabled, spam_threshold,
-                     spam_window_seconds, spam_xp_penalty, levelup_announce,
+                     spam_window_seconds, spam_xp_penalty_divisor, levelup_announce,
                      levelup_channel_id, levelup_message,
                      remove_old_reward_role)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(guild_id) DO UPDATE SET
-                    enabled                = excluded.enabled,
+                    message_xp_enabled      = excluded.message_xp_enabled,
                     xp_per_word            = excluded.xp_per_word,
                     xp_min_per_message     = excluded.xp_min_per_message,
                     xp_max_per_message     = excluded.xp_max_per_message,
@@ -177,7 +177,7 @@ def save_leveling_config_api():
                     spam_detection_enabled = excluded.spam_detection_enabled,
                     spam_threshold         = excluded.spam_threshold,
                     spam_window_seconds    = excluded.spam_window_seconds,
-                    spam_xp_penalty        = excluded.spam_xp_penalty,
+                    spam_xp_penalty_divisor = excluded.spam_xp_penalty_divisor,
                     levelup_announce       = excluded.levelup_announce,
                     levelup_channel_id     = excluded.levelup_channel_id,
                     levelup_message        = excluded.levelup_message,
@@ -185,7 +185,7 @@ def save_leveling_config_api():
                     updated_at             = CURRENT_TIMESTAMP
             """, (
                 guild_id,
-                values["enabled"],
+                values["message_xp_enabled"],
                 values["xp_per_word"],
                 values["xp_min_per_message"],
                 values["xp_max_per_message"],
@@ -196,7 +196,7 @@ def save_leveling_config_api():
                 values["spam_detection_enabled"],
                 values["spam_threshold"],
                 values["spam_window_seconds"],
-                values["spam_xp_penalty"],
+                values["spam_xp_penalty_divisor"],
                 values["levelup_announce"],
                 data.get("levelup_channel_id") or None,
                 data.get("levelup_message") or None,

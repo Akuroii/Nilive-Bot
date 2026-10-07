@@ -47,6 +47,39 @@ def claim_sources(user=USER):
         (GUILD, user))
 
 
+def reward_side_effect_snapshot(user=USER):
+    """State negative XP administration must not pay, revoke, or redefine."""
+    return {
+        "claims": rows(
+            "SELECT * FROM level_reward_claims WHERE guild_id=? AND user_id=? ORDER BY id",
+            (GUILD, user)),
+        "wallet": rows(
+            "SELECT * FROM economy WHERE guild_id=? AND user_id=?",
+            (GUILD, user)),
+        "ledger": rows(
+            "SELECT * FROM transaction_ledger WHERE guild_id=? AND user_id=? ORDER BY id",
+            (GUILD, user)),
+        "inventory": rows(
+            "SELECT * FROM inventory_items WHERE guild_id=? AND user_id=? ORDER BY id",
+            (GUILD, user)),
+        "active_boosts": rows(
+            "SELECT * FROM leveling_active_boosts WHERE guild_id=? AND user_id=? ORDER BY id",
+            (GUILD, user)),
+        "role_definitions": rows(
+            "SELECT * FROM leveling_rewards WHERE guild_id=? ORDER BY id",
+            (GUILD,)),
+        "currency_definitions": rows(
+            "SELECT * FROM leveling_currency_rewards WHERE guild_id=? ORDER BY id",
+            (GUILD,)),
+        "shop_definitions": rows(
+            "SELECT * FROM leveling_shop_rewards WHERE guild_id=? ORDER BY id",
+            (GUILD,)),
+        "boost_definitions": rows(
+            "SELECT * FROM leveling_boost_rewards WHERE guild_id=? ORDER BY id",
+            (GUILD,)),
+    }
+
+
 class Fail(Exception):
     pass
 
@@ -264,6 +297,17 @@ async def main():
           and all(c[3] == "pending" for c in claims())
           and wallet()[0] == 100,
           str(claims()))
+
+    from utils.xp_calculator import xp_progress
+    before_negative_set = level_of()
+    set_side_effects_before = reward_side_effect_snapshot()
+    await Leveling.setxp.callback(cog, ix, who, -123)
+    after_negative_set = level_of()
+    check("negative /setxp clamps the existing member to zero without reward side effects",
+          before_negative_set is not None and before_negative_set[0] > 0
+          and after_negative_set == (0, xp_progress(0)[0])
+          and reward_side_effect_snapshot() == set_side_effects_before,
+          f"before={before_negative_set} after={after_negative_set}")
     setxp_sources = claim_sources()
 
     import dashboard.app as dashboard
@@ -298,6 +342,22 @@ async def main():
           response.status_code < 400 and len(created) == 1
           and created[0][3] == "pending" and wallet()[0] == 0,
           str(created))
+
+    before_negative_dashboard = level_of()
+    dashboard_side_effects_before = reward_side_effect_snapshot()
+    response = client.post(
+        "/api/edit-member",
+        json={"user_id": USER, "xp": -987, "coins": 0, "diamonds": 0},
+        headers={"X-CSRF-Token": "phase1-csrf"})
+    after_negative_dashboard = level_of()
+    check("negative Dashboard member edit clamps existing XP without reward or claim side effects",
+          response.status_code == 200
+          and response.get_json() == {"success": True}
+          and before_negative_dashboard is not None and before_negative_dashboard[0] > 0
+          and after_negative_dashboard == (0, xp_progress(0)[0])
+          and reward_side_effect_snapshot() == dashboard_side_effects_before,
+          f"status={response.status_code} before={before_negative_dashboard} "
+          f"after={after_negative_dashboard}")
     dashboard_sources = claim_sources()
 
     # 11. Reset keeps the rows. Re-leveling does not create a second identity.
@@ -359,16 +419,16 @@ async def main():
           paid["delivered_currency"] == 1 and wallet() == (15, 0)
           and claims()[0][3] == "fulfilled")
 
-    execute("INSERT INTO leveling_config (guild_id, enabled) VALUES (?, 0) "
-            "ON CONFLICT(guild_id) DO UPDATE SET enabled=0", (GUILD,))
+    execute("INSERT INTO leveling_config (guild_id, message_xp_enabled) VALUES (?, 0) "
+            "ON CONFLICT(guild_id) DO UPDATE SET message_xp_enabled=0", (GUILD,))
     before_off = claims()
-    skipped = await give_reward(
-        SimpleNamespace(), GUILD, USER, "xp", amount=500,
-        reason="off", source="test")
-    from utils.reward_engine import xp_grant_skipped
-    check("leveling off creates no entitlement and no XP",
-          xp_grant_skipped(skipped) and claims() == before_off
-          and level_of()[0] == 100)
+    xp_before_off = level_of()[0]
+    direct = await give_reward(
+        SimpleNamespace(), GUILD, USER, "xp", amount=1,
+        reason="independent source", source="mission")
+    check("Message XP OFF does not gate mission/event XP grants",
+          direct.get("success") and claims() == before_off
+          and level_of()[0] == xp_before_off + 1)
 
     rank_source = inspect.getsource(Leveling.rank.callback)
     check("/rank was not given claim behavior",

@@ -49,6 +49,144 @@ if not _owner_id_raw:
 OWNER_DISCORD_ID = int(_owner_id_raw)
 
 
+LEVELING_CONFIG_BASELINE_MIGRATION = "message-xp-10s-spam-window-20s-v1"
+LEVELING_CONFIG_CREATE_SQL = """
+    CREATE TABLE IF NOT EXISTS leveling_config (
+        guild_id                 INTEGER PRIMARY KEY,
+        message_xp_enabled       INTEGER NOT NULL DEFAULT 1,
+        xp_per_word              INTEGER DEFAULT 1,
+        xp_min_per_message       INTEGER DEFAULT 5,
+        xp_max_per_message       INTEGER DEFAULT 50,
+        xp_cooldown_seconds      INTEGER DEFAULT 10,
+        voice_xp_enabled         INTEGER DEFAULT 1,
+        voice_xp_per_minute      INTEGER DEFAULT 3,
+        voice_require_unmuted    INTEGER DEFAULT 1,
+        spam_detection_enabled   INTEGER DEFAULT 1,
+        spam_threshold           INTEGER DEFAULT 10,
+        spam_window_seconds      INTEGER DEFAULT 20,
+        -- Deprecated storage only: preserve historical values, but the runtime
+        -- now applies the incident-based divisor and rolling cap below.
+        spam_xp_penalty          INTEGER DEFAULT 10,
+        spam_xp_penalty_divisor  INTEGER DEFAULT 1000,
+        levelup_announce         INTEGER DEFAULT 1,
+        levelup_channel_id       INTEGER,
+        levelup_message          TEXT,
+        levelup_embed_data       TEXT,
+        remove_old_reward_role   INTEGER DEFAULT 0,
+        updated_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+
+
+async def migrate_leveling_config(db):
+    """Bring the Leveling config schema and legacy baselines forward once.
+
+    The marker makes the data migration one-shot: existing rows receive the
+    approved cooldown/window baselines exactly once, while later bot/dashboard
+    startups never overwrite subsequent administrator edits. Other configured
+    row values, including spam_threshold, are not part of this data migration.
+    The SQL default for spam_threshold is 10 for future rows; any table rebuild
+    copies existing per-guild values verbatim.
+    """
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        await db.execute(LEVELING_CONFIG_CREATE_SQL)
+        cursor = await db.execute("PRAGMA table_info(leveling_config)")
+        columns = {row[1] for row in await cursor.fetchall()}
+
+        if "message_xp_enabled" not in columns and "enabled" in columns:
+            await db.execute(
+                "ALTER TABLE leveling_config RENAME COLUMN enabled TO message_xp_enabled")
+            columns.remove("enabled")
+            columns.add("message_xp_enabled")
+        elif "message_xp_enabled" not in columns:
+            await db.execute(
+                "ALTER TABLE leveling_config ADD COLUMN message_xp_enabled "
+                "INTEGER NOT NULL DEFAULT 1")
+            columns.add("message_xp_enabled")
+        elif "enabled" in columns:
+            # Defensive support for a partial rollout that briefly stored both.
+            await db.execute("""
+                UPDATE leveling_config SET message_xp_enabled=enabled
+                WHERE enabled IS NOT NULL
+            """)
+            await db.execute("ALTER TABLE leveling_config DROP COLUMN enabled")
+            columns.remove("enabled")
+
+        if "spam_window_seconds" not in columns:
+            await db.execute(
+                "ALTER TABLE leveling_config ADD COLUMN spam_window_seconds "
+                "INTEGER DEFAULT 20")
+            columns.add("spam_window_seconds")
+        if "spam_xp_penalty_divisor" not in columns:
+            await db.execute(
+                "ALTER TABLE leveling_config ADD COLUMN spam_xp_penalty_divisor "
+                "INTEGER DEFAULT 1000")
+            columns.add("spam_xp_penalty_divisor")
+        # Keep the old fixed-penalty column as inert compatibility storage.
+        # Its value has no safe/arbitrary mapping to the new incident divisor;
+        # the listener and Dashboard never read or write it.
+
+        # SQLite cannot alter an existing column's DEFAULT. Rebuild only when
+        # a legacy default is still present so direct inserts on an upgraded
+        # database use the same baseline as fresh databases and Dashboard saves.
+        cursor = await db.execute("PRAGMA table_info(leveling_config)")
+        schema = await cursor.fetchall()
+        defaults = {row[1]: row[4] for row in schema}
+        wanted_defaults = {
+            "xp_cooldown_seconds": "10",
+            "spam_threshold": "10",
+            "spam_window_seconds": "20",
+            "spam_xp_penalty_divisor": "1000",
+        }
+        if any(str(defaults.get(name)) != value
+               for name, value in wanted_defaults.items()):
+            await db.execute(
+                "ALTER TABLE leveling_config RENAME TO leveling_config_legacy")
+            await db.execute(LEVELING_CONFIG_CREATE_SQL)
+            old_cursor = await db.execute(
+                "PRAGMA table_info(leveling_config_legacy)")
+            old_columns = {row[1] for row in await old_cursor.fetchall()}
+            new_cursor = await db.execute(
+                "PRAGMA table_info(leveling_config)")
+            new_columns = [row[1] for row in await new_cursor.fetchall()]
+            shared = [name for name in new_columns if name in old_columns]
+            names = ", ".join(f'"{name}"' for name in shared)
+            await db.execute(
+                f"INSERT INTO leveling_config ({names}) "
+                f"SELECT {names} FROM leveling_config_legacy")
+            await db.execute("DROP TABLE leveling_config_legacy")
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS leveling_config_migrations (
+                migration_name TEXT PRIMARY KEY,
+                applied_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor = await db.execute(
+            "SELECT 1 FROM leveling_config_migrations WHERE migration_name=?",
+            (LEVELING_CONFIG_BASELINE_MIGRATION,))
+        if not await cursor.fetchone():
+            # These two baselines are intentionally migrated for every existing
+            # guild exactly once. Spam threshold is a separate design setting:
+            # preserve each existing guild's configured value rather than
+            # silently changing it as part of this cooldown/window migration.
+            await db.execute("""
+                UPDATE leveling_config
+                   SET xp_cooldown_seconds = 10,
+                       spam_window_seconds = 20,
+                       updated_at = CURRENT_TIMESTAMP
+            """)
+            await db.execute(
+                "INSERT INTO leveling_config_migrations (migration_name) VALUES (?)",
+                (LEVELING_CONFIG_BASELINE_MIGRATION,))
+
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+
 async def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
@@ -660,38 +798,63 @@ async def init_db():
             ON welcome_messages(guild_id)
         """)
 
+        # Run the Leveling config schema/data migration transactionally. The
+        # helper is idempotent for schema work and marker-gated for baseline
+        # updates, so startup never re-applies defaults over Dashboard choices.
+        await db.commit()
+        await migrate_leveling_config(db)
+
+        # Persistent one-hour anti-spam budget. Each incident deduction is
+        # recorded atomically with levels.xp by apply_spam_penalty(), so an
+        # in-memory/cog restart cannot reset the cumulative limit.
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS leveling_config (
-                guild_id               INTEGER PRIMARY KEY,
-                enabled                INTEGER DEFAULT 1,
-                xp_per_word            INTEGER DEFAULT 1,
-                xp_min_per_message     INTEGER DEFAULT 5,
-                xp_max_per_message     INTEGER DEFAULT 50,
-                xp_cooldown_seconds    INTEGER DEFAULT 20,
-                voice_xp_enabled       INTEGER DEFAULT 1,
-                voice_xp_per_minute    INTEGER DEFAULT 3,
-                voice_require_unmuted  INTEGER DEFAULT 1,
-                spam_detection_enabled INTEGER DEFAULT 1,
-                spam_xp_penalty        INTEGER DEFAULT 10,
-                spam_threshold         INTEGER DEFAULT 3,
-                levelup_announce       INTEGER DEFAULT 1,
-                levelup_channel_id     INTEGER,
-                levelup_message        TEXT,
-                levelup_embed_data     TEXT,
-                remove_old_reward_role INTEGER DEFAULT 0,
-                updated_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            CREATE TABLE IF NOT EXISTS leveling_spam_penalty_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,
+                created_at  REAL NOT NULL,
+                deducted    INTEGER NOT NULL CHECK (deducted > 0),
+                rolling_cap INTEGER NOT NULL CHECK (rolling_cap >= 0)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_leveling_spam_penalties_member_time
+            ON leveling_spam_penalty_events(guild_id, user_id, created_at)
+        """)
+
+        # Persist the active spam episode separately from the in-memory
+        # detector's short-lived message history. One row per member retains
+        # the current incident, its quiet-window deadline, the one-time
+        # penalty/warning claims, and the last-warning time across restarts.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS leveling_spam_incidents (
+                guild_id          INTEGER NOT NULL,
+                user_id           INTEGER NOT NULL,
+                incident_id       TEXT NOT NULL,
+                active_until      REAL NOT NULL,
+                penalty_attempted INTEGER NOT NULL DEFAULT 0,
+                warning_attempted INTEGER NOT NULL DEFAULT 0,
+                last_warning_at   REAL,
+                PRIMARY KEY (guild_id, user_id)
             )
         """)
 
-        try:
-            cursor = await db.execute("PRAGMA table_info(leveling_config)")
-            cols = [c[1] for c in await cursor.fetchall()]
-            if "spam_window_seconds" not in cols:
-                await db.execute(
-                    "ALTER TABLE leveling_config ADD COLUMN spam_window_seconds INTEGER DEFAULT 10")
-                await db.commit()
-        except Exception as e:
-            print(f"[MIGRATION] leveling_config.spam_window_seconds: {e}")
+        # Existing penalty ledgers predate incident ids. SQLite cannot add
+        # this column conditionally in CREATE TABLE, so migrate it in place;
+        # legacy budget rows remain valid with a NULL incident_id.
+        cursor = await db.execute(
+            "PRAGMA table_info(leveling_spam_penalty_events)")
+        penalty_columns = {row[1] for row in await cursor.fetchall()}
+        if "incident_id" not in penalty_columns:
+            await db.execute(
+                "ALTER TABLE leveling_spam_penalty_events "
+                "ADD COLUMN incident_id TEXT")
+        await db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_leveling_spam_penalties_incident
+            ON leveling_spam_penalty_events(guild_id, user_id, incident_id)
+            WHERE incident_id IS NOT NULL
+        """)
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_rewards (

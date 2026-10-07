@@ -391,7 +391,7 @@ async def deliver_role(member, role_id: int, reason: str) -> None:
     await member.add_roles(role, reason=reason)
 
 
-# ─── Level reward roles are exclusive to the progression ────────────────
+# ─── Level reward role progression ─────────────────────────────────────
 # A guild configures this on the Leveling page as `remove_old_reward_role`:
 #
 #   OFF (0, the default) — Level reward roles accumulate, exactly as they
@@ -445,14 +445,15 @@ async def superseded_role_ids(db, guild_id: int, user_id: int,
 
 
 async def enforce_role_progression(member, guild_id: int, user_id: int,
-                                   level: int, role_id: int) -> list[int]:
-    """Drop superseded Level-reward roles from `member`. Returns the role ids
-    actually removed.
+                                   level: int, role_id: int,
+                                   failures: list | None = None) -> list[int]:
+    """Drop superseded Level-reward roles; return IDs actually removed.
 
-    Called after the new role is on the member, so a failure here cannot leave
-    them with nothing: the claim that triggered it is marked failed by the
-    caller and stays retryable, and re-running is idempotent (roles the member
-    no longer holds, and roles deleted from the guild, are skipped)."""
+    Call only after every required role at the highest Level is fulfilled and
+    present. Removal failures are reported separately and never change reward
+    definitions, claim state, or XP. A caller that omits ``failures`` retains
+    the legacy raise-on-error behavior.
+    """
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         stale = await superseded_role_ids(db, guild_id, user_id, level, role_id)
     if not stale:
@@ -464,85 +465,120 @@ async def enforce_role_progression(member, guild_id: int, user_id: int,
         role = guild.get_role(stale_id) if guild is not None else None
         if role is None or role not in held:
             continue
-        await member.remove_roles(
-            role, reason=f"Replaced by the Level {level} reward role")
-        removed.append(stale_id)
+        try:
+            await member.remove_roles(
+                role, reason=f"Replaced by the Level {level} reward role")
+            removed.append(stale_id)
+        except Exception as exc:
+            if failures is None:
+                raise
+            failures.append((stale_id, str(exc)))
     return removed
 
 
 async def reconcile_role_progression(member, guild_id: int, user_id: int) -> dict:
-    """Re-add the Level reward roles of the HIGHEST fulfilled claim if missing.
+    """Restore earned Level roles and optionally enforce exclusivity.
 
-    Explicit, member-initiated reconciliation for the case where a role the
-    member had already claimed is no longer on them (Discord dropped it, an
-    admin cleaned it up, they were away when it happened). The claim is
-    `fulfilled`, so the normal pass never delivers it again, and no XP path can
-    restore it: a crossing counts *increases* only, and faking one is exactly
-    what this must not do.
+    This is the shared membership-only reconciliation used by both rejoin and
+    the member's Claim All path. It never writes the claim ledger or pays a
+    reward. With ``remove_old_reward_role`` OFF, every fulfilled role claim is
+    restored because Level roles accumulate. With it ON, only the highest
+    fulfilled Level set is restored and lower fulfilled roles are removed after
+    every role in that set is present. A failed/pending/processing same-Level
+    claim or Discord add failure blocks replacement; unrelated roles are never
+    considered.
 
-    Boundaries, deliberately:
-
-    * only roles belonging to the **highest fulfilled level** are restored —
-      never every historical Level role;
-    * a lower fulfilled role that is still on the member is removed by the
-      existing progression rule once the highest one is present, so with
-      exclusivity ON the end state is the highest role and nothing else;
-    * the claim ledger is read, never written: no row is inserted, no status
-      changes, so claim identity and idempotency are untouched, and a
-      delivery failure is *reported*, never written back to the claim;
-    * a failure to restore the highest role leaves the member's current roles
-      exactly as they are (a lower role is never stripped when the role that
-      should replace it could not be delivered);
-    * unrelated roles are never considered — only role ids that appear in a
-      fulfilled `role` claim are ever touched.
-
-    Returns {"restored": [...], "removed": [...], "failed": [(role_id, err)]}.
+    Returns ``{"restored": [...], "removed": [...], "failed": [...],
+    "blocked": bool}``. Failures are role IDs with an explanatory string.
     """
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         cursor = await db.execute("""
-            SELECT reward_level, payload_json FROM level_reward_claims
-            WHERE guild_id=? AND user_id=? AND track=? AND status='fulfilled'
+            SELECT reward_level, payload_json, status FROM level_reward_claims
+            WHERE guild_id=? AND user_id=? AND track=?
         """, (guild_id, user_id, TRACK_ROLE))
-        by_level: dict[int, set[int]] = {}
-        for claimed_level, payload in await cursor.fetchall():
-            try:
-                claimed_role = int(json.loads(payload)["role_id"])
-            except (TypeError, ValueError, KeyError):
-                continue
-            by_level.setdefault(int(claimed_level), set()).add(claimed_role)
+        claim_rows = await cursor.fetchall()
 
-    result: dict = {"restored": [], "removed": [], "failed": []}
+    result: dict = {"restored": [], "removed": [], "failed": [],
+                    "blocked": False}
+    by_level: dict[int, dict] = {}
+    for claimed_level, payload, status in claim_rows:
+        level = int(claimed_level)
+        group = by_level.setdefault(level, {"role_ids": set(), "unfulfilled": False})
+        if status != "fulfilled":
+            group["unfulfilled"] = True
+        try:
+            role_id = int(json.loads(payload)["role_id"])
+        except (TypeError, ValueError, KeyError):
+            group["unfulfilled"] = True
+            result["failed"].append((None, f"Invalid role claim payload at Level {level}"))
+            continue
+        if status == "fulfilled":
+            group["role_ids"].add(role_id)
+
     if not by_level:
         return result
 
+    from utils.xp_calculator import get_leveling_config
+    exclusive_roles = bool(
+        (await get_leveling_config(guild_id)).get("remove_old_reward_role"))
     highest = max(by_level)
-    keep = sorted(by_level[highest])
-    guild = getattr(member, "guild", None)
-    held = set(getattr(member, "roles", None) or [])
-    present = False
-    for role_id in keep:
-        role = guild.get_role(role_id) if guild is not None else None
-        if role is not None and role in held:
-            present = True
-            continue
-        try:
-            await deliver_role(member, role_id,
-                               f"Level {highest} reward (restored)")
-            result["restored"].append(role_id)
-            present = True
-        except Exception as e:
-            result["failed"].append((role_id, str(e)))
+    group = by_level[highest]
+    keep = sorted(group["role_ids"])
+    if exclusive_roles and not keep:
+        result["blocked"] = bool(group["unfulfilled"])
+        return result
 
-    if not present:
-        # Nothing of the highest level could be put on the member: leave them
-        # as they are rather than removing a role we cannot replace.
+    guild = getattr(member, "guild", None)
+    if guild is None:
+        result["failed"].append((None, "Member has no guild"))
+        result["blocked"] = True
+        return result
+
+    # OFF means every fulfilled Level role remains part of the member's
+    # accumulated progression. For ON, restore only the highest set so an
+    # exclusive progression doesn't re-grant roles that were superseded.
+    restore_groups = ([(highest, group)] if exclusive_roles else
+                     sorted(by_level.items()))
+    held = set(getattr(member, "roles", None) or [])
+    for reward_level, role_group in restore_groups:
+        for role_id in sorted(role_group["role_ids"]):
+            role = guild.get_role(role_id)
+            if role is None:
+                result["failed"].append((role_id, "Role no longer exists"))
+                continue
+            if role in held:
+                continue
+            try:
+                await deliver_role(
+                    member, role_id,
+                    f"Level {reward_level} reward (restored)")
+                result["restored"].append(role_id)
+                held = set(getattr(member, "roles", None) or [])
+                if role not in held:
+                    result["failed"].append(
+                        (role_id, "Role add returned without membership"))
+            except Exception as exc:
+                result["failed"].append((role_id, str(exc)))
+
+    if not exclusive_roles:
+        result["blocked"] = bool(result["failed"])
+        return result
+
+    # Re-evaluate the member after all add attempts. Partial success must never
+    # strip a lower role that is still the member's only reliable reward.
+    held = set(getattr(member, "roles", None) or [])
+    if (result["failed"] or group["unfulfilled"] or any(
+            guild.get_role(role_id) is None or guild.get_role(role_id) not in held
+            for role_id in keep)):
+        result["blocked"] = True
         return result
 
     result["removed"] = await enforce_role_progression(
-        member, guild_id, user_id, highest, keep[0])
+        member, guild_id, user_id, highest, keep[0],
+        failures=result["failed"])
+    result["blocked"] = bool(result["failed"])
     return result
-
 
 async def _grant_inventory(db, guild_id: int, user_id: int, payload: dict,
                           metadata: dict | None = None) -> None:
@@ -613,7 +649,8 @@ async def claim_available(guild_id: int, user_id: int, *,
         # Explicit reconciliation of already-fulfilled Level roles (see
         # reconcile_role_progression). Empty unless the toggle is ON and this
         # was a member-initiated full pass.
-        "reconciled": {"restored": [], "removed": [], "failed": []},
+        "reconciled": {"restored": [], "removed": [], "failed": [],
+                        "blocked": False},
     }
     roles = []
     temp_roles = []
@@ -675,10 +712,11 @@ async def claim_available(guild_id: int, user_id: int, *,
             raise
 
     # Read once per pass: `remove_old_reward_role` is a guild setting (default
-    # OFF), so with it off this pass behaves exactly as it always did — roles
-    # accumulate and a missing role stays missing. It gates both the
-    # post-delivery enforcement below and the explicit reconciliation at the
-    # end of a member-initiated full pass.
+    # OFF). With it OFF, claim delivery never removes roles; this Claim All path
+    # reconciles fulfilled roles only when the setting is ON, while the member-
+    # join callback separately restores all accumulated fulfilled roles when
+    # OFF. The setting gates the post-delivery enforcement below and this
+    # full-pass reconciliation.
     exclusive_roles = False
     if roles or (member is not None and claim_ids is None):
         from utils.xp_calculator import get_leveling_config
@@ -692,15 +730,9 @@ async def claim_available(guild_id: int, user_id: int, *,
             await deliver_role(
                 member, row["payload"]["role_id"],
                 f"Level {row['reward_level']} reward")
-            # With exclusivity ON: now that the new role is on the member, drop
-            # the ones it supersedes (fulfilled role claims at lower levels).
-            # Inside the same try on purpose — if the add or the removal fails,
-            # the claim is marked failed and stays retryable, exactly like any
-            # other role-delivery failure, and a retry is idempotent.
-            if exclusive_roles:
-                await enforce_role_progression(
-                    member, guild_id, user_id,
-                    int(row["reward_level"]), int(row["payload"]["role_id"]))
+            # Role replacement is deliberately deferred until every role
+            # claim at the highest Level has been delivered. Removing a lower
+            # role here would be unsafe when another same-Level add later fails.
         except Exception as e:
             async with aiosqlite.connect(DB_PATH, timeout=10) as db:
                 await db.execute("BEGIN IMMEDIATE")
@@ -771,12 +803,11 @@ async def claim_available(guild_id: int, user_id: int, *,
                 await db.execute("ROLLBACK")
                 raise
 
-    # Explicit reconciliation of the highest already-fulfilled Level role, on
-    # the member's own Claim All pass (never on a message, never on a timer,
-    # never in the background). Requires a member and a full pass, and rides
-    # the exclusivity setting: with `remove_old_reward_role` OFF roles
-    # accumulate by design, so a role that is gone stays gone until the member
-    # reaches a level they have not claimed yet.
+    # Explicit reconciliation on the member's own Claim All pass (never on a
+    # message, never on a timer, never in the background). Requires a member and
+    # a full pass, and runs there only when exclusivity is ON. The member-join
+    # listener also calls the shared reconciliation: with the setting OFF it
+    # restores all fulfilled roles because the progression accumulates.
     #
     # FUTURE — member blacklist (still under construction, NOT
     # `leveling_blacklist_roles`, which is only a role-based XP opt-out; see

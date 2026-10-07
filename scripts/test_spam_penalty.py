@@ -1,386 +1,555 @@
-"""Anti-spam penalty: real deduction, floor at zero, consistent level (D1 = B).
+"""Incident-based anti-spam runtime regression suite.
 
-Locks down the semantics decided for the penalty:
-
-* a spam message deducts XP from the member — it is not just a "zero gain";
-* XP is floored at zero and **never** goes negative: a penalty is not a debt,
-  and it never has to be worked off;
-* the stored `level` is recomputed from the resulting XP in the same
-  transaction, so `levels.xp` and `levels.level` can never disagree (the old
-  write floored XP but left `level` stale, and the *next* legitimate XP grant
-  would then silently demote the member);
-* a demotion caused by a penalty is legitimate, but it is **not a crossing**:
-  it creates no entitlement, revokes no fulfilled claim and removes no role —
-  and re-earning the level afterwards cannot pay a reward twice;
-* the existing `spam_threshold` / `spam_xp_penalty` / `spam_window_seconds`
-  values and the detection ordering are unchanged;
-* the warning is the approved embed, sent as a REPLY to the offending message,
-  at most once per member per spam window (the penalty still lands on every
-  spamming message), it reports the XP that was actually deducted, and a
-  failure to send it can never roll the penalty back.
-
-Run from the scripts directory:
-    python test_spam_penalty.py
+Covers detection signals, quiet-window incident grouping, the capped
+proportional XP deduction, warning rate limits, level consistency, and claim
+ledger isolation through the active Message XP listener.
+Run with:
+    python scripts/test_spam_penalty.py
 """
 import asyncio
 import math
-import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import aiosqlite
 from phase1_support import DB_PATH, GUILD, USER, execute, reset_database, rows
+
+APPROVED_SPAM_WARNING_TEXT = (
+    "> مع كل احتراماتي لا تسبام <:brick:1556981905218478162>\n"
+    "> -# من لفلك نيهاهاها   XP تم خصم (≖⩊≖)"
+)
+
+
+class Fail(Exception):
+    pass
+
+
+def check(label, ok, detail=""):
+    print(f"[{'PASS' if ok else 'FAIL'}] {label}" + (f" — {detail}" if detail else ""))
+    if not ok:
+        raise Fail(label)
 
 
 def xp_to(level: int) -> int:
-    return sum(math.floor(100 * l ** 1.5) for l in range(1, level + 1))
+    return sum(math.floor(100 * current ** 1.5)
+               for current in range(1, level + 1))
 
 
-def level_state(user=USER):
-    found = rows("SELECT xp, level FROM levels WHERE guild_id=? AND user_id=?",
+def xp_state(user):
+    found = rows("SELECT xp,level FROM levels WHERE guild_id=? AND user_id=?",
                  (GUILD, user))
     return found[0] if found else (0, 0)
 
 
-def claims():
-    return rows("SELECT reward_level, track, status FROM level_reward_claims "
-                "WHERE guild_id=? AND user_id=? ORDER BY reward_level, track",
-                (GUILD, USER))
-
-
-def ledger_rows():
-    return rows("SELECT COUNT(*) FROM transaction_ledger")[0][0]
-
-
-def person(user=USER):
-    who = SimpleNamespace(id=user, bot=False, mention=f"<@{user}>")
-    who.roles = []
-    return who
-
-
-def warnings_sent(channel):
-    """Only the cat warnings — the same channel also carries level-up embeds."""
-    return [call.args[0] for call in channel.send.await_args_list
-            if call.args and isinstance(call.args[0], str) and "Meow" in call.args[0]]
-
-
-def message_for(user=USER, channel=None, reply=None):
-    return SimpleNamespace(
-        author=person(user),
-        guild=SimpleNamespace(id=GUILD),
-        channel=channel or SimpleNamespace(send=AsyncMock()),
-        reply=reply or AsyncMock(),
-        content="spam spam spam",
-    )
-
-
-def already_spamming(leveling, user=USER):
-    """Pre-fill the tracker so the very next message is the penalised one."""
-    import time as _time
-    leveling._spam_tracker[(GUILD, user)] = [_time.time() - 2, _time.time() - 1]
-    leveling._spam_warn_times.clear()
-
-
-def warning_embeds(message):
-    """The embeds the anti-spam warning replied with (kwargs form)."""
-    return [call.kwargs.get("embed") for call in message.reply.await_args_list
-            if call.kwargs.get("embed") is not None]
-
-
-def cog():
+def make_cog():
     from cogs.leveling import Leveling
     obj = Leveling.__new__(Leveling)
-    obj.bot = SimpleNamespace(get_guild=lambda gid: None)
+    obj.bot = SimpleNamespace(get_guild=lambda _gid: None)
     obj._xp_cooldowns = {}
     obj._spam_tracker = {}
+    obj._spam_incidents = {}
     obj._spam_warn_times = {}
     return obj
 
 
+def make_message(user, content):
+    author = SimpleNamespace(
+        id=user, bot=False, roles=[], mention=f"<@{user}>",
+        display_name=f"user-{user}")
+    return SimpleNamespace(
+        author=author,
+        guild=SimpleNamespace(id=GUILD, get_channel=lambda _id: None),
+        channel=SimpleNamespace(send=AsyncMock()),
+        reply=AsyncMock(), content=content)
+
+
+def set_spam_config(*, enabled=1, message_xp=1, threshold=10,
+                    window=20, divisor=1000, cooldown=10):
+    execute("""
+        INSERT INTO leveling_config
+            (guild_id,message_xp_enabled,xp_cooldown_seconds,
+             spam_detection_enabled,spam_threshold,spam_window_seconds,
+             spam_xp_penalty_divisor,levelup_announce)
+        VALUES (?,?,?,?,?,?,?,0)
+        ON CONFLICT(guild_id) DO UPDATE SET
+            message_xp_enabled=excluded.message_xp_enabled,
+            xp_cooldown_seconds=excluded.xp_cooldown_seconds,
+            spam_detection_enabled=excluded.spam_detection_enabled,
+            spam_threshold=excluded.spam_threshold,
+            spam_window_seconds=excluded.spam_window_seconds,
+            spam_xp_penalty_divisor=excluded.spam_xp_penalty_divisor,
+            levelup_announce=0
+    """, (GUILD, message_xp, cooldown, enabled, threshold, window, divisor))
+
+
+def warning_embeds(messages):
+    return [call.kwargs["embed"] for message in messages
+            for call in message.reply.await_args_list
+            if call.kwargs.get("embed") is not None]
+
+
 async def main():
-    import cogs.leveling as leveling_mod
-    from utils.xp_calculator import (
-        LEVELING_CONFIG_DEFAULTS, apply_spam_penalty, xp_progress,
-    )
-    from utils.level_claims import ensure_tables
+    import cogs.leveling as leveling_module
     from cogs.leveling import Leveling, SPAM_WARNING_TEXT
+    from utils.level_claims import ensure_tables, record_crossing
+    from utils.xp_calculator import (
+        LEVELING_CONFIG_DEFAULTS, apply_spam_penalty, get_leveling_config,
+        xp_progress,
+    )
+    import aiosqlite
 
     await reset_database()
     await ensure_tables()
+    check("10s message cooldown and separate 20s spam window defaults",
+          LEVELING_CONFIG_DEFAULTS["xp_cooldown_seconds"] == 10
+          and LEVELING_CONFIG_DEFAULTS["spam_window_seconds"] == 20
+          and LEVELING_CONFIG_DEFAULTS["spam_threshold"] == 10)
+    check("incident divisor defaults to conservative 1/1000",
+          LEVELING_CONFIG_DEFAULTS["spam_xp_penalty_divisor"] == 1000)
+    check("spam detection remains enabled for an unconfigured guild",
+          LEVELING_CONFIG_DEFAULTS["spam_detection_enabled"] == 1
+          and (await get_leveling_config(GUILD + 90))["spam_detection_enabled"] == 1)
 
-    checks = []
+    # Proportional formula, per-incident cap, low-balance rounding and floor.
+    for user, xp, divisor, expected in (
+            (USER, 100_000, 1000, 100),
+            (USER + 1, 100_000, 100, 1000),
+            (USER + 2, 100_000, 1, 1000),  # corrupted divisor is clamped
+            (USER + 3, 50, 1000, 0)):
+        execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)",
+                (GUILD, user, xp, xp_progress(xp)[0]))
+        result = await apply_spam_penalty(
+            GUILD, user, divisor, penalty_cap=1_000_000, now=1000.0)
+        check(f"proportional deduction at xp={xp}, divisor={divisor}",
+              result["deducted"] == expected
+              and result["new_xp"] == xp - expected
+              and result["applied"] == (expected > 0), str(result))
+        check("stored level is recomputed from post-penalty XP",
+              xp_state(user)[1] == xp_progress(xp_state(user)[0])[0])
+        check("deduction never exceeds 1% or creates negative XP",
+              0 <= result["new_xp"] <= xp
+              and result["deducted"] <= xp // 100)
 
-    def check(name, ok, extra=""):
-        checks.append((name, ok, extra))
-        print(f"  {'PASS' if ok else 'FAIL'} {name}"
-              + (f"  [{extra}]" if extra and not ok else ""))
+    # Restore the old boundary sweep with the current incident formula: every
+    # live write must still persist xp_progress(new_xp), including exact edges.
+    boundary_states = []
+    for index, fixture_xp in enumerate((0, 3, 99, 100, 101, 384, 385,
+                                        2819, 2820, 100_000)):
+        boundary_user = USER + 30 + index
+        execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)",
+                (GUILD, boundary_user, fixture_xp,
+                 xp_progress(fixture_xp)[0]))
+        boundary_result = await apply_spam_penalty(
+            GUILD, boundary_user, 100, penalty_cap=1_000_000,
+            now=11_000.0 + index * 3600)
+        expected_xp = fixture_xp - fixture_xp // 100
+        stored = xp_state(boundary_user)
+        boundary_states.append(
+            stored == (expected_xp, xp_progress(expected_xp)[0])
+            and boundary_result["new_level"] == xp_progress(expected_xp)[0]
+            and 0 <= stored[0] <= fixture_xp)
+    check("post-penalty XP/Level stay consistent across curve boundaries",
+          all(boundary_states), str(boundary_states))
 
-    # ── 1. the numbers the user asked to keep unchanged ────────────────────
-    print("== 1. detection settings are untouched ==")
-    check("spam_threshold is still 3",
-          LEVELING_CONFIG_DEFAULTS["spam_threshold"] == 3)
-    check("spam_xp_penalty is still 10",
-          LEVELING_CONFIG_DEFAULTS["spam_xp_penalty"] == 10)
-    check("spam_window_seconds is still 10",
-          LEVELING_CONFIG_DEFAULTS["spam_window_seconds"] == 10)
-    check("spam detection is still enabled by default",
-          LEVELING_CONFIG_DEFAULTS["spam_detection_enabled"] == 1)
+    zero_user = USER + 5
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,0,0)",
+            (GUILD, zero_user))
+    zero_penalty = await apply_spam_penalty(
+        GUILD, zero_user, 1000, penalty_cap=50, now=1500.0)
+    check("zero-XP incident remains at zero without debt or fake crossing",
+          zero_penalty["deducted"] == 0 and zero_penalty["new_xp"] == 0
+          and zero_penalty["new_level"] == 0 and xp_state(zero_user) == (0, 0))
 
-    # ── 2. the deduction, and the level that follows it ────────────────────
-    print("== 2. a penalty deducts XP and recomputes the level ==")
-    execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (GUILD,))
-    at_level2 = xp_to(2) + 3                       # 3 XP into Level 2
-    execute("INSERT INTO levels (guild_id, user_id, xp, level) VALUES (?,?,?,?)",
-            (GUILD, USER, at_level2, 2))
-    outcome = await apply_spam_penalty(GUILD, USER, 10)
-    xp, level = level_state()
-    check("the penalty subtracted from current XP",
-          xp == at_level2 - 10 and outcome["applied"] is True,
-          f"xp={xp} outcome={outcome}")
-    check("the stored level matches the XP curve after the penalty",
-          level == xp_progress(xp)[0] == 1,
-          f"stored={level} derived={xp_progress(xp)[0]}")
+    # The cumulative cap is one max production Message XP award for the hour.
+    # It survives rebuilding every in-memory cog/state object because the
+    # budget events are committed to SQLite with the XP deduction.
+    budget_user = USER + 4
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)",
+            (GUILD, budget_user, 200_000, xp_progress(200_000)[0]))
+    first_budget = await apply_spam_penalty(
+        GUILD, budget_user, 100, penalty_cap=50, now=10_000.0)
+    fresh_process_cog = make_cog()
+    fresh_process_cog._spam_incidents.clear()
+    reset_budget_attempts = []
+    for incident in range(1, 8):
+        reset_budget_attempts.append(await apply_spam_penalty(
+            GUILD, budget_user, 100, penalty_cap=50,
+            now=10_000.0 + incident * 300))
+    used_in_hour = rows(
+        "SELECT COALESCE(SUM(deducted),0) FROM leveling_spam_penalty_events "
+        "WHERE guild_id=? AND user_id=? AND created_at>?",
+        (GUILD, budget_user, 8_500.0))
+    check("one incident cannot exceed the one-message rolling cap",
+          first_budget["deducted"] == 50 and first_budget["rolling_cap"] == 50,
+          str(first_budget))
+    check("repeated incidents after a cog/state reset cannot exceed the hour budget",
+          used_in_hour == [(50,)]
+          and all(result["deducted"] == 0 for result in reset_budget_attempts)
+          and xp_state(budget_user)[0] == 199_950,
+          f"sum={used_in_hour}, xp={xp_state(budget_user)}")
+    after_rollover = await apply_spam_penalty(
+        GUILD, budget_user, 100, penalty_cap=50, now=13_601.0)
+    rolling_after_expiry = rows(
+        "SELECT COALESCE(SUM(deducted),0) FROM leveling_spam_penalty_events "
+        "WHERE guild_id=? AND user_id=? AND created_at>?",
+        (GUILD, budget_user, 10_001.0))
+    check("a deduction ages out after the rolling hour and budget refills",
+          after_rollover["deducted"] == 50
+          and rolling_after_expiry == [(50,)]
+          and xp_state(budget_user)[0] == 199_900,
+          f"result={after_rollover}, sum={rolling_after_expiry}")
 
-    print("== 3. XP is floored at zero and never becomes a debt ==")
-    execute("UPDATE levels SET xp=4, level=0 WHERE guild_id=? AND user_id=?",
-            (GUILD, USER))
-    first = await apply_spam_penalty(GUILD, USER, 10)
-    check("a penalty larger than the balance floors XP at 0",
-          level_state() == (0, 0) and first["applied"] is True and
-          first["new_xp"] == 0, f"state={level_state()} outcome={first}")
-    seen = []
-    for _ in range(5):
-        outcome = await apply_spam_penalty(GUILD, USER, 10)
-        seen.append(outcome["new_xp"])
-    check("repeated penalties at zero stay at zero (no debt)",
-          seen == [0] * 5 and level_state() == (0, 0), f"sequence={seen}")
-    check("no negative XP anywhere in the sequence",
-          all(value >= 0 for value in seen) and level_state()[0] >= 0)
-
-    print("== 4. consistency across fixtures ==")
-    consistent = True
-    for fixture_xp in (0, 3, 99, 100, 101, 384, 385, 2819, 2820, 100000):
-        execute("UPDATE levels SET xp=?, level=? WHERE guild_id=? AND user_id=?",
-                (fixture_xp, xp_progress(fixture_xp)[0], GUILD, USER))
-        await apply_spam_penalty(GUILD, USER, 10)
-        stored_xp, stored_level = level_state()
-        if stored_xp != max(0, fixture_xp - 10) or \
-                stored_level != xp_progress(stored_xp)[0]:
-            consistent = False
-    check("xp and level agree after every penalty, at every boundary",
-          consistent)
-
-    # ── 5. a penalty is not a crossing ─────────────────────────────────────
-    print("== 5. the demotion creates no entitlement and revokes no claim ==")
-    execute("DELETE FROM level_reward_claims")
-    execute("DELETE FROM leveling_rewards")
-    execute("INSERT INTO leveling_rewards (guild_id, level, role_id) VALUES (?,?,?)",
-            (GUILD, 2, 2222))
-    execute("INSERT INTO leveling_rewards (guild_id, level, role_id) VALUES (?,?,?)",
-            (GUILD, 5, 5555))
-    xp_at_5 = xp_to(5)
-    execute("UPDATE levels SET xp=?, level=? WHERE guild_id=? AND user_id=?",
-            (xp_at_5, 5, GUILD, USER))
-    from utils.level_claims import SOURCE_SETXP, record_crossing
+    # Create real role + currency entitlements, deliver them through Claim All,
+    # then prove a down-level penalty neither mutates the fulfilled ledger nor
+    # removes/re-pays the already-delivered rewards when XP is earned again.
+    penalty_user = USER + 10
+    start_xp = xp_to(3) + 5
+    role_id = 3333
+    execute("INSERT INTO leveling_rewards (guild_id,level,role_id) VALUES (?,?,?)",
+            (GUILD, 3, role_id))
+    execute("INSERT INTO leveling_currency_rewards (guild_id,level,currency,amount) "
+            "VALUES (?,3,'balance',777)", (GUILD,))
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)",
+            (GUILD, penalty_user, start_xp, 3))
+    execute("INSERT INTO economy (guild_id,user_id,balance,diamonds) VALUES (?,?,0,0)",
+            (GUILD, penalty_user))
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
-        await record_crossing(db, GUILD, USER, 0, xp_at_5, {}, source="test")
+        await record_crossing(db, GUILD, penalty_user, xp_to(2), start_xp, {},
+                              source="test")
         await db.commit()
-    execute("UPDATE level_reward_claims SET status='fulfilled'")
-    before_claims = claims()
-    before_ledger = ledger_rows()
-    check("fixture: both crossed levels hold a fulfilled role claim",
-          before_claims == [(2, "role", "fulfilled"), (5, "role", "fulfilled")],
-          str(before_claims))
 
-    demoting = await apply_spam_penalty(GUILD, USER, xp_to(5))
-    xp, level = level_state()
-    check("the penalty demoted the member (legitimate)",
-          xp == 0 and level == 0 and demoting["old_level"] == 5
-          and demoting["new_level"] == 0, f"state={level_state()}")
-    check("no entitlement row was created by the demotion",
-          claims() == before_claims, str(claims()))
-    check("the fulfilled claim was not revoked or re-opened",
-          all(row[2] == "fulfilled" for row in claims()), str(claims()))
-    check("the XP transaction ledger was not written by the penalty",
-          ledger_rows() == before_ledger, f"{before_ledger} -> {ledger_rows()}")
+    role = SimpleNamespace(id=role_id, name="Level Three", position=1)
+    guild = SimpleNamespace(
+        me=SimpleNamespace(top_role=SimpleNamespace(position=100)),
+        get_role=lambda requested: role if int(requested) == role_id else None)
 
-    print("== 6. re-earning a demoted level cannot pay twice ==")
+    class ClaimMember:
+        def __init__(self):
+            self.guild = guild
+            self.roles = []
+
+        async def add_roles(self, given, reason=None):
+            if given not in self.roles:
+                self.roles.append(given)
+
+        async def remove_roles(self, given, reason=None):
+            self.roles = [held for held in self.roles if held != given]
+
+    member_with_reward = ClaimMember()
+    from utils.level_claims import claim_available
+    paid = await claim_available(GUILD, penalty_user,
+                                 member=member_with_reward)
+    check("fixture: real Claim All delivered one role and one currency reward",
+          paid["delivered_roles"] == 1 and paid["delivered_currency"] == 1
+          and rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                   (GUILD, penalty_user)) == [(777,)]
+          and [held.id for held in member_with_reward.roles] == [role_id])
+    claims_before = rows("SELECT id,reward_level,track,reward_ref,payload_json,status "
+                         "FROM level_reward_claims WHERE guild_id=? AND user_id=? "
+                         "ORDER BY id", (GUILD, penalty_user))
+    roles_before = [held.id for held in member_with_reward.roles]
+    currency_ledger_before = rows(
+        "SELECT currency,amount,source FROM transaction_ledger "
+        "WHERE guild_id=? AND user_id=? AND currency!='xp' ORDER BY id",
+        (GUILD, penalty_user))
+    definitions_before = (
+        rows("SELECT id,guild_id,level,role_id FROM leveling_rewards "
+             "WHERE guild_id=? ORDER BY id", (GUILD,)),
+        rows("SELECT id,guild_id,level,currency,amount FROM leveling_currency_rewards "
+             "WHERE guild_id=? ORDER BY id", (GUILD,)),
+    )
+    penalty = await apply_spam_penalty(
+        GUILD, penalty_user, 100, penalty_cap=1_000_000, now=2000.0)
+    claims_after_penalty = rows(
+        "SELECT id,reward_level,track,reward_ref,payload_json,status "
+        "FROM level_reward_claims WHERE guild_id=? AND user_id=? "
+        "ORDER BY id", (GUILD, penalty_user))
+    check("a penalty can demote while XP and Level stay consistent",
+          penalty["new_level"] == 2 and xp_state(penalty_user)[1] == 2
+          and xp_state(penalty_user)[0] == penalty["new_xp"], str(penalty))
+    check("penalty leaves fulfilled claims, paid currency, roles and definitions unchanged",
+          claims_after_penalty == claims_before
+          and rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                   (GUILD, penalty_user)) == [(777,)]
+          and [held.id for held in member_with_reward.roles] == roles_before
+          and rows("SELECT currency,amount,source FROM transaction_ledger "
+                   "WHERE guild_id=? AND user_id=? AND currency!='xp' ORDER BY id",
+                   (GUILD, penalty_user)) == currency_ledger_before
+          and definitions_before == (
+              rows("SELECT id,guild_id,level,role_id FROM leveling_rewards "
+                   "WHERE guild_id=? ORDER BY id", (GUILD,)),
+              rows("SELECT id,guild_id,level,currency,amount "
+                   "FROM leveling_currency_rewards WHERE guild_id=? ORDER BY id",
+                   (GUILD,))),
+          f"claims={claims_after_penalty}, wallet={rows('SELECT balance FROM economy WHERE guild_id=? AND user_id=?', (GUILD, penalty_user))}")
+
     from utils.reward_engine import give_reward
-    bot = SimpleNamespace(get_guild=lambda gid: None)
-    await give_reward(bot, GUILD, USER, "xp", amount=xp_at_5,
-                      reason="re-earn after the penalty", source="test")
-    after = claims()
-    check("re-crossing the level adds no second claim row",
-          len(after) == len(before_claims), str(after))
-    check("the already-fulfilled claim is still fulfilled exactly once",
-          after == before_claims, str(after))
+    before_reearn = xp_state(penalty_user)[0]
+    recross = await give_reward(
+        None, GUILD, penalty_user, "xp", amount=start_xp - before_reearn,
+        reason="re-earn after penalty", source="test-reearn")
+    retry = await claim_available(GUILD, penalty_user,
+                                  member=member_with_reward)
+    claims_after_reearn = rows(
+        "SELECT id,reward_level,track,reward_ref,payload_json,status "
+        "FROM level_reward_claims WHERE guild_id=? AND user_id=? "
+        "ORDER BY id", (GUILD, penalty_user))
+    check("re-earning a crossed Level does not create a duplicate or pay again",
+          recross.get("success") is True and recross.get("leveled_up") is True
+          and retry["owned"] == 0 and claims_after_reearn == claims_before
+          and rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                   (GUILD, penalty_user)) == [(777,)]
+          and [held.id for held in member_with_reward.roles] == roles_before,
+          f"grant={recross}, retry={retry}, claims={claims_after_reearn}")
+    followup = await apply_spam_penalty(
+        GUILD, penalty_user, 1000, penalty_cap=1_000_000, now=2001.0)
+    check("a subsequent penalty still derives Level from XP",
+          followup["new_level"] == xp_progress(followup["new_xp"])[0])
 
-    # ── 7. the approved warning: an embed REPLY to the offending message ────
-    print("== 7. the anti-spam warning is the approved embed reply ==")
-    APPROVED_TEXT = (
-        "> مع كل احتراماتي لا تسبام <:brick:1556981905218478162>\n"
-        "> -# من لفلك نيهاهاها   XP تم خصم (≖⩊≖)")
-    check("the shipped text is the approved text, byte for byte",
-          SPAM_WARNING_TEXT == APPROVED_TEXT, repr(SPAM_WARNING_TEXT))
-    check("the custom emoji syntax is preserved literally",
-          "<:brick:1556981905218478162>" in SPAM_WARNING_TEXT)
-    check("both approved lines are quoted blockquote lines",
-          SPAM_WARNING_TEXT.startswith("> ")
-          and "\n> -# " in SPAM_WARNING_TEXT)
-    check("the old standalone cat message is gone",
-          not hasattr(leveling_mod, "SPAM_WARNING_MESSAGE")
-          or "Meow" not in getattr(leveling_mod, "SPAM_WARNING_MESSAGE", ""))
+    # Replace wall clock only for the active cog's in-memory tracker/warning
+    # window. DB penalty and shared XP paths remain real.
+    clock = [1000.0]
+    leveling_module.time = SimpleNamespace(time=lambda: clock[0])
+    user = USER + 20
+    initial_xp = 10_000
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)",
+            (GUILD, user, initial_xp, xp_progress(initial_xp)[0]))
+    set_spam_config()
+    cog = make_cog()
+    seen = []
 
-    execute("DELETE FROM leveling_config")
-    leveling = cog()
-    channel = SimpleNamespace(send=AsyncMock())
-    execute("DELETE FROM levels")
-    execute("INSERT INTO levels (guild_id, user_id, xp, level) VALUES (?,?,?,?)",
-            (GUILD, USER, xp_to(5) + 50, 5))
+    async def send_at(when, content, target=user):
+        clock[0] = float(when)
+        msg = make_message(target, content)
+        seen.append(msg)
+        await Leveling.on_activity_message(cog, msg, 3)
+        return msg
 
-    message = message_for(channel=channel)
-    for _ in range(2):                       # threshold 3: not spam yet
-        await Leveling.on_activity_message(leveling, message_for(channel=channel), 3)
-    check("messages below the threshold reply with nothing",
-          message.reply.await_count == 0 and warning_embeds(message) == [],
-          str(message.reply.await_args_list))
+    # Five identical messages is one repeated-content incident. Messages two
+    # through four are inside the ordinary XP cooldown, and message five opens
+    # the incident: one penalty, one warning, then no repeated deductions.
+    first_incident = [await send_at(1000 + 2 * i, "same short message")
+                      for i in range(5)]
+    after_first = xp_state(user)[0]
+    first_deduction = (initial_xp + 5) // 1000
+    check("five identical messages trigger one incident penalty",
+          after_first == initial_xp + 5 - first_deduction,
+          f"xp={after_first}, expected={initial_xp + 5 - first_deduction}")
+    check("production warning constant retains the approved copy byte-for-byte",
+          SPAM_WARNING_TEXT == APPROVED_SPAM_WARNING_TEXT,
+          repr(SPAM_WARNING_TEXT))
+    check("first incident replies to the triggering message with approved copy and actual deduction",
+          len(warning_embeds(first_incident)) == 1
+          and first_incident[-1].reply.await_count == 1
+          and all(message.reply.await_count == 0 for message in first_incident[:-1])
+          and warning_embeds(first_incident)[0].description == APPROVED_SPAM_WARNING_TEXT
+          and warning_embeds(first_incident)[0].footer.text == f"-{first_deduction} XP")
+    check("spam warning is reply-only; it does not send a standalone channel message",
+          all(message.channel.send.await_count == 0 for message in first_incident))
 
-    message = message_for(channel=channel)
-    await Leveling.on_activity_message(leveling, message, 3)
-    embeds = warning_embeds(message)
-    check("the spamming message gets exactly one embed reply",
-          len(embeds) == 1 and message.reply.await_count == 1, str(embeds))
-    check("the warning is a reply to the offending message, not a channel send",
-          message.reply.await_count == 1
-          and not any("brick" in str(call) for call in channel.send.await_args_list),
-          f"channel_sends={channel.send.await_args_list}")
-    check("the embed carries the approved description",
-          embeds and embeds[0].description == APPROVED_TEXT,
-          repr(embeds[0].description if embeds else None))
-    check("the embed reports the XP that was actually deducted",
-          embeds and embeds[0].footer is not None
-          and embeds[0].footer.text == "-10 XP",
-          repr(embeds[0].footer.text if embeds and embeds[0].footer else None))
+    await send_at(1009, "same short message")
+    await send_at(1011, "same short message")
+    check("repeated detections inside an incident do not drain XP or re-warn",
+          xp_state(user)[0] == after_first
+          and sum(m.reply.await_count for m in seen) == 1,
+          f"xp={xp_state(user)[0]}, replies={sum(m.reply.await_count for m in seen)}")
 
-    print("== 8. the warning rate-limit is one per spam window ==")
-    before_xp = level_state()[0]
-    burst = message_for(channel=channel)
-    for _ in range(4):                       # same burst: penalised, not re-warned
-        await Leveling.on_activity_message(leveling, burst, 3)
-    check("every further spamming message still pays the penalty",
-          level_state()[0] == before_xp - 4 * 10, str(level_state()))
-    check("but the member is warned only once in the window",
-          burst.reply.await_count == 0, str(burst.reply.await_count))
+    # A second member has an independent detector, incident and warning clock
+    # while the first member's incident is still active.
+    peer_user = USER + 27
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,20000,4)",
+            (GUILD, peer_user))
+    peer_messages = []
+    for i in range(5):
+        clock[0] = 1020 + i
+        peer_message = make_message(peer_user, "peer repeated content")
+        peer_messages.append(peer_message)
+        await Leveling.on_activity_message(cog, peer_message, 3)
+        if i < 4:
+            check(f"a different member does not inherit the first member's spam samples ({i + 1}/4)",
+                  sum(item.reply.await_count for item in peer_messages) == 0)
+    peer_incident_ids = rows(
+        "SELECT user_id,incident_id FROM leveling_spam_incidents "
+        "WHERE guild_id=? AND user_id IN (?,?) ORDER BY user_id",
+        (GUILD, user, peer_user))
+    check("both members open distinct incidents and each can receive its own warning",
+          len(peer_incident_ids) == 2
+          and peer_incident_ids[0][1] != peer_incident_ids[1][1]
+          and peer_messages[-1].reply.await_count == 1
+          and sum(item.reply.await_count for item in peer_messages) == 1,
+          f"incidents={peer_incident_ids}, replies={sum(item.reply.await_count for item in peer_messages)}")
 
-    import cogs.leveling as leveling_mod
-    real_time = leveling_mod.time
-    clock = {"t": 1000.0}
-    leveling_mod.time = SimpleNamespace(time=lambda: clock["t"])
-    try:
-        leveling._spam_warn_times.clear()
-        first = leveling._spam_warning_due(GUILD, USER, 10)
-        same_window = leveling._spam_warning_due(GUILD, USER, 10)
-        clock["t"] = 1005.0
-        still_same = leveling._spam_warning_due(GUILD, USER, 10)
-        clock["t"] = 1011.0
-        next_window = leveling._spam_warning_due(GUILD, USER, 10)
-        check("the first spam in a fresh window warns",
-              first is True, str(first))
-        check("further spam inside the same window stays quiet",
-              same_window is False and still_same is False,
-              f"{same_window}/{still_same}")
-        check("the next window warns again", next_window is True)
-        check("a different member has their own warning clock",
-              leveling._spam_warning_due(GUILD, USER + 1, 10) is True)
-    finally:
-        leveling_mod.time = real_time
+    # After a full 20s quiet interval the old message history and active incident
+    # have expired; the next five identical messages are a new incident and may
+    # receive exactly one new penalty/warning.
+    await send_at(1040, "different normal content")
+    second_incident = [await send_at(1041 + i, "second repeated line")
+                       for i in range(5)]
+    after_second = xp_state(user)[0]
+    check("a new post-quiet incident gets one new penalty",
+          after_second < after_first
+          and sum(m.reply.await_count for m in seen) == 2,
+          f"xp={after_second}, replies={sum(m.reply.await_count for m in seen)}")
+    check("warning is a reply to the incident message and remains rate-limited",
+          len(warning_embeds(second_incident)) == 1)
+    await send_at(1046, "second repeated line")
+    check("ongoing second incident still has exactly one penalty/warning",
+          sum(m.reply.await_count for m in seen) == 2)
 
-    print("== 9. the warning reports the real amount (XP floor) ==")
-    leveling = cog()
-    execute("UPDATE levels SET xp=4, level=0 WHERE guild_id=? AND user_id=?",
-            (GUILD, USER))
-    already_spamming(leveling)               # the next message is the penalised one
-    message = message_for(channel=channel)
-    await Leveling.on_activity_message(leveling, message, 3)
-    embeds = warning_embeds(message)
-    check("a member with less XP than the penalty loses only what they had",
-          level_state() == (0, 0), str(level_state()))
-    check("the footer shows the deducted amount, not the configured one",
-          embeds and embeds[0].footer.text == "-4 XP",
-          repr(embeds[0].footer.text if embeds and embeds[0].footer else None))
+    # Six unique short-interval messages are the independent burst signal.
+    rapid_user = USER + 21
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)",
+            (GUILD, rapid_user, 30_000, xp_progress(30_000)[0]))
+    set_spam_config()
+    rapid_cog = make_cog()
+    rapid_msgs = []
+    for i in range(6):
+        clock[0] = 2000 + i * 0.5
+        msg = make_message(rapid_user, f"unique burst {i}")
+        rapid_msgs.append(msg)
+        await Leveling.on_activity_message(rapid_cog, msg, 3)
+        if i < 5:
+            check(f"burst signal waits through message {i + 1}",
+                  sum(item.reply.await_count for item in rapid_msgs) == 0)
+    check("six messages in three seconds trigger one capped incident",
+          sum(item.reply.await_count for item in rapid_msgs) == 1)
 
-    print("== 10. nothing to deduct means no warning (and never a debt) ==")
-    leveling = cog()
-    execute("UPDATE levels SET xp=0, level=0 WHERE guild_id=? AND user_id=?",
-            (GUILD, USER))
-    already_spamming(leveling)
-    message = message_for(channel=channel)
-    await Leveling.on_activity_message(leveling, message, 3)
-    check("a member at 0 XP is penalised in code but not warned about XP",
-          level_state() == (0, 0) and message.reply.await_count == 0,
-          f"state={level_state()} replies={message.reply.await_count}")
+    # The configurable sustained-frequency threshold remains independent of
+    # repeated content and the short-burst signal.
+    sustained_user = USER + 22
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)",
+            (GUILD, sustained_user, 40_000, xp_progress(40_000)[0]))
+    set_spam_config()
+    sustained_cog = make_cog()
+    sustained_msgs = []
+    for i in range(10):
+        clock[0] = 3000 + i * 2.1
+        msg = make_message(sustained_user, f"different {i}")
+        sustained_msgs.append(msg)
+        await Leveling.on_activity_message(sustained_cog, msg, 3)
+    check("10 distinct messages within the 20s window trigger once",
+          sum(item.reply.await_count for item in sustained_msgs) == 1)
 
-    print("== 11. a warning that cannot be sent never breaks the penalty ==")
-    leveling = cog()
-    execute("UPDATE levels SET xp=500, level=1 WHERE guild_id=? AND user_id=?",
-            (GUILD, USER))
-    already_spamming(leveling)
-    failing = AsyncMock(side_effect=RuntimeError("missing permissions"))
-    message = message_for(channel=channel, reply=failing)
-    await Leveling.on_activity_message(leveling, message, 3)     # must not raise
-    check("a failed reply still applies the penalty",
-          level_state()[0] == 490, str(level_state()))
-    check("the failure was attempted once and swallowed",
-          failing.await_count == 1, str(failing.await_count))
+    # Ordinary chatter is not spam; low balances round to zero without a bogus
+    # warning, and disabling spam detection stops detection independently.
+    normal_user = USER + 23
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)",
+            (GUILD, normal_user, 0, 0))
+    set_spam_config()
+    normal_cog = make_cog()
+    normal_msgs = []
+    for i in range(4):
+        clock[0] = 4000 + i * 1.0
+        msg = make_message(normal_user, f"ordinary thought {i}")
+        normal_msgs.append(msg)
+        await Leveling.on_activity_message(normal_cog, msg, 3)
+    check("four distinct ordinary messages do not open an incident",
+          xp_state(normal_user)[0] == 5
+          and sum(item.reply.await_count for item in normal_msgs) == 0)
 
-    print("== 12. penalty 0 / detection off / non-spam traffic ==")
-    execute("INSERT INTO leveling_config (guild_id, spam_xp_penalty) VALUES (?,?)",
-            (GUILD, 0))
-    leveling = cog()
-    message = message_for(channel=channel)
-    for _ in range(3):
-        await Leveling.on_activity_message(leveling, message, 3)
-    # 490 + the first message's grant (1 XP per word raised to the
-    # `xp_min_per_message` floor of 5); message 2 is inside the cooldown and
-    # message 3 reaches the spam branch with the penalty set to 0, which writes
-    # nothing and warns nobody.
-    check("penalty 0 writes nothing and warns nobody",
-          level_state()[0] == 495 and message.reply.await_count == 0,
-          f"xp={level_state()} replies={message.reply.await_count}")
+    low_user = USER + 24
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,50,0)",
+            (GUILD, low_user))
+    set_spam_config(message_xp=0)
+    low_cog = make_cog()
+    low_msgs = []
+    for i in range(6):
+        clock[0] = 5000 + i
+        msg = make_message(low_user, "tiny balance repeat")
+        low_msgs.append(msg)
+        await Leveling.on_activity_message(low_cog, msg, 3)
+    check("zero-rounded low XP penalty is floored, no debt, no '-0 XP' warning",
+          xp_state(low_user) == (50, 0)
+          and sum(item.reply.await_count for item in low_msgs) == 0)
 
-    execute("UPDATE leveling_config SET spam_detection_enabled=0 WHERE guild_id=?",
-            (GUILD,))
-    leveling = cog()
-    message = message_for(channel=channel)
-    for _ in range(3):
-        await Leveling.on_activity_message(leveling, message, 3)
-    check("detection off means no penalty and no warning",
-          level_state()[0] == 500 and message.reply.await_count == 0,
-          f"xp={level_state()} replies={message.reply.await_count}")
+    disabled_user = USER + 25
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)",
+            (GUILD, disabled_user, 20_000, xp_progress(20_000)[0]))
+    set_spam_config(enabled=0)
+    disabled_cog = make_cog()
+    disabled_msgs = []
+    before_disabled = xp_state(disabled_user)[0]
+    for i in range(6):
+        clock[0] = 6000 + i * 0.2
+        msg = make_message(disabled_user, "same content")
+        disabled_msgs.append(msg)
+        await Leveling.on_activity_message(disabled_cog, msg, 3)
+    check("spam detection OFF prevents incident penalties and warnings",
+          xp_state(disabled_user)[0] == before_disabled + 5
+          and sum(item.reply.await_count for item in disabled_msgs) == 0)
 
-    execute("DELETE FROM leveling_config")
-    leveling = cog()
-    execute("UPDATE levels SET xp=0, level=0 WHERE guild_id=? AND user_id=?",
-            (GUILD, USER))
-    message = message_for(channel=channel)
-    await Leveling.on_activity_message(leveling, message, 3)
-    check("a normal message grants XP and warns nobody",
-          level_state()[0] == 5 and message.reply.await_count == 0,
-          f"xp={level_state()} replies={message.reply.await_count}")
-    bot_message = message_for(channel=channel)
-    bot_message.author.bot = True
-    await Leveling.on_activity_message(leveling, bot_message, 3)
-    check("bot messages are ignored (no XP, no warning)",
-          level_state()[0] == 5 and bot_message.reply.await_count == 0,
-          f"xp={level_state()}")
+    # A Discord reply failure is best-effort and cannot undo the committed XP
+    # deduction; only one failed reply is attempted for that incident.
+    failed_user = USER + 26
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)",
+            (GUILD, failed_user, 70_000, xp_progress(70_000)[0]))
+    set_spam_config()
+    failed_cog = make_cog()
+    failed_msgs = []
+    for i in range(5):
+        clock[0] = 7000 + i * 1.0
+        msg = make_message(failed_user, "reply failure repeated")
+        if i == 4:
+            msg.reply.side_effect = RuntimeError("missing send permission")
+        failed_msgs.append(msg)
+        await Leveling.on_activity_message(failed_cog, msg, 3)
+    after_failure = xp_state(failed_user)[0]
+    clock[0] = 7006
+    await Leveling.on_activity_message(
+        failed_cog, make_message(failed_user, "reply failure repeated"), 3)
+    check("failed warning does not rollback penalty or repeat within incident",
+          after_failure < 70_005 and xp_state(failed_user)[0] == after_failure
+          and sum(item.reply.await_count for item in failed_msgs) == 1)
 
-    failed = [c for c in checks if not c[1]]
-    print(f"\nSPAM PENALTY: {len(checks) - len(failed)} passed, {len(failed)} failed")
-    for name, _, extra in failed:
-        print("  FAILED:", name, extra)
-    return 1 if failed else 0
+    # Bot messages must be rejected before either ordinary XP or spam tracking.
+    bot_user = USER + 28
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,20000,4)",
+            (GUILD, bot_user))
+    set_spam_config(cooldown=0)
+    bot_cog = make_cog()
+    bot_messages = []
+    for i in range(5):
+        clock[0] = 8000 + i
+        bot_message = make_message(bot_user, "bot repeated content")
+        bot_message.author.bot = True
+        bot_messages.append(bot_message)
+        await Leveling.on_activity_message(bot_cog, bot_message, 3)
+    check("bot messages earn no XP and cannot open or warn on a spam incident",
+          xp_state(bot_user) == (20_000, 4)
+          and all(message.reply.await_count == 0 for message in bot_messages)
+          and all(message.channel.send.await_count == 0 for message in bot_messages)
+          and rows("SELECT COUNT(*) FROM leveling_spam_incidents "
+                   "WHERE guild_id=? AND user_id=?", (GUILD, bot_user)) == [(0,)])
+
+    # Finally exercise the actual listener with no stored config row: fallback
+    # defaults must leave spam detection ON, not merely expose a correct dict.
+    execute("DELETE FROM leveling_config WHERE guild_id=?", (GUILD,))
+    default_user = USER + 29
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,10000,6)",
+            (GUILD, default_user))
+    effective_default = await get_leveling_config(GUILD)
+    default_cog = make_cog()
+    default_messages = []
+    for i in range(5):
+        clock[0] = 9000 + 2 * i
+        default_message = make_message(default_user, "default-config repeated")
+        default_messages.append(default_message)
+        await Leveling.on_activity_message(default_cog, default_message, 3)
+    check("unconfigured runtime detects spam and emits one incident warning by default",
+          effective_default["spam_detection_enabled"] == 1
+          and xp_state(default_user)[0] == 9_995
+          and sum(message.reply.await_count for message in default_messages) == 1
+          and default_messages[-1].reply.await_count == 1)
+
+    print("ALL INCIDENT-BASED SPAM CHECKS PASSED")
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    try:
+        asyncio.run(main())
+    except Fail:
+        raise SystemExit(1)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise SystemExit(1)
