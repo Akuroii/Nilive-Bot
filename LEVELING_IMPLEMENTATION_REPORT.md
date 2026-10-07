@@ -1,5 +1,7 @@
 # Leveling / Dashboard implementation report
 
+> Historical implementation report. Its earlier cooldown, spam-detector, and runtime design descriptions predate the current Leveling architecture. For current defaults, one-time migration, penalty budget, test coverage, and verification boundaries, use `XP_PACING_SIMULATION.md` and the active production code/tests.
+
 Scope: the slices commissioned from `LEVELING_DASHBOARD_INVESTIGATION.md`
 (unchanged). Nothing is committed — the working tree holds all changes.
 Follow-up decisions were taken on 2026-10-06 and are applied (see §5).
@@ -19,7 +21,7 @@ D1 = (B) and D2 = (B) are implemented there, D3 is deferred, and the full eviden
 |---|---|
 | `cogs/leveling.py` | `/level` **Claim All button state** (item 1) + **Stats view** rework (item 8); `_claim_age` / `_claim_reward_text` / **`claim_result_footer`** helpers; **`/resetleaderboard` no longer arms the scheduled auto-reset** (UPDATE-only reset-config write); the hard-coded cooldown fallback is now 20; **anti-spam penalty is a real deduction** (D1 = B) via `apply_spam_penalty()` + the approved anti-spam **embed reply** to the offending message, once per spam window (`SPAM_WARNING_TEXT`, `_spam_warning_due`, `_warn_spam`) |
 | `utils/xp_calculator.py` | `LEVELING_CONFIG_DEFAULTS` (the single definition of "unconfigured"), `get_leveling_config()` returns **stored row ⊕ defaults** (S3), default cooldown **20 s** (pacing); **`apply_spam_penalty()`** — floor at zero + level recomputed in one transaction (D1 = B) |
-| `utils/level_claims.py` | `list_claims()` also returns `created_at`, `fulfilled_at`, `source` — read-only, for the Stats history. **Level reward roles can be a progression** (§7): `superseded_role_ids()` + `enforce_role_progression()`, called from the existing post-commit role-delivery loop and gated by the guild's `remove_old_reward_role` setting, which `claim_available()` reads once per pass. **Explicit reconciliation** (D2 = B): `reconcile_role_progression()`, run only at the end of a member-initiated full pass with the toggle ON — read-only over the ledger, restores the highest fulfilled missing role, no new engine |
+| `utils/level_claims.py` | `list_claims()` also returns `created_at`, `fulfilled_at`, `source` — read-only, for the Stats history. **Level reward roles can be a progression** (§7): `superseded_role_ids()` + `enforce_role_progression()` are gated by `remove_old_reward_role`. **Membership reconciliation** (D2 = B): the shared `reconcile_role_progression()` reads fulfilled claims only; the join listener restores all accumulated roles when OFF, while the full Claim All pass uses the highest fulfilled set when ON; no new engine or ledger writes |
 | `database.py` | `leveling_config.xp_cooldown_seconds` column default 30 → 20 (schema default only; no migration, no rewrite of stored rows) |
 
 ### Dashboard API
@@ -35,16 +37,17 @@ D1 = (B) and D2 = (B) are implemented there, D3 is deferred, and the full eviden
 | 21 other templates (`systems/*`, `manage/*`, `config/*`, `general/*`, `server_select.html`) | S1 wrapper + publishes only (no logic change) |
 | `dashboard/templates/base.html`, `dashboard/static/js/dashboard.js` | **untouched** |
 
-### Tests added (no existing test weakened or modified)
+### Tests and verification coverage
 | file | covers |
 |---|---|
-| `scripts/test_leveling_reset_config.py` | `/resetleaderboard` does not arm the auto-reset for a guild that never configured one (and keeps the settings of a guild that did); effective-config precedence; cooldown default 20; the `remove_old_reward_role` toggle defaults to OFF, is validated 0/1 by the save path, and a stored ON value is what the runtime reads |
+| `scripts/test_leveling_reset_config.py` | `/resetleaderboard` does not arm auto-reset for an unconfigured guild; effective-config precedence; cooldown default 10; approved spam defaults (window 20, threshold 10); `remove_old_reward_role` defaults OFF, validates 0/1, and stored ON is read by runtime |
 | `scripts/test_dashboard_page_scripts.py` | S1 + item 2: for **all 36 dashboard routes**, the page script is emitted **once**, sits inside `#content-area`, parses under `node --check`, is re-evaluation safe (no top-level `const`/`let`, checked with acorn), and every function the markup calls from an inline handler still resolves by bare name (top-level declaration, `window`/`globalThis`/`__neroGlobal` publish, or the shared `dashboard.js`); the nested `{% block scripts %}` is gone |
 | `scripts/test_level_reward_role_progression.py` | The §7 toggle in both modes: exclusive-ON first reward/replacement/multi-level skip/unrelated roles preserved/shared role id/failed add+failure retries, exclusive-OFF accumulation, and both switch directions (OFF→ON supersedes on the next delivery; ON→OFF keeps the older role) with the claim ledger unchanged throughout |
 | `scripts/simulate_negative_xp.py` | Item 3 audit: the six XP write paths and their floors, the shipped write (consistent) beside the legacy stale-level write, the rejected no-floor variant (negative progress, debt, rank), and the re-cross/duplicate-reward proof against the real claim ledger; refuses to run if the production shapes it models drift |
 | `scripts/test_spam_penalty.py` | Item 3 / D1 = B: real deduction, floor at zero, consistency at every boundary, demotion creates no entitlement and revokes no fulfilled claim, re-earning pays once, the approved anti-spam **embed reply** (byte-compared text, reply-not-channel-send, footer carries the XP actually deducted, one reply per window while every spamming message is still penalised, a failed reply never rolls the penalty back), penalty 0 / detection off unchanged |
 | `scripts/test_xp_safety_audit.py` | Final completeness audit: the `levels`-writer inventory (new write paths fail until classified), per-writer clamps and level recomputes, the spam gate's position and liveness, the penalty's claim-free body, claim idempotency, the D2 reconciler's boundaries, no sweep / no background reconciliation, unrelated-role preservation, the dashboard harness's anti-degradation guards, and the untouched systems + frozen settings |
-| `scripts/test_rejoin_reconciliation.py` | Items 4–5 / D2 = B: rejoin preserves progress, a message cannot fake a crossing or deliver a role, OFF restores nothing, ON restores only the highest fulfilled role, idempotency, lower worn role replaced, unrecoverable role fails softly, targeted/headless passes do not reconcile, footer reporting |
+| `scripts/test_rejoin_reconciliation.py` | Items 4–5 / D2 = B: the real join callback restores every fulfilled role with replacement OFF and only the highest fulfilled set with replacement ON; API-saved toggle, idempotency, partial same-Level failure/retry, unrelated roles, and no XP/economy/claim/reward/ledger mutation |
+| `scripts/test_leveling_reward_e2e.py` | Production Dashboard API create + supported DELETE/POST replacement of role/currency/product/boost definitions → SQLite/API/UI readback → `give_reward()`/`record_crossing()` → `claim_available()` delivery; independent same-Level claims, duplicate protection, and partial higher-role retry |
 
 New docs: `XP_PACING_SIMULATION.md` (pacing simulation), `LEVELING_FOLLOWUP_AUDIT.md` (items 3–5 audit + resolved decisions).
 Diff size: **29 files, 1160 insertions, 142 deletions**, plus the new (untracked) documents and the five test/simulation scripts; the 24 template files contribute the S1 wrapper/publish blocks, of which the only deleted lines are the 24 `{% block scripts %}` + 24 `{% endblock %}` pairs plus the 14 lines of the three documented label/toggle edits.
@@ -73,7 +76,7 @@ Before: Level / Total XP / Progress / Ready to claim / Fulfilled — i.e. the Le
 
 **Decided follow-ups applied this pass**
 * **Pacing (cooldown only):** `xp_cooldown_seconds` default **30 → 20 s** in every live default site (runtime fallback, effective-config dict, dashboard validator, DB column default). `xp_per_word`, the clamps, `spam_threshold`/`spam_xp_penalty`, the level curve and everything else are untouched. Impact: the cooldown ceiling rises 720 → 1,080 XP-messages per 6 h day; L100-in-300-days moves from unreachable (best case 417 days) to reachable at ~289 days **only** by a member saturating the cooldown (1 message every 20 s for the whole 6 h, every day, ≥12-word messages). Anyone under 1 message/20 s sees **no change at all**.
-* **Dead setting removed:** the `remove_old_reward_role` toggle is gone from the Leveling form, and the config API no longer validates, writes or returns it. The **column stays** and `utils/xp_calculator` still reads it, so nothing that might consult it breaks; the role-replacement path was not revived. `levelup_embed_data` untouched (no UI, no reader).
+* **Historical interim note, superseded by §7:** an earlier pass treated `remove_old_reward_role` as dead and removed its form/API wiring. That was later reversed; the setting is live again, persisted through the Dashboard and used by the runtime as documented in §7. `levelup_embed_data` remains untouched (no UI, no reader).
 * **`/resetleaderboard` (isolated fix):** the reset-config write is now `UPDATE … WHERE guild_id = ?` instead of an upsert, so a manual reset can no longer create/enable a scheduled auto-reset for a guild that never configured one. Guilds with an existing config keep their `enabled`/period and their auto-reset behaviour; the reset itself (archive → zero XP/level) is unchanged.
 * **S4 (voice “require another participant”): deferred** by decision. Voice XP, the `≥2 real members` engine gate, Missions, MVP and `activity_stats` are all untouched; the toggle and the participant redesign stay on the follow-up list.
 
@@ -89,12 +92,12 @@ Before: Level / Total XP / Progress / Ready to claim / Fulfilled — i.e. the Le
 |---|---|
 | `npm test` (13 JS harnesses, incl. the 275-check currency-icon suite) | **13/13 passed** |
 | **new** `scripts/test_spam_penalty.py` (D1 = B) | **41 passed, 0 failed**; mutation-tested — dropping the level recompute fails 3 checks, dropping the floor fails 4, sending the warning to the channel instead of replying fails 6, showing the configured instead of the real amount fails 1, warning when nothing was deducted fails 1, ignoring the rate-limit fails 1 |
-| **new** `scripts/test_xp_safety_audit.py` (final audit) | **105 passed, 0 failed**; mutation-tested — a new XP write path, a removed toggle gate, a disabled spam gate and a background sweep each fail it |
-| **new** `scripts/test_rejoin_reconciliation.py` (D2 = B) | **36 passed, 0 failed**; mutation-tested — ignoring the toggle fails 2 checks, restoring every historical role fails 9 |
+| `scripts/test_xp_safety_audit.py` (latest source audit) | **111 passed, 0 failed**; D2 checks cover persisted settings, OFF/ON restoration, no ledger mutation, and no sweep/background reconciliation |
+| `scripts/test_rejoin_reconciliation.py` (current D2 path) | **18 passed, 0 failed**; real join callback, OFF/ON API persistence, missing/deleted role retry, partial same-Level retry, idempotence, and no durable XP/economy/claim mutation |
 | `test_slice1_leveling_gate.py` … `test_slice4_boost_claims.py`, `test_vi_lifecycle.py`, `test_phase1_runtime.py`, `test_phase2_backend.py` | **all pass** (`test_rank_integration.py` needs `uharfbuzz`/`freetype-py`; passes once installed) |
 | **new** `scripts/test_dashboard_page_scripts.py` | **177 checks, 0 failed** across **all 36 routes**; mutation-tested (blanking one `__neroGlobal` publish line leaves 17 markup handlers unresolved, so the harness fails) |
 | **new** `scripts/test_leveling_reset_config.py` | **17 passed, 0 failed** (no auto-reset arming; configured guild unchanged; cooldown default 20; stored row wins; toggle defaults OFF, validates 0/1, stored ON is read) |
-| **new** `scripts/test_level_reward_role_progression.py` | **42 passed, 0 failed** — both toggle modes and both switch directions through the real `record_crossing` → `claim_available` path |
+| `scripts/test_level_reward_role_progression.py` | **46 passed, 0 failed** — both toggle modes, both switch directions, independent same-Level roles, partial add retry, and deferred replacement through real `record_crossing` → `claim_available` |
 | S1 A/B lifecycle sweep (24 routes × load/nav × before/after) | 11 routes flagged, all `[nav re-init 0 calls]` (DOM-only init, no API call — verified by script-execution instrumentation); **zero** critical errors; `/leveling` 9/9 load and 9/9 nav; `/minigames`, `/minigames/builder` init restored (0 → 3 calls); `/trade`, `/mvp`, `/tickets`, `/config/general`, `/embed-builder`, `/server-select` show one set of calls instead of two |
 | S1 same-realm re-evaluation probe | all 24 routes: second evaluation legal, every markup handler resolves |
 | S1 containment audit | 24/24 templates: every pre-existing non-blank page-script line byte-identical; only the block tags (+ the documented label/toggle edits) removed |
@@ -127,19 +130,18 @@ Full matrix in **`XP_PACING_SIMULATION.md`** (live gate order: spam → cooldown
 ## 7. Level reward roles: accumulate by default, progression when `remove_old_reward_role` is ON
 
 **Audit first — the delivery path.** A guild's `leveling_rewards` rows are a progression
-(Level 5 → Role 5, Level 10 → Role 10, …). Every Level reward role reaches a member through exactly
-one path:
+(Level 5 → Role 5, Level 10 → Role 10, …). The reward path is:
 
-`record_crossing()` (entitlement rows) → member runs `/level` → **Claim All** →
-`claim_available()` (reserve under `BEGIN IMMEDIATE` → per-claim fulfilment → post-commit
-`deliver_role()` → `_mark(fulfilled)`).
+`Dashboard API` → persisted `leveling_rewards` / config → production `give_reward()` crossing →
+`record_crossing()` pending entitlements → member runs `/level` → **Claim All** →
+`claim_available()` (reserve under `BEGIN IMMEDIATE` → per-claim fulfilment → `deliver_role()` →
+`_mark(fulfilled)`).
 
-`deliver_role()` is called from only two places, both inside `claim_available()`: the `roles` loop
-(track `role`) and the `temp_roles` loop (Shop temp roles). `leveling_rewards` itself is only ever
-written by the dashboard config API. So the smallest safe insertion point is **inside the existing
-`roles` loop, immediately after a successful add** — no new engine, no new table, no change to
-entitlement identity, and it automatically covers every route (Claim All, retries, targeted
-`claim_ids`).
+`leveling_rewards` is written by the Dashboard API and re-read by `_definitions()` at crossing time.
+`deliver_role()` is used by the existing claim delivery loops (permanent and temporary roles) and by
+`reconcile_role_progression()` for membership-only restoration. Separately, the production
+`on_member_join` listener calls that reconciler for already-fulfilled roles. Delivery remains
+centralized in the claim engine; reconciliation never creates or pays an entitlement.
 
 **The setting, and why it is a real toggle.** `remove_old_reward_role` is a live product setting
 again (a guild config, not dead code):
@@ -149,7 +151,7 @@ again (a guild config, not dead code):
 | DB | `leveling_config.remove_old_reward_role INTEGER DEFAULT 0` — column kept, **OFF by default** |
 | Dashboard → Leveling | checkbox **"Remove old reward role when new one is given"** + hint in the announcement card; loaded with the rest of the config and saved by the normal Save |
 | Config API | validated as 0/1, written by the upsert, returned by `GET /leveling/config` — runtime and Dashboard agree (S3 requirement) |
-| Runtime | `claim_available()` reads it **once per pass** via `get_leveling_config()` and only when there is a role to deliver; `exclusive_roles = False` (OFF) means the enforcement below is never called, so accumulation is byte-for-byte the old behaviour |
+| Runtime | `claim_available()` reads it once when it processes role claims; OFF never removes roles during delivery. The join reconciler also reads the persisted setting: OFF restores every fulfilled role claim, while ON restores the highest fulfilled set and enforces replacement after successful delivery |
 
 **Behaviour.** Two helpers in `utils/level_claims.py`:
 
@@ -161,12 +163,12 @@ again (a guild config, not dead code):
   the member (skipping roles they no longer hold or that were deleted from the guild), returning
   what it actually removed.
 
-The call sits inside the same `try` as `deliver_role()`, so a failure is an ordinary role-delivery
-failure: the claim is marked `failed` with `last_error`, stays retryable, and Claim All goes green
-again — the member is never left with nothing, and a retry is idempotent. It is gated by
-`if exclusive_roles:` — with the setting OFF the removal code cannot run at all.
+The existing `claim_available()` role loop marks a failed Discord add retryable. Replacement is a
+separate post-delivery reconciliation: a lower-role removal failure does not reopen the already
+fulfilled higher-role claim, and the next full Claim All pass can retry that membership reconciliation.
+The delivery-time removal is gated by `exclusive_roles`; with the setting OFF, roles are never removed.
 
-**Both modes, tested** (`scripts/test_level_reward_role_progression.py`, 42 checks):
+**Both modes, tested** (`scripts/test_level_reward_role_progression.py`, 46 checks):
 
 | mode | behaviour |
 |---|---|
@@ -183,17 +185,15 @@ again — the member is never left with nothing, and a retry is idempotent. It i
   booster roles and other systems' roles survive.
 * A role id configured at two levels is never removed (it is in the "keep" set of the highest
   fulfilled level).
-* The rule is evaluated from the ledger, so a **legacy member who already accumulated** Level 5 +
-  Level 10 roles keeps them until their next role delivery or retry, which then reconciles the
-  state. A retroactive sweep over every member was deliberately **not** added: it would need a new
-  bot-side task and a Discord round-trip per member, and the next delivery self-heals the state.
-* No schema change; the setting is exposed in the Dashboard/API and read by the runtime, so there
-  is no dead setting anywhere (S3 requirement); `levelup_embed_data` untouched.
-* With the setting OFF, a legacy member who accumulated roles keeps them: there is no retroactive
-  sweep, and no code path removes a Level role unless a delivery happens while the setting is ON.
+* The rule is evaluated from the ledger. A member who has lost a fulfilled role is reconciled on
+  their next join (all fulfilled roles when OFF; the highest fulfilled set when ON), or during the
+  qualifying full Claim All pass when ON. There is deliberately no guild-wide/background sweep.
+* No schema change; the setting is exposed in the Dashboard/API and read by the runtime; `levelup_embed_data`
+  is untouched.
 
-**Tests — `scripts/test_level_reward_role_progression.py`, 29 checks, 0 failed** (uses the real
-`record_crossing` → `claim_available` path with a fake Discord member):
+**Tests — `scripts/test_level_reward_role_progression.py`, 46 checks, 0 failed** (uses the real
+`record_crossing` → `claim_available` path with a fake Discord member; rejoin coverage is in
+`scripts/test_rejoin_reconciliation.py`):
 
 | # | case | asserted |
 |---|---|---|
@@ -202,8 +202,9 @@ again — the member is never left with nothing, and a retry is idempotent. It i
 | 3 | skipping multiple levels (L10 → L15 + L20 at once) | each skipped level keeps one fulfilled row; only **L20**'s role is held; L15's is gone |
 | 4 | unrelated roles | manual/other-system roles and the current progression role untouched; a no-op claim pass removes nothing |
 | 4b | a role id shared by two levels | never removed |
-| 5 | failed **removal** | claim `failed` with the error, no extra entitlement row, member keeps the old role (nothing lost), retry fulfils the same row and the progression then holds |
-| 5b | failed **add** | nothing removed while the add fails, retry delivers the new role and supersedes the old one |
+| 5 | failed **removal** | higher-role claim remains fulfilled; removal error is reported separately, old role remains, and a later reconciliation retries without replaying the claim |
+| 5b | failed **add** | role claim stays retryable; nothing is removed while the add fails, and retry delivers it before superseding lower roles |
+| 5c | partial same-Level **add** | successful and failed role claims stay independent; lower role remains until every role at the highest Level is present, then retry completes replacement |
 
 **Regression risk of this slice**
 
@@ -212,7 +213,7 @@ again — the member is never left with nothing, and a retry is idempotent. It i
 | a role that is not a Level reward gets removed | removal set is derived from fulfilled `role` claims only; `member.roles` is consulted before removing, and members without a role list remove nothing |
 | a member ends up with no role | the new role is added *before* any removal, inside the existing retryable-claim path |
 | repeated runs re-remove or re-add | removals skip roles not held; `_mark(fulfilled)` is idempotent; a further claim pass reports `owned=0` |
-| removing a role the bot outranks can fail (Discord) | surfaces as a normal retryable `failed` claim with the error text; Claim All is green again |
+| removing a lower role can fail (Discord) | reported as a reconciliation failure without reopening the fulfilled higher claim; join or a later full Claim All pass retries membership reconciliation |
 | interference with other systems | only `track='role'` claims are read; Shop/Prestige/Missions/MVP/reaction roles/boosts untouched |
 | existing tests | full Python suite + `npm test` re-run: slice 2 (role ownership/retry), slice 3 (Shop claims), slice 4 (boost claims), vi-lifecycle, phase2-backend, the S1 and reset/config harnesses all still pass. `test_slice1_leveling_gate.py` and `test_phase1_runtime.py` fail **identically on a pristine `HEAD` checkout** in this sandbox (missing `DISCORD_TOKEN`), i.e. unrelated to this change |
 
@@ -220,7 +221,7 @@ again — the member is never left with nothing, and a retry is idempotent. It i
 
 ## 5. Decisions taken / remaining
 
-**Applied (2026-10-06):** S4 deferred as-is; pacing = cooldown 20 s only; dead `remove_old_reward_role` toggle removed from the dashboard surface (column kept); `/resetleaderboard` UPDATE-only fix + regression test.
+**Historical interim decisions (2026-10-06; the toggle note was later superseded by §7):** S4 deferred; an earlier pacing pass described a 20 s cooldown; `remove_old_reward_role` was temporarily treated as dead and removed from the Dashboard before being restored as a live setting; `/resetleaderboard` remains UPDATE-only with a regression test.
 
 **Still open**
 1. **XP pacing target** — with cooldown 20 s the ~10-month L100 is reachable only at a saturating schedule. If a normal member should reach it, the level curve (or a new passive/voice source) has to change; not attempted.
@@ -238,10 +239,10 @@ again — the member is never left with nothing, and a retry is idempotent. It i
 | S1 IIFE + publishes (24 templates) | a future top-level function used from markup must be in the publish list | **now enforced** by `scripts/test_dashboard_page_scripts.py` (all 36 routes: single emission, containment, syntax, no top-level `const`/`let`, handler resolution) — 177 checks, mutation-tested; the run prints an explicit SKIPPED notice if node/acorn is missing, so a degraded run cannot pass as a full one |
 | `get_leveling_config` returning defaults ⊕ row | code that relied on a NULL column being `None` now sees a number | it is the S3 fix; `levelup_channel_id`/`levelup_message` keep `None`; covered by the S2/S3 probes and the reset/config test |
 | Cooldown default 30 → 20 | faster pacing for members who send more than 1 message per 20 s | no formula change; the anti-spam gate still runs first and the ceiling is still capped at 1,080 grants/day; stored guild rows keep their own value untouched |
-| `remove_old_reward_role` is live again | a guild that turns it ON loses superseded Level roles on the next delivery | default is OFF; the runtime read is one per claim pass; both directions and both switch directions are covered by the 42-check progression test; only fulfilled `role` claims are ever considered for removal |
+| `remove_old_reward_role` is live again | ON replaces superseded Level roles after a successful higher-role delivery or qualifying reconciliation | default is OFF; persisted setting is read by the runtime; both modes and switch directions are covered by 46 progression checks and 18 join/reconciliation checks; only fulfilled `role` claims are considered for removal |
 | Dashboard page-script lifecycle (item 2) | a page made inert by a future edit | enforced by the 177-check harness over all 36 routes, which asserts every inline markup handler still resolves and rejects a new top-level `const`/`let` |
 | Anti-spam penalty now deducts XP (D1 = B) | a member can be demoted by spamming, and their rank/level changes without an XP grant | the deduction is floored at zero (no debt), the level is recomputed in the same transaction, and no entitlement/role/claim is touched — `scripts/test_spam_penalty.py` (31 checks, mutation-tested) proves each of those, including that re-earning cannot pay twice |
-| Explicit reconciliation on Claim All (D2 = B) | a role an admin deliberately removed comes back when the member taps Claim All | it runs only with `remove_old_reward_role` ON (OFF = nothing is restored), only for the highest fulfilled level, never writes to the ledger, and never runs on a message, a join, a timer or a narrowed claim pass — `scripts/test_rejoin_reconciliation.py` (36 checks, mutation-tested) |
+| Role membership reconciliation on rejoin / Claim All (D2 = B) | a fulfilled role removed by Discord membership loss is restored from persisted claims | join restores all fulfilled roles when OFF; Claim All / join restore the highest fulfilled set when ON; reconciliation never changes XP/Level or claims and has no sweep/background loop — `scripts/test_rejoin_reconciliation.py` |
 | UPDATE-only reset-config write | none for configured guilds; unconfigured guilds now never receive an auto-reset config | regression test asserts both directions, plus that the reset itself (archive + zero) is unchanged |
 | `list_claims` extra keys | additive only | slice-2 suite green; no engine code reads them |
 | Stricter config validation | an external client sending `"30.5"` is rejected instead of half-saved | absent keys still default; bounds keep headroom over the form's `min`/`max` |
@@ -259,10 +260,10 @@ Full audit for items 3–5, with the simulation output and the exact decisions n
 
 | item | outcome | status |
 |---|---|---|
-| 1. `remove_old_reward_role` restored as a real toggle | see §7 — DB column kept, checkbox + hint in the Leveling Dashboard, API validated/written/returned, runtime reads it once per claim pass; OFF = accumulate, ON = exclusive progression; 42/42 checks across OFF / ON / OFF→ON / ON→OFF | **implemented** |
+| 1. `remove_old_reward_role` restored as a real toggle | see §7 — DB column kept, checkbox + hint in the Leveling Dashboard, API validated/written/returned; OFF = accumulate, ON = exclusive progression; 46/46 progression checks plus 18/18 join/reconciliation checks | **implemented** |
 | 2. Dashboard script duplication — fix the **whole** Dashboard | audited every nav route: nested `{% block scripts %}` exists only in `base.html` (already fixed), and the four routes outside the S1 wrapper (`/backups`, `/tag-missions`, `/tag-partners`) declare **no** top-level `const`/`let`, so they were already re-evaluation safe; `/moderation` is a genuine IIFE inside the script, not an unwrapped leak. **No template change was needed and none was made.** The permanent harness was extended from the 24 rollout routes to **all 36** and now asserts the real invariant (single emission, containment in `#content-area`, syntax, no top-level `const`/`let`, and every inline markup handler still resolving) — 177 checks, mutation-tested | **complete, verified** |
-| 3. Anti-spam penalty semantics (**D1 = B, implemented**) | `apply_spam_penalty()` (`utils/xp_calculator.py`): a spam message **deducts** XP from the member, floored at zero — never negative, never a debt — and `level` is recomputed from the resulting XP in the same transaction, so `levels.xp` and `levels.level` cannot disagree. A penalty may therefore demote a member (intended); that is not a crossing, so no entitlement is created, no fulfilled claim is revoked and no role is removed, and re-earning the level cannot pay twice. The old stale-level defect and its silent next-message demotion are gone. `spam_threshold` (3 / 10 s) and `spam_xp_penalty` (10) are **unchanged** — only the semantics changed. The member gets one reply per spam window (not per message): an embed whose description is the approved text — `> مع كل احتراماتي لا تسبام <:brick:1556981905218478162>` / `> -# من لفلك نيهاهاها   XP تم خصم (≖⩊≖)` — with the XP actually deducted in the embed footer; it is a **reply to the offending message**, and a failure to send it can never roll the penalty back. | **implemented, 41/41** |
-| 4. Leave/rejoin + missing-role reconciliation (**D2 = B, implemented**) | XP/level stay keyed `(guild_id, user_id)` — no production `DELETE FROM levels`, no member-lifecycle cog touches level state, so rejoin resets nothing. A missing Level role is restored **only** by `reconcile_role_progression()` at the end of a member-initiated full Claim All pass, **only** while `remove_old_reward_role` is ON, and only for the **highest** fulfilled level (never historical roles, never a fake crossing, no XP granted, no ledger write, failures reported not failed). With the toggle OFF a role that is gone stays gone. No per-member sweep, no timer, no background task, no second reward engine. The Claim All footer reports a restored role. | **implemented, 36/36** |
+| 3. Anti-spam penalty semantics (**D1 = B, implemented**) | `apply_spam_penalty()` (`utils/xp_calculator.py`): a spam message **deducts** XP from the member, floored at zero — never negative, never a debt — and `level` is recomputed from the resulting XP in the same transaction, so `levels.xp` and `levels.level` cannot disagree. A penalty may therefore demote a member (intended); that is not a crossing, so no entitlement is created, no fulfilled claim is revoked and no role is removed, and re-earning the level cannot pay twice. The old stale-level defect and its silent next-message demotion are gone. The approved anti-spam defaults (`spam_threshold=10`, `spam_window_seconds=20`, `spam_xp_penalty_divisor=1000`) are **unchanged** — only penalty semantics changed. The member gets one reply per spam window (not per message): an embed whose description is the approved text — `> مع كل احتراماتي لا تسبام <:brick:1556981905218478162>` / `> -# من لفلك نيهاهاها   XP تم خصم (≖⩊≖)` — with the XP actually deducted in the embed footer; it is a **reply to the offending message**, and a failure to send it can never roll the penalty back. | **implemented, 41/41** |
+| 4. Leave/rejoin + missing-role reconciliation (**D2 = B, implemented**) | The member-join listener calls `reconcile_role_progression()` as a membership-only action; it never changes XP/Level, pays a claim, or writes the ledger. With `remove_old_reward_role` OFF, all fulfilled role claims are restored because roles accumulate; with it ON, only the highest fulfilled set is restored and lower fulfilled roles are removed after the set is present. Partial same-Level failures block replacement; unrelated roles are untouched. No sweep, timer, background task, or second reward engine. | **verified by `scripts/test_rejoin_reconciliation.py`** |
 | 5. Blacklist boundary | The member blacklist system is **under construction and is not `leveling_blacklist_roles`** (that stays a role-based XP opt-out: message XP via `get_xp_multiplier`, voice XP via `is_role_blacklisted`). **Nothing was implemented** for it: no table, no command, no automatic restore/unrestore. The future invariant — *a blacklisted member must not have automatic reconciliation restore roles the blacklist intentionally removed* — is documented in the code at the two chokepoints (`deliver_role()` calls and the reconcile call in `claim_available`) and in the audit's §5. | **deferred by design** |
 
 **Decisions — resolved on 2026-10-06 (second pass):**
@@ -270,14 +271,14 @@ Full audit for items 3–5, with the simulation output and the exact decisions n
 * **D1 = (B) — implemented.** Penalty deducts real XP, floored at zero (no negative XP, no debt),
   with `level` recomputed in the same transaction. A penalty may legitimately demote the member;
   that creates no crossing, no entitlement, no claim change and no role change.
-* **D2 = (B) — implemented.** A missing Level reward role is reconciled explicitly through the
-  existing Claim All path, only with `remove_old_reward_role` ON, and only for the highest applicable
-  fulfilled level. OFF keeps the old one-shot behaviour.
+* **D2 = (B) — implemented.** `reconcile_role_progression()` is shared by the join callback and the
+  existing Claim All path. OFF restores every fulfilled role claim because roles accumulate; ON
+  restores the highest fulfilled set and removes lower roles only after that set is present.
 * **D3 — deferred by design.** The member blacklist is still under construction; nothing was wired,
   and `leveling_blacklist_roles` was explicitly *not* treated as the member blacklist. The future
   invariant is recorded in the code and in the audit.
-* **No retroactive guild-wide sweep** — legacy members keep their accumulated roles until an
-  explicit reconciliation; no background task was added.
+* **No retroactive guild-wide sweep** — reconciliation is per-member on join or on the qualifying
+  full Claim All pass; no background task or guild-wide member pass was added.
 * **D3 / member blacklist — still OPEN, by instruction.** No member blacklist exists in this repo
   (`leveling_blacklist_roles` is a role-based XP opt-out, and `utils/command_gating.py`'s role/
   channel blacklists govern command use). Nothing was implemented for it. The five bypass risks and
@@ -285,15 +286,14 @@ Full audit for items 3–5, with the simulation output and the exact decisions n
   including the invariant that a blacklisted member must never have a Level role restored by the
   automatic reconciliation.
 
-**Not touched by this pass:** `remove_old_reward_role` itself (§7 is unchanged and its 42/42 test
-still guards it), the four unwrapped templates (§8 item 2 — no cosmetic rewrites), and the claim
-engine's identity/status/idempotency semantics.
+**Not changed by this pass:** the `remove_old_reward_role` schema, Dashboard field/API validation, or
+claim identity/status/idempotency semantics. D2 membership reconciliation follows the persisted
+setting as described in §7; the four unwrapped templates remain unchanged (§8 item 2).
 
-Verification for this slice (all re-run after clearing `__pycache__`, with
-`PYTHONDONTWRITEBYTECODE=1`): XP safety audit 105/105, spam penalty 41/41, rejoin/reconciliation
-36/36, progression 42/42, reset/config 17/17, page-script harness 177/177 over 36 routes, slices
-1–4 green, rank/phase1 integration green, `npm test` 13/13, `simulate_negative_xp.py` assertions all
-hold. One sweep reported the progression suite as 39/42; that was a **stale `.pyc`** left by the
-mutation runs in the same session (source restored, bytecode from the mutant), not a regression —
-the suite is 42/42 from a clean cache and the source-level audit never saw the mutated gate.
-Nothing committed or pushed.
+**Latest targeted verification for this branch:** `scripts/test_leveling_reward_e2e.py` 11/11;
+`test_rejoin_reconciliation.py` 18/18; `test_level_reward_role_progression.py` 46/46;
+`test_xp_safety_audit.py` 111/111; `test_leveling_reset_config.py` 17/17;
+`test_leveling_config_migration.py` all 8 checks; slices 1–4, runtime, and all five XP caller
+integration checks passed. The previously passing anti-spam penalty and dashboard/JS harnesses were
+not changed by this E2E work. The earlier 39/42 progression result was a stale `.pyc` false alarm
+from mutation testing; current source passes all 46 progression checks. Nothing committed or pushed.

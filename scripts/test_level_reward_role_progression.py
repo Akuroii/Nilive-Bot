@@ -26,6 +26,7 @@ import aiosqlite
 from phase1_support import DB_PATH, GUILD, USER, execute, reset_database, rows
 
 ROLE_IDS = {5: 505, 10: 1010, 15: 1515, 20: 2020}
+SECOND_LEVEL10_ROLE = 1011
 UNRELATED_ROLE = 4242
 MANUAL_ROLE = 7777
 
@@ -73,6 +74,7 @@ class FakeMember:
 def guild_for(role_ids):
     catalog = {rid: Role(rid, f"Level Role {rid}") for rid in role_ids}
     catalog[8888] = Role(8888, "Shared Level Role")   # the two-levels-one-role case
+    catalog[SECOND_LEVEL10_ROLE] = Role(SECOND_LEVEL10_ROLE, "Second Level 10 Role")
     catalog[UNRELATED_ROLE] = Role(UNRELATED_ROLE, "Member")
     catalog[MANUAL_ROLE] = Role(MANUAL_ROLE, "Event Winner")
     return SimpleNamespace(
@@ -114,7 +116,7 @@ async def cross(old_xp, new_xp):
 
 def claim_rows(track="role"):
     return rows("SELECT reward_level, status FROM level_reward_claims "
-                "WHERE guild_id=? AND user_id=? AND track=? ORDER BY reward_level",
+                "WHERE guild_id=? AND user_id=? AND track=? ORDER BY reward_level, id",
                 (GUILD, USER, track))
 
 
@@ -208,8 +210,8 @@ async def main():
     check("both levels are fulfilled", claim_rows() == [(5, "fulfilled"), (10, "fulfilled")],
           str(claim_rows()))
 
-    # ── 5. a failed delivery retries without corrupting claim state ────────
-    print("== 5. [ON] a failed removal retries cleanly ==")
+    # ── 5. lower-role removal failures never corrupt claims ───────────────
+    print("== 5. [ON] a failed removal leaves the successful higher claim fulfilled ==")
     clear_progression()
     who.roles, who.removed, who.added = [guild.get_role(ROLE_IDS[5])], [], []
     seed_role_reward(5, ROLE_IDS[5])
@@ -223,23 +225,26 @@ async def main():
     await cross(xp_to(6), xp_to(11))                    # crosses L10
     who.fail_remove = lambda role: (_ for _ in ()).throw(RuntimeError("discord rate limited"))
     failed = await claim_available(GUILD, USER, member=who)
-    check("the removal failure is a retryable failed claim",
-          failed["delivered_roles"] == 0 and claim_rows()[-1] == (10, "failed")
-          and "rate limited" in (errors_for(10) or ""),
-          f"{claim_rows()} err={errors_for(10)}")
-    check("the failure created no extra entitlement row",
-          len(claim_rows()) == 2, str(claim_rows()))
-    check("the old role is still present (nothing was lost)",
-          ROLE_IDS[5] in who.held(), str(who.held()))
+    check("the higher role claim stays fulfilled when old-role removal fails",
+          failed["delivered_roles"] == 1
+          and claim_rows() == [(5, "fulfilled"), (10, "fulfilled")]
+          and failed["reconciled"]["failed"]
+          and "rate limited" in failed["reconciled"]["failed"][0][1]
+          and errors_for(10) is None,
+          f"{claim_rows()} reconciliation={failed['reconciled']}")
+    check("the failure creates no extra entitlement and preserves the old role",
+          len(claim_rows()) == 2 and ROLE_IDS[5] in who.held()
+          and ROLE_IDS[10] in who.held(), f"{claim_rows()} {who.held()}")
 
     who.fail_remove = None
     retried = await claim_available(GUILD, USER, member=who)
-    check("the retry fulfils the same row",
-          retried["delivered_roles"] == 1
+    check("the next explicit pass retries only Discord reconciliation",
+          retried["delivered_roles"] == 0
           and claim_rows() == [(5, "fulfilled"), (10, "fulfilled")]
           and errors_for(10) is None, f"{retried} {claim_rows()}")
-    check("the progression holds after the retry",
-          who.held() == [ROLE_IDS[10]], str(who.held()))
+    check("successful reconciliation then removes only the superseded role",
+          who.held() == [ROLE_IDS[10]] and who.removed == [ROLE_IDS[5]],
+          f"held={who.held()} removed={who.removed}")
     check("a further claim pass is a no-op",
           (await claim_available(GUILD, USER, member=who))["owned"] == 0, "")
 
@@ -263,6 +268,49 @@ async def main():
           ok["delivered_roles"] == 1 and who.held() == [ROLE_IDS[10]]
           and claim_rows() == [(5, "fulfilled"), (10, "fulfilled")],
           f"{ok} held={who.held()} claims={claim_rows()}")
+
+    print("== 5c. [ON] multiple same-Level roles are independent and atomic for replacement ==")
+    clear_progression()
+    who.roles, who.removed, who.added = [guild.get_role(ROLE_IDS[5])], [], []
+    who.fail_add = None
+    seed_role_reward(5, ROLE_IDS[5])
+    seed_role_reward(10, ROLE_IDS[10])
+    seed_role_reward(10, SECOND_LEVEL10_ROLE)
+    await cross(0, xp_to(6))
+    await claim_available(GUILD, USER, member=who)
+    await cross(xp_to(6), xp_to(11))
+    definitions_before = rows(
+        "SELECT id,level,role_id FROM leveling_rewards WHERE guild_id=? ORDER BY id",
+        (GUILD,))
+    who.fail_add = lambda role: (
+        (_ for _ in ()).throw(RuntimeError("second same-Level role unavailable"))
+        if role.id == SECOND_LEVEL10_ROLE else None)
+    partial = await claim_available(GUILD, USER, member=who)
+    check("one successful L10 role does not remove L5 while its sibling fails",
+          ROLE_IDS[5] in who.held() and ROLE_IDS[10] in who.held()
+          and SECOND_LEVEL10_ROLE not in who.held() and who.removed == []
+          and partial["reconciled"]["blocked"] is True,
+          f"held={who.held()} removed={who.removed} reconciled={partial['reconciled']}")
+    check("same-Level role claims stay independent; successful and failed states persist",
+          claim_rows() == [(5, "fulfilled"), (10, "fulfilled"), (10, "failed")]
+          and len(claim_rows()) == 3, str(claim_rows()))
+    check("role definitions were neither collapsed nor rewritten",
+          rows("SELECT id,level,role_id FROM leveling_rewards WHERE guild_id=? ORDER BY id",
+               (GUILD,)) == definitions_before and len(definitions_before) == 3,
+          str(definitions_before))
+
+    who.fail_add = None
+    completed_group = await claim_available(GUILD, USER, member=who)
+    check("after all highest-Level deliveries succeed, both roles stay and L5 is removed",
+          who.held() == sorted([ROLE_IDS[10], SECOND_LEVEL10_ROLE])
+          and who.removed == [ROLE_IDS[5]]
+          and completed_group["delivered_roles"] == 1,
+          f"held={who.held()} removed={who.removed} result={completed_group}")
+    check("the retried same-Level claim is fulfilled without deleting definitions",
+          claim_rows() == [(5, "fulfilled"), (10, "fulfilled"), (10, "fulfilled")]
+          and rows("SELECT id,level,role_id FROM leveling_rewards WHERE guild_id=? ORDER BY id",
+                   (GUILD,)) == definitions_before,
+          f"claims={claim_rows()}")
 
     # ── 6. toggle OFF: roles accumulate, nothing is removed ────────────────
     print("== 6. [OFF] the toggle is off: old roles accumulate ==")

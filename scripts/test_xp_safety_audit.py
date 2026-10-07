@@ -32,7 +32,7 @@ PRODUCTION_DIRS = ("cogs", "utils", "dashboard")
 # Files that legitimately write to `levels`, and why. Anything else fails.
 LEVEL_WRITERS = {
     ("utils/reward_engine.py", "give_reward"): "positive XP grant (clamped)",
-    ("utils/xp_calculator.py", "apply_spam_penalty"): "anti-spam deduction (clamped)",
+    ("utils/xp_calculator.py", "_apply_spam_penalty_in_transaction"): "anti-spam deduction (clamped)",
     ("cogs/leveling.py", "setxp"): "admin /setxp (clamped)",
     ("cogs/leveling.py", "resetxp"): "admin /resetxp (writes 0)",
     ("cogs/leveling.py", "perform_leaderboard_reset"): "leaderboard reset (writes 0)",
@@ -49,6 +49,31 @@ def production_files():
     for directory in PRODUCTION_DIRS:
         for path in sorted((ROOT / directory).rglob("*.py")):
             yield path
+
+
+def background_task_calls_reconciler() -> bool:
+    """Inspect task-loop function bodies, not unrelated file-level tokens."""
+    for path in production_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            is_task_loop = any(
+                ast.unparse(decorator).startswith("tasks.loop")
+                for decorator in node.decorator_list
+            )
+            if not is_task_loop:
+                continue
+            if any(
+                isinstance(item, ast.Call)
+                and ((isinstance(item.func, ast.Name)
+                      and item.func.id == "reconcile_role_progression")
+                     or (isinstance(item.func, ast.Attribute)
+                         and item.func.attr == "reconcile_role_progression"))
+                for item in ast.walk(node)
+            ):
+                return True
+    return False
 
 
 def function_spans(text: str):
@@ -85,10 +110,11 @@ def enclosing_function(spans, lineno: int) -> str:
 
 
 # The XP-changing writers and the exact recompute/consistency token each one
-# must contain in the same function as its write.
+# must contain in the same function as its write. The spam penalty's private
+# writer is called inside apply_spam_penalty's BEGIN IMMEDIATE transaction.
 LEVEL_CONSISTENCY = {
     ("utils/reward_engine.py", "give_reward"): "xp_progress(new_xp)",
-    ("utils/xp_calculator.py", "apply_spam_penalty"): "xp_progress(new_xp)[0]",
+    ("utils/xp_calculator.py", "_apply_spam_penalty_in_transaction"): "xp_progress(new_xp)[0]",
     ("cogs/leveling.py", "setxp"): "xp_progress(xp)",
     ("dashboard/app.py", "api_edit_member"): "calculate_level_from_xp(xp)",
 }
@@ -132,8 +158,21 @@ def main():
     dashboard_app = source("dashboard/app.py")
     check("the XP grant clamps at zero",
           "new_xp    = max(0, old_xp + amount)" in reward_engine)
-    check("the anti-spam deduction clamps at zero",
-          "new_xp = max(0, old_xp - penalty)" in penalty)
+    check("the anti-spam deduction clamps at zero, at 1% per incident and to rolling budget",
+          "incident_cap = old_xp // 100" in penalty
+          and "deducted = min(requested, budget_remaining)" in penalty
+          and "new_xp = max(0, old_xp - deducted)" in penalty
+          and "BEGIN IMMEDIATE" in penalty)
+    penalty_entry = function_body(penalty, "apply_spam_penalty")
+    penalty_writer = function_body(
+        penalty, "_apply_spam_penalty_in_transaction")
+    check("incident identity, penalty, and budget use the same immediate transaction",
+          "BEGIN IMMEDIATE" in penalty_entry
+          and "_apply_spam_penalty_in_transaction(" in penalty_entry
+          and "incident_detected" in penalty_entry)
+    check("the shared penalty writer leaves commit/rollback to its caller",
+          "db.commit" not in penalty_writer
+          and "db.rollback" not in penalty_writer)
     check("admin /setxp clamps at zero", "xp = max(0, xp)" in cog)
     check("the dashboard member edit clamps at zero",
           'xp        = max(0, int(data.get("xp", 0)))' in dashboard_app)
@@ -177,25 +216,26 @@ def main():
     check("the missions cog only displays rewards, it never writes XP",
           "INTO levels" not in missions_cog and "UPDATE levels" not in missions_cog)
 
-    print("== 5. the message path cannot bypass the spam gate ==")
+    print("== 5. incident detection precedes Message XP cooldown/grant ==")
     message_fn = cog[cog.index("async def on_activity_message"):]
     message_fn = message_fn[:message_fn.index("async def _announce_levelup")]
-    # `.find` (not `.index`) so a mutated/removed gate is reported as a failed
-    # check instead of crashing the audit — the inventory must survive the very
-    # change it is meant to catch.
     spam_at = message_fn.find('if config.get("spam_detection_enabled", 1):')
-    cooldown_at = message_fn.find('cooldown = config.get("xp_cooldown_seconds", 20)')
+    cooldown_at = message_fn.find('cooldown = max(0, int(config.get("xp_cooldown_seconds", 10)))')
     grant_at = message_fn.find("await give_reward(")
     warn_at = message_fn.find("await self._warn_spam(")
-    check("the spam gate condition is live (not disabled in place)",
-          '        if config.get("spam_detection_enabled", 1):' in message_fn)
-    check("the spam gate runs before the cooldown gate",
+    check("spam detection is live and separate from Message XP",
+          'if config.get("spam_detection_enabled", 1):' in message_fn
+          and 'if not config.get("message_xp_enabled", 1):' in message_fn)
+    check("incident detection runs before the 10s cooldown",
           spam_at < cooldown_at, f"{spam_at} vs {cooldown_at}")
-    check("the spam gate runs before the XP grant",
+    check("incident detection runs before the XP grant",
           spam_at < grant_at, f"{spam_at} vs {grant_at}")
-    check("the penalty branch warns before the XP grant is ever reached",
-          -1 < warn_at < grant_at, f"warn={warn_at} grant={grant_at}")
-    check("the penalty is the only spam consequence in the codebase",
+    check("one incident-claim warning branch precedes any XP grant",
+          -1 < warn_at < grant_at
+          and 'incident_started and outcome["applied"]' in message_fn
+          and 'outcome["warning_due"]' in message_fn,
+          f"warn={warn_at} grant={grant_at}")
+    check("the penalty helper has one implementation",
           source("utils/xp_calculator.py").count("async def apply_spam_penalty") == 1)
     users = [str(path.relative_to(ROOT)) for path in production_files()
              if "apply_spam_penalty" in path.read_text(encoding="utf-8")]
@@ -220,8 +260,8 @@ def main():
           and "give_reward" not in source("cogs/activity_engine.py"))
 
     print("== 6. the penalty cannot create, revoke or duplicate a claim ==")
-    fn_start = penalty.index("async def apply_spam_penalty")
-    fn_body = penalty[fn_start:penalty.index("async def check_and_award_level_rewards")]
+    fn_body = (function_body(penalty, "apply_spam_penalty")
+               + function_body(penalty, "_apply_spam_penalty_in_transaction"))
     check("the penalty never touches the claim ledger",
           "level_reward_claims" not in fn_body)
     check("the penalty never records a crossing",
@@ -252,52 +292,69 @@ def main():
     check("re-crossing inserts are ignored, not duplicated",
           "INSERT OR IGNORE" in claims)
     check("the exclusivity setting defaults to OFF in code and in the schema",
-          '"remove_old_reward_role": 0' in penalty
-          and "remove_old_reward_role INTEGER DEFAULT 0" in source("database.py"))
+          re.search(r'"remove_old_reward_role"\s*:\s*0', penalty) is not None
+          and re.search(r"remove_old_reward_role\s+INTEGER DEFAULT 0",
+                        source("database.py")) is not None)
     check("the config API validates the toggle as 0/1",
           '("remove_old_reward_role",' in source("dashboard/api/leveling.py")
           and ", 0, 0, 1)," in source("dashboard/api/leveling.py"))
-    check("enforcement only runs when the toggle is ON",
-          re.search(r"if exclusive_roles:\s*\n\s*await enforce_role_progression", claims)
-          is not None)
+    check("role replacement is deferred until the full role-delivery pass",
+          "if exclusive_roles and member is not None and claim_ids is None:" in claims
+          and "await enforce_role_progression(" not in claims[
+              claims.index("for row in roles:"):claims.index("for row in temp_roles:")])
 
     print("== 9. D2 reconciliation cannot restore the wrong thing ==")
     rec = claims[claims.index("async def reconcile_role_progression"):]
     rec = rec[:rec.index("async def _grant_inventory")]
-    check("the reconciler reads fulfilled role claims only",
-          "status='fulfilled'" in rec and "TRACK_ROLE" in rec)
-    check("the reconciler restores only the highest fulfilled level",
-          "highest = max(by_level)" in rec and "keep = sorted(by_level[highest])" in rec)
+    check("the reconciler inspects all role claim statuses",
+          "SELECT reward_level, payload_json, status" in rec and "TRACK_ROLE" in rec)
+    check("the reconciler targets the highest role claim group",
+          "highest = max(by_level)" in rec
+          and 'keep = sorted(group["role_ids"])' in rec)
+    check("fulfilled highest roles are restored even when a sibling is unresolved, but replacement is blocked",
+          'if exclusive_roles and not keep:' in rec
+          and 'group["unfulfilled"]' in rec
+          and 'result["blocked"] = True' in rec)
+    check("OFF restores every fulfilled role; ON restores only the highest group",
+          'restore_groups = ([(highest, group)] if exclusive_roles else' in rec
+          and 'sorted(by_level.items())' in rec)
     check("the reconciler never writes to the claim ledger",
           "INSERT" not in rec and "UPDATE level_reward_claims" not in rec)
     check("the reconciler never records a crossing",
           "record_crossing" not in rec)
     check("the reconciler never invents role ids from live config",
           "leveling_rewards" not in rec)
-    check("a role that cannot be restored leaves the member as they were",
-          "if not present:" in rec)
-    check("reconciliation is reachable only from the claim pass",
+    check("a partial/unfulfilled highest-role delivery blocks lower-role removal",
+          'result["failed"] or group["unfulfilled"] or any(' in rec)
+    check("reconciliation reads the persisted remove-old setting for role restoration",
+          "get_leveling_config(guild_id)" in rec
+          and 'get("remove_old_reward_role")' in rec
+          and "exclusive_roles" in rec)
+    check("reconciliation has one claim/retry implementation plus the join callback",
           [str(p.relative_to(ROOT)) for p in production_files()
            if "reconcile_role_progression" in p.read_text(encoding="utf-8")]
-          == ["utils/level_claims.py"])
-    check("it needs a member, a full pass and the toggle",
+          == ["cogs/leveling.py", "utils/level_claims.py"])
+    check("Claim All path requires a member, full pass and replacement enabled",
           "if exclusive_roles and member is not None and claim_ids is None:" in claims)
+    check("join callback reconciles automatically without requiring Claim All",
+          "async def on_member_join" in source("cogs/leveling.py")
+          and "reconcile_role_progression" in source("cogs/leveling.py"))
     check("no background task calls it",
-          not any("@tasks.loop" in p.read_text(encoding="utf-8")
-                  and "reconcile_role_progression" in p.read_text(encoding="utf-8")
-                  for p in production_files()))
-    check("no guild-wide sweep exists for it",
-          "reconcile_role_progression" not in source("cogs/leveling.py"))
+          not background_task_calls_reconciler())
+    check("no guild-wide/member-list sweep is introduced by the join callback",
+          "for member in guild.members" not in source("cogs/leveling.py"))
 
     print("== 10. no retroactive sweep, no rejoin reset ==")
     call_sites = [str(p.relative_to(ROOT)) for p in production_files()
                   if "reconcile_role_progression(" in p.read_text(encoding="utf-8")]
-    check("the reconciler has exactly one call site in production",
-          call_sites == ["utils/level_claims.py"], str(call_sites))
+    check("the reconciler has only the Claim All and join callback callers",
+          call_sites == ["cogs/leveling.py", "utils/level_claims.py"],
+          str(call_sites))
     claim_pass = source("utils/level_claims.py")
     claim_pass = claim_pass[claim_pass.index("async def claim_available"):]
-    check("that call site is the member's own claim pass",
-          claim_pass.count("reconcile_role_progression(") == 1)
+    check("the claim-pass call is member-initiated, full-pass only",
+          claim_pass.count("reconcile_role_progression(") == 1
+          and "if exclusive_roles and member is not None and claim_ids is None:" in claim_pass)
     check("nothing loops over guilds or members to reconcile in bulk",
           not re.search(r"for\s+guild\w*\s+in[^\n]*\n(?:.*\n){0,6}.*reconcile_role_progression",
                         source("utils/level_claims.py")))
@@ -306,7 +363,7 @@ def main():
                             "level_reward_claims"))
                  for name in ("welcome.py", "tagpartners.py", "boost.py",
                               "reactionroles.py", "auditlog.py")}
-    check("no member-lifecycle listener touches level state",
+    check("unrelated lifecycle cogs do not mutate level state",
           set(lifecycle.values()) == {0}, str(lifecycle))
 
     print("== 11. unrelated roles are preserved ==")
@@ -356,9 +413,10 @@ def main():
           "apply_spam_penalty" not in voice and "_is_spamming" not in voice)
     defaults = source("utils/xp_calculator.py")
     for name, value in (("xp_per_word", "1"), ("xp_min_per_message", "5"),
-                        ("xp_max_per_message", "50"), ("xp_cooldown_seconds", "20"),
-                        ("spam_threshold", "3"), ("spam_xp_penalty", "10"),
-                        ("spam_window_seconds", "10")):
+                        ("xp_max_per_message", "50"), ("xp_cooldown_seconds", "10"),
+                        ("spam_threshold", "10"),
+                        ("spam_xp_penalty_divisor", "1000"),
+                        ("spam_window_seconds", "20")):
         check(f"the frozen setting {name} is still {value}",
               re.search(rf'"{name}":\s*{value},', defaults) is not None)
     check("the XP curve is unchanged",
@@ -375,15 +433,15 @@ def main():
         execute("INSERT INTO levels (guild_id, user_id, xp, level) VALUES (?,?,?,?)",
                 (GUILD, USER, 7, 0))
         for _ in range(5):
-            outcome = await apply_spam_penalty(GUILD, USER, 10)
+            outcome = await apply_spam_penalty(GUILD, USER, 100)
         stored = rows("SELECT xp, level FROM levels WHERE guild_id=? AND user_id=?",
                       (GUILD, USER))[0]
         return outcome, stored
 
     import asyncio
     outcome, stored = asyncio.run(runnf())
-    check("five penalties on 7 XP leave 0 XP, level 0 — never negative",
-          stored == (0, 0) and outcome["applied"] is False,
+    check("five rounded penalties on 7 XP leave 7 XP, level 0 — no debt",
+          stored == (7, 0) and outcome["applied"] is False,
           f"stored={stored} outcome={outcome}")
     check("the last penalty deducted nothing (no debt to carry)",
           outcome["deducted"] == 0, str(outcome))
