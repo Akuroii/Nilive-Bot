@@ -94,6 +94,9 @@ _LEVELING_INT_FIELDS = (
     ("voice_xp_enabled",            "Voice XP enabled",              1,    0,     1),
     ("voice_xp_per_minute",         "XP per minute in voice",        3,    0, 10000),
     ("voice_require_unmuted",       "Require unmuted to earn voice XP", 1, 0,     1),
+    # ON (default) = no Voice XP while alone, deafened or in the AFK channel.
+    # Separate from voice_require_unmuted, which only governs mute.
+    ("voice_farming_guard",         "Voice XP anti-farming guard",   1,    0,     1),
     ("spam_detection_enabled",      "Enable spam detection",         1,    0,     1),
     ("spam_threshold",              "Spam threshold (messages)",    10,    2, 10000),
     ("spam_window_seconds",         "Spam window (seconds)",        20,    1,  3600),
@@ -164,11 +167,12 @@ def save_leveling_config_api():
                      xp_min_per_message, xp_max_per_message,
                      xp_cooldown_seconds, voice_xp_enabled,
                      voice_xp_per_minute, voice_require_unmuted,
+                     voice_farming_guard,
                      spam_detection_enabled, spam_threshold,
                      spam_window_seconds, spam_xp_penalty_divisor, levelup_announce,
                      levelup_channel_id, levelup_message,
                      remove_old_reward_role)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                     message_xp_enabled      = excluded.message_xp_enabled,
                     xp_per_word            = excluded.xp_per_word,
@@ -178,6 +182,7 @@ def save_leveling_config_api():
                     voice_xp_enabled       = excluded.voice_xp_enabled,
                     voice_xp_per_minute    = excluded.voice_xp_per_minute,
                     voice_require_unmuted  = excluded.voice_require_unmuted,
+                    voice_farming_guard    = excluded.voice_farming_guard,
                     spam_detection_enabled = excluded.spam_detection_enabled,
                     spam_threshold         = excluded.spam_threshold,
                     spam_window_seconds    = excluded.spam_window_seconds,
@@ -197,6 +202,7 @@ def save_leveling_config_api():
                 values["voice_xp_enabled"],
                 values["voice_xp_per_minute"],
                 values["voice_require_unmuted"],
+                values["voice_farming_guard"],
                 values["spam_detection_enabled"],
                 values["spam_threshold"],
                 values["spam_window_seconds"],

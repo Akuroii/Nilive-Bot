@@ -1,43 +1,60 @@
-# Leveling_fix — manifest
+# Voice_XP_fix — manifest
 
-Base: `Akuroii/Nilive-Bot` `main` @ `d6feb2f`. Extract at the repository root (paths below are repo-relative). Nothing committed or pushed.
+Base: `Akuroii/Nilive-Bot` `main` @ `6c2af9a`. Extract at the repository root. Nothing committed or pushed.
 
-| File | Type | Why |
+## Behaviour changed
+
+ONE new setting, `voice_farming_guard` (`leveling_config`, default **1 = ON**), decides what **alone / deafened (self or server) / AFK channel** mean for Voice XP:
+
+- ON (default): none of the three earns Voice XP (identical to the old behaviour).
+- OFF: none of the three blocks Voice XP by itself; an otherwise-eligible member earns it.
+
+`voice_require_unmuted` is untouched (mute only). `voice_xp_enabled` still wins over everything.
+
+Architecture (smallest split, no new consumers broken):
+- `cogs/activity_engine.py` keeps computing alone / AFK / deafened with its existing definitions (alone = fewer than 2 non-bot members in the channel; a deafened member still counts as a participant; AFK = `guild.afk_channel`). For members that fail them it still skips `activity_stats.voice_minutes` and the existing `activity_voice_tick` event, exactly as before (missions + mvp unaffected; same event, same flags dict, same recipients).
+- It additionally dispatches a NEW event `activity_voice_xp_tick` for every real member in a voice channel, with the old flags plus `alone` and `afk`. Only Leveling listens to it.
+- `cogs/leveling.py`: the listener is renamed `on_activity_voice_tick` -> `on_activity_voice_xp_tick` (so there is no double award) and applies the guard.
+
+## Files
+
+| File | Type | Change |
 |---|---|---|
-| `utils/level_claims.py` | production | `reconcile_role_progression` (rejoin + Claim All) targets the highest **fulfilled** Level reward role. A higher pending/failed Level is never granted and never costs the member the role they already earned. OFF-mode behaviour (incl. the `blocked` flag) is unchanged. |
-| `dashboard/api/leveling.py` | production | Reject `xp_min_per_message > xp_max_per_message`; spam threshold floor `1 -> 2` (default stays 10, spam math untouched). |
-| `dashboard/templates/systems/leveling.html` | production | `spam_threshold` input `min="1"` -> `min="2"` to mirror the server floor. |
-| `scripts/test_xp_safety_audit.py` | test | Two source-text assertions matched the old reconciler lines (`highest = max(by_level)`, `if exclusive_roles and not keep:`); updated to the new lines, same intent. |
-| `scripts/test_leveling_voice_hard_blocks.py` | test (new) | Toggle OFF + AFK / server-deaf / alone -> no Voice XP (real ActivityEngine tick -> real Leveling listener), with positive controls. No production change. |
-| `scripts/test_leveling_claim_all_d2.py` | test (new) | `_claim_button_available` semantics + full D2 Claim All: restores the missing fulfilled role, removes the old role only after delivery, whole-DB diff proves no claim/XP/level/ledger/economy change, idempotent second pass, OFF accumulates. No production change. |
-| `scripts/test_leveling_final_fixes.py` | test (new) | Rejoin highest-fulfilled cases (ON + OFF, pending/failed/partial/none) and the validation rules (min>max, threshold floor 2, custom >= 2 kept, template min=2). |
+| `cogs/activity_engine.py` | production | dispatch `activity_voice_xp_tick` (adds `alone`/`afk`); legacy gating/event/`voice_minutes` unchanged |
+| `cogs/leveling.py` | production | listener moved to the new event; `voice_farming_guard` check; comments updated |
+| `database.py` | production | column in `leveling_config` CREATE + additive `ALTER TABLE ... ADD COLUMN ... DEFAULT 1` in `migrate_leveling_config` (existing guilds stay ON) |
+| `utils/xp_calculator.py` | production | effective default `voice_farming_guard: 1` (GET + runtime for guilds with no row); one comment |
+| `dashboard/api/leveling.py` | production | field validated (0/1, default 1) and saved |
+| `dashboard/templates/systems/leveling.html` | production | new checkbox, load/save wiring, hint rewritten ("Controlled by this toggle ...") |
+| `scripts/test_leveling_voice_hard_blocks.py` | test | REWRITTEN in place (the old version asserted the always-blocked behaviour): real engine -> real listener matrix, ON/OFF x alone / server-deaf / self-deaf / AFK / normal, mute independence, legacy event + `voice_minutes` unchanged, master switch, default ON, additive migration, Dashboard API -> DB -> runtime, UI wiring |
+| `scripts/test_leveling_runtime.py` | test | listener renamed; the engine-gate test now filters `activity_voice_tick` (the legacy contract) and feeds Leveling the new event |
+| `scripts/test_slice1_leveling_gate.py` | test | listener rename only |
+| `scripts/test_xp_safety_audit.py` | test | source-slice anchor renamed to the new listener |
 
-## Commands run (from repo root) and results
+## Tests run (repo root) — all PASS
 
-    python scripts/test_leveling_voice_hard_blocks.py       PASS
-    python scripts/test_leveling_claim_all_d2.py            PASS
-    python scripts/test_leveling_final_fixes.py             PASS
-    python scripts/test_xp_safety_audit.py                  PASS (111 passed, 0 failed)
-    python scripts/test_level_reward_role_progression.py    PASS (46/0)
-    python scripts/test_rejoin_reconciliation.py            PASS
-    python scripts/test_leveling_reward_e2e.py              PASS
-    python scripts/test_leveling_runtime.py                 PASS
-    python scripts/test_slice1_leveling_gate.py             PASS
-    python scripts/test_slice2_level_claims.py              PASS
-    python scripts/test_slice3_shop_claims.py               PASS
-    python scripts/test_slice4_boost_claims.py              PASS
-    python scripts/test_leveling_config_migration.py        PASS
-    python scripts/test_leveling_reset_config.py            PASS
-    python scripts/test_leveling_caller_integrations.py     PASS
-    for t in scripts/test_*.py; do python "$t"; done        52 files: 50 pass, 2 fail (pre-existing, see caveats)
-    python -c "import compileall..."                        OK
+    python scripts/test_leveling_voice_hard_blocks.py     (73 checks)
+    python scripts/test_leveling_runtime.py
+    python scripts/test_slice1_leveling_gate.py
+    python scripts/test_xp_safety_audit.py
+    python scripts/test_leveling_config_migration.py
+    python scripts/test_leveling_reset_config.py
+    python scripts/test_level_reward_role_progression.py
+    python scripts/test_leveling_reward_e2e.py
+    python scripts/test_leveling_caller_integrations.py
+    python scripts/test_leveling_final_fixes.py
+    python scripts/test_leveling_claim_all_d2.py
+    python scripts/test_slice2_level_claims.py
+    python scripts/test_slice3_shop_claims.py
+    python scripts/test_slice4_boost_claims.py
+    python scripts/test_rejoin_reconciliation.py
+    for t in scripts/test_*.py; do python "$t"; done      50 pass, 2 fail
 
-Verified by extracting this ZIP onto a pristine clone of `main` @ `d6feb2f` and re-running the suites there.
-
-Test-strength checks: with the production patch reverted, `test_leveling_final_fixes` fails 5 checks. Voice/D2 tests guard already-correct behaviour, so they were mutation-checked instead: deleting the AFK skip, deleting the deaf skip, forcing `_claim_button_available` to False, and disabling `enforce_role_progression` removal each make the relevant test fail.
+Mutation checks (each makes `test_leveling_voice_hard_blocks.py` fail; sources restored afterwards): guard ignored/always-block, guard ignored/never-block, guard wired to `voice_require_unmuted`, engine stops reporting `alone`, engine stops reporting `afk`, legacy `activity_voice_tick` leaking for ineligible members, API dropping the column from the upsert, default flipped to OFF.
 
 ## Caveats
 
-- `scripts/test_afk.py` fails (`cancel reports the 2 mentions counted`) and `scripts/test_shop_publications.py` errors (`No module named 'pytest'`, not in requirements.txt). Both fail identically on pristine `main`; unrelated to Leveling.
-- Running the suites rewrites tracked `__pycache__/*.pyc` and some `preview_*.png` files in the repo; these are not included here. Discard them with `git checkout -- .` before committing.
-- Rejoin with nothing fulfilled and the toggle ON reports `blocked=True` (previous behaviour, unchanged); no code outside tests reads that flag.
+- `scripts/test_afk.py` and `scripts/test_shop_publications.py` still fail exactly as on pristine `main` (not touched, as instructed).
+- Missions and MVP still listen to `activity_voice_tick` and are unchanged; only Leveling moved to the new event. Any third-party/unlisted code that called `Leveling.on_activity_voice_tick` directly would need the new name (none in the repo).
+- Root-level duplicate files (`leveling.py`, `activity_engine.py`, ...) are not loaded by `main.py` and were not touched.
+- Test runs rewrite tracked `__pycache__/*.pyc` files; they are not in this ZIP. Run `git checkout -- .` on those before committing.

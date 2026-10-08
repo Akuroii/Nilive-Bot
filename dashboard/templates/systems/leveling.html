@@ -112,7 +112,11 @@
                     <input type="checkbox" name="voice_require_unmuted" id="cfg-voice-unmuted">
                     Require unmuted to earn voice XP
                 </label>
-                <div class="form-hint">Voice XP is never given when alone, deafened, or in AFK channel.</div>
+                <label class="form-check" style="margin-bottom:8px;">
+                    <input type="checkbox" name="voice_farming_guard" id="cfg-voice-guard">
+                    Block voice XP when alone, deafened, or in the AFK channel
+                </label>
+                <div class="form-hint">Controlled by this toggle: when ON (the default), Voice XP is never given when alone, deafened (self or server), or in the AFK channel. When OFF, those states no longer block Voice XP by themselves. Muting is controlled separately by "Require unmuted".</div>
             </div>
 
             <div class="card">
@@ -549,6 +553,7 @@ async function loadConfig() {
     set('cfg-voice-enabled',   c.voice_xp_enabled);
     set('cfg-voice-xp',        c.voice_xp_per_minute);
     set('cfg-voice-unmuted',   c.voice_require_unmuted);
+    set('cfg-voice-guard',     c.voice_farming_guard);
     set('cfg-spam',            c.spam_detection_enabled);
     set('cfg-spam-thresh',     c.spam_threshold);
     set('cfg-spam-window',     c.spam_window_seconds);
@@ -577,6 +582,7 @@ async function saveConfig(btn) {
         voice_xp_enabled:      getVal('cfg-voice-enabled'),
         voice_xp_per_minute:   getVal('cfg-voice-xp'),
         voice_require_unmuted: getVal('cfg-voice-unmuted'),
+        voice_farming_guard:   getVal('cfg-voice-guard'),
         spam_detection_enabled:getVal('cfg-spam'),
         spam_threshold:        getVal('cfg-spam-thresh'),
         spam_window_seconds:   getVal('cfg-spam-window'),

@@ -402,8 +402,8 @@ class Leveling(commands.Cog):
         # persisted with XP in SQLite; only this short detector history stays
         # process-local.
         # Phase 3 / E1: voice XP is now driven by
-        # cogs/activity_engine.py's activity_voice_tick event (see
-        # on_activity_voice_tick below) instead of this cog running
+        # cogs/activity_engine.py's activity_voice_xp_tick event (see
+        # on_activity_voice_xp_tick below) instead of this cog running
         # its own poll loop, so there's no task to start/cancel here
         # anymore.
         self.leaderboard_reset_task.start()
@@ -658,22 +658,31 @@ class Leveling(commands.Cog):
             await channel.send(embed=embed)
 
     # ─── VOICE XP (Phase 3 / E1: now driven by the Activity
-    # Engine's activity_voice_tick event instead of running its own
+    # Engine's activity_voice_xp_tick event instead of running its own
     # 60s poll loop over every guild/channel/member. The engine
-    # already applies the raw disqualifiers (2+ real members present,
-    # not AFK channel, not deafened) that used to live in this loop;
+    # reports the raw facts (alone, AFK channel, deafened) and this
+    # listener applies the guild's `voice_farming_guard` to them;
     # what's left here is leveling's own POLICY on top of a valid
     # tick — voice_xp_enabled, the require_unmuted choice, the XP
     # blacklist, and the actual XP math — exactly as before, just
     # invoked once per tick instead of leveling running its own
     # duplicate poll. ──────────────────────────────────────────────
     @commands.Cog.listener()
-    async def on_activity_voice_tick(self, guild: discord.Guild,
-                                      member: discord.Member,
-                                      flags: dict):
+    async def on_activity_voice_xp_tick(self, guild: discord.Guild,
+                                         member: discord.Member,
+                                         flags: dict):
         try:
             config = await get_leveling_config(guild.id)
             if not config.get("voice_xp_enabled", 1):
+                return
+
+            # Voice-farming guard (one setting, three facts from the Activity
+            # Engine): alone, deafened (self or server) or in the AFK channel.
+            # ON (the default) = none of them earns Voice XP. OFF = they no
+            # longer block by themselves. Independent of the mute rule below.
+            if config.get("voice_farming_guard", 1) and (
+                    flags.get("alone") or flags.get("afk")
+                    or flags.get("self_deaf") or flags.get("deaf")):
                 return
 
             require_unmuted = config.get("voice_require_unmuted", 1)

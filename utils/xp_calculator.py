@@ -44,7 +44,7 @@ async def get_xp_multiplier(guild_id: int, member_role_ids: list[int]) -> float:
 
 
 # BUGFIX (dark-fixes pass #7): XP blacklist roles not applying to
-# voice XP. cogs/leveling.py's on_activity_voice_tick() grants voice
+# voice XP. cogs/leveling.py's on_activity_voice_xp_tick() grants voice
 # XP directly (calculate_voice_xp + give_reward) and never once
 # consulted leveling_blacklist_roles — only calculate_message_xp()
 # (via get_xp_multiplier above) ever checked it. A member given a
@@ -87,6 +87,8 @@ LEVELING_CONFIG_DEFAULTS = {
     "voice_xp_enabled":        1,
     "voice_xp_per_minute":     3,
     "voice_require_unmuted":   1,
+    # ON = no Voice XP while alone, deafened or in the AFK channel.
+    "voice_farming_guard":     1,
     "spam_detection_enabled":  1,
     "spam_threshold":          10,
     "spam_window_seconds":     20,

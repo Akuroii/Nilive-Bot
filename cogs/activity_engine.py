@@ -89,18 +89,40 @@ class ActivityEngine(commands.Cog):
                 afk_channel_id = guild.afk_channel.id if guild.afk_channel else None
 
                 for channel in guild.voice_channels:
-                    if channel.id == afk_channel_id:
-                        continue
-
+                    # Sensor/policy split: AFK channel / alone / deafened are
+                    # still computed here, with the definitions this engine
+                    # has always used, but they no longer end the member's
+                    # tick for Leveling. They keep gating everything else
+                    # (activity_stats.voice_minutes and the
+                    # `activity_voice_tick` consumers: missions, mvp).
+                    in_afk_channel = channel.id == afk_channel_id
                     real_members = [m for m in channel.members if not m.bot]
-                    if len(real_members) < 2:
-                        continue
+                    alone = len(real_members) < 2
 
                     for member in real_members:
                         try:
                             if not member.voice:
                                 continue
-                            if member.voice.self_deaf or member.voice.deaf:
+                            flags = {
+                                "self_mute": bool(member.voice.self_mute),
+                                "mute":      bool(member.voice.mute),
+                                "self_deaf": bool(member.voice.self_deaf),
+                                "deaf":      bool(member.voice.deaf),
+                                "channel_id": channel.id,
+                            }
+                            # Leveling's own event: it carries the three
+                            # anti-farming facts so the guild's
+                            # `voice_farming_guard` setting decides what they
+                            # mean. Dispatched for EVERY real member in a
+                            # voice channel; no other consumer listens to it.
+                            xp_flags = dict(flags, alone=alone,
+                                            afk=in_afk_channel)
+                            if (in_afk_channel or alone
+                                    or member.voice.self_deaf
+                                    or member.voice.deaf):
+                                self.bot.dispatch(
+                                    "activity_voice_xp_tick",
+                                    guild, member, xp_flags)
                                 continue
 
                             async with aiosqlite.connect(DB_PATH) as db:
@@ -117,16 +139,12 @@ class ActivityEngine(commands.Cog):
                             # missions can check WHERE the minute was spent,
                             # without changing the listener signature the
                             # other on_activity_voice_tick consumers
-                            # (leveling, mvp) already bind to.
-                            flags = {
-                                "self_mute": bool(member.voice.self_mute),
-                                "mute":      bool(member.voice.mute),
-                                "self_deaf": bool(member.voice.self_deaf),
-                                "deaf":      bool(member.voice.deaf),
-                                "channel_id": channel.id,
-                            }
+                            # (missions, mvp) already bind to.
                             self.bot.dispatch(
                                 "activity_voice_tick", guild, member, flags)
+                            self.bot.dispatch(
+                                "activity_voice_xp_tick",
+                                guild, member, xp_flags)
                         except Exception as e:
                             print(f"[ACTIVITY] voice tick error for "
                                   f"member {member.id} in guild "

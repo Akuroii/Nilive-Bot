@@ -405,8 +405,8 @@ def main():
         existing = (ROOT / rel).exists()
         check(f"{rel} does not reference this slice's new behaviour",
               (not existing) or leaked == [], str(leaked))
-    voice = cog[cog.index("async def on_activity_voice_tick"):]
-    voice = voice[:voice.index("async def ", voice.index("async def on_activity_voice_tick") + 10)]
+    voice = cog[cog.index("async def on_activity_voice_xp_tick"):]
+    voice = voice[:voice.index("async def ", voice.index("async def on_activity_voice_xp_tick") + 10)]
     check("voice XP keeps its own gates and still goes through the engine",
           "is_role_blacklisted" in voice and "give_reward" in voice)
     check("voice XP is not run through the message spam penalty",
