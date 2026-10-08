@@ -308,11 +308,11 @@ def main():
     rec = rec[:rec.index("async def _grant_inventory")]
     check("the reconciler inspects all role claim statuses",
           "SELECT reward_level, payload_json, status" in rec and "TRACK_ROLE" in rec)
-    check("the reconciler targets the highest role claim group",
-          "highest = max(by_level)" in rec
+    check("the reconciler targets the highest FULFILLED role claim group",
+          "highest = max(delivered_levels)" in rec
           and 'keep = sorted(group["role_ids"])' in rec)
     check("fulfilled highest roles are restored even when a sibling is unresolved, but replacement is blocked",
-          'if exclusive_roles and not keep:' in rec
+          'if not delivered_levels:' in rec
           and 'group["unfulfilled"]' in rec
           and 'result["blocked"] = True' in rec)
     check("OFF restores every fulfilled role; ON restores only the highest group",

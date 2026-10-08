@@ -522,12 +522,18 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int) -> dic
     from utils.xp_calculator import get_leveling_config
     exclusive_roles = bool(
         (await get_leveling_config(guild_id)).get("remove_old_reward_role"))
-    highest = max(by_level)
+    # The target is the highest Level whose role the member has actually been
+    # given (fulfilled). A higher Level that is still pending/failed is not a
+    # target: its role cannot be restored (it was never delivered) and it must
+    # not cause the member to lose the role they already earned.
+    delivered_levels = [lvl for lvl, grp in by_level.items() if grp["role_ids"]]
+    if not delivered_levels:
+        result["blocked"] = bool(result["failed"]) or (
+            exclusive_roles and any(grp["unfulfilled"] for grp in by_level.values()))
+        return result
+    highest = max(delivered_levels)
     group = by_level[highest]
     keep = sorted(group["role_ids"])
-    if exclusive_roles and not keep:
-        result["blocked"] = bool(group["unfulfilled"])
-        return result
 
     guild = getattr(member, "guild", None)
     if guild is None:
