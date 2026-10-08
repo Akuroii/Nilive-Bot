@@ -124,6 +124,9 @@ INACTIVE_CRYSTAL_STRAY_BOX = (0, 1560, 140, 1765)
 # 2 -> 64 px tall (50x64 / 46x64 px) for the 32 px slots, so the last step is
 # an exact 2:1 average.
 PRESTIGE_PIP_WORK_SCALE = 2
+# Height (px) of one prestige-crystal slot on the card; shared by the slot layout and
+# by the sprite-cache check in _load_prestige_crystals so the two can never disagree.
+PRESTIGE_PIP_SLOT_H = 32
 
 # Supplied XP-potion artwork (source of truth -- replaces the old hand-drawn
 # flask). Content box measured off the asset itself (alpha>10 threshold) to
@@ -143,8 +146,9 @@ FONT_PATHS = {
     "cinzel": _asset_path(os.path.join("fonts", "Cinzel-Variable.ttf"), "Cinzel-Variable.ttf"),
     "zilla_bold": _asset_path(os.path.join("fonts", "ZillaSlab-Bold.ttf"), "ZillaSlab-Bold.ttf"),
     # XP numerals ONLY (XP PROGRESS value / "of needed" / TOTAL XP value).
-    # Supplied Varsity, used unmodified; not used anywhere else on the card.
-    "varsity": _asset_path(os.path.join("fonts", "varsity_regular.ttf"), "varsity_regular.ttf"),
+    # Supplied Fortuner Heavy, used unmodified; not used anywhere else on the card.
+    "fortuner": _asset_path(os.path.join("fonts", "FortunerHeavyPersonalUse.otf"),
+                            "FortunerHeavyPersonalUse.otf"),
     "outfit": _asset_path(os.path.join("fonts", "Outfit-Variable.ttf"), "Outfit-Variable.ttf"),
     "amiri_regular": _asset_path(os.path.join("fonts", "Amiri-Regular.ttf"), "Amiri-Regular.ttf"),
     "amiri_bold": _asset_path(os.path.join("fonts", "Amiri-Bold.ttf"), "Amiri-Bold.ttf"),
@@ -303,16 +307,17 @@ def zilla_bold(size):
     return _font("zilla_bold", size)
 
 
-def varsity(size):
-    """Supplied Varsity (collegiate small-caps), used only for the XP
-    numerals. Falls back to Zilla Slab Bold if the file is missing so a bad
-    deploy can never take /rank down. Cap height is 0.70 em (digits and
-    capitals share it), so the sizes used for the XP numerals are chosen to
-    keep the cap heights the XP hierarchy already had."""
+def fortuner(size):
+    """Supplied Fortuner Heavy, used only for the XP numerals. Falls back to
+    Zilla Slab Bold if the file is missing so a bad deploy can never take
+    /rank down. Cap height is 0.639 em (digits and capitals share it), so
+    the sizes used for the XP numerals are the previous Varsity sizes
+    scaled by 0.700/0.639 -- that keeps the cap heights (and therefore the
+    XP hierarchy) exactly what they were."""
     try:
-        return ImageFont.truetype(FONT_PATHS["varsity"], size)
+        return ImageFont.truetype(FONT_PATHS["fortuner"], size)
     except OSError:
-        log.warning("rank_card_renderer: Varsity font missing, using Zilla")
+        log.warning("rank_card_renderer: Fortuner font missing, using Zilla")
         return zilla_bold(size)
 
 
@@ -1320,13 +1325,41 @@ def _placeholder_avatar(size) -> Image.Image:
 # MAIN ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────
 
-async def render_rank_card(data: dict) -> io.BytesIO:
+def _render_rank_card_sync(data, avatar_im, ring_im, coin_icon_im, diamond_icon_im,
+                           item_icons, mailbox_im, active_crystal_im, inactive_crystal_im,
+                           potion_im) -> io.BytesIO:
+    """All the blocking Pillow work of one rank card (background, every drawer,
+    PNG encode), moved verbatim out of render_rank_card so it can run in a
+    worker thread via asyncio.to_thread. It takes only already-fetched images
+    and the payload -- no awaiting, no network -- and returns the PNG buffer."""
     img = _draw_background()
     draw = ImageDraw.Draw(img)
 
     line_icons_30 = _build_line_icons(68)
     line_icons_16 = _build_line_icons(68)
 
+    _draw_name_block(img, draw, data, line_icons_16)
+    _draw_rank_prestige_panel(img, draw, data, line_icons_16,
+                              active_crystal_im, inactive_crystal_im)
+    _draw_level_xp_panels(img, draw, data, potion_im)
+    _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, line_icons_30)
+    _draw_inventory(img, draw, data, line_icons_16, item_icons)
+    if mailbox_im is not None:
+        _draw_mailbox(img, mailbox_im)
+    _draw_footer(img, draw)
+
+    # avatar (and its ring) pasted after every panel, but the placeholder/
+    # fetch needs to happen before drawing -- done via the resolved
+    # avatar_im/ring_im captured above.
+    _paste_avatar(img, data, avatar_im, ring_im)
+
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+async def render_rank_card(data: dict) -> io.BytesIO:
     grid = data.get("inventory_grid") or []
 
     async def _no_icon():
@@ -1349,25 +1382,12 @@ async def render_rank_card(data: dict) -> io.BytesIO:
     active_crystal_im, inactive_crystal_im = await _load_prestige_crystals()
     potion_im = await _load_potion_icon()
 
-    _draw_name_block(img, draw, data, line_icons_16)
-    _draw_rank_prestige_panel(img, draw, data, line_icons_16,
-                              active_crystal_im, inactive_crystal_im)
-    _draw_level_xp_panels(img, draw, data, potion_im)
-    _draw_stat_cards(img, draw, data, coin_icon_im, diamond_icon_im, line_icons_30)
-    _draw_inventory(img, draw, data, line_icons_16, item_icons)
-    if mailbox_im is not None:
-        _draw_mailbox(img, mailbox_im)
-    _draw_footer(img, draw)
-
-    # avatar (and its ring) pasted after every panel, but the placeholder/
-    # fetch needs to happen before drawing -- done via the resolved
-    # avatar_im/ring_im captured above.
-    _paste_avatar(img, data, avatar_im, ring_im)
-
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="PNG")
-    buf.seek(0)
-    return buf
+    # Network fetching above stays on the event loop; only the blocking Pillow
+    # drawing + PNG encode runs in a worker thread so /rank no longer stalls
+    # the bot (heartbeats, other commands) while a card is being rendered.
+    return await asyncio.to_thread(
+        _render_rank_card_sync, data, avatar_im, ring_im, coin_icon_im, diamond_icon_im,
+        item_icons, mailbox_im, active_crystal_im, inactive_crystal_im, potion_im)
 
 
 async def _fetch_avatar(session, avatar_url) -> Image.Image:
@@ -1406,22 +1426,121 @@ async def _load_avatar_ring() -> Image.Image | None:
         return None
 
 
+class _CachedCrystalSource:
+    """Size-only stand-in for a crystal source image whose final-size pip
+    sprite is already in _PRESTIGE_PIP_CACHE. _draw_rank_prestige_panel only
+    needs .width/.height to pick the slot width, and _prestige_pip_sprite
+    returns its cached sprite before it ever touches the pixels -- so the
+    ~3000px PNG does not have to be decoded again on every render."""
+    __slots__ = ("width", "height")
+
+    def __init__(self, box):
+        self.width, self.height = box[2] - box[0], box[3] - box[1]
+
+
+def _decode_crystal_source(path, box):
+    """Decode one ORIGINAL full-resolution crystal PNG and trim it to its
+    measured content box. Returns None if the asset is missing/unreadable."""
+    if not os.path.isfile(path):
+        log.warning("rank_card: prestige crystal asset not found at %s", path)
+        return None
+    try:
+        im = Image.open(path)
+        im.load()
+        return im.convert("RGBA").crop(box)
+    except Exception as e:
+        log.warning("rank_card: failed to load prestige crystal asset %s: %s", path, e)
+        return None
+
+
+def _pip_geometry(kind):
+    """(content_box, slot_width) for a crystal kind. Same arithmetic as the
+    slot loop (aspect = width / height, then round) so cache keys match."""
+    box = ACTIVE_CRYSTAL_CONTENT_BOX if kind == "active" else INACTIVE_CRYSTAL_CONTENT_BOX
+    w, h = box[2] - box[0], box[3] - box[1]
+    return box, max(1, round(PRESTIGE_PIP_SLOT_H * (w / h)))
+
+
+def _pip_recipe(kind) -> str:
+    """Everything that determines the sprite's pixels besides the source art.
+    Stored in the pre-generated PNG; a mismatch means the file is stale."""
+    box, _cw = _pip_geometry(kind)
+    stray = INACTIVE_CRYSTAL_STRAY_BOX if kind == "inactive" else None
+    return (f"pip-v1|{kind}|box={tuple(box)}|stray={stray}"
+            f"|work={PRESTIGE_PIP_WORK_SCALE}|h={PRESTIGE_PIP_SLOT_H}")
+
+
+def _prebaked_pip_path(kind) -> str:
+    name = f"prestige_pip_{kind}_h{PRESTIGE_PIP_SLOT_H}.png"
+    return _asset_path(name, name)
+
+
+_PIP_PREBAKED_REJECTED = set()
+
+
+def _load_prebaked_pip(kind):
+    """The pre-generated, lossless final-size sprite for `kind` -- produced by
+    scripts/generate_prestige_pip_sprites.py by running _prestige_pip_sprite on
+    the ORIGINAL full-resolution PNG. Returns it only if it is valid for the
+    current code (mode, exact size, recipe, source-art size); otherwise None,
+    and the caller falls back to the normal decode-and-build path."""
+    _box, cw = _pip_geometry(kind)
+    path = _prebaked_pip_path(kind)
+
+    def _reject(reason):
+        if kind not in _PIP_PREBAKED_REJECTED:
+            _PIP_PREBAKED_REJECTED.add(kind)
+            log.info("rank_card: pre-generated %s crystal sprite not used (%s); "
+                     "building it from the original artwork instead.", kind, reason)
+        return None
+
+    if not os.path.isfile(path):
+        return _reject("file not found")
+    try:
+        im = Image.open(path)
+        im.load()
+        text = dict(getattr(im, "text", {}) or {})
+        sprite = im.convert("RGBA")
+    except Exception as e:
+        return _reject(f"unreadable: {e}")
+    if sprite.size != (cw, PRESTIGE_PIP_SLOT_H):
+        return _reject(f"size {sprite.size} != {(cw, PRESTIGE_PIP_SLOT_H)}")
+    if text.get("recipe") != _pip_recipe(kind):
+        return _reject("recipe changed")
+    src_path = ACTIVE_CRYSTAL_PNG_PATH if kind == "active" else INACTIVE_CRYSTAL_PNG_PATH
+    if os.path.isfile(src_path) and text.get("src_bytes") != str(os.path.getsize(src_path)):
+        return _reject("source artwork changed")
+    return sprite
+
+
+def _crystal_sprite_cached(kind) -> bool:
+    """True if the final-size sprite for `kind` is (now) in _PRESTIGE_PIP_CACHE.
+    Seeds the cache from the validated pre-generated PNG on first use."""
+    _box, cw = _pip_geometry(kind)
+    key = (kind, cw, PRESTIGE_PIP_SLOT_H)
+    if key in _PRESTIGE_PIP_CACHE:
+        return True
+    if kind in _PIP_PREBAKED_REJECTED:
+        return False
+    sprite = _load_prebaked_pip(kind)
+    if sprite is None:
+        return False
+    _PRESTIGE_PIP_CACHE[key] = sprite
+    return True
+
+
 async def _load_prestige_crystals():
     """Returns (active_im, inactive_im), each trimmed to its own measured
-    content box, or None for whichever asset is missing/unreadable."""
-    def _load_one(path, box):
-        if not os.path.isfile(path):
-            log.warning("rank_card: prestige crystal asset not found at %s", path)
-            return None
-        try:
-            im = Image.open(path)
-            im.load()
-            return im.convert("RGBA").crop(box)
-        except Exception as e:
-            log.warning("rank_card: failed to load prestige crystal asset %s: %s", path, e)
-            return None
-    return (_load_one(ACTIVE_CRYSTAL_PNG_PATH, ACTIVE_CRYSTAL_CONTENT_BOX),
-            _load_one(INACTIVE_CRYSTAL_PNG_PATH, INACTIVE_CRYSTAL_CONTENT_BOX))
+    content box, or None for whichever asset is missing/unreadable. A kind
+    whose final-size sprite is already cached (or available as a valid
+    pre-generated PNG) is returned as a size-only stand-in instead of
+    decoding the ~3000px original -- the sprite pixels are unchanged."""
+    def _load_one(kind, path, box):
+        if _crystal_sprite_cached(kind):
+            return _CachedCrystalSource(box)
+        return _decode_crystal_source(path, box)
+    return (_load_one("active", ACTIVE_CRYSTAL_PNG_PATH, ACTIVE_CRYSTAL_CONTENT_BOX),
+            _load_one("inactive", INACTIVE_CRYSTAL_PNG_PATH, INACTIVE_CRYSTAL_CONTENT_BOX))
 
 
 async def _load_potion_icon() -> Image.Image | None:
@@ -1741,7 +1860,7 @@ def _draw_rank_prestige_panel(img, draw, data, icons16,
     # prestige level -- identical slot size, shared vertical center, equal
     # pitch. Falls back to the old vector sparkle/diamond pips if either
     # asset failed to load.
-    crystal_h = 32
+    crystal_h = PRESTIGE_PIP_SLOT_H
     pitch = 30
     total_pips = 6
     start_x = x + w / 2 - (total_pips - 1) * pitch / 2
@@ -1852,27 +1971,30 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
 
     # Hierarchy (unchanged): current XP is the hero; "/ needed XP" is the
     # same face but much smaller and muted, on the hero's baseline. One
-    # family (Varsity) for the whole numeric treatment. Sizes keep the cap
+    # family (Fortuner) for the whole numeric treatment. Sizes keep the cap
     # heights of the previous treatment (hero ~29px, suffix ~15px); only the
     # face changed. Display formatting only: cur / needed / frac below are
     # untouched.
     cur_txt = _format_compact_progress(cur)
     suffix_words = ["/", _format_compact_progress(needed), "XP"]
-    HERO_SIZE, SUF_SIZE, SUF_GAP, HERO_GAP = 41, 22, 7, 14
-    suffix_font = varsity(SUF_SIZE)
+    HERO_SIZE, SUF_SIZE, SUF_GAP, HERO_GAP = 45, 24, 7, 14
+    suffix_font = fortuner(SUF_SIZE)
     suffix_w = _ss_words_width(draw, suffix_words, suffix_font, SUF_GAP)
     available = (div_x - 10) - (x + 14) - HERO_GAP - suffix_w
-    vf, cur_w = _fit_numeral_font(draw, cur_txt, varsity, max(available, 40), HERO_SIZE,
-                                  min_size=24)
+    vf, cur_w = _fit_numeral_font(draw, cur_txt, fortuner, max(available, 40), HERO_SIZE,
+                                  min_size=26)
     _draw_glow_layer(img, lambda d: d.text((x + 14, hero_baseline), cur_txt, font=vf,
                                             fill=(150, 70, 210, 140), anchor="ls"),
                      blur=3)
-    hero_bb = _draw_numeral_ss(img, x + 14, hero_baseline, cur_txt, varsity, vf.size,
+    hero_bb = _draw_numeral_ss(img, x + 14, hero_baseline, cur_txt, fortuner, vf.size,
                                COLORS["xp_value"])
-    _draw_ss_words(img, hero_bb[2] + HERO_GAP, hero_baseline, suffix_words, varsity,
+    _draw_ss_words(img, hero_bb[2] + HERO_GAP, hero_baseline, suffix_words, fortuner,
                    SUF_SIZE, COLORS["xp_suffix"], SUF_GAP)
 
-    draw.line((div_x, y + 14, div_x, y + h - 14), fill=(*COLORS["accent"], 30), width=1)
+    # Ends at the numerals' baseline, leaving a small gap above the XP bar
+    # (bar top = y + 84) instead of running through/past it. Top edge, x,
+    # width and colour unchanged.
+    draw.line((div_x, y + 14, div_x, y + 72), fill=(*COLORS["accent"], 30), width=1)
 
     # Bar: unchanged (size/shape/design and the same _draw_xp_bar call).
     bar_x, bar_y, bar_w, bar_h = x + 8, y + 84, w - 20, 21
@@ -1913,9 +2035,9 @@ def _draw_level_xp_panels(img, draw, data, potion_im=None):
     # the label/icon beside it), without outweighing the panel the way a
     # 38-42px value did.
     total_baseline_y = hero_baseline
-    tf2, _tw = _fit_numeral_font(draw, total_txt, varsity, max(total_available, 40), 33,
-                                 min_size=18)
-    total_bbox = _draw_numeral_ss(img, total_x, total_baseline_y, total_txt, varsity,
+    tf2, _tw = _fit_numeral_font(draw, total_txt, fortuner, max(total_available, 40), 36,
+                                 min_size=20)
+    total_bbox = _draw_numeral_ss(img, total_x, total_baseline_y, total_txt, fortuner,
                                   tf2.size, COLORS["xp_total_value"])
 
     # Potion icon: the supplied artwork (potion_im, pre-trimmed to its
@@ -2390,8 +2512,10 @@ def _draw_inventory(img, draw, data, icons16, item_icons=None):
         col, row = i % cols, i // cols
         sx = ox + col * (sw + gx)
         sy = oy + row * (sh + gy)
-        draw.rounded_rectangle((sx, sy, sx + sw, sy + sh), radius=12,
-                               fill=(30, 24, 46, 170), outline=(*COLORS["accent"], 22), width=1)
+        # Antialiased (same box/radius/colours as the plain call it replaces,
+        # which stair-stepped the corners) -- see _aa_rounded_rect.
+        _aa_rounded_rect(img, (sx, sy, sx + sw, sy + sh), 12,
+                         fill=(30, 24, 46, 170), outline=(*COLORS["accent"], 22), width=1)
         if i < len(items):
             icon_im = item_icons[i] if i < len(item_icons) else None
             _draw_inventory_item(img, draw, sx, sy, sw, sh, items[i], icon_im)
@@ -2407,8 +2531,8 @@ def _draw_inventory_item(img, draw, sx, sy, sw, sh, item, icon_im=None):
         ic = ImageOps.fit(icon_im, (56, 56), Image.LANCZOS)
         img.paste(ic, (int(sx + sw / 2 - 28), int(sy + sh / 2 - 28)), ic)
     else:
-        draw.rounded_rectangle((sx + 7, sy + 7, sx + sw - 7, sy + sh - 7), radius=8,
-                               fill=(58, 38, 88, 190))
+        _aa_rounded_rect(img, (sx + 7, sy + 7, sx + sw - 7, sy + sh - 7), 8,
+                         fill=(58, 38, 88, 190))
     qty = item.get("quantity", 1)
     if qty and qty > 1:
         draw.text((sx + sw - 7, sy + sh - 7), f"x{qty}",
