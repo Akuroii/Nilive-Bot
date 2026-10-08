@@ -95,7 +95,7 @@ _LEVELING_INT_FIELDS = (
     ("voice_xp_per_minute",         "XP per minute in voice",        3,    0, 10000),
     ("voice_require_unmuted",       "Require unmuted to earn voice XP", 1, 0,     1),
     ("spam_detection_enabled",      "Enable spam detection",         1,    0,     1),
-    ("spam_threshold",              "Spam threshold (messages)",    10,    1, 10000),
+    ("spam_threshold",              "Spam threshold (messages)",    10,    2, 10000),
     ("spam_window_seconds",         "Spam window (seconds)",        20,    1,  3600),
     ("spam_xp_penalty_divisor",     "XP penalty divisor (1/N)",   1000,  100, 1000000),
     ("levelup_announce",            "Announce level ups",            1,    0,     1),
@@ -129,6 +129,10 @@ def _leveling_config_ints(data):
         if not lo <= value <= hi:
             return None, f"{label} must be between {lo} and {hi}"
         values[field] = value
+    # A minimum above the maximum silently pays the minimum on every message
+    # (calculate_message_xp clamps to max(min, min(max, base))).
+    if values["xp_min_per_message"] > values["xp_max_per_message"]:
+        return None, "Min XP per message cannot be greater than Max XP per message"
     return values, None
 
 
