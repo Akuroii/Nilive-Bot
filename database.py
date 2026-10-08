@@ -64,6 +64,7 @@ LEVELING_CONFIG_CREATE_SQL = """
         voice_xp_enabled         INTEGER DEFAULT 1,
         voice_xp_per_minute      INTEGER DEFAULT 3,
         voice_require_unmuted    INTEGER DEFAULT 1,
+        voice_farming_guard      INTEGER DEFAULT 1,
         spam_detection_enabled   INTEGER DEFAULT 1,
         spam_threshold           INTEGER DEFAULT 10,
         spam_window_seconds      INTEGER DEFAULT 20,
@@ -147,6 +148,14 @@ async def migrate_leveling_config(db):
                 "ALTER TABLE leveling_config ADD COLUMN spam_xp_penalty_divisor "
                 "INTEGER DEFAULT 1000")
             columns.add("spam_xp_penalty_divisor")
+        # Voice-farming guard (alone / deafened / AFK). Additive: existing
+        # rows get 1 (ON) from the column default, i.e. the pre-existing
+        # always-blocked behaviour, so an upgrade changes nothing by itself.
+        if "voice_farming_guard" not in columns:
+            await db.execute(
+                "ALTER TABLE leveling_config ADD COLUMN voice_farming_guard "
+                "INTEGER DEFAULT 1")
+            columns.add("voice_farming_guard")
         # Keep the old fixed-penalty column as inert compatibility storage.
         # Its value has no safe/arbitrary mapping to the new incident divisor;
         # the listener and Dashboard never read or write it.

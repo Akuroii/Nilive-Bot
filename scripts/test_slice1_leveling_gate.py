@@ -144,18 +144,18 @@ async def main():
     # Voice XP has its own enable switch and the existing Require-unmuted toggle.
     muted_flags = {"self_mute": True, "mute": False,
                    "deaf": False, "self_deaf": False}
-    await Leveling.on_activity_voice_tick(leveling, SimpleNamespace(id=GUILD),
+    await Leveling.on_activity_voice_xp_tick(leveling, SimpleNamespace(id=GUILD),
                                           person(), muted_flags)
     check("Require unmuted ON blocks a muted member", xp_state()[0] == 32)
     execute("UPDATE leveling_config SET voice_require_unmuted=0 WHERE guild_id=?",
             (GUILD,))
-    await Leveling.on_activity_voice_tick(leveling, SimpleNamespace(id=GUILD),
+    await Leveling.on_activity_voice_xp_tick(leveling, SimpleNamespace(id=GUILD),
                                           person(), muted_flags)
     check("Require unmuted OFF permits muted-member Voice XP",
           xp_state()[0] == 35, str(xp_state()))
     execute("UPDATE leveling_config SET voice_xp_enabled=0 WHERE guild_id=?",
             (GUILD,))
-    await Leveling.on_activity_voice_tick(leveling, SimpleNamespace(id=GUILD),
+    await Leveling.on_activity_voice_xp_tick(leveling, SimpleNamespace(id=GUILD),
                                           person(), {"self_mute": False, "mute": False})
     check("Voice XP OFF blocks only Voice XP", xp_state()[0] == 35)
 

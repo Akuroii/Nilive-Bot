@@ -209,14 +209,14 @@ async def test_dashboard_config_api():
         leveling = make_leveling()
         muted = {"self_mute": True, "mute": False,
                  "self_deaf": False, "deaf": False}
-        await type(leveling).on_activity_voice_tick(
+        await type(leveling).on_activity_voice_xp_tick(
             leveling, SimpleNamespace(id=GUILD), person(), muted)
         check("Dashboard Require-unmuted ON blocks muted Voice XP", xp()[0] == 0)
 
         payload["voice_require_unmuted"] = 0
         saved_off = client.post("/api/leveling/config", json=payload, headers=headers)
         stored_off = await get_leveling_config(GUILD)
-        await type(leveling).on_activity_voice_tick(
+        await type(leveling).on_activity_voice_xp_tick(
             leveling, SimpleNamespace(id=GUILD), person(), muted)
         check("Dashboard Require-unmuted OFF permits muted Voice XP",
               saved_off.status_code == 200 and stored_off["voice_require_unmuted"] == 0
@@ -224,7 +224,7 @@ async def test_dashboard_config_api():
 
         payload["voice_xp_enabled"] = 0
         client.post("/api/leveling/config", json=payload, headers=headers)
-        await type(leveling).on_activity_voice_tick(
+        await type(leveling).on_activity_voice_xp_tick(
             leveling, SimpleNamespace(id=GUILD), person(),
             {"self_mute": False, "mute": False,
              "self_deaf": False, "deaf": False})
@@ -367,6 +367,11 @@ async def test_message_cooldown_and_announcements():
           xp(announce_user) == (100, 1) and channel.send.await_count == 1)
 
 
+def legacy_ticks(events):
+    """The `activity_voice_tick` dispatches only (what missions/mvp consume)."""
+    return [event for event in events if event[0] == "activity_voice_tick"]
+
+
 async def test_real_voice_participant_gate():
     from cogs.activity_engine import ActivityEngine
     import cogs.leveling as leveling_module
@@ -385,7 +390,7 @@ async def test_real_voice_participant_gate():
                                  dispatch=lambda *args: one_events.append(args))
     await ActivityEngine.voice_tick_task.coro(engine)
     check("one real human plus a bot is below the voice participant threshold",
-          one_events == [])
+          legacy_ticks(one_events) == [])
 
     # Two actual people pass the ActivityEngine filter; bots still never appear
     # in its dispatch list. Feed those real dispatch events into Leveling's
@@ -401,7 +406,8 @@ async def test_real_voice_participant_gate():
                                  dispatch=lambda *args: events.append(args))
     await ActivityEngine.voice_tick_task.coro(engine)
     check("two real humans pass; bot does not count or receive a tick",
-          len(events) == 2 and {event[2].id for event in events}
+          len(legacy_ticks(events)) == 2
+          and {event[2].id for event in legacy_ticks(events)}
           == {human1.id, human2.id})
 
     execute("DELETE FROM levels WHERE guild_id=? AND user_id IN (?,?)",
@@ -413,7 +419,9 @@ async def test_real_voice_participant_gate():
                voice_require_unmuted=1, spam_detection_enabled=0)
     leveling = make_leveling()
     for event, event_guild, member, flags in events:
-        await Leveling.on_activity_voice_tick(leveling, event_guild, member, flags)
+        if event == "activity_voice_xp_tick":
+            await Leveling.on_activity_voice_xp_tick(
+                leveling, event_guild, member, flags)
     check("Message XP OFF leaves the two-human Voice XP path active",
           xp(human1.id)[0] == 3 and xp(human2.id)[0] == 3)
 
@@ -423,13 +431,14 @@ async def test_real_voice_participant_gate():
     events.clear()
     await ActivityEngine.voice_tick_task.coro(engine)
     check("deafened member receives no activity tick",
-          len(events) == 1 and events[0][2].id == human1.id)
+          len(legacy_ticks(events)) == 1
+          and legacy_ticks(events)[0][2].id == human1.id)
     solo_channel = SimpleNamespace(id=7003, members=[human1, bot2])
     guild.voice_channels = [solo_channel]
     events.clear()
     await ActivityEngine.voice_tick_task.coro(engine)
     check("after the second human leaves, human plus bot still earns no tick",
-          events == [])
+          legacy_ticks(events) == [])
 
 
 async def test_level_stats_button_styles():
