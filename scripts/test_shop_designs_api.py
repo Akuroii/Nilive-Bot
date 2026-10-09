@@ -20,6 +20,9 @@ What this locks down
   7.  LEVEL_OWNER + session-guild isolation (body guild_id ignored) + the
       shared blueprint CSRF enforcement on POST/DELETE.
   8.  The routes write ONLY shop_designs — no audit rows, no other table.
+  9.  DELETE is refused with 409 design_has_publications while a Publication
+      references the Design (and removes nothing); after Unpublish it succeeds.
+      Malformed and missing ids are 404 and never delete anything.
 
 Run:  python3 scripts/test_shop_designs_api.py
 """
@@ -28,6 +31,7 @@ import asyncio
 import json
 import time
 import unittest
+from unittest import mock
 
 from phase1_support import (
     GUILD, USER, execute, rows, mutation_snapshot, reset_database,
@@ -262,6 +266,60 @@ class ShopDesignsApiTests(unittest.TestCase):
         self.assertEqual(rows("SELECT id FROM shop_designs WHERE id = ?",
                               (created["id"],)), [])
         self.assertEqual(self.delete(created["id"]).status_code, 404)
+
+    def test_delete_is_refused_while_a_publication_references_the_design(self):
+        # Real publish + unpublish routes; only Discord REST is faked. Before the
+        # fix this returned the unknown_design 404: the 'published' outcome fell
+        # into the `not deleted` branch, so the 409 contract was unreachable.
+        item_id = seed_product()
+        created = self.save(item_id=item_id).get_json()["design"]
+        discord = mock.MagicMock()
+        discord.create_message.return_value = 555001
+        headers = {"X-CSRF-Token": "step0-csrf"}
+        with mock.patch("dashboard.api.shop_publications.DiscordREST",
+                        return_value=discord):
+            published = self.client.post(
+                "/api/shop-publisher/publications/publish",
+                json={"design_id": created["id"], "channel_id": 777000111},
+                headers=headers)
+            self.assertEqual(published.status_code, 201)
+            publication_id = published.get_json()["publication"]["id"]
+
+            blocked = self.delete(created["id"])
+            self.assertEqual(blocked.status_code, 409)
+            body = blocked.get_json()
+            self.assertEqual(body["code"], "design_has_publications")
+            self.assertIs(body["success"], False)
+            self.assertEqual(rows("SELECT id FROM shop_designs WHERE id = ?",
+                                  (created["id"],)), [(created["id"],)],
+                             "a blocked Delete removes no Design")
+            self.assertEqual(rows("SELECT status FROM shop_publications "
+                                  "WHERE id = ?", (publication_id,)),
+                             [("published",)],
+                             "a blocked Delete leaves the Publication alone")
+            discord.delete_message.assert_not_called()
+
+            unpublished = self.client.delete(
+                f"/api/shop-publisher/publications/{publication_id}",
+                headers=headers)
+            self.assertIs(unpublished.get_json()["success"], True)
+
+        self.assertIs(self.delete(created["id"]).get_json()["success"], True)
+        self.assertEqual(rows("SELECT id FROM shop_designs WHERE id = ?",
+                              (created["id"],)), [])
+
+    def test_malformed_and_missing_design_ids_are_404_and_delete_nothing(self):
+        item_id = seed_product()
+        self.save(item_id=item_id)
+        before = rows("SELECT id, name FROM shop_designs ORDER BY id")
+        for design_id in ("abc", "-1", "0", "999999"):
+            with self.subTest(design_id=design_id):
+                response = self.delete(design_id)
+                self.assertEqual(response.status_code, 404)
+                body = response.get_json(silent=True) or {}
+                self.assertIsNot(body.get("success"), True)
+        self.assertEqual(rows("SELECT id, name FROM shop_designs ORDER BY id"),
+                         before)
 
     def test_list_returns_full_records_for_the_session_guild_only(self):
         item_id = seed_product()

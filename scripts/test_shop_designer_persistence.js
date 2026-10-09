@@ -8,6 +8,9 @@ const vm = require('vm');
 const { createDom, createWindow, parseTemplate, findById, materialize } = require('./support/dom_stub.js');
 
 let pass = 0, fail = 0;
+// A promise rejection that escapes the page is a failure of this harness, not noise.
+let unhandledRejections = 0;
+process.on('unhandledRejection', () => { unhandledRejections += 1; });
 function assert(ok, label, detail) {
     if (ok) { pass += 1; console.log('  PASS', label); }
     else { fail += 1; console.log('  FAIL', label, detail || ''); }
@@ -58,6 +61,27 @@ async function setup(options) {
     let nextId = records.reduce((max, row) => Math.max(max, Number(row.id) || 0), 0) + 1;
     let failNextSave = false;
     let failNextDelete = false;
+    let deleteBlocked = false;
+    let nextDeleteReply = null;
+    let holdNextDelete = false;
+    let throwNextDelete = false;
+    let heldDeleteRelease = null;
+    let holdNextSave = false;
+    let heldSaveRelease = null;
+    // DELETE answers like the server, as real Response objects, so the page's
+    // status and JSON-envelope handling run against the fetch Response API (Node DOM double, not a browser).
+    function jsonReply(status, body) {
+        return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+    }
+    function serveDelete(id) {
+        if (failNextDelete) { failNextDelete = false; return Promise.reject(Error('delete rejected')); }
+        if (nextDeleteReply) { const reply = nextDeleteReply; nextDeleteReply = null; return Promise.resolve(new Response(reply.body, { status: reply.status })); }
+        if (deleteBlocked) return Promise.resolve(jsonReply(409, { success: false, code: 'design_has_publications', error: 'This Design has Publications. Unpublish them first.' }));
+        const index = records.findIndex(item => Number(item.id) === id);
+        if (index < 0) return Promise.resolve(jsonReply(404, { success: false, error: 'Not found.', problems: [{ code: 'unknown_design', path: 'design_id', message: 'Not found.' }] }));
+        records.splice(index, 1);
+        return Promise.resolve(jsonReply(200, { success: true }));
+    }
     const ctx = {
         on(target, type, handler) { target.addEventListener(type, handler); },
         fetchJSON(url, request) {
@@ -75,15 +99,10 @@ async function setup(options) {
                 const row = { id, name: body.name, source_template_name: body.source_template_name || null, design: json(body.design) };
                 const index = records.findIndex(item => Number(item.id) === id);
                 if (index < 0) records.push(row); else records[index] = row;
-                return Promise.resolve({ success: true, design: json(row) });
-            }
-            const match = url.match(/^\/api\/shop-publisher\/designs\/(\d+)$/);
-            if (match && method === 'DELETE') {
-                if (failNextDelete) { failNextDelete = false; return Promise.reject(Error('delete rejected')); }
-                const index = records.findIndex(item => Number(item.id) === Number(match[1]));
-                if (index < 0) return Promise.reject(Error('not found'));
-                records.splice(index, 1);
-                return Promise.resolve({ success: true });
+                // The server stores the row before it replies; holdNextSave() delays only the reply.
+                const reply = { success: true, design: json(row) };
+                if (holdNextSave) { holdNextSave = false; return new Promise((resolve, reject) => { heldSaveRelease = failed => (failed ? reject(Error('HTTP 404')) : resolve(reply)); }); }
+                return Promise.resolve(reply);
             }
             if (url === '/api/shop-publisher/catalog') return Promise.resolve({ products: PRODUCTS, templates: ['snapshot-template'] });
             if (url === '/api/shop-publisher/categories') return Promise.resolve({ categories: [] });
@@ -95,12 +114,36 @@ async function setup(options) {
             }
             return Promise.reject(Error('unexpected request ' + method + ' ' + url));
         },
+        // Raw fetch, as nav-lifecycle's ctx.fetch: the caller reads the reply body.
+        fetch(url, request) {
+            request = request || {};
+            const method = request.method || 'GET';
+            calls.push({ url, method, body: request.body ? JSON.parse(request.body) : null });
+            const match = url.match(/^\/api\/shop-publisher\/designs\/(\d+)$/);
+            if (match && method === 'DELETE') {
+                const id = Number(match[1]);
+                if (throwNextDelete) { throwNextDelete = false; throw Error('request could not be built'); }
+                if (holdNextDelete) {
+                    holdNextDelete = false;
+                    return new Promise(resolve => { heldDeleteRelease = () => resolve(serveDelete(id)); });
+                }
+                return serveDelete(id);
+            }
+            return Promise.reject(Error('unexpected fetch ' + method + ' ' + url));
+        },
         isDestroyed() { return false; },
     };
     page.init(root, ctx);
     const initialDesignStatus = root.querySelector('#sd-design-status').textContent;
     return { dom, window, root, page, sandbox, calls, records, ctx, initialDesignStatus,
-        setFailSave() { failNextSave = true; }, setFailDelete() { failNextDelete = true; } };
+        setFailSave() { failNextSave = true; }, setFailDelete() { failNextDelete = true; },
+        setDeleteBlocked(on) { deleteBlocked = Boolean(on); },
+        setNextDeleteReply(status, body) { nextDeleteReply = { status, body }; },
+        setThrowNextDelete() { throwNextDelete = true; },
+        holdNextDelete() { holdNextDelete = true; },
+        releaseHeldDelete() { const release = heldDeleteRelease; heldDeleteRelease = null; if (release) release(); },
+        holdNextSave() { holdNextSave = true; },
+        releaseHeldSave(failed) { const release = heldSaveRelease; heldSaveRelease = null; if (release) release(Boolean(failed)); } };
 }
 function click(container, node) { container.dispatch('click', { target: node }); }
 function clickButton(app, selector) {
@@ -130,7 +173,162 @@ function switchAction(app, kind) {
     select.dispatch('change');
 }
 async function save(app) { clickButton(app, '#sd-design-save'); await tick(); await tick(); }
+// Response.json() reads its body asynchronously; settle past several macrotasks.
+async function settle() { for (let i = 0; i < 10; i += 1) await tick(); }
 function lastCall(app, method, url) { return app.calls.filter(call => call.method === method && call.url === url).slice(-1)[0]; }
+
+// Delete while its DELETE is pending: no second request, no UI path that re-enables Delete,
+// a newer selection survives a success, refusals and rejected or unexpected replies keep the
+// record, and a Save reply that arrives after the delete cannot bring the Design back.
+async function deleteRaceChecks() {
+    console.log('\nDelete while a DELETE is pending');
+    const RECORDS = () => [
+        { id: 1, name: 'Alpha', source_template_name: null, design: { presentation: { mode: 'per_product', content: '', embeds: [] }, products: [7], action: { kind: 'buttons', entries: [{ product_id: 7 }] } } },
+        { id: 2, name: 'Beta', source_template_name: null, design: { presentation: { mode: 'per_product', content: '', embeds: [] }, products: [2], action: { kind: 'buttons', entries: [{ product_id: 2 }] } } },
+    ];
+    const UNCONFIRMED = 'Could not confirm that the Design was deleted. Reload the page to check the saved list.';
+    const pick = (app, id) => { const select = app.root.querySelector('#sd-design-select'); select.value = String(id); select.dispatch('change'); };
+    const selected = app => app.root.querySelector('#sd-design-select').value;
+    const listIds = app => app.root.querySelector('#sd-design-select').children.map(option => option.value).filter(value => value !== '');
+    const control = (app, selector) => app.root.querySelector(selector);
+    const status = app => app.root.querySelector('#sd-design-status').textContent;
+    const deletesOf = (app, id) => app.calls.filter(call => call.method === 'DELETE' && call.url === '/api/shop-publisher/designs/' + id).length;
+
+    // 1. A second Delete while the first is pending sends no second DELETE and asks nothing again.
+    {
+        const options = { confirmMessages: [], confirmAnswers: [true, true], records: RECORDS() };
+        const app = await setup(options);
+        await settle();
+        pick(app, 1);
+        app.holdNextDelete();
+        clickButton(app, '#sd-design-delete');
+        await settle();
+        assert(deletesOf(app, 1) === 1 && control(app, '#sd-design-delete').disabled === true, 'the first DELETE is pending and Delete is disabled');
+        clickButton(app, '#sd-design-delete'); // dispatched although disabled: the handler guard must hold
+        await settle();
+        assert(deletesOf(app, 1) === 1, 'a second Delete while the first is pending sends no second DELETE');
+        assert(options.confirmMessages.length === 1, 'a second Delete while the first is pending does not ask for confirmation again');
+        app.releaseHeldDelete();
+        await settle();
+        assert(app.records.length === 1 && app.records[0].id === 2 && status(app) === 'Design deleted.', 'the confirmed DELETE removes Alpha once');
+        assert(control(app, '#sd-design-delete').disabled === true && selected(app) === '', 'after the delete, Delete stays disabled with nothing selected');
+        app.page.destroy();
+    }
+
+    // 2. Choosing another Design, loading it, or saving cannot re-enable Delete while a DELETE is pending.
+    {
+        const options = { confirmMessages: [], confirmAnswers: [true], records: RECORDS() };
+        const app = await setup(options);
+        await settle();
+        pick(app, 1);
+        app.holdNextDelete();
+        clickButton(app, '#sd-design-delete');
+        await settle();
+        assert(control(app, '#sd-design-load').disabled === true, 'Load is disabled for the Design whose DELETE is pending');
+        pick(app, 2);
+        assert(control(app, '#sd-design-delete').disabled === true, 'choosing another Design does not re-enable Delete while a DELETE is pending');
+        assert(control(app, '#sd-design-load').disabled === false, 'Load stays available for the other Design');
+        clickButton(app, '#sd-design-load');
+        await settle();
+        assert(control(app, '#sd-design-delete').disabled === true, 'loading another Design does not re-enable Delete while a DELETE is pending');
+        clickButton(app, '#sd-design-save');
+        await settle();
+        assert(control(app, '#sd-design-delete').disabled === true, 'saving does not re-enable Delete while a DELETE is pending');
+        app.releaseHeldDelete();
+        await settle();
+        assert(app.records.length === 1 && app.records[0].id === 2, 'the held DELETE still removes only Alpha after those interactions');
+        app.page.destroy();
+    }
+
+    // 3. A successful DELETE keeps a Design that the user selected while it was pending.
+    {
+        const options = { confirmMessages: [], confirmAnswers: [true], records: RECORDS() };
+        const app = await setup(options);
+        await settle();
+        pick(app, 1);
+        app.holdNextDelete();
+        clickButton(app, '#sd-design-delete');
+        await settle();
+        pick(app, 2);
+        app.releaseHeldDelete();
+        await settle();
+        assert(app.records.length === 1 && app.records[0].id === 2, 'the confirmed DELETE removes only the Design it named');
+        assert(selected(app) === '2' && listIds(app).join(',') === '2', 'the list drops Alpha and keeps the Design the user chose meanwhile');
+        assert(control(app, '#sd-design-delete').disabled === false && status(app) === 'Design deleted.', 'Delete is re-enabled for the Design that is still selected');
+        app.page.destroy();
+    }
+
+    // 4. Refusals, rejected requests, and unexpected replies keep the record and restore the controls.
+    {
+        const options = { confirmMessages: [], confirmAnswers: [true, true, true], records: RECORDS() };
+        const app = await setup(options);
+        await settle();
+        pick(app, 1);
+        app.setDeleteBlocked(true);
+        clickButton(app, '#sd-design-delete');
+        await settle();
+        assert(app.records.length === 2 && selected(app) === '1' && status(app) === 'This Design has Publications. Unpublish them first.', 'a refused DELETE keeps Alpha selected and shows the server reason');
+        assert(control(app, '#sd-design-delete').disabled === false && control(app, '#sd-design-load').disabled === false, 'a refused DELETE re-enables Delete and Load for a retry');
+        app.setDeleteBlocked(false);
+        app.setFailDelete();
+        clickButton(app, '#sd-design-delete');
+        await settle();
+        assert(app.records.length === 2 && status(app) === UNCONFIRMED && control(app, '#sd-design-delete').disabled === false, 'a rejected DELETE keeps Alpha, says the outcome is unconfirmed, and re-enables Delete');
+        app.setNextDeleteReply(200, 'not json');
+        clickButton(app, '#sd-design-delete');
+        await settle();
+        assert(app.records.length === 2 && status(app) === UNCONFIRMED && control(app, '#sd-design-delete').disabled === false, 'a 200 reply without the success envelope is not treated as deleted');
+        app.setThrowNextDelete();
+        clickButton(app, '#sd-design-delete');
+        await settle();
+        assert(app.records.length === 2 && status(app) === UNCONFIRMED && control(app, '#sd-design-delete').disabled === false && control(app, '#sd-design-load').disabled === false, 'a request that throws before it is sent is reported as unconfirmed and restores the controls');
+        app.page.destroy();
+    }
+
+    // 5. A Save reply that arrives after the Delete succeeded cannot bring the Design back.
+    {
+        const options = { confirmMessages: [], confirmAnswers: [true], records: RECORDS() };
+        const app = await setup(options);
+        await settle();
+        pick(app, 1);
+        clickButton(app, '#sd-design-load');
+        await settle();
+        app.holdNextSave();
+        clickButton(app, '#sd-design-save'); // the server stores Alpha; its reply is held
+        await settle();
+        clickButton(app, '#sd-design-delete');
+        await settle();
+        assert(app.records.length === 1 && status(app) === 'Design deleted.', 'Alpha is deleted while its Save reply is still held');
+        app.releaseHeldSave();
+        await settle();
+        assert(!listIds(app).includes('1'), 'the late Save reply does not put Alpha back into the list');
+        assert(app.root.querySelector('#sd-current-design').textContent === 'New design' && selected(app) === '', 'the late Save reply does not reopen Alpha in the editor');
+        assert(control(app, '#sd-design-save').disabled === false, 'Save is re-enabled once its reply has settled');
+        app.page.destroy();
+    }
+
+    // 6. A Save that fails after the delete does not replace the delete's outcome with its error.
+    {
+        const options = { confirmMessages: [], confirmAnswers: [true], records: RECORDS() };
+        const app = await setup(options);
+        await settle();
+        pick(app, 1);
+        clickButton(app, '#sd-design-load');
+        await settle();
+        app.holdNextSave();
+        clickButton(app, '#sd-design-save');
+        await settle();
+        clickButton(app, '#sd-design-delete');
+        await settle();
+        app.releaseHeldSave(true);
+        await settle();
+        assert(status(app) === 'Design deleted.' && app.root.querySelector('#sd-design-status').classList.contains('sd-error') === false, 'a Save that fails after the delete leaves the delete outcome in place');
+        assert(app.records.length === 1 && control(app, '#sd-design-save').disabled === false, 'the failed late Save changes nothing on the server and re-enables Save');
+        app.page.destroy();
+    }
+
+    assert(unhandledRejections === 0, 'no promise rejection escaped the page during the Delete checks', unhandledRejections);
+}
 
 async function main() {
     const empty = await setup({ confirmMessages: [], confirmAnswers: [] });
@@ -276,11 +474,34 @@ async function main() {
     options.confirmAnswers.push(true);
     app.setFailDelete();
     clickButton(app, '#sd-design-delete');
-    await tick(); await tick();
+    await settle();
     assert(app.records.length === 1 && app.root.querySelector('#sd-design-status').classList.contains('sd-error'), 'Delete mutation failure is surfaced without dropping the saved record');
+
+    // A server refusal shows the server's own reason (not a bare HTTP code) and keeps the record.
     options.confirmAnswers.push(true);
+    app.setDeleteBlocked(true);
     clickButton(app, '#sd-design-delete');
-    await tick(); await tick();
+    await settle();
+    const blockedStatus = app.root.querySelector('#sd-design-status');
+    assert(app.records.length === 1 && blockedStatus.classList.contains('sd-error') && blockedStatus.textContent === 'This Design has Publications. Unpublish them first.', 'a Publication-blocked Delete shows the server reason and keeps the saved record');
+    assert(app.root.querySelector('#sd-design-select').value === '1' && app.root.querySelector('#sd-design-delete').disabled === false, 'the blocked Design stays selected and Delete is re-enabled for a retry');
+    app.setDeleteBlocked(false);
+
+    // A non-JSON server failure is reported by its status, never as success.
+    options.confirmAnswers.push(true);
+    app.setNextDeleteReply(500, '<!doctype html><title>Server error</title>');
+    clickButton(app, '#sd-design-delete');
+    await settle();
+    assert(app.records.length === 1 && app.root.querySelector('#sd-design-status').textContent === 'Design could not be deleted (HTTP 500).', 'a non-JSON server failure is reported by status and keeps the saved record');
+
+    // The record is removed only once the server confirms; right after the click, Delete is disabled while the request is in flight.
+    options.confirmAnswers.push(true);
+    app.holdNextDelete();
+    clickButton(app, '#sd-design-delete');
+    await settle();
+    assert(app.records.length === 1 && app.root.querySelector('#sd-design-status').textContent === 'Deleting saved design…' && app.root.querySelector('#sd-design-delete').disabled === true, 'while DELETE is in flight the saved record stays and Delete stays disabled');
+    app.releaseHeldDelete();
+    await settle();
     assert(app.records.length === 0 && app.root.querySelector('#sd-design-status').textContent === 'Design deleted.', 'confirmed Delete removes the record through the existing ID endpoint');
     assert(app.root.querySelector('#sd-current-design').textContent === 'New design' && app.root.querySelector('#sd-dirty').hidden === true, 'deleting the active record returns the shell to a clean new design');
 
@@ -293,6 +514,8 @@ async function main() {
     assert(app.calls.some(call => call.method === 'DELETE' && call.url === '/api/shop-publisher/designs/1'), 'Delete uses only the existing saved-design ID endpoint');
     assert(!app.calls.some(call => /\/publish(?:\/|$)|\/purchase(?:\/|$)|shop_buy/.test(call.url)), 'persistence integration adds no Publication or purchase calls');
     app.page.destroy();
+
+    await deleteRaceChecks();
 
     console.log('\n' + pass + '/' + (pass + fail) + ' checks passed.');
     if (fail) process.exitCode = 1;
