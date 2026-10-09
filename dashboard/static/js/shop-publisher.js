@@ -661,13 +661,34 @@ window.NERO = window.NERO || {};
                     product: productSelect ? productSelect.value : '',
                 }) : null;
                 setStatus('Deleting design…');
-                ctx.fetchJSON(DESIGNS_URL + '/' + designId, {
-                    method: 'DELETE',
-                }).then(function (data) {
+                // ctx.fetch, not fetchJSON: fetchJSON throws a bare "HTTP <status>"
+                // and drops the reply body, which carries the reason (for example,
+                // a Publication blocks the delete with 409 design_has_publications).
+                // Read the envelope on failure as well as success. The Promise
+                // wrapper turns a synchronous throw into a rejection.
+                var unconfirmed = 'the request outcome is unconfirmed; reload the page to check the saved list.';
+                new Promise(function (resolve) {
+                    resolve(ctx.fetch(DESIGNS_URL + '/' + designId, { method: 'DELETE' }));
+                }).then(function (response) {
+                    if (!response || typeof response.json !== 'function') throw new Error(unconfirmed);
+                    // An error page that is not JSON (a 500 HTML body) must not
+                    // become an unhandled rejection: fall back to the status code.
+                    return response.json().catch(function () { return null; }).then(function (data) {
+                        if (!response.ok) {
+                            throw new Error((data && (data.error || data.message)) ||
+                                'the design could not be deleted (HTTP ' + response.status + ').');
+                        }
+                        if (!data || !data.success) {
+                            throw new Error((data && data.error) ||
+                                'the server did not confirm the deletion.');
+                        }
+                    });
+                }, function () {
+                    // The request failed in transit, so the server may or may not
+                    // have removed the Design: never claim that nothing changed.
+                    throw new Error(unconfirmed);
+                }).then(function () {
                     if (ctx.isDestroyed()) return;
-                    if (!data || !data.success) {
-                        throw new Error((data && data.error) || 'unknown error');
-                    }
                     savedDesigns = (savedDesigns || []).filter(function (d) {
                         return d.id !== designId;
                     });
