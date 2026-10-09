@@ -31,8 +31,9 @@ CONTRACT:
     404 {"code": "unknown_design"} — cross-guild existence is never disclosed,
     and `guild_id` comes only from the session (a body guild_id is ignored).
   * Delete is a HARD delete (MVP): no revisions, no version history, no soft
-    delete, no autosave, no collaboration model. Nothing references designs
-    yet, so there is nothing to unlink.
+    delete, no autosave, no collaboration model. While any Publication
+    references the Design it is refused with 409 design_has_publications
+    (Unpublish first); Publications are never unlinked or cascaded here.
   * Saves are validated with the SAME Step 0 design contract the preview
     route uses (utils.shop_publisher.validate_design): broken drafts are
     rejected with the existing problem codes (empty_roster,
@@ -349,12 +350,18 @@ def api_shop_designs_delete(design_id: int):
             return "deleted", cursor.rowcount
 
     outcome, deleted = run_async(write())
-    if outcome == "missing" or not deleted:
+    if outcome == "missing":
         return _not_found("unknown_design", "design_id")
+    # Checked before `not deleted`: a blocked Design is an existing record, so
+    # it must not be reported as an unknown id (the 404 hid this 409 branch).
     if outcome == "published":
         return jsonify({
             "success": False,
             "code": "design_has_publications",
             "error": "This Design has Publications. Unpublish them first.",
         }), 409
+    if not deleted:
+        # Unreachable under the IMMEDIATE transaction; never report success
+        # for a DELETE that removed no row.
+        return _not_found("unknown_design", "design_id")
     return jsonify({"success": True})

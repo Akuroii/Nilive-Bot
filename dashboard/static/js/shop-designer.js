@@ -118,7 +118,12 @@ window.NERO = window.NERO || {};
             var designListLoaded = false;
             var designListRequestSequence = 0;
             var saveRequestSequence = 0;
-            var deleteRequestSequence = 0;
+            // The Design whose DELETE is in flight (its id), or null. While it is set, Delete is
+            // disabled, no second DELETE is sent, and Load is disabled for that Design.
+            var deleteInFlightId = null;
+            // Ids of Designs this page has confirmed deleted. A Save reply that arrives after the
+            // delete must not put such a Design back into the list or the editor.
+            var deletedDesignIds = {};
             var applyPresentationDocument = null;
             var selectedInspectorContext = null;
             var selectedProductId = null;
@@ -245,8 +250,12 @@ window.NERO = window.NERO || {};
             function updateDesignControls() {
                 var selected = designSelect && designSelect.value;
                 var hasSelected = !!selected && isFinite(parseInt(selected, 10));
-                if (designLoadButton) designLoadButton.disabled = !hasSelected || !catalogLoaded || !designListLoaded;
-                if (designDeleteButton) designDeleteButton.disabled = !hasSelected || !designListLoaded;
+                // While a DELETE is pending, no selection, list render, Load, or Save may re-enable
+                // Delete, and Load stays off for the Design being deleted.
+                var deleting = deleteInFlightId !== null;
+                var deletingSelected = deleting && hasSelected && parseInt(selected, 10) === deleteInFlightId;
+                if (designLoadButton) designLoadButton.disabled = !hasSelected || !catalogLoaded || !designListLoaded || deletingSelected;
+                if (designDeleteButton) designDeleteButton.disabled = deleting || !hasSelected || !designListLoaded;
             }
 
             function renderSavedDesigns() {
@@ -1080,6 +1089,8 @@ window.NERO = window.NERO || {};
                     if (destroyed || ctx.isDestroyed() || requestSequence !== saveRequestSequence) return;
                     if (!data || !data.success || !data.design) throw new Error((data && (data.error || data.message)) || 'Design could not be saved.');
                     var record = data.design;
+                    // Deleted while this save was in flight: a late reply must not bring it back.
+                    if (deletedDesignIds[Number(record.id)] === true) return;
                     upsertSavedDesign(record);
                     if (designSelect) designSelect.value = String(record.id);
                     if (revision === editRevision) {
@@ -1093,6 +1104,8 @@ window.NERO = window.NERO || {};
                     updateDesignControls();
                 }).catch(function (error) {
                     if (destroyed || ctx.isDestroyed() || requestSequence !== saveRequestSequence) return;
+                    // A save for a Design deleted meanwhile must not replace the delete's outcome with its error.
+                    if (body.id != null && deletedDesignIds[Number(body.id)] === true) return;
                     setDesignStatus(error && error.message ? error.message : 'Design could not be saved.', true);
                 }).then(function () {
                     if (!destroyed && !ctx.isDestroyed() && requestSequence === saveRequestSequence && designSaveButton) designSaveButton.disabled = false;
@@ -1109,30 +1122,55 @@ window.NERO = window.NERO || {};
                 setDesignStatus('Loaded “' + (record.name || 'saved design') + '”.');
             });
             ctx.on(designDeleteButton, 'click', function () {
+                // A DELETE is already pending: send no second one, even if this click got past the disabled button.
+                if (deleteInFlightId !== null) return;
                 var record = selectedSavedDesign();
                 if (!record) { setDesignStatus('Choose a saved design to delete.', true); return; }
                 var message = 'Delete “' + (record.name || 'this design') + '”? This cannot be undone.';
                 if (dirty && Number(record.id) === Number(currentDesignId)) message += ' Its unsaved changes will also be discarded.';
                 if (!confirmAction(message)) { setDesignStatus('Delete cancelled.'); return; }
-                designDeleteButton.disabled = true;
-                setDesignStatus('Deleting saved design…');
                 var deletingId = Number(record.id);
-                var requestSequence = ++deleteRequestSequence;
-                ctx.fetchJSON(DESIGNS_URL + '/' + deletingId, { method: 'DELETE' }).then(function (data) {
-                    if (destroyed || ctx.isDestroyed() || requestSequence !== deleteRequestSequence) return;
-                    if (!data || !data.success) throw new Error((data && (data.error || data.message)) || 'Design could not be deleted.');
+                var unconfirmed = 'Could not confirm that the Design was deleted. Reload the page to check the saved list.';
+                // Runs once the request has settled, on success or failure, so Delete and Load are
+                // re-evaluated even if an outcome handler itself throws: Delete is never left stuck.
+                var finish = function () {
+                    deleteInFlightId = null;
+                    if (!destroyed && !ctx.isDestroyed()) updateDesignControls();
+                };
+                deleteInFlightId = deletingId;
+                updateDesignControls();
+                setDesignStatus('Deleting saved design…');
+                // ctx.fetch, not fetchJSON: fetchJSON throws a bare "HTTP <status>"
+                // and drops the reply body, which carries the reason (for example,
+                // a Publication blocks the delete). Read the envelope on failure too.
+                // The Promise wrapper turns a synchronous throw into a rejection.
+                new Promise(function (resolve) {
+                    resolve(ctx.fetch(DESIGNS_URL + '/' + deletingId, { method: 'DELETE' }));
+                }).then(function (response) {
+                    if (!response || typeof response.json !== 'function') throw new Error(unconfirmed);
+                    return response.json().catch(function () { return null; }).then(function (data) {
+                        if (!response.ok) {
+                            throw new Error((data && (data.error || data.message)) || 'Design could not be deleted (HTTP ' + response.status + ').');
+                        }
+                        if (!data || !data.success) throw new Error(unconfirmed);
+                    });
+                }, function () {
+                    // The request failed in transit, so the server may or may not have removed the Design.
+                    throw new Error(unconfirmed);
+                }).then(function () {
+                    if (destroyed || ctx.isDestroyed()) return;
+                    deletedDesignIds[deletingId] = true;
                     designListRequestSequence += 1;
                     savedDesigns = savedDesigns.filter(function (item) { return Number(item.id) !== deletingId; });
-                    if (designSelect) designSelect.value = '';
+                    // Clear the selection only while it still names the deleted Design; keep a newer choice.
+                    if (designSelect && Number(designSelect.value) === deletingId) designSelect.value = '';
                     renderSavedDesigns();
                     if (Number(currentDesignId) === deletingId) resetToNewDesign();
                     setDesignStatus('Design deleted.');
                 }).catch(function (error) {
-                    if (destroyed || ctx.isDestroyed() || requestSequence !== deleteRequestSequence) return;
+                    if (destroyed || ctx.isDestroyed()) return;
                     setDesignStatus(error && error.message ? error.message : 'Design could not be deleted.', true);
-                }).then(function () {
-                    if (!destroyed && !ctx.isDestroyed() && requestSequence === deleteRequestSequence) updateDesignControls();
-                });
+                }).then(finish, finish);
             });
             if (window && typeof window.addEventListener === 'function') ctx.on(window, 'beforeunload', function (event) {
                 if (!dirty) return;
