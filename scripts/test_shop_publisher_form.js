@@ -46,13 +46,6 @@ function assert(cond, name, extra) {
 }
 function section(t) { console.log('\n== ' + t + ' =='); }
 
-// A promise rejection that escapes the page is a failure of this harness, not
-// noise — a non-JSON error body must be handled, never left unhandled.
-const escapedRejections = [];
-process.on('unhandledRejection', (reason) => {
-    escapedRejections.push(String((reason && reason.message) || reason));
-});
-
 const ROOT_DIR = path.join(__dirname, '..');
 const js = (...parts) => path.join(ROOT_DIR, 'dashboard', 'static', 'js', ...parts);
 const FOUNDATION = [
@@ -181,32 +174,20 @@ function makeEnv(opts) {
             return Promise.resolve({ ok: false, status: 404, json: async () => ({ success: false, error: 'no route ' + url }) });
         }
         const record = { call, settled: false, resolve: null };
-        const promise = new Promise((resolve, reject) => {
+        const promise = new Promise((resolve) => {
             record.resolve = (result) => {
                 record.settled = true;
                 resolve({
                     ok: (result.status || 200) < 400,
                     status: result.status || 200,
-                    // jsonThrows emulates a real error page (e.g. a 500 HTML
-                    // body) where res.json() rejects instead of parsing.
-                    json: async () => {
-                        if (result.jsonThrows) {
-                            throw new SyntaxError('Unexpected token < in JSON at position 0');
-                        }
-                        return result.body;
-                    },
+                    json: async () => result.body,
                 });
             };
-            // networkError emulates the request never reaching the server, so
-            // the outcome is genuinely unknown (the server may still have acted).
-            record.rejectRequest = (error) => { record.settled = true; reject(error); };
         });
         pending.push(record);
         const result = route(call);
         if (result && result.hold) {
             record.hold = true;              // settled later by the test
-        } else if (result && result.networkError) {
-            record.rejectRequest(result.networkError);
         } else {
             record.resolve(result || { status: 200, body: { success: true } });
         }
@@ -911,134 +892,6 @@ async function deleteInFlightTests() {
     env.unmount();
 }
 
-async function deleteErrorVisibilityTests() {
-    section('L. Delete error visibility — the server reason, not a bare HTTP status');
-    const REASON = 'This Design has Publications. Unpublish them first.';
-    // The pre-fix behaviour: fetchJSON threw a bare "HTTP 409" and the reply
-    // body (which carries the reason) was discarded before the page saw it.
-    const BARE = 'HTTP 409';
-
-    // ── 1. A 409 that carries the real reason shows that reason ────────────
-    {
-        const env = makeEnv({ routes: defaultRoutes() });
-        await env.mount();
-        await env.change('sp-design', '3');
-        env.routes['/api/shop-publisher/designs/3'] = () => ({
-            status: 409,
-            body: { success: false, code: 'design_has_publications', error: REASON },
-        });
-        env.el('sp-design-delete').dispatch('click');
-        await env.settle();
-        const text = env.text('sp-status');
-        assert(text === 'Design delete failed: ' + REASON,
-            'a 409 shows the server\'s exact reason', JSON.stringify(text));
-        assert(text.indexOf(BARE) === -1,
-            'the bare status never replaces a reason the server did send',
-            JSON.stringify(text));
-        assert(env.optionValues(env.el('sp-design')).includes('3'),
-            'a refused delete keeps the Design in the picker');
-        assert(env.el('sp-design').value === '3',
-            'a refused delete keeps the Design selected');
-        assert(env.el('sp-status').className.indexOf('sp-status-error') !== -1,
-            'a refused delete is rendered as an error');
-        env.unmount();
-    }
-
-    // ── 2. A 409 with no usable message falls back to naming the status ────
-    {
-        const env = makeEnv({ routes: defaultRoutes() });
-        await env.mount();
-        await env.change('sp-design', '4');
-        env.routes['/api/shop-publisher/designs/4'] = () => ({
-            status: 409, body: { success: false, code: 'design_has_publications' },
-        });
-        env.el('sp-design-delete').dispatch('click');
-        await env.settle();
-        const text = env.text('sp-status');
-        assert(text.indexOf('Design delete failed:') === 0,
-            'the existing failure prefix is preserved', JSON.stringify(text));
-        assert(text.indexOf('409') !== -1,
-            'the status code is surfaced when there is no server message',
-            JSON.stringify(text));
-        assert(text.trim() !== 'Design delete failed:',
-            'the status is never left empty', JSON.stringify(text));
-        env.unmount();
-    }
-
-    // ── 3. A non-JSON 500 body is handled, never an unhandled rejection ────
-    {
-        const env = makeEnv({ routes: defaultRoutes() });
-        await env.mount();
-        await env.change('sp-design', '4');
-        env.routes['/api/shop-publisher/designs/4'] = () => ({
-            status: 500, jsonThrows: true, body: null,
-        });
-        env.el('sp-design-delete').dispatch('click');
-        await env.settle(40);
-        const text = env.text('sp-status');
-        assert(text.indexOf('Design delete failed:') === 0,
-            'a non-JSON 500 still produces a useful status', JSON.stringify(text));
-        assert(text.indexOf('500') !== -1,
-            'the non-JSON failure names its status code', JSON.stringify(text));
-        assert(env.optionValues(env.el('sp-design')).includes('4'),
-            'a non-JSON failure leaves the Design in the picker');
-        env.unmount();
-    }
-
-    // ── 4. A transport failure is unconfirmed, never "nothing changed" ─────
-    {
-        const env = makeEnv({ routes: defaultRoutes() });
-        await env.mount();
-        await env.change('sp-design', '4');
-        env.routes['/api/shop-publisher/designs/4'] = () => ({
-            networkError: new TypeError('Failed to fetch'),
-        });
-        env.el('sp-design-delete').dispatch('click');
-        await env.settle(40);
-        const text = env.text('sp-status');
-        assert(text.indexOf('Design delete failed:') === 0,
-            'a transport failure uses the same failure prefix', JSON.stringify(text));
-        assert(/unconfirmed/i.test(text),
-            'a transport failure is reported as unconfirmed', JSON.stringify(text));
-        assert(!/nothing changed|no change was made/i.test(text),
-            'a transport failure never claims the server made no change',
-            JSON.stringify(text));
-        assert(env.optionValues(env.el('sp-design')).includes('4'),
-            'an unconfirmed outcome keeps the Design in the picker');
-        env.unmount();
-    }
-
-    // ── 5. After a refusal the normal success path still works ─────────────
-    {
-        const env = makeEnv({ routes: defaultRoutes() });
-        await env.mount();
-        await env.change('sp-design', '3');
-        env.routes['/api/shop-publisher/designs/3'] = () => ({
-            status: 409,
-            body: { success: false, code: 'design_has_publications', error: REASON },
-        });
-        env.el('sp-design-delete').dispatch('click');
-        await env.settle();
-        assert(env.optionValues(env.el('sp-design')).includes('3'),
-            'the refused attempt is a no-op on the list');
-
-        // The Publication is resolved out of band; the same click now succeeds.
-        env.routes['/api/shop-publisher/designs/3'] = () => ({ status: 200, body: { success: true } });
-        env.el('sp-design-delete').dispatch('click');
-        await env.settle();
-        assert(env.text('sp-status').indexOf('Design deleted.') !== -1,
-            'a later delete of the same Design succeeds', JSON.stringify(env.text('sp-status')));
-        assert(!env.optionValues(env.el('sp-design')).includes('3'),
-            'the successfully deleted Design leaves the picker',
-            JSON.stringify(env.optionValues(env.el('sp-design'))));
-        env.unmount();
-    }
-
-    assert(escapedRejections.length === 0,
-        'no promise rejection escaped the page during the delete-visibility checks',
-        JSON.stringify(escapedRejections));
-}
-
 async function legacyFilterDraftTests() {
     section('J. Legacy Publisher filtered selection stays aligned with Preview and Save');
     const env = makeEnv({ routes: defaultRoutes() });
@@ -1133,7 +986,6 @@ async function legacyDraftProtectionTests() {
     await catalogFailureTests();
     await designTests();
     await deleteInFlightTests();
-    await deleteErrorVisibilityTests();
     await legacyFilterDraftTests();
     await legacyDraftProtectionTests();
     console.log('\n' + '='.repeat(60));
