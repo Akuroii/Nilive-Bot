@@ -64,6 +64,9 @@
                     var li = document.createElement('li');
                     li.textContent = 'Channel ' + p.channel_id + ' · ' + p.status + (p.message_id ? ' · message ' + p.message_id : '');
                     var hasMessageId = p.message_id !== null && p.message_id !== undefined && String(p.message_id).trim() !== '';
+                    // A definitively failed send never created a Discord message, so only
+                    // this exact state may be cleared; `pending` (uncertain) stays locked.
+                    var failedOrphan = p.status === 'failed' && !hasMessageId;
                     function showLocked(message) {
                         var locked = document.createElement('span');
                         locked.textContent = ' Not actionable: ' + message;
@@ -95,18 +98,20 @@
                         showLocked(p.status === 'pending'
                             ? 'publish is pending or uncertain; no retry, Update, or Unpublish is available.'
                             : 'a lifecycle operation is in progress or locked; Update and Unpublish are unavailable.');
-                    } else if (!hasMessageId) {
+                    } else if (!hasMessageId && !failedOrphan) {
                         showLocked('no confirmed message ID is recorded; Update and Unpublish are unavailable.');
                     } else if (p.status !== 'published' && p.status !== 'attention' &&
-                            p.status !== 'replacement_retry_authorized') {
+                            p.status !== 'replacement_retry_authorized' && !failedOrphan) {
                         showLocked('this lifecycle state does not permit Update or Unpublish.');
                     } else {
                         var rowActionInFlight = false;
-                        (p.status === 'replacement_retry_authorized' ? ['Update'] : ['Update', 'Unpublish']).forEach(function (label) {
+                        (p.status === 'replacement_retry_authorized' ? ['Update'] : failedOrphan ? ['Unpublish'] : ['Update', 'Unpublish']).forEach(function (label) {
                             var action = document.createElement('button'); action.type = 'button'; action.textContent = label;
                             action.addEventListener('click', function () {
                                 if (!isCurrentContext(designId, generation) || rowActionInFlight) return;
-                                if (label === 'Unpublish' && !window.confirm('Delete this Discord message and remove its Publication?')) return;
+                                if (label === 'Unpublish' && !window.confirm(failedOrphan
+                                    ? 'The send failed and no Discord message exists. Remove this failed Publication record?'
+                                    : 'Delete this Discord message and remove its Publication?')) return;
                                 rowActionInFlight = true;
                                 var rowButtons = li.querySelectorAll('button');
                                 for (var buttonIndex = 0; buttonIndex < rowButtons.length; buttonIndex += 1) {

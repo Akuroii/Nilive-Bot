@@ -485,8 +485,11 @@ def remove_publication(guild_id, publication_id, *, expected_statuses=None,
             where = f"id=? AND guild_id=? AND status IN ({marks})"
             values = [publication_id, guild_id, *expected_statuses]
             if match_message:
-                where += " AND message_id=?"
-                values.append(expected_message_id)
+                if expected_message_id is None:
+                    where += " AND message_id IS NULL"
+                else:
+                    where += " AND message_id=?"
+                    values.append(expected_message_id)
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(f"DELETE FROM shop_publications WHERE {where}", values)
             await db.commit()
@@ -619,6 +622,17 @@ def unpublish(guild_id, publication, *, rest=None):
         return {"outcome": "replacement_uncertain", "publication": current,
                 "error": "Another operation is active or requires explicit recovery."}
     channel_id, message_id = int(current["channel_id"]), current.get("message_id")
+    if current.get("status") == "failed" and not message_id:
+        # A definitive send failure (Discord rejected the create call) means no
+        # message was ever created, so there is nothing on Discord to delete and
+        # the orphaned association can be cleared without a Discord call. Only
+        # an exact failed + message-less row qualifies; a `pending` row (send
+        # outcome uncertain) may have a live message and stays protected below.
+        if remove_publication(guild_id, pid, expected_statuses=("failed",),
+                              expected_message_id=None, match_message=True):
+            return {"outcome": "removed", "already_missing": False, "orphan_cleared": True}
+        return {"outcome": "attention", "publication": get_publication(guild_id, pid),
+                "error": "Publication state changed; reload before Unpublish."}
     if not message_id:
         return {"outcome": "attention", "publication": current,
                 "error": "No confirmed message ID is recorded; association retained for attention."}
