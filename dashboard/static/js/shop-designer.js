@@ -73,6 +73,9 @@ window.NERO = window.NERO || {};
             var previewPurchase = root.querySelector('#sd-preview-purchase');
             var previewWarnings = root.querySelector('#sd-preview-warnings');
             var previewTokens = root.querySelector('#sd-preview-tokens');
+            var tokenList = root.querySelector('#sd-token-list');
+            var tokenSearch = root.querySelector('#sd-token-search');
+            var tokenStatus = root.querySelector('#sd-token-status');
             var previewStatus = root.querySelector('#sd-preview-status');
             var designSelect = root.querySelector('#sd-design-select');
             var designNameInput = root.querySelector('#sd-design-name');
@@ -258,6 +261,40 @@ window.NERO = window.NERO || {};
                 if (designDeleteButton) designDeleteButton.disabled = deleting || !hasSelected || !designListLoaded;
             }
 
+            // ctx.fetchJSON throws a bare "HTTP <status>" and drops the reply body, but the preview
+            // and save routes answer 400/409 with the reason (error / problems[]). Read the envelope
+            // so the user sees why. Falls back to ctx.fetchJSON where ctx.fetch is unavailable.
+            function requestJSON(url, init) {
+                if (typeof ctx.fetch !== 'function') return ctx.fetchJSON(url, init);
+                return ctx.fetch(url, init).then(function (res) {
+                    return res.json().then(function (data) { return data; }, function () { return null; }).then(function (data) {
+                        if (!res.ok) {
+                            var first = data && Array.isArray(data.problems) && data.problems[0];
+                            var reason = (first && first.message) || (data && (data.error || data.message));
+                            var failure = new Error(reason ? String(reason) : 'HTTP ' + res.status);
+                            failure.status = res.status; failure.data = data; throw failure;
+                        }
+                        if (data === null || typeof data !== 'object') throw new Error('The server returned an unreadable response.');
+                        return data;
+                    });
+                });
+            }
+
+            // Setting select.value in code fires no event, so dependents (the Publications panel)
+            // would keep showing the previous Design's records. Announce a real selection change,
+            // and only a real one: a list refresh that keeps the same Design must not reload anything.
+            function setDesignSelection(next, previous) {
+                if (!designSelect) return;
+                var before = previous === undefined ? designSelect.value : previous;
+                designSelect.value = next;
+                if (String(designSelect.value) === String(before)) return;
+                if (typeof designSelect.dispatchEvent === 'function' && typeof window.Event === 'function') {
+                    designSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
+                } else if (typeof designSelect.dispatch === 'function') {
+                    designSelect.dispatch('change');
+                }
+            }
+
             function renderSavedDesigns() {
                 if (!designSelect) return;
                 var selected = designSelect.value;
@@ -271,7 +308,7 @@ window.NERO = window.NERO || {};
                     designSelect.appendChild(option);
                 });
                 var found = savedDesigns.some(function (record) { return String(record.id) === selected; });
-                designSelect.value = found ? selected : '';
+                setDesignSelection(found ? selected : '', selected);
                 if (designEmpty) {
                     designEmpty.hidden = savedDesigns.length > 0;
                     designEmpty.textContent = savedDesigns.length
@@ -720,7 +757,7 @@ window.NERO = window.NERO || {};
                     }),
                 };
                 if (selectMode) action.placeholder = draft.action.placeholder || '';
-                ctx.fetchJSON(PREVIEW_URL, {
+                requestJSON(PREVIEW_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1018,7 +1055,7 @@ window.NERO = window.NERO || {};
                 }
                 renderCatalog();
                 setSavedBaseline(record);
-                if (designSelect) designSelect.value = String(record.id);
+                setDesignSelection(String(record.id));
                 suppressDirty = false;
                 refreshDirtyState();
                 clearPreviewOutput();
@@ -1081,7 +1118,7 @@ window.NERO = window.NERO || {};
                 var body = currentDesignSnapshot();
                 if (currentDesignId !== null) body.id = currentDesignId;
                 var requestSequence = ++saveRequestSequence;
-                ctx.fetchJSON(DESIGNS_URL, {
+                requestJSON(DESIGNS_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
@@ -1092,7 +1129,7 @@ window.NERO = window.NERO || {};
                     // Deleted while this save was in flight: a late reply must not bring it back.
                     if (deletedDesignIds[Number(record.id)] === true) return;
                     upsertSavedDesign(record);
-                    if (designSelect) designSelect.value = String(record.id);
+                    setDesignSelection(String(record.id));
                     if (revision === editRevision) {
                         restoreSavedDesign(record);
                         setDesignStatus('Design saved.');
@@ -1163,7 +1200,7 @@ window.NERO = window.NERO || {};
                     designListRequestSequence += 1;
                     savedDesigns = savedDesigns.filter(function (item) { return Number(item.id) !== deletingId; });
                     // Clear the selection only while it still names the deleted Design; keep a newer choice.
-                    if (designSelect && Number(designSelect.value) === deletingId) designSelect.value = '';
+                    if (designSelect && Number(designSelect.value) === deletingId) setDesignSelection('');
                     renderSavedDesigns();
                     if (Number(currentDesignId) === deletingId) resetToNewDesign();
                     setDesignStatus('Design deleted.');
@@ -1192,12 +1229,70 @@ window.NERO = window.NERO || {};
                 if (event && event.stopImmediatePropagation) event.stopImmediatePropagation();
             }, true);
 
+            // Token catalog: a read-only reference rendered from the same catalog response the
+            // product list uses. Definitions, aliases and wording come verbatim from the server
+            // (text only, never HTML), so formatting-sensitive examples are preserved exactly.
+            var tokenCatalog = [];
+            function tokenMatches(entry, needle) {
+                if (!needle) return true;
+                var haystack = [entry.token, entry.label, entry.group, entry.description]
+                    .concat(Array.isArray(entry.aliases) ? entry.aliases : []).join('\n').toLowerCase();
+                return haystack.indexOf(needle) !== -1;
+            }
+            function copyToken(text) {
+                var clip = window.navigator && window.navigator.clipboard;
+                if (clip && clip.writeText) {
+                    return clip.writeText(text).then(function () { return true; }, function () { return false; });
+                }
+                return Promise.resolve(false);
+            }
+            function renderTokenCatalog() {
+                if (!tokenList) return;
+                clear(tokenList);
+                var needle = tokenSearch ? String(tokenSearch.value || '').trim().toLowerCase() : '';
+                var shown = 0, lastGroup = null;
+                tokenCatalog.forEach(function (entry) {
+                    if (!tokenMatches(entry, needle)) return;
+                    if (entry.group !== lastGroup) {
+                        lastGroup = entry.group;
+                        tokenList.appendChild(make(doc, 'h4', 'sd-token-group-title', entry.group || 'Other'));
+                    }
+                    var card = make(doc, 'div', 'sd-token-entry');
+                    var head = make(doc, 'div', 'sd-token-head');
+                    head.appendChild(make(doc, 'code', 'sd-token-name', entry.token));
+                    var copy = make(doc, 'button', 'btn btn-secondary sd-token-copy', 'Copy');
+                    copy.type = 'button';
+                    copy.addEventListener('click', function () {
+                        copyToken(entry.token).then(function (ok) {
+                            if (tokenStatus && !ctx.isDestroyed()) {
+                                tokenStatus.textContent = ok ? 'Copied ' + entry.token + '.' : 'Copy is unavailable here; select the token text instead.';
+                            }
+                        });
+                    });
+                    head.appendChild(copy); card.appendChild(head);
+                    if (entry.label) card.appendChild(make(doc, 'div', 'sd-token-label', entry.label));
+                    card.appendChild(make(doc, 'div', 'sd-muted', entry.description || ''));
+                    if (Array.isArray(entry.aliases) && entry.aliases.length) {
+                        card.appendChild(make(doc, 'div', 'sd-muted', 'Also accepts: ' + entry.aliases.join(', ')));
+                    }
+                    tokenList.appendChild(card); shown += 1;
+                });
+                if (tokenStatus) {
+                    tokenStatus.textContent = !tokenCatalog.length ? 'Token catalog unavailable.'
+                        : shown ? (needle ? shown + ' of ' + tokenCatalog.length + ' tokens' : tokenCatalog.length + ' tokens')
+                            : 'No tokens match “' + needle + '”.';
+                }
+            }
+            if (tokenSearch) ctx.on(tokenSearch, 'input', renderTokenCatalog);
+
             loadSavedDesignList();
             Promise.all([ctx.fetchJSON(CATALOG_URL), ctx.fetchJSON(CATEGORIES_URL)]).then(function (responses) {
                 if (ctx.isDestroyed()) return;
                 var catalog = responses[0] || {}; var categoryData = responses[1] || {};
                 catalogProducts = Array.isArray(catalog.products) ? catalog.products : [];
                 categories = Array.isArray(categoryData.categories) ? categoryData.categories : [];
+                tokenCatalog = Array.isArray(catalog.tokens) ? catalog.tokens.filter(function (t) { return t && typeof t.token === 'string'; }) : [];
+                renderTokenCatalog();
                 renderCategoryFilter(); renderCatalog();
                 catalogLoaded = true;
                 updateDesignControls();
@@ -1209,6 +1304,7 @@ window.NERO = window.NERO || {};
             }).catch(function () {
                 if (ctx.isDestroyed()) return;
                 catalogProducts = []; categories = []; renderCategoryFilter(); renderCatalog();
+                tokenCatalog = []; renderTokenCatalog();
                 catalogLoaded = true;
                 updateDesignControls();
                 if (catalogStatus) catalogStatus.textContent = 'Could not load the catalog.';

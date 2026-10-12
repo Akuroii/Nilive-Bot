@@ -41,9 +41,19 @@
                 <label class="sd-field-label" for="sd-publication-channel">Discord channel ID</label>
                 <input id="sd-publication-channel" class="form-input" inputmode="numeric" placeholder="Text/news channel ID">
                 <button id="sd-publication-publish" class="btn btn-primary" type="button">Publish saved Design</button>
+                <button id="sd-publication-recheck" class="btn" type="button" disabled
+                        title="Ask Discord whether each message or channel still exists; only confirmed-missing records are cleared.">Re-check with Discord</button>
                 <div id="sd-publication-status" class="sd-muted" role="status" aria-live="polite"></div>
                 <ul id="sd-publication-list" aria-label="Design publications"></ul>
             </section>
+            <details id="sd-token-catalog-panel" class="sd-token-catalog">
+                <summary>📖 Token catalog</summary>
+                <p class="sd-muted">Type a token such as <code>&#123;&#123;product.name&#125;&#125;</code> in the message content or any embed text. It is filled in from the product when the design is previewed or published. A short spelling (alias) resolves to the same value as its full token.</p>
+                <label class="sd-field-label" for="sd-token-search">Find a token</label>
+                <input id="sd-token-search" class="form-input" type="search" placeholder="name, price, stock…" autocomplete="off">
+                <div id="sd-token-status" class="sd-muted" role="status" aria-live="polite"></div>
+                <div id="sd-token-list" class="sd-token-list"></div>
+            </details>
         </aside>
 
         <main class="sd-main-workspace" aria-label="Shop design workspace">

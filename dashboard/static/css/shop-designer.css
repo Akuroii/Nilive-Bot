@@ -150,3 +150,15 @@
 .sd-shell .btn:disabled, .sd-shell .btn[disabled] { opacity: .4; cursor: not-allowed; }
 .sd-shell select:disabled, .sd-shell input:disabled { opacity: .55; cursor: not-allowed; }
 .sd-shell :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Token catalog (reference panel; the server owns every definition) */
+.sd-token-catalog { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color, rgba(255,255,255,.12)); display: grid; gap: .5rem; }
+.sd-token-catalog summary { cursor: pointer; font-weight: 600; }
+.sd-token-list { display: grid; gap: .6rem; max-height: 22rem; overflow-y: auto; }
+.sd-token-group-title { margin: .4rem 0 0; font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text3); }
+.sd-token-entry { display: grid; gap: .15rem; padding: .45rem .55rem; border: 1px solid var(--border-color, rgba(255,255,255,.12)); border-radius: 6px; }
+.sd-token-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.sd-token-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.sd-token-copy { padding: .15rem .5rem; font-size: .8rem; }
+
+.sd-token-label { font-weight: 600; font-size: .9rem; }

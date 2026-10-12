@@ -86,20 +86,33 @@ function assert(ok, label) { if (!ok) throw new Error('FAIL: ' + label); console
     await tick();
     const stateRows = ids['sd-publication-list'].children;
     assert(stateRows.length === 10, 'Publication statuses are rendered as separate rows');
-    [0, 1, 2, 3, 4, 5].forEach(index => {
+    // Row 1 (failed, no message ID) is intentionally actionable now: it offers
+    // only Unpublish, covered in test_shop_failed_publication_ui.js.
+    [2, 3, 4].forEach(index => {
         assert(stateRows[index].querySelectorAll('button').length === 0 &&
             stateRows[index].textContent.indexOf('Not actionable:') !== -1,
-            'message-less or locked state ' + index + ' has a clear non-actionable explanation');
+            'in-flight state ' + index + ' has a clear non-actionable explanation and no actions');
     });
+    // pending / message-less attention are not actionable for Update or Unpublish, but may be
+    // resolved by the explicit, confirmed record-only removal (covered in the recovery UI test).
+    [0, 5].forEach(index => {
+        const labels = stateRows[index].querySelectorAll('button').map(b => b.textContent);
+        assert(labels.join() === 'Remove record only' &&
+            stateRows[index].textContent.indexOf('Not actionable:') !== -1,
+            'message-less state ' + index + ' keeps its explanation and offers only Remove record only');
+    });
+    assert(stateRows[1].querySelectorAll('button').length === 1 &&
+        stateRows[1].querySelectorAll('button')[0].textContent === 'Unpublish',
+        'a failed, message-less row offers only Unpublish (no Update)');
     assert(stateRows[6].querySelectorAll('button').length === 2 &&
-        stateRows[7].querySelectorAll('button').length === 2,
-        'published and actionable attention states offer Update and Unpublish');
+        stateRows[7].querySelectorAll('button').map(b => b.textContent).join() === 'Update,Unpublish,Remove record only',
+        'published offers Update and Unpublish; attention adds the explicit record-only removal');
     assert(stateRows[8].querySelectorAll('button').length === 1 &&
         stateRows[8].querySelectorAll('button')[0].textContent === 'Update',
         'replacement retry authorization permits only its deliberate Update');
-    assert(stateRows[9].querySelectorAll('button').length === 1 &&
-        stateRows[9].querySelectorAll('button')[0].textContent === 'Authorize replacement retry',
-        'uncertain replacement exposes only the existing explicit authorization action');
+    assert(stateRows[9].querySelectorAll('button').map(b => b.textContent).join() ===
+        'Authorize replacement retry,Remove record only',
+        'uncertain replacement keeps explicit authorization and adds the record-only removal');
 
     // One row operation disables its sibling, and a response for a previous
     // Design cannot overwrite the newly selected Design's status/list.

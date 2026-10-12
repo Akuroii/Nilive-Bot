@@ -1,0 +1,1717 @@
+diff --git a/cogs/shop_publication_sync.py b/cogs/shop_publication_sync.py
+new file mode 100644
+index 0000000..30ed6c3
+--- /dev/null
++++ b/cogs/shop_publication_sync.py
+@@ -0,0 +1,65 @@
++"""Keeps Shop Publication records in step with Discord deletions the bot can observe.
++
++Handles single-message, bulk-message and channel deletion, plus one-time recovery of
++operations interrupted by a restart. Every handler is idempotent and touches only the
++exact publication rows the event identifies; see utils/shop_publication.py for the rules.
++
++The bot can only react to deletions that happen while it is online. Anything it missed
++is recovered through the dashboard's per-design "Re-check with Discord" action.
++"""
++import asyncio
++
++from discord.ext import commands
++
++from utils.shop_publication import (
++    reconcile_channel_deleted, reconcile_message_deleted, recover_stale_operations,
++)
++
++
++class ShopPublicationSync(commands.Cog):
++    def __init__(self, bot):
++        self.bot = bot
++        self._recovered = False
++
++    async def _run(self, label, func, *args):
++        # The service is synchronous (it uses a dedicated DB loop); keep it off the bot loop.
++        try:
++            removed = await asyncio.to_thread(func, *args)
++        except Exception as exc:  # never let cleanup break event dispatch
++            print(f"[shop-publication-sync] {label} failed: {exc!r}")
++            return 0
++        if removed:
++            print(f"[shop-publication-sync] {label}: reconciled {removed} publication record(s)")
++        return removed
++
++    @commands.Cog.listener()
++    async def on_ready(self):
++        if self._recovered:
++            return
++        self._recovered = True
++        await self._run("startup recovery", recover_stale_operations)
++
++    @commands.Cog.listener()
++    async def on_raw_message_delete(self, payload):
++        if payload.guild_id is None:
++            return
++        await self._run("message deleted", reconcile_message_deleted,
++                        payload.guild_id, payload.channel_id, [payload.message_id])
++
++    @commands.Cog.listener()
++    async def on_raw_bulk_message_delete(self, payload):
++        if payload.guild_id is None:
++            return
++        await self._run("bulk delete", reconcile_message_deleted,
++                        payload.guild_id, payload.channel_id, list(payload.message_ids))
++
++    @commands.Cog.listener()
++    async def on_guild_channel_delete(self, channel):
++        guild = getattr(channel, "guild", None)
++        if guild is None:
++            return
++        await self._run("channel deleted", reconcile_channel_deleted, guild.id, channel.id)
++
++
++async def setup(bot):
++    await bot.add_cog(ShopPublicationSync(bot))
+diff --git a/dashboard/api/shop_publications.py b/dashboard/api/shop_publications.py
+index 43e481b..85e391a 100644
+--- a/dashboard/api/shop_publications.py
++++ b/dashboard/api/shop_publications.py
+@@ -5,7 +5,8 @@ from dashboard.api import api_bp
+ from dashboard.permissions import LEVEL_OWNER, get_session_guild_id, log_action, require_api_permission
+ from utils.shop_publication import (
+     DiscordREST, PublicationError, authorize_replacement_retry, design_exists,
+-    get_publication, list_publications, post_publish, unpublish, update_publication,
++    forget_publication_record, get_publication, list_publications, post_publish,
++    recheck_design_publications, unpublish, update_publication,
+ )
+ 
+ 
+@@ -156,7 +157,10 @@ def api_shop_publication_unpublish(publication_id: int):
+         log_action(guild_id, f"Unpublished Shop Publication #{publication_id}",
+                    "shoppublisher", target_id=publication_id,
+                    target_name=str(publication["design_id"]))
+-        return jsonify({"success": True, "already_missing": result.get("already_missing", False)})
++        payload = {"success": True, "already_missing": result.get("already_missing", False)}
++        if result.get("channel_deleted"):
++            payload["channel_deleted"] = True
++        return jsonify(payload)
+     saved = result.get("publication")
+     log_action(guild_id, f"Shop Publication #{publication_id} unpublish needs attention",
+                "shoppublisher", details=result.get("error"), target_id=publication_id,
+@@ -164,3 +168,45 @@ def api_shop_publication_unpublish(publication_id: int):
+     code = "uncertain_unpublish" if result["outcome"] == "uncertain" else "publication_attention"
+     return jsonify({"success": False, "code": code, "publication": saved,
+                     "error": result.get("error")}), 202 if result["outcome"] == "uncertain" else 409
++
++
++@api_bp.route("/shop-publisher/designs/<int:design_id>/publications/recheck", methods=["POST"])
++@require_api_permission(LEVEL_OWNER)
++def api_shop_publications_recheck(design_id: int):
++    """Ask Discord about this design's stable publications; clear only confirmed-gone ones."""
++    guild_id = get_session_guild_id()
++    if not design_exists(guild_id, design_id):
++        return jsonify({"success": False, "error": "Saved Design was not found in this server."}), 404
++    try:
++        summary = recheck_design_publications(guild_id, design_id, rest=DiscordREST())
++    except PublicationError as exc:
++        return _service_error(exc)
++    if summary["removed"]:
++        log_action(guild_id, f"Re-checked Shop Publications for Design #{design_id}: "
++                             f"{summary['removed']} stale record(s) cleared",
++                   "shoppublisher", target_id=design_id, target_name=str(design_id))
++    return jsonify({"success": True, **summary})
++
++
++@api_bp.route("/shop-publisher/publications/<int:publication_id>/forget", methods=["POST"])
++@require_api_permission(LEVEL_OWNER)
++def api_shop_publication_forget(publication_id: int):
++    """Operator-confirmed, database-only removal of one stuck association.
++
++    Never contacts Discord: a message may still exist and must be deleted manually.
++    """
++    guild_id = get_session_guild_id()
++    body = request.get_json(silent=True)
++    if not isinstance(body, dict) or body.get("confirm") is not True:
++        return jsonify({"success": False, "code": "confirmation_required",
++                        "error": "Explicit confirmation is required to remove a record only."}), 400
++    publication = get_publication(guild_id, publication_id)
++    if publication is None:
++        return jsonify({"success": False, "error": "Publication not found."}), 404
++    if not forget_publication_record(guild_id, publication_id):
++        return jsonify({"success": False, "code": "record_not_removable",
++                        "error": "This Publication is not in a state that allows record-only removal."}), 409
++    log_action(guild_id, f"Removed Shop Publication #{publication_id} record only (Discord untouched)",
++               "shoppublisher", details=f"Previous status: {publication.get('status')}",
++               target_id=publication_id, target_name=str(publication["design_id"]))
++    return jsonify({"success": True, "discord_untouched": True})
+diff --git a/dashboard/static/css/shop-designer.css b/dashboard/static/css/shop-designer.css
+index b09e776..cc4422e 100644
+--- a/dashboard/static/css/shop-designer.css
++++ b/dashboard/static/css/shop-designer.css
+@@ -150,3 +150,15 @@
+ .sd-shell .btn:disabled, .sd-shell .btn[disabled] { opacity: .4; cursor: not-allowed; }
+ .sd-shell select:disabled, .sd-shell input:disabled { opacity: .55; cursor: not-allowed; }
+ .sd-shell :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
++
++/* Token catalog (reference panel; the server owns every definition) */
++.sd-token-catalog { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color, rgba(255,255,255,.12)); display: grid; gap: .5rem; }
++.sd-token-catalog summary { cursor: pointer; font-weight: 600; }
++.sd-token-list { display: grid; gap: .6rem; max-height: 22rem; overflow-y: auto; }
++.sd-token-group-title { margin: .4rem 0 0; font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text3); }
++.sd-token-entry { display: grid; gap: .15rem; padding: .45rem .55rem; border: 1px solid var(--border-color, rgba(255,255,255,.12)); border-radius: 6px; }
++.sd-token-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
++.sd-token-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
++.sd-token-copy { padding: .15rem .5rem; font-size: .8rem; }
++
++.sd-token-label { font-weight: 600; font-size: .9rem; }
+diff --git a/dashboard/static/js/shop-designer.js b/dashboard/static/js/shop-designer.js
+index 80f6b38..2d6d827 100644
+--- a/dashboard/static/js/shop-designer.js
++++ b/dashboard/static/js/shop-designer.js
+@@ -73,6 +73,9 @@ window.NERO = window.NERO || {};
+             var previewPurchase = root.querySelector('#sd-preview-purchase');
+             var previewWarnings = root.querySelector('#sd-preview-warnings');
+             var previewTokens = root.querySelector('#sd-preview-tokens');
++            var tokenList = root.querySelector('#sd-token-list');
++            var tokenSearch = root.querySelector('#sd-token-search');
++            var tokenStatus = root.querySelector('#sd-token-status');
+             var previewStatus = root.querySelector('#sd-preview-status');
+             var designSelect = root.querySelector('#sd-design-select');
+             var designNameInput = root.querySelector('#sd-design-name');
+@@ -258,6 +261,40 @@ window.NERO = window.NERO || {};
+                 if (designDeleteButton) designDeleteButton.disabled = deleting || !hasSelected || !designListLoaded;
+             }
+ 
++            // ctx.fetchJSON throws a bare "HTTP <status>" and drops the reply body, but the preview
++            // and save routes answer 400/409 with the reason (error / problems[]). Read the envelope
++            // so the user sees why. Falls back to ctx.fetchJSON where ctx.fetch is unavailable.
++            function requestJSON(url, init) {
++                if (typeof ctx.fetch !== 'function') return ctx.fetchJSON(url, init);
++                return ctx.fetch(url, init).then(function (res) {
++                    return res.json().then(function (data) { return data; }, function () { return null; }).then(function (data) {
++                        if (!res.ok) {
++                            var first = data && Array.isArray(data.problems) && data.problems[0];
++                            var reason = (first && first.message) || (data && (data.error || data.message));
++                            var failure = new Error(reason ? String(reason) : 'HTTP ' + res.status);
++                            failure.status = res.status; failure.data = data; throw failure;
++                        }
++                        if (data === null || typeof data !== 'object') throw new Error('The server returned an unreadable response.');
++                        return data;
++                    });
++                });
++            }
++
++            // Setting select.value in code fires no event, so dependents (the Publications panel)
++            // would keep showing the previous Design's records. Announce a real selection change,
++            // and only a real one: a list refresh that keeps the same Design must not reload anything.
++            function setDesignSelection(next, previous) {
++                if (!designSelect) return;
++                var before = previous === undefined ? designSelect.value : previous;
++                designSelect.value = next;
++                if (String(designSelect.value) === String(before)) return;
++                if (typeof designSelect.dispatchEvent === 'function' && typeof window.Event === 'function') {
++                    designSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
++                } else if (typeof designSelect.dispatch === 'function') {
++                    designSelect.dispatch('change');
++                }
++            }
++
+             function renderSavedDesigns() {
+                 if (!designSelect) return;
+                 var selected = designSelect.value;
+@@ -271,7 +308,7 @@ window.NERO = window.NERO || {};
+                     designSelect.appendChild(option);
+                 });
+                 var found = savedDesigns.some(function (record) { return String(record.id) === selected; });
+-                designSelect.value = found ? selected : '';
++                setDesignSelection(found ? selected : '', selected);
+                 if (designEmpty) {
+                     designEmpty.hidden = savedDesigns.length > 0;
+                     designEmpty.textContent = savedDesigns.length
+@@ -720,7 +757,7 @@ window.NERO = window.NERO || {};
+                     }),
+                 };
+                 if (selectMode) action.placeholder = draft.action.placeholder || '';
+-                ctx.fetchJSON(PREVIEW_URL, {
++                requestJSON(PREVIEW_URL, {
+                     method: 'POST',
+                     headers: { 'Content-Type': 'application/json' },
+                     body: JSON.stringify({
+@@ -1018,7 +1055,7 @@ window.NERO = window.NERO || {};
+                 }
+                 renderCatalog();
+                 setSavedBaseline(record);
+-                if (designSelect) designSelect.value = String(record.id);
++                setDesignSelection(String(record.id));
+                 suppressDirty = false;
+                 refreshDirtyState();
+                 clearPreviewOutput();
+@@ -1081,7 +1118,7 @@ window.NERO = window.NERO || {};
+                 var body = currentDesignSnapshot();
+                 if (currentDesignId !== null) body.id = currentDesignId;
+                 var requestSequence = ++saveRequestSequence;
+-                ctx.fetchJSON(DESIGNS_URL, {
++                requestJSON(DESIGNS_URL, {
+                     method: 'POST',
+                     headers: { 'Content-Type': 'application/json' },
+                     body: JSON.stringify(body),
+@@ -1092,7 +1129,7 @@ window.NERO = window.NERO || {};
+                     // Deleted while this save was in flight: a late reply must not bring it back.
+                     if (deletedDesignIds[Number(record.id)] === true) return;
+                     upsertSavedDesign(record);
+-                    if (designSelect) designSelect.value = String(record.id);
++                    setDesignSelection(String(record.id));
+                     if (revision === editRevision) {
+                         restoreSavedDesign(record);
+                         setDesignStatus('Design saved.');
+@@ -1163,7 +1200,7 @@ window.NERO = window.NERO || {};
+                     designListRequestSequence += 1;
+                     savedDesigns = savedDesigns.filter(function (item) { return Number(item.id) !== deletingId; });
+                     // Clear the selection only while it still names the deleted Design; keep a newer choice.
+-                    if (designSelect && Number(designSelect.value) === deletingId) designSelect.value = '';
++                    if (designSelect && Number(designSelect.value) === deletingId) setDesignSelection('');
+                     renderSavedDesigns();
+                     if (Number(currentDesignId) === deletingId) resetToNewDesign();
+                     setDesignStatus('Design deleted.');
+@@ -1192,12 +1229,70 @@ window.NERO = window.NERO || {};
+                 if (event && event.stopImmediatePropagation) event.stopImmediatePropagation();
+             }, true);
+ 
++            // Token catalog: a read-only reference rendered from the same catalog response the
++            // product list uses. Definitions, aliases and wording come verbatim from the server
++            // (text only, never HTML), so formatting-sensitive examples are preserved exactly.
++            var tokenCatalog = [];
++            function tokenMatches(entry, needle) {
++                if (!needle) return true;
++                var haystack = [entry.token, entry.label, entry.group, entry.description]
++                    .concat(Array.isArray(entry.aliases) ? entry.aliases : []).join('\n').toLowerCase();
++                return haystack.indexOf(needle) !== -1;
++            }
++            function copyToken(text) {
++                var clip = window.navigator && window.navigator.clipboard;
++                if (clip && clip.writeText) {
++                    return clip.writeText(text).then(function () { return true; }, function () { return false; });
++                }
++                return Promise.resolve(false);
++            }
++            function renderTokenCatalog() {
++                if (!tokenList) return;
++                clear(tokenList);
++                var needle = tokenSearch ? String(tokenSearch.value || '').trim().toLowerCase() : '';
++                var shown = 0, lastGroup = null;
++                tokenCatalog.forEach(function (entry) {
++                    if (!tokenMatches(entry, needle)) return;
++                    if (entry.group !== lastGroup) {
++                        lastGroup = entry.group;
++                        tokenList.appendChild(make(doc, 'h4', 'sd-token-group-title', entry.group || 'Other'));
++                    }
++                    var card = make(doc, 'div', 'sd-token-entry');
++                    var head = make(doc, 'div', 'sd-token-head');
++                    head.appendChild(make(doc, 'code', 'sd-token-name', entry.token));
++                    var copy = make(doc, 'button', 'btn btn-secondary sd-token-copy', 'Copy');
++                    copy.type = 'button';
++                    copy.addEventListener('click', function () {
++                        copyToken(entry.token).then(function (ok) {
++                            if (tokenStatus && !ctx.isDestroyed()) {
++                                tokenStatus.textContent = ok ? 'Copied ' + entry.token + '.' : 'Copy is unavailable here; select the token text instead.';
++                            }
++                        });
++                    });
++                    head.appendChild(copy); card.appendChild(head);
++                    if (entry.label) card.appendChild(make(doc, 'div', 'sd-token-label', entry.label));
++                    card.appendChild(make(doc, 'div', 'sd-muted', entry.description || ''));
++                    if (Array.isArray(entry.aliases) && entry.aliases.length) {
++                        card.appendChild(make(doc, 'div', 'sd-muted', 'Also accepts: ' + entry.aliases.join(', ')));
++                    }
++                    tokenList.appendChild(card); shown += 1;
++                });
++                if (tokenStatus) {
++                    tokenStatus.textContent = !tokenCatalog.length ? 'Token catalog unavailable.'
++                        : shown ? (needle ? shown + ' of ' + tokenCatalog.length + ' tokens' : tokenCatalog.length + ' tokens')
++                            : 'No tokens match “' + needle + '”.';
++                }
++            }
++            if (tokenSearch) ctx.on(tokenSearch, 'input', renderTokenCatalog);
++
+             loadSavedDesignList();
+             Promise.all([ctx.fetchJSON(CATALOG_URL), ctx.fetchJSON(CATEGORIES_URL)]).then(function (responses) {
+                 if (ctx.isDestroyed()) return;
+                 var catalog = responses[0] || {}; var categoryData = responses[1] || {};
+                 catalogProducts = Array.isArray(catalog.products) ? catalog.products : [];
+                 categories = Array.isArray(categoryData.categories) ? categoryData.categories : [];
++                tokenCatalog = Array.isArray(catalog.tokens) ? catalog.tokens.filter(function (t) { return t && typeof t.token === 'string'; }) : [];
++                renderTokenCatalog();
+                 renderCategoryFilter(); renderCatalog();
+                 catalogLoaded = true;
+                 updateDesignControls();
+@@ -1209,6 +1304,7 @@ window.NERO = window.NERO || {};
+             }).catch(function () {
+                 if (ctx.isDestroyed()) return;
+                 catalogProducts = []; categories = []; renderCategoryFilter(); renderCatalog();
++                tokenCatalog = []; renderTokenCatalog();
+                 catalogLoaded = true;
+                 updateDesignControls();
+                 if (catalogStatus) catalogStatus.textContent = 'Could not load the catalog.';
+diff --git a/dashboard/static/js/shop-publications.js b/dashboard/static/js/shop-publications.js
+index 9dfa2dc..f9965c5 100644
+--- a/dashboard/static/js/shop-publications.js
++++ b/dashboard/static/js/shop-publications.js
+@@ -7,11 +7,13 @@
+         var button = root.querySelector('#sd-publication-publish');
+         var list = root.querySelector('#sd-publication-list');
+         var status = root.querySelector('#sd-publication-status');
++        var recheck = root.querySelector('#sd-publication-recheck');
+         if (!select || !button || button.dataset.publicationBound) return;
+         button.dataset.publicationBound = '1';
+         var csrf = window.__CSRF_TOKEN__ || '';
+         var listGeneration = 0;
+         var publishInFlight = false;
++        var recheckInFlight = false;
+         // Keep uncertainty attached to the exact Design/channel request, not
+         // as a page-wide flag that could warn for another Design.
+         var uncertainPublishContexts = Object.create(null);
+@@ -20,6 +22,10 @@
+         var publicationListState = 'idle';
+         button.disabled = true;
+         function syncPublishButton() {
++            if (recheck) {
++                recheck.disabled = recheckInFlight || !select.value || publicationListState !== 'loaded' ||
++                    publicationListDesign !== select.value;
++            }
+             button.disabled = publishInFlight || !select.value || publicationListState !== 'loaded' ||
+                 publicationListDesign !== select.value;
+         }
+@@ -36,7 +42,14 @@
+             }, body: body ? JSON.stringify(body) : undefined}).then(function (r) {
+                 return r.json().then(function (data) {
+                     if (!r.ok && r.status !== 202) {
+-                        var error = new Error(data.error || 'Request failed'); error.status = r.status; throw error;
++                        var text = data.error || 'Request failed';
++                        // A blocked Update lists every validation problem; show them all, not just the first.
++                        if (Array.isArray(data.problems) && data.problems.length > 1) {
++                            text += ' (+' + (data.problems.length - 1) + ' more: ' + data.problems.slice(1, 4).map(function (item) {
++                                return item && item.message ? item.message : String(item && item.code || 'problem');
++                            }).join('; ') + (data.problems.length > 4 ? '; …' : '') + ')';
++                        }
++                        var error = new Error(text); error.status = r.status; throw error;
+                     }
+                     return data;
+                 });
+@@ -133,7 +146,12 @@
+                                             releaseRowActions();
+                                             return;
+                                         }
+-                                        status.textContent = result.error || label + ' completed.'; render();
++                                        status.textContent = result.error || (label === 'Unpublish' && result.channel_deleted
++                                            ? 'The channel no longer exists; the Publication record was cleared.'
++                                            : label === 'Unpublish' && result.already_missing
++                                                ? 'The message was already gone; the Publication record was cleared.'
++                                                : label + ' completed.');
++                                        render();
+                                     });
+                                 }
+                                 run(null).catch(function (e) {
+@@ -144,6 +162,29 @@
+                             }); li.appendChild(action);
+                         });
+                     }
++                    if (p.status === 'pending' || p.status === 'attention' || p.status === 'replacement_send_uncertain') {
++                        // Last resort when Unpublish cannot resolve the record (for example the bot lost the
++                        // server). Database-only: Discord is never contacted and a message may still exist.
++                        var forget = document.createElement('button'); forget.type = 'button';
++                        forget.textContent = 'Remove record only';
++                        forget.addEventListener('click', function () {
++                            if (!isCurrentContext(designId, generation)) return;
++                            if (!window.confirm('Remove this Publication record from the database only?\n\n' +
++                                'Discord is NOT contacted. If a message still exists in the channel, delete it manually. ' +
++                                'Use this only when Unpublish cannot resolve the record.')) return;
++                            forget.disabled = true;
++                            request('/api/shop-publisher/publications/' + p.id + '/forget', 'POST', {confirm: true}).then(function () {
++                                if (!isCurrentContext(designId, generation)) return;
++                                status.textContent = 'Record removed. Discord was not contacted; delete any remaining message manually.';
++                                render();
++                            }).catch(function (e) {
++                                if (!isCurrentContext(designId, generation)) return;
++                                status.textContent = e.message;
++                                forget.disabled = false;
++                            });
++                        });
++                        li.appendChild(forget);
++                    }
+                     list.appendChild(li);
+                 });
+             }).catch(function (e) {
+@@ -154,6 +195,23 @@
+                 }
+             });
+         }
++        if (recheck) recheck.addEventListener('click', function () {
++            var designId = select.value, generation = listGeneration;
++            if (!designId || recheckInFlight || publicationListState !== 'loaded' || publicationListDesign !== designId) return;
++            recheckInFlight = true; syncPublishButton();
++            status.textContent = 'Checking Discord…';
++            request('/api/shop-publisher/designs/' + designId + '/publications/recheck', 'POST', {}).then(function (r) {
++                if (!isCurrentContext(designId, generation)) return;
++                var parts = [(r.removed || 0) + ' stale record(s) cleared'];
++                if (r.still_present) parts.push(r.still_present + ' still on Discord');
++                if (r.unverified) parts.push(r.unverified + ' could not be verified and were left untouched');
++                status.textContent = 'Re-check complete: ' + parts.join('; ') + '.';
++                render();
++            }).catch(function (e) {
++                if (!isCurrentContext(designId, generation)) return;
++                status.textContent = e.message;
++            }).then(function () { recheckInFlight = false; syncPublishButton(); });
++        });
+         select.addEventListener('change', function () {
+             // Status belongs to the Design that initiated it. Clear it before
+             // loading another Design; in-flight callbacks use their captured
+diff --git a/dashboard/templates/manage/shopdesigner.html b/dashboard/templates/manage/shopdesigner.html
+index beda104..9ee9614 100644
+--- a/dashboard/templates/manage/shopdesigner.html
++++ b/dashboard/templates/manage/shopdesigner.html
+@@ -41,9 +41,19 @@
+                 <label class="sd-field-label" for="sd-publication-channel">Discord channel ID</label>
+                 <input id="sd-publication-channel" class="form-input" inputmode="numeric" placeholder="Text/news channel ID">
+                 <button id="sd-publication-publish" class="btn btn-primary" type="button">Publish saved Design</button>
++                <button id="sd-publication-recheck" class="btn" type="button" disabled
++                        title="Ask Discord whether each message or channel still exists; only confirmed-missing records are cleared.">Re-check with Discord</button>
+                 <div id="sd-publication-status" class="sd-muted" role="status" aria-live="polite"></div>
+                 <ul id="sd-publication-list" aria-label="Design publications"></ul>
+             </section>
++            <details id="sd-token-catalog-panel" class="sd-token-catalog">
++                <summary>📖 Token catalog</summary>
++                <p class="sd-muted">Type a token such as <code>&#123;&#123;product.name&#125;&#125;</code> in the message content or any embed text. It is filled in from the product when the design is previewed or published. A short spelling (alias) resolves to the same value as its full token.</p>
++                <label class="sd-field-label" for="sd-token-search">Find a token</label>
++                <input id="sd-token-search" class="form-input" type="search" placeholder="name, price, stock…" autocomplete="off">
++                <div id="sd-token-status" class="sd-muted" role="status" aria-live="polite"></div>
++                <div id="sd-token-list" class="sd-token-list"></div>
++            </details>
+         </aside>
+ 
+         <main class="sd-main-workspace" aria-label="Shop design workspace">
+diff --git a/main.py b/main.py
+index 07ca807..b3ec69e 100644
+--- a/main.py
++++ b/main.py
+@@ -203,6 +203,7 @@ async def load_cogs():
+         "cogs.tagmissions",
+         "cogs.tagpartners",
+         "cogs.afk",
++        "cogs.shop_publication_sync",
+         # Load order does NOT matter for aliases any more (2026-08-28). The
+         # old comment here said "MUST be last, it rewrites message.content so
+         # process_commands can dispatch it" — that was wrong twice over:
+diff --git a/scripts/test_shop_designer_persistence.js b/scripts/test_shop_designer_persistence.js
+index d94cb09..23f5d27 100644
+--- a/scripts/test_shop_designer_persistence.js
++++ b/scripts/test_shop_designer_persistence.js
+@@ -129,7 +129,11 @@ async function setup(options) {
+                 }
+                 return serveDelete(id);
+             }
+-            return Promise.reject(Error('unexpected fetch ' + method + ' ' + url));
++            // Everything else behaves as the real ctx.fetch would: the same routes as fetchJSON,
++            // delivered as a Response-like object (ok/status/json) so callers read the body themselves.
++            return this.fetchJSON(url, request).then(
++                body => ({ ok: true, status: 200, json: () => Promise.resolve(body) }),
++                error => { const m = /^HTTP (\d+)$/.exec(error && error.message || ''); return { ok: false, status: m ? Number(m[1]) : 500, json: () => Promise.resolve(null) }; });
+         },
+         isDestroyed() { return false; },
+     };
+diff --git a/scripts/test_shop_designer_preview_save_publications.js b/scripts/test_shop_designer_preview_save_publications.js
+new file mode 100644
+index 0000000..87bc1e3
+--- /dev/null
++++ b/scripts/test_shop_designer_preview_save_publications.js
+@@ -0,0 +1,141 @@
++#!/usr/bin/env node
++'use strict';
++// Regression tests for: (1) Preview failures showing the server's reason instead of "HTTP 400",
++// (2) Save failures doing the same, (3) the Publications panel following Save/Delete selection
++// changes made in code (select.value assignments fire no DOM event).
++// Real template + real designer module + real publications module; only transport is mocked.
++const fs = require('fs'), path = require('path'), vm = require('vm');
++const { createDom, parseTemplate, findById, materialize } = require('./support/dom_stub.js');
++let pass = 0, fail = 0;
++function assert(ok, label, detail) { if (ok) { pass++; console.log('  PASS', label); } else { fail++; console.log('  FAIL', label, detail || ''); } }
++const tick = () => new Promise(r => setTimeout(r, 0));
++const rootDir = path.join(__dirname, '..');
++const js = f => path.join(rootDir, 'dashboard/static/js', f);
++const PRODUCTS = [{id: 7, name: 'Alpha', type: 'role', price: 1500, price_diamonds: null, enabled: 1, current_stock: 12, max_stock: 20,
++    prestige_tier: null, featured: 0, category_id: null, option_of_id: null}];
++const TEMPLATE = {content: 'Buy {{product.name}}', embeds: [{title: '{{product.name}}'}]};
++const res = (status, body) => ({ok: status >= 200 && status < 300, status,
++    json: () => body instanceof Error ? Promise.reject(body) : Promise.resolve(body)});
++
++async function boot() {
++    const dom = createDom(); const pages = {};
++    const window = {NERO: {definePage(n, m) { pages[n] = m; }}, __BOT_IDENTITY__: {name: 'Bot', avatar: null}, __CSRF_TOKEN__: 'csrf'};
++    const state = {preview: res(200, {success: true}), save: null, savedId: 41, publicationsCalls: [], designs: [], deleteReply: res(200, {success: true})};
++    const sandbox = {window, document: dom.document, console, setTimeout, clearTimeout, Promise, Object, Array, Math, Date, JSON, Number, String, RegExp, Error, TypeError, Set, Map, Symbol, parseInt, isFinite};
++    sandbox.fetch = (url, init) => {           // used by shop-publications.js
++        init = init || {};
++        const m = /\/designs\/(\d+)\/publications$/.exec(url);
++        if (m && (init.method || 'GET') === 'GET') { state.publicationsCalls.push(m[1]); return Promise.resolve(res(200, {success: true,
++            publications: [{id: 900 + Number(m[1]), channel_id: 555, status: 'published', message_id: 777}]})); }
++        return Promise.reject(new Error('unexpected publications fetch ' + url));
++    };
++    window.fetch = sandbox.fetch;
++    vm.createContext(sandbox);
++    ['embed/model.js', 'embed/assets.js', 'embed/store.js', 'embed/validate.js', 'embed/discord-markdown.js', 'embed/preview.js',
++     'embed/views/rail.js', 'embed/views/inspector.js', 'shop-publisher.js', 'shop-designer.js'].forEach(f => vm.runInContext(fs.readFileSync(js(f), 'utf8'), sandbox, {filename: f}));
++    const tree = parseTemplate(fs.readFileSync(path.join(rootDir, 'dashboard/templates/manage/shopdesigner.html'), 'utf8'));
++    const root = materialize(findById(tree, 'sd-root'), dom.document); dom.attach(root);
++    const changeEvents = []; const select = root.querySelector('#sd-design-select');
++    select.addEventListener('change', () => changeEvents.push(select.value));
++    const ctx = {
++        on(t, ty, h) { t.addEventListener(ty, h); }, isDestroyed: () => false,
++        fetchJSON(url) {
++            if (url === '/api/shop-publisher/designs') return Promise.resolve({success: true, designs: state.designs});
++            if (url === '/api/shop-publisher/catalog') return Promise.resolve({products: PRODUCTS, templates: ['welcome'], tokens: []});
++            if (url === '/api/shop-publisher/categories') return Promise.resolve({categories: []});
++            if (url === '/api/embedbuilder/template/welcome') return Promise.resolve({template: TEMPLATE});
++            return Promise.reject(new Error('unexpected ' + url));
++        },
++        fetch(url, init) {
++            init = init || {}; const method = init.method || 'GET';
++            if (url === '/api/shop-publisher/preview') { const r = state.preview; return r instanceof Error ? Promise.reject(r) : Promise.resolve(r); }
++            if (url === '/api/shop-publisher/designs' && method === 'POST') {
++                if (state.save) { const r = state.save; return r instanceof Error ? Promise.reject(r) : Promise.resolve(r); }
++                const body = JSON.parse(init.body); const id = body.id == null ? state.savedId : Number(body.id);
++                const row = {id, name: body.name, source_template_name: body.source_template_name || null, design: body.design};
++                state.designs = state.designs.filter(d => d.id !== id).concat([row]);
++                return Promise.resolve(res(200, {success: true, design: row}));
++            }
++            const del = /\/designs\/(\d+)$/.exec(url);
++            if (del && method === 'DELETE') {
++                if (state.deleteReply.ok) state.designs = state.designs.filter(d => d.id !== Number(del[1]));
++                return Promise.resolve(state.deleteReply);
++            }
++            return this.fetchJSON(url, init).then(b => res(200, b));
++        },
++    };
++    pages['shop-designer'].init(root, ctx);
++    vm.runInContext(fs.readFileSync(js('shop-publications.js'), 'utf8'), sandbox, {filename: 'shop-publications.js'});
++    await tick();
++    root.querySelector('#sd-template').value = 'welcome'; root.querySelector('#sd-template').dispatch('change'); await tick();
++    const add = root.querySelector('#sd-available').querySelectorAll('button').find(b => b.getAttribute('data-add-product') === '7');
++    root.querySelector('#sd-available').dispatch('click', {target: add});
++    root.querySelector('#sd-action-product').value = '7'; root.querySelector('#sd-action-add').dispatch('click');
++    return {root, state, changeEvents, select, dom};
++}
++const q = (a, s) => a.root.querySelector(s);
++const text = n => !n ? '' : (n._text || '') + (n.children || []).map(text).join(' ');
++async function validate(a) { q(a, '#sd-action-validate').dispatch('click'); await tick(); await tick(); }
++async function save(a, name) { q(a, '#sd-design-name').value = name; q(a, '#sd-design-name').dispatch('input'); q(a, '#sd-design-save').dispatch('click'); for (let i = 0; i < 6; i++) await tick(); }
++
++(async function () {
++    console.log('A. Preview shows the server\'s reason');
++    let a = await boot();
++    a.state.preview = res(400, {success: false, error: 'Preview request invalid.', problems: [{message: 'No product 7 in this guild.'}]});
++    await validate(a);
++    assert(q(a, '#sd-preview-status').textContent === 'No product 7 in this guild.', 'a 400 with problems[] shows the first problem, not "HTTP 400"', q(a, '#sd-preview-status').textContent);
++    assert(q(a, '#sd-action-validation').textContent === 'No product 7 in this guild.', 'the action validation line shows it too');
++    a.state.preview = res(400, {success: false, error: 'presentation.content must be text.', problems: []});
++    await validate(a);
++    assert(q(a, '#sd-preview-status').textContent === 'presentation.content must be text.', 'a 400 with only error shows the error text', q(a, '#sd-preview-status').textContent);
++    a.state.preview = res(502, new Error('not json'));
++    await validate(a);
++    assert(q(a, '#sd-preview-status').textContent === 'HTTP 502', 'a non-JSON error body falls back to the status code', q(a, '#sd-preview-status').textContent);
++    a.state.preview = res(200, new Error('proxy html'));
++    await validate(a);
++    assert(/unreadable response/.test(q(a, '#sd-preview-status').textContent) && !/ready/.test(q(a, '#sd-preview-status').textContent), 'a 200 with an unreadable body is an error, never "Preview ready"', q(a, '#sd-preview-status').textContent);
++    a.state.preview = res(200, {success: false, error: 'Server said no.'});
++    await validate(a);
++    assert(q(a, '#sd-preview-status').textContent === 'Server said no.', 'success:false with 200 still shows its error');
++    a.state.preview = new Error('network down');
++    await validate(a);
++    assert(q(a, '#sd-preview-status').textContent === 'network down', 'a transport failure shows its message and is not a preview');
++    assert(/No preview yet/.test(q(a, '#sd-preview-warnings').textContent), 'every failed preview leaves no stale result behind');
++
++    console.log('B. Save shows the server\'s reason');
++    a = await boot();
++    a.state.save = res(409, {success: false, error: 'A design named “X” already exists.'});
++    await save(a, 'X');
++    assert(q(a, '#sd-design-status').textContent === 'A design named “X” already exists.', 'a 409 shows the server reason, not "HTTP 409"', q(a, '#sd-design-status').textContent);
++    assert(a.select.value === '' && a.changeEvents.length === 0, 'a failed save selects nothing and announces nothing');
++    a.state.save = res(500, new Error('html'));
++    await save(a, 'X');
++    assert(q(a, '#sd-design-status').textContent === 'HTTP 500', 'an unreadable error body falls back to the status code');
++    assert(!q(a, '#sd-design-save').disabled, 'Save is re-enabled after a failure');
++
++    console.log('C. Save → Publications selection');
++    a = await boot(); a.state.savedId = 41;
++    await save(a, 'First');
++    assert(a.select.value === '41', 'Save selects the saved design');
++    assert(a.changeEvents.length === 1 && a.changeEvents[0] === '41', 'Save announces exactly one change, carrying the new design id', JSON.stringify(a.changeEvents));
++    assert(a.state.publicationsCalls.join() === '41', 'the Publications panel loads exactly that design\'s publications', a.state.publicationsCalls.join());
++    assert(q(a, '#sd-publication-list').children.length === 1 && /message 777/.test(text(q(a, '#sd-publication-list').children[0])), 'its records are listed');
++    assert(q(a, '#sd-publication-publish').disabled === false, 'Publish becomes available once that design\'s publication list has loaded');
++    await save(a, 'First edited');
++    assert(a.changeEvents.length === 1 && a.state.publicationsCalls.length === 1, 'saving the same design again reloads nothing (selection did not change)', JSON.stringify(a.changeEvents));
++
++    console.log('D. Delete clears the Publications context');
++    a = await boot(); await save(a, 'To delete');
++    const beforeDelete = a.changeEvents.length;
++    q(a, '#sd-design-delete').dispatch('click'); await tick(); await tick();
++    assert(q(a, '#sd-design-status').textContent === 'Design deleted.', 'delete succeeds', q(a, '#sd-design-status').textContent);
++    assert(a.changeEvents.length === beforeDelete + 1 && a.changeEvents[a.changeEvents.length - 1] === '', 'deleting the selected design announces an empty selection');
++    assert(q(a, '#sd-publication-list').children.length === 0, 'the deleted design\'s publication rows are gone from the panel');
++    assert(q(a, '#sd-publication-publish').disabled === true, 'Publish is disabled with no design selected');
++    a = await boot(); await save(a, 'Blocked');
++    a.state.deleteReply = res(409, {success: false, code: 'design_has_publications', error: 'This Design has Publications. Unpublish them first.'});
++    const n = a.changeEvents.length;
++    q(a, '#sd-design-delete').dispatch('click'); await tick(); await tick();
++    assert(a.select.value === '41' && a.changeEvents.length === n, 'a blocked delete keeps the selection and announces nothing');
++    console.log('\n' + pass + '/' + (pass + fail) + ' checks passed.'); process.exit(fail ? 1 : 0);
++})().catch(e => { console.error(e); process.exit(1); });
+diff --git a/scripts/test_shop_designer_token_catalog.js b/scripts/test_shop_designer_token_catalog.js
+new file mode 100644
+index 0000000..7db766e
+--- /dev/null
++++ b/scripts/test_shop_designer_token_catalog.js
+@@ -0,0 +1,93 @@
++#!/usr/bin/env node
++'use strict';
++// Token Catalog panel inside Shop Designer: real template + real page module, fed the REAL server catalog.
++const fs = require('fs'), path = require('path'), vm = require('vm'), { execFileSync } = require('child_process');
++const { createDom, parseTemplate, findById, materialize } = require('./support/dom_stub.js');
++let pass = 0, fail = 0;
++function assert(c, label, d) { if (c) { pass++; console.log('  PASS', label); } else { fail++; console.log('  FAIL', label, d || ''); } }
++const rootDir = path.join(__dirname, '..');
++const payload = JSON.parse(execFileSync('python3', ['-c',
++    'import sys,json; sys.path.insert(0,"."); import utils.shop_publisher as SP; print(json.dumps(SP.token_catalog_payload(), ensure_ascii=False))'],
++    {cwd: rootDir, encoding: 'utf8', env: Object.assign({}, process.env, {PYTHONPATH: rootDir})}));
++const templateSrc = fs.readFileSync(path.join(rootDir, 'dashboard/templates/manage/shopdesigner.html'), 'utf8');
++const tree = parseTemplate(templateSrc);
++const modulePath = path.join(rootDir, 'dashboard/static/js/shop-designer.js');
++const text = n => !n ? '' : (n._text || '') + (n.children || []).map(text).join(' ');
++
++async function boot(catalogResponse, navigatorStub) {
++    const dom = createDom(); let pageModule = null;
++    const window = {NERO: {definePage: (n, m) => { pageModule = m; }}};
++    if (navigatorStub) window.navigator = navigatorStub;
++    const sandbox = {window, document: dom.document, console, Promise, Object, Array, Math, JSON, Number, String, RegExp, Error, parseInt, isFinite};
++    vm.createContext(sandbox); vm.runInContext(fs.readFileSync(modulePath, 'utf8'), sandbox, {filename: modulePath});
++    const root = materialize(findById(tree, 'sd-root'), dom.document); dom.attach(root);
++    const routes = {'/api/shop-publisher/designs': {success: true, designs: []},
++        '/api/shop-publisher/categories': {success: true, categories: [], uncategorized: 0}};
++    const ctx = {on: (t, ty, h) => t.addEventListener(ty, h), isDestroyed: () => false,
++        fetchJSON: url => url === '/api/shop-publisher/catalog'
++            ? (catalogResponse instanceof Error ? Promise.reject(catalogResponse) : Promise.resolve(catalogResponse))
++            : (routes[url] ? Promise.resolve(routes[url]) : Promise.reject(new Error('unexpected ' + url)))};
++    pageModule.init(root, ctx); await new Promise(r => setTimeout(r, 0));
++    return {root, list: root.querySelector('#sd-token-list'), search: root.querySelector('#sd-token-search'), status: root.querySelector('#sd-token-status')};
++}
++const entries = list => list.children.filter(c => /sd-token-entry/.test(c.className || ''));
++const groups = list => list.children.filter(c => /sd-token-group-title/.test(c.className || '')).map(c => c.textContent);
++const names = list => entries(list).map(e => text(e.children[0]).replace(/\s*Copy\s*$/, '').trim());
++
++(async function () {
++    console.log('A. template');
++    assert(/id="sd-token-catalog-panel"/.test(templateSrc) && /<details[^>]*id="sd-token-catalog-panel"/.test(templateSrc), 'panel is a <details> inside the Designer template');
++    assert(!/<details[^>]*sd-token-catalog-panel[^>]*\bopen\b/.test(templateSrc), 'panel is collapsed by default');
++    assert(/&#123;&#123;product\.name&#125;&#125;/.test(templateSrc) && !/<code>\{\{product\.name\}\}<\/code>/.test(templateSrc),
++        'usage example uses entities so Jinja cannot evaluate it');
++
++    console.log('B. renders the real catalog exactly');
++    const a = await boot({products: [], templates: [], tokens: payload});
++    assert(payload.length >= 10, 'real catalog loaded from the server code', String(payload.length));
++    assert(entries(a.list).length === payload.length, 'one entry per catalog token');
++    assert(JSON.stringify(names(a.list)) === JSON.stringify(payload.map(t => t.token)), 'canonical token names and server order preserved');
++    const firstSeen = []; payload.forEach(t => { if (firstSeen.indexOf(t.group) === -1) firstSeen.push(t.group); });
++    assert(JSON.stringify(groups(a.list)) === JSON.stringify(firstSeen), 'groups appear in the server order: ' + firstSeen.join(', '));
++    const bodyText = entries(a.list).map(e => text(e));
++    assert(payload.every((t, i) => bodyText[i].indexOf(t.description) !== -1), 'every description is rendered verbatim (no rewording)');
++    assert(payload.some(t => t.description.indexOf('1,500') !== -1) && bodyText.join('\n').indexOf('1,500') !== -1, 'grouped-price example "1,500" preserved');
++    assert(payload.some(t => t.description.indexOf('𝐅𝐫𝐞𝐞') !== -1) && bodyText.join('\n').indexOf('𝐅𝐫𝐞𝐞') !== -1, 'the exact 𝐅𝐫𝐞𝐞 convention preserved');
++    assert(payload.every((t, i) => !t.aliases.length || bodyText[i].indexOf('Also accepts: ' + t.aliases.join(', ')) !== -1), 'aliases shown for every token that has them');
++    assert(a.status.textContent === payload.length + ' tokens', 'status reports the count', a.status.textContent);
++
++    console.log('C. search');
++    a.search.value = 'PRICE'; a.search.dispatch('input');
++    const priced = names(a.list);
++    assert(priced.length > 0 && priced.length < payload.length && priced.every(n => payload.find(t => t.token === n)), 'case-insensitive search narrows the list');
++    assert(a.status.textContent === priced.length + ' of ' + payload.length + ' tokens', 'status shows N of M', a.status.textContent);
++    const aliasHit = payload.find(t => t.aliases.length);
++    a.search.value = aliasHit.aliases[0]; a.search.dispatch('input');
++    assert(names(a.list).indexOf(aliasHit.token) !== -1, 'searching an alias finds its canonical token');
++    a.search.value = 'zzzz-no-such-token'; a.search.dispatch('input');
++    assert(entries(a.list).length === 0 && /No tokens match/.test(a.status.textContent), 'no match shows a clear message');
++    a.search.value = ''; a.search.dispatch('input');
++    assert(entries(a.list).length === payload.length, 'clearing the search restores everything');
++
++    console.log('D. copy');
++    const copied = []; const clip = {writeText: t => { copied.push(t); return Promise.resolve(); }};
++    const b = await boot({products: [], templates: [], tokens: payload}, {clipboard: clip});
++    entries(b.list)[0].querySelectorAll('button')[0].click(); await new Promise(r => setTimeout(r, 0));
++    assert(copied.length === 1 && copied[0] === payload[0].token, 'Copy writes the exact canonical token', JSON.stringify(copied));
++    assert(b.status.textContent === 'Copied ' + payload[0].token + '.', 'status confirms the copy');
++    const c = await boot({products: [], templates: [], tokens: payload}, {clipboard: {writeText: () => Promise.reject(new Error('denied'))}});
++    entries(c.list)[0].querySelectorAll('button')[0].click(); await new Promise(r => setTimeout(r, 0));
++    assert(/Copy is unavailable/.test(c.status.textContent), 'a denied clipboard is reported honestly, not as success');
++    const d0 = await boot({products: [], templates: [], tokens: payload});
++    entries(d0.list)[0].querySelectorAll('button')[0].click(); await new Promise(r => setTimeout(r, 0));
++    assert(/Copy is unavailable/.test(d0.status.textContent), 'no clipboard API is reported honestly');
++
++    console.log('E. robustness');
++    const e = await boot(new Error('network'));
++    assert(entries(e.list).length === 0 && e.status.textContent === 'Token catalog unavailable.', 'a failed catalog load shows "unavailable" and does not throw');
++    const f = await boot({products: [], templates: [], tokens: 'nonsense'});
++    assert(entries(f.list).length === 0 && f.status.textContent === 'Token catalog unavailable.', 'a malformed tokens field is handled safely');
++    const g = await boot({products: [], templates: [], tokens: ['ignored', null, 7, {token: 42}, {token: '{{ok}}', label: 'OK', group: 'G', description: '<img src=x onerror=alert(1)>', aliases: 'bad'}]});
++    assert(entries(g.list).length === 1 && names(g.list)[0] === '{{ok}}', 'malformed entries are skipped, valid ones kept');
++    assert(text(entries(g.list)[0]).indexOf('<img src=x onerror=alert(1)>') !== -1 && !g.list.querySelectorAll('img').length, 'descriptions are inserted as text, never as HTML');
++    console.log('\n' + pass + '/' + (pass + fail) + ' checks passed.'); process.exit(fail ? 1 : 0);
++})().catch(err => { console.error(err); process.exit(1); });
+diff --git a/scripts/test_shop_failed_publication_ui.js b/scripts/test_shop_failed_publication_ui.js
+new file mode 100644
+index 0000000..93d7675
+--- /dev/null
++++ b/scripts/test_shop_failed_publication_ui.js
+@@ -0,0 +1,74 @@
++#!/usr/bin/env node
++'use strict';
++// A definitively failed, message-less Publication offers Unpublish (and nothing
++// else). pending / message-bearing failed / published rows keep their old rules.
++const fs = require('fs'), path = require('path'), vm = require('vm');
++const { createDom, createWindow } = require('./support/dom_stub.js');
++const dom = createDom(), win = createWindow(), doc = dom.document;
++const root = doc.createElement('div');
++root.setAttribute('data-page-module', 'shop-designer');
++const ids = {};
++['sd-design-select', 'sd-publication-channel', 'sd-publication-publish',
++ 'sd-publication-list', 'sd-publication-status'].forEach(id => {
++    const node = doc.createElement(id === 'sd-design-select' ? 'select' : 'div');
++    node.id = id; ids[id] = node; root.appendChild(node);
++});
++ids['sd-design-select'].value = '7';
++ids['sd-publication-channel'].value = '1088248319982006322';
++doc.body.appendChild(root);
++win.__CSRF_TOKEN__ = 'csrf';
++const confirmations = []; let confirmAccept = true;
++win.confirm = m => { confirmations.push(m); return confirmAccept; };
++const calls = [], deferred = [];
++win.fetch = (url, init) => { calls.push({url, init}); return new Promise(resolve => deferred.push({url,
++    resolve: (body, ok = true, status = 200) => resolve({ok, status, json: () => Promise.resolve(body)})})); };
++const sandbox = {window: win, document: doc, fetch: win.fetch, Promise, Number, String, Object, Array, Error, console};
++vm.createContext(sandbox);
++vm.runInContext(fs.readFileSync(path.join(__dirname, '../dashboard/static/js/shop-publications.js'), 'utf8'), sandbox);
++const tick = () => new Promise(r => setTimeout(r, 0));
++function assert(ok, label) { if (!ok) throw new Error('FAIL: ' + label); console.log('PASS', label); }
++const labels = row => row.querySelectorAll('button').map(b => b.textContent);
++(async function () {
++    deferred.shift().resolve({success: true, publications: [
++        {id: 1, channel_id: 11, status: 'failed', message_id: null},     // orphan -> Unpublish only
++        {id: 2, channel_id: 12, status: 'pending', message_id: null},    // uncertain -> protected
++        {id: 3, channel_id: 13, status: 'failed', message_id: 903},      // failed WITH message -> locked
++        {id: 4, channel_id: 14, status: 'published', message_id: 904},   // unchanged
++        {id: 5, channel_id: 15, status: 'attention', message_id: null},  // unchanged (locked)
++    ]});
++    await tick();
++    const rows = ids['sd-publication-list'].children;
++    assert(rows.length === 5, 'all five rows render');
++    assert(labels(rows[0]).join() === 'Unpublish', 'failed + no message ID offers exactly Unpublish (no Update)');
++    assert(labels(rows[1]).join() === 'Remove record only' && rows[1].textContent.indexOf('Not actionable:') !== -1,
++        'pending row offers no Update/Unpublish (only the explicit record-only removal), clear explanation');
++    assert(labels(rows[2]).length === 0 && rows[2].textContent.indexOf('Not actionable:') !== -1,
++        'failed row that carries a message ID stays locked');
++    assert(labels(rows[3]).join() === 'Update,Unpublish', 'published row still offers Update and Unpublish');
++    assert(labels(rows[4]).join() === 'Remove record only' && rows[4].textContent.indexOf('Not actionable:') !== -1,
++        'message-less attention row offers no Update/Unpublish (only the explicit record-only removal)');
++
++    // Declining the confirmation sends nothing.
++    confirmAccept = false;
++    const before = calls.length;
++    rows[0].querySelectorAll('button')[0].click();
++    assert(calls.length === before && confirmations.length === 1, 'declined confirmation sends no request');
++    assert(/no Discord message exists/.test(confirmations[0]) && !/Delete this Discord message/.test(confirmations[0]),
++        'failed-row confirmation says no Discord message exists (not "Delete this Discord message")');
++
++    // Accepting sends DELETE for exactly that Publication, then reloads the list.
++    confirmAccept = true;
++    rows[0].querySelectorAll('button')[0].click();
++    const del = deferred.shift();
++    const call = calls[calls.length - 1];
++    assert(call.url === '/api/shop-publisher/publications/1' && call.init.method === 'DELETE',
++        'Unpublish issues DELETE /api/shop-publisher/publications/1');
++    del.resolve({success: true, already_missing: false});
++    await tick();
++    const reload = deferred.shift();
++    assert(/\/designs\/7\/publications$/.test(reload.url), 'list reloads after the failed row is cleared');
++    reload.resolve({success: true, publications: []});
++    await tick();
++    assert(ids['sd-publication-list'].children.length === 0, 'cleared row disappears from the list');
++    console.log('All failed-publication UI checks passed.');
++})().catch(e => { console.error(e.message); process.exit(1); });
+diff --git a/scripts/test_shop_failed_publication_unpublish.py b/scripts/test_shop_failed_publication_unpublish.py
+new file mode 100644
+index 0000000..c4c3790
+--- /dev/null
++++ b/scripts/test_shop_failed_publication_unpublish.py
+@@ -0,0 +1,189 @@
++"""Failed, message-less Publications can be cleared; everything else stays protected.
++
++Real Flask routes + real SQLite. Only the Discord REST layer is faked, and every
++fake records calls so the failed-row path is proven to make none.
++"""
++import asyncio, os, sys, time, unittest
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from phase1_support import GUILD, USER, execute, rows, reset_database  # noqa: E402
++import dashboard.app as dash  # noqa: E402
++import dashboard.api.shop_publications as api_pub  # noqa: E402
++import utils.shop_publication as pub  # noqa: E402
++
++H = {"X-CSRF-Token": "t"}
++
++
++class FakeRest(pub.DiscordREST):
++    """create_message behaviour is chosen per test; all other calls are recorded."""
++    send = "ok"          # "ok" | "reject" (definitive) | "uncertain"
++    calls = []
++
++    def __init__(self): pass
++
++    def validate_channel_and_permissions(self, *a, **k):
++        FakeRest.calls.append("validate"); return True
++
++    def create_message(self, *a, **k):
++        FakeRest.calls.append("create")
++        if FakeRest.send == "reject":
++            raise pub.DiscordFailure("Missing Permissions", status=403, discord_code=50013)
++        if FakeRest.send == "uncertain":
++            raise pub.DiscordFailure("timeout", uncertain=True)
++        return 4242
++
++    def fetch_message(self, *a, **k): FakeRest.calls.append("fetch"); return {"id": "4242"}
++    def delete_message(self, *a, **k): FakeRest.calls.append("delete"); return True
++
++
++class FailedPublicationUnpublish(unittest.TestCase):
++    def setUp(self):
++        asyncio.run(reset_database())
++        execute("INSERT INTO dashboard_users (guild_id,user_id,permission_level,enabled) "
++                "VALUES (?,?,'owner',1)", (GUILD, USER))
++        api_pub.DiscordREST = FakeRest
++        FakeRest.send, FakeRest.calls = "ok", []
++        self.c = dash.app.test_client()
++        with self.c.session_transaction() as s:
++            s.update({"user": {"id": USER, "username": "t", "avatar": None}, "guild_id": GUILD,
++                      "csrf_token": "t", "expires_at": time.time() + 7200})
++
++    # -- helpers
++    def design(self, name="d"):
++        pid = execute(
++            "INSERT INTO shop_items (guild_id,name,type,price,description,role_id,max_stock,current_stock,"
++            "required_level,rarity,enabled,featured) VALUES (?,?,?,?,?,?,?,?,?,?,1,0)",
++            (GUILD, "VIP " + name, "role", 1500, "d", 99, 20, 12, 5, "epic"))
++        body = {"presentation": {"mode": "per_product", "content": "Buy {{product.name}}!",
++                                 "embeds": [{"title": "{{product.name}}"}]},
++                "products": [pid], "action": {"kind": "buttons", "entries": [{"product_id": pid}]}}
++        r = self.c.post("/api/shop-publisher/designs", headers=H,
++                        json={"name": name, "source_template_name": "banner", "design": body})
++        self.assertEqual(r.status_code, 200, r.get_json())
++        return r.get_json()["design"]["id"]
++
++    def publish(self, did):
++        r = self.c.post("/api/shop-publisher/publications/publish", headers=H,
++                        json={"design_id": did, "channel_id": 777001})
++        if r.get_json().get("code") == "ack_required" or r.get_json().get("requires_warning_ack"):
++            tok = r.get_json().get("warning_token")
++            r = self.c.post("/api/shop-publisher/publications/publish", headers=H,
++                            json={"design_id": did, "channel_id": 777001, "warning_token": tok})
++        return r
++
++    def pubs(self, did):
++        return rows("SELECT id,status,message_id FROM shop_publications WHERE design_id=?", (did,))
++
++    def design_exists(self, did):
++        return bool(rows("SELECT id FROM shop_designs WHERE id=?", (did,)))
++
++    def delete_design(self, did):
++        return self.c.delete(f"/api/shop-publisher/designs/{did}", headers=H)
++
++    def unpublish(self, pid):
++        return self.c.delete(f"/api/shop-publisher/publications/{pid}", headers=H)
++
++    # -- 1. published rows keep blocking deletion
++    def test_published_design_deletion_stays_blocked(self):
++        did = self.design()
++        self.assertEqual(self.publish(did).status_code, 201)
++        r = self.delete_design(did)
++        self.assertEqual(r.status_code, 409)
++        self.assertEqual(r.get_json()["code"], "design_has_publications")
++        self.assertEqual(r.get_json()["error"], "This Design has Publications. Unpublish them first.")
++        self.assertTrue(self.design_exists(did))
++        self.assertEqual(len(self.pubs(did)), 1)
++
++    def test_published_row_still_unpublishes_via_discord_then_design_deletes(self):
++        did = self.design()
++        self.assertEqual(self.publish(did).status_code, 201)
++        pid = self.pubs(did)[0][0]
++        FakeRest.calls = []
++        r = self.unpublish(pid)
++        self.assertEqual((r.status_code, r.get_json()["success"]), (200, True))
++        self.assertIn("delete", FakeRest.calls)           # normal path still deletes the message
++        self.assertEqual(self.delete_design(did).status_code, 200)
++
++    # -- 2. failed + message-less rows can be cleared, then the design deleted
++    def test_failed_messageless_row_can_be_cleared_then_design_deleted(self):
++        did = self.design()
++        FakeRest.send = "reject"
++        r = self.publish(did)
++        self.assertEqual(r.status_code, 502)
++        (pid, status, message_id), = self.pubs(did)
++        self.assertEqual((status, message_id), ("failed", None))
++        self.assertEqual(self.delete_design(did).status_code, 409)       # still guarded while the row exists
++        FakeRest.calls = []
++        r = self.unpublish(pid)
++        self.assertEqual((r.status_code, r.get_json()["success"]), (200, True), r.get_json())
++        self.assertEqual(FakeRest.calls, [], "clearing a never-sent row must make no Discord calls")
++        self.assertEqual(self.pubs(did), [])
++        r = self.delete_design(did)
++        self.assertEqual((r.status_code, r.get_json()["success"]), (200, True))
++        self.assertFalse(self.design_exists(did))
++
++    def test_clearing_only_removes_the_targeted_failed_row(self):
++        a, b = self.design("a"), self.design("b")
++        FakeRest.send = "reject"
++        self.publish(a); self.publish(b)
++        pid_a = self.pubs(a)[0][0]
++        self.assertEqual(self.unpublish(pid_a).status_code, 200)
++        self.assertEqual(self.pubs(a), [])
++        self.assertEqual(len(self.pubs(b)), 1)                            # sibling design's row untouched
++        self.assertEqual(self.delete_design(b).status_code, 409)
++
++    def test_unpublish_of_an_already_cleared_row_is_404(self):
++        did = self.design()
++        FakeRest.send = "reject"; self.publish(did)
++        pid = self.pubs(did)[0][0]
++        self.assertEqual(self.unpublish(pid).status_code, 200)
++        self.assertEqual(self.unpublish(pid).status_code, 404)
++
++    # -- 3. pending (uncertain send) rows stay protected
++    def test_pending_row_stays_protected(self):
++        did = self.design()
++        FakeRest.send = "uncertain"
++        self.assertEqual(self.publish(did).status_code, 202)
++        (pid, status, message_id), = self.pubs(did)
++        self.assertEqual((status, message_id), ("pending", None))
++        FakeRest.calls = []
++        r = self.unpublish(pid)
++        self.assertEqual(r.status_code, 409)
++        self.assertEqual(r.get_json()["code"], "publication_attention")
++        self.assertEqual(FakeRest.calls, [])
++        self.assertEqual(len(self.pubs(did)), 1, "pending row must be retained")
++        self.assertEqual(self.delete_design(did).status_code, 409)
++        self.assertTrue(self.design_exists(did))
++
++    def test_failed_row_that_has_a_message_id_is_not_cleared_by_the_new_path(self):
++        did = self.design()
++        pid = execute("INSERT INTO shop_publications (guild_id,design_id,channel_id,message_id,status) "
++                      "VALUES (?,?,?,?,?)", (GUILD, did, 777001, 555001, "failed"))
++        r = self.unpublish(pid)
++        self.assertEqual(r.status_code, 409)
++        self.assertEqual(len(self.pubs(did)), 1)
++
++    def test_remove_publication_null_match_never_matches_a_row_with_a_message(self):
++        did = self.design()
++        pid = execute("INSERT INTO shop_publications (guild_id,design_id,channel_id,message_id,status) "
++                      "VALUES (?,?,?,?,?)", (GUILD, did, 777001, 555001, "failed"))
++        self.assertFalse(pub.remove_publication(GUILD, pid, expected_statuses=("failed",),
++                                                expected_message_id=None, match_message=True))
++        self.assertEqual(len(self.pubs(did)), 1)
++        pid2 = execute("INSERT INTO shop_publications (guild_id,design_id,channel_id,status) "
++                       "VALUES (?,?,?,?)", (GUILD, did, 777002, "pending"))
++        self.assertFalse(pub.remove_publication(GUILD, pid2, expected_statuses=("failed",),
++                                                expected_message_id=None, match_message=True))
++        self.assertEqual(len(self.pubs(did)), 2, "status guard must keep pending rows")
++
++    # -- 4. normal deletion still works
++    def test_design_without_publications_still_deletes(self):
++        did = self.design()
++        r = self.delete_design(did)
++        self.assertEqual((r.status_code, r.get_json()["success"]), (200, True))
++        self.assertFalse(self.design_exists(did))
++        self.assertEqual(self.delete_design(did).status_code, 404)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/scripts/test_shop_publication_reconcile.py b/scripts/test_shop_publication_reconcile.py
+new file mode 100644
+index 0000000..48b89e8
+--- /dev/null
++++ b/scripts/test_shop_publication_reconcile.py
+@@ -0,0 +1,330 @@
++"""Deleted channels/messages, event reconciliation, stale-operation recovery, re-check and the
++record-only escape hatch. Real Flask routes + real SQLite; only the Discord layer is faked.
++"""
++import asyncio, os, sys, time, types, unittest
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++from phase1_support import GUILD, USER, execute, rows, reset_database  # noqa: E402
++import dashboard.app as dash  # noqa: E402
++import dashboard.api.shop_publications as api_pub  # noqa: E402
++import utils.shop_publication as pub  # noqa: E402
++from cogs.shop_publication_sync import ShopPublicationSync  # noqa: E402
++
++H = {"X-CSRF-Token": "t"}
++CH = 777001
++
++
++class FakeRest(pub.DiscordREST):
++    channel = "ok"        # ok | deleted | forbidden | transient   (validate_channel_and_permissions)
++    message = "present"   # present | missing | transient          (fetch_message)
++    chan_get = "404"      # 404 | 403 | transport                  (GET /channels/<id>)
++    calls = []
++
++    def __init__(self): pass
++
++    def validate_channel_and_permissions(self, *a, **k):
++        FakeRest.calls.append("validate")
++        if FakeRest.channel == "deleted":
++            raise pub.PublicationError("The selected channel is not available in this server.", code="unknown_channel", status=404)
++        if FakeRest.channel == "forbidden":
++            raise pub.PublicationError("The bot lacks required channel permissions: View Channel.", code="bot_missing_permissions", status=403)
++        if FakeRest.channel == "transient":
++            raise pub.PublicationError("Discord channel verification failed.", code="channel_verification_failed", status=502)
++        return True
++
++    def request(self, method, path, **k):
++        FakeRest.calls.append("GET " + path)
++        if FakeRest.chan_get == "404":
++            raise pub.DiscordFailure("Unknown Channel", status=404, discord_code=10003)
++        if FakeRest.chan_get == "403":
++            raise pub.DiscordFailure("Missing Access", status=403, discord_code=50001)
++        raise pub.DiscordFailure("transport error", uncertain=False)
++
++    def fetch_message(self, *a, **k):
++        FakeRest.calls.append("fetch")
++        if FakeRest.message == "missing":
++            raise pub.DiscordFailure("Unknown Message", status=404, discord_code=10008)
++        if FakeRest.message == "transient":
++            raise pub.DiscordFailure("server error", status=500)
++        return {"id": "1"}
++
++    def delete_message(self, *a, **k):
++        FakeRest.calls.append("delete"); return True
++
++
++class Base(unittest.TestCase):
++    def setUp(self):
++        asyncio.run(reset_database())
++        execute("INSERT INTO dashboard_users (guild_id,user_id,permission_level,enabled) VALUES (?,?,'owner',1)", (GUILD, USER))
++        api_pub.DiscordREST = FakeRest
++        FakeRest.channel, FakeRest.message, FakeRest.chan_get, FakeRest.calls = "ok", "present", "404", []
++        self.c = dash.app.test_client()
++        with self.c.session_transaction() as s:
++            s.update({"user": {"id": USER, "username": "t", "avatar": None}, "guild_id": GUILD,
++                      "csrf_token": "t", "expires_at": time.time() + 7200})
++        pid = execute("INSERT INTO shop_items (guild_id,name,type,price,description,role_id,max_stock,current_stock,required_level,rarity,enabled,featured) VALUES (?,?,?,?,?,?,?,?,?,?,1,0)", (GUILD, "VIP", "role", 1500, "d", 99, 20, 12, 5, "epic"))
++        body = {"presentation": {"mode": "per_product", "content": "Buy {{product.name}}!", "embeds": [{"title": "{{product.name}}"}]},
++                "products": [pid], "action": {"kind": "buttons", "entries": [{"product_id": pid}]}}
++        r = self.c.post("/api/shop-publisher/designs", headers=H, json={"name": "d", "source_template_name": "banner", "design": body})
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.did = r.get_json()["design"]["id"]
++
++    def row(self, status, message_id=None, channel=CH, guild=GUILD, design=None):
++        return execute("INSERT INTO shop_publications (guild_id,design_id,channel_id,message_id,status) VALUES (?,?,?,?,?)",
++                       (guild, design or self.did, channel, message_id, status))
++
++    def status(self, pid):
++        r = rows("SELECT status FROM shop_publications WHERE id=?", (pid,))
++        return r[0][0] if r else None
++
++    def delete_design(self):
++        return self.c.delete(f"/api/shop-publisher/designs/{self.did}", headers=H)
++
++    def unpublish(self, pid):
++        return self.c.delete(f"/api/shop-publisher/publications/{pid}", headers=H)
++
++
++class UnpublishDeletedChannel(Base):
++    def test_confirmed_deleted_channel_clears_row_then_design_deletes(self):
++        pid = self.row("published", 555)
++        FakeRest.channel = "deleted"
++        r = self.unpublish(pid)
++        self.assertEqual((r.status_code, r.get_json()["success"]), (200, True), r.get_json())
++        self.assertTrue(r.get_json()["channel_deleted"] and r.get_json()["already_missing"])
++        self.assertNotIn("delete", FakeRest.calls)               # no message delete on a dead channel
++        self.assertIsNone(self.status(pid))
++        self.assertEqual(self.delete_design().status_code, 200)
++
++    def test_attention_row_with_deleted_channel_also_clears(self):
++        pid = self.row("attention", 555); FakeRest.channel = "deleted"
++        self.assertEqual(self.unpublish(pid).status_code, 200)
++        self.assertIsNone(self.status(pid))
++
++    def test_unknown_channel_without_discord_confirmation_stays_protected_403(self):
++        pid = self.row("published", 555); FakeRest.channel = "deleted"; FakeRest.chan_get = "403"
++        r = self.unpublish(pid)
++        self.assertEqual(r.status_code, 409)
++        self.assertEqual(self.status(pid), "attention")
++        self.assertEqual(self.delete_design().status_code, 409)
++
++    def test_unknown_channel_with_transport_failure_stays_protected(self):
++        pid = self.row("published", 555); FakeRest.channel = "deleted"; FakeRest.chan_get = "transport"
++        self.assertEqual(self.unpublish(pid).status_code, 409)
++        self.assertEqual(self.status(pid), "attention")
++
++    def test_permission_error_is_never_treated_as_deleted(self):
++        pid = self.row("published", 555); FakeRest.channel = "forbidden"
++        self.assertEqual(self.unpublish(pid).status_code, 409)
++        self.assertEqual(self.status(pid), "attention")
++        self.assertNotIn("GET /channels/%d" % CH, FakeRest.calls)   # not even asked: only unknown_channel is verified
++
++    def test_transient_verification_error_is_never_treated_as_deleted(self):
++        pid = self.row("published", 555); FakeRest.channel = "transient"
++        self.assertEqual(self.unpublish(pid).status_code, 409)
++        self.assertEqual(self.status(pid), "attention")
++
++
++class EventReconcilers(Base):
++    def test_message_delete_removes_only_the_exact_stable_row(self):
++        hit = self.row("published", 111)
++        attn = self.row("attention", 112)
++        other_msg = self.row("published", 113)
++        other_chan = self.row("published", 111, channel=CH + 1)
++        other_guild = self.row("published", 111, guild=GUILD + 1)
++        inflight = self.row("unpublishing", 111)
++        pending = self.row("pending", None)
++        n = pub.reconcile_message_deleted(GUILD, CH, [111, 112])
++        self.assertEqual(n, 2, "exactly the published + attention rows for messages 111/112 in this channel")
++        self.assertIsNone(self.status(hit)); self.assertIsNone(self.status(attn))
++        for keep in (other_msg, other_chan, other_guild, inflight, pending):
++            self.assertIsNotNone(self.status(keep), "unrelated / in-flight / pending rows must be untouched")
++
++    def test_message_delete_is_idempotent_and_ignores_unknown_ids(self):
++        pid = self.row("published", 111)
++        self.assertEqual(pub.reconcile_message_deleted(GUILD, CH, [111]), 1)
++        self.assertEqual(pub.reconcile_message_deleted(GUILD, CH, [111]), 0)
++        self.assertEqual(pub.reconcile_message_deleted(GUILD, CH, [999999]), 0)
++        self.assertEqual(pub.reconcile_message_deleted(GUILD, CH, []), 0)
++
++    def test_bulk_delete_removes_all_listed_and_only_those(self):
++        a, b, c = self.row("published", 1), self.row("published", 2), self.row("published", 3)
++        self.assertEqual(pub.reconcile_message_deleted(GUILD, CH, {1, 2}), 2)
++        self.assertIsNone(self.status(a)); self.assertIsNone(self.status(b)); self.assertEqual(self.status(c), "published")
++
++    def test_channel_delete_removes_every_non_inflight_row_of_that_channel_only(self):
++        gone = [self.row(s, 50 + i) for i, s in enumerate(("published", "attention", "replacement_send_uncertain", "replacement_retry_authorized"))]
++        gone += [self.row("pending", None), self.row("failed", None)]
++        keep_inflight = [self.row(s, 90) for s in ("updating", "unpublishing", "replacement_sending")]
++        keep_other = [self.row("published", 60, channel=CH + 1), self.row("published", 61, guild=GUILD + 1)]
++        self.assertEqual(pub.reconcile_channel_deleted(GUILD, CH), len(gone))
++        for pid in gone: self.assertIsNone(self.status(pid))
++        for pid in keep_inflight + keep_other: self.assertIsNotNone(self.status(pid))
++        self.assertEqual(pub.reconcile_channel_deleted(GUILD, CH), 0)       # idempotent
++
++    def test_deleting_a_channel_unblocks_the_design(self):
++        self.row("published", 1); self.row("pending", None)
++        self.assertEqual(self.delete_design().status_code, 409)
++        pub.reconcile_channel_deleted(GUILD, CH)
++        self.assertEqual(self.delete_design().status_code, 200)
++
++
++class CogHandlers(Base):
++    def run_cog(self, coro_fn, *a):
++        cog = ShopPublicationSync(types.SimpleNamespace())
++        return asyncio.run(coro_fn(cog, *a))
++
++    def test_raw_message_delete_handler(self):
++        pid = self.row("published", 111)
++        payload = types.SimpleNamespace(guild_id=GUILD, channel_id=CH, message_id=111)
++        self.run_cog(ShopPublicationSync.on_raw_message_delete, payload)
++        self.assertIsNone(self.status(pid))
++        self.run_cog(ShopPublicationSync.on_raw_message_delete, payload)    # duplicate event: no error
++
++    def test_dm_and_guildless_events_are_ignored(self):
++        pid = self.row("published", 111)
++        self.run_cog(ShopPublicationSync.on_raw_message_delete, types.SimpleNamespace(guild_id=None, channel_id=CH, message_id=111))
++        self.run_cog(ShopPublicationSync.on_raw_bulk_message_delete, types.SimpleNamespace(guild_id=None, channel_id=CH, message_ids={111}))
++        self.run_cog(ShopPublicationSync.on_guild_channel_delete, types.SimpleNamespace(guild=None, id=CH))
++        self.assertEqual(self.status(pid), "published")
++
++    def test_bulk_and_channel_handlers(self):
++        a, b = self.row("published", 1), self.row("published", 2)
++        self.run_cog(ShopPublicationSync.on_raw_bulk_message_delete, types.SimpleNamespace(guild_id=GUILD, channel_id=CH, message_ids={1}))
++        self.assertIsNone(self.status(a)); self.assertEqual(self.status(b), "published")
++        self.run_cog(ShopPublicationSync.on_guild_channel_delete, types.SimpleNamespace(guild=types.SimpleNamespace(id=GUILD), id=CH))
++        self.assertIsNone(self.status(b))
++
++    def test_handler_failure_never_raises(self):
++        orig = pub.reconcile_message_deleted
++        import cogs.shop_publication_sync as mod
++        def boom(*a, **k): raise RuntimeError("db locked")
++        mod.reconcile_message_deleted = boom
++        try:
++            self.run_cog(ShopPublicationSync.on_raw_message_delete, types.SimpleNamespace(guild_id=GUILD, channel_id=CH, message_id=1))
++        finally:
++            mod.reconcile_message_deleted = orig
++
++    def test_startup_recovery_runs_once(self):
++        old = self.row("updating", 5)
++        execute("UPDATE shop_publications SET updated_at=datetime('now','-1 hour') WHERE id=?", (old,))
++        cog = ShopPublicationSync(types.SimpleNamespace())
++        asyncio.run(cog.on_ready())
++        self.assertEqual(self.status(old), "attention")
++        execute("UPDATE shop_publications SET status='updating', updated_at=datetime('now','-1 hour') WHERE id=?", (old,))
++        asyncio.run(cog.on_ready())                      # second ready event: guarded
++        self.assertEqual(self.status(old), "updating")
++
++
++class StaleRecovery(Base):
++    def age(self, pid, seconds=3600):
++        execute("UPDATE shop_publications SET updated_at=datetime('now', ?) WHERE id=?", (f"-{seconds} seconds", pid))
++
++    def test_only_stale_inflight_rows_move_and_into_recoverable_states(self):
++        u, un, rs = self.row("updating", 1), self.row("unpublishing", 2), self.row("replacement_sending", 3)
++        fresh = self.row("updating", 4)
++        published, pending = self.row("published", 5), self.row("pending", None)
++        for pid in (u, un, rs, published, pending): self.age(pid)
++        self.assertEqual(pub.recover_stale_operations(900), 3)
++        self.assertEqual((self.status(u), self.status(un)), ("attention", "attention"))
++        self.assertEqual(self.status(rs), "replacement_send_uncertain")
++        self.assertEqual(self.status(fresh), "updating")                  # not stale
++        self.assertEqual((self.status(published), self.status(pending)), ("published", "pending"))
++        self.assertEqual(pub.recover_stale_operations(900), 0)           # idempotent
++
++    def test_recovered_rows_can_be_unpublished(self):
++        pid = self.row("unpublishing", 555); self.age(pid)
++        pub.recover_stale_operations(900)
++        r = self.unpublish(pid)                                           # message present -> real unpublish path
++        self.assertEqual(r.status_code, 200, r.get_json())
++
++
++class Recheck(Base):
++    def recheck(self):
++        r = self.c.post(f"/api/shop-publisher/designs/{self.did}/publications/recheck", headers=H)
++        return r.status_code, r.get_json()
++
++    def test_confirmed_missing_message_is_cleared(self):
++        pid = self.row("published", 555); FakeRest.message = "missing"
++        code, b = self.recheck()
++        self.assertEqual((code, b["removed"]), (200, 1)); self.assertIsNone(self.status(pid))
++
++    def test_confirmed_deleted_channel_is_cleared(self):
++        pid = self.row("attention", 555); FakeRest.channel = "deleted"
++        code, b = self.recheck()
++        self.assertEqual(b["removed"], 1); self.assertIsNone(self.status(pid))
++
++    def test_present_message_is_kept(self):
++        pid = self.row("published", 555)
++        code, b = self.recheck()
++        self.assertEqual((b["removed"], b["still_present"]), (0, 1)); self.assertEqual(self.status(pid), "published")
++
++    def test_ambiguous_results_never_remove(self):
++        a, b_, c_ = self.row("published", 1), self.row("published", 2), self.row("published", 3)
++        for setup in (("forbidden", "present", "404"), ("transient", "present", "404"), ("ok", "transient", "404"), ("deleted", "present", "403")):
++            FakeRest.channel, FakeRest.message, FakeRest.chan_get = setup
++            code, body = self.recheck()
++            self.assertEqual(body["removed"], 0, setup)
++            self.assertEqual(body["unverified"], 3, setup)
++        for pid in (a, b_, c_): self.assertEqual(self.status(pid), "published")
++
++    def test_non_stable_and_message_less_rows_are_skipped(self):
++        ids = [self.row("pending", None), self.row("failed", None), self.row("updating", 9), self.row("replacement_send_uncertain", 9)]
++        FakeRest.message = "missing"
++        code, b = self.recheck()
++        self.assertEqual((b["removed"], b["skipped"]), (0, 4))
++        for pid in ids: self.assertIsNotNone(self.status(pid))
++
++    def test_unknown_design_is_404(self):
++        r = self.c.post("/api/shop-publisher/designs/99999/publications/recheck", headers=H)
++        self.assertEqual(r.status_code, 404)
++
++    def test_recheck_only_touches_its_own_design(self):
++        mine = self.row("published", 1)
++        theirs = self.row("published", 2, design=self.did + 500)
++        FakeRest.message = "missing"
++        self.recheck()
++        self.assertIsNone(self.status(mine)); self.assertEqual(self.status(theirs), "published")
++
++
++class RecordOnlyRemoval(Base):
++    def forget(self, pid, body=None):
++        r = self.c.post(f"/api/shop-publisher/publications/{pid}/forget", headers=H, json=body if body is not None else {"confirm": True})
++        return r.status_code, r.get_json()
++
++    def test_requires_explicit_confirmation(self):
++        pid = self.row("pending", None)
++        for bad in ({}, {"confirm": "yes"}, {"confirm": 1}, {"confirm": False}):
++            code, b = self.forget(pid, bad)
++            self.assertEqual((code, b["code"]), (400, "confirmation_required"), bad)
++        self.assertEqual(self.status(pid), "pending")
++
++    def test_removes_only_allowed_states_and_never_calls_discord(self):
++        for st, mid in (("pending", None), ("attention", 5), ("replacement_send_uncertain", 6)):
++            pid = self.row(st, mid)
++            FakeRest.calls = []
++            code, b = self.forget(pid)
++            self.assertEqual((code, b["success"], b["discord_untouched"]), (200, True, True), st)
++            self.assertIsNone(self.status(pid)); self.assertEqual(FakeRest.calls, [], st)
++
++    def test_published_and_inflight_and_other_states_are_refused(self):
++        for st, mid in (("published", 5), ("updating", 5), ("unpublishing", 5), ("replacement_sending", 5),
++                        ("replacement_retry_authorized", 5), ("failed", None)):
++            pid = self.row(st, mid)
++            code, b = self.forget(pid)
++            self.assertEqual((code, b["code"]), (409, "record_not_removable"), st)
++            self.assertEqual(self.status(pid), st)
++
++    def test_unknown_row_is_404_and_guard_still_blocks_published(self):
++        self.assertEqual(self.forget(99999)[0], 404)
++        self.row("published", 5)
++        self.assertEqual(self.delete_design().status_code, 409)
++
++    def test_stuck_pending_row_unblocks_design_after_explicit_removal(self):
++        pid = self.row("pending", None)
++        self.assertEqual(self.delete_design().status_code, 409)
++        self.assertEqual(self.forget(pid)[0], 200)
++        self.assertEqual(self.delete_design().status_code, 200)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/scripts/test_shop_publication_recovery_ui.js b/scripts/test_shop_publication_recovery_ui.js
+new file mode 100644
+index 0000000..6a69337
+--- /dev/null
++++ b/scripts/test_shop_publication_recovery_ui.js
+@@ -0,0 +1,113 @@
++#!/usr/bin/env node
++'use strict';
++// Re-check with Discord + Remove record only: gating, confirmation, requests, stale-response safety.
++const fs = require('fs'), path = require('path'), vm = require('vm');
++const { createDom, createWindow } = require('./support/dom_stub.js');
++const dom = createDom(), win = createWindow(), doc = dom.document;
++const root = doc.createElement('div'); root.setAttribute('data-page-module', 'shop-designer');
++const ids = {};
++[['sd-design-select', 'select'], ['sd-publication-channel', 'div'], ['sd-publication-publish', 'button'],
++ ['sd-publication-recheck', 'button'], ['sd-publication-list', 'div'], ['sd-publication-status', 'div']].forEach(([id, tag]) => {
++    const node = doc.createElement(tag); node.id = id; ids[id] = node; root.appendChild(node);
++});
++ids['sd-design-select'].value = '7';
++doc.body.appendChild(root);
++win.__CSRF_TOKEN__ = 'csrf';
++const confirmations = []; let confirmAccept = true;
++win.confirm = m => { confirmations.push(m); return confirmAccept; };
++const calls = [], deferred = [];
++win.fetch = (url, init) => { calls.push({url, init}); return new Promise(resolve => deferred.push({url, init,
++    resolve: (body, ok = true, status = 200) => resolve({ok, status, json: () => Promise.resolve(body)})})); };
++const sandbox = {window: win, document: doc, fetch: win.fetch, Promise, Number, String, Object, Array, Error, console};
++vm.createContext(sandbox);
++vm.runInContext(fs.readFileSync(path.join(__dirname, '../dashboard/static/js/shop-publications.js'), 'utf8'), sandbox);
++const tick = () => new Promise(r => setTimeout(r, 0));
++function assert(ok, label) { if (!ok) throw new Error('FAIL: ' + label); console.log('PASS', label); }
++const labels = row => row.querySelectorAll('button').map(b => b.textContent);
++const recheck = ids['sd-publication-recheck'], list = ids['sd-publication-list'], status = ids['sd-publication-status'];
++const PUBS = [
++    {id: 1, channel_id: 11, status: 'pending', message_id: null},
++    {id: 2, channel_id: 12, status: 'attention', message_id: 902},
++    {id: 3, channel_id: 13, status: 'published', message_id: 903},
++    {id: 4, channel_id: 14, status: 'replacement_send_uncertain', message_id: 904},
++    {id: 5, channel_id: 15, status: 'failed', message_id: null},
++    {id: 6, channel_id: 16, status: 'unpublishing', message_id: 906},
++];
++(async function () {
++    // list still loading -> Re-check disabled
++    const first = deferred.shift();
++    assert(recheck.disabled === true, 'Re-check is disabled while the publication list is loading');
++    first.resolve({success: true, publications: PUBS}); await tick();
++    assert(recheck.disabled === false, 'Re-check is enabled once the list for the selected design has loaded');
++
++    const rows = list.children;
++    assert(labels(rows[0]).join() === 'Remove record only', 'pending: only Remove record only');
++    assert(labels(rows[1]).join() === 'Update,Unpublish,Remove record only', 'attention with message: Update, Unpublish, Remove record only');
++    assert(labels(rows[2]).join() === 'Update,Unpublish', 'published: NO record-only removal (Unpublish must be used)');
++    assert(labels(rows[3]).join() === 'Authorize replacement retry,Remove record only', 'uncertain replacement: authorize + record-only');
++    assert(labels(rows[4]).join() === 'Unpublish', 'failed orphan: Unpublish only');
++    assert(labels(rows[5]).length === 0, 'in-flight row: no actions at all');
++
++    // --- Remove record only: declined -> nothing sent
++    confirmAccept = false; let before = calls.length;
++    rows[0].querySelectorAll('button')[0].click();
++    assert(calls.length === before, 'declining the record-only confirmation sends no request');
++    const msg = confirmations[confirmations.length - 1];
++    assert(/database only/i.test(msg) && /Discord is NOT contacted/.test(msg) && /delete it manually/.test(msg),
++        'confirmation says database-only, Discord not contacted, message may need manual deletion');
++    // accepted -> POST /forget {confirm:true}, then reload
++    confirmAccept = true;
++    rows[0].querySelectorAll('button')[0].click();
++    const f = deferred.shift();
++    assert(f.url === '/api/shop-publisher/publications/1/forget' && f.init.method === 'POST' &&
++        JSON.parse(f.init.body).confirm === true, 'POST /publications/1/forget with {confirm:true}');
++    assert(rows[0].querySelectorAll('button')[0].disabled === true, 'button disables while the request runs');
++    f.resolve({success: true, discord_untouched: true}); await tick();
++    assert(/Discord was not contacted/.test(status.textContent), 'status states Discord was not contacted');
++    const reload = deferred.shift(); assert(/\/designs\/7\/publications$/.test(reload.url), 'list reloads after removal');
++    reload.resolve({success: true, publications: PUBS.slice(1)}); await tick();
++
++    // --- failure keeps row and re-enables the button
++    list.children[0].querySelectorAll('button')[2].click();           // attention row: Remove record only
++    const bad = deferred.shift();
++    bad.resolve({success: false, error: 'This Publication is not in a state that allows record-only removal.'}, false, 409); await tick();
++    assert(/not in a state/.test(status.textContent), 'server refusal is shown, not swallowed');
++    assert(list.children[0].querySelectorAll('button')[2].disabled === false, 'button re-enables after a refusal');
++
++    // --- Re-check
++    recheck.click();
++    const rc = deferred.shift();
++    assert(rc.url === '/api/shop-publisher/designs/7/publications/recheck' && rc.init.method === 'POST', 'POST /designs/7/publications/recheck');
++    assert(recheck.disabled === true && /Checking Discord/.test(status.textContent), 'Re-check disables itself and shows progress');
++    recheck.click(); assert(deferred.length === 0, 'a second click while running sends nothing');
++    rc.resolve({success: true, removed: 2, still_present: 1, unverified: 1, skipped: 0}); await tick();
++    assert(/2 stale record\(s\) cleared/.test(status.textContent) && /1 still on Discord/.test(status.textContent) &&
++        /1 could not be verified and were left untouched/.test(status.textContent), 'summary reports cleared / present / unverified honestly');
++    deferred.shift().resolve({success: true, publications: []}); await tick();
++    assert(recheck.disabled === false, 'Re-check re-enables after completion');
++
++    // --- stale Re-check response must not overwrite a newer selection
++    recheck.click(); const stale = deferred.shift();
++    ids['sd-design-select'].value = '8'; ids['sd-design-select'].dispatch('change');
++    const other = deferred.shift(); other.resolve({success: true, publications: []}); await tick();
++    status.textContent = 'design 8 status';
++    stale.resolve({success: true, removed: 5, still_present: 0, unverified: 0}); await tick();
++    assert(status.textContent === 'design 8 status', 'a stale Re-check result cannot overwrite another design\'s status');
++    assert(recheck.disabled === false, 'Re-check is usable again for the newly selected design');
++
++    // --- blocked Update (HTTP 400) surfaces every validation problem, and the row stays actionable
++    ids['sd-design-select'].value = '9'; ids['sd-design-select'].dispatch('change');
++    deferred.shift().resolve({success: true, publications: [{id: 20, channel_id: 21, status: 'published', message_id: 999}]}); await tick();
++    list.children[0].querySelectorAll('button')[0].click();                    // Update
++    deferred.shift().resolve({success: false, code: 'publication_validation_failed', error: 'No product 5 in this guild.',
++        problems: [{message: 'No product 5 in this guild.'}, {message: 'No product 6 in this guild.'}]}, false, 400); await tick();
++    assert(/No product 5 in this guild\./.test(status.textContent) && /\+1 more: No product 6 in this guild\./.test(status.textContent),
++        'a blocked Update shows the first problem and the remaining ones');
++    deferred.shift().resolve({success: true, publications: [{id: 20, channel_id: 21, status: 'published', message_id: 999}]}); await tick();
++    assert(labels(list.children[0]).join() === 'Update,Unpublish', 'after a blocked Update the row is untouched and Unpublish stays available');
++
++    // --- Re-check disabled when nothing selected
++    ids['sd-design-select'].value = ''; ids['sd-design-select'].dispatch('change');
++    assert(recheck.disabled === true, 'Re-check is disabled with no design selected');
++    console.log('All publication recovery UI checks passed.');
++})().catch(e => { console.error(e.message); process.exit(1); });
+diff --git a/scripts/test_shop_publications_ui.js b/scripts/test_shop_publications_ui.js
+index 0514955..6a0770a 100644
+--- a/scripts/test_shop_publications_ui.js
++++ b/scripts/test_shop_publications_ui.js
+@@ -86,20 +86,33 @@ function assert(ok, label) { if (!ok) throw new Error('FAIL: ' + label); console
+     await tick();
+     const stateRows = ids['sd-publication-list'].children;
+     assert(stateRows.length === 10, 'Publication statuses are rendered as separate rows');
+-    [0, 1, 2, 3, 4, 5].forEach(index => {
++    // Row 1 (failed, no message ID) is intentionally actionable now: it offers
++    // only Unpublish, covered in test_shop_failed_publication_ui.js.
++    [2, 3, 4].forEach(index => {
+         assert(stateRows[index].querySelectorAll('button').length === 0 &&
+             stateRows[index].textContent.indexOf('Not actionable:') !== -1,
+-            'message-less or locked state ' + index + ' has a clear non-actionable explanation');
++            'in-flight state ' + index + ' has a clear non-actionable explanation and no actions');
+     });
++    // pending / message-less attention are not actionable for Update or Unpublish, but may be
++    // resolved by the explicit, confirmed record-only removal (covered in the recovery UI test).
++    [0, 5].forEach(index => {
++        const labels = stateRows[index].querySelectorAll('button').map(b => b.textContent);
++        assert(labels.join() === 'Remove record only' &&
++            stateRows[index].textContent.indexOf('Not actionable:') !== -1,
++            'message-less state ' + index + ' keeps its explanation and offers only Remove record only');
++    });
++    assert(stateRows[1].querySelectorAll('button').length === 1 &&
++        stateRows[1].querySelectorAll('button')[0].textContent === 'Unpublish',
++        'a failed, message-less row offers only Unpublish (no Update)');
+     assert(stateRows[6].querySelectorAll('button').length === 2 &&
+-        stateRows[7].querySelectorAll('button').length === 2,
+-        'published and actionable attention states offer Update and Unpublish');
++        stateRows[7].querySelectorAll('button').map(b => b.textContent).join() === 'Update,Unpublish,Remove record only',
++        'published offers Update and Unpublish; attention adds the explicit record-only removal');
+     assert(stateRows[8].querySelectorAll('button').length === 1 &&
+         stateRows[8].querySelectorAll('button')[0].textContent === 'Update',
+         'replacement retry authorization permits only its deliberate Update');
+-    assert(stateRows[9].querySelectorAll('button').length === 1 &&
+-        stateRows[9].querySelectorAll('button')[0].textContent === 'Authorize replacement retry',
+-        'uncertain replacement exposes only the existing explicit authorization action');
++    assert(stateRows[9].querySelectorAll('button').map(b => b.textContent).join() ===
++        'Authorize replacement retry,Remove record only',
++        'uncertain replacement keeps explicit authorization and adds the record-only removal');
+ 
+     // One row operation disables its sibling, and a response for a previous
+     // Design cannot overwrite the newly selected Design's status/list.
+diff --git a/utils/shop_publication.py b/utils/shop_publication.py
+index 9c4b667..1089b8f 100644
+--- a/utils/shop_publication.py
++++ b/utils/shop_publication.py
+@@ -612,6 +612,29 @@ def authorize_replacement_retry(guild_id, publication_id):
+     return publication if changed else None
+ 
+ 
++# States in which a Discord operation is mid-flight. Reconciliation never touches these.
++IN_FLIGHT_STATUSES = ("updating", "unpublishing", "replacement_sending")
++# Discord event / re-check cleanup only trusts a message ID on these stable states.
++MESSAGE_BEARING_STABLE_STATUSES = ("published", "attention")
++# States that can legitimately carry no usable Discord message and need an explicit operator decision.
++FORGETTABLE_STATUSES = ("pending", "attention", "replacement_send_uncertain")
++
++
++def channel_confirmed_deleted(rest, channel_id):
++    """True only when Discord itself answers 404 / code 10003 (Unknown Channel) for the channel.
++
++    403 Missing Access, timeouts, rate limits, 5xx and any unexpected error all return
++    False: none of them prove the channel (and therefore the message) is gone.
++    """
++    try:
++        rest.request("GET", f"/channels/{int(channel_id)}")
++    except DiscordFailure as exc:
++        return exc.status == 404 and exc.discord_code == 10003
++    except Exception:
++        return False
++    return False
++
++
+ def unpublish(guild_id, publication, *, rest=None):
+     pid = int(publication["id"])
+     current = get_publication(guild_id, pid)
+@@ -672,6 +695,15 @@ def unpublish(guild_id, publication, *, rest=None):
+                         "error": "Publication state changed before cleanup; association was retained."}
+             raise
+     except PublicationError as exc:
++        # `unknown_channel` means the server's channel list was read successfully and lacks
++        # this channel. Require Discord to also confirm the channel itself is deleted (404 /
++        # 10003) before treating the message as gone; permission and transient errors stay
++        # protected as `attention`.
++        if exc.code == "unknown_channel" and channel_confirmed_deleted(rest, channel_id):
++            if remove_claimed():
++                return {"outcome": "removed", "already_missing": True, "channel_deleted": True}
++            return {"outcome": "attention", "publication": get_publication(guild_id, pid),
++                    "error": "Publication state changed before cleanup; association was retained."}
+         saved = restore_attention(str(exc))
+         return {"outcome": "attention", "publication": saved, "error": str(exc)}
+     except DiscordFailure as exc:
+@@ -682,3 +714,128 @@ def unpublish(guild_id, publication, *, rest=None):
+         return {"outcome": "attention", "publication": get_publication(guild_id, pid),
+                 "error": "Message was deleted, but Publication state changed; operator review is required."}
+     return {"outcome": "removed", "already_missing": False}
++
++
++# ---------------------------------------------------------------------------
++# Reconciliation (Discord deletion events, re-check, interrupted operations, operator escape hatch)
++# ---------------------------------------------------------------------------
++
++def reconcile_message_deleted(guild_id, channel_id, message_ids):
++    """Remove stable publication associations whose exact Discord message was deleted.
++
++    Only `published`/`attention` rows matching guild + channel + message ID are removed.
++    In-flight rows are skipped (the bot's own update/unpublish deletes fire this event too).
++    Idempotent: a repeat call, or an unknown message, removes nothing. Returns rows removed.
++    """
++    ids = sorted({int(m) for m in (message_ids or ())})
++    if not ids:
++        return 0
++    async def delete():
++        async with aiosqlite.connect(DB_PATH) as db:
++            st = ",".join("?" for _ in MESSAGE_BEARING_STABLE_STATUSES)
++            mk = ",".join("?" for _ in ids)
++            await db.execute("BEGIN IMMEDIATE")
++            cur = await db.execute(
++                f"DELETE FROM shop_publications WHERE guild_id=? AND channel_id=? "
++                f"AND status IN ({st}) AND message_id IN ({mk})",
++                (int(guild_id), int(channel_id), *MESSAGE_BEARING_STABLE_STATUSES, *ids))
++            await db.commit()
++            return cur.rowcount
++    return int(run_async(delete()) or 0)
++
++
++def reconcile_channel_deleted(guild_id, channel_id):
++    """Remove every association pointing at a deleted channel (all its messages are gone).
++
++    In-flight rows are left for their own operation to finish; they end in `attention` and
++    the verified-deleted-channel Unpublish path (or a later reconcile) clears them.
++    """
++    async def delete():
++        async with aiosqlite.connect(DB_PATH) as db:
++            mk = ",".join("?" for _ in IN_FLIGHT_STATUSES)
++            await db.execute("BEGIN IMMEDIATE")
++            cur = await db.execute(
++                f"DELETE FROM shop_publications WHERE guild_id=? AND channel_id=? "
++                f"AND status NOT IN ({mk})",
++                (int(guild_id), int(channel_id), *IN_FLIGHT_STATUSES))
++            await db.commit()
++            return cur.rowcount
++    return int(run_async(delete()) or 0)
++
++
++def recover_stale_operations(max_age_seconds=900):
++    """Move operations interrupted mid-flight (process crash/restart) to a recoverable state.
++
++    updating/unpublishing -> attention (the message ID is retained, so Update/Unpublish work);
++    replacement_sending -> replacement_send_uncertain (a new message may or may not exist, so
++    it needs the existing explicit operator recovery). Returns the number of rows moved.
++    """
++    age = f"-{int(max_age_seconds)} seconds"
++    async def recover():
++        async with aiosqlite.connect(DB_PATH) as db:
++            await db.execute("BEGIN IMMEDIATE")
++            a = await db.execute(
++                "UPDATE shop_publications SET status='attention', updated_at=CURRENT_TIMESTAMP, "
++                "last_error='Interrupted operation recovered after a restart; verify with Discord.' "
++                "WHERE status IN ('updating','unpublishing') AND updated_at <= datetime('now', ?)", (age,))
++            b = await db.execute(
++                "UPDATE shop_publications SET status='replacement_send_uncertain', "
++                "updated_at=CURRENT_TIMESTAMP, "
++                "last_error='Interrupted replacement send; the new message may exist. Review before retrying.' "
++                "WHERE status='replacement_sending' AND updated_at <= datetime('now', ?)", (age,))
++            await db.commit()
++            return a.rowcount + b.rowcount
++    return int(run_async(recover()) or 0)
++
++
++def recheck_design_publications(guild_id, design_id, *, rest=None):
++    """Ask Discord about each stable publication of one design and clear only confirmed-gone ones.
++
++    A row is removed only when Discord confirms its message is absent (404 / 10008) or its
++    channel is deleted (guild channel list lacks it AND GET /channels/<id> is 404 / 10003).
++    Anything ambiguous (403, timeouts, rate limits, 5xx) is left untouched and counted.
++    """
++    rest = rest or DiscordREST()
++    summary = {"removed": 0, "still_present": 0, "unverified": 0, "skipped": 0}
++    for pub in list_publications(guild_id, design_id):
++        pid, message_id = int(pub["id"]), pub.get("message_id")
++        if pub.get("status") not in MESSAGE_BEARING_STABLE_STATUSES or not message_id:
++            summary["skipped"] += 1
++            continue
++        channel_id = int(pub["channel_id"])
++        gone = False
++        try:
++            rest.validate_channel_and_permissions(guild_id, channel_id, "recheck")
++            try:
++                rest.fetch_message(channel_id, int(message_id))
++            except DiscordFailure as exc:
++                if not exc.message_missing:
++                    raise
++                gone = True
++        except PublicationError as exc:
++            if exc.code == "unknown_channel" and channel_confirmed_deleted(rest, channel_id):
++                gone = True
++            else:
++                summary["unverified"] += 1
++                continue
++        except DiscordFailure:
++            summary["unverified"] += 1
++            continue
++        if not gone:
++            summary["still_present"] += 1
++        elif remove_publication(guild_id, pid, expected_statuses=MESSAGE_BEARING_STABLE_STATUSES,
++                                expected_message_id=int(message_id), match_message=True):
++            summary["removed"] += 1
++        else:
++            summary["skipped"] += 1
++    return summary
++
++
++def forget_publication_record(guild_id, publication_id):
++    """Database-only removal of one stuck association (operator-confirmed, never touches Discord).
++
++    Allowed only for states that can lack a usable message and cannot otherwise be resolved:
++    pending (uncertain send), attention, replacement_send_uncertain. The Discord message, if
++    any, is NOT deleted. Returns True when the row was removed.
++    """
++    return remove_publication(guild_id, int(publication_id), expected_statuses=FORGETTABLE_STATUSES)

@@ -203,6 +203,7 @@ async def load_cogs():
         "cogs.tagmissions",
         "cogs.tagpartners",
         "cogs.afk",
+        "cogs.shop_publication_sync",
         # Load order does NOT matter for aliases any more (2026-08-28). The
         # old comment here said "MUST be last, it rewrites message.content so
         # process_commands can dispatch it" — that was wrong twice over:
