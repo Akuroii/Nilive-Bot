@@ -5,7 +5,8 @@ from dashboard.api import api_bp
 from dashboard.permissions import LEVEL_OWNER, get_session_guild_id, log_action, require_api_permission
 from utils.shop_publication import (
     DiscordREST, PublicationError, authorize_replacement_retry, design_exists,
-    get_publication, list_publications, post_publish, unpublish, update_publication,
+    forget_publication_record, get_publication, list_publications, post_publish,
+    recheck_design_publications, unpublish, update_publication,
 )
 
 
@@ -156,7 +157,10 @@ def api_shop_publication_unpublish(publication_id: int):
         log_action(guild_id, f"Unpublished Shop Publication #{publication_id}",
                    "shoppublisher", target_id=publication_id,
                    target_name=str(publication["design_id"]))
-        return jsonify({"success": True, "already_missing": result.get("already_missing", False)})
+        payload = {"success": True, "already_missing": result.get("already_missing", False)}
+        if result.get("channel_deleted"):
+            payload["channel_deleted"] = True
+        return jsonify(payload)
     saved = result.get("publication")
     log_action(guild_id, f"Shop Publication #{publication_id} unpublish needs attention",
                "shoppublisher", details=result.get("error"), target_id=publication_id,
@@ -164,3 +168,45 @@ def api_shop_publication_unpublish(publication_id: int):
     code = "uncertain_unpublish" if result["outcome"] == "uncertain" else "publication_attention"
     return jsonify({"success": False, "code": code, "publication": saved,
                     "error": result.get("error")}), 202 if result["outcome"] == "uncertain" else 409
+
+
+@api_bp.route("/shop-publisher/designs/<int:design_id>/publications/recheck", methods=["POST"])
+@require_api_permission(LEVEL_OWNER)
+def api_shop_publications_recheck(design_id: int):
+    """Ask Discord about this design's stable publications; clear only confirmed-gone ones."""
+    guild_id = get_session_guild_id()
+    if not design_exists(guild_id, design_id):
+        return jsonify({"success": False, "error": "Saved Design was not found in this server."}), 404
+    try:
+        summary = recheck_design_publications(guild_id, design_id, rest=DiscordREST())
+    except PublicationError as exc:
+        return _service_error(exc)
+    if summary["removed"]:
+        log_action(guild_id, f"Re-checked Shop Publications for Design #{design_id}: "
+                             f"{summary['removed']} stale record(s) cleared",
+                   "shoppublisher", target_id=design_id, target_name=str(design_id))
+    return jsonify({"success": True, **summary})
+
+
+@api_bp.route("/shop-publisher/publications/<int:publication_id>/forget", methods=["POST"])
+@require_api_permission(LEVEL_OWNER)
+def api_shop_publication_forget(publication_id: int):
+    """Operator-confirmed, database-only removal of one stuck association.
+
+    Never contacts Discord: a message may still exist and must be deleted manually.
+    """
+    guild_id = get_session_guild_id()
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return jsonify({"success": False, "code": "confirmation_required",
+                        "error": "Explicit confirmation is required to remove a record only."}), 400
+    publication = get_publication(guild_id, publication_id)
+    if publication is None:
+        return jsonify({"success": False, "error": "Publication not found."}), 404
+    if not forget_publication_record(guild_id, publication_id):
+        return jsonify({"success": False, "code": "record_not_removable",
+                        "error": "This Publication is not in a state that allows record-only removal."}), 409
+    log_action(guild_id, f"Removed Shop Publication #{publication_id} record only (Discord untouched)",
+               "shoppublisher", details=f"Previous status: {publication.get('status')}",
+               target_id=publication_id, target_name=str(publication["design_id"]))
+    return jsonify({"success": True, "discord_untouched": True})

@@ -129,7 +129,11 @@ async function setup(options) {
                 }
                 return serveDelete(id);
             }
-            return Promise.reject(Error('unexpected fetch ' + method + ' ' + url));
+            // Everything else behaves as the real ctx.fetch would: the same routes as fetchJSON,
+            // delivered as a Response-like object (ok/status/json) so callers read the body themselves.
+            return this.fetchJSON(url, request).then(
+                body => ({ ok: true, status: 200, json: () => Promise.resolve(body) }),
+                error => { const m = /^HTTP (\d+)$/.exec(error && error.message || ''); return { ok: false, status: m ? Number(m[1]) : 500, json: () => Promise.resolve(null) }; });
         },
         isDestroyed() { return false; },
     };

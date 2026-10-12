@@ -612,6 +612,29 @@ def authorize_replacement_retry(guild_id, publication_id):
     return publication if changed else None
 
 
+# States in which a Discord operation is mid-flight. Reconciliation never touches these.
+IN_FLIGHT_STATUSES = ("updating", "unpublishing", "replacement_sending")
+# Discord event / re-check cleanup only trusts a message ID on these stable states.
+MESSAGE_BEARING_STABLE_STATUSES = ("published", "attention")
+# States that can legitimately carry no usable Discord message and need an explicit operator decision.
+FORGETTABLE_STATUSES = ("pending", "attention", "replacement_send_uncertain")
+
+
+def channel_confirmed_deleted(rest, channel_id):
+    """True only when Discord itself answers 404 / code 10003 (Unknown Channel) for the channel.
+
+    403 Missing Access, timeouts, rate limits, 5xx and any unexpected error all return
+    False: none of them prove the channel (and therefore the message) is gone.
+    """
+    try:
+        rest.request("GET", f"/channels/{int(channel_id)}")
+    except DiscordFailure as exc:
+        return exc.status == 404 and exc.discord_code == 10003
+    except Exception:
+        return False
+    return False
+
+
 def unpublish(guild_id, publication, *, rest=None):
     pid = int(publication["id"])
     current = get_publication(guild_id, pid)
@@ -672,6 +695,15 @@ def unpublish(guild_id, publication, *, rest=None):
                         "error": "Publication state changed before cleanup; association was retained."}
             raise
     except PublicationError as exc:
+        # `unknown_channel` means the server's channel list was read successfully and lacks
+        # this channel. Require Discord to also confirm the channel itself is deleted (404 /
+        # 10003) before treating the message as gone; permission and transient errors stay
+        # protected as `attention`.
+        if exc.code == "unknown_channel" and channel_confirmed_deleted(rest, channel_id):
+            if remove_claimed():
+                return {"outcome": "removed", "already_missing": True, "channel_deleted": True}
+            return {"outcome": "attention", "publication": get_publication(guild_id, pid),
+                    "error": "Publication state changed before cleanup; association was retained."}
         saved = restore_attention(str(exc))
         return {"outcome": "attention", "publication": saved, "error": str(exc)}
     except DiscordFailure as exc:
@@ -682,3 +714,128 @@ def unpublish(guild_id, publication, *, rest=None):
         return {"outcome": "attention", "publication": get_publication(guild_id, pid),
                 "error": "Message was deleted, but Publication state changed; operator review is required."}
     return {"outcome": "removed", "already_missing": False}
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation (Discord deletion events, re-check, interrupted operations, operator escape hatch)
+# ---------------------------------------------------------------------------
+
+def reconcile_message_deleted(guild_id, channel_id, message_ids):
+    """Remove stable publication associations whose exact Discord message was deleted.
+
+    Only `published`/`attention` rows matching guild + channel + message ID are removed.
+    In-flight rows are skipped (the bot's own update/unpublish deletes fire this event too).
+    Idempotent: a repeat call, or an unknown message, removes nothing. Returns rows removed.
+    """
+    ids = sorted({int(m) for m in (message_ids or ())})
+    if not ids:
+        return 0
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            st = ",".join("?" for _ in MESSAGE_BEARING_STABLE_STATUSES)
+            mk = ",".join("?" for _ in ids)
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute(
+                f"DELETE FROM shop_publications WHERE guild_id=? AND channel_id=? "
+                f"AND status IN ({st}) AND message_id IN ({mk})",
+                (int(guild_id), int(channel_id), *MESSAGE_BEARING_STABLE_STATUSES, *ids))
+            await db.commit()
+            return cur.rowcount
+    return int(run_async(delete()) or 0)
+
+
+def reconcile_channel_deleted(guild_id, channel_id):
+    """Remove every association pointing at a deleted channel (all its messages are gone).
+
+    In-flight rows are left for their own operation to finish; they end in `attention` and
+    the verified-deleted-channel Unpublish path (or a later reconcile) clears them.
+    """
+    async def delete():
+        async with aiosqlite.connect(DB_PATH) as db:
+            mk = ",".join("?" for _ in IN_FLIGHT_STATUSES)
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute(
+                f"DELETE FROM shop_publications WHERE guild_id=? AND channel_id=? "
+                f"AND status NOT IN ({mk})",
+                (int(guild_id), int(channel_id), *IN_FLIGHT_STATUSES))
+            await db.commit()
+            return cur.rowcount
+    return int(run_async(delete()) or 0)
+
+
+def recover_stale_operations(max_age_seconds=900):
+    """Move operations interrupted mid-flight (process crash/restart) to a recoverable state.
+
+    updating/unpublishing -> attention (the message ID is retained, so Update/Unpublish work);
+    replacement_sending -> replacement_send_uncertain (a new message may or may not exist, so
+    it needs the existing explicit operator recovery). Returns the number of rows moved.
+    """
+    age = f"-{int(max_age_seconds)} seconds"
+    async def recover():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            a = await db.execute(
+                "UPDATE shop_publications SET status='attention', updated_at=CURRENT_TIMESTAMP, "
+                "last_error='Interrupted operation recovered after a restart; verify with Discord.' "
+                "WHERE status IN ('updating','unpublishing') AND updated_at <= datetime('now', ?)", (age,))
+            b = await db.execute(
+                "UPDATE shop_publications SET status='replacement_send_uncertain', "
+                "updated_at=CURRENT_TIMESTAMP, "
+                "last_error='Interrupted replacement send; the new message may exist. Review before retrying.' "
+                "WHERE status='replacement_sending' AND updated_at <= datetime('now', ?)", (age,))
+            await db.commit()
+            return a.rowcount + b.rowcount
+    return int(run_async(recover()) or 0)
+
+
+def recheck_design_publications(guild_id, design_id, *, rest=None):
+    """Ask Discord about each stable publication of one design and clear only confirmed-gone ones.
+
+    A row is removed only when Discord confirms its message is absent (404 / 10008) or its
+    channel is deleted (guild channel list lacks it AND GET /channels/<id> is 404 / 10003).
+    Anything ambiguous (403, timeouts, rate limits, 5xx) is left untouched and counted.
+    """
+    rest = rest or DiscordREST()
+    summary = {"removed": 0, "still_present": 0, "unverified": 0, "skipped": 0}
+    for pub in list_publications(guild_id, design_id):
+        pid, message_id = int(pub["id"]), pub.get("message_id")
+        if pub.get("status") not in MESSAGE_BEARING_STABLE_STATUSES or not message_id:
+            summary["skipped"] += 1
+            continue
+        channel_id = int(pub["channel_id"])
+        gone = False
+        try:
+            rest.validate_channel_and_permissions(guild_id, channel_id, "recheck")
+            try:
+                rest.fetch_message(channel_id, int(message_id))
+            except DiscordFailure as exc:
+                if not exc.message_missing:
+                    raise
+                gone = True
+        except PublicationError as exc:
+            if exc.code == "unknown_channel" and channel_confirmed_deleted(rest, channel_id):
+                gone = True
+            else:
+                summary["unverified"] += 1
+                continue
+        except DiscordFailure:
+            summary["unverified"] += 1
+            continue
+        if not gone:
+            summary["still_present"] += 1
+        elif remove_publication(guild_id, pid, expected_statuses=MESSAGE_BEARING_STABLE_STATUSES,
+                                expected_message_id=int(message_id), match_message=True):
+            summary["removed"] += 1
+        else:
+            summary["skipped"] += 1
+    return summary
+
+
+def forget_publication_record(guild_id, publication_id):
+    """Database-only removal of one stuck association (operator-confirmed, never touches Discord).
+
+    Allowed only for states that can lack a usable message and cannot otherwise be resolved:
+    pending (uncertain send), attention, replacement_send_uncertain. The Discord message, if
+    any, is NOT deleted. Returns True when the row was removed.
+    """
+    return remove_publication(guild_id, int(publication_id), expected_statuses=FORGETTABLE_STATUSES)

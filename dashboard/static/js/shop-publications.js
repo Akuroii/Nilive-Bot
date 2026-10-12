@@ -7,11 +7,13 @@
         var button = root.querySelector('#sd-publication-publish');
         var list = root.querySelector('#sd-publication-list');
         var status = root.querySelector('#sd-publication-status');
+        var recheck = root.querySelector('#sd-publication-recheck');
         if (!select || !button || button.dataset.publicationBound) return;
         button.dataset.publicationBound = '1';
         var csrf = window.__CSRF_TOKEN__ || '';
         var listGeneration = 0;
         var publishInFlight = false;
+        var recheckInFlight = false;
         // Keep uncertainty attached to the exact Design/channel request, not
         // as a page-wide flag that could warn for another Design.
         var uncertainPublishContexts = Object.create(null);
@@ -20,6 +22,10 @@
         var publicationListState = 'idle';
         button.disabled = true;
         function syncPublishButton() {
+            if (recheck) {
+                recheck.disabled = recheckInFlight || !select.value || publicationListState !== 'loaded' ||
+                    publicationListDesign !== select.value;
+            }
             button.disabled = publishInFlight || !select.value || publicationListState !== 'loaded' ||
                 publicationListDesign !== select.value;
         }
@@ -36,7 +42,14 @@
             }, body: body ? JSON.stringify(body) : undefined}).then(function (r) {
                 return r.json().then(function (data) {
                     if (!r.ok && r.status !== 202) {
-                        var error = new Error(data.error || 'Request failed'); error.status = r.status; throw error;
+                        var text = data.error || 'Request failed';
+                        // A blocked Update lists every validation problem; show them all, not just the first.
+                        if (Array.isArray(data.problems) && data.problems.length > 1) {
+                            text += ' (+' + (data.problems.length - 1) + ' more: ' + data.problems.slice(1, 4).map(function (item) {
+                                return item && item.message ? item.message : String(item && item.code || 'problem');
+                            }).join('; ') + (data.problems.length > 4 ? '; …' : '') + ')';
+                        }
+                        var error = new Error(text); error.status = r.status; throw error;
                     }
                     return data;
                 });
@@ -133,7 +146,12 @@
                                             releaseRowActions();
                                             return;
                                         }
-                                        status.textContent = result.error || label + ' completed.'; render();
+                                        status.textContent = result.error || (label === 'Unpublish' && result.channel_deleted
+                                            ? 'The channel no longer exists; the Publication record was cleared.'
+                                            : label === 'Unpublish' && result.already_missing
+                                                ? 'The message was already gone; the Publication record was cleared.'
+                                                : label + ' completed.');
+                                        render();
                                     });
                                 }
                                 run(null).catch(function (e) {
@@ -143,6 +161,29 @@
                                 });
                             }); li.appendChild(action);
                         });
+                    }
+                    if (p.status === 'pending' || p.status === 'attention' || p.status === 'replacement_send_uncertain') {
+                        // Last resort when Unpublish cannot resolve the record (for example the bot lost the
+                        // server). Database-only: Discord is never contacted and a message may still exist.
+                        var forget = document.createElement('button'); forget.type = 'button';
+                        forget.textContent = 'Remove record only';
+                        forget.addEventListener('click', function () {
+                            if (!isCurrentContext(designId, generation)) return;
+                            if (!window.confirm('Remove this Publication record from the database only?\n\n' +
+                                'Discord is NOT contacted. If a message still exists in the channel, delete it manually. ' +
+                                'Use this only when Unpublish cannot resolve the record.')) return;
+                            forget.disabled = true;
+                            request('/api/shop-publisher/publications/' + p.id + '/forget', 'POST', {confirm: true}).then(function () {
+                                if (!isCurrentContext(designId, generation)) return;
+                                status.textContent = 'Record removed. Discord was not contacted; delete any remaining message manually.';
+                                render();
+                            }).catch(function (e) {
+                                if (!isCurrentContext(designId, generation)) return;
+                                status.textContent = e.message;
+                                forget.disabled = false;
+                            });
+                        });
+                        li.appendChild(forget);
                     }
                     list.appendChild(li);
                 });
@@ -154,6 +195,23 @@
                 }
             });
         }
+        if (recheck) recheck.addEventListener('click', function () {
+            var designId = select.value, generation = listGeneration;
+            if (!designId || recheckInFlight || publicationListState !== 'loaded' || publicationListDesign !== designId) return;
+            recheckInFlight = true; syncPublishButton();
+            status.textContent = 'Checking Discord…';
+            request('/api/shop-publisher/designs/' + designId + '/publications/recheck', 'POST', {}).then(function (r) {
+                if (!isCurrentContext(designId, generation)) return;
+                var parts = [(r.removed || 0) + ' stale record(s) cleared'];
+                if (r.still_present) parts.push(r.still_present + ' still on Discord');
+                if (r.unverified) parts.push(r.unverified + ' could not be verified and were left untouched');
+                status.textContent = 'Re-check complete: ' + parts.join('; ') + '.';
+                render();
+            }).catch(function (e) {
+                if (!isCurrentContext(designId, generation)) return;
+                status.textContent = e.message;
+            }).then(function () { recheckInFlight = false; syncPublishButton(); });
+        });
         select.addEventListener('change', function () {
             // Status belongs to the Design that initiated it. Clear it before
             // loading another Design; in-flight callbacks use their captured
