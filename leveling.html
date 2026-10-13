@@ -70,10 +70,10 @@
                 <div class="card-title">💬 Message XP</div>
                 <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
                     <label class="toggle">
-                        <input type="checkbox" name="enabled" id="cfg-enabled">
+                        <input type="checkbox" name="message_xp_enabled" id="cfg-message-enabled">
                         <span class="toggle-slider"></span>
                     </label>
-                    <span style="font-size:13px;color:var(--text2);">Leveling enabled</span>
+                    <span style="font-size:13px;color:var(--text2);">Message XP enabled</span>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
@@ -112,7 +112,11 @@
                     <input type="checkbox" name="voice_require_unmuted" id="cfg-voice-unmuted">
                     Require unmuted to earn voice XP
                 </label>
-                <div class="form-hint">Voice XP is never given when alone, deafened, or in AFK channel.</div>
+                <label class="form-check" style="margin-bottom:8px;">
+                    <input type="checkbox" name="voice_farming_guard" id="cfg-voice-guard">
+                    Block voice XP when alone, deafened, or in the AFK channel
+                </label>
+                <div class="form-hint">Controlled by this toggle: when ON (the default), Voice XP is never given when alone, deafened (self or server), or in the AFK channel. When OFF, those states no longer block Voice XP by themselves. Muting is controlled separately by "Require unmuted".</div>
             </div>
 
             <div class="card">
@@ -127,9 +131,15 @@
                         <input class="form-input" type="number" name="spam_threshold" id="cfg-spam-thresh" min="2">
                     </div>
                     <div class="form-group">
-                        <label class="form-label">XP penalty per spam</label>
-                        <input class="form-input" type="number" name="spam_xp_penalty" id="cfg-spam-penalty" min="0">
+                        <label class="form-label">Spam window (seconds)</label>
+                        <input class="form-input" type="number" name="spam_window_seconds" id="cfg-spam-window" min="1">
                     </div>
+                    <div class="form-group">
+                        <label class="form-label">Penalty divisor (1/N of current XP)</label>
+                        <input class="form-input" type="number" name="spam_xp_penalty_divisor" id="cfg-spam-penalty" min="100">
+                    </div>
+                </div>
+                <div class="form-hint">Frequency default: 10 messages in the configured 20-second window; a legacy threshold of 3 was moved to 10 once; other saved values were preserved. Additional signals catch 6 messages in 3 seconds or 5 normalized identical messages in up to 10 seconds. These signals catch short bursts and repeated-content flooding before the general threshold. One incident deduction is at most 1% of current XP, and total deductions are capped at one production-calculated max Message XP award per rolling hour (default 50 XP before multipliers).
                 </div>
             </div>
 
@@ -154,6 +164,9 @@
                     <input type="checkbox" name="remove_old_reward_role" id="cfg-remove-old">
                     Remove old reward role when new one is given
                 </label>
+                <div class="form-hint">When on, Level reward roles are exclusive: reaching a
+                    higher reward level replaces the lower Level reward role. Roles that are not
+                    Level rewards are never touched.</div>
             </div>
 
             <div class="card">
@@ -199,6 +212,29 @@
 <!-- REWARDS TAB -->
 <div id="tab-content-rewards" class="tab-content" style="display:none;">
     <div class="card">
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Show</label>
+                <select class="form-input" id="reward-filter-audience" style="width:170px;"
+                        onchange="applyRewardFilter()">
+                    <option value="">All audiences</option>
+                    <option value="everyone">Everyone</option>
+                    <option value="boosters">⭐ Boosters only</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Find level</label>
+                <input class="form-input" id="reward-filter-level" type="number" min="1"
+                       placeholder="e.g. 25" style="width:130px;" oninput="applyRewardFilter()">
+            </div>
+        </div>
+        <p class="text-muted text-sm" style="margin:10px 0 0;">
+            Boosters-only rewards are given in addition to the Everyone rewards, and only to
+            members who are boosting this server when they reach the level.
+        </p>
+    </div>
+
+    <div class="card">
         <div class="card-title">➕ Add Level Reward — Role</div>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
             <div class="form-group" style="margin-bottom:0;">
@@ -209,6 +245,13 @@
             <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px;">
                 <label class="form-label">Role</label>
                 <select class="nero-role-picker form-input" id="reward-role-picker"></select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Audience</label>
+                <select class="form-input" id="reward-audience" style="width:150px;">
+                    <option value="everyone">Everyone</option>
+                    <option value="boosters">⭐ Boosters only</option>
+                </select>
             </div>
             <button class="btn btn-primary" onclick="addReward()">Add Reward</button>
         </div>
@@ -221,8 +264,8 @@
                 <thead><tr><th>Level</th><th>Role ID</th><th></th></tr></thead>
                 <tbody id="rewards-tbody">
                     {% for r in rewards %}
-                    <tr>
-                        <td><span class="badge badge-accent">Level {{ r[1] }}</span></td>
+                    <tr class="reward-row" data-level="{{ r[1] }}" data-audience="{{ r[3] }}">
+                        <td><span class="badge badge-accent">Level {{ r[1] }}</span>{% if r[3] == 'boosters' %} <span class="badge badge-warning">⭐ Boosters</span>{% endif %}</td>
                         <td><code>{{ r[2] }}</code></td>
                         <td>
                             <button class="btn btn-sm btn-danger"
@@ -264,6 +307,13 @@
                 <label class="form-label">Amount</label>
                 <input class="form-input" id="currency-reward-amount"
                        type="number" min="1" placeholder="e.g. 500" style="width:140px;">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Audience</label>
+                <select class="form-input" id="currency-reward-audience" style="width:150px;">
+                    <option value="everyone">Everyone</option>
+                    <option value="boosters">⭐ Boosters only</option>
+                </select>
             </div>
             <button class="btn btn-primary" onclick="addCurrencyReward()">Add Reward</button>
         </div>
@@ -340,6 +390,13 @@
                 <label class="form-label">Quantity</label>
                 <input class="form-input" id="shop-reward-quantity"
                        type="number" min="1" value="1" style="width:110px;">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Audience</label>
+                <select class="form-input" id="shop-reward-audience" style="width:150px;">
+                    <option value="everyone">Everyone</option>
+                    <option value="boosters">⭐ Boosters only</option>
+                </select>
             </div>
             <button class="btn btn-primary" onclick="addShopReward()">Add Reward</button>
         </div>
@@ -463,8 +520,46 @@
     </div>
 </div>
 
-{% block scripts %}
 <script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.switchTab = switchTab;
+__neroGlobal.loadConfig = loadConfig;
+__neroGlobal.saveConfig = saveConfig;
+__neroGlobal.loadResetConfig = loadResetConfig;
+__neroGlobal.saveResetConfig = saveResetConfig;
+__neroGlobal.forceResetNow = forceResetNow;
+__neroGlobal.addReward = addReward;
+__neroGlobal.deleteReward = deleteReward;
+__neroGlobal.loadCurrencyRewards = loadCurrencyRewards;
+__neroGlobal.addCurrencyReward = addCurrencyReward;
+__neroGlobal.deleteCurrencyReward = deleteCurrencyReward;
+__neroGlobal.loadBonusRoles = loadBonusRoles;
+__neroGlobal.addBonus = addBonus;
+__neroGlobal.deleteBonus = deleteBonus;
+__neroGlobal.loadBlacklist = loadBlacklist;
+__neroGlobal.addBlacklist = addBlacklist;
+__neroGlobal.deleteBlacklist = deleteBlacklist;
+__neroGlobal.renderPrestigeMultipliers = renderPrestigeMultipliers;
+__neroGlobal.loadPrestigeConfig = loadPrestigeConfig;
+__neroGlobal.savePrestigeConfig = savePrestigeConfig;
+__neroGlobal.loadPrestigeRoles = loadPrestigeRoles;
+__neroGlobal.addPrestigeRole = addPrestigeRole;
+__neroGlobal.deletePrestigeRole = deletePrestigeRole;
+__neroGlobal.shopText = shopText;
+__neroGlobal.loadShopRewards = loadShopRewards;
+__neroGlobal.addShopReward = addShopReward;
+__neroGlobal.deleteShopReward = deleteShopReward;
+__neroGlobal.loadBoostRewards = loadBoostRewards;
+__neroGlobal.addBoostReward = addBoostReward;
+__neroGlobal.deleteBoostReward = deleteBoostReward;
+
 // ── TAB SWITCHING ──────────────────────────────────────────────
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
@@ -494,7 +589,7 @@ async function loadConfig() {
             setTimeout(() => { $(el).val(String(val || '')).trigger('change.select2'); }, 600);
         } else el.value = val ?? '';
     };
-    set('cfg-enabled',         c.enabled);
+    set('cfg-message-enabled', c.message_xp_enabled);
     set('cfg-xp-per-word',     c.xp_per_word);
     set('cfg-xp-min',          c.xp_min_per_message);
     set('cfg-xp-max',          c.xp_max_per_message);
@@ -502,9 +597,11 @@ async function loadConfig() {
     set('cfg-voice-enabled',   c.voice_xp_enabled);
     set('cfg-voice-xp',        c.voice_xp_per_minute);
     set('cfg-voice-unmuted',   c.voice_require_unmuted);
+    set('cfg-voice-guard',     c.voice_farming_guard);
     set('cfg-spam',            c.spam_detection_enabled);
     set('cfg-spam-thresh',     c.spam_threshold);
-    set('cfg-spam-penalty',    c.spam_xp_penalty);
+    set('cfg-spam-window',     c.spam_window_seconds);
+    set('cfg-spam-penalty',    c.spam_xp_penalty_divisor);
     set('cfg-announce',        c.levelup_announce);
     set('cfg-levelup-channel', c.levelup_channel_id);
     set('cfg-levelup-msg',     c.levelup_message);
@@ -521,7 +618,7 @@ async function saveConfig(btn) {
         return el.value;
     };
     const payload = {
-        enabled:               getVal('cfg-enabled'),
+        message_xp_enabled:    getVal('cfg-message-enabled'),
         xp_per_word:           getVal('cfg-xp-per-word'),
         xp_min_per_message:    getVal('cfg-xp-min'),
         xp_max_per_message:    getVal('cfg-xp-max'),
@@ -529,9 +626,11 @@ async function saveConfig(btn) {
         voice_xp_enabled:      getVal('cfg-voice-enabled'),
         voice_xp_per_minute:   getVal('cfg-voice-xp'),
         voice_require_unmuted: getVal('cfg-voice-unmuted'),
+        voice_farming_guard:   getVal('cfg-voice-guard'),
         spam_detection_enabled:getVal('cfg-spam'),
         spam_threshold:        getVal('cfg-spam-thresh'),
-        spam_xp_penalty:       getVal('cfg-spam-penalty'),
+        spam_window_seconds:   getVal('cfg-spam-window'),
+        spam_xp_penalty_divisor:getVal('cfg-spam-penalty'),
         levelup_announce:      getVal('cfg-announce'),
         levelup_channel_id:    getVal('cfg-levelup-channel'),
         levelup_message:       getVal('cfg-levelup-msg'),
@@ -580,6 +679,25 @@ async function forceResetNow() {
     }
 }
 
+// ── AUDIENCE BADGE / FILTER ────────────────────────────────────
+function rewardAudienceBadge(audience) {
+    return audience === 'boosters' ? ' <span class="badge badge-warning">⭐ Boosters</span>' : '';
+}
+
+function applyRewardFilter() {
+    const aud = document.getElementById('reward-filter-audience');
+    const lvl = document.getElementById('reward-filter-level');
+    if (!aud || !lvl) return;
+    const wantAudience = aud.value;
+    const wantLevel = lvl.value.trim();
+    document.querySelectorAll('tr.reward-row').forEach(row => {
+        const okAudience = !wantAudience || row.dataset.audience === wantAudience;
+        const okLevel = !wantLevel || row.dataset.level === wantLevel;
+        row.style.display = (okAudience && okLevel) ? '' : 'none';
+    });
+}
+__neroGlobal.applyRewardFilter = applyRewardFilter;
+
 // ── ROLE REWARDS ───────────────────────────────────────────────
 async function addReward() {
     const level   = document.getElementById('reward-level').value;
@@ -588,7 +706,8 @@ async function addReward() {
     if (!level || !role_id) { showToast('Select a level and role', 'warning'); return; }
     const res  = await fetch('/api/leveling/reward', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ level: parseInt(level), role_id }),
+        body: JSON.stringify({ level: parseInt(level), role_id,
+            audience: document.getElementById('reward-audience').value }),
     });
     const data = await res.json();
     if (data.success) {
@@ -619,8 +738,8 @@ async function loadCurrencyRewards() {
         return;
     }
     tbody.innerHTML = data.rewards.map(r => `
-        <tr>
-            <td><span class="badge badge-accent">Level ${r.level}</span></td>
+        <tr class="reward-row" data-level="${r.level}" data-audience="${r.audience || 'everyone'}">
+            <td><span class="badge badge-accent">Level ${r.level}</span>${rewardAudienceBadge(r.audience)}</td>
             <td>${currencyLabel(r.currency)}</td>
             <td>${r.amount.toLocaleString()}</td>
             <td>
@@ -630,6 +749,7 @@ async function loadCurrencyRewards() {
                 </button>
             </td>
         </tr>`).join('');
+    applyRewardFilter();
 }
 
 async function addCurrencyReward() {
@@ -639,7 +759,8 @@ async function addCurrencyReward() {
     if (!level || !amount) { showToast('Enter a level and amount', 'warning'); return; }
     const res  = await fetch('/api/leveling/currency-reward', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ level: parseInt(level), currency, amount: parseInt(amount) }),
+        body: JSON.stringify({ level: parseInt(level), currency, amount: parseInt(amount),
+            audience: document.getElementById('currency-reward-audience').value }),
     });
     const data = await res.json();
     if (data.success) {
@@ -746,6 +867,17 @@ async function deleteBlacklist(id) {
 // ── PRESTIGE (finalized Prestige system) ─────────────────────────
 const PRESTIGE_TIER_NAMES = {1:'I', 2:'II', 3:'III', 4:'IV', 5:'V', 6:'VI'};
 
+// The currency display name for a stored key. dashboard.js's currencyNameFor()
+// is the real implementation, but it is loaded after this page script and the
+// first render of the multipliers card (fired by loadPrestigeConfig on page
+// load) would throw and leave the card stuck on "Loading…". Both read the same
+// window.__CURRENCY__ that base.html writes, so use it until dashboard.js is
+// there; every later render takes the dashboard.js branch.
+function currencyName(key) {
+    if (typeof currencyNameFor === 'function') return currencyNameFor(key);
+    return ((window.__CURRENCY__ || {})[key] || {}).name || key;
+}
+
 function renderPrestigeMultipliers(tiers) {
     const wrap = document.getElementById('prestige-multipliers');
     if (!wrap) return;
@@ -757,12 +889,12 @@ function renderPrestigeMultipliers(tiers) {
             <div style="border:1px solid var(--border);border-radius:8px;padding:12px;">
                 <div style="font-weight:600;margin-bottom:8px;">★ ${PRESTIGE_TIER_NAMES[t]}${boosterNote}</div>
                 <div class="form-group" style="margin-bottom:8px;">
-                    <label class="form-label">${currencyNameFor('coins')} ×</label>
+                    <label class="form-label">${currencyName('coins')} ×</label>
                     <input class="form-input prestige-mult" data-tier="${t}" data-cur="coins"
                            type="number" step="0.1" min="0" value="${m.coins}">
                 </div>
                 <div class="form-group" style="margin-bottom:0;">
-                    <label class="form-label">${currencyNameFor('diamonds')} ×</label>
+                    <label class="form-label">${currencyName('diamonds')} ×</label>
                     <input class="form-input prestige-mult" data-tier="${t}" data-cur="diamonds"
                            type="number" step="0.1" min="0" value="${m.diamonds}">
                 </div>
@@ -881,8 +1013,8 @@ async function loadShopRewards() {
         return;
     }
     tbody.innerHTML = data.rewards.map(r => `
-        <tr>
-            <td><span class="badge badge-accent">Level ${r.level}</span></td>
+        <tr class="reward-row" data-level="${r.level}" data-audience="${r.audience || 'everyone'}">
+            <td><span class="badge badge-accent">Level ${r.level}</span>${rewardAudienceBadge(r.audience)}</td>
             <td>${shopText(r.name || ('Product ' + r.item_id))}</td>
             <td>${r.quantity}x</td>
             <td>
@@ -892,6 +1024,7 @@ async function loadShopRewards() {
                 </button>
             </td>
         </tr>`).join('');
+    applyRewardFilter();
 }
 
 async function addShopReward() {
@@ -907,6 +1040,7 @@ async function addShopReward() {
         body: JSON.stringify({
             level: parseInt(level), item_id: parseInt(itemId),
             quantity: parseInt(quantity),
+            audience: document.getElementById('shop-reward-audience').value,
         }),
     });
     const data = await res.json();
@@ -990,6 +1124,7 @@ loadShopRewards();
 loadBonusRoles();
 loadBlacklist();
 loadPrestigeRoles();
+
+})();
 </script>
-{% endblock %}
 {% endblock %}
