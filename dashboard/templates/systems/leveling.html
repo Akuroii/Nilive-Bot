@@ -212,6 +212,29 @@
 <!-- REWARDS TAB -->
 <div id="tab-content-rewards" class="tab-content" style="display:none;">
     <div class="card">
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Show</label>
+                <select class="form-input" id="reward-filter-audience" style="width:170px;"
+                        onchange="applyRewardFilter()">
+                    <option value="">All audiences</option>
+                    <option value="everyone">Everyone</option>
+                    <option value="boosters">⭐ Boosters only</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Find level</label>
+                <input class="form-input" id="reward-filter-level" type="number" min="1"
+                       placeholder="e.g. 25" style="width:130px;" oninput="applyRewardFilter()">
+            </div>
+        </div>
+        <p class="text-muted text-sm" style="margin:10px 0 0;">
+            Boosters-only rewards are given in addition to the Everyone rewards, and only to
+            members who are boosting this server when they reach the level.
+        </p>
+    </div>
+
+    <div class="card">
         <div class="card-title">➕ Add Level Reward — Role</div>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
             <div class="form-group" style="margin-bottom:0;">
@@ -222,6 +245,13 @@
             <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px;">
                 <label class="form-label">Role</label>
                 <select class="nero-role-picker form-input" id="reward-role-picker"></select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Audience</label>
+                <select class="form-input" id="reward-audience" style="width:150px;">
+                    <option value="everyone">Everyone</option>
+                    <option value="boosters">⭐ Boosters only</option>
+                </select>
             </div>
             <button class="btn btn-primary" onclick="addReward()">Add Reward</button>
         </div>
@@ -234,8 +264,8 @@
                 <thead><tr><th>Level</th><th>Role ID</th><th></th></tr></thead>
                 <tbody id="rewards-tbody">
                     {% for r in rewards %}
-                    <tr>
-                        <td><span class="badge badge-accent">Level {{ r[1] }}</span></td>
+                    <tr class="reward-row" data-level="{{ r[1] }}" data-audience="{{ r[3] }}">
+                        <td><span class="badge badge-accent">Level {{ r[1] }}</span>{% if r[3] == 'boosters' %} <span class="badge badge-warning">⭐ Boosters</span>{% endif %}</td>
                         <td><code>{{ r[2] }}</code></td>
                         <td>
                             <button class="btn btn-sm btn-danger"
@@ -277,6 +307,13 @@
                 <label class="form-label">Amount</label>
                 <input class="form-input" id="currency-reward-amount"
                        type="number" min="1" placeholder="e.g. 500" style="width:140px;">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Audience</label>
+                <select class="form-input" id="currency-reward-audience" style="width:150px;">
+                    <option value="everyone">Everyone</option>
+                    <option value="boosters">⭐ Boosters only</option>
+                </select>
             </div>
             <button class="btn btn-primary" onclick="addCurrencyReward()">Add Reward</button>
         </div>
@@ -353,6 +390,13 @@
                 <label class="form-label">Quantity</label>
                 <input class="form-input" id="shop-reward-quantity"
                        type="number" min="1" value="1" style="width:110px;">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+                <label class="form-label">Audience</label>
+                <select class="form-input" id="shop-reward-audience" style="width:150px;">
+                    <option value="everyone">Everyone</option>
+                    <option value="boosters">⭐ Boosters only</option>
+                </select>
             </div>
             <button class="btn btn-primary" onclick="addShopReward()">Add Reward</button>
         </div>
@@ -635,6 +679,25 @@ async function forceResetNow() {
     }
 }
 
+// ── AUDIENCE BADGE / FILTER ────────────────────────────────────
+function rewardAudienceBadge(audience) {
+    return audience === 'boosters' ? ' <span class="badge badge-warning">⭐ Boosters</span>' : '';
+}
+
+function applyRewardFilter() {
+    const aud = document.getElementById('reward-filter-audience');
+    const lvl = document.getElementById('reward-filter-level');
+    if (!aud || !lvl) return;
+    const wantAudience = aud.value;
+    const wantLevel = lvl.value.trim();
+    document.querySelectorAll('tr.reward-row').forEach(row => {
+        const okAudience = !wantAudience || row.dataset.audience === wantAudience;
+        const okLevel = !wantLevel || row.dataset.level === wantLevel;
+        row.style.display = (okAudience && okLevel) ? '' : 'none';
+    });
+}
+__neroGlobal.applyRewardFilter = applyRewardFilter;
+
 // ── ROLE REWARDS ───────────────────────────────────────────────
 async function addReward() {
     const level   = document.getElementById('reward-level').value;
@@ -643,7 +706,8 @@ async function addReward() {
     if (!level || !role_id) { showToast('Select a level and role', 'warning'); return; }
     const res  = await fetch('/api/leveling/reward', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ level: parseInt(level), role_id }),
+        body: JSON.stringify({ level: parseInt(level), role_id,
+            audience: document.getElementById('reward-audience').value }),
     });
     const data = await res.json();
     if (data.success) {
@@ -674,8 +738,8 @@ async function loadCurrencyRewards() {
         return;
     }
     tbody.innerHTML = data.rewards.map(r => `
-        <tr>
-            <td><span class="badge badge-accent">Level ${r.level}</span></td>
+        <tr class="reward-row" data-level="${r.level}" data-audience="${r.audience || 'everyone'}">
+            <td><span class="badge badge-accent">Level ${r.level}</span>${rewardAudienceBadge(r.audience)}</td>
             <td>${currencyLabel(r.currency)}</td>
             <td>${r.amount.toLocaleString()}</td>
             <td>
@@ -685,6 +749,7 @@ async function loadCurrencyRewards() {
                 </button>
             </td>
         </tr>`).join('');
+    applyRewardFilter();
 }
 
 async function addCurrencyReward() {
@@ -694,7 +759,8 @@ async function addCurrencyReward() {
     if (!level || !amount) { showToast('Enter a level and amount', 'warning'); return; }
     const res  = await fetch('/api/leveling/currency-reward', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ level: parseInt(level), currency, amount: parseInt(amount) }),
+        body: JSON.stringify({ level: parseInt(level), currency, amount: parseInt(amount),
+            audience: document.getElementById('currency-reward-audience').value }),
     });
     const data = await res.json();
     if (data.success) {
@@ -947,8 +1013,8 @@ async function loadShopRewards() {
         return;
     }
     tbody.innerHTML = data.rewards.map(r => `
-        <tr>
-            <td><span class="badge badge-accent">Level ${r.level}</span></td>
+        <tr class="reward-row" data-level="${r.level}" data-audience="${r.audience || 'everyone'}">
+            <td><span class="badge badge-accent">Level ${r.level}</span>${rewardAudienceBadge(r.audience)}</td>
             <td>${shopText(r.name || ('Product ' + r.item_id))}</td>
             <td>${r.quantity}x</td>
             <td>
@@ -958,6 +1024,7 @@ async function loadShopRewards() {
                 </button>
             </td>
         </tr>`).join('');
+    applyRewardFilter();
 }
 
 async function addShopReward() {
@@ -973,6 +1040,7 @@ async function addShopReward() {
         body: JSON.stringify({
             level: parseInt(level), item_id: parseInt(itemId),
             quantity: parseInt(quantity),
+            audience: document.getElementById('shop-reward-audience').value,
         }),
     });
     const data = await res.json();

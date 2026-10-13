@@ -19,6 +19,11 @@ TRACK_CURRENCY = "currency"
 TRACK_SHOP = "shop"
 TRACK_BOOST = "boost"
 BOOST_REF = "xp_boost"
+# Booster-only rewards share the existing tracks. Their ledger identity is the
+# normal ref with this prefix, so a Booster reward never collides with, or
+# replaces, the Everyone reward at the same level. The ref is only a key:
+# delivery reads the payload.
+BOOSTER_PREFIX = "booster:"
 BACKFILL_NAME = "legacy_fulfilled_no_payout"
 SHOP_REWARD_TYPES = ("custom", "title", "potion", "temp_role")
 _INVENTORY_TYPE = {
@@ -58,6 +63,18 @@ _CREATE_MIGRATIONS = """
         applied_at TEXT NOT NULL
     )
 """
+
+
+def is_booster_ref(ref) -> bool:
+    return str(ref or "").startswith(BOOSTER_PREFIX)
+
+
+def member_is_booster(member) -> bool:
+    """True only when Discord reports an active server boost on this member.
+
+    Fails closed: no member, or an object without premium_since, is False.
+    """
+    return member is not None and getattr(member, "premium_since", None) is not None
 
 
 def _now() -> datetime:
@@ -124,40 +141,55 @@ def _freeze_amount(amount: int, currency: str, multipliers: dict) -> int:
     return final
 
 
-async def _definitions(db: aiosqlite.Connection, guild_id: int) -> dict:
+async def _definitions(db: aiosqlite.Connection, guild_id: int,
+                       boosters: bool = False) -> dict:
     """One identity per (level, track, ref). Currency rows of the same
-    currency at the same level sum into that identity's raw amount."""
+    currency at the same level sum into that identity's raw amount.
+
+    Booster-only rows are included only when boosters=True, under a
+    BOOSTER_PREFIX ref. Callers that create entitlements pass the member's
+    verified boost status; the default excludes them.
+    """
     identities = {}
     cursor = await db.execute("""
-        SELECT level, role_id FROM leveling_rewards WHERE guild_id=?
+        SELECT level, role_id, audience FROM leveling_rewards WHERE guild_id=?
     """, (guild_id,))
-    for level, role_id in await cursor.fetchall():
+    for level, role_id, audience in await cursor.fetchall():
         if not role_id:
             continue
-        identities[(int(level), TRACK_ROLE, str(int(role_id)))] = {
+        prefix = BOOSTER_PREFIX if audience == "boosters" else ""
+        if prefix and not boosters:
+            continue
+        identities[(int(level), TRACK_ROLE, prefix + str(int(role_id)))] = {
             "role_id": int(role_id),
         }
     cursor = await db.execute("""
-        SELECT level, currency, amount FROM leveling_currency_rewards
+        SELECT level, currency, amount, audience FROM leveling_currency_rewards
         WHERE guild_id=?
     """, (guild_id,))
-    for level, currency, amount in await cursor.fetchall():
+    for level, currency, amount, audience in await cursor.fetchall():
         if currency not in ("balance", "diamonds"):
             continue
         if not amount or int(amount) <= 0:
             continue
-        key = (int(level), TRACK_CURRENCY, currency)
+        prefix = BOOSTER_PREFIX if audience == "boosters" else ""
+        if prefix and not boosters:
+            continue
+        key = (int(level), TRACK_CURRENCY, prefix + currency)
         slot = identities.setdefault(key, {"currency": currency, "amount": 0})
         slot["amount"] += int(amount)
     cursor = await db.execute("""
         SELECT r.level, r.item_id, r.quantity, s.name, s.type,
-               s.role_id, s.duration_hours, s.xp_boost_multiplier
+               s.role_id, s.duration_hours, s.xp_boost_multiplier, r.audience
         FROM leveling_shop_rewards r
         JOIN shop_items s ON s.id = r.item_id AND s.guild_id = r.guild_id
         WHERE r.guild_id = ?
     """, (guild_id,))
-    for level, item_id, quantity, name, item_type, role_id, duration_hours, multiplier in await cursor.fetchall():
+    for level, item_id, quantity, name, item_type, role_id, duration_hours, multiplier, audience in await cursor.fetchall():
         if item_type not in SHOP_REWARD_TYPES or not name:
+            continue
+        prefix = BOOSTER_PREFIX if audience == "boosters" else ""
+        if prefix and not boosters:
             continue
         if not quantity or int(quantity) < 1:
             continue
@@ -178,7 +210,7 @@ async def _definitions(db: aiosqlite.Connection, guild_id: int) -> dict:
             from utils.potion_engine import EFFECT_XP_BOOST, build_metadata
             raw["metadata"] = build_metadata(
                 EFFECT_XP_BOOST, float(multiplier), int(duration_hours))
-        identities[(int(level), TRACK_SHOP, str(int(item_id)))] = raw
+        identities[(int(level), TRACK_SHOP, prefix + str(int(item_id)))] = raw
     cursor = await db.execute("""
         SELECT level, multiplier, duration_hours
         FROM leveling_boost_rewards WHERE guild_id=?
@@ -242,20 +274,24 @@ async def _insert_identity(db, guild_id, user_id, level, track, ref,
 async def record_crossing(db: aiosqlite.Connection, guild_id: int,
                           user_id: int, old_xp: int, new_xp: int,
                           multipliers: dict | None = None, *,
-                          source: str) -> int:
+                          source: str, is_booster: bool = False) -> int:
     """Insert pending rows for levels crossed by an XP increase.
 
     Caller owns the transaction. Eligibility is xp_progress(xp).level,
     not the stored levels.level column. Existing rows are left alone,
     so a reset and re-level cannot pay a second time. source is stored
     once and is not read by reserve or payout.
+
+    Booster-only entitlements are created only when is_booster is True (the
+    caller verified an active Discord boost at this crossing). There is no
+    retroactive creation, and unknown status (False) creates none.
     """
     old_level = progress_level(old_xp)
     new_level = progress_level(new_xp)
     if new_level <= old_level:
         return 0
     await ensure_tables(db)
-    identities = await _definitions(db, guild_id)
+    identities = await _definitions(db, guild_id, boosters=bool(is_booster))
     now = _iso(_now())
     created = 0
     for (level, track, ref), raw in identities.items():
@@ -326,6 +362,7 @@ def _reserve_sql(claim_ids: list[int] | None) -> str:
                          OR processing_started_at < ?)
                 )
               )
+          AND (substr(reward_ref, 1, 8) != 'booster:' OR ?)
     """
     if claim_ids:
         marks = ",".join("?" for _ in claim_ids)
@@ -652,6 +689,10 @@ async def claim_available(guild_id: int, user_id: int, *,
         "delivered_roles": 0,
         "delivered_shop": 0,
         "delivered_boost": 0,
+        # Booster-only rewards held back because the member is not verified
+        # as boosting right now. Not a failure: they stay claimable later.
+        "locked": 0,
+        "booster_unverified": member is None,
         # Explicit reconciliation of already-fulfilled Level roles (see
         # reconcile_role_progression). Empty unless the toggle is ON and this
         # was a member-initiated full pass.
@@ -660,15 +701,32 @@ async def claim_available(guild_id: int, user_id: int, *,
     }
     roles = []
     temp_roles = []
+    # Booster-only rows are reserved only while Discord reports an active
+    # boost on the passed member. Checked here, outside the DB lock.
+    booster_ok = member_is_booster(member)
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
-            params = [token, started, guild_id, user_id, expired_before]
+            params = [token, started, guild_id, user_id, expired_before,
+                      1 if booster_ok else 0]
             if claim_ids:
                 params.extend(claim_ids)
             await db.execute(_reserve_sql(claim_ids), params)
             owned = await _owned_rows(db, token)
             result["owned"] = len(owned)
+            if not booster_ok:
+                lock_sql = """
+                    SELECT COUNT(*) FROM level_reward_claims
+                    WHERE guild_id=? AND user_id=?
+                      AND status IN ('pending', 'failed')
+                      AND substr(reward_ref, 1, 8) = 'booster:'
+                """
+                lock_params = [guild_id, user_id]
+                if claim_ids:
+                    lock_sql += " AND id IN (%s)" % ",".join("?" for _ in claim_ids)
+                    lock_params.extend(claim_ids)
+                cursor = await db.execute(lock_sql, lock_params)
+                result["locked"] = int((await cursor.fetchone())[0])
             for row in owned:
                 if row["track"] == TRACK_ROLE:
                     roles.append(row)
@@ -861,7 +919,7 @@ async def list_claims(guild_id: int, user_id: int) -> list[dict]:
 async def current_level_definitions(guild_id: int, level: int) -> list[dict]:
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH) as db:
-        identities = await _definitions(db, guild_id)
+        identities = await _definitions(db, guild_id, boosters=True)
     rows = []
     for (reward_level, track, ref), raw in sorted(identities.items()):
         if reward_level != level:

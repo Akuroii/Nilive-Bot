@@ -236,18 +236,27 @@ def save_leveling_config_api():
     return jsonify({"success": True})
 
 
+def _reward_audience(data):
+    """'everyone' (default) or 'boosters'; anything else is rejected."""
+    audience = (data or {}).get("audience") or "everyone"
+    return audience if audience in ("everyone", "boosters") else None
+
+
 @api_bp.route("/leveling/reward", methods=["POST"])
 @require_api_permission(LEVEL_ADMIN)
 def add_leveling_reward():
     guild_id = get_session_guild_id()
     data     = request.json
+    audience = _reward_audience(data)
+    if audience is None:
+        return jsonify({"success": False, "error": "Audience must be 'everyone' or 'boosters'"})
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                INSERT INTO leveling_rewards (guild_id, level, role_id)
-                VALUES (?, ?, ?)
-            """, (guild_id, int(data.get("level")), data.get("role_id")))
+                INSERT INTO leveling_rewards (guild_id, level, role_id, audience)
+                VALUES (?, ?, ?, ?)
+            """, (guild_id, int(data.get("level")), data.get("role_id"), audience))
             await db.commit()
 
     run_async(save())
@@ -278,7 +287,7 @@ def get_leveling_currency_rewards():
     async def fetch():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT id, level, currency, amount
+                SELECT id, level, currency, amount, audience
                 FROM leveling_currency_rewards
                 WHERE guild_id = ? ORDER BY level ASC
             """, (guild_id,))
@@ -287,6 +296,7 @@ def get_leveling_currency_rewards():
     rows = run_async(fetch())
     return jsonify({"rewards": [{
         "id": r[0], "level": r[1], "currency": r[2], "amount": r[3],
+        "audience": r[4],
     } for r in rows]})
 
 
@@ -307,13 +317,17 @@ def add_leveling_currency_reward():
     currency = data.get("currency", "balance")
     if currency not in ("balance", "diamonds"):
         return jsonify({"success": False, "error": "Currency must be 'balance' or 'diamonds'"})
+    audience = _reward_audience(data)
+    if audience is None:
+        return jsonify({"success": False, "error": "Audience must be 'everyone' or 'boosters'"})
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                INSERT INTO leveling_currency_rewards (guild_id, level, currency, amount)
-                VALUES (?, ?, ?, ?)
-            """, (guild_id, level, currency, amount))
+                INSERT INTO leveling_currency_rewards
+                    (guild_id, level, currency, amount, audience)
+                VALUES (?, ?, ?, ?, ?)
+            """, (guild_id, level, currency, amount, audience))
             await db.commit()
 
     run_async(save())
@@ -430,7 +444,8 @@ def get_leveling_shop_rewards():
     async def fetch():
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
-                SELECT r.id, r.level, r.item_id, r.quantity, s.name, s.type
+                SELECT r.id, r.level, r.item_id, r.quantity, s.name, s.type,
+                       r.audience
                 FROM leveling_shop_rewards r
                 LEFT JOIN shop_items s
                   ON s.id = r.item_id AND s.guild_id = r.guild_id
@@ -451,7 +466,7 @@ def get_leveling_shop_rewards():
     return jsonify({
         "rewards": [{
             "id": r[0], "level": r[1], "item_id": r[2], "quantity": r[3],
-            "name": r[4], "type": r[5],
+            "name": r[4], "type": r[5], "audience": r[6],
         } for r in rewards],
         "products": [{
             "id": p[0], "name": p[1], "type": p[2],
@@ -473,6 +488,9 @@ def add_leveling_shop_reward():
         return jsonify({"success": False, "error": "Level, product, and quantity must be numbers"})
     if level <= 0 or item_id <= 0 or quantity < 1:
         return jsonify({"success": False, "error": "Level, product, and quantity must be at least 1"})
+    audience = _reward_audience(data)
+    if audience is None:
+        return jsonify({"success": False, "error": "Audience must be 'everyone' or 'boosters'"})
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -493,9 +511,9 @@ def add_leveling_shop_reward():
             try:
                 await db.execute("""
                     INSERT INTO leveling_shop_rewards
-                        (guild_id, level, item_id, quantity)
-                    VALUES (?, ?, ?, ?)
-                """, (guild_id, level, item_id, quantity))
+                        (guild_id, level, item_id, quantity, audience)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (guild_id, level, item_id, quantity, audience))
                 await db.commit()
             except Exception as exc:
                 await db.execute("ROLLBACK")
