@@ -120,14 +120,23 @@ def _compact_qty(amount: int) -> str:
 _CLAIMABLE_STATUSES = ("pending", "failed")
 
 
-def _has_claimable(claims) -> bool:
+def _is_locked_claim(claim, booster_ok: bool) -> bool:
+    """A Booster-only reward the member cannot claim right now."""
+    from utils.level_claims import is_booster_ref
+    return (not booster_ok and is_booster_ref((claim or {}).get("reward_ref"))
+            and (claim or {}).get("status") in _CLAIMABLE_STATUSES)
+
+
+def _has_claimable(claims, booster_ok: bool = False) -> bool:
     return any((c or {}).get("status") in _CLAIMABLE_STATUSES
+               and not _is_locked_claim(c, booster_ok)
                for c in (claims or []))
 
 
-async def _claim_button_available(guild_id: int, claims) -> bool:
+async def _claim_button_available(guild_id: int, claims,
+                                  booster_ok: bool = False) -> bool:
     """Also expose Claim All as the explicit exclusive-role reconcile action."""
-    if _has_claimable(claims):
+    if _has_claimable(claims, booster_ok):
         return True
     if not any((claim or {}).get("track") == "role"
                and (claim or {}).get("status") == "fulfilled"
@@ -184,6 +193,11 @@ def claim_result_footer(result: dict) -> str:
     got = len(result.get("fulfilled") or [])
     missed = len(result.get("failed") or [])
     text = f"Claimed {got}. Retryable failures: {missed}."
+    locked = int(result.get("locked") or 0)
+    if locked:
+        text += f" Locked (Boosters only): {locked}."
+        if result.get("booster_unverified"):
+            text += " Boost status could not be verified."
     reconciled = result.get("reconciled") or {}
     restored = len(reconciled.get("restored") or [])
     reconciliation_failures = len(reconciled.get("failed") or [])
@@ -209,6 +223,8 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
         row = await cursor.fetchone()
     xp = row[0] if row else 0
     level, current, needed = xp_progress(xp)
+    from utils.level_claims import is_booster_ref, member_is_booster
+    booster_ok = member_is_booster(member)
     claims = await list_claims(guild.id, member.id)
     by_key = {(c["reward_level"], c["track"], c["reward_ref"]): c for c in claims}
     if page == "stats":
@@ -220,8 +236,11 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
         for claim in claims:
             by_status.setdefault(claim["status"], []).append(claim)
         fulfilled = by_status.get("fulfilled", [])
-        waiting = by_status.get("pending", []) + by_status.get("failed", [])
-        failed = by_status.get("failed", [])
+        waiting_all = by_status.get("pending", []) + by_status.get("failed", [])
+        locked_claims = [c for c in waiting_all if _is_locked_claim(c, booster_ok)]
+        waiting = [c for c in waiting_all if not _is_locked_claim(c, booster_ok)]
+        failed = [c for c in by_status.get("failed", [])
+                  if not _is_locked_claim(c, booster_ok)]
         newest = max((c for c in fulfilled if c.get("fulfilled_at")),
                      key=lambda c: c["fulfilled_at"], default=None)
         oldest = min((c for c in waiting if c.get("created_at")),
@@ -232,12 +251,16 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             claimed_txt += (f"\nLatest: {_claim_reward_text(guild, newest, currency)} · "
                             f"{_claim_age(newest['fulfilled_at'])}")
         embed.add_field(name="Claimed", value=claimed_txt, inline=False)
-        waiting_txt = (f"{len(by_status.get('pending', []))} pending · "
+        pending_ready = [c for c in by_status.get("pending", [])
+                         if not _is_locked_claim(c, booster_ok)]
+        waiting_txt = (f"{len(pending_ready)} pending · "
                        f"{len(failed)} retryable failure(s)")
+        if locked_claims:
+            waiting_txt += f" · {len(locked_claims)} locked (Boosters only)"
         if oldest:
             waiting_txt += (f"\nOldest: {_claim_reward_text(guild, oldest, currency)} · "
                             f"{_claim_age(oldest['created_at'])}")
-        elif not waiting:
+        elif not waiting and not locked_claims:
             waiting_txt = "Nothing waiting — every crossed reward is delivered."
         embed.add_field(name="Waiting", value=waiting_txt, inline=False)
         if failed:
@@ -260,7 +283,8 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
         color=0x7c5cbf)
     other_ready = sum(
         1 for c in claims
-        if c["reward_level"] != level and c["status"] in ("pending", "failed"))
+        if c["reward_level"] != level and c["status"] in ("pending", "failed")
+        and not _is_locked_claim(c, booster_ok))
     if other_ready:
         embed.set_footer(
             text=f"Claim All also collects {other_ready} earlier reward(s).")
@@ -270,7 +294,11 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
     for item in defs:
         key = (item["reward_level"], item["track"], item["reward_ref"])
         claim = by_key.get(key)
-        status = claim["status"] if claim else "not crossed"
+        booster_item = is_booster_ref(item["reward_ref"])
+        status = claim["status"] if claim else (
+            "not earned" if booster_item else "not crossed")
+        if claim and _is_locked_claim(claim, booster_ok):
+            status = "locked"
         if item["track"] == "currency":
             code = item["payload"]["currency"]
             label = currency["coins" if code == "balance" else "diamonds"]["name"]
@@ -287,6 +315,8 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             text = role.mention if role else f"role {item['payload']['role_id']}"
         if claim and claim.get("last_error") and status == "failed":
             text += f" — failed, can retry"
+        if booster_item:
+            text = f"⭐ {text} (Boosters only)"
         lines.append(f"{text} · {status}")
     # A deleted Shop product or boost config leaves the frozen claim.
     shown = {(item["reward_level"], item["track"], item["reward_ref"]) for item in defs}
@@ -342,9 +372,10 @@ class LevelRewardView(discord.ui.View):
             await interaction.response.send_message(
                 "This level card belongs to someone else.", ephemeral=True)
             return
-        from utils.level_claims import list_claims
+        from utils.level_claims import list_claims, member_is_booster
         claims = await list_claims(self.guild_id, self.user_id)
-        self.set_claimable(await _claim_button_available(self.guild_id, claims))
+        self.set_claimable(await _claim_button_available(
+            self.guild_id, claims, member_is_booster(interaction.user)))
         self.set_page_state(page)
         embed = await _level_embed(interaction.guild, interaction.user, page)
         await interaction.response.edit_message(embed=embed, view=self)
@@ -365,11 +396,14 @@ class LevelRewardView(discord.ui.View):
             return
         # Role delivery is outside SQLite and can exceed the 3s ack window.
         await interaction.response.defer()
-        from utils.level_claims import claim_available, list_claims
+        from utils.level_claims import (
+            claim_available, list_claims, member_is_booster,
+        )
         result = await claim_available(
             self.guild_id, self.user_id, member=interaction.user, bot=self.bot)
         self.set_claimable(await _claim_button_available(
-            self.guild_id, await list_claims(self.guild_id, self.user_id)))
+            self.guild_id, await list_claims(self.guild_id, self.user_id),
+            member_is_booster(interaction.user)))
         self.set_page_state("level")
         embed = await _level_embed(interaction.guild, interaction.user, "level")
         embed.set_footer(text=claim_result_footer(result))
@@ -885,7 +919,8 @@ class Leveling(commands.Cog):
         xp = max(0, xp)
         new_level, _, _ = xp_progress(xp)
         from utils.level_claims import (
-            SOURCE_SETXP, record_crossing, snapshot_multipliers,
+            SOURCE_SETXP, member_is_booster, record_crossing,
+            snapshot_multipliers,
         )
         multipliers = await snapshot_multipliers(
             interaction.guild.id, member.id, member=member, bot=self.bot)
@@ -906,7 +941,8 @@ class Leveling(commands.Cog):
                       xp, new_level))
                 await record_crossing(
                     db, interaction.guild.id, member.id, old_xp, xp,
-                    multipliers, source=SOURCE_SETXP)
+                    multipliers, source=SOURCE_SETXP,
+                    is_booster=member_is_booster(member))
                 await db.commit()
             except Exception:
                 await db.execute("ROLLBACK")
@@ -970,11 +1006,12 @@ class Leveling(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
         embed = await _level_embed(interaction.guild, interaction.user, "level")
-        from utils.level_claims import list_claims
+        from utils.level_claims import list_claims, member_is_booster
         claims = await list_claims(interaction.guild.id, interaction.user.id)
         view = LevelRewardView(self.bot, interaction.guild.id, interaction.user.id,
                                claimable=await _claim_button_available(
-                                   interaction.guild.id, claims))
+                                   interaction.guild.id, claims,
+                                   member_is_booster(interaction.user)))
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ─── PRESTIGE STATE / READ-ONLY VIEW ─────────────────

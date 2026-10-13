@@ -92,7 +92,9 @@ async def give_reward(bot: discord.Client,
         # XP sources are independent. Message XP and Voice XP each apply their
         # own switches in their runtime listeners; shared rewards (missions,
         # events, minigames, tags, claims) are never suppressed by Message XP.
-        from utils.level_claims import record_crossing, snapshot_multipliers
+        from utils.level_claims import (
+            member_is_booster, record_crossing, snapshot_multipliers,
+        )
         member = None
         guild = None
         if bot is not None and hasattr(bot, "get_guild"):
@@ -140,7 +142,7 @@ async def give_reward(bot: discord.Client,
                 # Auto-grant stays off; the member claims the snapshot later.
                 await record_crossing(
                     db, guild_id, user_id, old_xp, new_xp, multipliers,
-                    source=source)
+                    source=source, is_booster=member_is_booster(member))
                 await db.commit()
             except Exception:
                 await db.execute("ROLLBACK")
