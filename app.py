@@ -1210,7 +1210,7 @@ def leveling():
             levels = [(l[0], l[1], l[2], min(l[3] or 0, MAX_PERMANENT_TIER))
                       for l in levels]
             rewards_cursor = await db.execute("""
-                SELECT id, level, role_id FROM leveling_rewards
+                SELECT id, level, role_id, audience FROM leveling_rewards
                 WHERE guild_id=? ORDER BY level ASC
             """, (guild_id,))
             rewards = await rewards_cursor.fetchall()

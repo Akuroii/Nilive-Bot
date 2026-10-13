@@ -966,6 +966,18 @@ async def init_db():
             ON leveling_boost_rewards(guild_id)
         """)
 
+        # Booster-only level rewards: 'everyone' (default, every existing row)
+        # or 'boosters'. Idempotent in-place migration; XP-boost rewards are
+        # deliberately not included.
+        for _reward_table in ("leveling_rewards", "leveling_currency_rewards",
+                              "leveling_shop_rewards"):
+            cursor = await db.execute(f"PRAGMA table_info({_reward_table})")
+            _reward_columns = {row[1] for row in await cursor.fetchall()}
+            if "audience" not in _reward_columns:
+                await db.execute(
+                    f"ALTER TABLE {_reward_table} "
+                    "ADD COLUMN audience TEXT NOT NULL DEFAULT 'everyone'")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_reset_config (
                 guild_id   INTEGER PRIMARY KEY,
