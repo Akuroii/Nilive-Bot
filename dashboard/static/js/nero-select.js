@@ -10,7 +10,13 @@ window.NeroSelect = (function () {
             const res = await fetch(url);
             const data = await res.json();
             const results = data.results || [];
-            _optionsCache[kind] = results;
+            // /api/guild/roles reports a failed Discord fetch as
+            // {"results": [], "error": ...}. Keep that empty list out of the
+            // cache so the next picker retries instead of reusing it for the
+            // rest of the page. Successful answers are cached as before.
+            if (kind !== 'role' || (res.ok && !data.error)) {
+                _optionsCache[kind] = results;
+            }
             return results;
         } catch (e) {
             console.error('NeroSelect fetch failed', e);
