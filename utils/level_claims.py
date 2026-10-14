@@ -654,6 +654,99 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int) -> dic
         result["blocked"] = result["blocked"] or bool(result["failed"])
     return result
 
+
+async def strip_booster_roles(member, guild_id: int, user_id: int) -> dict:
+    """Remove Booster-only Level roles from a member who no longer boosts.
+
+    Call only on a *confirmed* loss of the member's last active boost (see
+    ``cogs/leveling.py::on_member_update``). Only roles that can be identified
+    reliably as Booster-only Level reward roles are touched:
+
+    * a candidate must be proven by this member's own claim ledger - a role
+      track claim whose ``reward_ref`` carries ``BOOSTER_PREFIX``, which only
+      exists for a reward earned while boosting. A Booster-only role somebody
+      was given outside the Level system is therefore left alone;
+    * a role that is also a Member reward (an ``everyone`` role claim in this
+      member's ledger, or an ``audience='everyone'`` row in the guild's config)
+      is kept, because it is still legitimately earned;
+    * normal Level roles, unrelated roles, Prestige roles, Shop temp roles
+      (a different track with its own expiry), the boost cog's own roles and
+      reaction roles are never candidates.
+
+    Fails closed: without a member object exposing ``premium_since`` the boost
+    status cannot be verified, and a verification failure is never treated as a
+    confirmed boost loss, so nothing is removed. A member who is still boosting
+    (one or more active boosts) keeps every Booster-only role.
+
+    The claim ledger is never written: fulfilled Booster-only claims stay
+    terminal, so boosting again restores them through
+    ``reconcile_role_progression`` while levels passed without a boost never
+    create an entitlement and are therefore never granted retroactively.
+
+    Returns ``{"removed": [...], "failed": [...], "not_held": [...],
+    "unverified": bool, "still_boosting": bool}``; failures are
+    ``(role_id, reason)`` pairs and never raise into the Discord event.
+    """
+    result: dict = {"removed": [], "failed": [], "not_held": [],
+                    "unverified": False, "still_boosting": False}
+    if member is None or not hasattr(member, "premium_since"):
+        result["unverified"] = True
+        return result
+    if member_is_booster(member):
+        result["still_boosting"] = True
+        return result
+
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute("""
+            SELECT reward_ref, payload_json
+            FROM level_reward_claims
+            WHERE guild_id=? AND user_id=? AND track=?
+        """, (guild_id, user_id, TRACK_ROLE))
+        claim_rows = await cursor.fetchall()
+        cursor = await db.execute(
+            "SELECT role_id, audience FROM leveling_rewards WHERE guild_id=?",
+            (guild_id,))
+        configured = await cursor.fetchall()
+
+    booster_ids: set[int] = set()
+    member_ids: set[int] = set()
+    for ref, payload in claim_rows:
+        try:
+            role_id = int(json.loads(payload)["role_id"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        (booster_ids if is_booster_ref(ref) else member_ids).add(role_id)
+    for configured_role, audience in configured:
+        if audience == "boosters":
+            # A config row alone is not proof that this member earned the role
+            # through the Level system, so it never makes a role a candidate.
+            continue
+        try:
+            role_id = int(configured_role)
+        except (TypeError, ValueError):
+            continue
+        member_ids.add(role_id)
+
+    guild = getattr(member, "guild", None)
+    held = {getattr(role, "id", None)
+            for role in (getattr(member, "roles", None) or [])}
+    for role_id in sorted(booster_ids - member_ids):
+        if role_id not in held:
+            result["not_held"].append(role_id)
+            continue
+        role = guild.get_role(role_id) if guild is not None else None
+        if role is None:
+            result["failed"].append((role_id, "Role is not resolvable in the guild"))
+            continue
+        try:
+            await member.remove_roles(role, reason="Server boost ended")
+            result["removed"].append(role_id)
+        except Exception as exc:  # deleted role, hierarchy, permissions, rate limit
+            result["failed"].append((role_id, str(exc)))
+    return result
+
+
 async def _grant_inventory(db, guild_id: int, user_id: int, payload: dict,
                           metadata: dict | None = None) -> None:
     from utils.inventory import give_item

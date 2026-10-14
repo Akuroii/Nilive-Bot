@@ -305,7 +305,7 @@ def main():
 
     print("== 9. D2 reconciliation cannot restore the wrong thing ==")
     rec = claims[claims.index("async def reconcile_role_progression"):]
-    rec = rec[:rec.index("async def _grant_inventory")]
+    rec = rec[:rec.index("async def strip_booster_roles")]
     check("the reconciler inspects all role claim statuses",
           "SELECT reward_level, reward_ref, payload_json, status" in rec
           and "TRACK_ROLE" in rec and "AND status" not in rec)
@@ -351,6 +351,43 @@ def main():
           not background_task_calls_reconciler())
     check("no guild-wide/member-list sweep is introduced by the join callback",
           "for member in guild.members" not in source("cogs/leveling.py"))
+
+    print("== 9b. boost loss strips only ledger-proven Booster-only roles ==")
+    strip = claims[claims.index("async def strip_booster_roles"):]
+    strip = strip[:strip.index("async def _grant_inventory")]
+    check("the strip helper fails closed when the boost status is unverifiable",
+          'if member is None or not hasattr(member, "premium_since"):' in strip
+          and 'result["unverified"] = True' in strip)
+    check("the strip helper refuses to touch a member who is still boosting",
+          "if member_is_booster(member):" in strip
+          and 'result["still_boosting"] = True' in strip)
+    check("candidates come only from this member's booster role claims",
+          "WHERE guild_id=? AND user_id=? AND track=?" in strip
+          and "(booster_ids if is_booster_ref(ref) else member_ids).add(role_id)"
+          in strip)
+    check("a live config row alone never makes a role a candidate",
+          'if audience == "boosters":' in strip and "booster_ids.add" not in strip)
+    check("roles that are also Member rewards are excluded from removal",
+          "sorted(booster_ids - member_ids)" in strip)
+    check("the strip helper never grants a role and never writes the ledger",
+          "add_roles" not in strip and "INSERT" not in strip
+          and "UPDATE level_reward_claims" not in strip
+          and "record_crossing" not in strip)
+    hook = source("cogs/leveling.py")
+    hook = hook[hook.index("async def on_member_update"):]
+    hook = hook[:hook.index("def _is_spamming")]
+    check("the boost-loss hook acts only on a confirmed last-boost loss",
+          "was_boosting = before.premium_since is not None" in hook
+          and "still_boosting = after.premium_since is not None" in hook
+          and "if not was_boosting or still_boosting:" in hook)
+    check("the boost-loss hook fails closed on an unverifiable payload",
+          "except AttributeError:" in hook)
+    check("the boost-loss hook re-checks the cached member before removing",
+          "member = guild.get_member(after.id) or after" in hook
+          and "if member_is_booster(member):" in hook)
+    check("the boost-loss hook grants nothing",
+          "give_reward" not in hook and "claim_available" not in hook
+          and "record_crossing" not in hook and "add_roles" not in hook)
 
     print("== 10. no retroactive sweep, no rejoin reset ==")
     call_sites = [str(p.relative_to(ROOT)) for p in production_files()

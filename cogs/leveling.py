@@ -471,6 +471,56 @@ class Leveling(commands.Cog):
             print(f"[LEVEL ROLE REJOIN] reconciliation failed "
                   f"guild={member.guild.id} user={member.id}: {exc}")
 
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        """Drop Booster-only Level roles when the member's last boost ends.
+
+        The gateway supplies both member snapshots, so the boost loss is
+        confirmed rather than inferred: it is acted on only when ``before`` had
+        ``premium_since`` and ``after`` does not, i.e. the member went from at
+        least one active boost to none. ``premium_since`` stays set while any
+        boost is active, so losing one of several boosts keeps every
+        Booster-only Level role.
+
+        Nothing is granted here. Boosting again restores previously fulfilled
+        Booster-only roles through the existing reconciliation, and levels
+        passed without a boost never created an entitlement, so no reward is
+        unlocked retroactively. Fails closed: if the boost status cannot be
+        verified, or the removal itself fails (deleted role, hierarchy,
+        permissions, rate limit), roles stay and the reason is logged.
+        """
+        if getattr(after, "bot", False):
+            return
+        try:
+            was_boosting = before.premium_since is not None
+            still_boosting = after.premium_since is not None
+        except AttributeError:
+            # A verification failure is never treated as a confirmed boost loss.
+            return
+        if not was_boosting or still_boosting:
+            return
+        guild = getattr(after, "guild", None)
+        if guild is None:
+            return
+        try:
+            from utils.level_claims import member_is_booster, strip_booster_roles
+            # Prefer the cached member so a stale or partial event payload can
+            # never strip roles from somebody who is in fact still boosting.
+            member = guild.get_member(after.id) or after
+            if member_is_booster(member):
+                return
+            result = await strip_booster_roles(member, guild.id, member.id)
+        except Exception as exc:
+            print(f"[LEVEL BOOSTER ROLES] boost-loss handling failed "
+                  f"guild={guild.id} user={after.id}: {exc}")
+            return
+        if result.get("removed"):
+            print(f"[LEVEL BOOSTER ROLES] guild={guild.id} user={after.id} "
+                  f"boost ended, removed={result['removed']}")
+        if result.get("failed"):
+            print(f"[LEVEL BOOSTER ROLES] guild={guild.id} user={after.id} "
+                  f"could not remove={result['failed']}")
+
     # ─── INCIDENT-BASED SPAM DETECTION ────────────────────
     # Track independently of the XP cooldown. Normal message counts are
     # evaluated over the separately configured 20s window; clear bursts and
