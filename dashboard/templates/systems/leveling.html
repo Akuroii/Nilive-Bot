@@ -218,8 +218,8 @@
                 <select class="form-input" id="reward-filter-audience" style="width:170px;"
                         onchange="applyRewardFilter()">
                     <option value="">All audiences</option>
-                    <option value="everyone">Everyone</option>
-                    <option value="boosters">⭐ Boosters only</option>
+                    <option value="everyone">Member Rewards</option>
+                    <option value="boosters">⭐ Booster Rewards</option>
                 </select>
             </div>
             <div class="form-group" style="margin-bottom:0;">
@@ -230,8 +230,10 @@
         </div>
         <p class="text-muted text-sm" id="reward-filter-summary" style="margin:10px 0 0;"></p>
         <p class="text-muted text-sm" style="margin:10px 0 0;">
-            Boosters-only rewards are given in addition to the Everyone rewards, and only to
-            members who are boosting this server when they reach the level.
+            <strong>Member Rewards</strong> are available to every member, whether or not they
+            boost this server. <strong>Booster Rewards</strong> are additional rewards for members
+            with at least one active server boost; a member who boosts stays eligible for both.
+            Booster Rewards are not retroactive: levels reached before boosting never unlock them.
         </p>
     </div>
 
@@ -250,8 +252,8 @@
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Audience</label>
                 <select class="form-input" id="reward-audience" style="width:150px;">
-                    <option value="everyone">Everyone</option>
-                    <option value="boosters">⭐ Boosters only</option>
+                    <option value="everyone">Member Rewards</option>
+                    <option value="boosters">⭐ Booster Rewards</option>
                 </select>
             </div>
             <button class="btn btn-primary" onclick="addReward()">Add Reward</button>
@@ -266,7 +268,7 @@
                 <tbody id="rewards-tbody">
                     {% for r in rewards %}
                     <tr class="reward-row" data-level="{{ r[1] }}" data-audience="{{ r[3] }}">
-                        <td><span class="badge badge-accent">Level {{ r[1] }}</span>{% if r[3] == 'boosters' %} <span class="badge badge-booster">⭐ Boosters</span>{% endif %}</td>
+                        <td><span class="badge badge-accent">Level {{ r[1] }}</span>{% if r[3] == 'boosters' %} <span class="badge badge-booster">⭐ Booster Reward</span>{% endif %}</td>
                         <td><code>{{ r[2] }}</code></td>
                         <td>
                             <button class="btn btn-sm btn-danger"
@@ -312,8 +314,8 @@
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Audience</label>
                 <select class="form-input" id="currency-reward-audience" style="width:150px;">
-                    <option value="everyone">Everyone</option>
-                    <option value="boosters">⭐ Boosters only</option>
+                    <option value="everyone">Member Rewards</option>
+                    <option value="boosters">⭐ Booster Rewards</option>
                 </select>
             </div>
             <button class="btn btn-primary" onclick="addCurrencyReward()">Add Reward</button>
@@ -361,7 +363,7 @@
         <div class="card-title">⚡ Level Rewards - XP Boost <span class="badge badge-source" id="count-boost">0</span></div>
         <p class="text-muted text-sm" style="margin:-8px 0 14px;">
             XP boosts are earned by every member who claims them. They are not part of the
-            Everyone / Boosters audience system, so the audience filter never hides them.
+            Member / Booster reward system, so the audience filter never hides them.
         </p>
         <div class="table-wrap">
             <table class="table">
@@ -399,8 +401,8 @@
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Audience</label>
                 <select class="form-input" id="shop-reward-audience" style="width:150px;">
-                    <option value="everyone">Everyone</option>
-                    <option value="boosters">⭐ Boosters only</option>
+                    <option value="everyone">Member Rewards</option>
+                    <option value="boosters">⭐ Booster Rewards</option>
                 </select>
             </div>
             <button class="btn btn-primary" onclick="addShopReward()">Add Reward</button>
@@ -686,7 +688,7 @@ async function forceResetNow() {
 
 // ── AUDIENCE BADGE / FILTER ────────────────────────────────────
 function rewardAudienceBadge(audience) {
-    return audience === 'boosters' ? ' <span class="badge badge-booster">⭐ Boosters</span>' : '';
+    return audience === 'boosters' ? ' <span class="badge badge-booster">⭐ Booster Reward</span>' : '';
 }
 
 function applyRewardFilter() {
@@ -696,8 +698,8 @@ function applyRewardFilter() {
     const wantAudience = aud.value;
     const wantLevel = lvl.value.trim();
     document.querySelectorAll('tr.reward-row').forEach(row => {
-        // Rows without an audience (XP boosts) are not part of the Everyone /
-        // Boosters system, so the audience filter leaves them alone.
+        // Rows without an audience (XP boosts) are not part of the Member /
+        // Booster reward system, so the audience filter leaves them alone.
         const rowAudience = row.dataset.audience || '';
         const okAudience = !wantAudience || !rowAudience || rowAudience === wantAudience;
         const okLevel = !wantLevel || row.dataset.level === wantLevel;
@@ -714,7 +716,7 @@ function updateFilterSummary(audience, level) {
     if (!audience && !level) { out.textContent = ''; return; }
     const parts = [];
     if (level) parts.push(`level ${level}`);
-    if (audience) parts.push(audience === 'boosters' ? 'Boosters only' : 'Everyone');
+    if (audience) parts.push(audience === 'boosters' ? 'Booster Rewards' : 'Member Rewards');
     out.textContent = `${shown} of ${rows.length} reward row(s) match ${parts.join(' · ')}`;
 }
 
