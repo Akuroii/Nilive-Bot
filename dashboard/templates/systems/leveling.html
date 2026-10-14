@@ -786,9 +786,10 @@ __neroGlobal.syncRewardCounts  = syncRewardCounts;
 // The table stores Discord role IDs. An ID on its own tells an admin nothing,
 // and worse: a reward pointing at a deleted role looks exactly as healthy as
 // one pointing at a live role. Names come from the same /api/guild/roles
-// endpoint the role pickers already use (see static/js/nero-select.js), fetched
-// once per page load and cached, so this adds no backend contract and writes
-// nothing. Three states, and the table never guesses between them:
+// endpoint the role pickers already use (see static/js/nero-select.js), so this
+// adds no backend contract and writes nothing. A good list is cached until a
+// reward is added (addReward() drops it so a new role is looked up fresh); a
+// failed fetch is never cached, so the next refresh tries again. Three states, and the table never guesses between them:
 //   in the guild's role list -> "@Name" next to the ID
 //   absent from a good list  -> "Role not found" (deleted, or never existed)
 //   list could not be loaded -> "Name unavailable" (Discord unreachable, no bot
@@ -799,7 +800,7 @@ var __roleNamesPromise = null;
 
 function loadRoleNames() {
     if (!__roleNamesPromise) {
-        __roleNamesPromise = fetch('/api/guild/roles')
+        const pending = fetch('/api/guild/roles')
             .then(res => (res.ok ? res.json() : null))
             .then(data => {
                 // An empty or errored payload is "unavailable", not "every role
@@ -814,7 +815,14 @@ function loadRoleNames() {
                 });
                 return map;
             })
-            .catch(() => null);
+            .catch(() => null)
+            .then(names => {
+                // Callers already waiting still get null ("Name unavailable"),
+                // but a failure is not kept: the next call fetches again.
+                if (!names && __roleNamesPromise === pending) __roleNamesPromise = null;
+                return names;
+            });
+        __roleNamesPromise = pending;
     }
     return __roleNamesPromise;
 }
@@ -850,7 +858,11 @@ function renderRoleCell(cell, roleId, names) {
 }
 
 async function applyRoleNames() {
-    const names = await loadRoleNames();
+    const request = loadRoleNames();
+    const names = await request;
+    // A newer list was requested while this one was in flight (a reward was
+    // added); let that call paint, so an older list cannot overwrite it.
+    if (__roleNamesPromise && __roleNamesPromise !== request) return;
     document.querySelectorAll('.reward-role').forEach(cell => {
         renderRoleCell(cell, cell.dataset.roleId, names);
     });
@@ -943,6 +955,7 @@ async function addReward() {
         showToast('Reward added!');
         document.getElementById('reward-level').value = '';
         if (rp) $(rp).val('').trigger('change.select2');
+        __roleNamesPromise = null;  // the new role may postdate the cached list
         loadRewards();
     } else {
         showToast(data.error || 'Error adding reward', 'error');
