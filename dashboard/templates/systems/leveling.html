@@ -211,7 +211,7 @@
 
 <!-- REWARDS TAB -->
 <div id="tab-content-rewards" class="tab-content" style="display:none;">
-    <div class="card">
+    <div class="card reward-filter-bar">
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Show</label>
@@ -228,6 +228,7 @@
                        placeholder="e.g. 25" style="width:130px;" oninput="applyRewardFilter()">
             </div>
         </div>
+        <p class="text-muted text-sm" id="reward-filter-summary" style="margin:10px 0 0;"></p>
         <p class="text-muted text-sm" style="margin:10px 0 0;">
             Boosters-only rewards are given in addition to the Everyone rewards, and only to
             members who are boosting this server when they reach the level.
@@ -258,14 +259,14 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🎁 Level Rewards — Roles</div>
+        <div class="card-title">🎁 Level Rewards - Roles <span class="badge badge-source" id="count-roles">{{ rewards|length }}</span></div>
         <div class="table-wrap">
             <table class="table">
                 <thead><tr><th>Level</th><th>Role ID</th><th></th></tr></thead>
                 <tbody id="rewards-tbody">
                     {% for r in rewards %}
                     <tr class="reward-row" data-level="{{ r[1] }}" data-audience="{{ r[3] }}">
-                        <td><span class="badge badge-accent">Level {{ r[1] }}</span>{% if r[3] == 'boosters' %} <span class="badge badge-warning">⭐ Boosters</span>{% endif %}</td>
+                        <td><span class="badge badge-accent">Level {{ r[1] }}</span>{% if r[3] == 'boosters' %} <span class="badge badge-booster">⭐ Boosters</span>{% endif %}</td>
                         <td><code>{{ r[2] }}</code></td>
                         <td>
                             <button class="btn btn-sm btn-danger"
@@ -320,7 +321,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🎁 Level Rewards — Currency</div>
+        <div class="card-title">🎁 Level Rewards - Currency <span class="badge badge-source" id="count-currency">0</span></div>
         <div class="table-wrap">
             <table class="table">
                 <thead><tr><th>Level</th><th>Currency</th><th>Amount</th><th></th></tr></thead>
@@ -357,7 +358,11 @@
     </div>
 
     <div class="card">
-        <div class="card-title">⚡ Level Rewards — XP Boost</div>
+        <div class="card-title">⚡ Level Rewards - XP Boost <span class="badge badge-source" id="count-boost">0</span></div>
+        <p class="text-muted text-sm" style="margin:-8px 0 14px;">
+            XP boosts are earned by every member who claims them. They are not part of the
+            Everyone / Boosters audience system, so the audience filter never hides them.
+        </p>
         <div class="table-wrap">
             <table class="table">
                 <thead><tr><th>Level</th><th>Multiplier</th><th>Duration</th><th></th></tr></thead>
@@ -403,7 +408,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🎁 Level Rewards — Shop</div>
+        <div class="card-title">🎁 Level Rewards - Shop <span class="badge badge-source" id="count-shop">0</span></div>
         <div class="table-wrap">
             <table class="table">
                 <thead><tr><th>Level</th><th>Product</th><th>Quantity</th><th></th></tr></thead>
@@ -681,7 +686,7 @@ async function forceResetNow() {
 
 // ── AUDIENCE BADGE / FILTER ────────────────────────────────────
 function rewardAudienceBadge(audience) {
-    return audience === 'boosters' ? ' <span class="badge badge-warning">⭐ Boosters</span>' : '';
+    return audience === 'boosters' ? ' <span class="badge badge-booster">⭐ Boosters</span>' : '';
 }
 
 function applyRewardFilter() {
@@ -691,12 +696,46 @@ function applyRewardFilter() {
     const wantAudience = aud.value;
     const wantLevel = lvl.value.trim();
     document.querySelectorAll('tr.reward-row').forEach(row => {
-        const okAudience = !wantAudience || row.dataset.audience === wantAudience;
+        // Rows without an audience (XP boosts) are not part of the Everyone /
+        // Boosters system, so the audience filter leaves them alone.
+        const rowAudience = row.dataset.audience || '';
+        const okAudience = !wantAudience || !rowAudience || rowAudience === wantAudience;
         const okLevel = !wantLevel || row.dataset.level === wantLevel;
         row.style.display = (okAudience && okLevel) ? '' : 'none';
     });
+    updateFilterSummary(wantAudience, wantLevel);
+}
+
+function updateFilterSummary(audience, level) {
+    const out = document.getElementById('reward-filter-summary');
+    if (!out) return;
+    const rows = Array.from(document.querySelectorAll('tr.reward-row'));
+    const shown = rows.filter(r => r.style.display !== 'none').length;
+    if (!audience && !level) { out.textContent = ''; return; }
+    const parts = [];
+    if (level) parts.push(`level ${level}`);
+    if (audience) parts.push(audience === 'boosters' ? 'Boosters only' : 'Everyone');
+    out.textContent = `${shown} of ${rows.length} reward row(s) match ${parts.join(' · ')}`;
+}
+
+// Reward counts in the card titles, so admins can see the size of each track
+// at a glance without scrolling the tables.
+function syncRewardCounts() {
+    const map = {
+        'count-roles':    'rewards-tbody',
+        'count-currency': 'currency-rewards-tbody',
+        'count-boost':    'boost-rewards-tbody',
+        'count-shop':     'shop-rewards-tbody',
+    };
+    Object.keys(map).forEach(badgeId => {
+        const badge = document.getElementById(badgeId);
+        const tbody = document.getElementById(map[badgeId]);
+        if (!badge || !tbody) return;
+        badge.textContent = tbody.querySelectorAll('tr.reward-row').length;
+    });
 }
 __neroGlobal.applyRewardFilter = applyRewardFilter;
+__neroGlobal.syncRewardCounts  = syncRewardCounts;
 
 // ── ROLE REWARDS ───────────────────────────────────────────────
 async function addReward() {
@@ -735,6 +774,7 @@ async function loadCurrencyRewards() {
     const tbody = document.getElementById('currency-rewards-tbody');
     if (!data.rewards || !data.rewards.length) {
         tbody.innerHTML = '<tr><td colspan="4" class="empty">No currency rewards configured yet</td></tr>';
+        syncRewardCounts();
         return;
     }
     tbody.innerHTML = data.rewards.map(r => `
@@ -749,6 +789,7 @@ async function loadCurrencyRewards() {
                 </button>
             </td>
         </tr>`).join('');
+    syncRewardCounts();
     applyRewardFilter();
 }
 
@@ -1010,6 +1051,7 @@ async function loadShopRewards() {
     const tbody = document.getElementById('shop-rewards-tbody');
     if (!data.rewards || !data.rewards.length) {
         tbody.innerHTML = '<tr><td colspan="4" class="empty">No Shop rewards configured yet</td></tr>';
+        syncRewardCounts();
         return;
     }
     tbody.innerHTML = data.rewards.map(r => `
@@ -1024,6 +1066,7 @@ async function loadShopRewards() {
                 </button>
             </td>
         </tr>`).join('');
+    syncRewardCounts();
     applyRewardFilter();
 }
 
@@ -1067,10 +1110,11 @@ async function loadBoostRewards() {
     const tbody = document.getElementById('boost-rewards-tbody');
     if (!data.rewards || !data.rewards.length) {
         tbody.innerHTML = '<tr><td colspan="4" class="empty">No XP boost rewards configured yet</td></tr>';
+        syncRewardCounts();
         return;
     }
     tbody.innerHTML = data.rewards.map(r => `
-        <tr>
+        <tr class="reward-row" data-level="${r.level}">
             <td><span class="badge badge-accent">Level ${r.level}</span></td>
             <td>${r.multiplier}x</td>
             <td>${r.duration_hours}h</td>
@@ -1081,6 +1125,8 @@ async function loadBoostRewards() {
                 </button>
             </td>
         </tr>`).join('');
+    syncRewardCounts();
+    applyRewardFilter();
 }
 
 async function addBoostReward() {
@@ -1121,6 +1167,7 @@ async function deleteBoostReward(id) {
 loadCurrencyRewards();
 loadBoostRewards();
 loadShopRewards();
+syncRewardCounts();
 loadBonusRoles();
 loadBlacklist();
 loadPrestigeRoles();
