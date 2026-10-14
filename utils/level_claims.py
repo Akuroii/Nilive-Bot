@@ -1055,3 +1055,27 @@ async def current_level_definitions(guild_id: int, level: int) -> list[dict]:
             "payload": json.loads(_payload(track, raw, None)),
         })
     return rows
+
+
+async def next_reward_level(guild_id: int, level: int, *,
+                            boosters: bool = False) -> int | None:
+    """The lowest configured Level Reward milestone above `level`, or None.
+
+    Read-only presentation support for the /level card heading. It reuses
+    `_definitions()` - the exact identity set `record_crossing()` turns into
+    entitlements - so a level that could never produce a claim (deleted Shop
+    product, zero amount, multiplier <= 1, quantity < 1) is not reported as a
+    milestone, and the four reward tables cannot drift apart from the heading.
+
+    `boosters` carries the member's verified boost status (`member_is_booster`,
+    which fails closed), so Booster-only milestones are skipped for a member
+    who is not a verified booster: the card never aims at a reward the member
+    cannot claim. Nothing here creates, updates, reserves or pays a claim, and
+    no eligibility rule is applied beyond that existing audience filter.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH) as db:
+        identities = await _definitions(db, guild_id, boosters=bool(boosters))
+    ahead = [reward_level for (reward_level, _track, _ref) in identities
+             if int(reward_level) > int(level)]
+    return min(ahead) if ahead else None

@@ -8,8 +8,12 @@ integration tests, not live Discord tests.
 
 What it locks down:
 
-* the level page shows the current level on the left and the next level on the
-  right, the progress path under it, and the numeric XP progress beside it;
+* the level page shows the current level on the left and the next configured,
+  eligible Level Reward milestone on the right ("REWARD L{n}"), falling back to
+  "LEVEL {n+1}" when no eligible milestone is ahead; the progress path and its
+  numbers under it keep measuring the current level only;
+* "Rewards Available" lists only rewards the member can claim right now - never
+  locked, not-yet-crossed or already-delivered rows;
 * the path uses ◆ for reached stations, ◇ for stations ahead and ━━ between
   them, and the plane position is derived from real XP - it moves monotonically
   and is never a static decoration;
@@ -24,6 +28,7 @@ Run with:
     python scripts/test_level_card_visuals.py
 """
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -36,7 +41,11 @@ AHEAD = "\u25c7"          # ◇ a station not reached yet
 LINK = "\u2501"           # ━ the path itself
 ARROW = "\u27a4"          # ➤ current level -> next level
 
-COIN_L3, COIN_L5, BOOST_ROLE_L5 = 100, 250, 601
+COIN_L3, COIN_L5, COIN_L10 = 100, 250, 900
+BOOST_ROLE_L5, BOOST_ROLE_L8 = 601, 602
+MILESTONE_EVERYONE, MILESTONE_BOOSTER = 10, 8
+BOOSTING = datetime(2026, 1, 1, tzinfo=timezone.utc)
+EMPTY = "Nothing to claim right now."
 
 
 class Fail(Exception):
@@ -70,6 +79,13 @@ def seed_rewards():
             (GUILD, 5, "balance", COIN_L5))
     execute("INSERT INTO leveling_rewards (guild_id,level,role_id,audience) "
             "VALUES (?,?,?,'boosters')", (GUILD, 5, BOOST_ROLE_L5))
+    # A Booster-only milestone between the member and the next Everyone one: a
+    # verified booster aims at L8, anybody else aims at L10.
+    execute("INSERT INTO leveling_rewards (guild_id,level,role_id,audience) "
+            "VALUES (?,?,?,'boosters')", (GUILD, MILESTONE_BOOSTER, BOOST_ROLE_L8))
+    execute("INSERT INTO leveling_currency_rewards "
+            "(guild_id,level,currency,amount,audience) VALUES (?,?,?,?,'everyone')",
+            (GUILD, MILESTONE_EVERYONE, "balance", COIN_L10))
 
 
 def balance():
@@ -90,28 +106,33 @@ async def main():
     await reset_database()
     import cogs.leveling as leveling
     from cogs.leveling import LevelRewardView, _level_embed, _progress_path
-    from utils.level_claims import ensure_tables, list_claims
+    from utils.level_claims import (ensure_tables, list_claims,
+                                    member_is_booster, next_reward_level)
     from utils.reward_engine import give_reward
     from utils.xp_calculator import xp_for_level, xp_progress
 
     await ensure_tables()
-    execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (GUILD,))
-    execute("INSERT INTO levels (guild_id,user_id,xp,level,prestige) VALUES (?,?,0,0,0)",
-            (GUILD, USER))
-    execute("INSERT INTO economy (guild_id,user_id,balance,diamonds) VALUES (?,?,0,0)",
-            (GUILD, USER))
-    seed_rewards()
+    for gid in (GUILD, GUILD + 1):
+        execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (gid,))
+        execute("INSERT INTO levels (guild_id,user_id,xp,level,prestige) "
+                "VALUES (?,?,0,0,0)", (gid, USER))
+        execute("INSERT INTO economy (guild_id,user_id,balance,diamonds) "
+                "VALUES (?,?,0,0)", (gid, USER))
+    seed_rewards()          # GUILD only; GUILD + 1 has no Level Rewards at all
 
     guild = SimpleNamespace(id=GUILD, get_role=lambda rid: None,
                             me=SimpleNamespace(top_role=SimpleNamespace(position=100)))
-    bot = SimpleNamespace(get_guild=lambda gid: guild if int(gid) == GUILD else None)
+    bare_guild = SimpleNamespace(id=GUILD + 1, get_role=lambda rid: None,
+                                 me=SimpleNamespace(top_role=SimpleNamespace(position=100)))
+    known = {GUILD: guild, GUILD + 1: bare_guild}
+    bot = SimpleNamespace(get_guild=lambda gid: known.get(int(gid)))
     guild.get_member = lambda uid: SimpleNamespace(id=USER) if int(uid) == USER else None
 
-    async def to_level(level, extra=0):
+    async def to_level(level, extra=0, guild_id=GUILD):
         total = sum(xp_for_level(n) for n in range(1, level + 1)) + extra
         current = rows("SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
-                       (GUILD, USER))[0][0]
-        await give_reward(bot, GUILD, USER, "xp", amount=total - current,
+                       (guild_id, USER))[0][0]
+        await give_reward(bot, guild_id, USER, "xp", amount=total - current,
                           reason="card-test", source="leveling")
         return total
 
@@ -151,12 +172,57 @@ async def main():
     # ── 2. the real /level embed: header, path, XP numbers ──
     print("== 2. the level page renders the reference layout ==")
     member = SimpleNamespace(id=USER, premium_since=None)
+    boosting = SimpleNamespace(id=USER, premium_since=BOOSTING)
     await to_level(5)
     xp = rows("SELECT xp FROM levels WHERE guild_id=? AND user_id=?", (GUILD, USER))[0][0]
     level, current, needed = xp_progress(xp)
     embed = await _level_embed(guild, member, "level")
-    check("the current level is on the left and the next level on the right",
-          embed.title == f"LEVEL {level} {ARROW} LEVEL {level + 1}", embed.title)
+    milestone = await next_reward_level(GUILD, level, boosters=False)
+    check("the current level is on the left, the next reward milestone on the right",
+          milestone == MILESTONE_EVERYONE and milestone != level + 1
+          and embed.title == f"LEVEL {level} {ARROW} REWARD L{milestone}",
+          f"{embed.title} (milestone L{milestone}, level+1 L{level + 1})")
+    # Every configured Everyone milestone above each level, in one pass: from
+    # L2 the next is L3, and from L5/L7/L8 it is L10 (L8 is Booster-only).
+    walked = [(n, await next_reward_level(GUILD, n, boosters=False))
+              for n in (2, 3, 5, 7, 8)]
+    check("the milestone comes from the configured rewards, not from level+1",
+          walked == [(2, 3), (3, 5), (5, MILESTONE_EVERYONE),
+                     (7, MILESTONE_EVERYONE), (8, MILESTONE_EVERYONE)],
+          str(walked))
+    check("a Booster-only milestone is skipped for a member who is not boosting",
+          await next_reward_level(GUILD, level, boosters=True) == MILESTONE_BOOSTER
+          and f"L{MILESTONE_BOOSTER}" not in embed.title, embed.title)
+    check("a verified booster aims at the Booster-only milestone instead",
+          (await _level_embed(guild, boosting, "level")).title
+          == f"LEVEL {level} {ARROW} REWARD L{MILESTONE_BOOSTER}",
+          (await _level_embed(guild, boosting, "level")).title)
+    check("an unverifiable boost status fails closed, like the claim gate does",
+          await next_reward_level(GUILD, level,
+                                  boosters=member_is_booster(SimpleNamespace(id=USER)))
+          == MILESTONE_EVERYONE
+          and await next_reward_level(GUILD, level, boosters=member_is_booster(None))
+          == MILESTONE_EVERYONE)
+    check("no eligible milestone ahead reports None instead of inventing a target",
+          await next_reward_level(GUILD, MILESTONE_EVERYONE) is None
+          and await next_reward_level(GUILD, MILESTONE_EVERYONE + 5) is None
+          and await next_reward_level(GUILD + 1, 0) is None)
+    await to_level(4, 300, GUILD + 1)
+    bare = await _level_embed(bare_guild, member, "level")
+    bare_level, bare_current, bare_needed = xp_progress(
+        rows("SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+             (GUILD + 1, USER))[0][0])
+    check("a guild with no Level Rewards keeps the LEVEL n ➤ LEVEL n+1 heading",
+          bare_level == 4 and bare.title == f"LEVEL {bare_level} {ARROW} LEVEL 5"
+          and bare.fields[0].value == EMPTY, f"{bare.title} / {bare.fields[0].value}")
+    check("the fallback heading keeps the same within-level bar",
+          bare.description.endswith(f"{bare_current} / {bare_needed} XP")
+          and PLANE in bare.description, bare.description)
+    span = sum(xp_for_level(n) for n in range(level + 1, milestone + 1))
+    check("the bar still measures one level, not the distance to the milestone",
+          needed == xp_for_level(level + 1) and needed != span
+          and embed.description.endswith(f"{current} / {needed} XP"),
+          f"one level={needed} XP vs L{level}->L{milestone}={span} XP")
     check("the path is drawn under the level line",
           all(g in embed.description for g in (REACHED, AHEAD, LINK, PLANE)),
           embed.description)
@@ -192,9 +258,10 @@ async def main():
     check("the footer still counts the earlier rewards",
           embed.footer.text == "Claim All also collects 1 earlier reward(s).",
           embed.footer.text)
-    check("a Booster reward a non-booster cannot claim stays visible as locked",
-          any("(Boosters only)" in line and line.rstrip().endswith("not earned")
-              for line in lines), str(lines))
+    check("rewards the member cannot claim are not offered on this page",
+          not any(word in embed.fields[0].value for word in
+                  ("(Boosters only)", "locked", "not earned", "not crossed",
+                   "fulfilled")), str(lines))
 
     claims = await list_claims(GUILD, USER)
     view = LevelRewardView(bot, GUILD, USER, claimable=True)
@@ -210,9 +277,17 @@ async def main():
           paid == COIN_L3 + COIN_L5, f"paid={paid}")
     after = await _level_embed(guild, member, "level")
     after_lines = after.fields[0].value
-    check("delivered rewards are shown as fulfilled, never as claimable",
-          "fulfilled" in after_lines and "ready to claim" not in after_lines,
-          after_lines)
+    check("delivered rewards leave Rewards Available (claimable only)",
+          after_lines == EMPTY and "fulfilled" not in after_lines
+          and "ready to claim" not in after_lines, after_lines)
+    check("the section and the Claim All button agree on what is claimable",
+          await leveling._claim_button_available(
+              GUILD, await list_claims(GUILD, USER), False) is False
+          and after.footer.text is None, str(after.footer.text))
+    stats = await _level_embed(guild, member, "stats")
+    check("the Stats page still reports the delivered rewards",
+          "Claimed" in field_names(stats)
+          and f"{COIN_L5}x Coins" in field_text(stats), field_text(stats))
     footer = itx.edit_original_response.await_args.kwargs["embed"].footer.text
     check("the Claim All footer still reports the real result",
           footer.startswith("Claimed 2.") and "Retryable failures: 0." in footer,

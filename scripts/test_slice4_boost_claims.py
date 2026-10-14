@@ -200,6 +200,13 @@ async def main():
         "UPDATE leveling_boost_rewards SET multiplier=9, duration_hours=1 "
         "WHERE guild_id=?", (GUILD,))
     execute("DELETE FROM leveling_boost_rewards WHERE guild_id=?", (GUILD,))
+    guild = SimpleNamespace(id=GUILD, get_role=lambda rid: None)
+    # The live config was just edited to 9x/1h and then deleted, and the frozen
+    # claim is still claimable: only the frozen payload can read 2x · 12h here.
+    embed = await _level_embed(guild, SimpleNamespace(id=USER), "level")
+    shown = "\n".join(field.value for field in embed.fields)
+    check("10 /level shows the frozen boost while it is claimable",
+          "2x XP · 12h" in shown and "9x XP · 1h" not in shown, shown)
     paid = await claim_available(GUILD, USER)
     claim_id = rows(
         "SELECT id, payload_json FROM level_reward_claims WHERE track='boost'")[0]
@@ -209,11 +216,10 @@ async def main():
           and paid["delivered_boost"] == 1
           and paid_row and paid_row[0][0] == 2.0,
           str(paid_row))
-    guild = SimpleNamespace(id=GUILD, get_role=lambda rid: None)
     embed = await _level_embed(guild, SimpleNamespace(id=USER), "level")
     shown = "\n".join(field.value for field in embed.fields)
-    check("10 /level still shows the frozen boost",
-          "2x XP · 12h" in shown, shown)
+    check("10 a delivered boost leaves Rewards Available (claimable only)",
+          "2x XP · 12h" not in shown, shown)
 
     # Shop xp_boost purchase stays source=shop and can coexist.
     shop_boost = execute(

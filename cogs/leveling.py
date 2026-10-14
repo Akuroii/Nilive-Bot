@@ -183,10 +183,20 @@ def _is_locked_claim(claim, booster_ok: bool) -> bool:
             and (claim or {}).get("status") in _CLAIMABLE_STATUSES)
 
 
+def _claimable_now(claim, booster_ok: bool = False) -> bool:
+    """One claim row this member can collect with Claim All right now.
+
+    The single predicate behind the Claim All button, the "Rewards Available"
+    list and what the claim pass will actually pay, so those three can never
+    disagree: pending or retryable-failed, and not a Booster-only reward the
+    member's verified boost status leaves locked.
+    """
+    return ((claim or {}).get("status") in _CLAIMABLE_STATUSES
+            and not _is_locked_claim(claim, booster_ok))
+
+
 def _has_claimable(claims, booster_ok: bool = False) -> bool:
-    return any((c or {}).get("status") in _CLAIMABLE_STATUSES
-               and not _is_locked_claim(c, booster_ok)
-               for c in (claims or []))
+    return any(_claimable_now(c, booster_ok) for c in (claims or []))
 
 
 async def _claim_button_available(guild_id: int, claims,
@@ -268,7 +278,7 @@ def claim_result_footer(result: dict) -> str:
 async def _level_embed(guild, member, page: str) -> discord.Embed:
     from utils.currency import get_currency_config
     from utils.level_claims import (
-        current_level_definitions, list_claims,
+        current_level_definitions, list_claims, next_reward_level,
     )
     from utils.xp_calculator import xp_progress
 
@@ -333,10 +343,20 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             inline=False)
         return embed
 
-    # Reference layout: the current level on the left, the next level on the
-    # right, then the progress path with the numeric XP progress beside it.
+    # Reference layout: the current level on the left, the next configured
+    # Level Reward milestone on the right, then the progress path with the
+    # numeric XP progress beside it. The right-hand word carries the meaning -
+    # "REWARD L{n}" names a reward milestone the member is eligible for, while
+    # the fallback "LEVEL {level + 1}" names the path's own destination, so the
+    # heading never implies the bar measures something it does not. The path
+    # and its numbers stay exactly what xp_progress reports for this level:
+    # progress from the current level towards the next one, never towards the
+    # milestone. Milestone selection is read-only and audience-aware through
+    # next_reward_level(); nothing about XP or eligibility changes here.
+    milestone = await next_reward_level(guild.id, level, boosters=booster_ok)
+    target = f"REWARD L{milestone}" if milestone else f"LEVEL {level + 1}"
     embed = discord.Embed(
-        title=f"LEVEL {level} ➤ LEVEL {level + 1}",
+        title=f"LEVEL {level} ➤ {target}",
         description=(f"{_progress_path(current, needed)}  "
                      f"{int(current)} / {int(needed)} XP"),
         color=0x7c5cbf)
@@ -352,15 +372,19 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             text=f"Claim All also collects {len(earlier)} earlier reward(s).")
     defs = await current_level_definitions(guild.id, level)
     currency = await get_currency_config(guild.id)
-    entries = []
+    # "Rewards Available" is a list of offers, so it carries only the rows this
+    # member can claim right now - _claimable_now(), the same predicate the
+    # Claim All button uses. Locked, not-yet-crossed and already-delivered rows
+    # are not offers and stay off this page; the Stats page still reports every
+    # one of them (Claimed / Waiting / locked (Boosters only) / Last failure).
+    available = []
     for item in defs:
         key = (item["reward_level"], item["track"], item["reward_ref"])
         claim = by_key.get(key)
+        if not _claimable_now(claim, booster_ok):
+            continue
         booster_item = is_booster_ref(item["reward_ref"])
-        status = claim["status"] if claim else (
-            "not earned" if booster_item else "not crossed")
-        if claim and _is_locked_claim(claim, booster_ok):
-            status = "locked"
+        status = claim["status"]
         if item["track"] == "currency":
             code = item["payload"]["currency"]
             label = currency["coins" if code == "balance" else "diamonds"]["name"]
@@ -379,12 +403,14 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             text += f" — failed, can retry"
         if booster_item:
             text = f"⭐ {text} (Boosters only)"
-        entries.append((status in ("pending", "failed"), f"{text} · {status}"))
+        available.append(f"{text} · {status}")
     # A deleted Shop product or boost config leaves the frozen claim.
     shown = {(item["reward_level"], item["track"], item["reward_ref"]) for item in defs}
     for claim in claims:
         key = (claim["reward_level"], claim["track"], claim["reward_ref"])
         if claim["reward_level"] != level or claim["track"] not in ("shop", "boost") or key in shown:
+            continue
+        if not _claimable_now(claim, booster_ok):
             continue
         payload = claim["payload"]
         if claim["track"] == "boost":
@@ -393,17 +419,16 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             text = f"{_compact_qty(payload['quantity'])} {payload['name']}"
         if claim.get("last_error") and claim["status"] == "failed":
             text += " — failed, can retry"
-        entries.append((claim["status"] in ("pending", "failed"),
-                        f"{text} · {claim['status']}"))
-    ready = [line for claimable, line in entries if claimable]
-    waiting = [line for claimable, line in entries if not claimable]
-    ready += [f"{_claim_reward_text(guild, claim, currency)} · ready to claim"
-              for claim in sorted(earlier, key=lambda c: c["reward_level"])]
-    bullets = [f"- {line}" for line in ready + waiting]
+        available.append(f"{text} · {claim['status']}")
+    # Earlier levels Claim All would collect are offers too, so they are listed
+    # rather than only counted in the footer.
+    available += [f"{_claim_reward_text(guild, claim, currency)} · ready to claim"
+                  for claim in sorted(earlier, key=lambda c: c["reward_level"])]
+    bullets = [f"- {line}" for line in available]
     embed.add_field(
         name="Rewards Available",
         value="\n".join(bullets)[:1024] if bullets
-        else "No rewards are configured for your current level.",
+        else "Nothing to claim right now.",
         inline=False)
     return embed
 

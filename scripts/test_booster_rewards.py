@@ -328,8 +328,14 @@ async def main():
     plain.premium_since = None
     embed = await leveling_cog._level_embed(guild, plain, "level")
     text = "\n".join(f.value for f in embed.fields)
-    check("/level shows the Booster reward as locked for a non-booster",
-          "Boosters only" in text and "locked" in text and "⭐" in text, text)
+    # Rewards Available lists only what this member can claim right now, so a
+    # locked Booster reward is not offered on the card. The guarantee itself is
+    # still asserted below, unchanged: claimable for a booster (:336), Claim All
+    # disabled for a non-booster (:340), Stats page "locked (Boosters only)"
+    # (:346) and the Claim All footer "Locked (Boosters only)" (:356).
+    check("/level offers a non-booster nothing they cannot claim",
+          "Boosters only" not in text and "locked" not in text
+          and text == "Nothing to claim right now.", text)
     plain.premium_since = BOOSTING
     embed = await leveling_cog._level_embed(guild, plain, "level")
     text = "\n".join(f.value for f in embed.fields)
