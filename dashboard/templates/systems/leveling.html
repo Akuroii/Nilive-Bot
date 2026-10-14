@@ -269,7 +269,7 @@
                     {% for r in rewards %}
                     <tr class="reward-row" data-id="{{ r[0] }}" data-level="{{ r[1] }}" data-audience="{{ r[3] }}">
                         <td><span class="badge badge-accent">Level {{ r[1] }}</span>{% if r[3] == 'boosters' %} <span class="badge badge-booster">⭐ Booster Reward</span>{% endif %}</td>
-                        <td><code>{{ r[2] }}</code></td>
+                        <td><span class="reward-role" data-role-id="{{ r[2] }}"><code>{{ r[2] }}</code></span></td>
                         <td>
                             <button class="btn btn-sm btn-danger"
                                 onclick="showConfirm('Delete Level {{ r[1] }} reward?', () => deleteReward({{ r[0] }}))">
@@ -543,6 +543,8 @@ __neroGlobal.loadResetConfig = loadResetConfig;
 __neroGlobal.saveResetConfig = saveResetConfig;
 __neroGlobal.forceResetNow = forceResetNow;
 __neroGlobal.loadRewards = loadRewards;
+__neroGlobal.loadRoleNames = loadRoleNames;
+__neroGlobal.applyRoleNames = applyRoleNames;
 __neroGlobal.addReward = addReward;
 __neroGlobal.deleteReward = deleteReward;
 __neroGlobal.loadCurrencyRewards = loadCurrencyRewards;
@@ -740,6 +742,80 @@ function syncRewardCounts() {
 __neroGlobal.applyRewardFilter = applyRewardFilter;
 __neroGlobal.syncRewardCounts  = syncRewardCounts;
 
+// ── ROLE NAMES (Level Rewards table) ───────────────────────────
+// The table stores Discord role IDs. An ID on its own tells an admin nothing,
+// and worse: a reward pointing at a deleted role looks exactly as healthy as
+// one pointing at a live role. Names come from the same /api/guild/roles
+// endpoint the role pickers already use (see static/js/nero-select.js), fetched
+// once per page load and cached, so this adds no backend contract and writes
+// nothing. Three states, and the table never guesses between them:
+//   in the guild's role list -> "@Name" next to the ID
+//   absent from a good list  -> "Role not found" (deleted, or never existed)
+//   list could not be loaded -> "Name unavailable" (Discord unreachable, no bot
+//                               token, or the caller lacks permission) - the
+//                               role may still be perfectly valid, so it is
+//                               never reported as deleted.
+var __roleNamesPromise = null;
+
+function loadRoleNames() {
+    if (!__roleNamesPromise) {
+        __roleNamesPromise = fetch('/api/guild/roles')
+            .then(res => (res.ok ? res.json() : null))
+            .then(data => {
+                // An empty or errored payload is "unavailable", not "every role
+                // was deleted": every real guild has at least @everyone, and
+                // get_guild_roles() answers 200 with {"results": [], "error": ...}
+                // when the bot token is missing or Discord refuses the call.
+                if (!data || data.error || !Array.isArray(data.results)
+                        || !data.results.length) return null;
+                const map = {};
+                data.results.forEach(r => {
+                    if (r && r.id != null) map[String(r.id)] = r;
+                });
+                return map;
+            })
+            .catch(() => null);
+    }
+    return __roleNamesPromise;
+}
+
+function renderRoleCell(cell, roleId, names) {
+    const id = String(roleId == null ? '' : roleId);
+    const role = names ? names[id] : null;
+    // The name goes in through textContent, never interpolated into HTML, so a
+    // role name containing < > & " cannot break the row - the same rule
+    // nero-select.js documents for its picker templates.
+    cell.innerHTML = '';
+    const label = document.createElement('span');
+    if (role && role.name) {
+        label.className = 'role-name';
+        label.textContent = '@' + role.name;
+        cell.title = '';
+    } else if (names) {
+        label.className = 'badge badge-danger';
+        label.textContent = 'Role not found';
+        cell.title = `Role ${id} is not in this server's current role list, so it `
+            + 'was most likely deleted and this reward can no longer be granted.';
+    } else {
+        label.className = 'badge badge-warning';
+        label.textContent = 'Name unavailable';
+        cell.title = `Role names could not be loaded from Discord, so role ${id} `
+            + 'could not be verified. The reward itself is unchanged.';
+    }
+    cell.appendChild(label);
+    cell.appendChild(document.createTextNode(' '));
+    const code = document.createElement('code');
+    code.textContent = id;
+    cell.appendChild(code);
+}
+
+async function applyRoleNames() {
+    const names = await loadRoleNames();
+    document.querySelectorAll('.reward-role').forEach(cell => {
+        renderRoleCell(cell, cell.dataset.roleId, names);
+    });
+}
+
 // ── ROLE REWARDS ───────────────────────────────────────────────
 // Same in-place refresh the currency / shop / boost tables already use, so
 // adding or deleting a role reward no longer reloads the page: the admin stays
@@ -762,7 +838,7 @@ async function loadRewards() {
     tbody.innerHTML = data.rewards.map(r => `
         <tr class="reward-row" data-id="${r.id}" data-level="${r.level}" data-audience="${r.audience || 'everyone'}">
             <td><span class="badge badge-accent">Level ${r.level}</span>${rewardAudienceBadge(r.audience)}</td>
-            <td><code>${r.role_id}</code></td>
+            <td><span class="reward-role" data-role-id="${r.role_id}"><code>${r.role_id}</code></span></td>
             <td>
                 <button class="btn btn-sm btn-danger"
                     onclick="showConfirm('Delete Level ${r.level} reward?', () => deleteReward(${r.id}))">
@@ -772,6 +848,7 @@ async function loadRewards() {
         </tr>`).join('');
     syncRewardCounts();
     applyRewardFilter();
+    applyRoleNames();
 }
 
 async function addReward() {
@@ -1201,6 +1278,7 @@ async function deleteBoostReward(id) {
 }
 
 loadRewards();
+applyRoleNames();
 loadCurrencyRewards();
 loadBoostRewards();
 loadShopRewards();

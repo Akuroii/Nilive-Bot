@@ -22,7 +22,7 @@ What this file proves:
    success/error through the existing toast;
 4. scope: no other template lost its reload, the tab default is untouched, the
    existing POST/DELETE routes and `_reward_audience` are byte-identical, and
-   exactly one route was added to the API module.
+   the role-reward route set is exactly the one read list plus those two.
 
 Run with:
     python scripts/test_leveling_rewards_ux_u1.py
@@ -474,14 +474,16 @@ async def main():
           "location.reload" not in template)
     check("the tab default is untouched (the fix removes the reload, not the default)",
           "switchTab('leaderboard');" in template)
-    check("exactly one route was added to the leveling API module",
+    # Pinned to the route set itself rather than to a git baseline, so the guard
+    # still means the same thing after the fix is committed: the role-reward
+    # surface is one read-only list route plus the POST/DELETE that already
+    # existed, and nothing else was added alongside them.
+    check("the role-reward routes are exactly one read list plus the existing POST/DELETE",
           api_text.count('@api_bp.route("/leveling/rewards", methods=["GET"])') == 1
-          and len(re.findall(r'@api_bp\.route\("/leveling/', api_text))
-          == 1 + len(re.findall(r'@api_bp\.route\("/leveling/',
-                                subprocess.run(
-                                    ["git", "show", "HEAD:dashboard/api/leveling.py"],
-                                    capture_output=True, text=True,
-                                    cwd=ROOT).stdout)))
+          and sorted(set(re.findall(r'@api_bp\.route\("(/leveling/reward[^"]*)"',
+                                    api_text)))
+          == ["/leveling/reward", "/leveling/reward/<int:reward_id>",
+              "/leveling/rewards"])
     check("the existing role POST/DELETE handlers and the audience validator are intact",
           '@api_bp.route("/leveling/reward", methods=["POST"])' in api_text
           and '@api_bp.route("/leveling/reward/<int:reward_id>", methods=["DELETE"])'
