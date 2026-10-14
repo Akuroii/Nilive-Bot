@@ -576,12 +576,14 @@ class Leveling(commands.Cog):
         boost is active, so losing one of several boosts keeps every
         Booster-only Level role.
 
-        Nothing is granted here. Boosting again restores previously fulfilled
-        Booster-only roles through the existing reconciliation, and levels
-        passed without a boost never created an entitlement, so no reward is
-        unlocked retroactively. Fails closed: if the boost status cannot be
-        verified, or the removal itself fails (deleted role, hierarchy,
-        permissions, rate limit), roles stay and the reason is logged.
+        Boosting again (``premium_since`` None -> set) restores the
+        Booster-only Level roles the member already earned: the reconciliation
+        reads fulfilled Booster-only role claims only, writes no claim, removes
+        nothing and never touches Member or unrelated roles. Levels passed
+        without a boost never created an entitlement, so no reward is unlocked
+        retroactively. Fails closed: if the boost status cannot be verified, or
+        the removal itself fails (deleted role, hierarchy, permissions, rate
+        limit), roles stay and the reason is logged.
         """
         if getattr(after, "bot", False):
             return
@@ -590,6 +592,9 @@ class Leveling(commands.Cog):
             still_boosting = after.premium_since is not None
         except AttributeError:
             # A verification failure is never treated as a confirmed boost loss.
+            return
+        if not was_boosting and still_boosting:
+            await self._restore_booster_roles(after)
             return
         if not was_boosting or still_boosting:
             return
@@ -614,6 +619,30 @@ class Leveling(commands.Cog):
         if result.get("failed"):
             print(f"[LEVEL BOOSTER ROLES] guild={guild.id} user={after.id} "
                   f"could not remove={result['failed']}")
+
+    async def _restore_booster_roles(self, after: discord.Member):
+        """Boost regained: give back previously fulfilled Booster-only roles."""
+        guild = getattr(after, "guild", None)
+        if guild is None:
+            return
+        try:
+            from utils.level_claims import (member_is_booster,
+                                            reconcile_role_progression)
+            member = guild.get_member(after.id) or after
+            if not member_is_booster(member):
+                return
+            result = await reconcile_role_progression(
+                member, guild.id, member.id, boosters_only=True)
+        except Exception as exc:
+            print(f"[LEVEL BOOSTER ROLES] boost-regained handling failed "
+                  f"guild={guild.id} user={after.id}: {exc}")
+            return
+        if result.get("restored"):
+            print(f"[LEVEL BOOSTER ROLES] guild={guild.id} user={after.id} "
+                  f"boost regained, restored={result['restored']}")
+        if result.get("failed"):
+            print(f"[LEVEL BOOSTER ROLES] guild={guild.id} user={after.id} "
+                  f"could not restore={result['failed']}")
 
     # ─── INCIDENT-BASED SPAM DETECTION ────────────────────
     # Track independently of the XP cooldown. Normal message counts are

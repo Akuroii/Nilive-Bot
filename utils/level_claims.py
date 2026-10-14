@@ -527,7 +527,8 @@ async def enforce_role_progression(member, guild_id: int, user_id: int,
     return removed
 
 
-async def reconcile_role_progression(member, guild_id: int, user_id: int) -> dict:
+async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
+                                     boosters_only: bool = False) -> dict:
     """Restore earned Level roles and optionally enforce exclusivity.
 
     This is the shared membership-only reconciliation used by both rejoin and
@@ -538,6 +539,11 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int) -> dic
     every role in that set is present. A failed/pending/processing same-Level
     claim or Discord add failure blocks replacement; unrelated roles are never
     considered.
+
+    ``boosters_only`` (the boost-regained path in cogs/leveling.py) restores
+    Booster-only Level roles and nothing else: Member-audience rows are
+    skipped and no role is ever removed, with the setting ON or OFF. It still
+    reads only fulfilled claims, so it cannot create an entitlement.
 
     Returns ``{"restored": [...], "removed": [...], "failed": [...],
     "blocked": bool}``. Failures are role IDs with an explanatory string.
@@ -562,6 +568,8 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int) -> dic
     partitions: dict[bool, dict[int, dict]] = {False: {}, True: {}}
     for claimed_level, ref, payload, status in claim_rows:
         audience = is_booster_ref(ref)
+        if boosters_only and not audience:
+            continue
         if audience and not booster_ok:
             continue
         level = int(claimed_level)
@@ -634,7 +642,7 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int) -> dic
                 except Exception as exc:
                     result["failed"].append((role_id, str(exc)))
 
-        if not exclusive_roles:
+        if not exclusive_roles or boosters_only:
             result["blocked"] = result["blocked"] or bool(result["failed"])
             continue
 
