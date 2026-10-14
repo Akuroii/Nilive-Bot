@@ -709,6 +709,7 @@ function applyRewardFilter() {
         row.style.display = (okAudience && okLevel) ? '' : 'none';
     });
     updateFilterSummary(wantAudience, wantLevel);
+    syncFilterEmptyRows();
 }
 
 function updateFilterSummary(audience, level) {
@@ -721,6 +722,44 @@ function updateFilterSummary(audience, level) {
     if (level) parts.push(`level ${level}`);
     if (audience) parts.push(audience === 'boosters' ? 'Booster Rewards' : 'Member Rewards');
     out.textContent = `${shown} of ${rows.length} reward row(s) match ${parts.join(' · ')}`;
+}
+
+// ── FILTERED-EMPTY STATE ───────────────────────────────────────
+// A filter that matched nothing used to leave the table with nothing but its
+// header, which reads like a broken table rather than an answer. Each reward
+// table now says so in place, and keeps that apart from its loader's "nothing
+// configured yet" row: this message only appears when the table HAS rows and
+// every one of them is filtered out, so "no rewards exist" and "no rewards
+// match" never look the same. The row is appended with insertAdjacentHTML,
+// never `innerHTML +=`: rewriting the table body would recreate every row node
+// and silently drop the display:none the filter has just applied.
+function syncFilterEmptyRows() {
+    const tables = [
+        ['rewards-tbody', 3, 'role'],
+        ['currency-rewards-tbody', 4, 'currency'],
+        ['boost-rewards-tbody', 4, 'XP boost'],
+        ['shop-rewards-tbody', 4, 'Shop'],
+    ];
+    tables.forEach(entry => {
+        const tbody = document.getElementById(entry[0]);
+        if (!tbody) return;
+        const rowId = entry[0] + '-filter-empty';
+        const rows = Array.from(tbody.querySelectorAll('tr.reward-row'));
+        const shown = rows.filter(row => row.style.display !== 'none').length;
+        const existing = document.getElementById(rowId);
+        if (!rows.length || shown) {
+            if (existing) existing.style.display = 'none';
+            return;
+        }
+        if (!existing) {
+            tbody.insertAdjacentHTML('beforeend',
+                `<tr id="${rowId}" class="filter-empty">`
+                + `<td colspan="${entry[1]}" class="empty">No ${entry[2]} rewards `
+                + 'match the current filters</td></tr>');
+        }
+        const row = document.getElementById(rowId);
+        if (row) row.style.display = '';
+    });
 }
 
 // Reward counts in the card titles, so admins can see the size of each track
@@ -740,6 +779,7 @@ function syncRewardCounts() {
     });
 }
 __neroGlobal.applyRewardFilter = applyRewardFilter;
+__neroGlobal.syncFilterEmptyRows = syncFilterEmptyRows;
 __neroGlobal.syncRewardCounts  = syncRewardCounts;
 
 // ── ROLE NAMES (Level Rewards table) ───────────────────────────
