@@ -236,6 +236,36 @@ def save_leveling_config_api():
     return jsonify({"success": True})
 
 
+@api_bp.route("/leveling/rewards", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_rewards():
+    """Role level rewards as JSON, mirroring get_leveling_currency_rewards().
+
+    The Rewards tab already refreshed the currency, shop and boost tables in
+    place from their list endpoints; role rewards had no list endpoint, so the
+    page had to reload to show an add or a delete (and the reload landed back
+    on the Leaderboard tab with the audience/level filters cleared). Same
+    columns and ORDER BY as the page route in dashboard/app.py, so the
+    client-side re-render matches the server-rendered first paint row for row.
+    Read-only: it writes nothing and no entitlement or audience rule changes.
+    """
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, level, role_id, audience
+                FROM leveling_rewards
+                WHERE guild_id = ? ORDER BY level ASC
+            """, (guild_id,))
+            return await cursor.fetchall()
+
+    rows = run_async(fetch())
+    return jsonify({"rewards": [{
+        "id": r[0], "level": r[1], "role_id": r[2], "audience": r[3],
+    } for r in rows]})
+
+
 def _reward_audience(data):
     """'everyone' (default) or 'boosters'; anything else is rejected."""
     audience = (data or {}).get("audience") or "everyone"

@@ -267,7 +267,7 @@
                 <thead><tr><th>Level</th><th>Role ID</th><th></th></tr></thead>
                 <tbody id="rewards-tbody">
                     {% for r in rewards %}
-                    <tr class="reward-row" data-level="{{ r[1] }}" data-audience="{{ r[3] }}">
+                    <tr class="reward-row" data-id="{{ r[0] }}" data-level="{{ r[1] }}" data-audience="{{ r[3] }}">
                         <td><span class="badge badge-accent">Level {{ r[1] }}</span>{% if r[3] == 'boosters' %} <span class="badge badge-booster">⭐ Booster Reward</span>{% endif %}</td>
                         <td><code>{{ r[2] }}</code></td>
                         <td>
@@ -542,6 +542,7 @@ __neroGlobal.saveConfig = saveConfig;
 __neroGlobal.loadResetConfig = loadResetConfig;
 __neroGlobal.saveResetConfig = saveResetConfig;
 __neroGlobal.forceResetNow = forceResetNow;
+__neroGlobal.loadRewards = loadRewards;
 __neroGlobal.addReward = addReward;
 __neroGlobal.deleteReward = deleteReward;
 __neroGlobal.loadCurrencyRewards = loadCurrencyRewards;
@@ -740,6 +741,39 @@ __neroGlobal.applyRewardFilter = applyRewardFilter;
 __neroGlobal.syncRewardCounts  = syncRewardCounts;
 
 // ── ROLE REWARDS ───────────────────────────────────────────────
+// Same in-place refresh the currency / shop / boost tables already use, so
+// adding or deleting a role reward no longer reloads the page: the admin stays
+// on the Rewards tab and the audience / level filters stay applied. Markup
+// mirrors the server-rendered rows above exactly (rewardAudienceBadge() emits
+// the same Booster badge the server-side conditional does), and a failed fetch
+// leaves the server-rendered rows untouched.
+async function loadRewards() {
+    const res  = await fetch('/api/leveling/rewards');
+    if (!res.ok) return;
+    const data = await res.json();
+    const tbody = document.getElementById('rewards-tbody');
+    if (!tbody) return;
+    if (!data.rewards || !data.rewards.length) {
+        tbody.innerHTML = '<tr><td colspan="3" class="empty">No role rewards configured yet</td></tr>';
+        syncRewardCounts();
+        applyRewardFilter();
+        return;
+    }
+    tbody.innerHTML = data.rewards.map(r => `
+        <tr class="reward-row" data-id="${r.id}" data-level="${r.level}" data-audience="${r.audience || 'everyone'}">
+            <td><span class="badge badge-accent">Level ${r.level}</span>${rewardAudienceBadge(r.audience)}</td>
+            <td><code>${r.role_id}</code></td>
+            <td>
+                <button class="btn btn-sm btn-danger"
+                    onclick="showConfirm('Delete Level ${r.level} reward?', () => deleteReward(${r.id}))">
+                    Delete
+                </button>
+            </td>
+        </tr>`).join('');
+    syncRewardCounts();
+    applyRewardFilter();
+}
+
 async function addReward() {
     const level   = document.getElementById('reward-level').value;
     const rp      = document.getElementById('reward-role-picker');
@@ -755,7 +789,7 @@ async function addReward() {
         showToast('Reward added!');
         document.getElementById('reward-level').value = '';
         if (rp) $(rp).val('').trigger('change.select2');
-        setTimeout(() => location.reload(), 600);
+        loadRewards();
     } else {
         showToast(data.error || 'Error adding reward', 'error');
     }
@@ -764,8 +798,8 @@ async function addReward() {
 async function deleteReward(id) {
     const res  = await fetch(`/api/leveling/reward/${id}`, { method: 'DELETE' });
     const data = await res.json();
-    if (data.success) { showToast('Reward deleted', 'info'); setTimeout(() => location.reload(), 600); }
-    else showToast('Error', 'error');
+    if (data.success) { showToast('Reward deleted', 'info'); loadRewards(); }
+    else showToast(data.error || 'Error deleting reward', 'error');
 }
 
 // ── CURRENCY REWARDS (Phase 5 / Leveling expansion) ─────────────
@@ -1166,6 +1200,7 @@ async function deleteBoostReward(id) {
     else showToast('Error', 'error');
 }
 
+loadRewards();
 loadCurrencyRewards();
 loadBoostRewards();
 loadShopRewards();
