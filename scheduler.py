@@ -29,7 +29,7 @@ def parse_when(when: str) -> datetime | None:
     Accepts either a relative shorthand ("30m", "2h", "3d") or an
     absolute "YYYY-MM-DD HH:MM" string, absolute is interpreted as
     Africa/Cairo wall-clock then converted to UTC for storage.
-    Returns None if it can't parse - callers turn that into a user
+    Returns None if it can't parse — callers turn that into a user
     facing error rather than guessing.
     """
     when = when.strip()
@@ -56,7 +56,7 @@ def compute_next_send(current_send_at: datetime, repeat_type: str,
                        repeat_interval: int) -> datetime | None:
     """
     Rolls a repeating message forward to its next occurrence, strictly
-    after "now" - if the bot was offline for a while and a daily
+    after "now" — if the bot was offline for a while and a daily
     message's slot passed twice, this skips the missed one(s) instead
     of firing a burst of catch-up sends the moment the bot reconnects.
     """
@@ -104,7 +104,7 @@ class Scheduler(commands.Cog):
                 # version marked the message as "sent" regardless of
                 # whether it actually went out, silently losing it
                 # forever with only a console log line as a trace.
-                # Leaving state untouched means it retries next tick -
+                # Leaving state untouched means it retries next tick —
                 # this will retry forever for a permanently-deleted
                 # channel, which is a real tradeoff (log spam over
                 # silent data loss), but losing a message an admin
@@ -123,7 +123,7 @@ class Scheduler(commands.Cog):
                         WHERE id = ?
                     """, (now, next_at.strftime("%Y-%m-%d %H:%M:%S"), row_id))
                 else:
-                    # One-off message - disable rather than delete, so
+                    # One-off message — disable rather than delete, so
                     # /schedule_list history still shows it fired.
                     await db.execute("""
                         UPDATE scheduled_messages
@@ -137,7 +137,7 @@ class Scheduler(commands.Cog):
         channel = self.bot.get_channel(channel_id)
         if channel is None:
             print(f"[SCHEDULER] Skipped scheduled message {row_id}: "
-                  f"channel {channel_id} not found (deleted or bot removed?) - will retry")
+                  f"channel {channel_id} not found (deleted or bot removed?) — will retry")
             return False
         embed = None
         if embed_data:
@@ -149,7 +149,7 @@ class Scheduler(commands.Cog):
             await channel.send(content=message_text or None, embed=embed)
             return True
         except Exception as e:
-            print(f"[SCHEDULER] Failed to send scheduled message {row_id}: {e} - will retry")
+            print(f"[SCHEDULER] Failed to send scheduled message {row_id}: {e} — will retry")
             return False
 
     @check_scheduled.before_loop
@@ -167,7 +167,7 @@ class Scheduler(commands.Cog):
         repeat="Repeat this message? Default: no",
         repeat_interval="Repeat every N hours/days/weeks (matches 'repeat'), default 1")
     @app_commands.choices(repeat=[
-        app_commands.Choice(name="No - send once", value="none"),
+        app_commands.Choice(name="No — send once", value="none"),
         app_commands.Choice(name="Every N hours", value="hourly"),
         app_commands.Choice(name="Every N days", value="daily"),
         app_commands.Choice(name="Every N weeks", value="weekly"),
@@ -241,7 +241,7 @@ class Scheduler(commands.Cog):
             except Exception:
                 send_display = f"{send_at} UTC"
             embed.add_field(
-                name=f"#{row_id} - {status}",
+                name=f"#{row_id} — {status}",
                 value=f"{chan_label} · `{send_display}` · {repeat_label}\n{preview}",
                 inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)

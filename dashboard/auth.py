@@ -15,13 +15,13 @@ REDIRECT_URI  = os.getenv("DISCORD_REDIRECT_URI")
 SESSION_DURATION_DEFAULT  = 60 * 60 * 24
 SESSION_DURATION_REMEMBER = 60 * 60 * 24 * 7
 
-# Phase 0 Extension - Server Permission Gating (Sapphire-style)
+# Phase 0 Extension — Server Permission Gating (Sapphire-style)
 DISCORD_PERMISSION_ADMINISTRATOR = 0x8
 # SECURITY HARDENING: default narrowed from Administrator (8) to the
 # specific permissions the bot actually uses (manage roles/channels,
 # kick/ban/timeout, manage nicknames, manage messages, send/embed/
 # attach, mention everyone, connect/speak). Only affects the invite
-# link generated for servers that DON'T have the bot yet - already-
+# link generated for servers that DON'T have the bot yet — already-
 # installed servers are untouched. Still overridable via env if
 # Administrator is ever wanted back.
 _DEFAULT_BOT_PERMISSIONS = (
@@ -34,21 +34,21 @@ BOT_INVITE_PERMISSIONS = os.getenv(
 
 def get_discord_oauth_url(remember: bool = False) -> str:
     # SECURITY FIX: OAuth `state` parameter was previously never
-    # generated or checked - a login CSRF gap where an attacker could
+    # generated or checked — a login CSRF gap where an attacker could
     # pre-generate/replay an authorization request and bind a victim's
     # session to an attacker-controlled Discord account. A random
     # per-flow token is stored in the pre-auth session and must match
     # what Discord echoes back to /callback before any code exchange
     # happens (see verify_oauth_state below).
     #
-    # BUGFIX, same change: "remember me" was already non-functional -
+    # BUGFIX, same change: "remember me" was already non-functional —
     # login.html wrote a `nero_remember` cookie nothing server-side
     # ever read, and `?remember=1` on /discord_login was silently
     # dropped since Discord's redirect back to /callback only ever
     # echoes `code` (and now `state`), not arbitrary extra params from
     # the original authorize request. The choice is now threaded
     # through the session alongside the state token so it actually
-    # survives the round trip - see consume_oauth_remember below.
+    # survives the round trip — see consume_oauth_remember below.
     state = secrets.token_urlsafe(24)
     session["oauth_state"] = state
     session["oauth_remember"] = bool(remember)
@@ -66,7 +66,7 @@ def verify_oauth_state(returned_state: str | None) -> bool:
     """
     Call from /callback before exchanging the code. Consumes the
     stored state (single-use) so a replayed callback URL can't be
-    reused. Returns False on any mismatch or missing state - callers
+    reused. Returns False on any mismatch or missing state — callers
     should treat that as an auth failure and redirect back to /login,
     never proceed.
     """
@@ -138,7 +138,7 @@ def fetch_discord_bot_guilds() -> set[int]:
     have the bot installed vs. still need an invite.
 
     Returns an empty set (never raises) if DISCORD_TOKEN isn't set
-    or the API call fails - callers treat that as "assume not a
+    or the API call fails — callers treat that as "assume not a
     member yet", which just shows the Invite button, the safe
     default.
     """
@@ -170,7 +170,7 @@ def fetch_discord_bot_guilds() -> set[int]:
 def fetch_bot_guilds_full() -> list[dict]:
     """
     Full guild objects (id, name, icon, ...) the bot is currently a
-    member of, read via the BOT token - same endpoint
+    member of, read via the BOT token — same endpoint
     fetch_discord_bot_guilds() above reduces to a bare ID set. Used
     by /server-select to render the developer's "every bot guild"
     view (dashboard/permissions.py's is_trusted_super_admin), which
@@ -210,14 +210,14 @@ def fetch_bot_guilds_full() -> list[dict]:
 
 def bot_is_in_guild(guild_id: int) -> bool:
     """
-    Phase 0 - Server Select fix. Single-guild membership check via the
-    BOT token (GET /guilds/{id} - 200 if the bot is a member, 403/404
+    Phase 0 — Server Select fix. Single-guild membership check via the
+    BOT token (GET /guilds/{id} — 200 if the bot is a member, 403/404
     otherwise). Used by /select-guild to verify the bot is actually
     installed before auto-granting OWNER_DISCORD_ID dashboard access,
     without paying for a full fetch_discord_bot_guilds() page-through
     just to check one guild.
 
-    Returns False (never raises) on any failure or missing token - the
+    Returns False (never raises) on any failure or missing token — the
     safe default is "assume not a member", which just means the
     auto-grant path is skipped and the normal dashboard_users check
     (403 if no row) applies as before.
@@ -266,7 +266,7 @@ def create_session(user: dict, remember_me: bool = False):
     session["expires_at"]  = time.time() + duration
     session["remember_me"] = remember_me
     # SECURITY FIX (Critical, this pass): dashboard had zero CSRF
-    # protection - every state-changing route relied solely on the
+    # protection — every state-changing route relied solely on the
     # session cookie. Minting a random per-session token here, checked
     # against the X-CSRF-Token header on every non-GET /api/* request
     # (see dashboard/api.py before_request hook), closes that gap for

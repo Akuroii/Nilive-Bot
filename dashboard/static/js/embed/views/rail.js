@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
-// NERO DASHBOARD - embed/views/rail.js
-// Message Builder v2 - the Structure rail (phase 1, step 5b).
+// NERO DASHBOARD — embed/views/rail.js
+// Message Builder v2 — the Structure rail (phase 1, step 5b).
 //
 // WHAT THIS IS
 //   A read-only-in-reverse view: it renders the structure of the canonical
@@ -16,12 +16,12 @@
 //        embed/add · embed/duplicate · embed/move · embed/remove
 //        field/add · field/move · field/remove · ui/selectNode
 //      The harness freezes the store's documents, so an in-place mutation
-//      throws instead of quietly working - a bug class the tests catch rather
+//      throws instead of quietly working — a bug class the tests catch rather
 //      than a convention nobody can check.
 //
 //   2. IT RENDERS FROM STATE, NOT FROM EVENTS. It subscribes to the store (the
 //      document and the selected node) and re-derives on every notification. An
-//      edit made anywhere else - the inspector in 5c, a load, undo - shows up
+//      edit made anywhere else — the inspector in 5c, a load, undo — shows up
 //      here without the rail being told.
 //
 //   3. ROWS KEEP THEIR IDENTITY. Re-rendering reconciles by node id: a row that
@@ -53,7 +53,7 @@
 //     off" and "the validator would complain" are one decision, not two.
 //   * THE BADGES. A row whose node carries issues from `store.ui.issues` shows
 //     how many, tinted by the worst severity. Presentation only: the rail never
-//     builds, filters or stores an issue, and it never dispatches one - it
+//     builds, filters or stores an issue, and it never dispatches one — it
 //     renders the ONE list the page already has.
 //   * FAIL CLOSED. No usable limits table ⇒ no add control is enabled. The rail
 //     never guesses a limit and never assumes "unlimited".
@@ -94,21 +94,21 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         if (title) parts.push(title);
         else parts.push('(no title)');
         if (fields) parts.push(fields === 1 ? '1 field' : fields + ' fields');
-        return parts.join(' - ');
+        return parts.join(' — ');
     }
 
     function fieldLabel(field, index) {
         const name = snippet(field && field.name);
-        return 'Field ' + (index + 1) + (name ? ' - ' + name : ' - (no name)');
+        return 'Field ' + (index + 1) + (name ? ' — ' + name : ' — (no name)');
     }
 
     function contentLabel(document_) {
         const text = snippet(document_ && document_.content);
-        return text ? 'Message content - ' + text : 'Message content';
+        return text ? 'Message content — ' + text : 'Message content';
     }
 
     /**
-     * The add caps for a document, measured by embed/validate.js - the rail holds
+     * The add caps for a document, measured by embed/validate.js — the rail holds
      * no limit of its own and never re-implements a comparison. Fail closed: an
      * unusable table (or a missing validator) can only answer "cannot add", and
      * the page's strip is what explains why.
@@ -295,7 +295,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             // The badge (6b) is decoration WITH a name for assistive tech: the
             // digits alone would read as a stray number, so the visible part is
             // hidden from the accessibility tree and a visually-hidden phrase
-            // carries the meaning. It announces nothing by itself - the strip is
+            // carries the meaning. It announces nothing by itself — the strip is
             // this page's only validation live region.
             const badge = doc.createElement('span');
             badge.className = 'mb2-rail-badge';
@@ -387,7 +387,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         /**
          * One place that turns a fact into a disabled control. `disabled` is the
          * button's real PROPERTY (what a browser and a screen reader act on), and
-         * it is written only when it differs - a keystroke that changes no cap
+         * it is written only when it differs — a keystroke that changes no cap
          * costs no DOM write.
          */
         function applyDisabled(row, wanted) {
@@ -405,7 +405,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         // ── painting ─────────────────────────────────────────────────
         /**
          * The issues grouped by the node they are about: what the badges show.
-         * Read-only - `store.ui.issues` is the ONE list (the page dispatched it
+         * Read-only — `store.ui.issues` is the ONE list (the page dispatched it
          * after validation ran), and the rail keeps no part of it.
          */
         function issuesByNode() {
@@ -563,7 +563,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             return true;
         }
 
-        /** Visible rows in visual order - read from the DOM the rail just built. */
+        /** Visible rows in visual order — read from the DOM the rail just built. */
         function visibleIds() {
             const ids = [];
             mount.children.forEach(function (node) {
@@ -604,7 +604,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
 
         /**
          * 6b: both add actions are capped. A disabled button cannot be clicked in
-         * a browser, so this is the second belt - a programmatic call (or a widget
+         * a browser, so this is the second belt — a programmatic call (or a widget
          * that ignores `disabled`) still cannot push the document past a served
          * limit. The facts come from the same measurement the button was painted
          * from, so the guard and the control can never disagree.
@@ -648,7 +648,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         /**
          * Where focus goes after a removal, decided BEFORE the row disappears:
          * the next sibling, else the previous sibling, else the parent embed (or
-         * the message root). Never nothing - losing focus to <body> is how a
+         * the message root). Never nothing — losing focus to <body> is how a
          * keyboard user gets teleported back to the top of the page.
          */
         function survivorAfter(removingId) {

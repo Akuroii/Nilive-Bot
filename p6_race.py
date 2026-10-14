@@ -1,4 +1,4 @@
-"""PROBE 6 - one decision per message, shared by every sibling listener.
+"""PROBE 6 — one decision per message, shared by every sibling listener.
 
 Why this exists: discord.py runs every cog's ``on_message`` as a *sibling task*
 (``Client.dispatch`` → ``_run_event`` → the extra events are scheduled after
@@ -47,7 +47,7 @@ def fake_message(bot, content, mid, guild_id=GUILD):
     ch = FakeChannel(guild=g)
     # the app command carries @checks.has_permissions(manage_guild=True); p0_env's
     # default fake namespace does not define it, which correctly fails the alias
-    # check closed - so give this channel the permission the check asks for.
+    # check closed — so give this channel the permission the check asks for.
     ch.permissions_for = lambda obj: types.SimpleNamespace(
         kick_members=True, ban_members=True, manage_guild=True, manage_roles=True,
         mention_everyone=False, manage_messages=True)

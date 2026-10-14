@@ -10,20 +10,20 @@ rows) and triggers (auto-responses).
 discord.py 2.7.1 dispatches every ``@commands.Cog.listener()`` ``on_message``
 as a **sibling task** after the client's own handler
 (``discord/ext/commands/bot.py:237-242``: ``Bot.dispatch`` calls
-``Client.dispatch`` - which schedules ``Bot.on_message`` -> ``process_commands``
-- and only then schedules each entry of ``extra_events``). Listeners therefore
+``Client.dispatch`` — which schedules ``Bot.on_message`` -> ``process_commands``
+— and only then schedules each entry of ``extra_events``). Listeners therefore
 run *concurrently* and interleave at whichever ``await`` they happen to hit;
 they do not run one-after-another to completion.
 
 That makes the two "obvious" ways of coordinating them both wrong:
 
   * rewriting ``message.content`` in one listener so a later
-    ``process_commands`` sees a prefix - impossible: ``process_commands`` has
+    ``process_commands`` sees a prefix — impossible: ``process_commands`` has
     already run, and the mutation leaks into whichever listener is still parked
     on its DB read (measured: ``exact``/``startswith`` triggers silently stop
     matching once the alias cog is loaded, because they receive ``!k`` where
     the user typed ``k``);
-  * a "handled" flag set by the first listener so the others stand down - a
+  * a "handled" flag set by the first listener so the others stand down — a
     race, because "first" is not deterministic.
 
 THE RULE (single source of truth)
@@ -65,12 +65,12 @@ class Route(str, Enum):
     A str-Enum so members compare equal to their own value (`route == "alias"`
     works) while staying identity-comparable (`route is Route.ALIAS`), and so a
     log line or the dashboard can print the label without a lookup table.
-    Declaring it here - instead of each cog deciding for itself - is the whole
+    Declaring it here — instead of each cog deciding for itself — is the whole
     point: there is exactly one precedence order in this program.
     """
 
     NONE = "none"
-    #: a real discord.py prefix command (!sync, !reload, …) - executed by
+    #: a real discord.py prefix command (!sync, !reload, …) — executed by
     #: process_commands, only reported here so the others stand down
     PREFIX_COMMAND = "prefix_command"
     #: bare alias word -> slash command
@@ -82,7 +82,7 @@ class Route(str, Enum):
     TRIGGER = "trigger"
 
 
-# Custom commands are read with an explicit column list - never ``SELECT *``.
+# Custom commands are read with an explicit column list — never ``SELECT *``.
 # database.init_db() creates 16 columns while the old cogs/customcommands.py
 # unpacked 14, which raised ValueError on every matching message; pinning the
 # column list makes the read immune to further schema additions.
@@ -110,10 +110,10 @@ def strip_word(word: str) -> str:
     """Trim punctuation a user may wrap around a command word.
 
     ``k.``, ``(k)``, ```k``` all count as the word ``k``. Only leading/trailing
-    characters are trimmed - never inner ones - so ordinary chat such as
+    characters are trimmed — never inner ones — so ordinary chat such as
     ``pick me up`` cannot collapse into a command word.
     """
-    return word.strip("`*_~()[]{}<>\"'.,;:!?-–-")
+    return word.strip("`*_~()[]{}<>\"'.,;:!?—–-")
 
 
 @dataclass
@@ -137,7 +137,7 @@ class Decision:
 class MessageRouter:
     def __init__(self, bot):
         self.bot = bot
-        # guild_id -> {alias_word: parent_command_name} - published by
+        # guild_id -> {alias_word: parent_command_name} — published by
         # cogs/command_aliases.py on every sync.
         self._alias_table: Dict[int, Dict[str, str]] = {}
         # message_id -> Task[Decision]. Shared so concurrent listeners await one
@@ -190,8 +190,8 @@ class MessageRouter:
         """Keep the memo bounded without cancelling anybody's work.
 
         Only *finished* decisions are eligible for eviction. If everything in
-        the cache is still in flight - a burst of more than CACHE_SIZE messages
-        at once - the cache grows briefly instead: evicting or cancelling a
+        the cache is still in flight — a burst of more than CACHE_SIZE messages
+        at once — the cache grows briefly instead: evicting or cancelling a
         shared decision surfaces as CancelledError inside whichever cog was
         awaiting it, which is a worse failure than a few hundred extra entries.
         """
@@ -209,7 +209,7 @@ class MessageRouter:
         """Forget memoised decisions.
 
         Only *finished* entries are dropped. A decision still in flight has at
-        least one listener awaiting it - cancelling it would raise
+        least one listener awaiting it — cancelling it would raise
         CancelledError inside that listener (and on a cog reload, that listener
         is another system's on_message, not ours), so it is left alone and its
         result simply stops being shared.
@@ -266,7 +266,7 @@ class MessageRouter:
             return decision
 
         # 3. Custom command: exact whole-token match on the trigger. Only
-        #    worth a DB read for prefixed messages - custom commands have
+        #    worth a DB read for prefixed messages — custom commands have
         #    always been "!trigger" invocations, and this keeps the hot path
         #    (plain chat) free of extra queries, exactly as before.
         if first.startswith("!"):
@@ -289,8 +289,8 @@ class MessageRouter:
         """Enabled custom-command row whose trigger equals ``first_word``.
 
         The bot prefix is accepted and ignored (``!k`` and ``k`` both match
-        trigger ``k``), matching is a whole-token comparison - so trigger ``k``
-        cannot swallow ``!kk`` or ``!kick`` - and disabled rows never match.
+        trigger ``k``), matching is a whole-token comparison — so trigger ``k``
+        cannot swallow ``!kk`` or ``!kick`` — and disabled rows never match.
         """
         token = strip_word((first_word or "").lower()).lstrip("!").strip()
         if not token:
@@ -315,7 +315,7 @@ class MessageRouter:
                 # back to "all rows" instead of throwing, and say so once.
                 if not getattr(self, "_warned_no_enabled", False):
                     self._warned_no_enabled = True
-                    print("[router] custom_commands has no `enabled` column - "
+                    print("[router] custom_commands has no `enabled` column — "
                           "run database.init_db() to migrate; treating all rows "
                           "as enabled")
                 cursor = await db.execute(base + " ORDER BY id ASC", (guild_id,))

@@ -5,8 +5,8 @@ Unlike scripts/test_rank_integration.py (which imports the data/renderer
 modules directly against its own seeded DB), this script drives the code
 through the paths the REAL processes use:
 
-  * the /rank command is loaded through main.load_cogs() - the exact
-    cog-loading path start.sh -> `python -u main.py` uses - and the
+  * the /rank command is loaded through main.load_cogs() — the exact
+    cog-loading path start.sh -> `python -u main.py` uses — and the
     REGISTERED tree command's own callback is then invoked with a mock
     interaction, so the proof covers registration + execution, not a
     copy of the code;
@@ -19,7 +19,7 @@ through the paths the REAL processes use:
 
 What this script can NOT prove (no Discord socket in a sandbox):
   * the live gateway/interaction round-trip, and that Discord actually
-    syncs the command - that requires a real token + a real guild;
+    syncs the command — that requires a real token + a real guild;
   * real Discord booster state (premium_since is mocked).
 
 Usage:
@@ -115,10 +115,10 @@ def mock_interaction(guild_id, member):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# SECTION 1 - DASHBOARD (real Flask app object, real routes, real session)
+# SECTION 1 — DASHBOARD (real Flask app object, real routes, real session)
 # ─────────────────────────────────────────────────────────────────────────
 def section_dashboard():
-    print("\n══ 1. DASHBOARD - real app routes (Flask test client) ══")
+    print("\n══ 1. DASHBOARD — real app routes (Flask test client) ══")
     import dashboard.app as dash
     from database import DB_PATH
     import aiosqlite
@@ -133,8 +133,8 @@ def section_dashboard():
     html = c.get("/shop").get_data(as_text=True)
     check("shop page offers tier 6", 'value="6"' in html,
           "GET /shop HTML contains <option value=\"6\">")
-    check("shop page labels VI", "VI - Free · Booster-only" in html,
-          "GET /shop HTML labels the option 'VI - Free · Booster-only'")
+    check("shop page labels VI", "VI — Free · Booster-only" in html,
+          "GET /shop HTML labels the option 'VI — Free · Booster-only'")
 
     with c.session_transaction() as s:
         csrf = s.get("csrf_token")
@@ -185,10 +185,10 @@ def section_dashboard():
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# SECTION 2 - BOT /rank (real load_cogs registration + real callback)
+# SECTION 2 — BOT /rank (real load_cogs registration + real callback)
 # ─────────────────────────────────────────────────────────────────────────
 async def section_bot_rank():
-    print("\n══ 2. BOT /rank - real cog load + registered callback ══")
+    print("\n══ 2. BOT /rank — real cog load + registered callback ══")
     import main as main_mod
     from database import init_db, DB_PATH
     import aiosqlite
@@ -293,10 +293,10 @@ async def section_bot_rank():
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# SECTION 3 - BOT SHOP (real process_purchase on the dashboard-made item)
+# SECTION 3 — BOT SHOP (real process_purchase on the dashboard-made item)
 # ─────────────────────────────────────────────────────────────────────────
 async def section_bot_shop(item_id):
-    print("\n══ 3. BOT SHOP - real process_purchase() on dashboard item ══")
+    print("\n══ 3. BOT SHOP — real process_purchase() on dashboard item ══")
     from database import DB_PATH
     import aiosqlite
     from cogs.shop import process_purchase
@@ -370,10 +370,10 @@ async def section_bot_shop(item_id):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# SECTION 4 - MIGRATION (pre-VI database upgraded by init_db)
+# SECTION 4 — MIGRATION (pre-VI database upgraded by init_db)
 # ─────────────────────────────────────────────────────────────────────────
 def section_migration():
-    print("\n══ 4. MIGRATION - init_db on a pre-VI database ══")
+    print("\n══ 4. MIGRATION — init_db on a pre-VI database ══")
     env = dict(os.environ)
     env["DATABASE_PATH"] = os.path.join(TMP, "pre_vi.db")
     proc = subprocess.run(

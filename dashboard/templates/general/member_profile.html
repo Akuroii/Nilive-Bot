@@ -32,7 +32,7 @@
             {% if profile.prestige %}
             ★ {{ ['I','II','III','IV','V'][profile.prestige-1] }}
             {% else %}
-            -
+            —
             {% endif %}
         </div>
     </div>
@@ -88,9 +88,9 @@
                 <tbody>
                     {% for w in profile.warnings %}
                     <tr>
-                        <td>{{ w[0] or '-' }}</td>
+                        <td>{{ w[0] or '—' }}</td>
                         <td class="text-muted">{{ w[2] or 'Unknown' }}</td>
-                        <td class="text-muted">{{ w[1][:10] if w[1] else '-' }}</td>
+                        <td class="text-muted">{{ w[1][:10] if w[1] else '—' }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -120,9 +120,9 @@
                                 {{ log[0] }}
                             </span>
                         </td>
-                        <td class="text-muted">{{ log[1] or '-' }}</td>
+                        <td class="text-muted">{{ log[1] or '—' }}</td>
                         <td class="text-muted">{{ log[2] or 'Unknown' }}</td>
-                        <td class="text-muted">{{ log[3][:10] if log[3] else '-' }}</td>
+                        <td class="text-muted">{{ log[3][:10] if log[3] else '—' }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -149,7 +149,7 @@
                     <tr>
                         <td><strong>{{ p[0] }}</strong></td>
                         <td>{{ currency_icon(currency.coins.emoji) }} {{ "{:,}".format(p[1]) }}</td>
-                        <td class="text-muted">{{ p[2][:10] if p[2] else '-' }}</td>
+                        <td class="text-muted">{{ p[2][:10] if p[2] else '—' }}</td>
                     </tr>
                     {% endfor %}
                 </tbody>

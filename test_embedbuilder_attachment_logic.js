@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /* ═══════════════════════════════════════════════════════════════
-   Embed Builder page logic - attachment preview resolution
+   Embed Builder page logic — attachment preview resolution
 
    This harness runs the REAL functions out of
    dashboard/templates/manage/embedbuilder.html (extracted from the
    Jinja template, not a copy) against real embed-composer.js, so a
    change to either side that breaks the other gets caught here:
 
-     * looksLikeImage - files whose File.type is empty are still images
+     * looksLikeImage — files whose File.type is empty are still images
      * the sync resolver must never return a stale/bogus URL
      * "in flight" must be a distinct state from "no preview"
      * revoke must clear every transient field
@@ -25,7 +25,7 @@ const vm = require('vm');
 let pass = 0, fail = 0; const failures = [];
 function assert(cond, name, extra) {
     if (cond) { pass++; console.log('  PASS', name); }
-    else { fail++; failures.push(name + (extra ? ' - ' + extra : '')); console.log('  FAIL', name, extra || ''); }
+    else { fail++; failures.push(name + (extra ? ' — ' + extra : '')); console.log('  FAIL', name, extra || ''); }
 }
 function section(t) { console.log('\n== ' + t + ' =='); }
 const tick = () => new Promise(r => setTimeout(r, 20));
@@ -45,12 +45,12 @@ const TEMPLATE = fs.readFileSync(
 
 // ── Pull the page's attachment helpers out of the template ──────────
 // Declared one per block, terminated by the next top-level declaration
-// - no copies, so renaming/adding a guard here fails loudly instead of
+// — no copies, so renaming/adding a guard here fails loudly instead of
 // silently testing a stale fork of the code.
 const DECL_RE = /^(const|let|function) ([A-Za-z_$][\w$]*)/gm;
 function extractPageBlock(decl) {
     const start = TEMPLATE.indexOf('\n' + decl);
-    if (start < 0) throw new Error(`embedbuilder.html no longer contains "${decl}" - update this harness`);
+    if (start < 0) throw new Error(`embedbuilder.html no longer contains "${decl}" — update this harness`);
     let end = TEMPLATE.length;
     DECL_RE.lastIndex = start + 1;
     let m;
@@ -78,7 +78,7 @@ const DECLS = [
     'function revokeAllAttachmentPreviews',
 ];
 const PAGE = Array.from(new Set(DECLS.map(extractPageBlock))).join('\n');
-// Fail loudly if the extraction silently produced an empty block - a harness
+// Fail loudly if the extraction silently produced an empty block — a harness
 // that tests nothing is worse than no harness.
 for (const d of DECLS) {
     if (!PAGE.includes(d.replace(/^(const|let|function) /, ''))) {
@@ -131,7 +131,7 @@ function build({ blobLoads }) {
 
 (async function main() {
 // ═══════════════════════════════════════════════════════════════
-section('type sniffing - an image with no File.type is still an image');
+section('type sniffing — an image with no File.type is still an image');
 {
     const { sandbox: sb } = build({ blobLoads: true });
     assert(sb.looksLikeImage({ name: 'a.png', type: 'image/png' }) === true, 'image/png → image');
@@ -167,7 +167,7 @@ section('blob: tier (normal case)');
 }
 
 // ═══════════════════════════════════════════════════════════════
-section('data: tier (CSP blocks blob:) - preview still appears');
+section('data: tier (CSP blocks blob:) — preview still appears');
 {
     const { sandbox: sb } = build({ blobLoads: false });
     const a = { id: 'b1', name: 'shot.png', type: 'image/png', size: 100, blob: new sb.Blob(['y']), source: 'local' };
@@ -179,7 +179,7 @@ section('data: tier (CSP blocks blob:) - preview still appears');
 }
 
 // ═══════════════════════════════════════════════════════════════
-section('oversized file - an honest reason, and no re-decode loop');
+section('oversized file — an honest reason, and no re-decode loop');
 {
     const { sandbox: sb, stats } = build({ blobLoads: false });
     const big = { id: 'c1', name: 'big.png', type: 'image/png', size: sb.EC.DATA_URL_MAX_BYTES + 1,
@@ -200,9 +200,9 @@ section('CSP img-src must allow blob: (the origin of this bug)');
     const APP = fs.readFileSync(path.join(ROOT, 'dashboard', 'app.py'), 'utf8');
     const m = APP.match(/"img-src\s+([^"]+)"/);
     if (!m) {
-        assert(false, 'img-src directive found in dashboard/app.py', 'the policy was reformatted - update this guard');
+        assert(false, 'img-src directive found in dashboard/app.py', 'the policy was reformatted — update this guard');
     } else {
-        // each header fragment ends with '; ' - strip it before matching
+        // each header fragment ends with '; ' — strip it before matching
         const tokens = m[1].replace(/[;,]/g, '').trim().split(/\s+/);
         assert(tokens.includes('blob:'), 'blob: is allowed, so createObjectURL previews paint',
             'img-src ' + m[1]);

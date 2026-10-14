@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Minigames v2 - Phase 5 (plan §3/§21.6) - migration verification suite.
+Minigames v2 — Phase 5 (plan §3/§21.6) — migration verification suite.
 
 Builds a REALISTIC v1 production-shaped database (tiers, config,
 legacy log rows, duplicate tier rows, disabled tiers, temp-role
@@ -10,8 +10,8 @@ verifies the tier→category migration per the Phase 5 gate:
   1. migration runs against REAL v1 data (not only fresh DBs)
   2. every important v1 datum maps into v2 (category name/weight/
      enabled, preset rewards in canonical shape, log/history, config)
-  3. fully idempotent - 4 consecutive runs, nothing duplicated
-  4. failure/rollback - a fault injected mid-migration leaves the
+  3. fully idempotent — 4 consecutive runs, nothing duplicated
+  4. failure/rollback — a fault injected mid-migration leaves the
      guild in a clean pre-migration state (no partial rows), other
      guilds still migrate, startup (ensure_tables) never dies
   5. legacy tables/columns kept (rollback path per plan §3.4)
@@ -20,7 +20,7 @@ verifies the tier→category migration per the Phase 5 gate:
   8. read-time normalization of legacy-shaped preset rows
 
 Run:  python3 scripts/test_minigame_migration.py
-(uses the system python - aiosqlite only, no flask needed)
+(uses the system python — aiosqlite only, no flask needed)
 """
 import os
 import sys
@@ -48,7 +48,7 @@ def check(cond, name, extra=""):
         print(f"  PASS  {name}")
     else:
         FAIL += 1
-        FAILURES.append(name + (f" - {extra}" if extra else ""))
+        FAILURES.append(name + (f" — {extra}" if extra else ""))
         print(f"  FAIL  {name}  {extra}")
 
 
@@ -72,7 +72,7 @@ def db_query(sql, args=()):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# FIXTURE - a production-shaped v1 database, as the OLD cog would
+# FIXTURE — a production-shaped v1 database, as the OLD cog would
 # have created it (exact v1 schema from git history).
 # ═══════════════════════════════════════════════════════════════════
 db_exec("""
@@ -117,7 +117,7 @@ db_exec("""
     )
 """)
 
-# ── Guild A: a well-used server - 4 tiers (+ a legacy duplicate
+# ── Guild A: a well-used server — 4 tiers (+ a legacy duplicate
 #    bronze row the old UI allowed), one DISABLED tier, a temp-role
 #    with duration, configured channel/pacing, 6 varied log rows.
 db_exec("INSERT INTO minigames_config "
@@ -147,7 +147,7 @@ for date, tier, chan, mid, wid, wname, forced, fired in [
             " winner_display_name, forced, fired_at) VALUES (?,?,?,?,?,?,?,?,?)",
             (G_A, date, tier, chan, mid, wid, wname, forced, fired))
 
-# ── Guild B: sparse - no config row, single tier, 2 log rows.
+# ── Guild B: sparse — no config row, single tier, 2 log rows.
 for tier, w, rt, rv in [("gold", 20, "coins", "50")]:
     db_exec("INSERT INTO minigames_tiers "
             "(guild_id, tier, weight, reward_type, reward_value) VALUES (?,?,?,?,?)",
@@ -159,7 +159,7 @@ for date, tier, fired in [("2026-08-02", "gold", "2026-08-02T12:00:00Z"),
             (G_B, date, tier, fired))
 
 # ── Guild C: already has a HAND-BUILT category (post-v2 usage) plus
-#    legacy tiers - the migration must NOT touch it.
+#    legacy tiers — the migration must NOT touch it.
 db_exec("""
     CREATE TABLE minigame_categories (
         id                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -186,7 +186,7 @@ db_exec("INSERT INTO minigames_tiers "
         "(guild_id, tier, weight, reward_type, reward_value) VALUES (?,?,?,?,?)",
         (G_D, "bronze", 3, "xp", "75"))
 
-# Guild E (the fault-injection target) gets its tier rows LATER - the
+# Guild E (the fault-injection target) gets its tier rows LATER — the
 # fault test must be guild E's FIRST migration attempt, so its rows are
 # added after the run-1 / idempotency sections.
 
@@ -206,7 +206,7 @@ def cats_of(guild):
 
 
 # ═══════════════════════════════════════════════════════════════════
-section("MIGRATION - run 1 on realistic v1 data")
+section("MIGRATION — run 1 on realistic v1 data")
 run_async(store.ensure_tables())
 
 ca = cats_of(G_A)
@@ -252,7 +252,7 @@ cfg = db_query("SELECT enabled, channel_id, min_events_per_week, max_events_per_
 check(list(cfg) == [1, 5000, 3, 9, 2, 300], "v1 config row byte-identical")
 
 # ═══════════════════════════════════════════════════════════════════
-section("IDEMPOTENCY - 3 more runs (4 total, plan §3.5 gate)")
+section("IDEMPOTENCY — 3 more runs (4 total, plan §3.5 gate)")
 for i in range(3):
     run_async(store.ensure_tables())
 counts = {g: db_query("SELECT COUNT(*) FROM minigame_categories WHERE guild_id=?", (g,))[0][0]
@@ -269,7 +269,7 @@ check(db_query("SELECT COUNT(*) FROM minigame_categories WHERE guild_id=?", (G_A
       "direct run_migration() call is a no-op when categories exist")
 
 # ═══════════════════════════════════════════════════════════════════
-section("FAILURE / ROLLBACK - injected fault mid-migration (guild E)")
+section("FAILURE / ROLLBACK — injected fault mid-migration (guild E)")
 # Guild E's FIRST migration attempt happens now.
 for tier, w, rt, rv in [("bronze", 10, "coins", "10"),
                         ("silver", 10, "xp", "20"),
@@ -285,7 +285,7 @@ ERROR = sqlite3.OperationalError("injected fault (test)")
 class EvilWrap:
     """Wraps an aiosqlite Connection; the 2nd INSERT of guild E dies.
     aiosqlite.connect is a SYNC factory returning the Connection
-    (an async context manager) - so the wrapper is sync too."""
+    (an async context manager) — so the wrapper is sync too."""
 
     def __init__(self, conn):
         self._conn = conn
@@ -326,7 +326,7 @@ finally:
     aiosqlite.connect = real_connect
 
 check(not crashed, "ensure_tables never propagates a migration fault (bot startup survives)")
-check(cats_of(G_E) == [], "guild E left CLEAN - no partial categories (rollback worked)",
+check(cats_of(G_E) == [], "guild E left CLEAN — no partial categories (rollback worked)",
       str(cats_of(G_E)))
 check(db_query("SELECT COUNT(*) FROM minigame_categories WHERE guild_id=?", (G_A,))[0][0] == 4,
       "guild A unaffected by guild E's failure")
@@ -338,7 +338,7 @@ check(len(ce) == 3 and [c[0] for c in ce] == ["Bronze", "Silver", "Gold"],
       "guild E fully migrated on the retry run", str([c[0] for c in ce]))
 
 # ═══════════════════════════════════════════════════════════════════
-section("LEGACY KEPT - rollback path (plan §3.4)")
+section("LEGACY KEPT — rollback path (plan §3.4)")
 tables = {r[0] for r in db_query("SELECT name FROM sqlite_master WHERE type='table'")}
 check({"minigames_tiers", "minigames_config", "minigames_log"} <= tables,
       "all legacy tables still present (old code redeploy finds its data)")
@@ -350,7 +350,7 @@ check({"template_id", "category_id", "game_type", "mode", "status",
       "v2 log columns added (guarded ALTERs ran once)")
 
 # ═══════════════════════════════════════════════════════════════════
-section("HISTORY - legacy rows readable, v2 snapshots independent")
+section("HISTORY — legacy rows readable, v2 snapshots independent")
 hist = run_async(store.get_history(G_A, limit=50))
 check(len(hist) == 6 and all(h["legacy"] for h in hist),
       "all 6 legacy rows returned, flagged legacy=True")
@@ -383,7 +383,7 @@ check(v2_row["status"] == "completed" and v2_row["template_name"] == "Snapshot C
       "v2 history row readable alongside legacy rows after lifecycle")
 
 # ═══════════════════════════════════════════════════════════════════
-section("READ-TIME NORMALIZATION - legacy-shaped preset rows")
+section("READ-TIME NORMALIZATION — legacy-shaped preset rows")
 db_exec("INSERT INTO minigame_categories "
         "(guild_id, parent_id, name, weight, sort_order, default_rewards_json, enabled) "
         "VALUES (?, NULL, 'Legacy Shape', 1, 99, ?, 1)",

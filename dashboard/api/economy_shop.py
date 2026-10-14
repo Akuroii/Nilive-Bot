@@ -20,7 +20,7 @@ from dashboard.api import api_bp
 
 # dark-fixes pass #18 (username resolver rollout, task #3 of 6): the two
 # htmx-loaded leaderboard partials below previously rendered raw
-# `<code>{{user_id}}</code>` - no snapshot table backs Economy (unlike
+# `<code>{{user_id}}</code>` — no snapshot table backs Economy (unlike
 # moderation_logs/purchase_history/etc), so a live resolve is correct
 # here. Both partials batch-resolve every ID on the page in ONE
 # resolve_users() call, not per-row, then render through the same
@@ -53,7 +53,7 @@ def economy_leaderboard_partial():
     from dashboard.utils.currency_ctx import resolved as _currency, icon_html
     _cc = _currency(guild_id)["coins"]
     # A configured custom emoji is Discord message markup, not HTML, so it
-    # is rendered as a CDN <img> (see currency_ctx.icon_html) - dropped
+    # is rendered as a CDN <img> (see currency_ctx.icon_html) — dropped
     # straight into this f-string it would be swallowed as an <a> tag.
     _cc_icon = icon_html(_cc["emoji"])
     html = ""
@@ -111,7 +111,7 @@ def economy_leaderboard_diamonds_partial():
 # ── Currency display configuration ─────────────────────────────────────
 # Economy owns the currency configuration; the rest of the project consumes
 # it via utils/currency.py. These two routes are the ONLY way the four
-# display columns are written from any UI - the General Settings form used
+# display columns are written from any UI — the General Settings form used
 # to write them too, and that is exactly what let the two surfaces drift.
 #
 # Both fields per currency are independent and optional: leaving a name
@@ -124,7 +124,7 @@ def _known_emojis_for_currency_form(guild_id: int) -> list[dict]:
     `<:_:id>` placeholder.
 
     Sources, cheapest first, and all of them already existed:
-      * the bot's own application emojis (utils/app_emoji_cache - these
+      * the bot's own application emojis (utils/app_emoji_cache — these
         render in EVERY guild, which is the only place a currency icon is
         guaranteed to work),
       * the current guild's emoji list (the same Discord endpoint
@@ -142,7 +142,7 @@ def _known_emojis_for_currency_form(guild_id: int) -> list[dict]:
             await app_emoji_cache.ensure_table()
             return await app_emoji_cache.list_all()
 
-        # Already {id, name, animated} - the exact shape this helper wants.
+        # Already {id, name, animated} — the exact shape this helper wants.
         known.extend(run_async(_app()) or [])
     except Exception:
         pass
@@ -213,7 +213,7 @@ def save_currency_config_api():
     # submit a partial payload without blanking fields it did not render.
     #
     # Emoji normalisation applies to the EMOJI fields only. A name is free
-    # text - routing it through normalize_currency_emoji() turned a purely
+    # text — routing it through normalize_currency_emoji() turned a purely
     # numeric name ("2024") into the Discord token `<:_:2024>`, because a
     # bare digit string is exactly the form that helper resolves as an
     # emoji ID. Names are stored as typed.
@@ -307,7 +307,7 @@ def shop_items_partial():
             return await cursor.fetchall()
 
     rows = run_async(fetch())
-    # Rank Card foundation: rarity badge colors on the admin table -
+    # Rank Card foundation: rarity badge colors on the admin table —
     # matches the tier ordering in utils/item_catalog.py, using the
     # dashboard's existing badge classes (no new CSS needed).
     RARITY_BADGE = {
@@ -360,13 +360,13 @@ def shop_items_partial():
                 type_display = "Prestige"
 
         # r[1] (name) and r[2] (description) are admin-entered but
-        # still free text - escaped so a mischievous/compromised admin
+        # still free text — escaped so a mischievous/compromised admin
         # account can't plant stored XSS for the next admin to view.
         html  += (
             f"<tr>"
             f"<td>{icon_html}<strong>{_esc(r[1])}</strong>{'⭐' if r[7] else ''} "
             f"<span class='badge {rarity_class}'>{_esc(rarity.title())}</span></td>"
-            f"<td class='text-muted'>{_esc(r[2]) if r[2] else '-'}</td>"
+            f"<td class='text-muted'>{_esc(r[2]) if r[2] else '—'}</td>"
             f"<td>{price_str}</td>"
             f"<td>{type_display}</td>"
             f"<td>{dur}</td>"
@@ -449,7 +449,7 @@ def add_shop_item():
     # Rank Card foundation: rarity is admin-set at creation time,
     # same place price/icon are already captured. Falls back to
     # 'common' on anything unrecognized rather than rejecting the
-    # save - a typo'd rarity shouldn't block adding the item.
+    # save — a typo'd rarity shouldn't block adding the item.
     from utils.item_catalog import is_valid_rarity, upsert_catalog_entry
     rarity = (data.get("rarity") or "common").strip().lower()
     if not is_valid_rarity(rarity):
@@ -485,7 +485,7 @@ def add_shop_item():
                 prestige_tier_val,
                 # PRE-EXISTING BUG FIX (found during the Wallet pass):
                 # this column was in the form, in the JS payload, and
-                # read back by cogs/shop.py's purchase path - but was
+                # read back by cogs/shop.py's purchase path — but was
                 # never actually part of this INSERT, so it always
                 # persisted as NULL. Every XP Boost item created from
                 # the dashboard was therefore permanently unbuyable
@@ -538,21 +538,21 @@ def shop_purchase_history():
     _gem_icon = _currency_icon_html(_cur['diamonds']['emoji'])
     html = ""
     for r in rows:
-        exp = r[4][:10] if r[4] else ("-" if r[2] == 0 else "Permanent")
+        exp = r[4][:10] if r[4] else ("—" if r[2] == 0 else "Permanent")
         # 'currency_paid' stores the stable key; the glyph comes from the
         # guild's configured icon for that key.
         currency_icon = (_gem_icon
                          if (len(r) > 5 and r[5] == "diamonds")
                          else _coin_icon)
-        # r[0] (user_display_name - a Discord nickname) and r[1]
-        # (item_name - admin-entered but still free text) are both
+        # r[0] (user_display_name — a Discord nickname) and r[1]
+        # (item_name — admin-entered but still free text) are both
         # escaped below; same stored-XSS class as moderation_logs_partial.
         html += (
             f"<tr>"
             f"<td>{_esc(r[0])}</td>"
             f"<td><strong>{_esc(r[1])}</strong></td>"
             f"<td>{'Free' if r[2] == 0 else f'{currency_icon} {r[2]:,}'}</td>"
-            f"<td class='text-muted'>{str(r[3])[:10] if r[3] else '-'}</td>"
+            f"<td class='text-muted'>{str(r[3])[:10] if r[3] else '—'}</td>"
             f"<td class='text-muted'>{exp}</td>"
             f"</tr>"
         )
@@ -591,7 +591,7 @@ def shop_temp_roles():
             f"<tr>"
             f"<td>{identity_html}</td>"
             f"<td><code>{r[1]}</code></td>"
-            f"<td class='text-muted'>{str(r[2])[:16] if r[2] else '-'}</td>"
+            f"<td class='text-muted'>{str(r[2])[:16] if r[2] else '—'}</td>"
             f"<td><span class='badge badge-accent'>{_esc(r[3])}</span></td>"
             f"</tr>"
         )

@@ -1,10 +1,10 @@
 """
-Shop Publisher - read-only catalog + design-draft preview routes (Step 0).
+Shop Publisher — read-only catalog + design-draft preview routes (Step 0).
 
 These routes serve the Shop Designer's front half only: template source
 listing, product listing and the fixed-token PREVIEW of a Design draft. There
 is NO publish/send route here (a later step), NO shop_publications table, and
-nothing in this module writes to the database - the preview is pure
+nothing in this module writes to the database — the preview is pure
 computation over embed_templates + shop_items + the currency config.
 
 THE PREVIEW CONTRACT (Step 0, locked):
@@ -34,7 +34,7 @@ Why a separate submodule instead of dashboard/api/economy_shop.py or
 dashboard/api/embedbuilder.py: both of those are frozen delivery boundaries of
 previous work (the Shop admin and the Embed Builder). Registering on the shared
 api_bp from a new file is the same zero-risk pattern every other surface here
-uses - existing routes, URLs and response shapes are untouched.
+uses — existing routes, URLs and response shapes are untouched.
 
 Permission: LEVEL_OWNER, matching the Embed Builder send/template routes. The
 Publisher consumes embed_templates (managed at LEVEL_OWNER) and later steps
@@ -96,23 +96,23 @@ def _row_dict(row, keys) -> dict:
 def api_shop_publisher_catalog():
     """Both pickers + the fixed token catalog, one round trip.
 
-    templates: embed_templates names only (["name"]) - the EXPLICIT final
+    templates: embed_templates names only (["name"]) — the EXPLICIT final
                Step 0 contract (Q2#12 CLOSED 2026-09-30, superseding the
                {name,data} ratification): at the expected ~100-template
                scale the catalog stays lightweight and only the selected
                template's document is loaded. The preview page reads that
                document on selection from the Embed Builder's existing
                GET /api/embedbuilder/template/<name>, used ONLY as the Step 0
-               transitional presentation source - NOT the final Shop
+               transitional presentation source — NOT the final Shop
                template load/snapshot architecture, which stays deferred to
                the Step 1+ design discussion.
     products:  shop_items rows (the product source of truth) with the additive
-               `category_id` link (Slice 2 - the nullable Shop Category
+               `category_id` link (Slice 2 — the nullable Shop Category
                membership; presentation metadata, NEVER publication). The
                deterministic sort (type-group order, then name, then id) is
                preserved exactly as before; the picker groups by category
                client-side and keeps `type` as display metadata only.
-    tokens:    utils/shop_publisher.token_catalog_payload() - the FIXED catalog
+    tokens:    utils/shop_publisher.token_catalog_payload() — the FIXED catalog
                (canonical spellings + friendly labels/groups + aliases), so the
                Insert Dynamic Field menu and the resolver cannot drift.
     """
@@ -203,8 +203,8 @@ def _collect_ids(design) -> list:
 def api_shop_publisher_preview():
     """Resolve a Design draft server-side and return the preview.
 
-    The resolution runs through utils/shop_publisher.preview_design() - the
-    same pure module the later publish path must call - so what this route
+    The resolution runs through utils/shop_publisher.preview_design() — the
+    same pure module the later publish path must call — so what this route
     returns IS the message that would go to Discord, plus the purchase action
     that would actually be published and the deterministic preview warnings.
 

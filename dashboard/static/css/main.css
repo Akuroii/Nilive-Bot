@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════
-   NERO DASHBOARD - main.css  (Phase 2)
+   NERO DASHBOARD — main.css  (Phase 2)
    ═══════════════════════════════════════════════ */
 
 :root[data-theme="dark"] {
@@ -774,7 +774,7 @@ code {
        (select2 default: position:absolute; left:0; ~16px wide). The old
        `padding: 2px 8px` shrank the left inset to 8px, so the first
        characters of every selected role/channel name rendered *under* the ×
-       - the "name missing / weird square" look in the multi-select pills. */
+       — the "name missing / weird square" look in the multi-select pills. */
     padding: 2px 8px 2px 22px;
     font-size: 12px;
     margin: 2px;
@@ -882,11 +882,11 @@ code {
 /* ── USER IDENTITY CELL ───────────────────────────
    Shared "Username (big) / User ID (small)" component used
    anywhere a table row only ever had a raw user_id and now
-   resolves it live via utils/discord_user_cache.py - Economy,
+   resolves it live via utils/discord_user_cache.py — Economy,
    Trade History, Missions, Tickets, and any future page that
    wants the same look. NOT used on pages that intentionally show
    a point-in-time name snapshot (Moderation Logs, Purchase
-   History, MVP History, Warnings) - those keep their own
+   History, MVP History, Warnings) — those keep their own
    historical display as-is.
    ────────────────────────────────────────────── */
 .user-identity {
@@ -944,7 +944,7 @@ code {
     line-height: 1.2;
 }
 
-/* Compact variant - same info, no avatar, tighter for dense tables */
+/* Compact variant — same info, no avatar, tighter for dense tables */
 .user-identity-compact .user-identity-name { font-size: 14px; }
 .user-identity-compact .user-identity-id { padding-top: 2px; }
 
@@ -990,7 +990,7 @@ code {
         grid-template-columns: 1fr !important;
     }
 
-    /* Responsive tables - horizontal scroll */
+    /* Responsive tables — horizontal scroll */
     .table-wrap {
         border-radius: 8px;
     }

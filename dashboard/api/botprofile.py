@@ -9,14 +9,14 @@ from dashboard.api import api_bp
 #
 # All four fields go in ONE call to Discord's "Modify Current Member"
 # endpoint (PATCH /guilds/{id}/members/@me), which accepts
-# nick/avatar/banner/bio for whichever token calls it - bot tokens
+# nick/avatar/banner/bio for whichever token calls it — bot tokens
 # included. avatar/banner must be base64 data URIs, so
 # utils/bot_profile.py downloads whatever URL is pasted here and
 # re-encodes it before sending.
 #
-# Applied directly from this Flask process via the bot token - same
+# Applied directly from this Flask process via the bot token — same
 # pattern dashboard/api/core.py already uses for role/channel lookups
-# - so there's no dependency on the bot's gateway connection being up.
+# — so there's no dependency on the bot's gateway connection being up.
 
 
 @api_bp.route("/botprofile/config", methods=["GET"])

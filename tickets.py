@@ -38,7 +38,7 @@ class TicketOpenButton(discord.ui.View):
         if rows:
             # PERMISSIONS FEATURE (TASK 4): a category with
             # required_role_id set is only offered to members holding
-            # that role - this is the dashboard Permissions tab's
+            # that role — this is the dashboard Permissions tab's
             # "who can open this ticket type" control. Categories with
             # no required role stay open to everyone, unchanged from
             # before this feature existed.
@@ -88,7 +88,7 @@ class TicketControlView(discord.ui.View):
         elif not interaction.user.guild_permissions.manage_channels:
             # SECURITY FIX (dark-fixes pass #8): `row and row[0]` above
             # skipped the staff check ENTIRELY whenever no staff_role_id
-            # was configured for this ticket - meaning any member who
+            # was configured for this ticket — meaning any member who
             # could see the ticket channel could claim it, not just
             # staff. close_ticket() already falls back to requiring
             # manage_channels (its is_admin check) when no staff role
@@ -140,12 +140,12 @@ class ClosedTicketView(discord.ui.View):
         user_id, staff_role_id, category = row
 
         # SECURITY FIX (dark-fixes pass #9): reopen_ticket() previously
-        # had NO permission check at all - any member who could see the
+        # had NO permission check at all — any member who could see the
         # closed ticket channel could click Reopen. Mirrors
         # close_ticket()'s existing fallback chain exactly (ticket
         # owner, guild-wide support role, the category's own closer
         # roles, or manage_channels) rather than inventing a new
-        # permission model - same class of fix as claim_ticket() and
+        # permission model — same class of fix as claim_ticket() and
         # delete_ticket() in pass #8.
         async with aiosqlite.connect(DB_PATH) as db:
             settings_cur = await db.execute(
@@ -194,7 +194,7 @@ class ClosedTicketView(discord.ui.View):
 
     @discord.ui.button(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="ticket_delete")
     async def delete_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # P1 #10 FIX: same dead-table bug as claim_ticket above - this
+        # P1 #10 FIX: same dead-table bug as claim_ticket above — this
         # queried the legacy ticket_config table (never populated since
         # the migration to ticket_settings), so the staff check never
         # fired and any member could permanently delete a ticket
@@ -212,7 +212,7 @@ class ClosedTicketView(discord.ui.View):
                 return
         elif not interaction.user.guild_permissions.manage_channels:
             # SECURITY FIX (dark-fixes pass #8): same open-access gap as
-            # claim_ticket above, but worse here - this is a permanent,
+            # claim_ticket above, but worse here — this is a permanent,
             # irreversible channel deletion. No staff_role_id configured
             # previously meant zero permission check at all. Now falls
             # back to manage_channels, matching close_ticket's existing
@@ -314,7 +314,7 @@ async def create_ticket(interaction: discord.Interaction, category: str):
 
     # TASK 4 upgrade: embed customization now supports the same
     # placeholders welcome embeds already use (cogs/welcome.py's
-    # build_embed), plus footer/thumbnail/image - previously only
+    # build_embed), plus footer/thumbnail/image — previously only
     # title/description/color were ever read here, so anything an
     # admin set for those three fields in the dashboard silently did
     # nothing.
@@ -325,7 +325,7 @@ async def create_ticket(interaction: discord.Interaction, category: str):
                     .replace("{name}", interaction.user.display_name)
                     .replace("{server}", guild.name))
 
-    title = _ph(open_embed_data.get("title")) or f"Ticket #{count:04d} - {category}"
+    title = _ph(open_embed_data.get("title")) or f"Ticket #{count:04d} — {category}"
     description = _ph(open_embed_data.get("description")) or (
         f"Hello {interaction.user.mention}! Support will be with you shortly.\n\n"
         f"Please describe your issue in detail.")
@@ -389,7 +389,7 @@ async def close_ticket(interaction: discord.Interaction):
         # P1 #10 ENHANCEMENT: previously only the single guild-wide
         # support_role_id could close a ticket. Categories can define
         # their own closer_roles (dashboard already exposes this per
-        # category) - those were being collected for channel view
+        # category) — those were being collected for channel view
         # access but never actually checked for close permission.
         closer_role_ids = []
         if category:
@@ -453,7 +453,7 @@ async def save_transcript(channel: discord.TextChannel, guild: discord.Guild):
                 fp=__import__('io').StringIO(transcript_text),
                 filename=f"transcript-{channel.name}.txt")
             embed = discord.Embed(
-                title=f"Transcript - {channel.name}",
+                title=f"Transcript — {channel.name}",
                 color=discord.Color.blurple())
             await log_channel.send(embed=embed, file=file)
 

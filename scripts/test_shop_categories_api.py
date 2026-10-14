@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Shop Publisher - Step 1 Slice 1: Category CRUD API, on the real Flask app,
+Shop Publisher — Step 1 Slice 1: Category CRUD API, on the real Flask app,
 real permissions, real CSRF and a scratch SQLite database (no HTTP server).
 
 What this locks down
@@ -8,17 +8,17 @@ What this locks down
       (server-assigned id, default emoji 🎫 / enabled 1 / sort_order 0) and
       UPDATES only when `id` exists in the SESSION guild.
   2.  Unknown ids and ids from ANOTHER guild return the same indistinguishable
-      404 {"code": "unknown_category"} bodies - cross-guild existence is never
+      404 {"code": "unknown_category"} bodies — cross-guild existence is never
       disclosed, and no request can move or mutate a category across guilds
       (guild_id comes only from the session; body guild_id is ignored).
   3.  Exactly name/emoji/enabled/sort_order are mutable; id, guild_id and
       created_at are immutable; updated_at is refreshed on successful
       update and reorder.
   4.  DELETE NULLs the matching shop_items.category_id links (products become
-      uncategorized - never stale) and writes NOTHING else.
+      uncategorized — never stale) and writes NOTHING else.
   5.  Product↔category assignment requires both rows in the session guild;
       the ONLY shop_items column any Category operation writes is the
-      nullable category_id link - every commerce field is byte-identical
+      nullable category_id link — every commerce field is byte-identical
       before/after every operation.
   6.  Reorder is all-or-nothing (unknown/cross-guild/duplicate rejects the
       whole request before any write) and sets sort_order = index with a
@@ -40,7 +40,7 @@ import asyncio
 app = dashboard.app
 app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
 
-OTHER = 9101  # a second guild - used to prove cross-guild isolation
+OTHER = 9101  # a second guild — used to prove cross-guild isolation
 
 _COMMERCE_FIELDS = (
     "name", "description", "price", "type", "role_id", "duration_hours",
@@ -266,7 +266,7 @@ class ShopCategoriesApiTests(unittest.TestCase):
             self.assertEqual(after, before,
                              "commerce fields are byte-identical")
             self.assertIsNone(item_row(item_id)["category_id"],
-                              "products become uncategorized - never stale")
+                              "products become uncategorized — never stale")
         self.assertIsNone(item_row(unassigned)["category_id"])
         self.assertEqual(item_row(foreign_item)["category_id"], foreign_cat,
                          "other guilds' links are untouched")

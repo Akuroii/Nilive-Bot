@@ -12,7 +12,7 @@ from utils.emoji import CHECK_EMOJI
 # TWITCH INTEGRATION
 #
 # CREATOR pass 2: routes live/ended notifications through the shared
-# utils/creator_notify_engine.py - previously this cog only ever sent a
+# utils/creator_notify_engine.py — previously this cog only ever sent a
 # new message on going live and never posted anything (edited or new)
 # when the stream ended. See that module's header for the state
 # machine / concurrency / failure-mode guarantees this relies on.
@@ -22,7 +22,7 @@ from utils.emoji import CHECK_EMOJI
 #   False  -> confirmed NOT live right now (a real 200 response with an
 #             empty stream list)
 #   None   -> the check FAILED (bad token, rate limit, network error,
-#             unexpected response) - UNKNOWN. This used to be
+#             unexpected response) — UNKNOWN. This used to be
 #             indistinguishable from "confirmed offline", meaning a
 #             single failed Helix call could have looked exactly like
 #             the stream ending.
@@ -63,7 +63,7 @@ async def check_stream_live(username: str, client_id: str, token: str) -> dict |
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status == 401:
-                    # Token expired/invalid - will be refreshed on the
+                    # Token expired/invalid — will be refreshed on the
                     # next tick. Unknown, not a confirmed offline read.
                     return None
                 if resp.status != 200:
@@ -186,7 +186,7 @@ class Twitch(commands.Cog):
 
                 if result is None:
                     # Token invalid/expired or a transient Helix
-                    # failure - reset the cached token so the next tick
+                    # failure — reset the cached token so the next tick
                     # re-fetches one, but otherwise skip this watch
                     # entirely this round. No state change.
                     self._token = None
@@ -237,11 +237,11 @@ class Twitch(commands.Cog):
 
         # CREATOR pass 3 (consolidated notifications): a watch linked
         # to a Creator Group posts/edits that group's single shared
-        # message instead of sending its own - detecting "is it live"
+        # message instead of sending its own — detecting "is it live"
         # above this point is completely unchanged either way. See
         # utils/creator_notify_engine.py's "CREATOR GROUPS" section
         # for the full design. Unlinked watches (get_watch_group
-        # returns None - the default for every watch that exists
+        # returns None — the default for every watch that exists
         # today) fall straight through to the exact same
         # start_live_session() call this cog always made.
         group = await engine.get_watch_group("twitch", cid)
@@ -273,7 +273,7 @@ class Twitch(commands.Cog):
         if give_role_id:
             if not discord_user_id:
                 print(f"[TWITCH] give_role_id is configured for config {cid} "
-                      f"({username}) but no discord_user_id is set - skipping "
+                      f"({username}) but no discord_user_id is set — skipping "
                       f"role grant rather than guessing which member to give "
                       f"it to. Set the streamer's Discord user in /twitch_setup "
                       f"or the dashboard.")
@@ -398,7 +398,7 @@ class Twitch(commands.Cog):
         for (cid, username, dch, is_live, enabled) in rows:
             status = "🔴 LIVE" if is_live else "⚫ Offline"
             active = CHECK_EMOJI if enabled else "❌"
-            embed.add_field(name=f"#{cid} {active} - {username}", value=f"{status} → <#{dch}>", inline=False)
+            embed.add_field(name=f"#{cid} {active} — {username}", value=f"{status} → <#{dch}>", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

@@ -55,7 +55,7 @@ def tickets_partial():
         u = user_map.get(r[2], {})
         identity_html = render_user_identity_html(
             r[2], u.get("display_name"), u.get("username"), u.get("avatar_url"))
-        # r[4] (category) is admin-configured but still free text -
+        # r[4] (category) is admin-configured but still free text —
         # escaped defensively rather than assumed trusted.
         html += (
             f"<tr>"
@@ -63,7 +63,7 @@ def tickets_partial():
             f"<td>{identity_html}</td>"
             f"<td>{_esc(r[4]) if r[4] else 'General'}</td>"
             f"<td><span class='badge {color}'>{_esc(r[3])}</span></td>"
-            f"<td class='text-muted'>{str(r[5])[:10] if r[5] else '-'}</td>"
+            f"<td class='text-muted'>{str(r[5])[:10] if r[5] else '—'}</td>"
             f"</tr>"
         )
     return html or "<tr><td colspan='5' class='empty'>No tickets found</td></tr>"

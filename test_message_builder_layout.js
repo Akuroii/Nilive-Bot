@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /* ═══════════════════════════════════════════════════════════════
-   Message Builder v2 - phase 1, step 5a: the page's static contract.
+   Message Builder v2 — phase 1, step 5a: the page's static contract.
 
    The page module is a consumer of markup it does not own: it looks up ids the
    template declares, it is loaded by nav-lifecycle.js in the order
    data-page-script lists, and it is styled by a stylesheet that must not touch
    the frozen v1 builder. None of that is exercised by booting the page in a DOM
-   double - a double happily provides whatever id the module asks for, which is
+   double — a double happily provides whatever id the module asks for, which is
    exactly how a renamed id survives a test suite and dies in a browser.
 
    So this harness checks the OTHER half: the real template, the real stylesheet
@@ -28,7 +28,7 @@ const vm = require('vm');
 let pass = 0, fail = 0; const failures = [];
 function assert(cond, name, extra) {
     if (cond) { pass++; console.log('  PASS', name); }
-    else { fail++; failures.push(name + (extra ? ' - ' + extra : '')); console.log('  FAIL', name, extra || ''); }
+    else { fail++; failures.push(name + (extra ? ' — ' + extra : '')); console.log('  FAIL', name, extra || ''); }
 }
 function section(t) { console.log('\n== ' + t + ' =='); }
 
@@ -137,7 +137,7 @@ REQUIRED.forEach(([id, tag]) => {
 });
 
 // Live regions: present in the markup, so the region exists before any text is
-// written into it - writing text into a region that is created in the same tick
+// written into it — writing text into a region that is created in the same tick
 // is the classic way an announcement gets lost.
 const strip = byId(TREE, 'mb2-strip');
 assert(strip && strip.attrs.role === 'status' && strip.attrs['aria-live'] === 'polite',
@@ -152,7 +152,7 @@ assert(strip && strip.attrs.class === 'mb2-strip',
 // data-limits must be on the page ROOT (the page reads it there) and it must be
 // the tojson|forceescape pipe: tojson alone leaves the double quotes raw, which
 // would break out of the double-quoted attribute the moment a limits table
-// contained one. This is a source-level assertion on purpose - the JSON itself
+// contained one. This is a source-level assertion on purpose — the JSON itself
 // is asserted by the page harness, which hands the page a real table.
 assert(ROOT_ATTRS['data-limits'] === '{{ limits | tojson | forceescape }}',
     'the page root carries the served limits, escaped so the attribute cannot break',
@@ -258,7 +258,7 @@ scriptOrder.forEach(rel => {
     const file = path.join(ROOT, 'dashboard', 'static', rel);
     assert(fs.existsSync(file), 'listed script exists: ' + rel);
 });
-// 7c: the asset layer (assets.js + asset-store.js) is a foundation too -
+// 7c: the asset layer (assets.js + asset-store.js) is a foundation too —
 // validate.js reads the record/reference vocabulary from it and the page
 // probes through it, so both must load before either consumer.
 // The validator is a foundation, so it must be loaded BEFORE the page that

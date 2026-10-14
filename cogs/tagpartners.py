@@ -1,5 +1,5 @@
 """
-Server Tag features - Feature 2: Cross-Server Join Reward.
+Server Tag features — Feature 2: Cross-Server Join Reward.
 
 On join, checks the new member's Discord "server tag" (Member.primary_guild,
 added in discord.py 2.6.0) against this guild's configured partner-server
@@ -8,9 +8,9 @@ reward via the shared reward_engine; tag_join_reward_log makes it one-time
 per (guild, partner, user) so a leave-and-rejoin can't farm it.
 
 Deliberately its own cog with its own on_member_join listener, separate
-from cogs/welcome.py's - same multi-listener pattern main.py/botprofile.py
+from cogs/welcome.py's — same multi-listener pattern main.py/botprofile.py
 already use for on_guild_join. No shared state with cogs/tagmissions.py
-(Feature 1) - separate tables, separate listener, per spec.
+(Feature 1) — separate tables, separate listener, per spec.
 """
 import discord
 from discord.ext import commands
@@ -89,7 +89,7 @@ class TagPartners(commands.Cog):
             try:
                 await member.send(welcome_message)
             except discord.Forbidden:
-                pass  # DMs closed - reward is already granted regardless
+                pass  # DMs closed — reward is already granted regardless
 
 
 async def setup(bot):

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* ═══════════════════════════════════════════════════════════════
-   Currency icons - the client-side twin (dashboard.js)
+   Currency icons — the client-side twin (dashboard.js)
 
    The dashboard builds several currency labels in JS rather than
    server-side: currencyLabel() / currencyAmount() feed innerHTML on
@@ -26,7 +26,7 @@ const vm = require('vm');
 let pass = 0, fail = 0; const failures = [];
 function assert(cond, name, extra) {
     if (cond) { pass++; console.log('  PASS', name); }
-    else { fail++; failures.push(name + (extra ? ' - ' + extra : ''));
+    else { fail++; failures.push(name + (extra ? ' — ' + extra : ''));
            console.log('  FAIL', name, extra || ''); }
 }
 function section(t) { console.log('\n== ' + t + ' =='); }
@@ -104,7 +104,7 @@ const CONFIGS = {
 };
 
 // A Discord token swallowed as markup becomes a start tag named after the
-// token itself. That - not "does the string contain <img>" - is the bug.
+// token itself. That — not "does the string contain <img>" — is the bug.
 const TOKEN_TAG = /^a?:\w+:\d+$/;
 function startTags(html) {
     return [...html.matchAll(/<\s*([^\s/>]+)/g)].map(m => m[1]);
@@ -121,7 +121,7 @@ function hasRawTokenText(html) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-section('1. currencyEmojiHtml() - unicode / static / animated');
+section('1. currencyEmojiHtml() — unicode / static / animated');
 {
     const s = load(CONFIGS['animated custom']);
     const cases = [
@@ -161,7 +161,7 @@ section('1. currencyEmojiHtml() - unicode / static / animated');
         'a unicode emoji never becomes an image');
 }
 
-section('2. currencyEmojiText() - the <option> twin');
+section('2. currencyEmojiText() — the <option> twin');
 {
     const s = load(CONFIGS['animated custom']);
     assert(s.currencyEmojiText('🪙') === '🪙', 'unicode passes through');
@@ -179,7 +179,7 @@ section('2. currencyEmojiText() - the <option> twin');
     }
 }
 
-section('3. currencyLabel() / currencyAmount() - the HTML sinks');
+section('3. currencyLabel() / currencyAmount() — the HTML sinks');
 for (const [name, cfg] of Object.entries(CONFIGS)) {
     const s = load(cfg);
     const isCustom = name.endsWith('custom');
@@ -219,12 +219,12 @@ for (const [name, cfg] of Object.entries(CONFIGS)) {
         }
     }
 
-    // labelFirst is prose - no icon either way, and unchanged behaviour.
+    // labelFirst is prose — no icon either way, and unchanged behaviour.
     const lf = s.currencyAmount('coins', 1250, true);
     assert(lf === `${cfg.coins.name} 1,250`,
         `[${name}] labelFirst keeps 'Name 1,250' with no icon`, lf);
 
-    // A non-currency key must fall through untouched - it must never be
+    // A non-currency key must fall through untouched — it must never be
     // labelled with a currency name or icon.
     assert(s.currencyLabel('xp') === 'xp', `[${name}] 'xp' falls through`,
         s.currencyLabel('xp'));
@@ -236,7 +236,7 @@ for (const [name, cfg] of Object.entries(CONFIGS)) {
         `[${name}] the stored key 'balance' resolves like 'coins'`);
 }
 
-section('4. currencyLabelText() - what the <option> pickers get');
+section('4. currencyLabelText() — what the <option> pickers get');
 for (const [name, cfg] of Object.entries(CONFIGS)) {
     const s = load(cfg);
     for (const key of ['coins', 'diamonds']) {

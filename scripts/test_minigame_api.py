@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Minigames v2 - Phase 4 - Dashboard API behavioral tests (Flask test client).
+Minigames v2 — Phase 4 — Dashboard API behavioral tests (Flask test client).
 
 Covers the Phase 4 test list against the REAL app + REAL store (no
 mocks):
@@ -22,7 +22,7 @@ mocks):
   audit         log_action rows written for mutations
 
 Run:  /tmp/mgv/bin/python scripts/test_minigame_api.py
-(needs the flask venv - see header comment; system python lacks flask)
+(needs the flask venv — see header comment; system python lacks flask)
 Env:  uses a fresh temp DB per run; OWNER_ID left unset so the
       explicit dashboard_users rows are the only permission source.
 """
@@ -39,7 +39,7 @@ _TMP = tempfile.mkdtemp(prefix="mgv4_")
 DB_PATH = os.path.join(_TMP, "test.db")
 os.environ["DATABASE_PATH"] = DB_PATH
 # database.py refuses to boot without OWNER_ID; set it to an ID no
-# test session ever uses (the developer bypass then never triggers -
+# test session ever uses (the developer bypass then never triggers —
 # every permission decision below goes through dashboard_users).
 os.environ["OWNER_ID"] = "999999999"
 os.environ.setdefault("SECRET_KEY", "testsecretkey0123456789abcdef0123456789")
@@ -59,7 +59,7 @@ def check(cond, name, extra=""):
         print(f"  PASS  {name}")
     else:
         FAIL += 1
-        FAILURES.append(name + (f" - {extra}" if extra else ""))
+        FAILURES.append(name + (f" — {extra}" if extra else ""))
         print(f"  FAIL  {name}  {extra}")
 
 
@@ -351,7 +351,7 @@ for label, payload in BAD.items():
     r = api(A, "POST", "/api/minigames/templates", payload).get_json()
     check(r["success"] is False, f"create rejected: {label}", r.get("error", ""))
 
-# API-shape embed (author/footer as dicts - what the composer sends)
+# API-shape embed (author/footer as dicts — what the composer sends)
 r = api(A, "POST", "/api/minigames/templates", {
     "name": "Dict embed", "category_id": C1, "game_type": "wheel",
     "config": {"join_seconds": 20},
@@ -442,12 +442,12 @@ check(row["category_name"] and row["has_reward_pool"] is True
       "template list row shape (category_name/has_reward_pool/flags)")
 
 # ═══════════════════════════════════════════════════════════════════
-section("RUNS - snapshot protection (plan §14)")
+section("RUNS — snapshot protection (plan §14)")
 NOW = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 from utils import minigame_store as store  # noqa: E402
 
 # Open the run through the REAL bot path (same call the spawn engine
-# makes) - it fills the legacy NOT NULL columns and snapshots names.
+# makes) — it fills the legacy NOT NULL columns and snapshots names.
 RUN_ID = run_async(store.start_run(
     GUILD_A, T1, "Math A v3", C1, "C1", "math", "auto", 888))
 check(RUN_ID is not None, "seeded a live 'running' row via store.start_run")
@@ -469,7 +469,7 @@ run_row = db_query("SELECT status, template_id, category_id FROM minigames_log W
 check(run_row[0] == "running" and run_row[2] == C1, "run row untouched by category edit")
 
 # ═══════════════════════════════════════════════════════════════════
-section("SPAWN (test / manual - queue, D12, guards)")
+section("SPAWN (test / manual — queue, D12, guards)")
 # a fresh ENABLED template to spawn (T1 was deleted above)
 T4 = api(A, "POST", "/api/minigames/templates", {
     "name": "Spawnable", "category_id": C1, "game_type": "wheel",
@@ -499,7 +499,7 @@ check(r["success"] is True, "TEST spawn of disabled template allowed (build→te
 REQ2 = r["request_id"]
 
 # broken-template guard at spawn time. The API itself refuses to
-# CREATE/EDIT a template with no answers (§17) - so seed one through
+# CREATE/EDIT a template with no answers (§17) — so seed one through
 # the store directly (what legacy/broken data looks like) and prove
 # the spawn path refuses it instead of queueing a doomed run.
 T5BROKEN = run_async(store.create_template(
@@ -518,7 +518,7 @@ check(r["success"] is False and "not found" in r["error"], "spawn on missing tem
 db_exec("DELETE FROM minigame_spawn_requests WHERE id=?", (REQ2,))
 
 # ═══════════════════════════════════════════════════════════════════
-section("PREVIEW ROWS - engine parity (plan §12)")
+section("PREVIEW ROWS — engine parity (plan §12)")
 from utils import minigame_engine as engine  # noqa: E402
 
 cases = [
@@ -570,7 +570,7 @@ legacy = next((x for x in rows if x["legacy"]), None)
 check(legacy and legacy["tier"] == "gold" and legacy["winner_display_name"] == "Legacy Winner"
       and legacy["participants"] == [] and legacy["winners"] == [],
       "legacy row rendered as-is (tier/winner/empty participants)")
-# ordering: newest first by COALESCE(started_at, fired_at) - the run
+# ordering: newest first by COALESCE(started_at, fired_at) — the run
 # row (started_at = now) must precede the legacy row (fired_at = Aug 1)
 check(rows[0]["id"] == RUN_ID, "history ordered newest first (run row before legacy row)")
 
@@ -587,7 +587,7 @@ check(MOD.open("/api/minigames/categories", method="POST",
                json={"name": "Nope"}, headers={"X-CSRF-Token": CSRF}).status_code == 403,
       "moderator cannot create categories (403)")
 # The minigames routes are LEVEL_ADMIN for BOTH read and write (admin
-# surface, same as v1) - a moderator gets 403 on GET too, and no row
+# surface, same as v1) — a moderator gets 403 on GET too, and no row
 # may have been created by the attempt above.
 check(MOD.get("/api/minigames/categories").status_code == 403,
       "moderator GET is 403 (minigames is an admin surface)")

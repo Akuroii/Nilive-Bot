@@ -43,7 +43,7 @@ class ReportReasonModal(discord.ui.Modal, title="Report Message"):
         reporter_snap = snapshot_user(reporter)
         author_snap   = snapshot_user(msg.author)
 
-        content_preview = msg.content or "*(no text content - embed, image, or attachment only)*"
+        content_preview = msg.content or "*(no text content — embed, image, or attachment only)*"
         if len(content_preview) > 900:
             content_preview = content_preview[:900] + "…"
 
@@ -112,7 +112,7 @@ class ReportReasonModal(discord.ui.Modal, title="Report Message"):
             await db.commit()
 
         await interaction.response.send_message(
-            f"{CHECK_EMOJI} Thanks - your report has been sent to the staff team.",
+            f"{CHECK_EMOJI} Thanks — your report has been sent to the staff team.",
             ephemeral=True)
 
 
@@ -126,7 +126,7 @@ class ReportActionView(discord.ui.View):
         config = await get_report_config(interaction.guild.id)
         staff_role_id = config.get("staff_role_id")
         if not staff_role_id:
-            # No staff role configured - fall back to manage_messages perm
+            # No staff role configured — fall back to manage_messages perm
             if interaction.user.guild_permissions.manage_messages:
                 return True
             await interaction.response.send_message(
@@ -187,7 +187,7 @@ class Report(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         # Context menu commands are created outside the class body and
-        # added to the tree manually - app_commands.context_menu
+        # added to the tree manually — app_commands.context_menu
         # doesn't bind to Cog methods the way app_commands.command does.
         self.report_ctx_menu = app_commands.ContextMenu(
             name="Report Message",
@@ -236,7 +236,7 @@ class Report(commands.Cog):
                 "Ask an admin to run `/report_setup` again.", ephemeral=True)
             return
 
-        # Basic duplicate-report guard - one open report per
+        # Basic duplicate-report guard — one open report per
         # (reporter, message) pair.
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
@@ -247,7 +247,7 @@ class Report(commands.Cog):
             existing = await cursor.fetchone()
         if existing:
             await interaction.response.send_message(
-                "You've already reported this message - staff will "
+                "You've already reported this message — staff will "
                 "review it shortly.", ephemeral=True)
             return
 
@@ -316,10 +316,10 @@ class Report(commands.Cog):
             return
 
         embed = discord.Embed(
-            title=f"🚩 Reports - {status.title()}", color=0xED4245)
+            title=f"🚩 Reports — {status.title()}", color=0xED4245)
         for (rid, target, reporter, reason, jump, created) in rows:
             embed.add_field(
-                name=f"#{rid} - {target}",
+                name=f"#{rid} — {target}",
                 value=(f"By: {reporter}\n"
                        f"Reason: {(reason or '')[:80]}\n"
                        f"[Jump]({jump}) • {str(created)[:16]}"),

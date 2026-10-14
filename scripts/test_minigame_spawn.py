@@ -1,22 +1,22 @@
 """
-Phase 3 verification harness - cogs/minigames.py (spawn flow, run
+Phase 3 verification harness — cogs/minigames.py (spawn flow, run
 lifecycle, channel delivery, admin controls, state handling).
 
 Covers, headless (fake Discord objects + REAL sqlite + REAL engine):
-  A. Recursive selection - deterministic structure (exact weights),
+  A. Recursive selection — deterministic structure (exact weights),
      eligibility rules (disabled branches, empty subtrees, auto_spawn)
-  B. Selection - Monte Carlo on plan §4 worked example A
+  B. Selection — Monte Carlo on plan §4 worked example A
   C. Shuffle bag mechanics (no replacement, reshuffle, staleness,
      per-node isolation)
-  D. spawn_game() - channel resolution/fallback, run row lifecycle,
+  D. spawn_game() — channel resolution/fallback, run row lifecycle,
      counter accounting (D5), post-failure & unplayable-template rows
-  E. Request queue - manual/test via _process_spawn_requests, D12
+  E. Request queue — manual/test via _process_spawn_requests, D12
      checks, deleted template, missing guild, D11 end-to-end, live
      MC + RPS played through the queued spawn
-  F. Startup sweep - aborted_restart, embed note, idempotency, grace
-  G. Pacing iteration - daily check bookkeeping (reset, one roll/day,
+  F. Startup sweep — aborted_restart, embed note, idempotency, grace
+  G. Pacing iteration — daily check bookkeeping (reset, one roll/day,
      max cap)
-  H. v1 retirement (Phase 6) - compat shims removed, live consumers kept
+  H. v1 retirement (Phase 6) — compat shims removed, live consumers kept
 
 Usage:  python scripts/test_minigame_spawn.py
 """
@@ -146,7 +146,7 @@ class FakeBot:
 
     async def wait_until_ready(self):
         await asyncio.get_running_loop().create_future()
-        # never resolves - the daily loop just waits (like a bot mid-boot)
+        # never resolves — the daily loop just waits (like a bot mid-boot)
 
 
 class FakeUser:
@@ -202,7 +202,7 @@ eng.give_reward = REC.fake_give_reward  # single patch, whole harness
 
 
 async def make_cog(guilds):
-    """Build a Minigames cog and immediately stop its background loops -
+    """Build a Minigames cog and immediately stop its background loops —
     the harness drives iterations manually (no 10s/30min racers)."""
     bot = FakeBot(guilds)
     cog = cog_mod.Minigames(bot)
@@ -232,7 +232,7 @@ async def wait_until(pred, timeout=5.0, step=0.005):
 
 async def row_closed(log_id, timeout=5.0):
     """Wait until the run row leaves 'running'. `engine.finished` is set
-    at CLAIM time (before grants/edit/finish_run) - the DB row is the
+    at CLAIM time (before grants/edit/finish_run) — the DB row is the
     ground truth for finalization."""
     row = None
     t0 = datetime.now(timezone.utc)
@@ -343,7 +343,7 @@ async def seed_main_guild(guild):
 # ══════════════════════════════════════════════════════════════════════
 
 async def test_selection_structure():
-    section("A. Recursive selection - structure & weights")
+    section("A. Recursive selection — structure & weights")
     G = 2001
     await store.save_config(G, channel_id=1)
     # plan §4 worked example A
@@ -460,7 +460,7 @@ async def test_selection_structure():
 
 
 async def test_selection_monte_carlo():
-    section("B. Recursive selection - Monte Carlo (worked example A)")
+    section("B. Recursive selection — Monte Carlo (worked example A)")
     G = 2002
     await store.save_config(G, channel_id=1)
     bronze = await store.create_category(G, "Bronze", weight=50)
@@ -523,7 +523,7 @@ async def test_bag_mechanics():
     for _ in range(3):
         tid, _ = await store.pop_bag(G, cat["id"], ids)
         next3.append(tid)
-    check("C2: exhausted bag reshuffles - next 3 also distinct",
+    check("C2: exhausted bag reshuffles — next 3 also distinct",
           len(set(next3)) == 3, str(next3))
 
     # staleness guard: stored bag holds a deleted id
@@ -561,13 +561,13 @@ async def test_bag_mechanics():
 
 
 async def test_spawn_flow():
-    section("D. spawn_game - lifecycle, channel, counter (D5)")
+    section("D. spawn_game — lifecycle, channel, counter (D5)")
     guild = FakeGuild(G1, [FakeChannel(9001)])
     cog, bot = await make_cog([guild])
     await seed_main_guild(guild)
 
     # 1) auto success → counter +1, run row closes no_winner (no joins).
-    #    The rotation picks a RANDOM eligible template - assert invariants,
+    #    The rotation picks a RANDOM eligible template — assert invariants,
     #    not a specific one.
     posted_ids = set()
     cfg = await store.get_config(G1)
@@ -733,7 +733,7 @@ async def test_request_queue():
                                                 "manual", "slash:42")
     await cog._process_spawn_requests()
     st, e = await request_state(rid)
-    check("E3: D12 - manual spawn of disabled template rejected",
+    check("E3: D12 — manual spawn of disabled template rejected",
           st == "failed" and "disabled" in (e or ""), f"{st}/{e}")
 
     # 4) D12: TEST of a disabled template is still allowed (always)
@@ -743,7 +743,7 @@ async def test_request_queue():
     st, e = await request_state(rid)
     row = await last_run_row(G1)
     await row_closed(row["id"], timeout=5.0)
-    check("E4: D12 - test spawn ignores the enabled toggle",
+    check("E4: D12 — test spawn ignores the enabled toggle",
           st == "done", f"{st}/{e}")
 
     # 5) deleted template → failed with a clear error
@@ -766,7 +766,7 @@ async def test_request_queue():
     check("E6: bot-not-in-guild → pending rows closed (no stuck queue)",
           st == "failed" and "not in this guild" in (e or ""), f"{st}/{e}")
 
-    # 7) D11 end-to-end: empty pool through the queue - winner announced,
+    # 7) D11 end-to-end: empty pool through the queue — winner announced,
     #    nothing granted
     await store.update_template(G1, TPL["mc"], {"rewards": []})
     rid, _ = await store.create_spawn_request(G1, TPL["mc"], "test", "x")
@@ -779,7 +779,7 @@ async def test_request_queue():
                          "main", "mc_0", info(77, "P"))
     row = await row_closed(row["id"], timeout=5.0)
     n_grants_before = len(REC.grants)
-    check("E7: D11 end-to-end - winner shown, zero grants, no_reward entry",
+    check("E7: D11 end-to-end — winner shown, zero grants, no_reward entry",
           st == "done" and row["status"] == "completed"
           and len(REC.grants) == n_grants_before
           and row["winners"] and row["winners"][0]["status"] == "no_reward"
@@ -815,12 +815,12 @@ async def test_request_queue():
     game = next(v for v in cog.live_games.values() if v.log_id == row["id"])
     i1 = FakeInteraction(FakeUser(11, "P1"), "join")
     await game._dispatch(i1, "main", "join", info(11, "P1"))
-    check("E9: RPS seat 1 - private choice row handed out on join",
+    check("E9: RPS seat 1 — private choice row handed out on join",
           len(game.seats) == 1 and i1.response.sent
           and i1.response.sent[0]["view"] is not None)
     i2 = FakeInteraction(FakeUser(12, "P2"), "join")
     await game._dispatch(i2, "main", "join", info(12, "P2"))
-    check("E9: RPS seat 2 - both seated", len(game.seats) == 2)
+    check("E9: RPS seat 2 — both seated", len(game.seats) == 2)
     n_grants = len(REC.grants)
     await game._dispatch(FakeInteraction(FakeUser(11, "P1"), "rps_11_rock"),
                          "choice", "rps_11_rock", info(11, "P1"))
@@ -834,7 +834,7 @@ async def test_request_queue():
           and row["winner_id"] == 12, str(row["winners"]))
 
     # 9b) REGRESSION: a game resolved BY ITS OWN TIMER (the production
-    #     path - resolve() runs inside the timer task) must still close
+    #     path — resolve() runs inside the timer task) must still close
     #     the row. The old _cancel_timers cancelled the running timer
     #     task itself, injecting CancelledError into resolve() after the
     #     reward grants and before finish_run (row stuck 'running').
@@ -846,7 +846,7 @@ async def test_request_queue():
     await asyncio.sleep(0.05)
     await game._dispatch(FakeInteraction(FakeUser(99, "J"), "join"),
                          "main", "join", info(99, "J"))
-    # no further interaction - the 0.2s join timer resolves it
+    # no further interaction — the 0.2s join timer resolves it
     row = await row_closed(row["id"], timeout=5.0)
     check("E9b: timer-triggered resolution closes the row (no self-cancel)",
           row["status"] == "completed" and row["winner_id"] == 99
@@ -854,7 +854,7 @@ async def test_request_queue():
           and REC.grants[-1]["user_id"] == 99,
           str(row and (row["status"], row["winner_id"])))
 
-    # 10) slash manual path (_command_spawn) - specific + rotation + guards
+    # 10) slash manual path (_command_spawn) — specific + rotation + guards
     ok, msg = await cog._command_spawn(guild, TPL["wheel"], "slash:1")
     check("E10: /minigames_spawn <id> queues the template",
           ok and "Queued" in msg, msg)
@@ -937,7 +937,7 @@ async def test_startup_sweep():
 
 
 async def test_pacing_iteration():
-    section("G. Pacing iteration - bookkeeping (D5)")
+    section("G. Pacing iteration — bookkeeping (D5)")
     G = 3001
     guild = FakeGuild(G, [FakeChannel(9001)])
     cog, bot = await make_cog([guild])
@@ -956,7 +956,7 @@ async def test_pacing_iteration():
         from utils.timezone import get_cairo_daily_key, get_cairo_weekly_key
         today = get_cairo_daily_key()
         monday = get_cairo_weekly_key(datetime.now(timezone.utc))
-        check("G1: first pass - roll recorded today + spawn happened",
+        check("G1: first pass — roll recorded today + spawn happened",
               cfg["last_check_date"] == today and cfg["week_start_date"] == monday
               and int(cfg["events_this_week"]) == 1,
               str({k: cfg[k] for k in ("last_check_date", "week_start_date",
@@ -982,9 +982,9 @@ async def test_pacing_iteration():
 
 
 async def test_retired_surface():
-    section("H. v1 retirement (Phase 6) - compat shims removed")
+    section("H. v1 retirement (Phase 6) — compat shims removed")
     # Phase 4 replaced the old dashboard (the shims' last consumers)
-    # and Phase 5 verified the migration - so the deprecated window is
+    # and Phase 5 verified the migration — so the deprecated window is
     # closed: the retired names must be GONE from the cog, while the
     # live consumers (rank card) keep working against the store.
     from cogs.minigames import get_user_win_count
@@ -1003,7 +1003,7 @@ async def test_retired_surface():
     await store.ensure_tables()
     check("H6: store-driven ensure_tables is idempotent", True)
 
-    # compute_daily_probability kept verbatim - known values
+    # compute_daily_probability kept verbatim — known values
     cases = [
         ((10, 3, 5, 10), (0.0, False)),
         ((0, 6, 5, 10), (1.0, True)),

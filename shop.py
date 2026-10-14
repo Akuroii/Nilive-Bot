@@ -30,7 +30,7 @@ class BuyView(discord.ui.View):
 # Rank Card foundation / Equip system: lets a member pick which owned
 # role/temp_role item to wear from /inventory. Shares equip_role()
 # (utils/equip_engine.py) with the auto-equip-on-grant path in
-# utils/reward_engine.py - this is purely the manual-swap entry point,
+# utils/reward_engine.py — this is purely the manual-swap entry point,
 # same underlying logic either way.
 class InventoryEquipSelect(discord.ui.Select):
     def __init__(self, guild_id: int, user_id: int,
@@ -69,7 +69,7 @@ class InventoryEquipSelect(discord.ui.Select):
                 ephemeral=True)
         else:
             await interaction.response.send_message(
-                f"Could not equip that role - {result.get('error', 'something went wrong.')}",
+                f"Could not equip that role — {result.get('error', 'something went wrong.')}",
                 ephemeral=True)
 
 
@@ -164,7 +164,7 @@ async def process_purchase(interaction: discord.Interaction,
             return
 
     # Phase 5 / Economy v2: an item is diamond-priced when
-    # price_diamonds is set (nullable column - see database.py
+    # price_diamonds is set (nullable column — see database.py
     # migration). Coins-priced items are untouched, same as before.
     pay_currency = "diamonds" if price_diamonds else "balance"
     pay_amount   = price_diamonds if price_diamonds else price
@@ -192,7 +192,7 @@ async def process_purchase(interaction: discord.Interaction,
             return
 
     # Wallet pass: a potion carries the SAME effect parameters an
-    # xp_boost item does (multiplier + duration) - the difference is
+    # xp_boost item does (multiplier + duration) — the difference is
     # only that the effect is stored in inventory and fired on use
     # instead of at purchase. Validated up front with the same
     # strictness, and for the same reason: an unusable potion sitting
@@ -213,7 +213,7 @@ async def process_purchase(interaction: discord.Interaction,
             return
 
     # Phase 5 / Leveling expansion: an xp_boost item must have both a
-    # multiplier and a duration configured - without both there's
+    # multiplier and a duration configured — without both there's
     # nothing meaningful to grant. Checked before any balance/stock
     # is touched, same as the level/role gates above.
     if itype == "xp_boost":
@@ -292,7 +292,7 @@ async def process_purchase(interaction: discord.Interaction,
             inline=False)
         embed.add_field(
             name=f"Level / XP / {cur['diamonds']['name']}",
-            value=(f"**Untouched** - your level, XP and "
+            value=(f"**Untouched** — your level, XP and "
                    f"{cur['diamonds']['emoji']} {cur['diamonds']['name']} are safe."),
             inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -318,13 +318,13 @@ async def process_purchase(interaction: discord.Interaction,
 
     # P1 #11 FIX: previously stock and balance were checked with
     # plain SELECTs, then both decremented in separate UPDATEs
-    # outside any shared transaction - two people buying the last
+    # outside any shared transaction — two people buying the last
     # unit of a limited item at the same moment could both pass the
     # check and both succeed, overselling stock and/or letting a
     # buyer without enough balance still get charged into a negative
     # number. Now stock is claimed atomically first; if the balance
     # deduction that follows fails, the stock claim is released.
-    # A Free item claims stock exactly like a paid one - free is not
+    # A Free item claims stock exactly like a paid one — free is not
     # unmetered, it only removes the charge.
     stock_ok = await safe_decrement_stock(iid)
     if not stock_ok:
@@ -332,7 +332,7 @@ async def process_purchase(interaction: discord.Interaction,
             "This item is out of stock.", ephemeral=True)
         return
 
-    # Only the deduction is skipped for a Free item - the same way the
+    # Only the deduction is skipped for a Free item — the same way the
     # Prestige VI branch above never reaches it. safe_deduct() keeps its own
     # "amount must be positive" contract untouched; it is simply not called
     # when there is nothing to charge. No balance row, ledger entry or
@@ -395,7 +395,7 @@ async def process_purchase(interaction: discord.Interaction,
         # too). Also fixes a small pre-existing inconsistency: this
         # used to write a temp_roles row whenever the item's
         # duration_hours happened to be set, regardless of whether the
-        # item's declared type was "role" (permanent) or "temp_role" -
+        # item's declared type was "role" (permanent) or "temp_role" —
         # now it's keyed off itype itself, matching what the admin
         # actually configured in the shop.
         # Rank Card foundation / Equip system: item_name=name is now
@@ -432,7 +432,7 @@ async def process_purchase(interaction: discord.Interaction,
         # inventory row's existing `metadata` JSON column (the same
         # column role items already use for {"role_id":...}), so the
         # potion stays usable even if the shop listing is later edited
-        # or deleted - matching how inventory_items already references
+        # or deleted — matching how inventory_items already references
         # items purely by name. Routed through the Reward Engine's
         # 'item' type so it's sourced/logged like every other grant.
         from utils.reward_engine import give_reward
@@ -449,7 +449,7 @@ async def process_purchase(interaction: discord.Interaction,
         if not result.get("success"):
             print(f"[SHOP] Potion give error: {result.get('error')}")
     elif itype == "title":
-        # Wallet pass: a title is a cosmetic, DB-only label - no
+        # Wallet pass: a title is a cosmetic, DB-only label — no
         # Discord role is created or assigned (that's the whole point
         # of the Title slot being independent from the Role slot).
         # quantity is left to accumulate naturally like any other item;
@@ -467,7 +467,7 @@ async def process_purchase(interaction: discord.Interaction,
         # Phase 3 / E4: anything that isn't a role/temp_role/xp_boost
         # (i.e. the shop's "Custom" item type) is delivered into the
         # buyer's Inventory instead of silently doing nothing beyond
-        # the purchase_history row above - previously a "custom"
+        # the purchase_history row above — previously a "custom"
         # item's only trace after purchase was the receipt, with
         # nothing a member could actually check or a future feature
         # (missions, trade) could query against. Routed through the
@@ -539,7 +539,7 @@ class Shop(commands.Cog):
         can't take out the rest of the batch or the whole loop.
 
         Phase 5 / Leveling expansion: also sweeps expired
-        leveling_active_boosts rows in the same tick - same
+        leveling_active_boosts rows in the same tick — same
         "expires_at has passed" shape as temp_roles, and boosts have
         no permission/Discord-API side effect to retry on failure
         (it's a pure DB row), so this half is a plain unconditional
@@ -571,7 +571,7 @@ class Shop(commands.Cog):
                                   f"{guild_id}: {e}")
                             removal_ok = False
                 else:
-                    # Bot isn't in this guild right now - keep the
+                    # Bot isn't in this guild right now — keep the
                     # row so it's retried once it rejoins.
                     removal_ok = False
 
@@ -585,7 +585,7 @@ class Shop(commands.Cog):
                     # Rank Card foundation / Equip system: the role's
                     # inventory row (and equipped_roles entry, if this
                     # was the equipped one) need to catch up now that
-                    # the Discord role is actually gone - otherwise
+                    # the Discord role is actually gone — otherwise
                     # /inventory and the rank card would keep showing
                     # an item the member no longer has.
                     try:
@@ -668,7 +668,7 @@ class Shop(commands.Cog):
             price_str = "Free" if free else (f"{price_diamonds:,} {cd['emoji']}" if price_diamonds
                          else f"{price:,} {cc['emoji']} {cc['name']}")
             embed.add_field(
-                name=f"{'⭐ ' if featured else ''}{name} - {price_str}",
+                name=f"{'⭐ ' if featured else ''}{name} — {price_str}",
                 value=(f"{desc or ''}{dur_info}{lvl_info}{stock_info}"),
                 inline=False)
 
@@ -679,12 +679,12 @@ class Shop(commands.Cog):
             vi = itype == "prestige" and prestige_tier == 6
             if not vi and max_s and not curr_s:
                 continue
-            # Label only - the custom_id (the purchase handle) is untouched.
+            # Label only — the custom_id (the purchase handle) is untouched.
             free = vi or (not price_diamonds and price == 0)
             if vi:
-                btn_label = f"Activate {name} - Free"
+                btn_label = f"Activate {name} — Free"
             elif free:
-                btn_label = f"Buy {name} - Free"
+                btn_label = f"Buy {name} — Free"
             else:
                 btn_label = f"Buy {name}"
             btn = discord.ui.Button(
@@ -697,7 +697,7 @@ class Shop(commands.Cog):
                 if not is_booster(interaction.user):
                     btn.disabled = True
                     btn.style = discord.ButtonStyle.gray
-                    btn.label = f"{name} - Booster only"
+                    btn.label = f"{name} — Booster only"
             view.add_item(btn)
 
         await interaction.response.send_message(
@@ -744,7 +744,7 @@ class Shop(commands.Cog):
                           description="Open your inventory (inside your wallet)")
     async def inventory(self, interaction: discord.Interaction):
         # /inventory now opens the wallet hub with the inventory
-        # ready. The old verbose purchase-history dump is gone -
+        # ready. The old verbose purchase-history dump is gone —
         # receipts live under Wallet → Receipts, and inventory is the
         # clean tabs view from cogs/wallet.py. This keeps one source
         # of truth for inventory rendering and removes the

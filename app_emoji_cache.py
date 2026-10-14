@@ -5,7 +5,7 @@ from database import DB_PATH
 # APPLICATION EMOJI IMPORT CACHE
 #
 # Discord's Application Emojis (docs.discord.com/developers/resources/emoji)
-# are owned by the BOT APPLICATION, not any one guild - up to 2,000 of them,
+# are owned by the BOT APPLICATION, not any one guild — up to 2,000 of them,
 # usable in any message the bot sends anywhere, with no USE_EXTERNAL_EMOJIS
 # permission required on the destination channel. That's what makes them
 # the right fallback for "this emoji isn't available to the bot": once
@@ -13,7 +13,7 @@ from database import DB_PATH
 # mention which only renders if the destination channel happens to grant
 # that permission.
 #
-# This table is deliberately NOT guild-scoped (no guild_id column) - same
+# This table is deliberately NOT guild-scoped (no guild_id column) — same
 # reasoning as the emoji resource itself being application-wide, not
 # per-guild. One row per distinct SOURCE emoji ID we've ever imported,
 # mapping it to the application emoji Discord created for it, so a second

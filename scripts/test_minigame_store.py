@@ -1,5 +1,5 @@
 """
-Phase 1 verification harness - utils/minigame_store.py
+Phase 1 verification harness — utils/minigame_store.py
 
 Runs against a throwaway SQLite DB (DATABASE_PATH is pointed at a temp
 file BEFORE database.py is imported). Re-runnable; doubles as the seed
@@ -15,7 +15,7 @@ import tempfile
 
 _tmpdir = tempfile.mkdtemp(prefix="mgstore_test_")
 os.environ["DATABASE_PATH"] = os.path.join(_tmpdir, "test.db")
-# database.py hard-exits without OWNER_ID - a dummy is enough for store tests
+# database.py hard-exits without OWNER_ID — a dummy is enough for store tests
 os.environ.setdefault("OWNER_ID", "1")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -95,7 +95,7 @@ async def test_migration():
                 "INSERT INTO minigames_tiers "
                 "(guild_id, tier, weight, reward_type, reward_value) "
                 "VALUES (?, ?, ?, ?, ?)", (GUILD, tier, w, rt, rv))
-        # duplicate tier row - migration must skip it (first wins)
+        # duplicate tier row — migration must skip it (first wins)
         await db.execute(
             "INSERT INTO minigames_tiers "
             "(guild_id, tier, weight, reward_type, reward_value) "

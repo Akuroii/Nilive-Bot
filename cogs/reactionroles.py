@@ -40,7 +40,7 @@ class ReactionRoles(commands.Cog):
                 )
             """)
             # PHASE 5 TAIL FIX: message_id added to the key here too,
-            # matching database.py's central schema/migration - see
+            # matching database.py's central schema/migration — see
             # that file for the full explanation. This CREATE is a
             # no-op in practice (database.py's init_db() already runs
             # and migrates the table before any cog's on_ready fires),
@@ -90,13 +90,13 @@ class ReactionRoles(commands.Cog):
                     if role and role in after.roles:
                         try:
                             await after.remove_roles(role)
-                            print(f"Removed {role.name} from {after} - required role lost")
+                            print(f"Removed {role.name} from {after} — required role lost")
                         except Exception as e:
                             print(f"Could not remove {role.name}: {e}")
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
-        # Member is gone from the guild entirely - clear every expiry
+        # Member is gone from the guild entirely — clear every expiry
         # obligation for them regardless of which panel/message it
         # came from, so message_id is intentionally NOT part of this
         # WHERE clause.
@@ -165,19 +165,19 @@ class ReactionRoles(commands.Cog):
         after regardless of whether the removal actually worked. If
         remove_roles() failed (rate limit, missing permission,
         network blip), the row was deleted anyway and the role
-        obligation silently vanished forever - the role just stayed
+        obligation silently vanished forever — the role just stayed
         on the member with no record left to retry against. The
         delete is now conditional on the removal actually succeeding
         (or there being nothing to remove), and each entry is
         isolated in its own try/except so one bad row can't stop the
-        rest of the batch - or the whole 30-minute loop - from
+        rest of the batch — or the whole 30-minute loop — from
         running. Same pattern as cogs/shop.py's temp_role_cleanup.
 
         PHASE 5 TAIL FIX (two changes):
 
         1. reaction_role_expiry rows are now keyed by (guild_id,
            user_id, role_id, message_id) instead of just (guild_id,
-           user_id, role_id) - the old key let the same role added to
+           user_id, role_id) — the old key let the same role added to
            two different panels with two different expiry periods
            collide, so a member claiming the role from either panel
            could silently pick up the wrong panel's expiry. message_id
@@ -188,13 +188,13 @@ class ReactionRoles(commands.Cog):
            per-panel "template" expiry written by /reactionrole_add)
            as if they were real member obligations. guild.get_member(0)
            is always None, so the role-removal branch was always
-           skipped for a sentinel row - but removal_ok stayed True
+           skipped for a sentinel row — but removal_ok stayed True
            regardless, so the sentinel got DELETEd anyway once its own
            expires_at passed. That silently broke the feature: a
            role's configured expiry stopped applying to any NEW
            claimant after the first expiry_days window elapsed, since
            the template row RoleButton.callback reads from was gone.
-           Sentinel rows are now explicitly excluded here - they're
+           Sentinel rows are now explicitly excluded here — they're
            metadata for a button click to read, not an obligation for
            this loop to clean up.
         """
@@ -223,7 +223,7 @@ class ReactionRoles(commands.Cog):
                                   f"{guild_id}: {e}")
                             removal_ok = False
                 else:
-                    # Bot isn't in this guild right now - keep the
+                    # Bot isn't in this guild right now — keep the
                     # row so it's retried once it rejoins.
                     removal_ok = False
 
@@ -312,7 +312,7 @@ class ReactionRoles(commands.Cog):
             if expiry_days > 0:
                 # PHASE 5 TAIL FIX: message_id is now part of both the
                 # key and the row itself. This sentinel row (user_id=0)
-                # is THIS panel's template expiry for this role -
+                # is THIS panel's template expiry for this role —
                 # previously keyed only on (guild_id, role_id), adding
                 # the same role to a second panel with a different
                 # expiry_days would silently overwrite this row instead
@@ -358,7 +358,7 @@ class ReactionRoles(commands.Cog):
                 (msg_id, role.id))
             # PHASE 5 TAIL FIX: also clean up this panel's own sentinel
             # expiry row (and any per-member rows tied to this specific
-            # panel) now that message_id disambiguates them - otherwise
+            # panel) now that message_id disambiguates them — otherwise
             # a removed button's expiry metadata would linger forever
             # since nothing else ever cleans up user_id=0 rows.
             await db.execute(
@@ -404,7 +404,7 @@ class ReactionRoles(commands.Cog):
                 info.append(f"max {max_roles}")
             embed.add_field(
                 name=f"Message: {msg_id}",
-                value=f"<#{ch_id}>" + (f" - {', '.join(info)}" if info else ""),
+                value=f"<#{ch_id}>" + (f" — {', '.join(info)}" if info else ""),
                 inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -490,7 +490,7 @@ class RoleButton(discord.ui.Button):
         await member.add_roles(role)
 
         # PHASE 5 TAIL FIX: both the sentinel lookup and the per-member
-        # expiry row this writes now include message_id - previously
+        # expiry row this writes now include message_id — previously
         # this read whichever panel's sentinel happened to have been
         # written LAST for this role_id (guild-wide), regardless of
         # which panel's button was actually clicked. Now it reads only

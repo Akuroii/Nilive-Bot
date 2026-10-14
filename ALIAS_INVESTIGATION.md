@@ -1,8 +1,8 @@
-# Alias system - full investigation + manual verification pass
+# Alias system — full investigation + manual verification pass
 
 Date: 2026-08-28. Branch: `arena/01a0467e-nilive-bot`. §0–§11 are the investigation itself:
 measurement only, with reproducible probes under `tools/alias_probes/`. **§12 records what was
-subsequently built** - the implementation, where it deviated from the recommendation in §10, and
+subsequently built** — the implementation, where it deviated from the recommendation in §10, and
 which acceptance item is proved by which probe run.
 
 ---
@@ -44,12 +44,12 @@ I also read the library source rather than trusting docs: `discord/ext/commands/
 | 4 | DB write | ✅ works | `command_toggles.aliases = '["k"]'` verified in the real DB (probe 4 §1). |
 | 5 | Sync flag | ✅ works | `bot_settings('command_aliases_sync_needed','1')` written and read correctly (probe 4, probe 5b). Cleared by `UPDATE ... value='0'`. |
 | 6 | Bot picks up the flag | ⚠️ works but slow/fragile | `command_aliases.py:599-627`: 30 s poll, so a save takes up to 30 s to take effect. Flag is cleared *before* syncing and the loop swallows all errors → a failed sync is silently consumed until the next save. |
-| 7 | Alias registration into `bot.all_commands` | ✅ *nominally* works | Probe 2: `Registered 1 alias(es)`, `'k' in bot.all_commands`. This is the part the previous pass "verified" - and it is **not** what's broken, but it is also **not** what makes aliases work (see 8–11). |
+| 7 | Alias registration into `bot.all_commands` | ✅ *nominally* works | Probe 2: `Registered 1 alias(es)`, `'k' in bot.all_commands`. This is the part the previous pass "verified" — and it is **not** what's broken, but it is also **not** what makes aliases work (see 8–11). |
 | 8 | Bare-message detection | ✅ logic is right | `command_aliases.py:542-557`: first whitespace token, lowercased, matched against `_registered`. |
-| 9 | Hand-off to `process_commands` (content mutation) | ❌ **FATAL - impossible** | `command_aliases.py:562` rewrites `message.content`, but `process_commands` has already run. Probe 1 + 5b: `process_commands` sees `'k <@111> rude'`; the mutation lands afterwards. |
-| 10 | Argument parsing / converters | ❌ **FATAL - never happens** | `_make_alias_cmd` dies at `slash_cmd.params` (no such attribute in 2.7.1) and at `CmdParameter(converter=…, required=…)` (no such kwargs), both inside `try/except Exception: pass` (`:499`). Net: `cmd.params == {'kwargs': <VAR_KEYWORD>}`, zero args parsed, `ignore_extra=True` silently drops everything. |
+| 9 | Hand-off to `process_commands` (content mutation) | ❌ **FATAL — impossible** | `command_aliases.py:562` rewrites `message.content`, but `process_commands` has already run. Probe 1 + 5b: `process_commands` sees `'k <@111> rude'`; the mutation lands afterwards. |
+| 10 | Argument parsing / converters | ❌ **FATAL — never happens** | `_make_alias_cmd` dies at `slash_cmd.params` (no such attribute in 2.7.1) and at `CmdParameter(converter=…, required=…)` (no such kwargs), both inside `try/except Exception: pass` (`:499`). Net: `cmd.params == {'kwargs': <VAR_KEYWORD>}`, zero args parsed, `ignore_extra=True` silently drops everything. |
 | 11 | Permission / cooldown / toggle checks | ✅ logic sound, never reached | `check_command_toggles` + shared `main._command_cooldowns` + `_run_slash_checks` (verified parity; `has_permissions` only needs `interaction.permissions`, so the `PrefixInteraction` shim is genuinely sufficient for the 76 `@app_commands.checks.has_permissions` in the repo). |
-| 12 | Invocation of the original callback | ❌ **FATAL - wrong call** | `:425` `await sc.callback(interaction, **kwargs)` omits the cog instance. Every app command here is a *method*, so the wrapper is consumed as `self`: `TypeError: Moderation.kick() missing 2 required positional arguments: 'interaction' and 'member'` (probes 2, 5c). |
+| 12 | Invocation of the original callback | ❌ **FATAL — wrong call** | `:425` `await sc.callback(interaction, **kwargs)` omits the cog instance. Every app command here is a *method*, so the wrapper is consumed as `self`: `TypeError: Moderation.kick() missing 2 required positional arguments: 'interaction' and 'member'` (probes 2, 5c). |
 
 **Conclusion: 4 independent fatal defects, stacked.** Fixing any one of them still yields a dead
 alias. The user-visible symptom ("typing `k` does nothing at all, no error in the channel") matches
@@ -57,7 +57,7 @@ defect 9 alone, and defects 10/12 guarantee it stays dead even if 9 were fixed.
 
 ---
 
-## 2. Defect 9 in detail - why the mutation trick can never work (library-level)
+## 2. Defect 9 in detail — why the mutation trick can never work (library-level)
 
 `discord/ext/commands/bot.py:237-242` (2.7.1):
 
@@ -81,7 +81,7 @@ Cog listeners are *not* overrides of `Bot.on_message`; `Cog` registers them thro
 1 / 5b:
 
 1. `Bot.on_message` → `process_commands` is scheduled **first**, always, and every cog listener is
-   scheduled **after** it. `main.py`'s load-order trick cannot change this - it is not a cog-order
+   scheduled **after** it. `main.py`'s load-order trick cannot change this — it is not a cog-order
    problem, it is an `extra_events`-after-base-handler problem.
 2. Both are separate `loop.create_task(...)` calls, so `process_commands`' task runs to its first
    *real* suspension point first; `get_context()` reads `origin.content` (and
@@ -92,21 +92,21 @@ Cog listeners are *not* overrides of `Bot.on_message`; `Cog` registers them thro
    sequentially to completion, they run as **concurrent sibling tasks**, each interleaving at its
    own `await`s.
 
-Defect 9 therefore has a second, nastier side effect - see §5 (the mutation is a shared-object
+Defect 9 therefore has a second, nastier side effect — see §5 (the mutation is a shared-object
 side effect that corrupts the other listeners' input).
 
 ---
 
-## 3. Defects 10 and 12 - the "register a real `commands.Command`" half is broken
+## 3. Defects 10 and 12 — the "register a real `commands.Command`" half is broken
 
 `command_aliases.py:431-506` (the `try: ... except Exception: pass` block):
 
-* `for name, param in slash_cmd.params.items()` - `app_commands.Command` in 2.7.1 has
+* `for name, param in slash_cmd.params.items()` — `app_commands.Command` in 2.7.1 has
   **`_params`** (private) and a `parameters` property returning `Parameter` proxies that expose
   `name/required/description/default` but **not** `.type` or `.channel_types`. The public
   `Command.params` does not exist → `AttributeError` → swallowed. (Probe 7 shows the correct
   source of truth is `cmd._params.values()` → `CommandParameter` with `.name/.type/.required/.default/.channel_types/_annotation`.)
-* `CmdParameter(..., converter=None, displayed_default=None, description=..., required=...)` -
+* `CmdParameter(..., converter=None, displayed_default=None, description=..., required=...)` —
   `discord.ext.commands.Parameter.__init__` (2.7.1, `parameters.py:92`) accepts only
   `(name, kind, default, annotation, description, displayed_default, displayed_name)`.
   `converter` and `required` are **read-only properties**, not constructor args → `TypeError` →
@@ -117,7 +117,7 @@ side effect that corrupts the other listeners' input).
   `self.callback(*ctx.args, **ctx.kwargs)` (`core.py:1075`). The callback is
   `async def alias_callback(ctx, **kwargs)` → `TypeError: too many positional arguments`.
   `KEYWORD_ONLY` is the *only* kind that lands in `kwargs`, and it also carries discord.py's
-  "consume rest" semantics - which is exactly what a trailing `reason: str` wants.
+  "consume rest" semantics — which is exactly what a trailing `reason: str` wants.
 * Defect 12: `sc.callback(interaction, **kwargs)` must be
   `sc.callback(sc.cog, interaction, **kwargs)` (or bind via `functools.partial`/`MethodType`).
 
@@ -126,7 +126,7 @@ Probe 7 proves the corrected combination works mechanically: params derived from
 command resolved through `bot.get_context`/`bot.invoke` (`ctx.command: k`), discord.py selecting
 the real `MemberConverter`, the shared `_command_cooldowns` gate reached, and the original message
 **left untouched**. The only remaining error was `MemberNotFound`, caused by my fake `Guild` not
-implementing `query_members` semantics - a probe limitation, not an architecture one.
+implementing `query_members` semantics — a probe limitation, not an architecture one.
 
 ---
 
@@ -135,16 +135,16 @@ implementing `query_members` semantics - a probe limitation, not an architecture
 These are genuinely sound and should be preserved by any redesign:
 
 1. **Storage**: JSON array in `command_toggles.aliases`, per `(guild_id, command_name)` row, plus
-   `UNIQUE(guild_id, command_name)` index - clean, no new table needed.
+   `UNIQUE(guild_id, command_name)` index — clean, no new table needed.
 2. **Save path**: normalization + validation without a minimum length (`k` is a legal alias and
    the API proves it), duplicates removed, `''`/`'[]'` treated as "no aliases", `aliases = excluded.aliases`
    only in the settings route, and the toggle / bulk-restrict routes correctly **do not** clobber
    aliases (probe 4 §4).
-3. **Sync-flag signalling** (`bot_settings.command_aliases_sync_needed`) - the right shape for a
+3. **Sync-flag signalling** (`bot_settings.command_aliases_sync_needed`) — the right shape for a
    two-process (bot + Flask) deployment.
 4. **`check_command_toggles` extracted as shared logic** and reusing `main._command_cooldowns`:
    so `/kick` and `k` share one cooldown key `(guild, user, 'kick')`. That parity idea is correct
-   and worth keeping (better: don't duplicate at all - see §7, Option R).
+   and worth keeping (better: don't duplicate at all — see §7, Option R).
 5. **`PrefixInteraction`** is adequate for this codebase: I checked all 76 app-level checks are
    `has_permissions`, which in 2.7.1 reads only `interaction.permissions` (`checks.py:332-335`),
    and `ctx.channel.permissions_for(author)` is the right computation. Fail-loud `__slots__` is a
@@ -155,14 +155,14 @@ These are genuinely sound and should be preserved by any redesign:
 
 The parts that are flawed: everything about **handing the message to the dispatcher** (§2),
 everything about **argument parsing** (§3), the **cog-self omission** (§3), treating aliases as
-**global** (`all_commands` can't be guild-scoped - §5), the **swallowed exceptions** (`except
+**global** (`all_commands` can't be guild-scoped — §5), the **swallowed exceptions** (`except
 Exception: pass` is why this looked "ready for manual testing"), and validation being **one-way** (§6).
 
 ---
 
 ## 5. Hidden interactions the current design creates (measured, not theorised)
 
-1. **The mutation leaks into other listeners - real, deterministic-looking, but racy.**
+1. **The mutation leaks into other listeners — real, deterministic-looking, but racy.**
    There are 5 `on_message` listeners: `activity_engine`, `sticky`, `triggers`, `customcommands`,
    `command_aliases` (in that order; observed in probe 5b). Probe 6 is decisive:
 
@@ -170,13 +170,13 @@ Exception: pass` is why this looked "ready for manual testing"), and validation 
    * alias cog loaded: same message `k` → **nothing** ❌
 
    because `Triggers.on_message` awaits a DB read and *then* calls `_matches(message.content, ...)`,
-   by which time content is `'!k'` - so `exact`/`startswith` triggers involving an alias word
+   by which time content is `'!k'` — so `exact`/`startswith` triggers involving an alias word
    **silently stop working**, while `contains` keeps firing. Word counts for XP/activity
    (`activity_engine.py:38`) can also be computed from the mutated text (3 words → `!k ...` 4
    words) depending on interleaving. Any implementation that mutates `message.content` is
    therefore unsafe *regardless* of load order.
 2. **`bot.all_commands` is not a sufficient source of truth** (the exact question you asked). It
-   contains only *prefix* commands (`['help','k','reload','sync']` in probe 2) - bare aliases are
+   contains only *prefix* commands (`['help','k','reload','sync']` in probe 2) — bare aliases are
    not represented anywhere in the tree, and slash commands are not in `all_commands`. So:
    * `customcommands.py:63`'s guard `first_word in self.bot.all_commands` only protects names that
      were **successfully registered** by the alias cog, in **any** guild, and only for the
@@ -185,8 +185,8 @@ Exception: pass` is why this looked "ready for manual testing"), and validation 
    * Triggers never consult `all_commands` at all → no protection whatsoever.
 3. **Aliases are effectively global.** `_sync_aliases` selects `FROM command_toggles` with **no
    guild filter** (`:304-307`) and registers into the single global command table. Probe 5c/§G: a
-   bare `k` in guild `999` (which has no rows at all) gets rewritten and - once defects 9–12 are
-   fixed - would execute `/kick` there. This is structural, not a patchable bug: `bot.all_commands`
+   bare `k` in guild `999` (which has no rows at all) gets rewritten and — once defects 9–12 are
+   fixed — would execute `/kick` there. This is structural, not a patchable bug: `bot.all_commands`
    has no notion of guild.
 4. **`commands.Command` objects pollute `!help`** and the command namespace; a removed/renamed
    alias can linger until the next successful re-sync (the loop only re-syncs when the flag is set).
@@ -197,13 +197,13 @@ Exception: pass` is why this looked "ready for manual testing"), and validation 
    `enabled` is never consulted by the bot (a "disabled" custom command still fires) and matching
    is `startswith(f"!{trigger}")` with **no word boundary** → trigger `k` also swallows `!kk`, `!kick`.
    Check your production DB with
-   `sqlite3 data/nero.db "PRAGMA table_info(custom_commands);"` - if it lists 16 columns, custom
+   `sqlite3 data/nero.db "PRAGMA table_info(custom_commands);"` — if it lists 16 columns, custom
    commands are currently dead in prod too.
 6. **Dead configuration** inherited by both paths: `delete_user_msg`, `delete_bot_reply`,
    `delete_bot_after`, `custom_cooldown`, `dm_response`, `require_permission`, `hide_from_help`,
    `cmd_emoji`, `category_color`, `ephemeral` are written by the dashboard and read by **no** bot
    code (grep: 0 hits under `cogs/`, `main.py`, `utils/`). So an alias can never be "ephemeral" and
-   the alias/slash parity concern here is moot - but the dashboard UI implies otherwise.
+   the alias/slash parity concern here is moot — but the dashboard UI implies otherwise.
 7. **Two copies of the gating logic** (`NeroCommandTree.interaction_check` vs
    `check_command_toggles`) already differ: the cooldown-prune call only happens on the slash path,
    and any check added to the tree later (`bot_has_permissions`, `guild_only`, `nsfw`,
@@ -212,16 +212,16 @@ Exception: pass` is why this looked "ready for manual testing"), and validation 
 
 ---
 
-## 6. Custom Commands vs Aliases - the concrete answer
+## 6. Custom Commands vs Aliases — the concrete answer
 
 Today, with defects in place, **nothing runs** for a bare `k`. Once implemented naively:
 
 | Input | Alias path | Custom command path | Verdict |
 |---|---|---|---|
-| `k @u rude` (alias `k`, custom trigger `k`) | runs (after fixes) | skipped - gate `content.startswith("!")` fails on the original text; but if the mutation lands first it becomes `!k ...` and the `all_commands` guard is the only thing saving it | **accidentally safe, structurally unsafe** |
+| `k @u rude` (alias `k`, custom trigger `k`) | runs (after fixes) | skipped — gate `content.startswith("!")` fails on the original text; but if the mutation lands first it becomes `!k ...` and the `all_commands` guard is the only thing saving it | **accidentally safe, structurally unsafe** |
 | `!k @u rude` | runs | `customcommands.py:63` returns because `k in all_commands` | single execution, but only by luck of ordering |
 | `!k @u rude`, alias registration skipped | nothing | custom command `k` runs (and `startswith` also swallows `!kk`, `!kick…`) | **hijack** |
-| custom trigger created **after** the alias | runs | runs | **double execution** - probe 4 §6 shows the API happily creates trigger `k` while alias `k` exists |
+| custom trigger created **after** the alias | runs | runs | **double execution** — probe 4 §6 shows the API happily creates trigger `k` while alias `k` exists |
 | `trigger_add` slash command (`cogs/triggers.py`) | runs | n/a | no validation at all: conflicts can always be created from Discord |
 
 Custom-command matching rules I verified in code: **prefix only** (`startswith("!"+trigger)`),
@@ -229,7 +229,7 @@ Custom-command matching rules I verified in code: **prefix only** (`startswith("
 OR guild_id = 0` (so global rows apply everywhere), first match wins via `break`, and the row is
 the DB order (no explicit `ORDER BY` → insertion order).
 
-## 7. Triggers vs Aliases - the concrete answer
+## 7. Triggers vs Aliases — the concrete answer
 
 * Trigger matching ignores commands entirely: `Triggers.on_message` (`:147`) queries
   `enabled = 1` rows for `(guild_id = ? OR guild_id = 0)` and matches with `contains` /
@@ -258,7 +258,7 @@ the DB order (no explicit `ORDER BY` → insertion order).
    flag are all fine.
 2. **Why does the manually tested alias not execute?** Because `process_commands` parses the message
    **before** any cog listener can rewrite it (library-guaranteed order), so `k @user` is parsed as
-   plain chat and nothing is invoked. The alias *is* registered - that's why code review and
+   plain chat and nothing is invoked. The alias *is* registered — that's why code review and
    "it compiled / it registered" looked green while the feature is dead.
 3. **Which parts of the previous implementation are correct?** Everything in §4 (storage, API
    validation incl. no min-length, flag signalling, shared toggle/cooldown logic, the
@@ -275,7 +275,7 @@ the DB order (no explicit `ORDER BY` → insertion order).
    mutation actively *breaks* `exact`/`startswith` triggers (measured). Also needs the precedence
    rule + removal of the mutation.
 7. **Normal messages?** Unaffected by the alias feature **except** when their first token happens
-   to equal a registered alias - e.g. someone chatting `k` or `k? nah` gets rewritten (probe 5b
+   to equal a registered alias — e.g. someone chatting `k` or `k? nah` gets rewritten (probe 5b
    §A/§E) and, once fixed, would run `/kick` with no arguments. There is no "only if the bot is
    mentioned / only in allowed channels / only with permission" guard on the *detection* step.
 8. **Permissions/cooldowns?** The logic is right and shared (single `_command_cooldowns` dict keyed
@@ -292,10 +292,10 @@ the DB order (no explicit `ORDER BY` → insertion order).
 
 ---
 
-## 9. Alias UI - ProBot-like chip field (design, no code written yet)
+## 9. Alias UI — ProBot-like chip field (design, no code written yet)
 
 Note: **the screenshot did not reach me** (nothing was attached to the workspace), so this is
-based on your written spec - `[ × k ] [ × o ] [ × p ] |` with type → Space → chip - which I treat
+based on your written spec — `[ × k ] [ × o ] [ × p ] |` with type → Space → chip — which I treat
 as unambiguous. If the screenshot adds constraints (colors, ordering, drag-to-sort?), re-send it.
 
 **Interaction contract**
@@ -313,10 +313,10 @@ as unambiguous. If the screenshot adds constraints (colors, ordering, drag-to-so
 | IME/dead keys | `compositionstart/end` guard so CJK/Arabic input isn't committed mid-composition |
 
 **Validation must mirror the server rule, not a stricter one.** Today the server accepts any
-Unicode letter/digit plus `-` (`alias.replace('-','').isalnum()`), 1–32 chars, lowercased - probe 4
+Unicode letter/digit plus `-` (`alias.replace('-','').isalnum()`), 1–32 chars, lowercased — probe 4
 confirms single-char `k` and even `ض` pass. So the client check should be
 `/^[\p{L}\p{N}-]+$/u` after trim/lowercase; a `[a-z0-9-]`-only regex would newly break Arabic
-aliases that the backend supports (and this repo explicitly cares about Arabic - see
+aliases that the backend supports (and this repo explicitly cares about Arabic — see
 `cogs/triggers.py` "Arabic support"). No minimum length, per your requirement.
 
 **Implementation options**
@@ -324,10 +324,10 @@ aliases that the backend supports (and this repo explicitly cares about Arabic -
 | | A. tiny vanilla component (recommended) | B. `select2` in `tags` mode | C. htmx-rendered chips |
 |---|---|---|---|
 | Code | `dashboard/static/js/nero-alias-input.js`, ~120 lines, `window.NeroAliasInput = { attach(el, {values, onChange}), get(el) }` | ~30 lines config | server round-trip per keystroke |
-| Fits repo conventions | yes - same pattern as `nero-select.js` (IIFE on `window`, loaded in `base.html`) | yes, jQuery+select2 already global | no |
+| Fits repo conventions | yes — same pattern as `nero-select.js` (IIFE on `window`, loaded in `base.html`) | yes, jQuery+select2 already global | no |
 | Space-to-commit, Backspace, paste-split, IME | full control | select2 commits on `Enter`/comma; needs `keydown` overrides + `tokenizer` surgery | awkward |
 | Theming into this dark UI | trivial; reuse `.cmd-chip` / `.cmd-chip-accent` (`manage/commands.html:510-525`) | needs select2 CSS overrides (the recurring pain in this file) | n/a |
-| Risk | low | medium (already wrapping select2 for role/channel pickers; alias semantics - free text - are select2's weakest area) | high |
+| Risk | low | medium (already wrapping select2 for role/channel pickers; alias semantics — free text — are select2's weakest area) | high |
 
 **Markup/state**: replace the bare `<input id="edit-aliases-{{cmd}}">`
 (`manage/commands.html:181-185`) with a `.alias-input` container holding a chip list + a real
@@ -336,36 +336,36 @@ aliases that the backend supports (and this repo explicitly cares about Arabic -
 `saveCommandSettings()` (`:826-841`) reads `NeroAliasInput.get(el)` instead of
 `.value.split(',')`. Keep the row-level affordance the current code half-implements: alias chips
 **in the collapsed row** (not just the "or `k [member] [reason]`" hint) and the conflict error from
-the API rendered **on the offending chip** (today `ajaxSave`'s toast is the only feedback - the
+the API rendered **on the offending chip** (today `ajaxSave`'s toast is the only feedback — the
 generic `❌ <error>` in `#edit-status-…`).
 
 **Nice-to-have worth deciding now:** client-side "already used by `/ban`" preview needs an
-`GET /api/commands/alias-registry` (single source of truth, §10 option V) - otherwise the chip can
+`GET /api/commands/alias-registry` (single source of truth, §10 option V) — otherwise the chip can
 only be validated on Save.
 
 ---
 
-## 10. Backend architecture - three options, then my recommendation
+## 10. Backend architecture — three options, then my recommendation
 
-**Option P - patch the prefix-command approach** (keep `all_commands` registration, fix 9/10/12:
+**Option P — patch the prefix-command approach** (keep `all_commands` registration, fix 9/10/12:
 call `bot.process_commands` ourselves after mutating, fix params via `_params`, pass `sc.cog`).
 *Pros*: minimal diff, keeps `!help` integration. *Cons*: still needs a mutation *or* a second
 `process_commands` call per message (double-dispatch risk for every other listener), aliases stay
 global (defect §5.3), still re-implements parameter mapping, still bypasses tree-level checks.
 **Rejected: it preserves the four structural problems we just measured.**
 
-**Option B - full custom parser** (no `commands.Command`, parse tokens by hand, hand
+**Option B — full custom parser** (no `commands.Command`, parse tokens by hand, hand
 `PrefixInteraction` a kwargs dict).
 *Pros*: total control, easy guild scoping. *Cons*: we own `Member/Role/Channel/Attachment`
-resolution, quoting, defaults, optional params, `Greedy`, error messages - i.e. we re-implement
+resolution, quoting, defaults, optional params, `Greedy`, error messages — i.e. we re-implement
 `_parse_arguments` and diverge from prefix-command behaviour forever. **Rejected.**
 
-**Option R - single per-message router (recommended).** One module owns "which system, if any,
+**Option R — single per-message router (recommended).** One module owns "which system, if any,
 executes this message", every subsystem asks it, nobody mutates the message:
 
 1. `utils/message_router.py` (bot-side):
    * `alias_index: dict[int guild_id, dict[str alias, str command_name]]` rebuilt on the existing
-     `command_aliases_sync_needed` flag (and on `on_ready`), **scoped per guild** - fixes the global
+     `command_aliases_sync_needed` flag (and on `on_ready`), **scoped per guild** — fixes the global
      leak, no `all_commands` involvement at all, and `k` stays legal.
    * `async def decide(bot, message) -> Route` where `Route ∈ {PREFIX_COMMAND, ALIAS,
      CUSTOM_COMMAND, TRIGGER, NONE}`, memoised per `message.id` in a bounded LRU so the 3-4 sibling
@@ -377,23 +377,23 @@ executes this message", every subsystem asks it, nobody mutates the message:
    (`types.SimpleNamespace(content=f"{prefix}{content}", author, guild, channel, _state, …)`) →
    `ctx = await bot.get_context(synthetic)` → `await bot.invoke(ctx)`. Original message untouched;
    converters, `TooManyArguments`/`MissingRequiredArgument`, `on_command_error`, `enable_on_edits`
-   - all free. (probe 7 verified this half end-to-end: `ctx.command: k` resolved, real
+   — all free. (probe 7 verified this half end-to-end: `ctx.command: k` resolved, real
    `MemberConverter` selected, original content unchanged.)
 3. The alias `Command` object, if we still want `!k` to work, is generated **once per alias name**
    with params derived from `slash_cmd._params` (`POSITIONAL_OR_KEYWORD` for all but a trailing
    `string` param, which becomes `KEYWORD_ONLY` = consume-rest; `ignore_extra=True`), and its
    callback does `check_command_toggles` → `_run_slash_checks` → `sc.callback(sc.cog,
    PrefixInteraction(ctx), **kwargs)`. Better still: have the router call the same `_run_alias()`
-   helper for both bare and prefixed forms, and register nothing in `all_commands` at all - then
+   helper for both bare and prefixed forms, and register nothing in `all_commands` at all — then
    `!help`, cooldowns and gating all come from one place.
 4. **Never swallow setup errors**: replace `except Exception: pass` with a real log + a
    `bot_settings` "alias_status" error surface the dashboard can display (that alone would have
    turned this from "looks ready" into "here is the traceback").
 5. Cooldown/toggle/permission checks: make `NeroCommandTree.interaction_check` and the alias path
-   call **the same function** (the extraction is already 90% done) - ideally the alias path invokes
+   call **the same function** (the extraction is already 90% done) — ideally the alias path invokes
    the tree's own machinery rather than a copy.
 
-**Validation redesign (answers 5/6/7 properly).** Save-time cross-checks can never be complete -
+**Validation redesign (answers 5/6/7 properly).** Save-time cross-checks can never be complete —
 `/trigger_add`, `/trigger_remove`, `guild_id=0` global rows, other guilds, and the custom-command
 route (which does zero alias checking today) all bypass it. So:
 
@@ -406,12 +406,12 @@ route (which does zero alias checking today) all bypass it. So:
   and with the *actual* matching semantics (substring/prefix/fuzzy overlap, not just string
   equality), and returns `{"success": true, "warnings": [...]}` (yellow chip outline: "trigger `kick`
   (contains) will be suppressed by alias `k`") instead of hard-blocking. Single-character aliases
-  remain fully allowed, exactly as you require - the collision problem is solved by precedence +
+  remain fully allowed, exactly as you require — the collision problem is solved by precedence +
   visibility, not by banning short aliases.
 * Also worth deciding here: whether `/trigger_add`-style slash commands should keep bypassing
   validation (they'd emit the same warning at runtime instead).
 
-**Two side-fixes this pass uncovered that are *not* alias-related but block the same UX** - flag for
+**Two side-fixes this pass uncovered that are *not* alias-related but block the same UX** — flag for
 your call, I have not touched either: `cogs/customcommands.py`'s 14-vs-16 column unpack (custom
 commands currently crash), and `custom_commands.enabled` being ignored by the bot.
 
@@ -440,7 +440,7 @@ commands currently crash), and `custom_commands.enabled` being ignored by the bo
 9. Save → effect latency: after removing the 30 s poll in favour of an immediate in-process re-read
    (or keeping the poll but clearing the flag only after a successful sync), document the number.
 10. `PRAGMA table_info(custom_commands)` on production, and `SELECT command_name, aliases FROM
-    command_toggles WHERE aliases IS NOT NULL` - to see the real current state before/after.
+    command_toggles WHERE aliases IS NOT NULL` — to see the real current state before/after.
 11. Dashboard: chip flow (Space/Enter/Backspace/×/paste/blur-pending-commit), Arabic + single-char
     aliases accepted, duplicate + conflict shown on the chip, panel reload shows persisted chips.
 
@@ -451,7 +451,7 @@ commands currently crash), and `custom_commands.enabled` being ignored by the bo
 Implementation date 2026-08-28, same branch. Full suite: `./tools/alias_probes/run_all.sh`
 → **p2 35/35 static guards · p4 39/39 dashboard · p6 18/18 router consistency ·
 p8 62/62 acceptance · p9 42/42 UI · p10 11/11 full boot** (207 assertions, all green, and p8 is
-idempotent - two runs in a row on the same DB both pass; p1 is printed evidence, not an assertion
+idempotent — two runs in a row on the same DB both pass; p1 is printed evidence, not an assertion
 script).
 
 ### 12.1 The shape that shipped (Option R, as chosen)
@@ -469,7 +469,7 @@ script).
 
 ### 12.2 Where it deviated from §10, and why
 
-Each deviation was found *by running the probes*, not in advance - which is the argument for the
+Each deviation was found *by running the probes*, not in advance — which is the argument for the
 probes existing.
 
 1. **The permission/toggle gate became a `Command` check instead of a step inside the callback.**
@@ -483,7 +483,7 @@ probes existing.
    `prepare()` outside the wrapping, so treating `AliasGateError` like a generic `CheckFailure`
    swallowed the disabled-command reply entirely.
 4. **The transient command is built lazily, at first use, not at sync time.** Building at sync meant
-   "the parent cog is not in the tree yet" silently dropped aliases - visible the moment p8 loaded
+   "the parent cog is not in the tree yet" silently dropped aliases — visible the moment p8 loaded
    the cogs in reverse order (`cogs.command_aliases` first ⇒ `ta` was never registered and the
    *trigger* answered instead). Now the index is tree-independent; if a word's command is missing at
    the moment of use, the alias says "`/trigger_add` isn't loaded at the moment" instead of vanishing,
@@ -512,19 +512,19 @@ probes existing.
 | 2 · `k @user` → real `Member` + rest-of-line reason; bare `k` alone → the command's own missing-argument reply | ✅ | p8 §3 (`KICKS == [(260100000000004242, 'being rude')]` through the real `MemberConverter`), p8 §9 |
 | 3 · nothing in a guild with no alias row | ✅ | p8 §5 (guild 999: zero outbound, zero rows touched) |
 | 4 · `K` / `k,` / `(ta)` / trailing spaces work; `ok k` and `!ta` do not | ✅ | p8 §13 (six typed forms, exact expectations) |
-| 5 · disabled → configured `error_message`; one shared cooldown | ✅ | p8 §8 + §11 (slash path says "slash says no", alias path says "nope, disabled", second alias use says "Slow down - try again in 29.4s"); p8 §15 drives `evaluate_toggle_row` directly across 14 rule combinations (blacklist before whitelist, `bypass_cooldown_roles`, `owner_only`, expiry, and the legacy `allowed_roles` column being *replaced* rather than unioned, so a row can never become more permissive than what the dashboard shows) |
+| 5 · disabled → configured `error_message`; one shared cooldown | ✅ | p8 §8 + §11 (slash path says "slash says no", alias path says "nope, disabled", second alias use says "Slow down — try again in 29.4s"); p8 §15 drives `evaluate_toggle_row` directly across 14 rule combinations (blacklist before whitelist, `bypass_cooldown_roles`, `owner_only`, expiry, and the legacy `allowed_roles` column being *replaced* rather than unioned, so a row can never become more permissive than what the dashboard shows) |
 | 6 · `has_permissions` parity | ✅ | p8 §14 ("You need the following Discord permissions: Manage Guild", and the command did not run) |
 | 7 · alias + triggers + custom command, exactly one action; `exact` trigger not corrupted | ✅ | p8 §3, §4, §6; p6 §6 (real cogs, one computation, one actor) |
 | 8 · trigger created *after* the alias, incl. `/trigger_add` | ✅ | p6 §6 (alias `kick` vs exact trigger `kick`), p4 §5 (advisory warning, save still allowed) |
 | 9 · save → effect latency documented | ✅ | 5 s poll + memo invalidation on table swap; status line + `command_aliases_last_sync` (p4 §6, p8 §10) |
 | 10 · production `PRAGMA table_info(custom_commands)` | ⚠️ not run here | needs the live `data/nero.db`; command is in §12.5 |
 | 11 · chip flow end-to-end | ✅ | p9 (all 42) + p4 §8 (page serves the component/styles and renders the host) |
-| *(new) nothing unrelated broke* | ✅ | p10 - all 29 cogs in `main.py` load, the set unloads and reloads **in reverse order** with the alias index still correct, the other four `on_message` listeners each receive the untouched text, and an alias-free sentence runs no command |
+| *(new) nothing unrelated broke* | ✅ | p10 — all 29 cogs in `main.py` load, the set unloads and reloads **in reverse order** with the alias index still correct, the other four `on_message` listeners each receive the untouched text, and an alias-free sentence runs no command |
 
 ### 12.4 Behaviour the UI now states out loud
 
-* Aliases are **bare**: `k @user`, `help ban @user`. There is no `!k` alias form - that prefix belongs
-  to the prefix parser - and no `@Nero` mention syntax.
+* Aliases are **bare**: `k @user`, `help ban @user`. There is no `!k` alias form — that prefix belongs
+  to the prefix parser — and no `@Nero` mention syntax.
 * No minimum length (`k`, `ض`, `!`-pasted words are normalised or refused on *characters*, never on
   length); over-long words are truncated to 32 with a visible note.
 * Collisions never block a save. Runtime precedence decides; the chip carries a ⚠ and the toast says
@@ -538,7 +538,7 @@ Everything above is real code with a stubbed gateway; these three need a human:
    `!cc` (a custom command), and the same words in a guild with no alias row.
 2. `PRAGMA table_info(custom_commands);` and
    `SELECT guild_id, command_name, aliases FROM command_toggles WHERE aliases IS NOT NULL;`
-   against the production DB - confirm the `enabled` column exists (the migration adds it on cog load
+   against the production DB — confirm the `enabled` column exists (the migration adds it on cog load
    if not) and see whether any guild-0 rows exist (they are inert for command settings).
 3. Confirm the ⚠ chip + warning toast appear for a deliberate collision (alias `kick` while a trigger
    named `kick` exists), and that the trigger still answers sentences containing `kick`.

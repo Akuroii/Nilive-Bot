@@ -1,8 +1,8 @@
-"""AFK - mark yourself away with an optional reason.
+"""AFK — mark yourself away with an optional reason.
 
 One prefix command, ``!afk [سبب]``. Because the bot is created with
 ``case_insensitive=True`` (see main.py), ``!afk``, ``!AFK`` and ``!Afk`` all
-resolve to the SAME command through discord.py's own resolver - no aliases
+resolve to the SAME command through discord.py's own resolver — no aliases
 table is needed, and adding mixed-case aliases manually would in fact raise
 ``CommandRegistrationError`` (a case variant already counts as the command
 itself).
@@ -14,25 +14,25 @@ Behaviour
                          the trailing ``*reason`` parameter captures it all).
 
 While AFK:
-* a REAL Discord mention of the member (``message.mentions`` - never a plain
+* a REAL Discord mention of the member (``message.mentions`` — never a plain
   text username search) makes the bot reply in that same channel that the
   member is AFK, with the reason when one exists;
-* every *distinct message* that mentions the member increments the counter -
+* every *distinct message* that mentions the member increments the counter —
   one message counts at most once per target, so re-delivery / double event
   processing can never double-count (dedup key is ``(guild, message, target)``);
 * the member's own next message in ANY channel (not tied to where ``!afk`` was
   used, not tied to a follow-up command) cancels AFK, and the bot reports
   how many mentions arrived while they were away.
 
-Re-running ``!afk`` while already AFK is *idempotent*: nothing changes -
-not the reason, not ``started_at``, not the mention counter, no new session -
+Re-running ``!afk`` while already AFK is *idempotent*: nothing changes —
+not the reason, not ``started_at``, not the mention counter, no new session —
 and the bot simply replies that the member is already away (showing the
 current reason when one exists).
 
 Cancellation rules
 ------------------
 * bot messages never cancel AFK (``message.author.bot`` is ignored);
-* the ``!afk`` invocation itself never cancels AFK - the command callback and
+* the ``!afk`` invocation itself never cancels AFK — the command callback and
   this cog's ``on_message`` listener run as sibling tasks, so the listener
   checks ``bot.get_context`` and stands down for the afk command instead of
   racing the write (same resolver the router uses, no content rewriting);
@@ -53,13 +53,13 @@ Dashboard & mentions button (AFK final-corrections pass, 2026-09-23)
 * The Dashboard Commands page lists ``afk`` under ``Utility & Trade`` as a
   *prefix* command (usage ``!afk [reason]``); the alias-editing UI is hidden
   for it, because the current alias bridge only targets slash commands.
-* The dashboard toggle row for ``afk`` gates ONLY the start of NEW sessions -
+* The dashboard toggle row for ``afk`` gates ONLY the start of NEW sessions —
   an owner who is already AFK can still cancel normally, mention alerts keep
   firing, and the button keeps answering while the feature is disabled.
 * The ``!afk`` activation card carries NO button: mention snapshots are
   collected silently while the member is away. The persistent
   ``AFKMentionsView`` button (label ``إظهار الرسائل``, attached even when the
-  session collected zero mentions) belongs to the CANCELLATION card - a
+  session collected zero mentions) belongs to the CANCELLATION card — a
   post-return way to inspect the messages collected during the session that
   just ended. Its custom_id embeds that session's unique token
   (``afk:mentions:{guild}:{owner}:{session}``), so an old return card can
@@ -72,13 +72,13 @@ Dashboard & mentions button (AFK final-corrections pass, 2026-09-23)
   ``هش هش ناس فضولية <:catto_evil:1438541407743901738>``; the owner gets an
   ephemeral panel with the mentioner's display name at mention time and the
   message content, 10 per page, newest first (the pager itself is not
-  persistent). Long content is truncated for display only - the full content
+  persistent). Long content is truncated for display only — the full content
   stays stored.
 * Each deduplicated mention snapshot stores the mentioner's id, display name
   at mention time, channel id, message id, full content and creation time
   (columns self-healed on older installs with guarded ALTERs). Snapshots and
   ended-session records are NEVER deleted automatically: there is no
-  time-based retention/TTL and no cleanup pass - a return card's button stays
+  time-based retention/TTL and no cleanup pass — a return card's button stays
   bound to its session indefinitely. All snapshot data stays DB-backed and
   session-scoped (a button click fetches one session's page only; startup
   registers views from ``afk_ended_sessions`` identity metadata and never
@@ -105,7 +105,7 @@ from utils.command_gating import load_toggle_row
 AFK_COLOR = 0x7c5cbf
 # Animated custom emoji, used both when entering AFK and in the mention alert.
 AFK_EMOJI = "<a:AFK:1552170028961374259>"
-# Cancellation card emojis - the approved text uses two DIFFERENT static
+# Cancellation card emojis — the approved text uses two DIFFERENT static
 # emojis, glued immediately after the text (and to each other).
 RUBY_BACK_EMOJI = "<:Ruby_BACK:1552200382699016253>"
 AQUA_WELCOME_EMOJI = "<:Aqua_Welcome:1552200384355762226>"
@@ -124,7 +124,7 @@ AFK_NOT_OWNER_TEXT = "هش هش ناس فضولية <:catto_evil:143854140774390
 AFK_ZERO_MENTIONS_TEXT = "لا يوجد منشن محفوظ في جلسة الـ AFK هذه حتى الآن."
 
 # Persistent "show saved messages" button on the AFK cancellation card. The
-# approved label is a custom emoji plus this exact Arabic label - in
+# approved label is a custom emoji plus this exact Arabic label — in
 # discord.py terms that is Button(emoji=PartialEmoji(...), label=...), NOT a
 # label containing the raw <:name:id> token.
 AFK_BUTTON_LABEL = "إظهار الرسائل"
@@ -134,7 +134,7 @@ AFK_BUTTON_EMOJI = discord.PartialEmoji(
 # Mentions panel (ephemeral, owner-only): 10 snapshots per page, newest
 # first (approved requirements).
 MENTIONS_PAGE_SIZE = 10
-# The panel view is NOT persistent - it only needs to live as long as the
+# The panel view is NOT persistent — it only needs to live as long as the
 # ephemeral response it is attached to.
 MENTIONS_PANEL_TIMEOUT = 300
 # Snapshot content is stored in full, but the panel truncates long messages
@@ -234,7 +234,7 @@ def build_mentions_panel(user, guild, rows, page: int,
                      icon_url=_avatar_url(user))
     lines = []
     for author_name, content in rows:
-        text = content if content else "-"
+        text = content if content else "—"
         if len(text) > MAX_PANEL_CONTENT_LENGTH:
             text = text[:MAX_PANEL_CONTENT_LENGTH - 1] + "…"
         lines.append(f"**{author_name}:** {text}")
@@ -298,12 +298,12 @@ class AFKMentionsPager(discord.ui.View):
 class AFKMentionsView(discord.ui.View):
     """Persistent mentions button, attached to every AFK cancellation card.
 
-    Requirements it satisfies: the activation card never carries it - the
+    Requirements it satisfies: the activation card never carries it — the
     button appears only on the return/cancellation card, as a post-return way
     to inspect the just-ended session (attached unconditionally, including a
     zero-mention session); survives restarts (``timeout=None`` plus the
     session-scoped custom_id rebuilt from ``afk_ended_sessions`` on cog
-    load); interaction access is owner-only - Discord cannot hide a public
+    load); interaction access is owner-only — Discord cannot hide a public
     component visually, so a non-owner click is rejected ephemerally with the
     approved text and never exposes the stored messages; the custom_id's
     session token pins the button to the specific session that just ended,
@@ -362,10 +362,10 @@ class AFK(commands.Cog):
 
         The button lives on the CANCELLATION card, so after a restart the
         live custom_ids are the ENDED sessions recorded in
-        ``afk_ended_sessions`` - including zero-mention sessions, which have
+        ``afk_ended_sessions`` — including zero-mention sessions, which have
         no ``afk_mentions`` rows to be discovered from. This reads only that
         session-identity metadata: snapshot rows stay in SQLite and are
-        fetched per session (one page at a time) when its button is clicked -
+        fetched per session (one page at a time) when its button is clicked —
         never loaded into memory here. Registration is keyed by the
         deterministic custom_id, and discord.py's view store keeps one
         dispatcher per custom_id, so a duplicate registration for the same
@@ -410,10 +410,10 @@ class AFK(commands.Cog):
             # Dedup ledger: a given message can count at most once per
             # target. Rows survive the dismissal and are never deleted
             # automatically (the return card's button must retrieve them for
-            # as long as the button exists - no TTL, no cleanup pass). The
+            # as long as the button exists — no TTL, no cleanup pass). The
             # (author_id, author_name, channel_id, content) columns turn each
             # deduplicated mention into the owner's viewable snapshot, and
-            # session_id pins every row to the session that collected it -
+            # session_id pins every row to the session that collected it —
             # self-healed onto older installs by _heal_schema below.
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS afk_mentions (
@@ -437,8 +437,8 @@ class AFK(commands.Cog):
             # Ended-session registry: written atomically at dismissal. It is
             # what gives the return card's button its stable identity after a
             # restart (session token -> snapshots). One row per ended session
-            # - several return cards of the same owner can coexist, each with
-            # its own token - and rows are never cleaned up on a timer.
+            # — several return cards of the same owner can coexist, each with
+            # its own token — and rows are never cleaned up on a timer.
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS afk_ended_sessions (
                     session_id TEXT NOT NULL,
@@ -458,7 +458,7 @@ class AFK(commands.Cog):
         ``ALTER TABLE ADD COLUMN`` pattern database.py uses to grow
         command_toggles: no separate migration framework, never a ``DROP``):
         pre-existing rows keep their dedup data and get safe defaults for
-        columns they never recorded - including the ``session_id`` token,
+        columns they never recorded — including the ``session_id`` token,
         where a pre-upgrade session becomes the unique per-owner legacy
         session ``LEGACY_SESSION_ID`` (see dismiss_afk).
         """
@@ -511,7 +511,7 @@ class AFK(commands.Cog):
         # Dashboard command toggle ("afk" row in the existing
         # command_toggles table, written by the existing Commands page
         # endpoints). Approved semantics: it gates ONLY starting NEW AFK
-        # sessions - nothing else in this cog ever reads the toggle, so
+        # sessions — nothing else in this cog ever reads the toggle, so
         # dismissal, mention alerts and the mentions button keep working
         # while AFK is disabled. Only the enabled flag is honored, not the
         # role/channel/cooldown/owner-only columns. enabled is the first
@@ -557,7 +557,7 @@ class AFK(commands.Cog):
 
         Only called after ``get_afk_reason`` confirmed the member is not
         already AFK. ``ON CONFLICT DO NOTHING`` guards the (near-impossible)
-        race where a session was inserted between that check and this write -
+        race where a session was inserted between that check and this write —
         in that case the existing session is left untouched rather than
         overwritten, preserving idempotency. The uuid token identifies THIS
         session everywhere afterwards (mention rows, the return card's
@@ -582,12 +582,12 @@ class AFK(commands.Cog):
                                content: str) -> tuple[bool, str | None]:
         """Count one mention of an AFK member and store its snapshot.
 
-        Returns ``(is_afk, reason)`` - ``is_afk`` is False when the target is
+        Returns ``(is_afk, reason)`` — ``is_afk`` is False when the target is
         not AFK (nothing was counted); otherwise True with the stored reason
         (which may be None). The ``(guild, message, target)`` unique key makes
         the increment idempotent per message: INSERT OR IGNORE reports a
         rowcount of 0 for an already-counted message, so the counter can never
-        be bumped twice by double event processing - while two *different*
+        be bumped twice by double event processing — while two *different*
         messages each count.
 
         The snapshot fields are what the owner later sees through the panel:
@@ -632,7 +632,7 @@ class AFK(commands.Cog):
         double-report.
 
         The session's ``afk_mentions`` snapshots are deliberately NOT deleted
-        here - nor anywhere else: the cancellation card's button must retrieve
+        here — nor anywhere else: the cancellation card's button must retrieve
         them for as long as the button exists (no time-based retention/TTL
         and no cleanup pass). Instead the session is recorded in
         ``afk_ended_sessions`` (the button's stable identity after restarts).
@@ -723,7 +723,7 @@ class AFK(commands.Cog):
         # The ``!afk`` invocation itself must never cancel AFK. Because
         # process_commands and this listener run as sibling tasks, the check
         # has to be deterministic (content-based), not timing-based. We reuse
-        # discord.py's own resolver exactly like utils/message_router does -
+        # discord.py's own resolver exactly like utils/message_router does —
         # no manual content sniffing.
         try:
             ctx = await self.bot.get_context(message)
@@ -738,7 +738,7 @@ class AFK(commands.Cog):
             reason, count, session_id = result
             embed = self.build_afk_end_embed(
                 message.author, guild, count)
-            # The mentions button belongs to THIS cancellation card only -
+            # The mentions button belongs to THIS cancellation card only —
             # created here (never at activation), pinned to the session that
             # just ended, and registered so it also dispatches after a
             # restart alongside the views rebuilt at cog load.
@@ -771,7 +771,7 @@ class AFK(commands.Cog):
                 channel_id=message.channel.id,
                 content=message.content or "")
             if not is_afk:
-                continue  # not AFK - no alert and nothing counted
+                continue  # not AFK — no alert and nothing counted
             embed = self.build_afk_mention_embed(
                 target, guild, reason)
             try:

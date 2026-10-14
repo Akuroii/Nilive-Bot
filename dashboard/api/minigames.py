@@ -15,15 +15,15 @@ from dashboard.api import api_bp
 # (utils/minigame_store.py), which is also what the spawn engine
 # (cogs/minigames.py, Phase 2/3) already consumes. This module is the
 # dashboard's write-ownership surface (plan §19: categories,
-# templates, rewards and spawn requests are written ONLY here - the
+# templates, rewards and spawn requests are written ONLY here — the
 # bot writes bag/log/counter state).
 #
 # Conventions (same as the rest of dashboard/api):
-#   * guild id comes ONLY from the session (get_session_guild_id) -
+#   * guild id comes ONLY from the session (get_session_guild_id) —
 #     a client-supplied guild_id is never trusted (IDOR guard);
 #   * every route is @require_api_permission(LEVEL_ADMIN);
 #   * validation/business errors return HTTP 200 + {"success": False,
-#     "error": ...} - the dashboard's ajaxSave/fetch handlers key off
+#     "error": ...} — the dashboard's ajaxSave/fetch handlers key off
 #     the JSON flag; only decorator-level failures (401/403/CSRF) use
 #     HTTP status codes. The one exception is DELETE
 #     /minigames/categories/<id>, which returns 409 when the category
@@ -39,7 +39,7 @@ from dashboard.api import api_bp
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Validation helpers (plan §17 - the server is the enforcement point;
+# Validation helpers (plan §17 — the server is the enforcement point;
 # the builder UI mirrors these limits so a normal user never sees a
 # rejection, but a crafted API call still cannot store a broken game).
 # ═══════════════════════════════════════════════════════════════════
@@ -53,7 +53,7 @@ _DISCORD_LIMITS = {
 def _validate_embed(embed) -> str | None:
     """Return a user-facing error string, or None when the embed is
     Discord-legal. `embed` is the API shape (author/footer/image/
-    thumbnail may be dicts or strings - both are accepted and stored
+    thumbnail may be dicts or strings — both are accepted and stored
     as sent; the engine normalizes before posting)."""
     if embed is None:
         return None
@@ -61,7 +61,7 @@ def _validate_embed(embed) -> str | None:
         return "embed must be an object"
 
     # title/description are always strings; author/footer may arrive
-    # as plain strings OR as API-shape dicts ({name} / {text}) - the
+    # as plain strings OR as API-shape dicts ({name} / {text}) — the
     # composer's cleanEmbedForPayload produces the dict form.
     for key in ("title", "description", "author", "footer"):
         v = embed.get(key, "")
@@ -221,7 +221,7 @@ def _validate_game_config(game_type: str, config) -> str | None:
 
 
 def _validate_colors_image(game_type: str, embed) -> str | None:
-    """§11.2: the Colors game's image (required) lives in the embed -
+    """§11.2: the Colors game's image (required) lives in the embed —
     the engine posts the embed plus the answer buttons as one
     message, so the image the players see IS the embed's image."""
     if game_type != "colors" or not isinstance(embed, dict):
@@ -229,7 +229,7 @@ def _validate_colors_image(game_type: str, embed) -> str | None:
     image = embed.get("image")
     url = image.get("url") if isinstance(image, dict) else image
     if not url or not isinstance(url, str) or not url.startswith(("http://", "https://")):
-        return "the Colors game needs an image - set a valid image URL in the Embed section"
+        return "the Colors game needs an image — set a valid image URL in the Embed section"
     return None
 
 
@@ -390,7 +390,7 @@ def delete_minigame_category_api(category_id: int):
 
     ok, msg = run_async(delete())
     if not ok:
-        # 409 is the one deliberate HTTP-status use in this module -
+        # 409 is the one deliberate HTTP-status use in this module —
         # plan §10: deleting a category with content is a conflict the
         # UI must surface as "move/delete its content first".
         return jsonify({"success": False, "error": msg}), 409
@@ -465,7 +465,7 @@ def list_minigame_templates_api():
         await store.ensure_tables()
         rows = await store.list_templates(guild_id, category_id=category_id,
                                           include_disabled=include_disabled)
-        # Live-run / queued flags (plan §10 list: "live-run flag") - a
+        # Live-run / queued flags (plan §10 list: "live-run flag") — a
         # template whose snapshot is running must show it, and an
         # in-flight spawn request must show as queued.
         async with aiosqlite.connect(DB_PATH) as db:
@@ -644,7 +644,7 @@ def delete_minigame_template_api(template_id: int):
     tpl, ok = run_async(delete())
     if not ok:
         return jsonify({"success": False, "error": "template not found"})
-    # Safe while a run is in progress - the running game keeps its
+    # Safe while a run is in progress — the running game keeps its
     # snapshot (plan §14); the row is only what future spawns read.
     log_action(guild_id, f"Deleted minigame template '{tpl['name']}'",
                "minigames", target_id=template_id, target_name=tpl["name"])
@@ -652,7 +652,7 @@ def delete_minigame_template_api(template_id: int):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# SPAWN (test / manual) - queue-based, plan §9/§16/§19
+# SPAWN (test / manual) — queue-based, plan §9/§16/§19
 # ═══════════════════════════════════════════════════════════════════
 
 @api_bp.route("/minigames/templates/<int:template_id>/spawn",
@@ -672,11 +672,11 @@ def spawn_minigame_template_api(template_id: int):
         tpl = await store.get_template(guild_id, template_id)
         if tpl is None:
             return None, "template not found"
-        # D12 (plan §9): test spawn is ALWAYS allowed - it is the
+        # D12 (plan §9): test spawn is ALWAYS allowed — it is the
         # build-then-test flow; manual spawn requires the template to
         # be Enabled. Auto-rotation is irrelevant to direct spawns.
         if mode == "manual" and not tpl["enabled"]:
-            return None, "this game is disabled - enable it first (or use Test Spawn)"
+            return None, "this game is disabled — enable it first (or use Test Spawn)"
         return tpl, None
 
     tpl, err = run_async(run())
@@ -688,7 +688,7 @@ def spawn_minigame_template_api(template_id: int):
     cfg = tpl.get("config") or {}
     if tpl["game_type"] in ("math", "colors", "emoji") and not cfg.get("answers"):
         return jsonify({"success": False,
-                        "error": "this game has no answers configured - fix its settings first"})
+                        "error": "this game has no answers configured — fix its settings first"})
 
     requester = (session.get("user") or {}).get("username") or str(
         (session.get("user") or {}).get("id") or "?")
@@ -735,7 +735,7 @@ def get_minigame_spawn_requests_api():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# HISTORY (extended log - replaces the retired /minigames/log)
+# HISTORY (extended log — replaces the retired /minigames/log)
 # ═══════════════════════════════════════════════════════════════════
 
 @api_bp.route("/minigames/history", methods=["GET"])
@@ -775,7 +775,7 @@ def get_minigames_history_api():
                     catnames[cid] = name
         for r in rows:
             # The stored template_name/category_name are SNAPSHOTS taken
-            # when the run opened (plan §14) - they survive template /
+            # when the run opened (plan §14) — they survive template /
             # category deletion and renames. Fall back to a live join
             # only for rows written before those columns existed.
             if not r.get("template_name"):
@@ -788,12 +788,12 @@ def get_minigames_history_api():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# LIVE PREVIEW - engine component rows (plan §12)
+# LIVE PREVIEW — engine component rows (plan §12)
 #
 # The builder's preview must show the EXACT component rows the engine
-# posts - so instead of re-implementing them in JS, the builder asks
+# posts — so instead of re-implementing them in JS, the builder asks
 # the server, and the server asks the ENGINE (the single source of
-# truth, utils/minigame_engine.initial_component_rows - a pure,
+# truth, utils/minigame_engine.initial_component_rows — a pure,
 # discord-free data function). Preview and real message cannot
 # diverge because they consume the same JSON.
 # ═══════════════════════════════════════════════════════════════════

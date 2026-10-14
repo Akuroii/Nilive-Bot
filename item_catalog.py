@@ -2,10 +2,10 @@ import aiosqlite
 from database import DB_PATH
 
 # ═══════════════════════════════════════════════════════════════════════
-# ITEM CATALOG - Rank Card foundation (pass 1: schema + backend)
+# ITEM CATALOG — Rank Card foundation (pass 1: schema + backend)
 #
 # Source-agnostic display metadata for an item, keyed by
-# (guild_id, item_name) - NOT by shop_items.id. Matches how
+# (guild_id, item_name) — NOT by shop_items.id. Matches how
 # inventory_items already references items purely by name (a
 # purchased item's inventory row already survives its shop listing
 # being edited/deleted); this follows the same loose coupling so the
@@ -15,12 +15,12 @@ from database import DB_PATH
 # Auto-populated from dashboard/api/economy_shop.py whenever a shop
 # item is saved. Items granted ONLY via events/minigames/missions have
 # no row here yet (no admin UI for that this pass, per Dark: "not
-# now") - get_catalog_entry() below returns a safe default
+# now") — get_catalog_entry() below returns a safe default
 # (rarity='common', no icon, no value) rather than erroring, so the
 # future card renderer never has to special-case a missing row.
 #
 # RARITY is the PRIMARY sort key for the future /rank card's item
-# grid (locked with Dark) - value (diamonds > coins, then amount) is
+# grid (locked with Dark) — value (diamonds > coins, then amount) is
 # only a tiebreaker within the same rarity. This is what lets a free
 # Legendary minigame drop outrank a boring 50-coin shop item, which a
 # price-only sort could never do.
@@ -29,11 +29,11 @@ from database import DB_PATH
 RARITY_ORDER = ["common", "rare", "epic", "legendary", "mythical", "secret"]
 RARITY_RANK = {r: i for i, r in enumerate(RARITY_ORDER)}
 
-# Locked with Dark - gradient stops per tier, kept consistent with the
+# Locked with Dark — gradient stops per tier, kept consistent with the
 # site's purple/violet palette rather than generic game-UI colors.
 # Mythical and Secret are intentionally 3-stop gradients; every other
 # tier is 2-stop. Used by the future /rank card Pillow renderer for
-# tile borders/badges - stored here now (rather than re-asked for
+# tile borders/badges — stored here now (rather than re-asked for
 # later) since Dark already gave exact values.
 RARITY_COLORS = {
     "common":    ["#777777", "#B8B8B8"],
@@ -60,7 +60,7 @@ def item_sort_key(rarity: str, value_currency: str | None,
                    value_amount: int | None) -> tuple:
     """
     Higher = "more valuable". Rarity first, then currency tier
-    (diamonds > coins > none), then amount - all descending. Use with
+    (diamonds > coins > none), then amount — all descending. Use with
     sorted(items, key=lambda it: item_sort_key(...), reverse=True).
     """
     return (
@@ -91,11 +91,11 @@ async def upsert_catalog_entry(guild_id: int, item_name: str,
                                 value_currency: str = None,
                                 value_amount: int = None):
     """
-    icon_url/rarity use COALESCE against the existing row - a caller
+    icon_url/rarity use COALESCE against the existing row — a caller
     that doesn't know an item's icon (e.g. a future minigame-tier
     save that only knows value) shouldn't be able to silently wipe an
     icon/rarity an admin already set elsewhere. value_currency/
-    value_amount are written as-is (None is meaningful here - "this
+    value_amount are written as-is (None is meaningful here — "this
     item has no price", distinct from "leave the existing price
     alone") since today the only writer (shop item save) always knows
     the current, correct price.

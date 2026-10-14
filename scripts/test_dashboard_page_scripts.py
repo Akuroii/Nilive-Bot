@@ -5,7 +5,7 @@ What this locks down (the S1 defect):
 * every page that had its inline `<script>` nested inside `{% block content %}`
   used to emit that script TWICE through base.html, and the second evaluation
   of a page script containing top-level `const`/`let` died with
-  "SyntaxError: Identifier 'X' has already been declared" - which killed the
+  "SyntaxError: Identifier 'X' has already been declared" — which killed the
   page script on every htmx navigation too;
 * the fix keeps the script inside `#content-area` but wraps it in one IIFE and
   re-publishes the page's top-level functions through `__neroGlobal`, so the
@@ -16,7 +16,7 @@ The test therefore asserts, per route: exactly one copy of the page script in
 the served HTML, it sits inside `#content-area`, the template no longer carries
 the nested `{% block scripts %}`, the served script is re-evaluation safe (no
 top-level `const`/`let`), and every function the markup calls from an inline
-`onclick=`/`onchange=` still resolves by bare name - either because the script
+`onclick=`/`onchange=` still resolves by bare name — either because the script
 declares it at top level (unwrapped script), because it is re-published through
 `window`/`globalThis`/`__neroGlobal` (wrapped script), or because the shared
 `dashboard.js` provides it. A page whose handlers stopped resolving is an inert
@@ -122,8 +122,8 @@ def declared_functions(template_text: str) -> set:
     """Top-level function declarations of the page script.
 
     These sit at column 0 (the S1 wrapper is inserted around the body without
-    re-indenting it), so an indented `function` belongs to some inner closure -
-    e.g. embed-builder's page script is itself a hand-written IIFE - and must
+    re-indenting it), so an indented `function` belongs to some inner closure —
+    e.g. embed-builder's page script is itself a hand-written IIFE — and must
     NOT be expected in the publish list."""
     return set(re.findall(r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)",
                           template_text, re.M))
@@ -255,7 +255,7 @@ def main():
                   "{% block scripts %}" not in text)
             # A page script whose handlers are attached with addEventListener
             # (embed-builder) carries the explicit "nothing to re-publish"
-            # marker instead of a publish list; that is information only - the
+            # marker instead of a publish list; that is information only — the
             # served-page handler resolution check below is what decides.
             handles_markup = "nothing to re-publish for markup handlers" not in text
 
@@ -295,7 +295,7 @@ def main():
             # swap must not redeclare a top-level const/let (that threw
             # "Identifier 'X' has already been declared" and killed the whole
             # script). Either it is wrapped in an IIFE, or it declares only
-            # var/function - both survive re-evaluation.
+            # var/function — both survive re-evaluation.
             analysis = analyse_script(script)
             if analysis is not None:
                 check(f"{route}: re-evaluation safe (no top-level const/let)",
@@ -320,11 +320,11 @@ def main():
     print(f"\nDASHBOARD PAGE SCRIPTS: {len(checks) - len(failed)} passed, {len(failed)} failed "
           f"({len(PAGES)} routes)")
     if not node:
-        print("  SKIPPED: node is not installed - the syntax checks, the "
+        print("  SKIPPED: node is not installed — the syntax checks, the "
               "top-level const/let check and the handler-resolution check did "
               "NOT run; this is a partial result.")
     elif not analyse_script("var probe = 1;"):
-        print("  SKIPPED: acorn is not installed (npm install acorn) - the "
+        print("  SKIPPED: acorn is not installed (npm install acorn) — the "
               "top-level const/let check and the acorn-based handler resolution "
               "did NOT run; this is a partial result.")
     for name, _, extra in failed[:20]:

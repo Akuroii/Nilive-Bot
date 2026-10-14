@@ -1,6 +1,6 @@
 """The success/check indicator as HTML, for the dashboard.
 
-Discord's `<a:check:id>` markup is a *message* feature - a browser cannot
+Discord's `<a:check:id>` markup is a *message* feature — a browser cannot
 render it, and printing the token would show members the raw
 `<a:check:1549…>` text. HTML therefore needs the underlying image, which is
 exactly what Discord's public emoji CDN serves by ID (`utils/emoji.py:
@@ -16,7 +16,7 @@ Exposed two ways, from this one implementation:
 
 Every branch is failure-tolerant: if the configured emoji cannot be parsed
 the unicode fallback is returned, and the `<img>` itself carries an
-`onerror` that swaps in the same fallback - a deleted emoji must never
+`onerror` that swaps in the same fallback — a deleted emoji must never
 leave a broken-image icon in the UI.
 """
 
@@ -25,7 +25,7 @@ import time
 from markupsafe import Markup
 
 # The app-emoji cache changes only when an admin imports an emoji, and the
-# fallback path is a constant - so the lookup is memoised rather than
+# fallback path is a constant — so the lookup is memoised rather than
 # queried on every template render (this runs on every dashboard page).
 _CACHE_TTL_SECONDS = 300
 _cache: dict = {"at": 0.0, "value": None}
@@ -56,7 +56,7 @@ def _resolve():
             if str(row.get("id")) == str(CHECK_EMOJI_ID):
                 return str(CHECK_EMOJI_ID), bool(row.get("animated"))
     except Exception:
-        # No cache table / no DB in this process - the constant below still
+        # No cache table / no DB in this process — the constant below still
         # knows the emoji's own animated flag.
         pass
     parsed = parse_emoji_input(CHECK_EMOJI)

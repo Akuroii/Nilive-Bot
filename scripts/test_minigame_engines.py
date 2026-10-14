@@ -1,11 +1,11 @@
 """
-Phase 2 verification harness - utils/minigame_engine.py
+Phase 2 verification harness — utils/minigame_engine.py
 
 Behavioral correctness (not just "it runs") for all six engines, plus
 REAL concurrency scenarios (gathered tasks racing on the same engine),
 exactly-one-authoritative-resolution proofs, and finalization-order
 proofs. Drives `engine._dispatch(...)` directly with fake Discord
-objects - no live client, no network.
+objects — no live client, no network.
 
 Usage:  python scripts/test_minigame_engines.py
 """
@@ -85,7 +85,7 @@ class FakeMessage:
         self.events = None  # shared event list, set by tests
 
     async def edit(self, embed=None, view=None, content=None):
-        # the edit ATTEMPT is the ordering event - even a failed attempt
+        # the edit ATTEMPT is the ordering event — even a failed attempt
         # happens after grants and before the log close
         if self.events is not None:
             self.events.append("edit")
@@ -185,7 +185,7 @@ async def wait_until(pred, timeout=5.0, step=0.005):
 
 async def test_quick_click():
     global REC
-    section("Quick Click / Reflex - behavior")
+    section("Quick Click / Reflex — behavior")
     # 1) reveal delay within configured range
     REC = Recorder()
     snapshot = snap("quick_click", config={
@@ -274,7 +274,7 @@ async def test_quick_click():
 
 async def test_quick_click_concurrency():
     global REC
-    section("Quick Click - concurrency (real gathered races)")
+    section("Quick Click — concurrency (real gathered races)")
     for trial in range(3):
         REC = Recorder()
         e, ch = await start_engine(snap("quick_click", config={
@@ -302,7 +302,7 @@ async def test_quick_click_concurrency():
 
 async def test_wheel():
     global REC
-    section("Wheel - behavior")
+    section("Wheel — behavior")
     # join window + duplicate joins + exactly one fair winner
     REC = Recorder()
     e, ch = await start_engine(snap("wheel", config={"join_seconds": 0.4}),
@@ -312,7 +312,7 @@ async def test_wheel():
                       "main", "join", info(1, "P1"))
     await e._dispatch(FakeInteraction(FakeUser(2, "P2"), "join"),
                       "main", "join", info(2, "P2"))
-    # duplicate join by P1 - must be safe + acknowledged
+    # duplicate join by P1 — must be safe + acknowledged
     dup = FakeInteraction(FakeUser(1, "P1"), "join")
     await e._dispatch(dup, "main", "join", info(1, "P1"))
     check("duplicate join acknowledged, not double-counted",
@@ -372,7 +372,7 @@ async def test_wheel():
 
 async def test_multiple_choice():
     global REC
-    section("Math/Colors/Emoji (shared engine) - behavior")
+    section("Math/Colors/Emoji (shared engine) — behavior")
     cfg = {"question": "15 × 7 = ?", "answers": ["95", "105", "115", "125"],
            "correct": 1, "seconds": 0.6}
     REC = Recorder()
@@ -473,9 +473,9 @@ async def test_multiple_choice():
 
 async def test_multiple_choice_concurrency():
     global REC
-    section("Multiple choice - concurrency (real gathered races)")
+    section("Multiple choice — concurrency (real gathered races)")
     # 1) timer fires while a click is being processed (repeated trials,
-    #    invariants asserted - exactly one authoritative resolution)
+    #    invariants asserted — exactly one authoritative resolution)
     for trial in range(5):
         REC = Recorder()
         e, _ = await start_engine(snap("math", config={
@@ -535,7 +535,7 @@ async def test_multiple_choice_concurrency():
 
 async def test_rps():
     global REC
-    section("RPS - behavior")
+    section("RPS — behavior")
     # seating: third player rejected
     REC = Recorder()
     e, ch = await start_engine(snap("rps", config={
@@ -634,7 +634,7 @@ def _final_desc(engine):
 
 async def test_rps_concurrency():
     global REC
-    section("RPS - concurrency (real gathered races)")
+    section("RPS — concurrency (real gathered races)")
     for trial in range(3):
         REC = Recorder()
         e, _ = await start_engine(snap("rps", config={
@@ -720,7 +720,7 @@ async def test_preview_descriptor():
     cfg_mc = {"answers": ["🔴 Red", "🟡 Yellow", "🔵 Blue"], "correct": 2,
               "seconds": 20}
     rows_mc = eng.initial_component_rows("math", cfg_mc)
-    check("mc preview: exact admin labels, enabled (D6 - no prefixes)",
+    check("mc preview: exact admin labels, enabled (D6 — no prefixes)",
           [b["label"] for b in rows_mc[0]] == ["🔴 Red", "🟡 Yellow",
                                                "🔵 Blue"]
           and not any(b["disabled"] for b in rows_mc[0]))

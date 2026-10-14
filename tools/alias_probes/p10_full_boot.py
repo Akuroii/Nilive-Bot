@@ -1,4 +1,4 @@
-"""PROBE 10 - the whole bot still boots, and the message path is intact.
+"""PROBE 10 — the whole bot still boots, and the message path is intact.
 
 The alias work touched main.py, two other cogs and a shared util, so this is the
 "did I break something unrelated" check: every cog main.py lists must load, the
@@ -89,7 +89,7 @@ async def main():
     listener_count = len(bot.extra_events.get("on_message", []))
     check("several cogs listen to on_message", listener_count >= 4, listener_count)
     # Dispatch one fake message to *every* registered on_message listener and
-    # assert each was handed the untouched text - the old implementation rewrote
+    # assert each was handed the untouched text — the old implementation rewrote
     # it mid-flight, which is how the trigger listener started matching "!zz".
     seen = []
 

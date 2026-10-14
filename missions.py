@@ -25,25 +25,25 @@ from utils.emoji import (
 )
 
 # ═══════════════════════════════════════════════════════════════════════
-# MISSIONS - v2 display
+# MISSIONS — v2 display
 #
 # /missions renders one ephemeral message containing a separate embed
 # per period that has missions (Daily / Weekly / One-time), each with:
 #   * a dynamic "(completed / total)" heading for THIS member
 #   * one block per mission: name, -# description line, glyph progress
-#     bar + percentage, then either `Progress: x / y unit` or - because
+#     bar + percentage, then either `Progress: x / y unit` or — because
 #     rewards are granted automatically the instant the target is
-#     crossed, with no claim step - `⤷ reward claimed <check> <reward>`,
+#     crossed, with no claim step — `⤷ reward claimed <check> <reward>`,
 #     where <check> is the bot's APPLICATION emoji `<a:check:…>` (it is
-#     owned by the application, not by any server - see utils/emoji.py)
+#     owned by the application, not by any server — see utils/emoji.py)
 #     and <reward> is `amount name emoji` from the Economy config
 #   * the period's next-rotation countdown, computed at render time
 #     from the same UTC period math the engine keys progress by (there
-#     is no timer job to duplicate - the reset is the period_key
+#     is no timer job to duplicate — the reset is the period_key
 #     rollover, this just reports it)
 #
 # The Refresh button re-renders that same message in place
-# (interaction.response.edit_message - the Wallet panel pattern), so
+# (interaction.response.edit_message — the Wallet panel pattern), so
 # refreshing never spawns duplicate mission messages.
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -67,33 +67,33 @@ PERIOD_HEADING = {
     "once": "One-time Missions",
 }
 PERIOD_FOOTER = {
-    "once": "No reset - completes once, forever",
+    "once": "No reset — completes once, forever",
 }
 
 MISSION_COLOR = 0x7c5cbf
 VIEW_TIMEOUT = 1800  # same as the Wallet panels
 
 # The reward/check emoji is NOT declared here any more. It used to be a
-# DIAMOND_EMOJI constant in this module - a currency-specific emoji
+# DIAMOND_EMOJI constant in this module — a currency-specific emoji
 # hardcoded inside Missions, which is exactly what the currency
 # source-of-truth rule forbids (and it became dead once reward lines moved
 # to the configured currency emoji). The success indicator now lives in
-# utils/emoji.py as CHECK_EMOJI - one source for every surface.
+# utils/emoji.py as CHECK_EMOJI — one source for every surface.
 #
 # CHECK_EMOJI is an APPLICATION emoji (Developer Portal → Application →
 # Emoji), not a guild emoji: it belongs to the bot application and renders
 # in every server. Nothing here may look for it in a server's emoji list,
 # and "this server doesn't have that emoji" is never a reason to render
 # something else. Reachability is established once against Discord's
-# application-emoji API - see Missions.on_ready below.
+# application-emoji API — see Missions.on_ready below.
 
-# Refresh button emoji - the server's custom emoji (locked by Dark).
+# Refresh button emoji — the server's custom emoji (locked by Dark).
 # Note: this is a GUILD emoji, so if it is ever deleted from the server the
 # button silently falls back to no glyph (still fully functional); the
 # label carries the meaning, the emoji is decoration.
 REFRESH_EMOJI = "<:imagePhotoroom17:1549206183498481714>"
 
-PROGRESS_NODES = 6      # v3: 6 nodes - a full bar means completed
+PROGRESS_NODES = 6      # v3: 6 nodes — a full bar means completed
 NODE_FILLED = "⬤"
 NODE_EMPTY = "◯"
 NODE_JOIN = "──"
@@ -101,11 +101,11 @@ EMBED_DESC_LIMIT = 3900  # safety margin under Discord's 4096 cap
 
 
 def progress_bar(pct: float, nodes: int = PROGRESS_NODES) -> str:
-    """Glyph bar - a node lights up once progress crosses into its
+    """Glyph bar — a node lights up once progress crosses into its
     share of the bar (62% of 6 nodes = 3.72 → 4 lit, 20% → 2 lit, so a
     bar never reads as emptier than the mission actually is). Pure
     percentage→glyph mapping; the CALLER decides what percentage to
-    feed it - _mission_block reserves a completely full bar for the
+    feed it — _mission_block reserves a completely full bar for the
     completed state, so a full bar always means 'reward claimed'."""
     pct = max(0.0, min(100.0, pct))
     # Tiny epsilon avoids floating error where 83.333...*6/100=5.000000000000001 ceil->6
@@ -116,7 +116,7 @@ def progress_bar(pct: float, nodes: int = PROGRESS_NODES) -> str:
 
 # An incomplete mission's bar is capped one node short of full: a
 # completely filled bar reads as "done", and done means the reward was
-# already granted - 95% must not look identical to 100%.
+# already granted — 95% must not look identical to 100%.
 _INCOMPLETE_BAR_CAP = (PROGRESS_NODES - 1) / PROGRESS_NODES * 100
 
 
@@ -137,7 +137,7 @@ def _auto_description(m: dict) -> str:
 
 def _mission_description(m: dict, guild) -> str:
     """The `-#` subtext line. Channel restrictions are enforced
-    internally but never surfaced to members - no 'counts in #channel'
+    internally but never surfaced to members — no 'counts in #channel'
     text is ever appended."""
     desc = (m.get("description") or "").strip() or _auto_description(m)
     desc = desc.rstrip(".")
@@ -148,11 +148,11 @@ def _reward_display_sync(m: dict, cur: dict | None) -> str:
     """Format a mission's reward using the guild's Economy currency config.
 
     Member-facing only (the `⤷ reward claimed` completion line), which
-    renders a currency reward as `amount name emoji` - e.g. `1 Diamonds 💎`.
+    renders a currency reward as `amount name emoji` — e.g. `1 Diamonds 💎`.
     The admin surfaces use reward_summary() instead and keep the shared
     wallet/shop `emoji amount name` order.
 
-    Missions never store a currency name or emoji - only the stable
+    Missions never store a currency name or emoji — only the stable
     `reward_type` key ('coins' / 'diamonds'). The label is composed here at
     RENDER time, which is what makes renaming a currency a config-only
     change: an already-completed mission row is untouched and simply
@@ -160,7 +160,7 @@ def _reward_display_sync(m: dict, cur: dict | None) -> str:
 
     `cur` is the resolved config from utils.currency.get_currency_config,
     which always supplies a name and emoji. The only fallback needed is for
-    a caller that passes None (a unit test, or a config read that raised) -
+    a caller that passes None (a unit test, or a config read that raised) —
     and even then it is the shared default constant rather than a literal
     repeated here, so there is still exactly one place defaults live.
     """
@@ -174,7 +174,7 @@ def _reward_display_sync(m: dict, cur: dict | None) -> str:
                 "diamonds": {"name": DEFAULT_DIAMOND_NAME,
                              "emoji": DEFAULT_DIAMOND_EMOJI},
             }
-        # `amount name emoji` - the locked order of the completion line,
+        # `amount name emoji` — the locked order of the completion line,
         # composed by the shared currency helper so the thousands
         # separator and the configured name/emoji stay in one place.
         return currency_amount(cur, rt, rv, emoji_last=True)
@@ -196,8 +196,8 @@ def reward_summary(reward_type: str, reward_value, cur: dict | None = None,
     """One human-readable description of a mission reward, for the admin
     surfaces (/mission_create confirmation, /mission_list).
 
-    Admin views used to print the raw stored key - literally
-    `coins: 500` - which told an owner who had renamed their currency to
+    Admin views used to print the raw stored key — literally
+    `coins: 500` — which told an owner who had renamed their currency to
     "Moon" nothing, and made the admin output inconsistent with what
     members see. This resolves the same way the member display does, so
     both surfaces agree and both follow the Economy configuration.
@@ -239,7 +239,7 @@ def _mission_block(m: dict, guild, cur: dict | None = None,
         status = f"⤷ `reward claimed` {check_emoji} {reward_str}".strip()
     else:
         # Never claim 100% before the mission is actually complete
-        # (e.g. 199/200 rounding up) - and never RENDER a full bar
+        # (e.g. 199/200 rounding up) — and never RENDER a full bar
         # either: both the number and the glyphs come from the same
         # progress/target value, capped just short of full.
         # v3: 6 nodes, incomplete max 5 filled. Cap by nodes, not just pct, to avoid float edge.
@@ -257,7 +257,7 @@ def _mission_block(m: dict, guild, cur: dict | None = None,
         f"{status}"
     )
 def _bot_display_name(bot, guild) -> str:
-    """The bot's name as this server sees it - the per-guild nickname
+    """The bot's name as this server sees it — the per-guild nickname
     when one is configured (Bot Profile system), else the global
     display name. Never a hardcoded product name."""
     me = getattr(guild, "me", None)
@@ -272,7 +272,7 @@ async def build_mission_display(bot, guild, user_id: int):
     Builds the whole /missions surface: (content, embeds). Returns
     None when the guild has no enabled missions at all (the caller
     sends the 'nothing configured' reply instead). One embed per
-    period that actually has missions - no empty embeds - and each
+    period that actually has missions — no empty embeds — and each
     embed's heading counts THIS member's completions over the guild's
     enabled missions for that period.
     """
@@ -281,7 +281,7 @@ async def build_mission_display(bot, guild, user_id: int):
         return None
 
     # Currency source of truth for completed-reward display. A config read
-    # failure must never blank the panel - get_currency_config already
+    # failure must never blank the panel — get_currency_config already
     # returns defaults for an unconfigured guild, so the except is only for
     # a genuine database error, and _reward_display_sync falls back to the
     # shared default constants in that case.
@@ -292,13 +292,13 @@ async def build_mission_display(bot, guild, user_id: int):
         print(f"[MISSIONS] currency config read failed for guild "
               f"{guild.id}: {e}")
 
-    # The check glyph is the bot's APPLICATION emoji `<a:check:…>` - added
+    # The check glyph is the bot's APPLICATION emoji `<a:check:…>` — added
     # in Developer Portal → Application → Emoji, owned by the application,
     # so it renders in every server with no guild emoji lookup and no
     # per-server setup.
     #
     # verify_check_emoji() is the only authoritative reachability check
-    # (it asks Discord's own application-emoji endpoint - guild caches
+    # (it asks Discord's own application-emoji endpoint — guild caches
     # cannot see application emojis at all) and it self-throttles to one
     # request per CHECK_REPROBE_SECONDS, so calling it on the render path
     # costs nothing after the first probe. The 1s cap keeps that rare
@@ -307,7 +307,7 @@ async def build_mission_display(bot, guild, user_id: int):
     # inconclusive, and inconclusive keeps the application emoji.
     # resolve_check_emoji() then returns the token; it degrades to a plain
     # ✅ ONLY when Discord positively says the application no longer owns
-    # that id - never merely because this server (or every server) has no
+    # that id — never merely because this server (or every server) has no
     # such GUILD emoji, which is the normal, expected state for an
     # application emoji.
     await verify_check_emoji(bot, timeout=1.0)
@@ -334,7 +334,7 @@ async def build_mission_display(bot, guild, user_id: int):
         # Defensive 4096 split: a guild with dozens of missions in one
         # period flows into "(part n)" continuation embeds rather than
         # an HTTP 400 from Discord. A single pathological block (only
-        # possible from a legacy row created before length validation -
+        # possible from a legacy row created before length validation —
         # create_definition now caps name/description) is hard-cut at
         # the limit so no input can ever produce an oversized embed.
         chunks, buf, size = [], [], 0
@@ -352,7 +352,7 @@ async def build_mission_display(bot, guild, user_id: int):
         for i, chunk in enumerate(chunks):
             title = f"{PERIOD_HEADING.get(period, period.title())} ({done} / {len(missions)})"
             if len(chunks) > 1:
-                title += f" - part {i + 1}"
+                title += f" — part {i + 1}"
             embed = discord.Embed(title=title, description=chunk,
                                   color=MISSION_COLOR)
             footer = PERIOD_FOOTER.get(period)
@@ -380,13 +380,13 @@ def _effective_channel_id(channel) -> Optional[int]:
 
 class MissionsView(discord.ui.View):
     """
-    Ephemeral mission panel with an in-place Refresh button - the same
+    Ephemeral mission panel with an in-place Refresh button — the same
     interaction contract as the Wallet panels (owner-checked, one
     message, edited on click, controls disabled on timeout). Refresh
     re-renders the SAME message; it never sends a second message while
     the first one still exists. The only exception is recovery: if the
     original panel was deleted (channel purge, message remove), a fresh
-    ephemeral response replaces the now-unreachable one - see the
+    ephemeral response replaces the now-unreachable one — see the
     Refresh callback below.
     """
 
@@ -400,7 +400,7 @@ class MissionsView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
-                "This isn't your mission panel - run `/missions` to see your own.",
+                "This isn't your mission panel — run `/missions` to see your own.",
                 ephemeral=True)
             return False
         return True
@@ -439,7 +439,7 @@ class MissionsView(discord.ui.View):
             # purged, or this click arrived on an interaction token
             # Discord no longer accepts. Editing in place is the normal
             # path; when the old message no longer exists a fresh
-            # ephemeral response is the recovery - the previous panel
+            # ephemeral response is the recovery — the previous panel
             # is unreachable, so this is a replacement, not a
             # duplicate. If even the followup fails (token fully
             # expired), there is nothing left to do: swallow, never
@@ -464,7 +464,7 @@ class Missions(commands.Cog):
         await ensure_tables()
         # NO emoji probe here, on purpose. main.py loads cogs BEFORE
         # bot.start(), so at cog_load() time the client holds neither a
-        # token nor an application_id - every application-emoji lookup
+        # token nor an application_id — every application-emoji lookup
         # could only fail, and that failure would say nothing about
         # reachability (it used to be reported as "emoji not reachable",
         # which is how the Missions panel ended up downgraded to a unicode
@@ -475,7 +475,7 @@ class Missions(commands.Cog):
     async def on_ready(self):
         """Confirm the check emoji against Discord's application-emoji API.
 
-        `<a:check:…>` is an APPLICATION emoji - added in Developer Portal →
+        `<a:check:…>` is an APPLICATION emoji — added in Developer Portal →
         Application → Emoji, owned by the bot application (which can hold
         ~2,000 of them), rendering in every server with no guild membership
         and no permission check. It is therefore invisible to
@@ -490,7 +490,7 @@ class Missions(commands.Cog):
         if state == CHECK_STATE_CONFIRMED:
             self._check_emoji_confirmed = True
             print(f"[MISSIONS] check emoji confirmed as an APPLICATION emoji: "
-                  f"{resolve_check_emoji(self.bot)} (id {CHECK_EMOJI_ID}) - "
+                  f"{resolve_check_emoji(self.bot)} (id {CHECK_EMOJI_ID}) — "
                   f"renders in every server, no guild emoji required.")
         elif state == CHECK_STATE_MISSING:
             print(f"[MISSIONS] check emoji {CHECK_EMOJI} (id {CHECK_EMOJI_ID}) "
@@ -504,12 +504,12 @@ class Missions(commands.Cog):
             # keep the application emoji. Downgrading here is exactly the
             # silent ✅ regression this probe exists to prevent.
             print(f"[MISSIONS] check emoji reachability unverified "
-                  f"({check_emoji_detail()}) - keeping the application emoji "
+                  f"({check_emoji_detail()}) — keeping the application emoji "
                   f"{CHECK_EMOJI}; it renders wherever an application emoji "
                   f"does, so no unicode downgrade.")
 
     # ─── PROGRESS HOOKS (same events cogs/mvp.py and cogs/leveling.py
-    # already listen to - no new tracking wired anywhere else) ──────
+    # already listen to — no new tracking wired anywhere else) ──────
     @commands.Cog.listener()
     async def on_activity_message(self, message: discord.Message,
                                    word_count: int):
@@ -544,7 +544,7 @@ class Missions(commands.Cog):
             self.bot, interaction.guild, interaction.user.id)
         if display is None:
             await interaction.response.send_message(
-                "No missions configured yet - an admin can add some via the dashboard "
+                "No missions configured yet — an admin can add some via the dashboard "
                 "or /mission_create.", ephemeral=True)
             return
         content, embeds = display
@@ -593,7 +593,7 @@ class Missions(commands.Cog):
                  if channel and mtype != "daily_completions" else "")
         cur = await get_currency_config(interaction.guild.id)
         await interaction.response.send_message(
-            f"{CHECK_EMOJI} Created mission **{name}** - {target} "
+            f"{CHECK_EMOJI} Created mission **{name}** — {target} "
             f"{TYPE_LABEL.get(mtype, mtype)} "
             f"({PERIOD_LABEL.get(period, period)}){where} → "
             f"{reward_summary(reward_type, reward_value, cur, duration_hours)}",
@@ -609,7 +609,7 @@ class Missions(commands.Cog):
             await interaction.response.send_message(
                 "No missions configured yet.", ephemeral=True)
             return
-        # Discord caps an embed at 25 fields - a guild running many
+        # Discord caps an embed at 25 fields — a guild running many
         # daily+weekly missions would crash the command at mission #26.
         # Page into multiple embeds of 20 (same shape the member
         # display's "(part n)" split already uses).

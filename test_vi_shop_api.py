@@ -28,7 +28,7 @@ class FreeVIShopApiTests(unittest.TestCase):
     def test_zero_price_is_a_normal_free_listing_and_not_a_vi_shortcut(self):
         # Superseded rule: this used to assert zero was rejected for every
         # non-Prestige kind. Zero (with no Diamond price) is now the normal Free
-        # listing for those kinds - but it must NOT inherit anything VI-specific:
+        # listing for those kinds — but it must NOT inherit anything VI-specific:
         # stock/level/role/duration stay exactly as submitted.
         for kind in ("title", "custom", "role", "temp_role", "potion", "xp_boost"):
             with self.subTest(kind=kind):
@@ -43,7 +43,7 @@ class FreeVIShopApiTests(unittest.TestCase):
             rows("SELECT price,max_stock,current_stock,required_level,required_role_id,"
                  "duration_hours,price_diamonds FROM shop_items"),
             [(0, 4, 4, 5, 88, 2, None)] * 6,
-            "a normal Free listing keeps its own restrictions - no VI normalization")
+            "a normal Free listing keeps its own restrictions — no VI normalization")
         # A positive diamond price is still a normal paid item, not a free item.
         response = self.post(dict(name="Paid diamonds", type="title", price=0, price_diamonds=5))
         self.assertEqual(response.status_code, 200)

@@ -62,7 +62,7 @@ vm.runInContext(script, context);
   assert.match(toasts.at(-1)[0], /price/);
 
   // Superseded rule: an ordinary item at 0 used to be rejected as "not VI".
-  // Zero is now the normal Free listing - but it must reach the API as a
+  // Zero is now the normal Free listing — but it must reach the API as a
   // plain 0 WITHOUT borrowing VI's unmetered normalization.
   element('item-duration').value = '2';   // a real value, so "free keeps it" is proven
   element('item-type').value = 'title';
@@ -92,6 +92,6 @@ vm.runInContext(script, context);
   assert.equal(sent.at(-1).data.price, 0);
   assert.equal(sent.at(-1).data.price_diamonds, 5,
     'a blank Coin price is still ignored when a Diamond price is set (existing precedence)');
-  console.log('PASS: actual Shop form - paid values preserved; VI Free/unmetered; '
+  console.log('PASS: actual Shop form — paid values preserved; VI Free/unmetered; '
     + 'explicit 0 = Free; blank/junk rejected; paid zero rejected');
 })().catch(error => { console.error(error); process.exitCode = 1; });

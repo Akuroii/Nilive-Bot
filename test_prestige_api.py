@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Finalized Prestige - Dashboard API validation (Issue 3).
+Finalized Prestige — Dashboard API validation (Issue 3).
 
 Proves the shop item create endpoint rejects a `prestige` item carrying a
 diamond price server-side (not only in the UI), and that non-prestige items
 still save as before.
 
 Run:  /tmp/p_venv/bin/python scripts/test_prestige_api.py
-(needs the venv with flask/aiosqlite/discord - see test_prestige.py header)
+(needs the venv with flask/aiosqlite/discord — see test_prestige.py header)
 
 Env:  uses a fresh temp DB; OWNER_ID is set to a value no test session uses,
       so every permission decision goes through dashboard_users.
@@ -50,7 +50,7 @@ def check(cond, name, extra=""):
         print(f"  PASS  {name}")
     else:
         FAIL += 1
-        FAILURES.append(name + (f" - {extra}" if extra else ""))
+        FAILURES.append(name + (f" — {extra}" if extra else ""))
         print(f"  FAIL  {name}  {extra}")
 
 

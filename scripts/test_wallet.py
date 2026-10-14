@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Wallet system - verification suite.
+Wallet system — verification suite.
 
 Runs the real engines against a scratch SQLite DB created by the
 project's own init_db(), so schema drift between this test and
@@ -61,7 +61,7 @@ def check(label: str, condition: bool, detail: str = ""):
         print(f"  \033[92mPASS\033[0m  {label}")
     else:
         _failed += 1
-        print(f"  \033[91mFAIL\033[0m  {label}" + (f"  - {detail}" if detail else ""))
+        print(f"  \033[91mFAIL\033[0m  {label}" + (f"  — {detail}" if detail else ""))
 
 
 def section(title: str):
@@ -119,7 +119,7 @@ async def main():
     from utils.economy_safe import get_balance
     from utils.ledger import get_user_ledger_page, count_user_ledger
 
-    section("2. Streak claim - crediting and ledger")
+    section("2. Streak claim — crediting and ledger")
     await reset_user()
     result = await perform_streak_claim(None, GUILD, USER)
     balance = await get_balance(GUILD, USER)
@@ -237,7 +237,7 @@ async def main():
         equip_title, unequip_title, get_equipped_title, cleanup_unowned_title,
     )
 
-    section("9. Titles - equip / unequip, independent of the role slot")
+    section("9. Titles — equip / unequip, independent of the role slot")
     await reset_user()
     await give_item(GUILD, USER, "The Silent One", 1, item_type="title")
     await give_item(GUILD, USER, "Nightfall", 1, item_type="title")
@@ -274,7 +274,7 @@ async def main():
     check("unequipping an already-unequipped title is rejected cleanly",
           r.get("success") is False and "error" in r, str(r))
 
-    section("10. Titles - ownership is enforced")
+    section("10. Titles — ownership is enforced")
     r = await equip_title(GUILD, USER, "A Title I Never Bought")
     check("equipping an unowned title is rejected",
           r.get("success") is False, str(r))
@@ -295,7 +295,7 @@ async def main():
         get_active_effects,
     )
 
-    section("12. Potions - use consumes one copy and grants the effect")
+    section("12. Potions — use consumes one copy and grants the effect")
     await reset_user()
     await give_item(GUILD, USER, "Elixir", 3, item_type="potion",
                     metadata=build_metadata(EFFECT_XP_BOOST, 2.0, 4))
@@ -384,7 +384,7 @@ async def main():
           seen == sorted(seen, reverse=True))
     check("page count is 3 for 23 rows at 8/page", page == 3, str(page))
 
-    section("17. Receipts isolation - per currency and per user")
+    section("17. Receipts isolation — per currency and per user")
     await safe_credit(GUILD, USER, 5, currency="diamonds",
                       reason="gem", source="test")
     await safe_credit(GUILD, OTHER, 999, currency="balance",

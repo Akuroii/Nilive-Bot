@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Dashboard currency-icon rendering + Mission check emoji - verification suite.
+Dashboard currency-icon rendering + Mission check emoji — verification suite.
 
 Two regressions this locks down:
 
@@ -22,12 +22,12 @@ Two regressions this locks down:
          `<a:gold:1549…>`;
        * an f-string partial does not escape it, so the HTML tokenizer
          reads `<a:gold:1549…>` as the start of an `<a>` tag and swallows
-         it - the icon disappears entirely.
+         it — the icon disappears entirely.
 
      Every currency surface now renders the icon through
      dashboard/utils/currency_ctx.py:icon_html (a CDN `<img>`, the same
      mechanism dashboard/utils/check_icon.py already used for the success
-     indicator) or its text twin icon_text where HTML cannot help - an
+     indicator) or its text twin icon_text where HTML cannot help — an
      `<option>` may only contain text.
 
 Covered here:
@@ -37,10 +37,10 @@ Covered here:
        literal text, ID-only placeholder, and what a browser's tokenizer
        actually does with each result.
    3.  icon_text(): the same inputs, for `<option>` sinks.
-   4.  End-to-end through the real Flask app - Economy page, Members,
+   4.  End-to-end through the real Flask app — Economy page, Members,
        member profile, Leveling, Shop, Ledger, Missions, Tag Missions,
        Tag Partners, and the htmx partials (both leaderboards, shop items,
-       purchase history, members search) - under four configurations:
+       purchase history, members search) — under four configurations:
        defaults, unicode, static custom, animated custom; for BOTH
        currencies.
    5.  `<option>` sinks carry text, never an `<img>` and never a raw token.
@@ -50,7 +50,7 @@ Covered here:
 
 Run:
   python3 scripts/test_currency_icon.py
-(needs the bot's own deps - discord.py, flask, aiosqlite - same as
+(needs the bot's own deps — discord.py, flask, aiosqlite — same as
 requirements.txt; no network and no Discord token: the user resolver is
 stubbed and every emoji image is asserted by URL, never fetched.)
 """
@@ -92,7 +92,7 @@ def check(label, condition, detail=""):
     else:
         _failed += 1
         _failures.append(label)
-        print(f"  \033[91mFAIL\033[0m  {label}" + (f"  - {detail}" if detail else ""))
+        print(f"  \033[91mFAIL\033[0m  {label}" + (f"  — {detail}" if detail else ""))
 
 
 def section(title):
@@ -279,10 +279,10 @@ async def mission_line_tests():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 2. icon_html() - the renderer
+# 2. icon_html() — the renderer
 # ═══════════════════════════════════════════════════════════════════
 def icon_html_tests():
-    section("2. icon_html() - unicode / static / animated / edge cases")
+    section("2. icon_html() — unicode / static / animated / edge cases")
     from dashboard.utils.currency_ctx import icon_html
 
     cases = [
@@ -327,10 +327,10 @@ def icon_html_tests():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 3. icon_text() - the <option> twin
+# 3. icon_text() — the <option> twin
 # ═══════════════════════════════════════════════════════════════════
 def icon_text_tests():
-    section("3. icon_text() - plain text for <option> sinks")
+    section("3. icon_text() — plain text for <option> sinks")
     from dashboard.utils.currency_ctx import icon_text
 
     check("unicode passes through", icon_text("🪙") == "🪙")
@@ -356,7 +356,7 @@ def icon_text_tests():
 # Pages that render a currency icon somewhere an <img> is allowed.
 ICON_PAGES = ["/economy", "/members", "/members/9001", "/leveling", "/shop"]
 # Pages whose ONLY currency sites are the currency pickers, which are
-# <option> elements - an <img> inside one is dropped by every browser, so
+# <option> elements — an <img> inside one is dropped by every browser, so
 # these must carry the icon's NAME as text instead.
 OPTION_ONLY_PAGES = ["/ledger", "/missions", "/tag-missions", "/tag-partners"]
 PAGES = ICON_PAGES + OPTION_ONLY_PAGES
@@ -427,7 +427,7 @@ def e2e_tests(client, csrf):
                       f"looking for {emoji_id}.{'gif' if is_animated else 'png'}")
             if is_custom and path in OPTION_ONLY_PAGES:
                 # Every currency site here is a picker, so the icon must
-                # have degraded to its NAME inside the <option> - never an
+                # have degraded to its NAME inside the <option> — never an
                 # <img> (browsers drop those) and never the raw token.
                 opts = re.findall(r"<option\b[^>]*>(.*?)</option>", page, re.S)
                 cur_opts = [o for o in opts if "Moon" in o or "Gems" in o]
@@ -526,7 +526,7 @@ def numeric_name_tests(client, csrf):
     check("a blank coin emoji still falls back to the default",
           cfg["coins"]["emoji"] == "🪙", cfg["coins"]["emoji"])
 
-    # An emoji field must still be normalised - a bare ID is the one form
+    # An emoji field must still be normalised — a bare ID is the one form
     # Discord cannot render on its own.
     r2 = client.post("/api/economy/currency", json={
         "coin_emoji_id": ANIM_ID},
@@ -611,7 +611,7 @@ def repo_scan_tests():
 # ═══════════════════════════════════════════════════════════════════
 def seed():
     """Rows so the leaderboards / shop / members surfaces have something
-    to render - an empty table would prove nothing."""
+    to render — an empty table would prove nothing."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("INSERT INTO dashboard_users "
                  "(guild_id, user_id, permission_level, enabled) "

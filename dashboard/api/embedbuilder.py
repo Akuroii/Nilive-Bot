@@ -15,22 +15,22 @@ from dashboard.api import api_bp
 from utils import app_emoji_cache
 from utils.emoji import parse_emoji_input
 
-# ── Embed Builder v2 - Composer (Content + multi-Embed + Attachments) ──────
+# ── Embed Builder v2 — Composer (Content + multi-Embed + Attachments) ──────
 #
 # The dashboard Embed Builder previously only supported building ONE embed
 # and either saving it as a template (embed_templates: {guild_id, name,
-# data}) or copying its JSON - actually sending anything to Discord only
+# data}) or copying its JSON — actually sending anything to Discord only
 # ever happened Discord-side, via /embed_send loading a saved template
 # (cogs/embedbuilder.py).
 #
 # This adds the missing "compose and send right now" path: a plain
 # message content field, up to 10 embeds, and up to 10 real file
 # attachments, sent directly to a chosen channel via Discord's REST API
-# using the bot token - same "call Discord directly from the Flask
+# using the bot token — same "call Discord directly from the Flask
 # process" pattern dashboard/api/botprofile.py's apply_bot_profile_via_rest
 # and dashboard/api/moderation.py's quick-action route already use.
 #
-# Attachments are NEVER written to disk or the database - the browser
+# Attachments are NEVER written to disk or the database — the browser
 # holds them (IndexedDB, client-side only) and uploads them directly in
 # the multipart POST at send time. This route only ever sees them as
 # an in-memory multipart upload for the duration of one request, exactly
@@ -96,7 +96,7 @@ def api_embedbuilder_send():
                         "error": "Attachments exceed the 25MB total upload limit"})
 
     if not content and not embeds and not files:
-        return jsonify({"success": False, "error": "Nothing to send - add content, an embed, or an attachment"})
+        return jsonify({"success": False, "error": "Nothing to send — add content, an embed, or an attachment"})
 
     bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:
@@ -236,7 +236,7 @@ def api_embedbuilder_delete_template(name: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# APPLICATION EMOJIS - the "isn't available to the bot" fallback
+# APPLICATION EMOJIS — the "isn't available to the bot" fallback
 #
 # Bot's own guild emoji and other-servers emoji (both handled by the
 # /api/guild/emojis* routes in core.py) are used directly when they
@@ -244,7 +244,7 @@ def api_embedbuilder_delete_template(name: str):
 # (including servers the bot has never joined) pasted as its raw ID or
 # <:name:id>/<a:name:id> markdown. Discord's CDN serves emoji images
 # publicly by ID with no auth required, so downloading doesn't need the
-# bot to share a guild with the source - only UPLOADING it as an
+# bot to share a guild with the source — only UPLOADING it as an
 # Application Emoji (which the bot's own token owns, usable everywhere,
 # no USE_EXTERNAL_EMOJIS needed) does.
 # ═══════════════════════════════════════════════════════════════════════
@@ -270,7 +270,7 @@ def _sanitize_emoji_name(name: str) -> str:
 def _downscale_static_image(data: bytes) -> bytes | None:
     """Iteratively shrinks a static image until it fits Discord's 256KiB
     application-emoji cap. Returns None if it still doesn't fit after the
-    smallest attempted size - the caller treats that as an import failure
+    smallest attempted size — the caller treats that as an import failure
     rather than uploading something Discord will just reject anyway."""
     try:
         from PIL import Image
@@ -308,7 +308,7 @@ def _upload_application_emoji(bot_token: str, app_id: str, name: str,
         except Exception:
             detail = {"message": resp.text}
         # A name collision is the only failure worth a single silent
-        # retry (with a randomized suffix) - every other failure (image
+        # retry (with a randomized suffix) — every other failure (image
         # invalid, 2000-emoji cap reached, rate limited) is real and
         # should surface to the person importing, not get retried blind.
         if "name" in json.dumps(detail).lower() and attempt_name == name:
@@ -364,7 +364,7 @@ def api_import_app_emoji():
             if animated:
                 return {"success": False,
                         "error": ("This animated emoji is over Discord's 256KiB application-emoji "
-                                  "limit and can't be auto-downscaled yet - try a smaller source, "
+                                  "limit and can't be auto-downscaled yet — try a smaller source, "
                                   "or import it manually from the Developer Portal.")}
             resized = _downscale_static_image(image_bytes)
             if not resized:

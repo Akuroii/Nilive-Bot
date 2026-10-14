@@ -1,6 +1,6 @@
 """
 Clone the production database into the staging database (or any two
-explicit paths) using SQLite's online backup API - safe to run while
+explicit paths) using SQLite's online backup API — safe to run while
 the production bot/dashboard are live and actively writing (WAL mode),
 unlike a plain file copy which can capture the main file and WAL out
 of sync and produce a corrupt copy. Same technique cogs/backup.py
@@ -12,7 +12,7 @@ Usage:
     python3 scripts/clone_to_staging.py --force   # overwrite an existing staging file
 
 Deliberately does NOT read NERO_ENVIRONMENT / DATABASE_PATH / import
-database.py - this script always targets the two well-known default
+database.py — this script always targets the two well-known default
 paths (mirrored below, kept in sync with database.py's
 PROD_DB_DEFAULT_PATH / STAGING_DB_DEFAULT_PATH) unless both are
 overridden with --source/--dest. That means running this script can
@@ -29,7 +29,7 @@ import aiosqlite
 # Mirrors database.py's PROD_DB_DEFAULT_PATH / STAGING_DB_DEFAULT_PATH.
 # Kept as plain literals here (not imported) so this script has zero
 # dependency on database.py's environment-resolution/safety-exit logic
-# - see module docstring.
+# — see module docstring.
 PROD_DB_DEFAULT_PATH = "/app/data/nero.db"
 STAGING_DB_DEFAULT_PATH = "/app/data/nero_staging.db"
 
@@ -43,7 +43,7 @@ async def clone(source: str, dest: str, force: bool) -> None:
         sys.exit(1)
 
     if source == dest:
-        print("FATAL: source and destination are the same path - refusing to clone onto itself.")
+        print("FATAL: source and destination are the same path — refusing to clone onto itself.")
         sys.exit(1)
 
     if os.path.exists(dest) and not force:
@@ -66,8 +66,8 @@ async def clone(source: str, dest: str, force: bool) -> None:
             await src.backup(dst)
 
     size = os.path.getsize(dest)
-    print(f"Done - {size:,} bytes written to {dest}")
-    print("This is a one-time snapshot, not a live link - re-run this script")
+    print(f"Done — {size:,} bytes written to {dest}")
+    print("This is a one-time snapshot, not a live link — re-run this script")
     print("whenever you want staging to reflect a fresher copy of production.")
 
 

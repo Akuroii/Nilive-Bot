@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
-// NERO DASHBOARD - embed/message-builder-page.js
-// Message Builder v2 - phase 1, step 5a: the page module.
+// NERO DASHBOARD — embed/message-builder-page.js
+// Message Builder v2 — phase 1, step 5a: the page module.
 //
 // It wires the already-approved foundations together and NOTHING else:
 //
@@ -30,7 +30,7 @@
 //     dirty flag, no scheduled write, no extra paint, and the payload the store
 //     holds stays byte-equivalent to the payload that was persisted.
 //
-// STEP 6a - VALIDATION (one pass per edit burst, one region, no new state)
+// STEP 6a — VALIDATION (one pass per edit burst, one region, no new state)
 //     The page owns #mb2-strip and is the only writer of it. The flow is
 //     exactly what the step-6 proposal approved and nothing wider:
 //
@@ -45,12 +45,12 @@
 //     * Validation runs OFF the keystroke path: an edit schedules one pass
 //       (VALIDATE_IDLE_MS) and the pass that runs cancels the schedule it came
 //       from, so a burst of keystrokes costs exactly one pass. Loading a
-//       document validates immediately instead - a restored draft with
+//       document validates immediately instead — a restored draft with
 //       problems must not look clean, not even for 150 ms.
 //     * The strip is hidden while there is nothing to say, and every write to
 //       it is change-guarded (text, tone class and `hidden` are each written
 //       only when they differ), so an unchanged result costs zero DOM writes.
-//     * Issues are read back from `store.ui.issues` - the store is the only
+//     * Issues are read back from `store.ui.issues` — the store is the only
 //       place they live. The page keeps no list of its own, only the change
 //       signature that decides whether the store needs telling again.
 //     * Step 6b adds no state here at all: the views are handed this same
@@ -136,7 +136,7 @@ window.NERO.embed = window.NERO.embed || {};
         if (!f.validate || !f.validate.validate) throw new Error('message-builder needs embed/validate.js loaded first');
         if (!f.preview || !f.preview.create) throw new Error('message-builder needs embed/preview.js loaded first');
         if (!f.drafts || !f.drafts.create) throw new Error('message-builder needs embed/drafts.js loaded first');
-        // 7c: the asset layer is a foundation too - assets.js owns what a
+        // 7c: the asset layer is a foundation too — assets.js owns what a
         // record/reference IS, asset-store.js owns the bytes. Without them the
         // page cannot answer "are the files this document names actually here?",
         // and guessing that answer is not an option.
@@ -265,7 +265,7 @@ window.NERO.embed = window.NERO.embed || {};
             // `limits` is the served table or null; `limitsError` is why it is
             // null. `issueSignature` is the change guard: the page dispatches
             // only when the issue list would actually be different, and never
-            // keeps a list of its own - the store owns `ui.issues`.
+            // keeps a list of its own — the store owns `ui.issues`.
             limits: servedLimits.limits,
             limitsError: servedLimits.error,
             issueSignature: f.validate.signature([]),
@@ -278,11 +278,11 @@ window.NERO.embed = window.NERO.embed || {};
             assetFacts: f.assets.noFacts({ embeds: [], assets: {} }),
             assetProbe: null,
             // ── step P2.4: asset recovery (pure bookkeeping, no source of
-            // truth - the store's answer is always re-read on the spot) ──
+            // truth — the store's answer is always re-read on the spot) ──
             // `assetStoreAvailable` mirrors the store's mode() at store
             // creation and is re-read at every write edge (the pre-gate
             // refresh); `assetRecoveryPending` is the admission hint that a
-            // previous pass left entries behind - it is never a candidate
+            // previous pass left entries behind — it is never a candidate
             // list, and nothing ever enumerates memory from the page.
             assetStoreAvailable: false,
             assetRecoveryPending: false,
@@ -297,7 +297,7 @@ window.NERO.embed = window.NERO.embed || {};
             // A pass compares against it and repaints only when the answer
             // actually changed, so an unchanged resolution costs zero DOM writes.
             // `assetPass` is the pass in flight (one at a time) and `assetAgain`
-            // is a trigger that arrived while it ran - absorbed, never dropped.
+            // is a trigger that arrived while it ran — absorbed, never dropped.
             resolutionSignature: null,
             assetPass: null,
             assetAgain: false,
@@ -346,13 +346,13 @@ window.NERO.embed = window.NERO.embed || {};
             store: inst.store,
             mount: els.inspectorBody,
             limits: inst.limits,
-            // One clock for the whole page life - the same one the preview
+            // One clock for the whole page life — the same one the preview
             // header uses, so "Now" cannot disagree with the rendered time.
             now: function () { return inst.startedAt; },
             // 7d: the local-file control. The page owns the pipeline (read →
             // identify → store → record → dispatch) and the words; the view owns
             // the control and paints exactly what these answer. `accept` is a
-            // picker hint built from the asset module's own table - the decision
+            // picker hint built from the asset module's own table — the decision
             // is assets.identify() on the bytes.
             upload: {
                 accept: uploadAccept(f),
@@ -367,7 +367,7 @@ window.NERO.embed = window.NERO.embed || {};
         }
         // The action bar is the third view over the same store: its buttons end
         // in store calls (undo/redo) or in a pure read (Copy JSON). It reports
-        // what it did through onNotice - the page's ONE status region - so the
+        // what it did through onNotice — the page's ONE status region — so the
         // bar itself owns no messaging and no document state.
         inst.actionbar = f.actionbar.create({
             document: doc,
@@ -400,13 +400,13 @@ window.NERO.embed = window.NERO.embed || {};
         // browser's own URL factory (7e) and from then on only ever calls
         // `urlFor` (resolve ahead of the render) and `cachedUrl` (the synchronous
         // render-path read). A window without that capability gets `null` here,
-        // which the store reports as `urls-unavailable` - an honest "no picture"
+        // which the store reports as `urls-unavailable` — an honest "no picture"
         // instead of a URL nobody could revoke.
         inst.assetStore = f.assetStore.create({
             scheduler: storageScheduler(inst),
             urls: f.assetStore.browserUrls(inst.win),
         });
-        // P2.4: the availability flag starts from the store's own answer -
+        // P2.4: the availability flag starts from the store's own answer —
         // a synchronous latch read, zero I/O. From then on it is only ever
         // re-read on the write edge (the pre-gate refresh); nothing
         // subscribes to it and no other code path updates it.
@@ -421,7 +421,7 @@ window.NERO.embed = window.NERO.embed || {};
         // The validation half of the same idea, on the store's slice selectors:
         // a document change SCHEDULES one pass (never one per keystroke), and a
         // changed issue list is what paints the strip. Both callbacks only read
-        // and render - nothing here dispatches from inside a notification pass.
+        // and render — nothing here dispatches from inside a notification pass.
         inst.unsubs.push(inst.store.subscribe(
             function (s) { return s.document; },
             function () { scheduleValidation(inst); }
@@ -455,8 +455,8 @@ window.NERO.embed = window.NERO.embed || {};
             notice: inst.notice,
         });
         // The bar's own derived state (which actions exist and are available)
-        // depends on the SESSION too - a confirmed save changes what "discard"
-        // would go back to - and this is the one place both owners are observed.
+        // depends on the SESSION too — a confirmed save changes what "discard"
+        // would go back to — and this is the one place both owners are observed.
         // Its writes are change-guarded, so this costs nothing per keystroke.
         if (inst.actionbar && inst.actionbar.refresh) inst.actionbar.refresh();
         if (inst.actionbar && inst.actionbar.renderSave) {
@@ -465,20 +465,20 @@ window.NERO.embed = window.NERO.embed || {};
                 pending: pending,
                 session: sessionState,
                 // The retryability question is the session's, and the session
-                // asks the storage adapter - the bar never keeps its own list.
+                // asks the storage adapter — the bar never keeps its own list.
                 retryable: !!(inst.session && inst.session.retryable && inst.session.retryable()),
             });
         }
     }
 
     /**
-     * SAVE NOW - the manual half of the ONE persistence path.
+     * SAVE NOW — the manual half of the ONE persistence path.
      *
      * This calls the session's own saveNow(), with no arguments and no force:
      * a manual save is exactly the write the idle timer performs, so a click
      * cannot write something the automatic path would not, cannot skip a gate
      * (destroyed / blocked / clean / in-flight) and cannot start a second
-     * write while one is in flight - saveNow() returns the SAME promise for a
+     * write while one is in flight — saveNow() returns the SAME promise for a
      * save already running. The result is deliberately not interpreted here:
      * the session records the outcome in its state, and renderStatus() renders
      * it, so there is one description of what happened rather than two.
@@ -493,7 +493,7 @@ window.NERO.embed = window.NERO.embed || {};
      * status pill: a notice line inside #mb2-bar-status (the page's only live
      * region besides the step-6 validation strip). A view reports results by
      * calling back here; it never touches the element and never creates a
-     * region of its own - two live regions announcing the same thing is how a
+     * region of its own — two live regions announcing the same thing is how a
      * screen-reader user hears everything twice.
      */
     function setNotice(inst, notice) {
@@ -521,7 +521,7 @@ window.NERO.embed = window.NERO.embed || {};
 
     /**
      * THE DISCARD: the canonical document becomes the last persisted one, under
-     * the SAME draft identity. Deliberately nothing else happens - no write is
+     * the SAME draft identity. Deliberately nothing else happens — no write is
      * scheduled (the restored document is what storage already holds, so the
      * session's own dirty check skips it), no pointer is touched (the pointer
      * only ever moves on a successful write), and no undo entry is created
@@ -537,7 +537,7 @@ window.NERO.embed = window.NERO.embed || {};
         setCanonical(inst, saved);
         setNotice(inst, {
             tone: 'info',
-            text: 'Changes discarded - back to the last saved version (' +
+            text: 'Changes discarded — back to the last saved version (' +
                   (inst.session.documentId() || 'this draft') + ').',
         });
         return true;
@@ -551,7 +551,7 @@ window.NERO.embed = window.NERO.embed || {};
                 rememberPointer(inst);      // only ever after a SUCCESSFUL write
                 // P2.4 recovery: the successful draft write is the page's
                 // one existing "storage is usable again" signal, and this
-                // edge is the only place the recovery pass may run - never
+                // edge is the only place the recovery pass may run — never
                 // on typing, never as a level check (C.1). The pre-gate
                 // refresh is a synchronous latch read INSIDE this branch,
                 // not a trigger: a mid-session degradation can leave the
@@ -574,7 +574,7 @@ window.NERO.embed = window.NERO.embed || {};
                             // most one probe per successful recovery
                             // pass): the probe's resolve-ahead is
                             // cached-URL-first, so it mints nothing and
-                            // replaces no node - the preview is visually
+                            // replaces no node — the preview is visually
                             // unchanged, and the facts stop lying about
                             // where the bytes live.
                             const doc = inst.store.getDocument();
@@ -593,7 +593,7 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * Remember which draft to reopen. Gated three ways on purpose: only after a
      * successful write, only once per page life, and never while storage is
-     * degraded - the pointer is the one piece of state that could make a real
+     * degraded — the pointer is the one piece of state that could make a real
      * draft unreachable, so it is never written on a guess.
      */
     function rememberPointer(inst) {
@@ -634,7 +634,7 @@ window.NERO.embed = window.NERO.embed || {};
             .catch(function (err) {
                 // load() is documented to return a verdict rather than throw, so
                 // reaching here means the stored record is malformed enough to
-                // break the reader itself - the one outcome the page cannot
+                // break the reader itself — the one outcome the page cannot
                 // classify. It does the only safe thing available: keep a
                 // document in memory, adopt a NEW draft identity (so no save can
                 // reach the record that could not be read) and say so plainly.
@@ -648,7 +648,7 @@ window.NERO.embed = window.NERO.embed || {};
         // The one validation pass that is NOT a burst: whatever document the
         // page ended up with (a restored draft, a preserved-record blank, an
         // in-memory new one) is checked immediately, and this pass consumes the
-        // schedule the load itself queued - one run, not two.
+        // schedule the load itself queued — one run, not two.
         validateNow(inst);
         return value;
     }
@@ -659,14 +659,14 @@ window.NERO.embed = window.NERO.embed || {};
             adopt(inst, result.document);
             if (status === 'repaired') {
                 const repairs = (result.repairs && result.repairs.length) ? ' (' + result.repairs.join(', ') + ')' : '';
-                inst.notice = { tone: 'warn', text: 'Your draft was recovered - missing parts were filled in' + repairs + '.' };
+                inst.notice = { tone: 'warn', text: 'Your draft was recovered — missing parts were filled in' + repairs + '.' };
             }
             return inst;
         }
         if (status === 'empty') return adoptNew(inst, 'no-record');
         if (status === 'unavailable') return adoptNew(inst, 'storage-unavailable');
         if (status === 'no-document-id') return adoptNew(inst, 'no-identity');
-        // corrupt | foreign | unsupported | future - the record is preserved.
+        // corrupt | foreign | unsupported | future — the record is preserved.
         return adoptGuarded(inst, result);
     }
 
@@ -675,7 +675,7 @@ window.NERO.embed = window.NERO.embed || {};
         if (why === 'storage-unavailable') {
             inst.notice = {
                 tone: 'warn',
-                text: 'Draft storage is unavailable - you can keep editing, but nothing will be saved until it is back.',
+                text: 'Draft storage is unavailable — you can keep editing, but nothing will be saved until it is back.',
             };
         } else if (why === 'unreadable') {
             inst.notice = {
@@ -701,7 +701,7 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * The ONE way a document becomes the canonical one: into the store, then
      * marked saved. `history:false` keeps the load out of the undo stack, and
-     * marking it saved is what makes "loaded" mean "in sync with storage" - no
+     * marking it saved is what makes "loaded" mean "in sync with storage" — no
      * dirty flag, no scheduled write, and (because the store's hash is taken
      * from this exact document) no phantom change on the next keystroke.
      */
@@ -751,7 +751,7 @@ window.NERO.embed = window.NERO.embed || {};
         if (inst.ctx && typeof inst.ctx.counter === 'function') inst.ctx.counter('validateRuns');
     }
 
-    /** Probes, counted the same way passes are - one number per burst. */
+    /** Probes, counted the same way passes are — one number per burst. */
     function countProbe(inst) {
         if (inst.ctx && typeof inst.ctx.counter === 'function') inst.ctx.counter('assetProbes');
     }
@@ -778,7 +778,7 @@ window.NERO.embed = window.NERO.embed || {};
      * Ask the byte store what it knows about the ids a document references,
      * and cache the answer as FACTS. The document is passed in as the snapshot
      * the probe belongs to, so the facts describe the ids that were actually
-     * looked up - if the user edits while the probe is in flight, the next
+     * looked up — if the user edits while the probe is in flight, the next
      * pass sees a different id set and probes again.
      *
      * A probe never writes, never hashes and never mints: it reads what the
@@ -793,7 +793,7 @@ window.NERO.embed = window.NERO.embed || {};
             if (inst.destroyed) return null;
             inst.assetFacts = NERO.embed.assets.assetFacts(doc, rows);
                 // 7e: the facts are what say which referenced files are readable,
-                // so this is the moment to resolve them - AHEAD of the render, so
+                // so this is the moment to resolve them — AHEAD of the render, so
                 // the paint that follows (and every later patch) finds its URL in
                 // the store's cache instead of waiting for one.
                 resolveAssets(inst);
@@ -805,7 +805,7 @@ window.NERO.embed = window.NERO.embed || {};
      * One validation pass, synchronously: read the store's document, run the
      * pure validator against the SERVED limits, and tell the store only if the
      * result differs from what it already holds. It also cancels any pending
-     * pass - a scheduled pass has nothing left to do once this one has run.
+     * pass — a scheduled pass has nothing left to do once this one has run.
      */
     function validateNow(inst) {
         if (!inst || inst.destroyed || !inst.store) return null;
@@ -819,7 +819,7 @@ window.NERO.embed = window.NERO.embed || {};
         // references, and this page is the only thing that can ask for one. So
         // a pass whose document names a different id set than the facts on
         // hand probes first and validates when the answer lands. One probe per
-        // change of that set - not per keystroke, not per render - and the
+        // change of that set — not per keystroke, not per render — and the
         // pass it replaces never counted itself as a run, so a burst still
         // costs exactly one pass and at most one probe.
         const ids = NERO.embed.assets.documentAssetIds(doc);
@@ -867,7 +867,7 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * Paint #mb2-strip from `store.ui.issues`. This is the page's one job for
      * the region: no view writes it, nothing else creates a live region, and
-     * every write is change-guarded - an unchanged issue list costs zero DOM
+     * every write is change-guarded — an unchanged issue list costs zero DOM
      * writes (the text is only assigned when it differs, the tone class only
      * when it differs, and `hidden` only on a real transition).
      *
@@ -891,7 +891,7 @@ window.NERO.embed = window.NERO.embed || {};
 
         const hasError = issues.some(function (issue) { return issue.severity === 'error'; });
         const label = issues.length === 1 ? '1 problem' : issues.length + ' problems';
-        const text = label + ' - ' + issues[0].message +
+        const text = label + ' — ' + issues[0].message +
             (issues.length > 1 ? ' (' + (issues.length - 1) + ' more)' : '');
         const className = STRIP_CLASS + (hasError ? ' mb2-tone-danger' : ' mb2-tone-warn');
 
@@ -904,14 +904,14 @@ window.NERO.embed = window.NERO.embed || {};
     // ── The files summary (step 7e) ───────────────────────────────
     /**
      * ONE STATIC LINE about what the message will carry: how many files it
-     * references, how big they are together, and - when a size is not measured -
+     * references, how big they are together, and — when a size is not measured —
      * that one of them is unmeasured rather than quietly dropped from the total.
      *
      * It shows NUMBERS, never verdicts: whether a file is acceptable is the
      * validator's answer and it is printed in the strip. This line must not
      * disagree with that verdict or repeat it. It counts the FILES the document
      * references (two slots using one file are one file) and sums only the sizes
-     * that are known, both read from the asset module - no second accounting
+     * that are known, both read from the asset module — no second accounting
      * lives here, and nothing is inferred from the preview's own state.
      *
      * It is not a live region: the strip announces, this line only states. Every
@@ -952,7 +952,7 @@ window.NERO.embed = window.NERO.embed || {};
      * Every step before the document is a GATE: a refusal at any of them leaves
      * the document exactly as it was (an edit that could not be stored is not an
      * edit). The two dispatches carry ONE coalesce key, so a pick is one undo
-     * step, and the record always lands BEFORE the reference - the document never
+     * step, and the record always lands BEFORE the reference — the document never
      * holds a reference to a file it cannot describe.
      *
      * What this code never does: mint an object URL, write bytes itself, hash a
@@ -1032,7 +1032,7 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * Read the chosen file ONCE, as bytes. The reader is the realm's own
      * FileReader; a realm without one, or a read that fails, is an explicit
-     * refusal - never a silent half-upload.
+     * refusal — never a silent half-upload.
      */
     function readUpload(inst, file) {
         return new Promise(function (resolve) {
@@ -1058,19 +1058,19 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * The pick is over (landed, refused or thrown): the token goes back to null
      * so "a pick is in flight" is a state with an end. A read that arrives after
-     * this - a superseded one - no longer matches and is discarded.
+     * this — a superseded one — no longer matches and is discarded.
      */
     function finishUpload(inst, token) {
         if (inst && inst.uploadToken === token) inst.uploadToken = null;
     }
 
-    /** Uploads, counted the way passes and probes are - one number per pick. */
+    /** Uploads, counted the way passes and probes are — one number per pick. */
     function countUpload(inst) {
         if (inst.ctx && typeof inst.ctx.counter === 'function') inst.ctx.counter('uploads');
     }
 
     /**
-     * `remove:<key>` - take the file off one slot. The REFERENCE goes first, the
+     * `remove:<key>` — take the file off one slot. The REFERENCE goes first, the
      * RECORD only when nothing in the document points at it any more, and the
      * BYTES never: a file nothing references is an orphan the retention analysis
      * is allowed to describe and nobody is allowed to delete in 7d. Both edits
@@ -1167,7 +1167,7 @@ window.NERO.embed = window.NERO.embed || {};
                 }, coalesce);
                 // Replacing a file is a ref REMOVAL like any other: if the id
                 // the slot used to hold has no reference left, its record goes
-                // too - same rule as Remove, same coalesce key, so the whole
+                // too — same rule as Remove, same coalesce key, so the whole
                 // pick is still ONE undo step. A record another slot still uses
                 // is never touched, and bytes are never deleted. Without this,
                 // a replaced file would leave an `assets.unused` warning the
@@ -1178,7 +1178,7 @@ window.NERO.embed = window.NERO.embed || {};
                         type: 'asset/remove', assetId: replaced, meta: { coalesceKey: coalesce },
                     });
                 }
-                // 7d/7e: a re-attached file can be the SAME id - identity is the
+                // 7d/7e: a re-attached file can be the SAME id — identity is the
                 // content, so picking the same bytes again addresses the same
                 // asset. The id set then does not move, and the last probe's
                 // answer ("those bytes are missing") would stand: a lie the moment
@@ -1193,7 +1193,7 @@ window.NERO.embed = window.NERO.embed || {};
                     // only. Never phrased as saved, because they are not.
                     setNotice(inst, {
                         tone: 'warn',
-                        text: 'That file is kept for this session only - this browser’s storage is not available right now.',
+                        text: 'That file is kept for this session only — this browser’s storage is not available right now.',
                     });
                 }
                 finishUpload(inst, token);
@@ -1205,7 +1205,7 @@ window.NERO.embed = window.NERO.embed || {};
      * A chosen local file. One pick at a time is honoured by SUPERSEDING: the
      * newest pick owns a token, and a read that finishes after a newer pick (or
      * after the slot changed, or after the page died) is discarded without
-     * touching the document - the bytes it may already have stored are
+     * touching the document — the bytes it may already have stored are
      * content-addressed duplicates at worst, and 7d deletes nothing.
      */
     function uploadPick(inst, request) {
@@ -1262,7 +1262,7 @@ window.NERO.embed = window.NERO.embed || {};
             ? text.slice(ATTACHMENT_PREFIX.length) : '';
     }
 
-    /** Resolution passes, and the repaints they caused - one number each. */
+    /** Resolution passes, and the repaints they caused — one number each. */
     function countResolve(inst) {
         if (inst.ctx && typeof inst.ctx.counter === 'function') inst.ctx.counter('assetResolves');
     }
@@ -1276,7 +1276,7 @@ window.NERO.embed = window.NERO.embed || {};
      * the live document and the byte store's own URL cache.
      *
      * The filename is the only key the preview can hand back (`attachment://name`
-     * carries no id), so it is the key here too - and that is exactly why an
+     * carries no id), so it is the key here too — and that is exactly why an
      * ambiguous name fails CLOSED: when two different assets claim one filename
      * (the validator's `assets.filename-clash`), neither resolves and the slot
      * shows no image, rather than whichever file happened to be found first. A
@@ -1284,7 +1284,7 @@ window.NERO.embed = window.NERO.embed || {};
      * way the validator reports it as unlinked.
      *
      * Synchronous and side-effect free on purpose: it reads the document, the
-     * records and the store's CACHE, and never probes, reads or mints - the URL
+     * records and the store's CACHE, and never probes, reads or mints — the URL
      * was resolved ahead of the render, which is the whole contract with
      * `cachedUrl`.
      */
@@ -1318,7 +1318,7 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * Paint the preview, and remember what the resolver answered for that paint.
      * Both the document subscription and the resolution pass come through here,
-     * so the signature always describes what is ON SCREEN - which is what makes
+     * so the signature always describes what is ON SCREEN — which is what makes
      * "repaint only when the resolution actually changed" true rather than
      * approximate. The renderer's own patch is change-guarded, so a paint with
      * nothing new to say writes nothing at all.
@@ -1345,7 +1345,7 @@ window.NERO.embed = window.NERO.embed || {};
     }
 
     /**
-     * Paint the resolution if - and only if - it differs from what the preview
+     * Paint the resolution if — and only if — it differs from what the preview
      * already shows. A refused mint (a browser without object URLs, bytes that
      * turned out to be missing or corrupt) is not a resolution change: the slot
      * simply has no URL, which is what an unresolved reference looks like too,
@@ -1379,13 +1379,13 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * THE RESOLUTION PASS. Given an observation that says which referenced files
      * this browser can actually read, it asks the byte store for a URL for each
-     * one that has no cached URL yet - resolved AHEAD of the render, so the
-     * render path itself never awaits anything - and then repaints only if the
+     * one that has no cached URL yet — resolved AHEAD of the render, so the
+     * render path itself never awaits anything — and then repaints only if the
      * resolver's answer changed.
      *
      * Costs, stated so they stay true: one pass per probe (plus one after a pick
      * that could not move the id set), at most one mint per asset per session (a
-     * cached URL is never re-minted - that part belongs to the 7d store), ZERO
+     * cached URL is never re-minted — that part belongs to the 7d store), ZERO
      * mints or byte reads for typing, and zero DOM writes when nothing changed. A
      * pass that is already running absorbs new triggers instead of stacking, and
      * no pass runs after teardown.

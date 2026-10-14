@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
-// NERO DASHBOARD - embed/validate.js
-// Message Builder v2 - phase 1, step 6a: the validation engine.
+// NERO DASHBOARD — embed/validate.js
+// Message Builder v2 — phase 1, step 6a: the validation engine.
 //
 // WHAT THIS FILE IS
 //   A PURE function of (document, limits). It takes the store's normalized
@@ -13,7 +13,7 @@
 //   No DOM, no timers, no storage, no network and no module state: the same
 //   document and the same limits always produce the same list, and a second
 //   call cannot see anything the first one left behind. The page owns WHEN this
-//   runs and WHERE the result goes - never this file.
+//   runs and WHERE the result goes — never this file.
 //
 //   It also MEASURES what the views display (step 6b): counts() reports each
 //   node's used/max numbers and caps() reports whether a node may still grow.
@@ -37,8 +37,8 @@
 //   Every number comes from the served table. ensureLimits() names the keys the
 //   rules below actually consume, and validate() refuses to run without them:
 //   a missing or unusable table yields ONE explicit issue, never a silent
-//   "no limit". (The harness mutates the table - a non-default table must
-//   change the outcome - and asserts validate.js contains no limit literal.)
+//   "no limit". (The harness mutates the table — a non-default table must
+//   change the outcome — and asserts validate.js contains no limit literal.)
 //
 // WORDING AUTHORITY (approved decision 7)
 //   Where the server already has the rule (utils/embed_schema.py) its message
@@ -53,7 +53,7 @@
 //     mistake. The send-time gate keeps its own severity.
 //   * An empty field NAME is a warning here (embed/model.js sends the
 //     zero-width placeholder Discord accepts) and an error server-side.
-//   * An empty document is CLEAN here - "nothing yet" is the state a new page
+//   * An empty document is CLEAN here — "nothing yet" is the state a new page
 //     starts in, and the strip stays out of the way. The server's
 //     "Nothing to send" error belongs to send time, which phase 1 does not have.
 //   * Timestamps: the forms this builder produces (and plain dates) are
@@ -74,12 +74,12 @@ window.NERO.embed = window.NERO.embed || {};
 
     // Loaded before this file (data-page-script order in
     // manage/message_builder.html). Used for the two shared vocabulary
-    // questions - "does this embed carry anything?" and "what URL would this
-    // media slot send?" - so those answers are never reimplemented here.
+    // questions — "does this embed carry anything?" and "what URL would this
+    // media slot send?" — so those answers are never reimplemented here.
     const model = NERO.embed.model;
 
     // 7c: the asset rules read the record/reference/fact vocabulary from
-    // embed/assets.js - the canonical record shape lives there and nowhere
+    // embed/assets.js — the canonical record shape lives there and nowhere
     // else. Loaded before this file (data-page-script order in
     // manage/message_builder.html), and only ever read, never re-implemented.
     const assets = NERO.embed.assets;
@@ -88,7 +88,7 @@ window.NERO.embed = window.NERO.embed || {};
      * The rail's / inspector's node id for the message root. The validator
      * reports a nodeId for every issue so a later step can jump to it, and the
      * message-level rules belong to that node. The harness asserts this equals
-     * rail.CONTENT_NODE and inspector.CONTENT_NODE - one vocabulary, no drift.
+     * rail.CONTENT_NODE and inspector.CONTENT_NODE — one vocabulary, no drift.
      */
     const CONTENT_NODE = 'content';
 
@@ -237,7 +237,7 @@ window.NERO.embed = window.NERO.embed || {};
     function checkMedia(issues, slot, wire) {
         if (!wire) return;
         // 7c: an `{kind:'upload'}` slot is described by the asset rules (it
-        // needs a record, and the record needs bytes) - this rule is about
+        // needs a record, and the record needs bytes) — this rule is about
         // URL values, including the legacy `attachment://name` string, and
         // firing it on a linked upload would say "no file is being uploaded"
         // about a file that IS. One problem, one message.
@@ -245,7 +245,7 @@ window.NERO.embed = window.NERO.embed || {};
         if (isAttachmentRef(wire)) {
             const name = wire.slice('attachment://'.length);
             const message = name
-                ? slot.label + ' points at the attachment "' + name + '", but no file with that name is being uploaded - reattach the file before sending.'
+                ? slot.label + ' points at the attachment "' + name + '", but no file with that name is being uploaded — reattach the file before sending.'
                 : slot.label + ' references an attachment with no file name.';
             push(issues, slot.code + '.attachment-missing', slot.path, slot.nodeId, WARNING, message);
             return;
@@ -355,7 +355,7 @@ window.NERO.embed = window.NERO.embed || {};
             const value = typeof field.value === 'string' ? field.value : '';
             if (!textLen(name)) {
                 // client severity (see the header): the wire carries the
-                // zero-width placeholder, so Discord accepts it - the server
+                // zero-width placeholder, so Discord accepts it — the server
                 // gate is stricter at send time.
                 push(issues, 'embed.field.name.missing', fpath + '.name', fnode, WARNING,
                     flabel + ' needs a name.');
@@ -369,11 +369,11 @@ window.NERO.embed = window.NERO.embed || {};
             } else if (textLen(name) > 0 && !textLen(value)) {
                 // client-only. Gated on a NAMED field on purpose: a field the
                 // user has not filled in at all is reported once ("needs a
-                // name"), not twice - an empty value is what Discord shows as
+                // name"), not twice — an empty value is what Discord shows as
                 // a blank line, which is worth saying only about a field the
                 // user clearly meant to write.
                 push(issues, 'embed.field.value.missing', fpath + '.value', fnode, WARNING,
-                    flabel + ' has no value - Discord will show it empty.');
+                    flabel + ' has no value — Discord will show it empty.');
             }
         }
 
@@ -390,7 +390,7 @@ window.NERO.embed = window.NERO.embed || {};
         //   * the message must have something else to send (on a page nobody
         //     has typed into, an empty embed is the starting state), and
         //   * there must be MORE THAN ONE embed, because the page itself
-        //     starts with one empty embed - reporting that one the moment the
+        //     starts with one empty embed — reporting that one the moment the
         //     user types a message would make the strip permanent noise
         //     instead of a signal.
         // With two or more embeds an empty one is a row the user created and
@@ -414,8 +414,8 @@ window.NERO.embed = window.NERO.embed || {};
 
     // ── The facts the views display (step 6b) ────────────────────
     /**
-     * ONE measurement pass over (document, limits). Every number 6b shows - the
-     * character counters, the embed/field caps - comes from here, and it is
+     * ONE measurement pass over (document, limits). Every number 6b shows — the
+     * character counters, the embed/field caps — comes from here, and it is
      * measured with the SAME helpers the rules above use (textLen,
      * embedCharCount), so "the counter says over" and "the validator says
      * too long" can never disagree: they are the same comparison.
@@ -471,7 +471,7 @@ window.NERO.embed = window.NERO.embed || {};
                 id: e.id === undefined || e.id === null ? null : String(e.id),
                 index: i,
                 label: 'Embed ' + (i + 1),
-                // Fixed order - the inspector paints counters by key, the tests
+                // Fixed order — the inspector paints counters by key, the tests
                 // assert the order, and nothing here depends on object key order.
                 controls: [
                     { key: 'title', used: textLen(e.title), max: limits.embed.title_max },
@@ -521,7 +521,7 @@ window.NERO.embed = window.NERO.embed || {};
      * caps(document, limits) → { ok, embeds: {used, max, canAdd},
      *                            fields: { <embedId>: {used, max, canAdd} } }
      *
-     * `canAdd` is `used < max` - adding is refused exactly AT the cap, while the
+     * `canAdd` is `used < max` — adding is refused exactly AT the cap, while the
      * rules above only complain ABOVE it. Both are true at once by design: a
      * full embed is not an error, it is a control that has nothing left to do.
      * An unusable table can only ever answer "cannot add" (fail closed).
@@ -550,13 +550,13 @@ window.NERO.embed = window.NERO.embed || {};
 
     // ── Assets (phase 2, step 7c) ────────────────────────────────
     /**
-     * THE ASSET RULES. They run LAST - after the message and after every embed
-     * - so the first issue a reader sees is still the first problem in reading
+     * THE ASSET RULES. They run LAST — after the message and after every embed
+     * — so the first issue a reader sees is still the first problem in reading
      * order, and they read exactly two inputs:
      *
      *   • the DOCUMENT's own metadata, through embed/assets.js: references,
      *     records, ids, byte counts. No second record model lives here. This
-     *     file owns wording, severity, order and the limits conversation -
+     *     file owns wording, severity, order and the limits conversation —
      *     never the vocabulary for what a record or a reference IS.
      *   • the FACTS the page probed from the byte store. Facts are
      *     OBSERVATIONS, not document content.
@@ -619,7 +619,7 @@ window.NERO.embed = window.NERO.embed || {};
         const known = ext && Object.prototype.hasOwnProperty.call(assets.MIME_BY_EXTENSION, ext);
         if (!known) {
             push(issues, 'assets.extension-not-allowed', path, nodeId, ERROR,
-                'Embed images must be one of: ' + allowedExtensions() + ' - "' + record.filename + '" is not.');
+                'Embed images must be one of: ' + allowedExtensions() + ' — "' + record.filename + '" is not.');
         } else if (record.mime && assets.MIME_BY_EXTENSION[ext] !== record.mime) {
             push(issues, 'assets.format-mismatch', path, nodeId, WARNING,
                 'The file name says .' + ext + ' but the file is recorded as ' + assets.mimeLabel(record.mime) + '.');
@@ -632,7 +632,7 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * What the byte store observed, and whether it agrees with the record.
      * `facts` is the product of assets.assetFacts() (or null): states keyed by
-     * id, rows for the id that were probed. Nothing is hashed here - a plain
+     * id, rows for the id that were probed. Nothing is hashed here — a plain
      * probe cannot prove bytes ARE the bytes, so corruption is only ever
      * reported when the store said so, and the record/row comparison below
      * catches the disagreements that need no digest at all.
@@ -657,7 +657,7 @@ window.NERO.embed = window.NERO.embed || {};
         }
         if (state === assets.FACT_STATES.UNAVAILABLE) {
             push(issues, 'assets.bytes-unavailable', path, nodeId, WARNING,
-                'The stored copy of ' + name + ' could not be checked - this browser\'s storage is not available right now.');
+                'The stored copy of ' + name + ' could not be checked — this browser\'s storage is not available right now.');
             return;
         }
         if (state !== assets.FACT_STATES.LOCAL) return;    // unknown: nothing was observed, so nothing is claimed
@@ -780,7 +780,7 @@ window.NERO.embed = window.NERO.embed || {};
 
     /**
      * One file against the served per-file advisory. The number is ADVISORY
-     * unless the server says otherwise (`file_advisory_is_hard`) - only
+     * unless the server says otherwise (`file_advisory_is_hard`) — only
      * Discord knows a guild's real ceiling, so a guess here would refuse a
      * file Discord accepts. The words come from assets.describeSize(), the
      * decision from assets.checkFileSize(): this file owns neither.
@@ -824,7 +824,7 @@ window.NERO.embed = window.NERO.embed || {};
         } else if (content.length && content.replace(/[\s\u200b]+/g, '').length === 0) {
             // client-only: Discord accepts it and shows nothing.
             push(issues, 'content.whitespace-only', 'content', CONTENT_NODE, WARNING,
-                'Message content is only spaces - Discord will show an empty message.');
+                'Message content is only spaces — Discord will show an empty message.');
         }
 
         if (embeds.length > limits.message.embeds_max) {
@@ -855,7 +855,7 @@ window.NERO.embed = window.NERO.embed || {};
      * The change signature of an issue list: the page dispatches only when this
      * differs, so "the strip is written only when its content changes" starts
      * with "the store is told only when the list changes". Order-sensitive on
-     * purpose - the list is deterministic, and the first issue is what the
+     * purpose — the list is deterministic, and the first issue is what the
      * strip shows.
      */
     function signature(issues) {

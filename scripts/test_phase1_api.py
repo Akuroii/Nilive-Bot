@@ -45,7 +45,7 @@ class ListingApiTests(unittest.TestCase):
     def test_nonprestige_zero_price_listing_is_accepted_as_a_free_item(self):
         # Superseded rule: this used to assert zero was invalid outside
         # Prestige. Free is now a first-class normal listing (price = 0 with no
-        # Diamond price) - the value must persist exactly as 0, and nothing
+        # Diamond price) — the value must persist exactly as 0, and nothing
         # else about the row may be reinterpreted.
         response = self.post(dict(name="Earnable title", type="title", price=0,
                                   max_stock=3, required_level=7))

@@ -1,6 +1,6 @@
-# Minigames v2 - Final Implementation Plan (v2, all decisions locked)
+# Minigames v2 — Final Implementation Plan (v2, all decisions locked)
 
-> **Status:** FINAL v2 - presented for the last review before the first code change.
+> **Status:** FINAL v2 — presented for the last review before the first code change.
 > **No code has been written or modified yet.**
 >
 > Round-3 sign-offs incorporated: empty reward pool = valid configuration (D11);
@@ -19,7 +19,7 @@
 
 ---
 
-## A. Decision log (complete - nothing left open)
+## A. Decision log (complete — nothing left open)
 
 | # | Decision |
 |---|---|
@@ -30,17 +30,17 @@
 | D5 | Weekly counter increments **only** on a successful automatic spawn. Manual and test never count. The weekly min/max system decides only *whether* an automatic spawn happens. |
 | D6 | Answer button text = exactly what the admin typed. No auto A/B/C/D prefix, no modification. |
 | D7 | Quick Click buttons auto-numbered `1 2 3 4 5` per configured count. |
-| D8 | No template weights in v1 - uniform probability within a selection level (shuffle bag). |
+| D8 | No template weights in v1 — uniform probability within a selection level (shuffle bag). |
 | D9 | Template toggles: `enabled` (master) + `auto_spawn` (rotation). Confirmed semantics + UI copy in §13. |
 | D10 | Category `enabled` = **automatic-rotation eligibility for the whole branch** (including nested subcategories/templates). Disabling deletes nothing, modifies nothing, permanently disables nothing; re-enabling restores eligibility. It does **not** block manual/test spawning of individual templates (their own toggles govern those). |
 | D11 | **Empty reward pool is a valid configuration.** The game runs normally, winners are still determined and shown, no rewards are granted, and the log records that the game had no rewards. Never treated as a configuration error. |
-| D12 | Spawn permission matrix - formalized (also in §8): automatic = `enabled ∧ auto_spawn ∧ enabled ancestor chain`; manual (specific template) = `enabled` (category state irrelevant); manual (no template) = same recursive eligibility as automatic; test = always allowed (admin-only), never counted. |
+| D12 | Spawn permission matrix — formalized (also in §8): automatic = `enabled ∧ auto_spawn ∧ enabled ancestor chain`; manual (specific template) = `enabled` (category state irrelevant); manual (no template) = same recursive eligibility as automatic; test = always allowed (admin-only), never counted. |
 
 ---
 
 ## 1. Final architecture
 
-Two processes, one source of truth - the pattern the project already runs:
+Two processes, one source of truth — the pattern the project already runs:
 
 ```
 ┌────────────────────────┐         ┌─────────────────────────────┐
@@ -64,7 +64,7 @@ Two processes, one source of truth - the pattern the project already runs:
 * All minigame SQL lives in `utils/minigame_store.py`; all engine logic in
   `utils/minigame_engine.py` (project rule: engines in `utils/`, like
   `reward_engine.py`); the cog (`cogs/minigames.py`) owns the Discord surface.
-* Reward delivery: exclusively `utils.reward_engine.give_reward()` - the single
+* Reward delivery: exclusively `utils.reward_engine.give_reward()` — the single
   shared engine every reward path in this project already uses.
 * Weekly pacing: `daily_check_loop` + `compute_daily_probability` kept verbatim.
 
@@ -73,7 +73,7 @@ Two processes, one source of truth - the pattern the project already runs:
 ## 2. Database / schema changes (complete)
 
 New tables via the minigames module's idempotent `ensure_tables()`
-(`CREATE TABLE IF NOT EXISTS` + guarded `ALTER`s) - the exact pattern the
+(`CREATE TABLE IF NOT EXISTS` + guarded `ALTER`s) — the exact pattern the
 current minigames tables use (dashboard awaits it before querying). **No
 `database.py` changes required.**
 
@@ -167,7 +167,7 @@ ALTER TABLE minigames_log ADD COLUMN status            TEXT DEFAULT 'completed';
 ```
 
 * Empty pool (D11): `winners_json` entries carry `reward_type: null,
-  reward_value: null, status: "no_reward"` - the run row is the record that no
+  reward_value: null, status: "no_reward"` — the run row is the record that no
   rewards existed. No extra column needed.
 * Legacy columns (`tier`, `winner_id`, `winner_display_name`, `forced`) stay;
   v1 rows remain untouched history. Names snapshotted → history survives any
@@ -186,7 +186,7 @@ ALTER TABLE minigames_config ADD COLUMN global_default_rewards_json TEXT;
 ## 3. Migration and rollback strategy
 
 1. **Timing:** new `ensure_tables()` runs at bot `cog_load` and is awaited by
-   the dashboard before any minigames query - first run of the new code, either
+   the dashboard before any minigames query — first run of the new code, either
    process. Every step idempotent.
 2. **Steps:** create new tables → guard-check existing columns via
    `PRAGMA table_info` before each `ALTER` (safe on re-runs) → **one-time
@@ -207,7 +207,7 @@ ALTER TABLE minigames_config ADD COLUMN global_default_rewards_json TEXT;
 
 ## 4. Category tree & recursive selection algorithm
 
-**Eligibility** (for automatic selection only - D10, D12):
+**Eligibility** (for automatic selection only — D10, D12):
 
 ```
 playable(t)      = t.enabled AND t.auto_spawn
@@ -224,7 +224,7 @@ select(virtual root):
 select(node):
     options =
       [ node's direct playable templates as ONE bag-option
-        (weight = node.weight) ]                        - only if ≥1 exists
+        (weight = node.weight) ]                        — only if ≥1 exists
       + [ each eligible subcategory S
          (weight = S.weight) ]
     pick = weighted_random(options)
@@ -233,12 +233,12 @@ select(node):
 ```
 
 One rule, plainly: *at any node, its direct games (as a group) compete with its
-subcategories - the group carries the node's weight, each subcategory carries
+subcategories — the group carries the node's weight, each subcategory carries
 its own.* A node with a single option simply takes it; pure organizational
-chains pass through at 100%. Empty nodes/subtrees are **never candidates - they
+chains pass through at 100%. Empty nodes/subtrees are **never candidates — they
 cannot consume a selection** (round-3 requirement).
 
-### Worked example A - mixed node (direct templates + subcategory)
+### Worked example A — mixed node (direct templates + subcategory)
 
 ```
 Root
@@ -260,9 +260,9 @@ Root
 | Math #1 (in Button Games) | **11.72%** |
 | Math #2 (Silver) | 30/80 = **37.50%** |
 
-(All five templates reachable - including ones living only in a subcategory.)
+(All five templates reachable — including ones living only in a subcategory.)
 
-### Worked example B - pure organizational chain
+### Worked example B — pure organizational chain
 
 ```
 Root
@@ -275,16 +275,16 @@ Root
 
 Only one eligible root (100%) → only one eligible child (100%) → the leaf node's
 only option is its direct bag → **Math #1 = Math #2 = RPS #1 = 33.33% each.**
-Weights on organizational-only nodes are irrelevant (single path) - you may
+Weights on organizational-only nodes are irrelevant (single path) — you may
 nest freely without doing any weight math.
 
-### Worked example C - disabled branch, empty category, no wasted selections
+### Worked example C — disabled branch, empty category, no wasted selections
 
 ```
 Root
 ├── Bronze (w=50, enabled)
 │   ├── QC #1
-│   └── "Later" (sub, EMPTY - no templates)
+│   └── "Later" (sub, EMPTY — no templates)
 ├── Silver (w=30, DISABLED)  ← 40 templates inside, all untouched
 └── Gold (w=20, enabled, no templates anywhere below)
 ```
@@ -293,7 +293,7 @@ Eligible roots: **Bronze only** (Silver's branch is excluded while disabled even
 though it holds 40 playable templates; Gold has nothing below → not a
 candidate). Every automatic spawn therefore comes from Bronze's direct bag
 ("Later" never participates). Re-enabling Silver restores the 50/30 split with
-all 40 templates intact - nothing was deleted, modified, or permanently
+all 40 templates intact — nothing was deleted, modified, or permanently
 disabled (D10).
 
 ### Manual spawn (no template given)
@@ -306,7 +306,7 @@ traversal + bag pop, with `mode='manual'` and no counter increment (D5, D12).
 ## 5. Shuffle Bag behavior & persistence
 
 * One bag **per node**, holding that node's **direct** playable templates.
-  Stored in `minigame_bag_state` (DB, not memory) - **survives bot restarts**;
+  Stored in `minigame_bag_state` (DB, not memory) — **survives bot restarts**;
   the bot process is the only writer (§19).
 * Pop **without replacement**; when empty → reshuffle the full eligible list
   into a fresh bag. 50 templates ⇒ 50 distinct games before any repeat (D8).
@@ -319,7 +319,7 @@ traversal + bag pop, with `mode='manual'` and no counter increment (D5, D12).
 
 ---
 
-## 6. Game engines - exact resolution & timeout behavior
+## 6. Game engines — exact resolution & timeout behavior
 
 Shared base (`utils/minigame_engine.py`):
 
@@ -354,16 +354,16 @@ every timeout ends `no winner, no reward` unless a valid winning state exists.
 | Start | Admin's embed + one **Join** button |
 | Participation | Click = join (ephemeral "You're in!"; re-click → "already in"); no live counts |
 | End of window | 0 joined → no winner. ≥1 joined → **exactly one** uniform-random winner |
-| Final embed | "🎡 **{winner}** wins the wheel - N participants" / "no one joined" |
+| Final embed | "🎡 **{winner}** wins the wheel — N participants" / "no one joined" |
 
-### 6.3 Multiple Choice - Math / Colors / Emoji (one engine, three template types)
+### 6.3 Multiple Choice — Math / Colors / Emoji (one engine, three template types)
 | Aspect | Behavior |
 |---|---|
 | Start | Admin's embed + one button per answer (2–6), **labels exactly as typed** (D6, e.g. `🔵 Blue`, `105`) |
-| Participation | Any click records/overwrites that user's pick → **last answer before expiry counts** (ephemeral "Answer set - you can change it until time runs out") |
+| Participation | Any click records/overwrites that user's pick → **last answer before expiry counts** (ephemeral "Answer set — you can change it until time runs out") |
 | During game | **No vote counts, no participant list, no correct-answer reveal** |
 | End | Correct button green, wrong buttons red (DANGER), all disabled; correct answer revealed in embed |
-| Winners | **Everyone** whose final answer was correct - all win |
+| Winners | **Everyone** whose final answer was correct — all win |
 | Nobody correct | No rewards; correct answer revealed; "no one got it right" shown clearly |
 | Final embed | Correct answer + winner names, or the no-winner note |
 
@@ -374,9 +374,9 @@ every timeout ends `no winner, no reward` unless a valid winning state exists.
 | Seating | First 2 clickers seated as P1/P2; Join disabled; "2/2 seated" |
 | Seating timeout | Dashboard-configurable (default 60s). <2 seated → **no winner, no reward** |
 | Choosing | Both seated → each receives a **private ephemeral message with their own Rock/Paper/Scissors buttons** (Discord cannot user-target shared-message buttons); main message shows "⏳ awaiting choices" |
-| Choice timeout | Dashboard-configurable (default 60s). **Resolves immediately once both chose**; expiry before both (including 1-of-2) → **no winner, no reward** - never a forfeit win (D3). A seated player who disconnects loses the ephemeral → covered by the same timeout |
+| Choice timeout | Dashboard-configurable (default 60s). **Resolves immediately once both chose**; expiry before both (including 1-of-2) → **no winner, no reward** — never a forfeit win (D3). A seated player who disconnects loses the ephemeral → covered by the same timeout |
 | Resolution | Standard matrix; **draw → no reward** |
-| Final embed | Player 1 + choice, Player 2 + choice, result: winner or "draw - no reward" |
+| Final embed | Player 1 + choice, Player 2 + choice, result: winner or "draw — no reward" |
 
 ---
 
@@ -386,7 +386,7 @@ every timeout ends `no winner, no reward` unless a valid winning state exists.
   (`duration_hours`). Vouchers/coupons = v2.
 * **Pool:** per-template rows; **no slot limit**; weights relative (dashboard
   shows computed %; sum ≠ 100 allowed and unmarked).
-* **Empty pool (D11) - valid configuration:**
+* **Empty pool (D11) — valid configuration:**
   * The game runs exactly like any other game.
   * Winners are still determined and shown in the final embed.
   * **No rewards are granted** (the roll step is skipped, not an error).
@@ -394,10 +394,10 @@ every timeout ends `no winner, no reward` unless a valid winning state exists.
     reward_value: null, status: "no_reward"`; the History UI shows a
     "no reward pool" badge on the run.
   * Saving with an empty pool is never blocked, and no UI warning treats it as
-    an error (an informational note "This game has no reward pool - winners
+    an error (an informational note "This game has no reward pool — winners
     will be announced only" is acceptable UX, nothing more).
 * **Roll (non-empty pool):** each winner gets an **independent**
-  `random.choices(rows, weights)` roll - different winners can get different
+  `random.choices(rows, weights)` roll — different winners can get different
   rewards or the same one; both correct by design.
 * **Delivery:** exclusively `utils.reward_engine.give_reward()` (economy-safe
   credits, xp/level hooks, temp-role scheduling, item catalog, role-position
@@ -426,7 +426,7 @@ weekly roll succeeds (or Sunday force-fire)
          (names also snapshotted into the log row at start)
       4. channel = template.channel_id or config.channel_id; validate
       5. spawn_game(guild, snapshot, mode="auto")          (shared, §8.5 below)
-      6. events_this_week += 1   - only after the message posts successfully
+      6. events_this_week += 1   — only after the message posts successfully
                                    (matches current behavior; D5)
   → if step 2 found nothing (no eligible root category):
       nothing spawns, counter NOT incremented, reason printed,
@@ -434,10 +434,10 @@ weekly roll succeeds (or Sunday force-fire)
 ```
 
 ### Slash commands
-* `/minigames_setup` - kept (channel + weekly range).
-* `/minigames_spawn [template_id]` - kept; with `template_id` = force exactly
+* `/minigames_setup` — kept (channel + weekly range).
+* `/minigames_spawn [template_id]` — kept; with `template_id` = force exactly
   that template (manual, D12); without = §4 manual path.
-* `/minigames_tier_add|list|remove` - **retired** (categories are
+* `/minigames_tier_add|list|remove` — **retired** (categories are
   dashboard-managed).
 
 ---
@@ -445,7 +445,7 @@ weekly roll succeeds (or Sunday force-fire)
 ## 9. Manual spawn & Test Spawn flow
 
 Both are **dashboard or slash → DB request row → bot executes** (the dashboard
-cannot run a live engine - §1). One shared path, real engine, no fake
+cannot run a live engine — §1). One shared path, real engine, no fake
 implementation (D4).
 
 ```
@@ -459,7 +459,7 @@ admin clicks [Test Spawn] (tree row / builder) or [Force spawn]
   → UI: "queued" toast (test) / "spawning" (manual)
 bot spawn_request_loop (every 10s)
   → atomic claim: UPDATE ... SET status='processing' WHERE id=? AND status='pending'
-    (rowcount check - idempotent even if the loop ever ran twice)
+    (rowcount check — idempotent even if the loop ever ran twice)
   → load template (fresh read, then snapshot) → spawn_game(mode)
   → row: done (+ message id into the run log) or failed(+error)
   → UI status pollable via GET /minigames/spawn-requests
@@ -470,7 +470,7 @@ bot spawn_request_loop (every 10s)
   **never** touches the weekly counter or probability (D5).
 * **Manual (specific template):** `mode='manual'`, no counter, no `[Test]`
   mark. Works even when the containing category is disabled (D10) and even
-  when `auto_spawn=0` - as long as `enabled=1` (D12).
+  when `auto_spawn=0` — as long as `enabled=1` (D12).
 
 ---
 
@@ -487,7 +487,7 @@ Existing patterns only: Flask page route + `@require_page`, Jinja under
 |---|---|
 | `GET  /minigames/categories` | Full nested tree; per node: id, name, weight, enabled, subtree-eligibility flag, direct/active template counts, preset summary |
 | `POST /minigames/categories` | `{name, parent_id?, weight?, emoji?, color?, default_rewards?}` |
-| `PATCH /minigames/categories/<id>` | Rename / weight / move / emoji / color / preset / enabled - rename safe (id references); `log_action` |
+| `PATCH /minigames/categories/<id>` | Rename / weight / move / emoji / color / preset / enabled — rename safe (id references); `log_action` |
 | `DELETE /minigames/categories/<id>` | **409 if it has direct templates or subcategories** (move/delete them first) |
 | `GET  /minigames/templates?category_id=&include_disabled=1` | List (+ subtree filter), reward summary (incl. "no pool"), live-run flag |
 | `POST /minigames/templates` | Create; rewards optional (empty pool valid, D11); omitted → prefill chain (§7) |
@@ -504,19 +504,19 @@ Existing patterns only: Flask page route + `@require_page`, Jinja under
 /minigames/tier/<id>`.
 
 ### Pages
-* `systems/minigames.html` - rebuilt, same URL; three client-side tabs, zero
+* `systems/minigames.html` — rebuilt, same URL; three client-side tabs, zero
   reloads: **Config** (weekly min/max, channel, enabled, global default preset
   editor) · **Categories & Templates** (unified tree, breadcrumbs, node/template
   quick actions, live-run badges) · **History** (mode badges, participants
   expandable, winners + rewards, "no reward pool" badge, legacy section).
-* `systems/minigame_builder.html` - **new**, one route in `dashboard/app.py`
+* `systems/minigame_builder.html` — **new**, one route in `dashboard/app.py`
   with the same `@require_page` key as the current minigames page.
-* `static/js/embed-composer.js` - **new shared component**: the per-embed
+* `static/js/embed-composer.js` — **new shared component**: the per-embed
   editor (title, description, color picker+hex, author, image, thumbnail,
   footer, fields) + live preview renderer, **extracted** from
   `manage/embedbuilder.html`; the old page is refactored to consume it and
   regression-tested (§20). Fallback if extraction proves risky mid-implementation:
-  duplicate the minimal single-embed editor inside the builder page only -
+  duplicate the minimal single-embed editor inside the builder page only —
   reported before merge (internal refactor, no agreed-behavior change).
 
 ---
@@ -551,7 +551,7 @@ No sub-pages, no tabs that can lose state. The admin should feel like they are
 | Math | question text, answers A–F (2–6, exact label text), correct answer, answer time (s) |
 | Colors | image URL (required), optional question text, answers A–F, correct, answer time |
 | Emoji | question text, optional image, answers A–F, correct, answer time |
-| RPS | seating timeout (s, default 60), choice timeout (s, default 60) - both dashboard-configurable |
+| RPS | seating timeout (s, default 60), choice timeout (s, default 60) — both dashboard-configurable |
 
 ### 11.3 Spawn Settings section
 Category (pre-filled with the one opened from), target channel
@@ -565,21 +565,21 @@ allowed), and the two toggles (§13).
 * Right pane, **sticky** while the left column scrolls; below ~1100px it
   stacks under the form (responsive).
 * Renders **the actual final Discord message**: the admin's embed **plus the
-  interactive component row the engine will generate** for the selected type -
+  interactive component row the engine will generate** for the selected type —
   answer buttons (exact typed labels), Join button, numbered Quick Click
-  buttons, RPS - so embed + components read as **one complete game**, not two
+  buttons, RPS — so embed + components read as **one complete game**, not two
   systems.
 * Re-renders on every input (debounced ~200ms): embed fields, per-type content
   (question/answers/image), type switch, button count, answer count.
 * The correct answer is **never** visible in the preview.
-* Reuses the extracted embed composer's renderer (§10) - identical look to the
+* Reuses the extracted embed composer's renderer (§10) — identical look to the
   existing Embed Builder preview.
 
 ---
 
 ## 13. Enabled / Auto-Rotation / Category-disable behavior
 
-**Template (D9) - exact UI copy:**
+**Template (D9) — exact UI copy:**
 ```
 Game Status
 ────────────────────────
@@ -598,18 +598,18 @@ Automatic Rotation [ ON ]
 The `Enabled ✓ / Rotation ✗` row **is** the "build → test → enable later" flow
 (step 19): flip the toggle from the tree row, no builder needed.
 
-**Category (D10) - exact UI copy:**
+**Category (D10) — exact UI copy:**
 ```
 Category
 ────────
 Enabled  [ ON ]
    "Controls whether this category branch is eligible for automatic rotation.
     Disabling excludes everything inside the branch from automatic rotation.
-    Nothing is deleted or modified - re-enabling restores eligibility."
+    Nothing is deleted or modified — re-enabling restores eligibility."
 ```
 
 * Disabling a category: no deletions, no DB modifications, no template changes,
-  no permanent disabling - **pure branch exclusion from automatic rotation**,
+  no permanent disabling — **pure branch exclusion from automatic rotation**,
   applied recursively through all nested levels. Re-enable → normal recursive
   selection resumes per each template's own settings.
 * Manual/Test spawning of templates inside a disabled category follows the
@@ -624,14 +624,14 @@ Enabled  [ ON ]
 
 * At spawn the live game receives a **deep copy**: template row, embed_json,
   config_json, reward rows (+ names for the log). After start, **nothing reads
-  the template again** - editing or deleting the template mid-game cannot affect
+  the template again** — editing or deleting the template mid-game cannot affect
   the running game; a deleted template's running game finishes normally.
 * The log row stores `template_name` / `category_name` snapshots → history
   survives renames and deletes.
 * **Bot restart mid-game (known limitation, handled):** in-memory views die
   with the process. Startup sweep: log rows with `ended_at IS NULL` older than
   5 minutes → finalize as `status='aborted_restart'`, no rewards, best-effort
-  embed edit ("⚠️ Game ended - bot restarted"). Documented, never silent.
+  embed edit ("⚠️ Game ended — bot restarted"). Documented, never silent.
 * **Cleanup after every finalize/abort:** pending timers cancelled, views
   discarded, bag state persisted, log row closed. No run survives on state
   other than its log row.
@@ -640,7 +640,7 @@ Enabled  [ ON ]
 
 ## 15. Logging & History
 
-* Single source: extended `minigames_log` (§2) - **no parallel log tables**.
+* Single source: extended `minigames_log` (§2) — **no parallel log tables**.
 * Every run row answers: what game (name/type snapshot) · what category
   (snapshot) · when (started/ended) · auto/manual/test · who participated ·
   who won · what each winner received (type + value + success / failed /
@@ -663,7 +663,7 @@ Enabled  [ ON ]
 * **CSRF:** app-level CSRF on all `/api` non-GET routes inherited
   automatically (existing mechanism).
 * **Attack surface:** the dashboard never needs the Discord token for this
-  feature - spawn execution happens in the bot via the request queue (§1, §9);
+  feature — spawn execution happens in the bot via the request queue (§1, §9);
   the existing REST-direct pattern is not extended.
 * **Input validation:** server-side whitelist/limit validation (§17) mirrored
   client-side; embed URLs restricted to `http(s)`; all user content rendered
@@ -685,7 +685,7 @@ fields within Discord limits (title ≤256, description ≤4096, footer ≤2048,
 fields ≤25 with name ≤256/value ≤1024, image/thumbnail `http(s)` URLs only);
 per-type numeric ranges (delays/times 1–300s, button/answer counts 2–6,
 correct-index in range); reward rows: type whitelist, integer weight ≥1,
-positive `duration_hours` for temp roles - **zero rows is valid (D11)**;
+positive `duration_hours` for temp roles — **zero rows is valid (D11)**;
 category `weight` ≥ 1; `parent_id` must be an existing same-guild category
 (cycle-checked: a node cannot become its own descendant).
 
@@ -693,7 +693,7 @@ category `weight` ≥ 1; `parent_id` must be an existing same-guild category
 
 | Edge case | Behavior |
 |---|---|
-| Empty category / branch (nothing playable below) | Never a candidate at any level - cannot consume a selection |
+| Empty category / branch (nothing playable below) | Never a candidate at any level — cannot consume a selection |
 | Games living only in subcategories | Fully reachable (recursive traversal, D1) |
 | Disabled category branch | Excluded from automatic rotation only; manual/test follow template toggles (D10/D12); nothing modified |
 | No eligible templates at all | Auto: nothing spawns, counter NOT incremented, reason printed, retried next daily check |
@@ -714,7 +714,7 @@ category `weight` ≥ 1; `parent_id` must be an existing same-guild category
 | Empty reward pool (D11) | Valid: game runs, winners shown, nothing granted, log `status:"no_reward"` |
 | Failed reward grant (role above bot, deleted item…) | Other winners continue; failure in `winners_json` + bot log |
 | Failed final embed edit | Rewards already delivered; failure logged; run still closes |
-| Late/duplicate clicks after end | `self.finished` guard - ignored |
+| Late/duplicate clicks after end | `self.finished` guard — ignored |
 | Weekly min/max limits | Untouched v1 pacing; only successful automatic posts increment the counter (D5) |
 | Manual spawn (dashboard or slash) | Real engine, `mode='manual'`, no counter, §4/D12 rules |
 | Test spawn | Same as manual + `[Test]` + `mode='test'`; duplicate pending rejected |
@@ -733,7 +733,7 @@ automatic retry of failed sends/grants in v1 (kept visible in logs instead).
 
 ## 19. Concurrency behavior
 
-* **Two processes, one DB:** already safe - `PRAGMA journal_mode=WAL` +
+* **Two processes, one DB:** already safe — `PRAGMA journal_mode=WAL` +
   `busy_timeout=5000` set in `database.py` (readers never block writers).
 * **Write ownership per table (no contention by construction):**
   `minigame_categories` / `minigame_templates` / `minigame_rewards` /
@@ -746,7 +746,7 @@ automatic retry of failed sends/grants in v1 (kept visible in logs instead).
   guards late/duplicate clicks within the process.
 * **Request-queue claim:** atomic
   `UPDATE … SET status='processing' WHERE id=? AND status='pending'` with
-  rowcount check - idempotent even if the poller ever double-fires.
+  rowcount check — idempotent even if the poller ever double-fires.
 * **Restart-sweep idempotency:** sweep only touches rows with
   `ended_at IS NULL`; double-finalize impossible.
 * **Bag writes:** single writer (bot), one row per (guild, category);
@@ -802,7 +802,7 @@ render; migration run twice on a production-DB copy (idempotency + data diff).
 ```
 Phase 1  utils/minigame_store.py
          tables + guarded ALTERs, tree queries, bag ops, request queue,
-         snapshot reads, tier→category migration      deps: -
+         snapshot reads, tier→category migration      deps: —
 Phase 2  utils/minigame_engine.py
          base engine + finalize pipeline + 6 engines
          (MC engine shared by math/colors/emoji), reward rolls  deps: 1
@@ -831,13 +831,13 @@ Each phase ends with its verification gate (§20) before the next begins.
 
 **Risks (all with mitigations; none require a design change):**
 1. *Embed-composer extraction* from the 1466-line page may surface unexpected
-   coupling - mitigation: old-page regression suite after extraction; fallback
+   coupling — mitigation: old-page regression suite after extraction; fallback
    = duplicate the minimal editor in the builder page only (internal, no
    agreed-behavior change; reported before merge).
-2. *Bot restart mid-game* kills live views - accepted limitation, sweep in §14.
-3. *Discord ephemeral lifetime* (RPS choices) - covered by the no-forfeit
+2. *Bot restart mid-game* kills live views — accepted limitation, sweep in §14.
+3. *Discord ephemeral lifetime* (RPS choices) — covered by the no-forfeit
    timeout rule (§6.4, D3).
-4. *Test/Manual spawn latency ≈ 10s* - inherent to the DB-queue architecture
+4. *Test/Manual spawn latency ≈ 10s* — inherent to the DB-queue architecture
    (dashboard cannot run a live engine); accepted (D4).
 
 **Ambiguities:** none. Every architectural, UX, and behavioral decision in
@@ -848,7 +848,7 @@ flagged before the decision is made.
 
 ---
 
-## C. End-to-end walkthrough - from zero to a player's reward
+## C. End-to-end walkthrough — from zero to a player's reward
 
 **1. Categories from scratch.** The admin opens the dashboard → Systems →
 Minigames → Categories & Templates tab (empty). `[+ Category]` → **Bronze**
@@ -857,34 +857,34 @@ Minigames → Categories & Templates tab (empty). `[+ Category]` → **Bronze**
 (weight 30). Tree now: `Minigames / Bronze / {Button Games}`.
 
 **2. Building the first game.** Bronze → `[+ Template]`. Builder opens:
-*Identity* - name it **"[Math] 15 × 7"**. *Game Type* - **🧮 Math**.
-*Game Settings* - question `15 × 7 = ?`, answers `95 / 105 / 115 / 125`,
-correct = `105`, time `30s`. *Embed* - the composer prefills the description
+*Identity* — name it **"[Math] 15 × 7"**. *Game Type* — **🧮 Math**.
+*Game Settings* — question `15 × 7 = ?`, answers `95 / 105 / 115 / 125`,
+correct = `105`, time `30s`. *Embed* — the composer prefills the description
 with the question; admin sets title **🧮 Math Challenge**, color, footer
-"Answer before time runs out!". *Rewards* - prefilled from Bronze's preset
-("Loaded from Bronze defaults - edit freely"); the admin leaves it.
-*Spawn Settings* - category Bronze (pre-filled), channel = guild default,
+"Answer before time runs out!". *Rewards* — prefilled from Bronze's preset
+("Loaded from Bronze defaults — edit freely"); the admin leaves it.
+*Spawn Settings* — category Bronze (pre-filled), channel = guild default,
 **Enabled ✓, Automatic Rotation ✗ for now** (step 19 flow). The right pane has
-been rendering the whole time: the embed with four buttons underneath -
+been rendering the whole time: the embed with four buttons underneath —
 exactly the message that will be posted.
 
 **3. Save → test → enable.** Save → toast → back on the Bronze tree with
 breadcrumbs. `[Test Spawn]` → "Test queued" → ~10s later
 **[Test] 🧮 Math Challenge** appears in the spawn channel with its four
-buttons. A member clicks `105` → ephemeral "Answer set - you can change it…".
+buttons. A member clicks `105` → ephemeral "Answer set — you can change it…".
 At 30s: `105` turns green, the others red, the embed reveals
-"✅ Correct: 105 - Winners: @member". The reward rolls (say 100 XP),
+"✅ Correct: 105 — Winners: @member". The reward rolls (say 100 XP),
 `give_reward` credits it through the normal ledger, the final embed is edited,
 History gains a `test` row with participant, winner, and reward. The admin
-flips **Automatic Rotation on** from the tree row - no builder needed.
+flips **Automatic Rotation on** from the tree row — no builder needed.
 
 **4. Building the library.** `[Duplicate]` → "[Math] 25 × 4" → change question
-+ answers → save. Repeat - 50 Math games land in Bronze's direct list, a
++ answers → save. Repeat — 50 Math games land in Bronze's direct list, a
 handful of Quick Click games under Button Games, Colors/Emoji games in new
 categories. Each new game ≈ 30 seconds.
 
 **5. A no-reward game (D11).** One game is saved with an **empty reward pool**
-(a pure fun game). When it later runs: buttons, timer, reveal - all normal;
+(a pure fun game). When it later runs: buttons, timer, reveal — all normal;
 winners are announced in the final embed; nothing is granted; the log row's
 winner entries read `no_reward` and History shows the "no reward pool" badge.
 
@@ -892,12 +892,12 @@ winner entries read `no_reward` and History shows the "no reward pool" badge.
 (min 5–10 events, adaptive daily probability, Sunday force-fire) decides a
 spawn is due. `select_and_spawn` runs: Bronze (50) beats the other roots;
 inside Bronze the direct bag (50) beats Button Games (30); Bronze's shuffle bag
-yields template #17 - a game not seen since the bag was last shuffled.
+yields template #17 — a game not seen since the bag was last shuffled.
 Snapshot taken, channel resolved, message posted, weekly counter incremented.
 
 **7. The player's experience.** A player sees 🧮 Math Challenge, reads the
 question, clicks an answer (can change until the last second), watches the
-reveal, and - if correct - their name appears in the winner list while the
+reveal, and — if correct — their name appears in the winner list while the
 reward roll lands in their balance/XP/inventory via the shared reward engine.
 The log row closes with participants, winner, and reward; the bag now holds 49
 games, so the next Bronze pick will be a different one.
@@ -906,7 +906,7 @@ games, so the next Bronze pick will be a different one.
 weights, and presets all survive (id references), old history keeps the
 original name. A disabled test category is dimmed in the tree with an "off
 rotation" badge; re-enabling restores its branch instantly. A template that
-aged out is deleted from its row - any in-progress run of it finishes
+aged out is deleted from its row — any in-progress run of it finishes
 normally, the bag rebuilds on the next pop, and history remains readable.
 
 ---

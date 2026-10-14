@@ -10,13 +10,13 @@ class BotProfile(commands.Cog):
     scoped to a single guild via Discord's "Modify Current Member"
     endpoint. The write path (Save button) lives in
     dashboard/api/botprofile.py and calls Discord's REST API directly
-    with the bot token - same pattern dashboard/api/core.py already
-    uses for role/channel lookups - so it applies instantly with no
+    with the bot token — same pattern dashboard/api/core.py already
+    uses for role/channel lookups — so it applies instantly with no
     dependency on this cog or the bot's gateway connection.
 
     This cog's only job: if the bot is removed from a server and later
     re-invited, Discord resets its guild member row (nick/avatar/
-    banner/bio all reset) - on_guild_join reapplies whatever was last
+    banner/bio all reset) — on_guild_join reapplies whatever was last
     configured, same "reapply stored config on join" pattern
     cogs/welcome.py already uses for auto-role.
     """
@@ -30,7 +30,7 @@ class BotProfile(commands.Cog):
             profile = await get_guild_bot_profile(guild.id)
             if not any([profile.get("nickname"), profile.get("avatar_url"),
                         profile.get("banner_url"), profile.get("bio")]):
-                return  # nothing configured for this guild - nothing to restore
+                return  # nothing configured for this guild — nothing to restore
             result = apply_bot_profile_via_rest(
                 guild.id,
                 profile.get("nickname"),
@@ -50,8 +50,8 @@ class BotProfile(commands.Cog):
     async def botprofile_view(self, interaction: discord.Interaction):
         profile = await get_guild_bot_profile(interaction.guild.id)
         embed = discord.Embed(
-            title=f"🪪 Bot Profile - {interaction.guild.name}",
-            description=("This is the bot's real, per-server Discord identity - "
+            title=f"🪪 Bot Profile — {interaction.guild.name}",
+            description=("This is the bot's real, per-server Discord identity — "
                          "set only for this server, via Discord's guild member "
                          "profile fields."),
             color=0x7c5cbf)

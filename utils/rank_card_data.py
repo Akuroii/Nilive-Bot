@@ -19,16 +19,16 @@ def _avatar_url(member) -> str:
         return str(asset.url)
 
 # ═══════════════════════════════════════════════════════════════════════
-# RANK CARD DATA - Rank Card foundation (pass 1: schema + backend)
+# RANK CARD DATA — Rank Card foundation (pass 1: schema + backend)
 #
 # Pure data aggregation, no image work, no Discord API calls beyond
 # what's already cached on the bot. Built now so the NEXT session
 # (the actual Pillow card build) only has to consume this dict and
-# draw - every table/engine it needs (item_catalog, equip_engine,
+# draw — every table/engine it needs (item_catalog, equip_engine,
 # minigame win count) already exists by the time that session starts.
 #
 # inventory_grid is sorted rarity-first, value-second (item_catalog.
-# item_sort_key), and excludes role/temp_role items - those live in
+# item_sort_key), and excludes role/temp_role items — those live in
 # their own equipped_role slot, per Dark's locked design: the rank
 # card and the equip system are visually independent, but the card
 # still needs to know what's equipped to render that slot.
@@ -117,7 +117,7 @@ async def get_rank_card_data(guild_id: int, user_id: int,
 
     # Wallet pass: the equipped TITLE is exposed here too, so the future
     # card renderer can read it from the same single aggregation call
-    # instead of learning about a second table. Read-only - nothing in
+    # instead of learning about a second table. Read-only — nothing in
     # this module decides how (or whether) a title is drawn. Independent
     # from equipped_role above by design: a member can wear one of each.
     from utils.title_engine import get_equipped_title

@@ -8,13 +8,13 @@ Pins the confirmed production bug and its preservation contract:
      commands assumed a guild channel with permission overwrites. A
      thread's lock IS its native `locked` flag; forum posts ARE threads.
   2. PRESERVED: on guild channels the behaviour is byte-for-byte the old
-     one - overwrite.send_messages False/None on @everyone +
+     one — overwrite.send_messages False/None on @everyone +
      set_permissions(..., reason=...) + the same embeds + the same
      log_mod_action call on lock only (unlock still does not log).
   3. SCHEMA VERIFICATION (user-requested evidence for the legacy
      mod_logs question): the CURRENT database.py schema is exercised
      with a REAL log_mod_action write to BOTH mod_logs and
-     moderation_logs. No migration is added - production evidence of a
+     moderation_logs. No migration is added — production evidence of a
      legacy schema does not exist (see report); this test proves the
      current schema is self-consistent and would only need to change if
      production proves otherwise.
@@ -30,7 +30,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 # Redirect DB + OWNER_ID BEFORE any repo import (database.py validates
-# OWNER_ID and binds DB_PATH at import time) - same convention as
+# OWNER_ID and binds DB_PATH at import time) — same convention as
 # scripts/test_afk.py. Throwaway paths only: no repo artifacts.
 os.environ["DATABASE_PATH"] = os.path.join(
     (_TMPDIR := tempfile.mkdtemp(prefix="locktest-")), "test.db")
@@ -74,7 +74,7 @@ class TextLike:
 
 
 class _Thread(discord.Thread):
-    """Real Thread subclass - still isinstance(x, discord.Thread) for the
+    """Real Thread subclass — still isinstance(x, discord.Thread) for the
     fix branch, but has a __dict__ so tests can shadow .edit (the real
     class uses __slots__ and its methods are read-only on instances)."""
 
@@ -111,7 +111,7 @@ def make_thread(kind=11, name="post"):
 
 
 def make_forum_post():
-    """Real discord.Thread parented by a ForumChannel - a forum post."""
+    """Real discord.Thread parented by a ForumChannel — a forum post."""
     st = discord.state.ConnectionState(
         dispatch=lambda *a, **k: None, handlers={}, hooks={},
         http=SimpleNamespace(), max_messages=None, application_id=None,
@@ -161,7 +161,7 @@ async def run_cmd(cmd, channel, reason="because"):
     err = None
     try:
         await cmd.callback(None, inter, reason=reason)
-    except Exception as e:  # noqa: BLE001 - the test IS about crashes
+    except Exception as e:  # noqa: BLE001 — the test IS about crashes
         err = e
     finally:
         M.log_mod_action = saved
@@ -178,7 +178,7 @@ async def main():
     check("Thread has no overwrites_for", not hasattr(th, "overwrites_for"))
     check("Thread has no set_permissions", not hasattr(th, "set_permissions"))
 
-    print("[1] lock on a guild channel - PRESERVED overwrite behaviour")
+    print("[1] lock on a guild channel — PRESERVED overwrite behaviour")
     ch = TextLike()
     inter, err, logs = await run_cmd(M.Moderation.lock, ch, reason="spam")
     check("no crash", err is None, f"raised {err!r}")
@@ -200,7 +200,7 @@ async def main():
     check("embed Reason field preserved",
           e.fields[0].name == "Reason" and e.fields[0].value == "spam")
 
-    print("[2] unlock on a guild channel - PRESERVED overwrite behaviour")
+    print("[2] unlock on a guild channel — PRESERVED overwrite behaviour")
     ch = TextLike()
     inter, err, logs = await run_cmd(M.Moderation.unlock, ch, reason="ok")
     check("no crash", err is None, f"raised {err!r}")
@@ -214,7 +214,7 @@ async def main():
     check("embed description preserved",
           e.description == "#general has been unlocked.", e.description)
 
-    print("[3] lock on a THREAD (the confirmed crash) - native locked flag")
+    print("[3] lock on a THREAD (the confirmed crash) — native locked flag")
     th = make_thread()
     inter, err, logs = await run_cmd(M.Moderation.lock, th, reason="raid")
     check("no AttributeError (was: 'Thread' object has no attribute "
@@ -246,7 +246,7 @@ async def main():
     check("unlock embed preserved for forum posts",
           e.title == "🔓 Channel Unlocked")
 
-    print("[5] unlock on a THREAD - the other half of the confirmed crash")
+    print("[5] unlock on a THREAD — the other half of the confirmed crash")
     th = make_thread()
     inter, err, logs = await run_cmd(M.Moderation.unlock, th)
     check("no AttributeError", err is None, f"raised {err!r}")
@@ -255,7 +255,7 @@ async def main():
     check("unlock on thread still does NOT log (preserved)",
           logs.await_count == 0)
 
-    print("[6] SCHEMA VERIFICATION - real log_mod_action on the CURRENT schema")
+    print("[6] SCHEMA VERIFICATION — real log_mod_action on the CURRENT schema")
     await init_db()
     u = SimpleNamespace(id=3, display_name="u",
                         display_avatar=SimpleNamespace(url="https://x/a.png"))

@@ -9,10 +9,10 @@ from dashboard.api import api_bp
 from utils import creator_notify_engine as engine
 
 # ═══════════════════════════════════════════════════════════════════════
-# CREATOR HUB - dashboard CRUD for YouTube / Twitch
+# CREATOR HUB — dashboard CRUD for YouTube / Twitch
 #
 # Before this pass, dashboard/templates/config/announcements.html was
-# read-only and mislabeled "Announcements" - it showed the two existing
+# read-only and mislabeled "Announcements" — it showed the two existing
 # tables (youtube_config, twitch_config) but every add/remove/toggle had
 # to go through Discord slash commands. This file is the missing
 # write-side surface: full add/delete/enable-toggle for both platforms,
@@ -20,22 +20,22 @@ from utils import creator_notify_engine as engine
 # (dashboard/api/minigames.py, dashboard/api/missions.py).
 #
 # youtube_config / twitch_config already exist in database.py's central
-# init_db() - reused as-is, no schema change needed for either.
+# init_db() — reused as-is, no schema change needed for either.
 #
 # CREATOR pass 2: every route below now also awaits
-# engine.ensure_tables() - that's what actually adds/backfills the
+# engine.ensure_tables() — that's what actually adds/backfills the
 # video_mention_type/shorts_*/live_* columns on youtube_config and the
 # mention_type column on twitch_config (see
 # utils/creator_notify_engine.py's _migrate_*_config() functions).
 # Calling engine.ensure_tables() at the top of every route is
 # deliberately cheap-but-redundant, matching the "belt and suspenders"
 # idiom already used by dashboard/api/minigames.py and
-# dashboard/api/missions.py - every statement inside it is either
+# dashboard/api/missions.py — every statement inside it is either
 # CREATE ... IF NOT EXISTS or a PRAGMA-gated ALTER, so calling it once
 # per request costs a few no-op checks, not a real migration re-run.
 #
 # A Kick integration existed in an earlier pass of this feature and has
-# been dropped per direction - youtube_config/twitch_config and the
+# been dropped per direction — youtube_config/twitch_config and the
 # engine's session machinery were never Kick-specific to begin with, so
 # nothing here needed unwinding beyond removing Kick's own table/routes.
 # ═══════════════════════════════════════════════════════════════════════
@@ -53,11 +53,11 @@ def _clean_mention_type(value) -> str:
 #
 # One row per watched channel. The base columns (enabled,
 # discord_channel_id, custom_message, ping_role_id, video_mention_type)
-# ARE the "Video" notification type - there's no separate video_enabled
+# ARE the "Video" notification type — there's no separate video_enabled
 # column, since Video is the original/primary type this table was built
 # around, and the base `enabled` flag also gates whether the row is
 # polled at all (cogs/youtube.py's check_videos query filters
-# WHERE enabled = 1) - turning Video off for a watch turns off Shorts
+# WHERE enabled = 1) — turning Video off for a watch turns off Shorts
 # and Live for it too, since nothing gets polled. Shorts and Live each
 # get their own enabled flag on top of that (shorts_enabled, live_enabled)
 # so either can be selectively switched off while Video (and polling)
@@ -140,7 +140,7 @@ def add_youtube_config():
     result = {"success": True}
     if not yt_channel_id:
         result["warning"] = (
-            "Could not extract a channel ID from that URL - notifications "
+            "Could not extract a channel ID from that URL — notifications "
             "may not work. Try the youtube.com/channel/UC... form instead.")
     return jsonify(result)
 
@@ -185,7 +185,7 @@ def toggle_youtube_config(entry_id: int):
 def _save_youtube_type_settings(entry_id: int, column_prefix: str, require_channel: bool):
     """
     Shared body for the three per-type YouTube settings endpoints below.
-    column_prefix is '' for Video (the base columns carry no prefix -
+    column_prefix is '' for Video (the base columns carry no prefix —
     they predate Shorts/Live existing at all), or 'shorts_'/'live_' for
     the other two. require_channel=True (Video only) rejects a missing
     discord_channel_id instead of silently nulling out a NOT NULL
@@ -301,7 +301,7 @@ def add_twitch_config():
     result = {"success": True}
     if not os.getenv("TWITCH_CLIENT_ID"):
         result["warning"] = (
-            "TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET aren't set on Railway - "
+            "TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET aren't set on Railway — "
             "this entry will save but won't check live status until they are.")
 
     async def save():
@@ -366,11 +366,11 @@ def save_twitch_settings(entry_id: int):
     """
     Previously the only way to change a Twitch watch's channel, message,
     or ping after creation was to delete it and re-add it (losing its
-    is_live/history in the process). This is the missing edit surface -
+    is_live/history in the process). This is the missing edit surface —
     covers every field that made sense to add at creation (custom_message,
     mention_type/mention_role_id, give_role_id, role_duration_hours) plus
     the target Discord channel. Renaming the tracked username stays a
-    delete-and-re-add - a different username is a different entity, not
+    delete-and-re-add — a different username is a different entity, not
     an edit of this one.
     """
     guild_id = get_session_guild_id()
@@ -404,8 +404,8 @@ def save_twitch_settings(entry_id: int):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Creator Groups - consolidated cross-platform live notifications
-# (CREATOR pass 3, additive-only - see utils/creator_notify_engine.py's
+# Creator Groups — consolidated cross-platform live notifications
+# (CREATOR pass 3, additive-only — see utils/creator_notify_engine.py's
 # "CREATOR GROUPS" section for the full design and utils/mission_engine.py
 # -style header comments already established elsewhere in this codebase).
 #
@@ -413,7 +413,7 @@ def save_twitch_settings(entry_id: int):
 # (e.g. "MeowlyVA" = one twitch_config row + one youtube_config row)
 # that announce as a single shared message instead of N independent
 # ones. Creating a group and linking watches to it is entirely
-# separate from each platform's own add/settings endpoints above -
+# separate from each platform's own add/settings endpoints above —
 # nothing about those changes, and a watch with no group link (every
 # watch that exists today) behaves exactly as it always has.
 # ═══════════════════════════════════════════════════════════════════════
@@ -435,7 +435,7 @@ async def _linked_watches(guild_id: int, group_id: int) -> list[dict]:
                 """, (guild_id, group_id))
                 rows = await cursor.fetchall()
             except Exception:
-                # Table doesn't exist yet on this guild - no matches,
+                # Table doesn't exist yet on this guild — no matches,
                 # not an error.
                 rows = []
             for wid, label in rows:
@@ -511,7 +511,7 @@ def add_creator_group():
 def update_creator_group(group_id: int):
     """
     Edits an existing group's name/channel/mention. Does NOT touch
-    which watches are linked to it - that's the separate
+    which watches are linked to it — that's the separate
     /<platform>/<id>/group endpoint below, so relinking watches never
     risks clobbering the group's own settings and vice versa.
     """
@@ -552,7 +552,7 @@ def delete_creator_group(group_id: int):
     async def delete():
         async with aiosqlite.connect(DB_PATH) as db:
             # Unlink every watch first so nothing is left pointing at
-            # a group_id that no longer exists - get_watch_group()
+            # a group_id that no longer exists — get_watch_group()
             # would already treat a dangling reference as "not
             # grouped" and fail safe, but there's no reason to leave
             # stale data sitting there.
@@ -600,7 +600,7 @@ def set_watch_group(platform: str, entry_id: int):
     """
     Links (or, with group_id=null, unlinks) one existing YouTube/Twitch
     watch to a Creator Group. This is the ONLY thing that changes a
-    watch's notification style - there's no separate style dropdown to
+    watch's notification style — there's no separate style dropdown to
     keep in sync with it. Linked = posts into the group's shared
     message; unlinked (group_id null, the default) = posts its own
     independent message exactly as before this feature existed.
@@ -618,7 +618,7 @@ def set_watch_group(platform: str, entry_id: int):
         async with aiosqlite.connect(DB_PATH) as db:
             if group_id:
                 # Guard against linking to a group from a DIFFERENT
-                # guild (e.g. a stale id from a previous selection) -
+                # guild (e.g. a stale id from a previous selection) —
                 # confirm it's actually this guild's before writing it.
                 cursor = await db.execute(
                     "SELECT id FROM creator_groups WHERE id = ? AND guild_id = ?",

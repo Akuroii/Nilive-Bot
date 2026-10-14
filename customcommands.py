@@ -1,13 +1,13 @@
-"""Custom commands - dashboard-defined ``!trigger`` commands.
+"""Custom commands — dashboard-defined ``!trigger`` commands.
 
 PRECEDENCE (2026-08-28): which system gets a given message is decided in ONE
-place - ``utils/message_router.py`` - with the rule
+place — ``utils/message_router.py`` — with the rule
 ``PREFIX_COMMAND > ALIAS > CUSTOM_COMMAND > TRIGGER``. This cog therefore asks
 the router for its own decision instead of sniffing ``message.content`` and
 ``bot.all_commands`` itself:
 
   * that is what guarantees a message can never run both a custom command and
-    an alias (or a trigger) - previously the only protection was a
+    an alias (or a trigger) — previously the only protection was a
     ``first_word in bot.all_commands`` check, which is process-global and only
     covered aliases that had actually registered;
   * matching is now an exact whole-token comparison on ``!trigger`` (see
@@ -118,13 +118,13 @@ class CustomCommands(commands.Cog):
         action_list = json.loads(actions) if actions else []
         action_errors = []
 
-        # Hierarchy check - block privilege escalation via custom commands
+        # Hierarchy check — block privilege escalation via custom commands
         #
         # SECURITY FIX: "warn" is now included here too. It's less
         # destructive than ban/kick, but it still writes a moderation
         # record against the target and previously let a member with a
         # custom-command trigger warn someone ABOVE them in the role
-        # hierarchy, bypassing can_moderate() entirely - the same class
+        # hierarchy, bypassing can_moderate() entirely — the same class
         # of gap that was already fixed for ban/kick/timeout/remove_all_roles.
         destructive = {"ban", "kick", "remove_all_roles", "warn"}
         is_destructive = (
@@ -183,14 +183,14 @@ class CustomCommands(commands.Cog):
                     if role:
                         # SECURITY FIX: this only ever checked whether the
                         # BOT could assign the role (check_bot_role_position)
-                        # - it never checked whether the ACTOR (the member
+                        # — it never checked whether the ACTOR (the member
                         # who typed the !command) was allowed to grant it.
                         # A moderator with access to a custom command whose
                         # actions included add_role:<high-privilege-role-id>
-                        # could hand out roles above their own rank -
+                        # could hand out roles above their own rank —
                         # straightforward privilege escalation. Now also
                         # requires the actor be guild owner, or have a top
-                        # role strictly above the role being granted - the
+                        # role strictly above the role being granted — the
                         # same rule utils.permissions.check_hierarchy()
                         # already uses for /ban, /kick, /timeout, /warn.
                         can_assign, warn = check_bot_role_position(
@@ -213,7 +213,7 @@ class CustomCommands(commands.Cog):
                     role    = message.guild.get_role(role_id)
                     if role:
                         # SECURITY FIX: same gap as add_role above, mirrored
-                        # for removal - previously any actor with access to
+                        # for removal — previously any actor with access to
                         # the trigger could strip a role off anyone,
                         # including roles above the actor's own rank.
                         actor_ok = (

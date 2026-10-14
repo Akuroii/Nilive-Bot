@@ -4,7 +4,7 @@ Economy owns the currency configuration (see `utils/currency.py`); the
 dashboard only ever CONSUMES it. This module is the dashboard-side adapter:
 the single place that knows how to (a) read the config for the current
 session's guild, (b) hand it to Jinja, and (c) fall back to the shipped
-defaults when there is no session/guild - or when the read fails, because a
+defaults when there is no session/guild — or when the read fails, because a
 template must still render.
 
 Nothing here defines a currency name or emoji. The defaults come from
@@ -30,7 +30,7 @@ guild's currency, because there is nothing to remember.
 
 Why the icon needs its own renderer
 -----------------------------------
-A configured currency icon may be a Discord custom emoji - `<:name:id>` or
+A configured currency icon may be a Discord custom emoji — `<:name:id>` or
 the animated `<a:name:id>`. That markup is a Discord *message* feature; a
 browser has no idea what it means, and both ways of dropping it into a page
 are wrong:
@@ -42,7 +42,7 @@ are wrong:
     icon silently disappears.
 
 So a custom icon is rendered as the image Discord's public emoji CDN serves
-by ID - the exact mechanism `dashboard/utils/check_icon.py` already uses for
+by ID — the exact mechanism `dashboard/utils/check_icon.py` already uses for
 the success indicator. Unicode emoji (🪙, 💎, 🌙, any script) are plain text
 that a browser renders natively, so those pass through untouched. `icon_html`
 is the one place that knows the difference; every currency surface in the
@@ -58,7 +58,7 @@ def _default_config() -> dict:
     """The shipped defaults in resolved-config shape.
 
     Used only when there is no guild in the session (login/server-select
-    pages) or the read failed - never as a second definition of the
+    pages) or the read failed — never as a second definition of the
     defaults themselves.
     """
     from utils.currency import (
@@ -92,7 +92,7 @@ def resolved(guild_id=None) -> dict:
 
 
 def defaults_flat() -> dict:
-    """`{coin_name, coin_emoji, diamond_name, diamond_emoji}` - the flat
+    """`{coin_name, coin_emoji, diamond_name, diamond_emoji}` — the flat
     shape the Economy currency form binds its placeholders to."""
     cur = _default_config()
     return {
@@ -105,7 +105,7 @@ def defaults_flat() -> dict:
 
 # ── Browser-safe rendering of the configured icon ───────────────────────
 #
-# Scoped to CURRENCY icons only - the success/check indicator has its own
+# Scoped to CURRENCY icons only — the success/check indicator has its own
 # equivalent in dashboard/utils/check_icon.py, and the two are deliberately
 # separate (different emoji, different sources, different fallbacks). What
 # they share is the primitive: utils/emoji.emoji_cdn_url, which serves any
@@ -129,7 +129,7 @@ def icon_html(emoji, fallback: str = "") -> Markup:
     decorative and an alt string would only be read out twice.
 
     Returns Markup (already-safe HTML) so f-string partials can interpolate
-    it directly - the same contract `render_user_identity_html` uses.
+    it directly — the same contract `render_user_identity_html` uses.
     """
     raw = (emoji or "").strip()
     if not raw:
@@ -160,7 +160,7 @@ def icon_css() -> Markup:
     Inline `width`/`height` already keep the layout stable (no reflow when
     the image lands); this only sits the glyph on the text baseline, so a
     custom icon lines up exactly where the unicode 🪙/💎 it replaced used
-    to. No sizing, colour or spacing changes - same footprint as before.
+    to. No sizing, colour or spacing changes — same footprint as before.
     """
     return Markup(
         "<style>"
@@ -174,7 +174,7 @@ def icon_text(emoji) -> str:
     """The configured icon as PLAIN TEXT, for places HTML cannot help with.
 
     `<option>` elements (the currency pickers on the Ledger, Leveling,
-    Missions, Tag Missions and Tag Partners pages) may contain text only -
+    Missions, Tag Missions and Tag Partners pages) may contain text only —
     an `<img>` inside one is dropped by every browser, so `icon_html` would
     leave the row with no icon at all there. This is the text twin:
 
@@ -200,7 +200,7 @@ def icon_text(emoji) -> str:
     name = parsed[1]
     # An ID-only emoji is stored under the `_` placeholder name (see
     # utils/emoji.normalize_currency_emoji). Showing `_` in a dropdown is
-    # noise, so treat it as "no icon" - the currency NAME next to it
+    # noise, so treat it as "no icon" — the currency NAME next to it
     # already identifies the row.
     return "" if name == "_" else name
 

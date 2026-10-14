@@ -1,10 +1,10 @@
 /* ═══════════════════════════════════════════════════════════════
-   Shop Publisher (Phase 1) - sp-* styles only.
+   Shop Publisher (Phase 1) — sp-* styles only.
 
    Namespace discipline (same rule as the other builders): `eb-*` belongs to
    the frozen v1 composer (embed-composer.css, loaded globally by base.html),
    `mb-*` to the minigame builder, `mb2-*` to the Message Builder v2. Nothing
-   in this file restates any of their rules - the preview mount reuses the
+   in this file restates any of their rules — the preview mount reuses the
    existing `.eb-preview-box` class for the Discord-style frame and the frozen
    embed/preview.js renderer emits the eb-* preview markup it always has.
 

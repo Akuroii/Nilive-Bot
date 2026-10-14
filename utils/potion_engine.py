@@ -3,15 +3,15 @@ from datetime import datetime, timezone
 from database import DB_PATH
 
 # ═══════════════════════════════════════════════════════════════════════
-# POTION ENGINE - Wallet pass
+# POTION ENGINE — Wallet pass
 #
 # A Potion is a CONSUMABLE inventory item: it is never equipped, it is
 # used, and using it decrements the stack by one and applies an effect.
 #
 # Deliberately NOT a new effects framework. The project already has
-# exactly one timed-effect mechanism - leveling_active_boosts, granted
+# exactly one timed-effect mechanism — leveling_active_boosts, granted
 # by utils.xp_calculator.grant_xp_boost() and read on every message by
-# calculate_message_xp() - and the whole point of a potion is "a timed
+# calculate_message_xp() — and the whole point of a potion is "a timed
 # effect you can hold in your bag and trigger later". So a potion is
 # defined as: the existing xp_boost effect, deferred.
 #
@@ -28,7 +28,7 @@ from database import DB_PATH
 # EFFECT_XP_BOOST is the only effect kind implemented, on purpose. The
 # metadata carries an explicit "effect" discriminator so a second kind
 # can be added later without a migration or a re-read of every existing
-# potion row - unknown kinds are rejected with a clear message rather
+# potion row — unknown kinds are rejected with a clear message rather
 # than silently consuming the item.
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -61,7 +61,7 @@ def describe(metadata: dict | None) -> str:
             return f"{mult:g}× XP for {hours}h"
         if mult:
             return f"{mult:g}× XP"
-    return "Unknown effect - ask an admin to check this item's setup."
+    return "Unknown effect — ask an admin to check this item's setup."
 
 
 def is_usable(metadata: dict | None) -> bool:
@@ -85,7 +85,7 @@ async def use_potion(guild_id: int, user_id: int, item_name: str) -> dict:
     the effect granted. A double-click therefore burns at most the
     quantity actually owned. If the effect grant itself fails after the
     decrement, the copy is refunded so the member is never charged for
-    nothing - that refund is the only place this module writes back to
+    nothing — that refund is the only place this module writes back to
     inventory.
 
     Never raises for user-facing failures; returns {"success": False,
@@ -107,7 +107,7 @@ async def use_potion(guild_id: int, user_id: int, item_name: str) -> dict:
     if not is_usable(meta):
         return {"success": False,
                 "error": (f"**{item_name}** has no valid effect configured "
-                          f"- ask an admin to check its setup.")}
+                          f"— ask an admin to check its setup.")}
 
     try:
         remaining = await remove_item(guild_id, user_id, item_name, quantity=1)
@@ -123,7 +123,7 @@ async def use_potion(guild_id: int, user_id: int, item_name: str) -> dict:
         expires_at = await grant_xp_boost(
             guild_id, user_id, multiplier, duration_hours, source="potion")
     except Exception as e:
-        # Refund the consumed copy - the member clicked Use and got
+        # Refund the consumed copy — the member clicked Use and got
         # nothing. give_item's upsert restores the exact stack size.
         try:
             await give_item(

@@ -11,7 +11,7 @@ from utils.currency import get_currency_config
 
 
 # Daily/Streak state lives entirely in utils/daily_engine.py. The
-# /daily command was removed - /streak is now the single public entry
+# /daily command was removed — /streak is now the single public entry
 # point (cogs/wallet.py), and the Wallet 🔥 Streak button opens the
 # same panel. There is no alias or duplicate claim path here.
 
@@ -76,7 +76,7 @@ class Economy(commands.Cog):
         cur = await get_currency_config(interaction.guild.id)
         cc, cd = cur["coins"], cur["diamonds"]
         embed = discord.Embed(
-            title=f"Balance - {member.display_name}",
+            title=f"Balance — {member.display_name}",
             color=WALLET_ECHO_COLOR)
         embed.add_field(name=f"{cc['emoji']} {cc['name']}",
                         value=f"**{bal:,}**")
@@ -129,7 +129,7 @@ class Economy(commands.Cog):
     # ─── CONVERT (Phase 5 / Economy v2) ─────────────────
     # Converts coins into diamonds at this guild's configured rate
     # (default 500:1, set via the Economy dashboard page or left at
-    # default). Rounds down to the nearest full diamond - leftover
+    # default). Rounds down to the nearest full diamond — leftover
     # coins that do not divide evenly stay in the user's balance.
     @app_commands.command(name="convert",
                           description="Convert coins into diamonds")

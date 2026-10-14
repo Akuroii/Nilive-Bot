@@ -30,10 +30,10 @@
         </div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Games spawn automatically with a probability that adapts daily to stay
-            within your min/max weekly range - behind pace pushes the odds up, ahead
+            within your min/max weekly range — behind pace pushes the odds up, ahead
             of pace pushes them down. On the last day of the week, if the minimum
             still hasn't been hit, a game force-fires regardless of the roll.
-            <b>Enabled OFF</b> only stops the automatic system - manual and test
+            <b>Enabled OFF</b> only stops the automatic system — manual and test
             spawns keep working.
         </p>
         <div class="form-row">
@@ -58,7 +58,7 @@
         <p class="text-muted text-sm" style="margin-bottom:14px;">
             When a new game is created without its own reward pool (and its
             category has no preset), it starts with <b>this</b> pool. Each winner
-            rolls one reward independently (weighted). An empty preset is valid -
+            rolls one reward independently (weighted). An empty preset is valid —
             games will just have no rewards.
         </p>
         <div id="mg-global-presets"></div>
@@ -89,7 +89,7 @@
             </div>
             <div class="form-group">
                 <label class="form-label">Parent (optional)</label>
-                <select class="form-input" id="mg-cat-parent"><option value="">- none (top level) -</option></select>
+                <select class="form-input" id="mg-cat-parent"><option value="">— none (top level) —</option></select>
             </div>
             <div class="form-group">
                 <label class="form-label">Weight</label>
@@ -210,10 +210,10 @@ const MG_TYPES = {
     rps:         { icon: '✊', name: 'Rock Paper Scissors' },
 };
 // coins/diamonds labels come from the guild's currency config
-// (window.__CURRENCY__, written by base.html) - never hardcoded here, so a
+// (window.__CURRENCY__, written by base.html) — never hardcoded here, so a
 // renamed currency shows up in reward lists with no code change.
 // The TEXT variant, not currencyLabel(): these labels land in the reward
-// type <select> below, and an <option> may only contain text - a custom
+// type <select> below, and an <option> may only contain text — a custom
 // currency icon has to degrade to its emoji name there.
 // Built on first use, not at load: currencyLabelText() lives in dashboard.js,
 // which is loaded after this page script, and calling it here would throw and
@@ -268,7 +268,7 @@ function esc(s) {
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-// fetch wrapper mirroring ajaxSave (POST only supports that method -
+// fetch wrapper mirroring ajaxSave (POST only supports that method —
 // PATCH/DELETE get the same loading + toast + CSRF behavior; the
 // global fetch patch attaches the CSRF header automatically).
 async function mgSave(method, url, payload, btn, successMsg, then) {
@@ -377,7 +377,7 @@ async function saveMinigamesConfig(btn) {
 }
 
 async function saveGlobalPresets(btn) {
-    // Preset is part of the config object - saving it persists the
+    // Preset is part of the config object — saving it persists the
     // current channel/min/max values along with it (they were loaded
     // from the same config, so nothing changes silently).
     const cp = document.getElementById('mg-channel-picker');
@@ -443,14 +443,14 @@ function renderTree() {
     const templates = mgState.templates;
 
     function templatesFor(node) {
-        // Direct templates only - a node's body lists what lives in IT.
+        // Direct templates only — a node's body lists what lives in IT.
         // Subtree totals are shown in the node's meta line, and child
         // categories render their own templates when expanded.
         return templates.filter(t => t.category_id === node.id);
     }
 
     function templateRows(list) {
-        if (!list.length) return '<div class="text-muted text-sm" style="padding:4px 0 8px 26px;">No games here yet - create one with the builder.</div>';
+        if (!list.length) return '<div class="text-muted text-sm" style="padding:4px 0 8px 26px;">No games here yet — create one with the builder.</div>';
         return list.map(t => {
             const type = MG_TYPES[t.game_type] || { icon: '🎮', name: t.game_type };
             const off = !t.enabled;
@@ -462,7 +462,7 @@ function renderTree() {
                 ${t.queued ? '<span class="mg-badge mg-badge-queued">queued</span>' : ''}
                 ${!t.has_reward_pool ? '<span class="mg-badge mg-badge-nopool">no reward pool</span>' : ''}
                 <div class="mg-tpl-actions">
-                    <label class="mg-inline-toggle" title="Enabled - allows this game to be used normally">
+                    <label class="mg-inline-toggle" title="Enabled — allows this game to be used normally">
                         <input type="checkbox" class="toggle-input" ${t.enabled ? 'checked' : ''}
                             onchange="toggleTemplateField(${t.id}, 'enabled', this)">
                         <span class="text-sm text-muted">Enabled</span>
@@ -494,7 +494,7 @@ function renderTree() {
                 <span class="mg-node-name">${esc(node.name)}</span>
                 <span class="mg-node-meta">w${node.weight} · ${node.subtree_playable} playable / ${node.direct_templates} direct</span>
                 <div class="mg-node-actions" onclick="event.stopPropagation()">
-                    <label title="Auto-rotation exclusion - disabled categories are simply never picked (nothing is deleted)">
+                    <label title="Auto-rotation exclusion — disabled categories are simply never picked (nothing is deleted)">
                         <input type="checkbox" class="toggle-input" ${node.enabled ? 'checked' : ''}
                             onchange="toggleCategoryField(${node.id}, 'enabled', this)">
                         <span class="text-sm text-muted">Active</span>
@@ -518,7 +518,7 @@ function renderTree() {
 
     if (!mgState.tree.length) {
         el.innerHTML = `<div class="card"><div class="text-muted" style="padding:12px;">
-            No categories yet - create your first one (e.g. “Weekend Challenges”) and
+            No categories yet — create your first one (e.g. “Weekend Challenges”) and
             add games inside it.</div></div>`;
         return;
     }
@@ -538,7 +538,7 @@ function openBuilderForCategory(id) {
 // ── Category create/edit form ──────────────────────────────────────
 function populateParentSelect(excludeId) {
     const sel = document.getElementById('mg-cat-parent');
-    let html = '<option value="">- none (top level) -</option>';
+    let html = '<option value="">— none (top level) —</option>';
     (function walk(nodes, prefix) {
         for (const n of nodes) {
             if (n.id === excludeId) continue; // cannot be parent of self
@@ -570,7 +570,7 @@ function editCategory(id) {
     const cat = find(mgState.tree);
     if (!cat) return;
     document.getElementById('mg-cat-edit-id').value = cat.id;
-    document.getElementById('mg-cat-form-title').textContent = '✏️ Edit Category - ' + cat.name;
+    document.getElementById('mg-cat-form-title').textContent = '✏️ Edit Category — ' + cat.name;
     document.getElementById('mg-cat-name').value = cat.name;
     document.getElementById('mg-cat-weight').value = cat.weight;
     document.getElementById('mg-cat-emoji').value = cat.emoji || '';
@@ -610,12 +610,12 @@ async function toggleCategoryField(id, field, el) {
     const before = el.checked;
     showConfirm(`Auto-rotation ${before ? 'ON' : 'OFF'} for this category? ` +
         (before
-            ? 'Disabled categories are simply never picked - nothing is deleted or stopped.'
+            ? 'Disabled categories are simply never picked — nothing is deleted or stopped.'
             : 'The category (and its subcategories) will be picked by the automatic system again.'),
         async () => {
             const data = await mgSave('PATCH', `/api/minigames/categories/${id}`, { [field]: before });
             if (data && data.success) loadCatsTab();
-            else el.checked = !before; // roll back - show the saved state
+            else el.checked = !before; // roll back — show the saved state
         });
 }
 
@@ -634,7 +634,7 @@ async function toggleTemplateField(id, field, el) {
     showConfirm(`${label} ${before ? 'ON' : 'OFF'} for this game?`, async () => {
         const data = await mgSave('PATCH', `/api/minigames/templates/${id}`, { [field]: before });
         if (!(data && data.success)) {
-            el.checked = !before; // roll back - the state the user sees is the saved state
+            el.checked = !before; // roll back — the state the user sees is the saved state
         }
         loadCatsTab();
     });
@@ -649,13 +649,13 @@ async function duplicateTemplate(id, btn) {
 }
 
 async function deleteTemplate(id, name) {
-    showConfirm(`Delete game "${name}"? A game that is currently running keeps its snapshot and finishes normally - deleting only removes it from future spawns.`, async () => {
+    showConfirm(`Delete game "${name}"? A game that is currently running keeps its snapshot and finishes normally — deleting only removes it from future spawns.`, async () => {
         const data = await mgSave('DELETE', `/api/minigames/templates/${id}`, undefined, null, 'Game deleted!',
             () => loadCatsTab());
     });
 }
 
-// ── Spawns (test / manual) - queue + poll ──────────────────────────
+// ── Spawns (test / manual) — queue + poll ──────────────────────────
 async function queueSpawn(id, mode, btn) {
     if (btn) setLoading(btn, true, '…');
     try {
@@ -666,7 +666,7 @@ async function queueSpawn(id, mode, btn) {
         });
         const data = await res.json();
         if (data.success) {
-            showToast(`Spawn queued - the bot picks it up within a few seconds`, 'success');
+            showToast(`Spawn queued — the bot picks it up within a few seconds`, 'success');
             loadCatsTab();
             startSpawnPolling();
         } else {
@@ -693,7 +693,7 @@ function startSpawnPolling() {
             const data = await res.json();
             if ((data.requests || []).length === 0) {
                 stopSpawnPolling();
-                showToast('Spawn finished - see History for the result', 'info');
+                showToast('Spawn finished — see History for the result', 'info');
                 loadCatsTab();
                 if (document.getElementById('tab-content-history').style.display === 'block') {
                     mgState.historyLoaded = false;
@@ -734,15 +734,15 @@ function fmtWhen(r) {
 function winnerNames(r) {
     if (r.legacy) return r.winner_display_name ? esc(r.winner_display_name) : '<span class="text-muted">Unclaimed</span>';
     const ws = r.winners || [];
-    if (!ws.length) return '<span class="text-muted">-</span>';
+    if (!ws.length) return '<span class="text-muted">—</span>';
     return ws.map(w => esc(w.display_name || w.name || String(w.id))).join(', ');
 }
 
 function rewardsSummary(r) {
-    if (r.legacy) return '<span class="text-muted">-</span>';
+    if (r.legacy) return '<span class="text-muted">—</span>';
     const ws = r.winners || [];
     const rw = ws.filter(w => w.rewards && w.rewards.length);
-    if (!rw.length) return '<span class="text-muted">-</span>';
+    if (!rw.length) return '<span class="text-muted">—</span>';
     return rw.map(w => w.rewards.map(x => esc(x.reward_type) + ': ' + esc(x.reward_value)).join(', ')).join(' · ');
 }
 
@@ -768,7 +768,7 @@ async function loadHistory() {
             : `<span class="mg-badge ${r.mode === 'auto' ? 'mg-badge-live' : 'mg-badge-queued'}">${MG_MODE_EMOJI[r.mode] || ''} ${esc(r.mode || '?')}</span>`;
         const statusBadge = isV2
             ? `<span class="mg-badge ${r.status === 'completed' ? 'mg-badge-live' : r.status === 'running' ? 'mg-badge-queued' : 'mg-badge-off'}">${MG_STATUS_LABELS[r.status] || esc(r.status || '?')}</span>`
-            : (r.forced ? '<span class="badge badge-warning">Forced</span>' : '-');
+            : (r.forced ? '<span class="badge badge-warning">Forced</span>' : '—');
         const gameName = isV2
             ? `<span style="margin-right:4px;">${type ? type.icon : '🎮'}</span><b>${esc(r.template_name || 'Deleted game')}</b>`
             : `<span class="text-muted">${esc(r.tier || '?')} tier</span>`;
@@ -801,7 +801,7 @@ function historyDetailHtml(r) {
         parts.push(ws.map(w => {
             const rw = (w.rewards || []).map(x =>
                 `${rewardTypeLabels()[x.reward_type] || esc(x.reward_type)}: ${esc(x.reward_value)}`).join(', ');
-            return `<div style="margin:2px 0;">🏆 ${esc(w.display_name || w.name || String(w.id))} ${rw ? '- ' + rw : ''}</div>`;
+            return `<div style="margin:2px 0;">🏆 ${esc(w.display_name || w.name || String(w.id))} ${rw ? '— ' + rw : ''}</div>`;
         }).join(''));
     } else if (r.result_text) {
         parts.push(`<div class="text-muted">${esc(r.result_text)}</div>`);

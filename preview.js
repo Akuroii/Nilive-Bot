@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   Message Builder v2 - the differential preview engine.
+   Message Builder v2 — the differential preview engine.
 
    Phase 1, step 3. The boundary is:
 
@@ -9,7 +9,7 @@
    the editor's internal shape, so "the preview is the message" is an
    assertion rather than a promise. The only addition on top of the wire
    payload is the `key` field, taken from the ids the Step 1 model
-   generated - those keys, and nothing else, give DOM nodes their
+   generated — those keys, and nothing else, give DOM nodes their
    identity across patches. This file never invents a key and never uses
    an array index as one.
 
@@ -43,7 +43,7 @@
    Every write goes through a counted helper, and `preview.stats()` reports
    what the last patches actually did. That is how "a one-character edit
    costs one text write and nothing else" becomes a measured fact instead
-   of an intention - in the test harness and, later, in the dev HUD.
+   of an intention — in the test harness and, later, in the dev HUD.
 
    NOT IN THIS FILE (deliberately)
    -------------------------------
@@ -148,7 +148,7 @@ window.NERO.embed = window.NERO.embed || {};
             throw new TypeError('preview.create needs a mount element');
         }
         if (typeof options.now !== 'function') {
-            throw new TypeError('preview.create needs opts.now - the clock is injected, never read');
+            throw new TypeError('preview.create needs opts.now — the clock is injected, never read');
         }
 
         const doc = mount.ownerDocument || options.document;
@@ -172,7 +172,7 @@ window.NERO.embed = window.NERO.embed || {};
 
         // Per-node memo of the last markup INPUT that was rendered into it.
         // Keyed on the input, not the output, so an unchanged field costs
-        // zero markdown parses - and never on the rendered HTML, because a
+        // zero markdown parses — and never on the rendered HTML, because a
         // browser normalises what it parses and reading it back would lie.
         const markupKeys = new WeakMap();
         const markupResults = new WeakMap();
@@ -222,7 +222,7 @@ window.NERO.embed = window.NERO.embed || {};
         }
 
         /**
-         * Write an element's TRAILING text - for the one place where v1 puts
+         * Write an element's TRAILING text — for the one place where v1 puts
          * a bare text node beside a child element (the author name). This is
          * the literal form of "patch the text node": the node is reused and
          * its `nodeValue` is updated; it is only created when missing.
@@ -276,7 +276,7 @@ window.NERO.embed = window.NERO.embed || {};
         //
         // Note on counting moves: a reorder repositions an existing node with
         // insertBefore. The node OBJECT is untouched, but a browser reports
-        // that as a removal+addition pair in MutationObserver records - which
+        // that as a removal+addition pair in MutationObserver records — which
         // is exactly why `nodesMoved` is a separate counter rather than being
         // folded into created/removed.
         // Existing children are matched by their data-key: a node whose key
@@ -379,7 +379,7 @@ window.NERO.embed = window.NERO.embed || {};
             const identity = ctx.botIdentity || {};
             // v1 renders the bot avatar's url as given (it comes from the
             // server, not from the message), so this one is not run through
-            // the media allowlist - matching v1 exactly.
+            // the media allowlist — matching v1 exactly.
             const avatarUrl = identity.avatar ? String(identity.avatar) : '';
             const avatarSpec = {
                 key: avatarUrl ? 'avatar:img' : 'avatar:div',
@@ -436,7 +436,7 @@ window.NERO.embed = window.NERO.embed || {};
         function embedKey(embed, index) {
             // The real path always carries `key` (model ids). The positional
             // fallback exists only for a hand-built payload, and is a
-            // documented degradation - never used by updateDocument.
+            // documented degradation — never used by updateDocument.
             return embed && embed.key !== undefined && embed.key !== null
                 ? String(embed.key) : 'index:' + index;
         }
@@ -463,7 +463,7 @@ window.NERO.embed = window.NERO.embed || {};
             if (author.name || authorIcon) {
                 const iconSpec = {
                     key: 'icon',
-                    // v1 gives this <img> no class - only an inline style.
+                    // v1 gives this <img> no class — only an inline style.
                     build: () => h(doc, 'img', null, stats),
                     update: (icon) => {
                         setAttr(icon, 'src', authorIcon);
@@ -658,7 +658,7 @@ window.NERO.embed = window.NERO.embed || {};
             if (destroyed) return;
             destroyed = true;
             // destroy() is a legitimate teardown, not a patch, but it still
-            // destroys nodes - so it is counted, and the counters stay an
+            // destroys nodes — so it is counted, and the counters stay an
             // honest account of how much DOM the preview created and threw away.
             while (mount.firstChild) {
                 mount.removeChild(mount.firstChild);

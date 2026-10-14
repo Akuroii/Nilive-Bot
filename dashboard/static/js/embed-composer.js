@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// NERO DASHBOARD - embed-composer.js
+// NERO DASHBOARD — embed-composer.js
 //
 // The single-embed editor + Discord message preview renderer,
 // EXTRACTED from manage/embedbuilder.html so the Minigames v2
@@ -15,11 +15,11 @@
 // lifecycle so previews never leak object URLs (see below).
 //
 // Consumed by:
-//   * manage/embedbuilder.html   - multi-embed composer (unchanged
+//   * manage/embedbuilder.html   — multi-embed composer (unchanged
 //                                   behavior; its inline editor /
 //                                   preview / payload code now
 //                                   delegates to this module)
-//   * systems/minigame_builder.html - one embed + live component
+//   * systems/minigame_builder.html — one embed + live component
 //                                   rows per game type
 //
 // No server round-trips, no storage: pure view + payload helpers.
@@ -30,7 +30,7 @@ window.EmbedComposer = (function () {
     'use strict';
 
     // ── Escaping ──────────────────────────────────────────────────
-    // String-based (no DOM allocation per call) - equivalent output
+    // String-based (no DOM allocation per call) — equivalent output
     // to the old page's textContent-div helper for all five HTML
     // specials.
     function esc(s) {
@@ -55,14 +55,14 @@ window.EmbedComposer = (function () {
     // ── Attachment preview URLs ───────────────────────────────────
     // The old inline renderer called URL.createObjectURL() fresh on EVERY
     // render (every keystroke, every embed edit) and never revoked anything
-    // - an unbounded per-keystroke leak of blob: URLs. Once enough piled
+    // — an unbounded per-keystroke leak of blob: URLs. Once enough piled
     // up, createObjectURL() could start throwing and abort the render
     // mid-loop, blanking the list/preview while `attachments` (what Send
-    // actually reads) stayed intact - i.e. Discord could receive a file
+    // actually reads) stayed intact — i.e. Discord could receive a file
     // the UI wasn't showing.
     //
     // So: mint at most ONE object URL per Blob and reuse it.
-    //   * Pages that OWN their attachment lifecycle (Embed Builder - it
+    //   * Pages that OWN their attachment lifecycle (Embed Builder — it
     //     caches on the attachment object, revokes on remove/send/clear)
     //     pass `data.attachmentPreviewUrl` and are fully in control.
     //   * Pages that don't (minigame builder) fall back to this WeakMap
@@ -99,7 +99,7 @@ window.EmbedComposer = (function () {
     // ── Graceful degradation: can we actually DISPLAY a blob: URL? ──────
     // A blob: src is only half the story. A Content-Security-Policy
     // `img-src` that omits `blob:` lets the attribute set, the object URL
-    // stay alive, and the <img> render as an empty box - no network
+    // stay alive, and the <img> render as an empty box — no network
     // request, no failed request, just a console line the admin never sees.
     // That is exactly how "attachments don't appear" gets reported as a
     // broken upload feature when nothing about the upload ever failed.
@@ -121,17 +121,17 @@ window.EmbedComposer = (function () {
     function _resetBlobProbe() { _blobOk = null; _blobProbe = null; }
 
     // Files small enough to inline as a data: URI. 25MB of image would be a
-    // ~33MB base64 string per attachment spliced into innerHTML - on a weak
+    // ~33MB base64 string per attachment spliced into innerHTML — on a weak
     // laptop that is a freeze, not a preview. Beyond this we show a clear
     // "no preview" tile and say why, which beats a silently blank box.
     const DATA_URL_MAX_BYTES = 5 * 1024 * 1024;
 
     // Human-readable copy for every way a preview can legitimately be
-    // unavailable. A blank tile is never an acceptable answer - the whole
+    // unavailable. A blank tile is never an acceptable answer — the whole
     // point is that the admin can tell "no preview" from "broken feature".
     const NO_PREVIEW_HINT = {
-        'too-large-for-preview': 'File is larger than the inline-preview limit - it will still be sent.',
-        'no-blob': 'No file data in this browser tab - re-add the file.',
+        'too-large-for-preview': 'File is larger than the inline-preview limit — it will still be sent.',
+        'no-blob': 'No file data in this browser tab — re-add the file.',
         'decode-failed': 'This browser could not read the file for previewing.',
         'remote-url-missing': 'Attachment reference has no URL.',
     };
@@ -160,7 +160,7 @@ window.EmbedComposer = (function () {
                 if (!ok) {
                     console.warn('[embed-composer] blob: URLs are not renderable in this '
                         + 'document (blocked by CSP img-src, or createObjectURL unavailable). '
-                        + 'Local attachment previews fall back to data: URIs - previews may '
+                        + 'Local attachment previews fall back to data: URIs — previews may '
                         + 'use more memory and are skipped above '
                         + (DATA_URL_MAX_BYTES / 1024 / 1024).toFixed(0) + 'MB.');
                 }
@@ -206,7 +206,7 @@ window.EmbedComposer = (function () {
      * The ONE place that decides how a local attachment gets previewed.
      * Order: cached → remote → blob: (if the document can render it) →
      * data: (small files only). Never throws; `null` means "no preview,
-     * and here is why" - callers must show that reason, not a blank box.
+     * and here is why" — callers must show that reason, not a blank box.
      *
      * @param {object} a attachment record { name, type, size, blob, source?, url? }
      * @param {object} [opts] { allowBlob?: boolean }
@@ -238,7 +238,7 @@ window.EmbedComposer = (function () {
                     return { url, kind: 'blob', reason: '' };
                 } catch (e) {
                     console.error('[embed-composer] createObjectURL failed for', a.name, e);
-                    // fall through to data: - a throw here must not mean "no preview"
+                    // fall through to data: — a throw here must not mean "no preview"
                 }
             }
             if (a.size > DATA_URL_MAX_BYTES) {
@@ -252,7 +252,7 @@ window.EmbedComposer = (function () {
                 });
         });
         a._previewPromise = run;
-        // The promise is only a de-dupe key - drop it once settled so a
+        // The promise is only a de-dupe key — drop it once settled so a
         // later retry (the "no preview → retry" affordance) isn't short-
         // circuited forever by a resolved promise.
         run.then(() => { a._previewPromise = null; },
@@ -261,7 +261,7 @@ window.EmbedComposer = (function () {
     }
 
     // ── Textarea insertion helpers ────────────────────────────────
-    // (verbatim from the old page - the emoji/mention tooling on
+    // (verbatim from the old page — the emoji/mention tooling on
     // both pages inserts through these.)
     function insertAtCursor(textarea, textToInsert, opts) {
         opts = opts || {};
@@ -311,21 +311,21 @@ window.EmbedComposer = (function () {
     // old page's renderEmbeds/wireEmbedEvents)
     //
     // opts:
-    //   listEl      - container that holds the accordion
-    //   counterEl   - "n / max" counter (optional)
-    //   maxEmbeds   - cap (button toasts are the PAGE's job)
-    //   getEmbeds   - () => array of embed objects (mutated in place)
-    //   getActive   - () => active index (-1 = none expanded)
-    //   setActive   - (i) => set active index
-    //   onChange    - () => called after ANY field mutation (preview/
+    //   listEl      — container that holds the accordion
+    //   counterEl   — "n / max" counter (optional)
+    //   maxEmbeds   — cap (button toasts are the PAGE's job)
+    //   getEmbeds   — () => array of embed objects (mutated in place)
+    //   getActive   — () => active index (-1 = none expanded)
+    //   setActive   — (i) => set active index
+    //   onChange    — () => called after ANY field mutation (preview/
     //                 draft/history hooks belong to the page)
-    //   onDuplicate - (i) => page-level duplicate (max check, toast)
-    //   onDelete    - (i) => page-level delete
-    //   hideActions - true = the per-card ⧉/🗑 buttons are not
+    //   onDuplicate — (i) => page-level duplicate (max check, toast)
+    //   onDelete    — (i) => page-level delete
+    //   hideActions — true = the per-card ⧉/🗑 buttons are not
     //                 rendered (single-embed pages like the minigames
-    //                 builder - the game has exactly one embed)
+    //                 builder — the game has exactly one embed)
     //
-    // Returns { render() } - call render() after structural changes
+    // Returns { render() } — call render() after structural changes
     // (add/delete/load/clear). Field inputs mutate the embed objects
     // in place and fire onChange() WITHOUT re-rendering the DOM (the
     // user's caret stays put, exactly as on the old page).
@@ -344,7 +344,7 @@ window.EmbedComposer = (function () {
         <div class="eb-embed-card ${i === active ? 'eb-expanded' : ''}" data-idx="${i}">
             <div class="eb-embed-head" data-toggle="${i}">
                 <span class="eb-embed-chevron">›</span>
-                <span class="eb-embed-title-preview">Embed ${i + 1}${e.title ? ' - ' + esc(e.title) : ''}</span>
+                <span class="eb-embed-title-preview">Embed ${i + 1}${e.title ? ' — ' + esc(e.title) : ''}</span>
                 ${opts.hideActions ? '' : `
                 <div class="eb-embed-actions">
                     <button type="button" class="btn btn-sm btn-secondary" data-dup="${i}" title="Duplicate">⧉</button>
@@ -448,7 +448,7 @@ window.EmbedComposer = (function () {
                         const label = listEl.querySelector(
                             `.eb-embed-card[data-idx="${i}"] .eb-embed-title-preview`);
                         if (label) label.textContent =
-                            `Embed ${i + 1}${el.value ? ' - ' + el.value : ''}`;
+                            `Embed ${i + 1}${el.value ? ' — ' + el.value : ''}`;
                     }
                     if (field === 'description') {
                         const counter = el.closest('.form-group').querySelector('.text-muted');
@@ -506,21 +506,21 @@ window.EmbedComposer = (function () {
     // DISCORD MESSAGE PREVIEW
     //
     // data:
-    //   content      - message text (markdown)
-    //   embeds       - [embed objects] (see blankEmbed)
-    //   attachments  - optional [ { name, type, blob } ] (old page only)
-    //   components   - optional: the ENGINE's component rows -
+    //   content      — message text (markdown)
+    //   embeds       — [embed objects] (see blankEmbed)
+    //   attachments  — optional [ { name, type, blob } ] (old page only)
+    //   components   — optional: the ENGINE's component rows —
     //                  [[{label, style, disabled, emoji?}, ...], ...]
     //                  (utils/minigame_engine.initial_component_rows).
     //                  Rendered as Discord action rows under the
-    //                  embeds - this is what keeps the preview
+    //                  embeds — this is what keeps the preview
     //                  identical to the real game message.
-    //   botIdentity  - { name, avatar }
-    //   lookups      - { roles: {id:{name,color}}, channels: {id:{name}},
+    //   botIdentity  — { name, avatar }
+    //   lookups      — { roles: {id:{name,color}}, channels: {id:{name}},
     //                  users: {id:name}, onUserResolve: fn|null }
-    //                  (all optional - unresolved mentions render as
+    //                  (all optional — unresolved mentions render as
     //                  raw IDs, exactly like Discord does)
-    //   emptyText    - placeholder when nothing is set
+    //   emptyText    — placeholder when nothing is set
     // ═══════════════════════════════════════════════════════════════
     const EMOJI_UNICODE_RE = /\p{Extended_Pictographic}(\u200d\p{Extended_Pictographic})*\ufe0f?/gu;
     const TOKEN_RE = /<(a?):(\w+):(\d+)>|<#(\d+)>|<@&(\d+)>|<@!?(\d+)>/g;
@@ -561,7 +561,7 @@ window.EmbedComposer = (function () {
         return esc(match);
     }
 
-    // Discord message-content markdown + mention/emoji rendering -
+    // Discord message-content markdown + mention/emoji rendering —
     // matches what the real client does closely enough for an
     // accurate preview (verbatim logic from the old page, lookups
     // now passed in instead of read from module globals).
@@ -587,7 +587,7 @@ window.EmbedComposer = (function () {
 
         let escaped = esc(working);
 
-        // Markdown - bold before italic so `**x**` isn't half-consumed by
+        // Markdown — bold before italic so `**x**` isn't half-consumed by
         // the single-asterisk italic pattern first.
         escaped = escaped.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
         escaped = escaped.replace(/__([\s\S]+?)__/g, '<u>$1</u>');
@@ -624,7 +624,7 @@ window.EmbedComposer = (function () {
     function emojiDisplay(emoji) {
         if (!emoji) return '';
         const t = String(emoji);
-        // Full tokens only: <a:name:id> / <name:id> - anything else
+        // Full tokens only: <a:name:id> / <name:id> — anything else
         // (unicode chars, plain text) renders as-is.
         const m = t.match(/^<(a?):(\w+):(\d+)>$/);
         if (m) {
@@ -680,7 +680,7 @@ window.EmbedComposer = (function () {
 
         if (attachments.length) {
             html += `<div class="eb-preview-attachments">`;
-            // Images first (in insertion order), then non-images as badges -
+            // Images first (in insertion order), then non-images as badges —
             // same split the Embed Builder's own list does.
             const imgHtml = attachments.filter(a => a.type && a.type.startsWith('image/')).map(a => {
                 try {
@@ -734,7 +734,7 @@ window.EmbedComposer = (function () {
             html += `</div>`;
         }
 
-        // The game's interactive component rows - same JSON the engine
+        // The game's interactive component rows — same JSON the engine
         // posts, so the preview IS the message (embed + components
         // read as one game, not two systems).
         if (components.length) {

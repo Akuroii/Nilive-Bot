@@ -35,7 +35,7 @@ class MVP(commands.Cog):
 
     # ─── SCORE MESSAGES (Phase 3 / E1: now driven by the Activity
     # Engine's activity_message event instead of its own on_message
-    # listener - word_count used to be computed here independently
+    # listener — word_count used to be computed here independently
     # of cogs/leveling.py's identical computation on the same
     # message; now it's computed once, centrally, in
     # cogs/activity_engine.py and passed to both.) ─────────────────
@@ -68,7 +68,7 @@ class MVP(commands.Cog):
     # Engine's activity_voice_tick event instead of MVP's own
     # join/leave session timer.
     #
-    # Worth flagging: this also fixes a real gap MVP had on its own -
+    # Worth flagging: this also fixes a real gap MVP had on its own —
     # the old on_voice_state_update/_credit_voice_score session timer
     # had NO anti-farming guards at all (unlike leveling's poll loop),
     # so a member could sit alone, deafened, or in the AFK channel
@@ -76,7 +76,7 @@ class MVP(commands.Cog):
     # excludes all of that before MVP ever sees the tick, so this is
     # a side-effect security/fairness improvement, not just a
     # refactor. The old voice_sessions-based join/leave bookkeeping
-    # is gone entirely - a tick-based model doesn't need it. ────────
+    # is gone entirely — a tick-based model doesn't need it. ────────
     @commands.Cog.listener()
     async def on_activity_voice_tick(self, guild: discord.Guild,
                                       member: discord.Member,

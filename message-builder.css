@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════
-   NERO DASHBOARD - message-builder.css
-   Message Builder v2 (phase 1) - the shell's own stylesheet.
+   NERO DASHBOARD — message-builder.css
+   Message Builder v2 (phase 1) — the shell's own stylesheet.
 
    SCOPE
    -----
@@ -26,7 +26,7 @@
 
    The topbar is sticky at top:0 and ~53px tall, so the sticky preview offsets
    itself below it via one variable; when the preview stops being a side column
-   (narrower widths) it becomes a top pane instead of a static block - the
+   (narrower widths) it becomes a top pane instead of a static block — the
    preview is never hidden, at any width.
    ═══════════════════════════════════════════════════════════════ */
 
@@ -93,7 +93,7 @@
 /* ── Files summary (owner: the page, step 7e) ──────────────────
    One static line about the files the message will carry. No rows, no
    verdicts, and no live region: it never announces (the strip does) and it
-   never wears a tone - the numbers are the whole message. Muted like the
+   never wears a tone — the numbers are the whole message. Muted like the
    region title it sits under, and `hidden` until the document names a file. */
 .mb2-files {
     margin: 0 0 10px;
@@ -107,7 +107,7 @@
 /* ── Validation strip (owner: the page, step 6a) ─────────────── */
 /* One region, two states: the tone class is what the page swaps when the
    worst issue changes (the same mb2-tone-* vocabulary the status bar uses).
-   The text inherits --text2 - a long message stays readable. */
+   The text inherits --text2 — a long message stays readable. */
 .mb2-strip {
     margin: 0 0 14px;
     padding: 10px 12px;
@@ -215,7 +215,7 @@
 .mb2-tone-muted .mb2-status-pill   { color: var(--text3); }
 
 /* ── Action bar buttons (actionbar.js owns everything inside the container) ──
-   The disabled style keys off :disabled - the button's real property - because
+   The disabled style keys off :disabled — the button's real property — because
    a disabled control must look disabled, not merely be one. */
 .mb2-bar-btn {
     display: inline-flex;
@@ -369,7 +369,7 @@
 }
 .mb2-rail-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
 .mb2-rail-btn:disabled { opacity: .35; cursor: default; }
-/* ── 6b: the rail's facts - the embeds count and the issue badges ──────
+/* ── 6b: the rail's facts — the embeds count and the issue badges ──────
    Numbers beside the rows, never verdicts of their own: the tone class is the
    same mb2-tone-* vocabulary the strip and the status bar use, and the badge is
    hidden (not emptied) when its node has nothing to report. [hidden] is left
@@ -398,7 +398,7 @@
 /* ── Inspector (inspector.js owns everything inside #mb2-inspector-body) ──
    Direct controls, no decoration: one labelled control per property, grouped
    with fieldsets. Every rule here is about touch target size, wrapping and
-   focus - none of it is validation state, which step 6 owns. */
+   focus — none of it is validation state, which step 6 owns. */
 .mb2-insp-panel { display: block; }
 .mb2-insp-field { margin-bottom: 12px; min-width: 0; }
 .mb2-insp-label,
@@ -431,7 +431,7 @@
 .mb2-insp-now { flex: 0 0 auto; min-height: 34px; }
 /* 7d: the local-file control. The input, its state line and the Remove button
    each get their own row inside the field. The state line is plain, quiet text:
-   it is what aria-describedby points at (never a live region - the strip
+   it is what aria-describedby points at (never a live region — the strip
    announces), and it is where a problem is READ. No validation tone is applied
    here, deliberately: the inspector has never painted validation, and a problem
    the validator found belongs to the strip (5c's contract, kept by 7d). */

@@ -6,7 +6,7 @@ scenarios:
 
 * **Inventory.** Every production write to the `levels` table is discovered by
   scanning the source and has to match a known, classified entry point. Adding a
-  new XP write path - the only way an XP-safety rule can be bypassed - fails this
+  new XP write path — the only way an XP-safety rule can be bypassed — fails this
   test until it is classified here.
 * **Invariants.** For each entry point: does it clamp XP at zero, does it keep
   `level` consistent with the XP curve, does it touch entitlements/claims/roles?
@@ -97,7 +97,7 @@ def function_body(text: str, *names: str) -> str:
 
 
 def enclosing_function(spans, lineno: int) -> str:
-    """The OUTERMOST function containing `lineno` - the stable API surface.
+    """The OUTERMOST function containing `lineno` — the stable API surface.
 
     A write inside a nested helper (`api_edit_member`'s inner `update()`) is
     attributed to the public entry point that owns it, so an inventory entry
@@ -146,7 +146,7 @@ def main():
               f"{statement} is not in the audit inventory")
     for key in sorted(LEVEL_WRITERS):
         check(f"inventory still lists {key[0]}::{key[1]}()", key in found,
-              "the audited entry point disappeared - re-audit")
+              "the audited entry point disappeared — re-audit")
     check("no production code deletes a member's levels row",
           not any(statement == "DELETE FROM levels" for statement in found.values()),
           str([k for k, v in found.items() if v == "DELETE FROM levels"]))
@@ -455,7 +455,7 @@ def main():
 
     import asyncio
     outcome, stored = asyncio.run(runnf())
-    check("five rounded penalties on 7 XP leave 7 XP, level 0 - no debt",
+    check("five rounded penalties on 7 XP leave 7 XP, level 0 — no debt",
           stored == (7, 0) and outcome["applied"] is False,
           f"stored={stored} outcome={outcome}")
     check("the last penalty deducted nothing (no debt to carry)",

@@ -431,10 +431,10 @@ async def deliver_role(member, role_id: int, reason: str) -> None:
 # ─── Level reward role progression ─────────────────────────────────────
 # A guild configures this on the Leveling page as `remove_old_reward_role`:
 #
-#   OFF (0, the default) - Level reward roles accumulate, exactly as they
+#   OFF (0, the default) — Level reward roles accumulate, exactly as they
 #   always did: reaching Level 10 leaves the Level 5 role in place.
 #
-#   ON (1) - the progression is exclusive: when a higher Level reward role is
+#   ON (1) — the progression is exclusive: when a higher Level reward role is
 #   successfully delivered, the superseded lower ones are removed, so the
 #   member wears the role of the highest level they have reached.
 #
@@ -904,7 +904,7 @@ async def claim_available(guild_id: int, user_id: int, *,
     # listener also calls the shared reconciliation: with the setting OFF it
     # restores all fulfilled roles because the progression accumulates.
     #
-    # FUTURE - member blacklist (still under construction, NOT
+    # FUTURE — member blacklist (still under construction, NOT
     # `leveling_blacklist_roles`, which is only a role-based XP opt-out; see
     # LEVELING_FOLLOWUP_AUDIT.md §5): a blacklisted member must not have roles
     # this reconciliation would hand back, and the blacklist check belongs
@@ -938,7 +938,7 @@ async def list_claims(guild_id: int, user_id: int) -> list[dict]:
             "status": status,
             "last_error": error,
             # History, for the /level Stats view: when the crossing was recorded,
-            # when it was delivered, and which path recorded it. Read-only -
+            # when it was delivered, and which path recorded it. Read-only —
             # nothing in the claim engine reads these back.
             "created_at": created_at,
             "fulfilled_at": fulfilled_at,

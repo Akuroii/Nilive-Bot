@@ -1,5 +1,5 @@
 import pathlib
-"""PROBE 1 - discord.py 2.7.1 dispatch semantics.
+"""PROBE 1 — discord.py 2.7.1 dispatch semantics.
 
 Question: does a *cog* `on_message` listener run BEFORE Bot.on_message ->
 process_commands, as cogs/command_aliases.py's comment claims?
@@ -72,7 +72,7 @@ async def main():
     print("content after all listeners:", repr(msg.content))
     print("command invoked?", "invoked_with" in seen)
 
-    # second scenario: what the mutation WOULD need - process_commands runs last
+    # second scenario: what the mutation WOULD need — process_commands runs last
     print("\n--- control: manual call after mutation (i.e. what actually works) ---")
     msg2 = FakeMessage("k @someone reason")
     msg2.content = "!" + msg2.content

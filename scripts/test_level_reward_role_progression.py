@@ -2,15 +2,15 @@
 
 The behaviour locked down here (`remove_old_reward_role` on the Leveling page):
 
-* OFF (default) - Level reward roles accumulate exactly as they always did;
-* ON - a guild's leveling_rewards rows are a progression (Level 5 → Role 5,
+* OFF (default) — Level reward roles accumulate exactly as they always did;
+* ON — a guild's leveling_rewards rows are a progression (Level 5 → Role 5,
   Level 10 → Role 10): delivering a higher role REMOVES the already delivered
   lower ones, so reaching Level 10 does not leave the member wearing Level 5's
   badge forever;
 * it must never touch roles that are not part of that progression (manually
   granted roles, other systems' roles, other claim tracks);
-* it must ride the existing claim-based delivery path - same entitlement
-  rows, same reserve/fulfil transaction, same retryable failed-claim state -
+* it must ride the existing claim-based delivery path — same entitlement
+  rows, same reserve/fulfil transaction, same retryable failed-claim state —
   with no schema change and no second reward engine.
 
 Cases: first reward / replace older / skip several levels / unrelated roles

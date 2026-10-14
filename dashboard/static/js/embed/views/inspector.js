@@ -1,11 +1,11 @@
 // ═══════════════════════════════════════════════════════════════
-// NERO DASHBOARD - embed/views/inspector.js
-// Message Builder v2 - the property inspector (phase 1, step 5c).
+// NERO DASHBOARD — embed/views/inspector.js
+// Message Builder v2 — the property inspector (phase 1, step 5c).
 //
 // WHAT THIS IS
 //   The editing surface for whatever the rail has selected: the message
 //   content, an embed's properties, or one field. It is a DIRECT view over the
-//   canonical document - the same relationship the rail has, with inputs
+//   canonical document — the same relationship the rail has, with inputs
 //   instead of rows.
 //
 // THE RULES IT KEEPS (all asserted by scripts/test_message_builder_inspector.js)
@@ -25,19 +25,19 @@
 //      control spec, and no loop over a property table: each control in the
 //      panels below is created by its own explicit call, with its own label,
 //      its own id and its own store action. Four tiny builders (text, textarea,
-//      checkbox, button) wrap createElement - that is all the abstraction there
+//      checkbox, button) wrap createElement — that is all the abstraction there
 //      is, and it is DOM plumbing, not a framework.
 //
 //   3. NO VALIDATION RULES. It never decides whether a value is legal: the rules
 //      live in embed/validate.js and their results in store.ui.issues (the page
-//      paints the strip). What 6b adds here is a READOUT - each control shows
-//      its own `used / max` from the same measurement the validator runs - plus
+//      paints the strip). What 6b adds here is a READOUT — each control shows
+//      its own `used / max` from the same measurement the validator runs — plus
 //      the field cap on the add button. No error paths, no aria-invalid,
 //      no maxlength. Step 6 owns all of it. Native input behaviour only.
 //
 //   4. NO PERSISTENCE, NO PREVIEW. The inspector never touches drafts.js and
 //      never calls the renderer: an edit reaches the preview the only way any
-//      other edit does - through the store's document slice, which the page's
+//      other edit does — through the store's document slice, which the page's
 //      preview subscription already listens to. The harness asserts this by
 //      running the inspector with no preview at all, and the mutation battery
 //      guards the boundary.
@@ -81,7 +81,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
 (function (NERO) {
     'use strict';
 
-    // The message-root node id - the rail owns the vocabulary, the inspector
+    // The message-root node id — the rail owns the vocabulary, the inspector
     // reads it (same constant, same meaning: "the message content").
     const CONTENT_NODE = 'content';
 
@@ -110,7 +110,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             throw new TypeError('inspector.create needs the document model (embed/model.js)');
         }
 
-        // 7d: the local-file control is OPTIONAL - a caller that passes no
+        // 7d: the local-file control is OPTIONAL — a caller that passes no
         // `upload` gets no file inputs at all (the panel is exactly what it was
         // before 7d). When it IS passed, all three functions are required,
         // because a half-wired control would end up reading bytes, storing
@@ -239,7 +239,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         // ── 6b: the numbers beside the controls ──────────────────────
         // Both readers are projections of the validator's ONE measurement pass
         // (embed/validate.js), fed with the served limits: the inspector does not
-        // own a limit, does not compare anything itself, and keeps no cache - a
+        // own a limit, does not compare anything itself, and keeps no cache — a
         // counter cannot drift from the rule it belongs to, because it is the
         // same comparison on the same helpers. Unusable limits ⇒ no numbers
         // (counters blank, add button disabled): fail closed, never "unlimited".
@@ -260,7 +260,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
 
         /**
          * A counter element under one control, registered in the panel that owns
-         * it. It is DECORATION: aria-hidden, not focusable, no live region - a
+         * it. It is DECORATION: aria-hidden, not focusable, no live region — a
          * counter that announced every keystroke would talk over the user, and
          * the strip is where a problem is announced. `key` is the measurement's
          * own vocabulary (`content`, `title`, `author.name`, `total`, …), so
@@ -323,7 +323,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         }
 
         /**
-         * 7d: one media slot's local-file control - a native `<input type="file">`
+         * 7d: one media slot's local-file control — a native `<input type="file">`
          * (labelled and keyboard-operable: it is the only thing that can choose a
          * file), a state line, and a Remove button that is shown only while there
          * is something to remove.
@@ -331,13 +331,13 @@ window.NERO.embed.views = window.NERO.embed.views || {};
          * Three boundaries this control keeps:
          *   • it never reads bytes and never stores anything. A pick is handed to
          *     the page (`upload.onPick`), and the state it paints is COMPUTED by
-         *     the page (`upload.stateFor`) - this file owns neither the pipeline
+         *     the page (`upload.stateFor`) — this file owns neither the pipeline
          *     nor the wording;
          *   • its `accept` attribute is a hint for the picker, never the decision:
          *     the page builds it from the asset module's own extension table, and
          *     the real answer is assets.identify(), run by the page on the bytes;
          *   • the state line is one static element referenced by
-         *     `aria-describedby` - no live region, no announcement of its own.
+         *     `aria-describedby` — no live region, no announcement of its own.
          *     Problems are announced by the page's one strip.
          */
         function fileField(parent, key, labelText) {
@@ -450,7 +450,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             controls.timestamp = textField(node, 'mb2-insp-timestamp', 'Timestamp', 'timestamp',
                 { placeholder: '2026-09-24T12:00:00.000Z' });
             // The timestamp row gets a button that fills it from the page's clock
-            // (the same injected clock the preview header uses - no second clock).
+            // (the same injected clock the preview header uses — no second clock).
             controls.timestamp.parentNode.className = 'mb2-insp-field mb2-insp-row';
             actionButton(controls.timestamp.parentNode, 'now', 'Now', 'Set the timestamp to now', 'mb2-insp-btn mb2-insp-now');
             controls.color = textField(node, 'mb2-insp-color', 'Colour', 'color', { type: 'color' });
@@ -521,7 +521,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
 
         function fieldRowLabel(field, index) {
             const name = String((field && field.name) || '').replace(/\s+/g, ' ').trim();
-            return 'Field ' + (index + 1) + (name ? ' - ' + name : ' - (no name)');
+            return 'Field ' + (index + 1) + (name ? ' — ' + name : ' — (no name)');
         }
 
         function updateFieldRow(row, field, index) {
@@ -604,7 +604,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             const panel = ensurePanel(key);
             const previous = panels[visibleKey];
             // Exactly ONE panel is ever mounted: the previous one is detached
-            // (not discarded - it keeps its nodes, so flipping the selection
+            // (not discarded — it keeps its nodes, so flipping the selection
             // back and forth rebuilds nothing and reuses the same inputs).
             if (previous && previous.node.parentNode) previous.node.parentNode.removeChild(previous.node);
             mount.appendChild(panel.node);
@@ -630,7 +630,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             return true;
         }
 
-        // An explicit patch - not a generic "set a path" helper: which keys are
+        // An explicit patch — not a generic "set a path" helper: which keys are
         // settable, and how, is decided here, per control.
         function buildPatch(key, value) {
             if (key === 'title') return { title: String(value) };
@@ -772,7 +772,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         // ── Events ──────────────────────────────────────────────────
         function controlValue(node) {
             // `.type` in a browser, the attribute in a harness that never
-            // reflects it - the checkbox contract must hold in both.
+            // reflects it — the checkbox contract must hold in both.
             const kind = node.type || (typeof node.getAttribute === 'function' && node.getAttribute('type')) || 'text';
             if (kind === 'checkbox') return !!node.checked;
             return node.value === undefined ? '' : String(node.value);
@@ -785,7 +785,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
          * Only a `change` is acted on (a browser also fires `input` for a file
          * field, and reading the same pick twice would run the pipeline twice),
          * and the field's own value is cleared first, so choosing the SAME file
-         * again still fires - a file input that kept its value would go silent
+         * again still fires — a file input that kept its value would go silent
          * and look broken. The files are read before the reset either way.
          */
         function onFilePicked(target, key) {
@@ -874,14 +874,14 @@ window.NERO.embed.views = window.NERO.embed.views || {};
 
         /**
          * Paint the visible panel's counters (6b). The facts are keyed by NODE, so
-         * the panel only has to know which node it is showing - it does not walk
+         * the panel only has to know which node it is showing — it does not walk
          * the document, and a hidden panel's counters are left exactly as they
          * were (nothing writes to a panel nobody can see). Both the text and the
          * over-state are change-guarded, so a keystroke that changes no counter
          * costs no DOM write.
          */
         /**
-         * 7d: paint the four file controls. One question per control - the page's
+         * 7d: paint the four file controls. One question per control — the page's
          * `stateFor` answers with the text to show, whether that text is an ERROR
          * (it is the validator's own issue when it exists) and whether there is
          * anything to remove. The view translates none of it: it writes what it

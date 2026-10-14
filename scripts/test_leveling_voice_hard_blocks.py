@@ -37,7 +37,7 @@ LEGACY_FLAG_KEYS = {"self_mute", "mute", "self_deaf", "deaf", "channel_id"}
 
 
 def check(label, ok, detail=""):
-    print(f"[{'PASS' if ok else 'FAIL'}] {label}" + (f" - {detail}" if detail and not ok else ""))
+    print(f"[{'PASS' if ok else 'FAIL'}] {label}" + (f" — {detail}" if detail and not ok else ""))
     if not ok:
         FAILS.append(label)
 
@@ -134,7 +134,7 @@ async def matrix():
             got = (T.xp(U1)[0], T.xp(U2)[0])
             check(f"{label}: {name}", got == expected, f"got {got}, expected {expected}")
             # other consumers: identical regardless of the guard
-            check(f"{label}: {name} - legacy activity_voice_tick + voice_minutes unchanged",
+            check(f"{label}: {name} — legacy activity_voice_tick + voice_minutes unchanged",
                   {e[2].id for e in legacy} == legacy_users
                   and set(voice_minutes()) == legacy_users
                   and all(m == 1 for m in voice_minutes().values())

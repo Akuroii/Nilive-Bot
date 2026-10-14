@@ -9,7 +9,7 @@
         <div class="card-title" style="margin:0;display:flex;align-items:center;gap:8px;">
             🎒 {% if target_user_id %}
                 {% set u = user_map.get(target_user_id, {}) %}
-                Inventory - {{ user_identity(target_user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}
+                Inventory — {{ user_identity(target_user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}
             {% else %}Guild Inventory{% endif %}
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -22,7 +22,7 @@
         </div>
     </div>
     <p class="text-muted text-sm" style="margin-bottom:16px;">
-        Read-only view of stackable items held per member - shop "Custom" purchases, event drops,
+        Read-only view of stackable items held per member — shop "Custom" purchases, event drops,
         and future mission rewards. Role/temp-role grants aren't shown here; they live on Discord
         roles directly (see Shop → Temp Roles).
     </p>
@@ -43,14 +43,14 @@
                     <td><span class="badge badge-accent">{{ it.item_type }}</span></td>
                     <td>×{{ it.quantity }}</td>
                     <td><span class="badge badge-source">{{ it.source }}</span></td>
-                    <td class="text-muted">{{ it.updated_at[:16] if it.updated_at else "-" }}</td>
+                    <td class="text-muted">{{ it.updated_at[:16] if it.updated_at else "—" }}</td>
                     {% else %}
                     {% set u = user_map.get(it.user_id, {}) %}
                     <td>{{ user_identity(it.user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
                     <td><strong>{{ it.item_name }}</strong></td>
                     <td><span class="badge badge-accent">{{ it.item_type }}</span></td>
                     <td>×{{ it.quantity }}</td>
-                    <td class="text-muted">{{ it.updated_at[:16] if it.updated_at else "-" }}</td>
+                    <td class="text-muted">{{ it.updated_at[:16] if it.updated_at else "—" }}</td>
                     {% endif %}
                 </tr>
                 {% else %}

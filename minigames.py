@@ -15,22 +15,22 @@ from utils.timezone import get_cairo_daily_key, get_cairo_weekly_key, CAIRO_TZ
 from utils.emoji import CHECK_EMOJI
 
 # ═══════════════════════════════════════════════════════════════════════
-# MINIGAMES v2 - the Discord surface (Phase 3 of the approved
+# MINIGAMES v2 — the Discord surface (Phase 3 of the approved
 # MINIGAMES_V2_PLAN.md).
 #
 # What this cog owns (plan §1, §21-Phase 3):
-#   * the weekly pacing loop - `daily_check_loop` + compute_daily_probability
+#   * the weekly pacing loop — `daily_check_loop` + compute_daily_probability
 #     KEPT VERBATIM (D5: it decides only WHETHER an automatic spawn happens);
 #   * the recursive weighted selection + shuffle-bag pop (plan §4/§5);
-#   * the shared spawn path `spawn_game()` - auto / manual / test all go
+#   * the shared spawn path `spawn_game()` — auto / manual / test all go
 #     through it (plan §8/§9/§14): snapshot → run row → real engine →
 #     post → (auto only) weekly counter bump AFTER a successful post;
-#   * `spawn_request_loop` (10s) - executes dashboard/slash spawn requests
+#   * `spawn_request_loop` (10s) — executes dashboard/slash spawn requests
 #     (plan §9/§19: atomic claim, real engine, no fake implementation);
-#   * the startup sweep - open run rows finalized as aborted_restart with a
+#   * the startup sweep — open run rows finalized as aborted_restart with a
 #     best-effort embed note (plan §14, no-forfeit: no rewards);
 #   * the v2 slash commands (/minigames_setup kept, /minigames_spawn new,
-#     /minigames_stats kept) - the tier commands are RETIRED (plan §8).
+#     /minigames_stats kept) — the tier commands are RETIRED (plan §8).
 #
 # Deliberately does NOT import from other cogs (project rule). Reward
 # granting goes through utils/reward_engine.py via the engine (the one
@@ -39,14 +39,14 @@ from utils.emoji import CHECK_EMOJI
 # utils/minigame_engine.py (Phase 2).
 # ═══════════════════════════════════════════════════════════════════════
 
-# ── Weekly pacing tuning (kept verbatim from v1 - D5) ──────────────────
+# ── Weekly pacing tuning (kept verbatim from v1 — D5) ──────────────────
 MIN_DAILY_PROB   = 0.10   # floor while still behind pace
 MAX_DAILY_PROB   = 0.60   # ceiling while still behind pace
 BONUS_DAILY_PROB = 0.15   # flat chance once weekly minimum is already met
 
 CHECK_LOOP_MINUTES = 30
 REQUEST_POLL_SECONDS = 10
-# A process that just started has NO live in-memory games - its first
+# A process that just started has NO live in-memory games — its first
 # ready may sweep every open row. A RECONNECT (same process) gets the
 # plan's 5-minute grace window so a still-healthy in-memory run is never
 # touched.
@@ -100,7 +100,7 @@ def _effective_playable(node: dict) -> int:
     """
     Count of playable (enabled + auto_spawn) templates reachable at or
     below this node UNDER THE ANCESTOR-ENABLED RULE: a disabled node
-    contributes 0 for its whole branch (D10 - pure rotation exclusion,
+    contributes 0 for its whole branch (D10 — pure rotation exclusion,
     nothing is modified). `direct_playable` / `children` come from
     store.get_categories_tree().
     """
@@ -113,7 +113,7 @@ def _effective_playable(node: dict) -> int:
 
 
 def _pick_option(options: list[tuple]) -> tuple:
-    """Weighted pick over (kind, target, weight) options - weights are
+    """Weighted pick over (kind, target, weight) options — weights are
     clamped to >=1, relative only (D8: no template-level weights in v1)."""
     weights = [max(1, int(o[2] or 1)) for o in options]
     i = random.choices(range(len(options)), weights=weights, k=1)[0]
@@ -126,12 +126,12 @@ async def select_template(guild_id: int) -> dict | None:
 
       * A node is a candidate iff enabled AND it has >=1 playable
         template somewhere below (counted with the ancestor-enabled
-        rule) - empty/disabled branches NEVER consume a selection.
+        rule) — empty/disabled branches NEVER consume a selection.
       * At any node, its DIRECT playable templates (as one bag-option,
         weight = the node's weight) compete with its eligible
         subcategories (weight = each subcategory's own weight).
       * A bag hit pops the node's shuffle bag (without replacement,
-        persisted, staleness-guarded - plan §5); a sub hit recurses.
+        persisted, staleness-guarded — plan §5); a sub hit recurses.
 
     Returns a FRESH full template read (the §14 snapshot source) or
     None when nothing is eligible.
@@ -169,14 +169,14 @@ async def select_template(guild_id: int) -> dict | None:
 # ── THE COG ─────────────────────────────────────────────────────────────
 
 class Minigames(commands.Cog):
-    """Minigames v2 - the bot side of the category/template system."""
+    """Minigames v2 — the bot side of the category/template system."""
 
     def __init__(self, bot):
         self.bot = bot
         # log_id → live engine. The engines keep themselves alive via
         # their timer tasks; this registry is for observability and
         # bounded memory (finished entries are pruned on every poll tick
-        # - a finished engine is referenced by its closed log row).
+        # — a finished engine is referenced by its closed log row).
         self.live_games: dict[int, engine.MinigameEngine] = {}
         # False until the first on_ready of THIS process has swept.
         self._sweep_done = False
@@ -200,7 +200,7 @@ class Minigames(commands.Cog):
         """
         Finalize run rows that are 'running' but have no live in-memory
         engine behind them (plan §14): a fresh process sweeps EVERY open
-        row (a new process has no live games - applying the 5-minute
+        row (a new process has no live games — applying the 5-minute
         grace here would leave runs started <5min before a crash stuck
         forever); a reconnect (same process, live games may still be
         healthy) only touches rows older than the grace window.
@@ -216,12 +216,12 @@ class Minigames(commands.Cog):
                 print(f"[MINIGAMES] sweep: closing run {row['id']} failed: {e}")
                 continue
             print(f"[MINIGAMES] sweep: run {row['id']} (guild {row['guild_id']}) "
-                  f"finalized as aborted_restart - no rewards")
+                  f"finalized as aborted_restart — no rewards")
             await self._notify_aborted(row)
 
     async def _notify_aborted(self, row: dict):
         """Best-effort '⚠️ bot restarted' note on the original message.
-        Never blocks the sweep, never touches rewards (there are none -
+        Never blocks the sweep, never touches rewards (there are none —
         the row was closed before this runs)."""
         try:
             guild = self.bot.get_guild(row["guild_id"])
@@ -233,7 +233,7 @@ class Minigames(commands.Cog):
             msg = await channel.fetch_message(int(row["message_id"]))
             embed = msg.embeds[0] if msg.embeds else discord.Embed(description="")
             base = embed.description or ""
-            embed.description = (base + "\n\n⚠️ **Game ended - bot "
+            embed.description = (base + "\n\n⚠️ **Game ended — bot "
                                    "restarted**")[:4096]
             await msg.edit(embed=embed)
         except Exception as e:
@@ -247,7 +247,7 @@ class Minigames(commands.Cog):
                          config: dict) -> tuple[discord.TextChannel | None, str | None]:
         """
         Template override first, then the guild default (a deleted
-        override falls back to the default - plan §17). Returns
+        override falls back to the default — plan §17). Returns
         (channel, error).
         """
         candidates = [template.get("channel_id"), config.get("channel_id")]
@@ -264,7 +264,7 @@ class Minigames(commands.Cog):
             if isinstance(ch, (discord.TextChannel, discord.Thread)):
                 return ch, None
         if tried:
-            return None, ("no valid spawn channel - the template's channel "
+            return None, ("no valid spawn channel — the template's channel "
                           "is missing and the configured guild default is "
                           "missing too")
         return None, "no spawn channel configured (run /minigames_setup)"
@@ -275,14 +275,14 @@ class Minigames(commands.Cog):
                          mode: str) -> tuple[bool, str | None]:
         """
         THE shared spawn path for auto / manual / test:
-          1. resolve + validate the channel (BEFORE the run row - a
+          1. resolve + validate the channel (BEFORE the run row — a
              channel failure leaves no phantom row, plan §17);
-          2. SNAPSHOT the template (deep copies - plan §14: after start,
+          2. SNAPSHOT the template (deep copies — plan §14: after start,
              nothing reads the template again);
           3. open the run row (auditable even if the post fails);
           4. real engine → post message + arm timers;
           5. store the message id, register the live engine.
-        Returns (ok, error). The weekly counter is NOT touched here -
+        Returns (ok, error). The weekly counter is NOT touched here —
         the auto caller bumps it only on success (D5).
         """
         config = await store.get_config(guild.id)
@@ -299,7 +299,7 @@ class Minigames(commands.Cog):
             "category_id": template["category_id"],
             "category_name": (category or {}).get("name")
                               or template["name"],
-            # §14 deep copies - fresh JSON parses on purpose:
+            # §14 deep copies — fresh JSON parses on purpose:
             "embed": json.loads(json.dumps(template.get("embed") or {})),
             "config": json.loads(json.dumps(template.get("config") or {})),
             "rewards": json.loads(json.dumps(template.get("rewards") or [])),
@@ -315,7 +315,7 @@ class Minigames(commands.Cog):
             game = engine.make_engine(snapshot, mode, log_id, bot=self.bot)
             message = await game.start(channel)
         except ValueError as e:
-            # Unplayable template (e.g. no answers) - pref light refusal.
+            # Unplayable template (e.g. no answers) — pref light refusal.
             await store.finish_run(log_id, "failed")
             return False, f"template cannot be spawned: {e}"
         except Exception as e:
@@ -333,14 +333,14 @@ class Minigames(commands.Cog):
                           forced: bool) -> bool:
         template = await select_template(guild.id)
         if not template:
-            print(f"[MINIGAMES] guild={guild.id} no eligible template - "
+            print(f"[MINIGAMES] guild={guild.id} no eligible template — "
                   f"nothing spawns, counter NOT incremented, retried at "
                   f"the next daily check")
             return False
         ok, err = await self.spawn_game(guild, template, "auto")
         if not ok:
             print(f"[MINIGAMES] guild={guild.id} auto spawn of "
-                  f"'{template['name']}' failed: {err} - counter NOT "
+                  f"'{template['name']}' failed: {err} — counter NOT "
                   f"incremented, retried at the next daily check")
             return False
         # D5: the weekly counter increments ONLY after the message posts.
@@ -353,7 +353,7 @@ class Minigames(commands.Cog):
 
     async def _daily_check_iteration(self):
         """The pacing iteration (extracted so tests can drive one pass
-        without waiting 30 minutes - the loop body is unchanged)."""
+        without waiting 30 minutes — the loop body is unchanged)."""
         now   = datetime.now(timezone.utc)
         today = get_cairo_daily_key(now)
         monday = get_cairo_weekly_key(now)
@@ -371,7 +371,7 @@ class Minigames(commands.Cog):
 
                 config = await store.get_config(guild_id)
 
-                # Weekly reset - new week started since last recorded
+                # Weekly reset — new week started since last recorded
                 # week_start_date.
                 if config.get("week_start_date") != monday:
                     await store.mark_week(
@@ -420,7 +420,7 @@ class Minigames(commands.Cog):
 
     async def _process_spawn_requests(self):
         # Bounded memory: drop finished engines from the registry (their
-        # log rows are already closed - the row is the record).
+        # log rows are already closed — the row is the record).
         if self.live_games:
             self.live_games = {k: v for k, v in self.live_games.items()
                                if not v.finished}
@@ -434,7 +434,7 @@ class Minigames(commands.Cog):
         for gid in guild_ids:
             guild = self.bot.get_guild(gid)
             if guild is None:
-                # The bot is not in this guild - the request can never
+                # The bot is not in this guild — the request can never
                 # run. Close its pending rows instead of letting them
                 # rot (the dashboard surfaces the error, plan §9).
                 for req in await store.get_in_flight_requests(gid):
@@ -504,7 +504,7 @@ class Minigames(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="minigames_spawn",
-                          description="Spawn a minigame right now (manual - admin)")
+                          description="Spawn a minigame right now (manual — admin)")
     @app_commands.describe(
         template_id="Optional: force a specific template by ID. "
                     "Omit to let the rotation pick a game.")
@@ -522,7 +522,7 @@ class Minigames(commands.Cog):
                              requester: str) -> tuple[bool, str]:
         """
         Manual spawn from a slash command (plan §8/§9): ONE shared path
-        - the request queue. spawn_request_loop executes it with the real
+        — the request queue. spawn_request_loop executes it with the real
         engine (~10s latency, the accepted D4 queue delay). D12: a
         specific template must be enabled (category state irrelevant);
         no template → the §4 recursive selection. Never touches the
@@ -537,13 +537,13 @@ class Minigames(commands.Cog):
         else:
             tpl = await select_template(guild.id)
             if tpl is None:
-                return False, ("❌ Nothing eligible right now - no enabled "
+                return False, ("❌ Nothing eligible right now — no enabled "
                                "template with automatic rotation on.")
         _rid, err = await store.create_spawn_request(
             guild.id, tpl["id"], "manual", requested_by=requester)
         if err:
             return False, f"❌ {err}."
-        return True, f"{CHECK_EMOJI} Queued **{tpl['name']}** - it will appear in a " \
+        return True, f"{CHECK_EMOJI} Queued **{tpl['name']}** — it will appear in a " \
                      "moment."
 
     @app_commands.command(name="minigames_stats",
@@ -560,7 +560,7 @@ class Minigames(commands.Cog):
         so_far = int(config.get("events_this_week") or 0)
         prob, force = compute_daily_probability(so_far, weekday, min_t, max_t)
 
-        embed = discord.Embed(title="🎲 Minigames - This Week", color=0x7c5cbf)
+        embed = discord.Embed(title="🎲 Minigames — This Week", color=0x7c5cbf)
         embed.add_field(name="Status", value="Enabled" if config.get("enabled") else "Disabled")
         embed.add_field(name="Automatic spawns so far", value=f"{so_far} / {min_t}–{max_t}")
         embed.add_field(name="Days left in week", value=str(remaining_days))
@@ -575,21 +575,21 @@ class Minigames(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# ── RETIRED (Phase 6 - migration verified, Phase 5 retirement pass) ──
+# ── RETIRED (Phase 6 — migration verified, Phase 5 retirement pass) ──
 # The Phase 4/6 compatibility window is CLOSED:
-#   - VALID_TIERS and get_tiers() - the old dashboard page/API that
+#   - VALID_TIERS and get_tiers() — the old dashboard page/API that
 #     read them was replaced in Phase 4 (dashboard/api/minigames.py is
 #     now store-based); nothing in production imported them anymore.
-#   - the ensure_tables()/get_config() aliases - every remaining
+#   - the ensure_tables()/get_config() aliases — every remaining
 #     caller uses utils.minigame_store directly.
 # The tier SYSTEM (slash commands, MinigameClaimView, legacy
 # claim/spawn flow) was removed in Phase 3 (plan §8).
 #
 # KEPT on purpose:
 #   - the legacy TABLES (minigames_tiers / minigames_config /
-#     minigames_log with their v1 columns) - never dropped, so
+#     minigames_log with their v1 columns) — never dropped, so
 #     redeploying the old code finds its data intact (plan §3.4);
-#   - get_user_win_count() - a LIVE consumer: utils/rank_card_data.py
+#   - get_user_win_count() — a LIVE consumer: utils/rank_card_data.py
 #     reads the legacy winner_id column, which v2 rows also fill via
 #     the first-winner mapping.
 # Do not rebuild removed shims.
@@ -597,7 +597,7 @@ class Minigames(commands.Cog):
 
 async def get_user_win_count(guild_id: int, user_id: int) -> int:
     """
-    Rank Card foundation: minigames_log records winner_id per run -
+    Rank Card foundation: minigames_log records winner_id per run —
     used by utils/rank_card_data.py. (Kept: it reads the LEGACY column,
     which v2 rows also fill via the first-winner mapping.)
     """

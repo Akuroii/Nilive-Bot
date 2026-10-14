@@ -1,17 +1,17 @@
 """
-Server Tag features - Feature 1: Tag-Loyalty Mission.
+Server Tag features — Feature 1: Tag-Loyalty Mission.
 
 A mission (dashboard-created) asks members to wear this server's own
 Discord "server tag" (Member.primary_guild, added in discord.py 2.6.0).
 Confirming is a live check at press-time; the actual payout is decided
-by a SECOND, independent live check at mission end - never from cached
-state - so wearing the tag just long enough to confirm, then removing
+by a SECOND, independent live check at mission end — never from cached
+state — so wearing the tag just long enough to confirm, then removing
 it, does not pay out. This is the one piece of this feature that isn't
 allowed to take a shortcut.
 
 Deliberately its own cog, own tables (tag_missions /
 tag_mission_participants), no shared state with cogs/tagpartners.py
-(Feature 2) - per spec, the two features stay independent all the way
+(Feature 2) — per spec, the two features stay independent all the way
 down to the code, not just the product surface.
 """
 import discord
@@ -26,7 +26,7 @@ class TagMissionConfirmView(discord.ui.View):
     """
     Persistent (timeout=None) view, one instance per mission. custom_id
     is namespaced per mission_id so more than one mission can be live
-    at once without their buttons colliding. Fully self-contained - no
+    at once without their buttons colliding. Fully self-contained — no
     reference to the cog/bot needed, since a confirm only ever touches
     interaction.guild / interaction.user (already a full Member in a
     guild interaction) and the DB.

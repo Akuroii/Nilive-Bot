@@ -41,7 +41,7 @@ if [ -n "${JSDOM_PATH:-}" ] || node -e "require('jsdom')" >/dev/null 2>&1 \
     run "p13 role/channel picker renders real data" \
         "$NODE" tools/alias_probes/p13_picker_render.js
 else
-    printf '\n\033[33m! skipping p9 / p11 / p13 (jsdom not found - npm i jsdom, or set JSDOM_PATH)\033[0m\n'
+    printf '\n\033[33m! skipping p9 / p11 / p13 (jsdom not found — npm i jsdom, or set JSDOM_PATH)\033[0m\n'
 fi
 
 printf '\n'

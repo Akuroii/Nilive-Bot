@@ -222,6 +222,6 @@ def api_tagmissions_delete(row_id: int):
     if result == "bad_status":
         return jsonify({"success": False,
                          "error": ("Can't delete a mission that's currently "
-                                   "active - cancel it first.")}), 400
+                                   "active — cancel it first.")}), 400
 
     return jsonify({"success": True})

@@ -4,29 +4,29 @@ from database import DB_PATH
 from utils.permissions import check_bot_role_position
 
 # ═══════════════════════════════════════════════════════════════════════
-# EQUIP ENGINE - Rank Card foundation (pass 1: schema + backend)
+# EQUIP ENGINE — Rank Card foundation (pass 1: schema + backend)
 #
 # One member can have exactly one "equipped" role/temp_role-type
 # inventory item at a time (enforced by equipped_roles' PK on
-# (guild_id, user_id) - see database.py). equip_role() is the single
+# (guild_id, user_id) — see database.py). equip_role() is the single
 # place that ever performs the actual Discord-side swap: remove
 # whatever was previously equipped (if different), add the new one,
 # update equipped_roles. Two callers share this:
 #
-#   1. utils/reward_engine.py's role/temp_role branch - buying or
+#   1. utils/reward_engine.py's role/temp_role branch — buying or
 #      winning a role/temp_role item auto-equips it, matching the
 #      role/temp_role reward type's existing behavior (the Discord
 #      role has always been granted immediately; this pass just
 #      routes that grant through the shared swap instead of a raw
 #      add_roles() call, so it also updates equipped_roles/inventory
 #      correctly). Locked with Dark: this applies uniformly to every
-#      reward_type role/temp_role grant - shop, events, minigames,
-#      missions, tag missions, tag partners - since all of those are
+#      reward_type role/temp_role grant — shop, events, minigames,
+#      missions, tag missions, tag partners — since all of those are
 #      "you got a cosmetic role as a reward" in the same sense.
-#   2. cogs/shop.py's /inventory command - the member manually picking
+#   2. cogs/shop.py's /inventory command — the member manually picking
 #      a different OWNED role item to wear instead.
 #
-# Deliberately does NOT touch anything about the Rank Card's display -
+# Deliberately does NOT touch anything about the Rank Card's display —
 # per Dark: "The Rank Card has no connection to the equipped-role
 # system." This module only manages the Discord-role side + the
 # equipped_roles bookkeeping table.
@@ -48,7 +48,7 @@ async def get_equipped(guild_id: int, user_id: int) -> dict | None:
 async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
                       item_name: str, reason: str = "Equipped") -> dict:
     """
-    Swaps the member's single equipped role to item_name - an
+    Swaps the member's single equipped role to item_name — an
     inventory_items row the member must already own, with item_type
     'role' or 'temp_role'. Never raises; every failure mode returns
     {"success": False, "error": "..."}.
@@ -67,7 +67,7 @@ async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
     role_id = meta.get("role_id")
     if not role_id:
         return {"success": False,
-                "error": (f"**{item_name}** has no role attached - "
+                "error": (f"**{item_name}** has no role attached — "
                           f"ask an admin to check its setup.")}
     role_id = int(role_id)
 
@@ -92,7 +92,7 @@ async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
         if old_role and old_role in member.roles:
             try:
                 await member.remove_roles(
-                    old_role, reason=f"{reason} - swapped out")
+                    old_role, reason=f"{reason} — swapped out")
             except Exception as e:
                 print(f"[EQUIP] Failed to remove previous role "
                       f"{current['role_id']} from {user_id} in "
@@ -170,7 +170,7 @@ async def cleanup_expired_role_item(guild_id: int, user_id: int, role_id: int):
     successfully removed an expired temp role's underlying Discord
     role. Finds the matching inventory_items row (item_type=
     'temp_role', metadata.role_id == role_id) and zeroes it out, and
-    clears equipped_roles if this was the equipped one - since the
+    clears equipped_roles if this was the equipped one — since the
     Discord role is already gone by the time this runs, there's
     nothing left to "unequip" on Discord, only bookkeeping to catch
     up so /inventory and the future rank card stop showing an item

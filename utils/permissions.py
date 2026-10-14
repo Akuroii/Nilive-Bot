@@ -83,7 +83,7 @@ PAGE_PERMISSIONS = {
 
     # Embed Builder v2: content + up to 10 embeds + real attachments,
     # sent LIVE to any channel the bot can see via a direct Discord API
-    # call - this is meaningfully more powerful than the old "build one
+    # call — this is meaningfully more powerful than the old "build one
     # embed, save it as a template" tool (LEVEL_ADMIN), so it's gated
     # at LEVEL_OWNER now, matching every other route in
     # dashboard/api/embedbuilder.py.
@@ -112,17 +112,17 @@ PAGE_PERMISSIONS = {
     "inventory_view":     LEVEL_ADMIN,
 
     # Event Stack Builder dashboard page (dark-fixes pass #13). Same
-    # tier as shop/events - tier/config CRUD is an admin action,
+    # tier as shop/events — tier/config CRUD is an admin action,
     # nothing here needs owner-only.
     "minigames":          LEVEL_ADMIN,
 
-    # Missions (Phase 6, built ahead of the Trade-verification gate -
+    # Missions (Phase 6, built ahead of the Trade-verification gate —
     # see utils/mission_engine.py header). Same tier as minigames:
     # mission definition CRUD is an admin action.
     "missions":           LEVEL_ADMIN,
 
     # Trade history page (dark-fixes pass #17). Read-only, same tier
-    # as ledger/inventory - viewing member trade history is an admin-
+    # as ledger/inventory — viewing member trade history is an admin-
     # level concern, not owner-only.
     "trade":              LEVEL_ADMIN,
 
@@ -134,7 +134,7 @@ PAGE_PERMISSIONS = {
 
     # CREATOR pass: replaces the old read-only "Announcements" page
     # with a real CRUD hub for YouTube/Twitch. Same tier as the page
-    # it replaces - adding/removing a watched channel/streamer is an
+    # it replaces — adding/removing a watched channel/streamer is an
     # admin action, not owner-only. "announcements" key kept above so
     # the old /config/announcements URL (now just a redirect to
     # /creator) still resolves a permission level rather than 403ing
@@ -147,14 +147,14 @@ PAGE_PERMISSIONS = {
     "reports":            LEVEL_MODERATOR,
     "health":             LEVEL_OWNER,
 
-    # Server Tags - Tag-Loyalty Missions + Cross-Server Join Reward.
+    # Server Tags — Tag-Loyalty Missions + Cross-Server Join Reward.
     # Same tier as minigames/missions: reward-tier CRUD is an admin
     # action, not owner-only.
     "tagmissions":        LEVEL_ADMIN,
     "tagpartners":        LEVEL_ADMIN,
 
     # Backups page. Deliberately still LEVEL_OWNER here (the page-load
-    # gate) - the bot-wide, cross-guild check lives one level deeper,
+    # gate) — the bot-wide, cross-guild check lives one level deeper,
     # in dashboard.permissions.require_bot_owner / require_bot_owner_api,
     # which every /backups route/API also stacks on top of this.
     "backups":            LEVEL_OWNER,

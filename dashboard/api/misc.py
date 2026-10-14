@@ -39,7 +39,7 @@ def audit_log_partial():
     rows = run_async(fetch())
     html = ""
     for r in rows:
-        # SECURITY FIX (dark-fixes pass, CRITICAL - stored XSS): same
+        # SECURITY FIX (dark-fixes pass, CRITICAL — stored XSS): same
         # class of bug as moderation_logs_partial above. r[0] is the
         # dashboard user's Discord username (attacker-controlled via
         # their own Discord profile), and r[2] ("details") is free
@@ -48,9 +48,9 @@ def audit_log_partial():
         html += (
             f"<tr>"
             f"<td>{_esc(r[0])}</td><td>{_esc(r[1])}</td>"
-            f"<td class='text-muted'>{_esc(r[2]) if r[2] else '-'}</td>"
-            f"<td><span class='badge badge-accent'>{_esc(r[3]) if r[3] else '-'}</span></td>"
-            f"<td class='text-muted'>{str(r[4])[:16] if r[4] else '-'}</td>"
+            f"<td class='text-muted'>{_esc(r[2]) if r[2] else '—'}</td>"
+            f"<td><span class='badge badge-accent'>{_esc(r[3]) if r[3] else '—'}</span></td>"
+            f"<td class='text-muted'>{str(r[4])[:16] if r[4] else '—'}</td>"
             f"</tr>"
         )
     return html or "<tr><td colspan='5' class='empty'>No actions logged yet</td></tr>"
@@ -74,12 +74,12 @@ def save_settings_general():
             # owned by the Economy page (see utils/currency.py's
             # set_currency_config and /api/economy/currency): Economy is
             # the single source of truth for currency DISPLAY, and this
-            # general-settings upsert must never touch those columns -
+            # general-settings upsert must never touch those columns —
             # otherwise saving the prefix/timezone would silently
             # overwrite whatever the owner configured under Economy.
             #
             # (This INSERT previously named `currency_emoji_id`, a column
-            # that no longer exists after the Wallet-pass schema change -
+            # that no longer exists after the Wallet-pass schema change —
             # so the WHOLE form 500'd on any fresh database, prefix and
             # timezone included. See CURRENCY_AUDIT.md C1.)
             await db.execute("""
@@ -262,7 +262,7 @@ def delete_status_message(msg_id: int):
     return jsonify({"success": True})
 
 
-# ── Phase 3 E3/E4 CLOSEOUT - Ledger & Inventory (read-only) ────────────────────
+# ── Phase 3 E3/E4 CLOSEOUT — Ledger & Inventory (read-only) ────────────────────
 
 @api_bp.route("/ledger")
 @require_api_permission(LEVEL_ADMIN)
@@ -284,7 +284,7 @@ def api_ledger():
 
     entries = run_async(fetch())
 
-    # Snowflake safety: user IDs travel to the client as STRINGS - same
+    # Snowflake safety: user IDs travel to the client as STRINGS — same
     # reason as /api/trade/history (JS numbers lose precision past 2^53,
     # which would corrupt trailing digits and break loadLedger()'s
     # userMap lookup on the refresh/filter path). The initial server-
@@ -299,7 +299,7 @@ def api_ledger():
     # dark-fixes pass #18 (username resolver rollout): one batched
     # resolve_users() call covering every user on the page. The map
     # travels in the JSON payload so loadLedger() renders the user cell
-    # client-side via dashboard.js's userIdentityHtml() - same pattern
+    # client-side via dashboard.js's userIdentityHtml() — same pattern
     # as /api/trade/history.
     async def resolve():
         from utils.discord_user_cache import resolve_users

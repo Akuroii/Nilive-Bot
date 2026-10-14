@@ -16,7 +16,7 @@ from utils.timezone import get_cairo_daily_key, seconds_until_cairo_midnight, CA
 #   - last_claim_date == yesterday        -> streak continues (+1)
 #   - anything older, or no prior claim   -> streak resets to 1
 #
-# The streak COUNT is never capped - it keeps incrementing past 7
+# The streak COUNT is never capped — it keeps incrementing past 7
 # indefinitely. Only the derived BONUS caps at the day-7 value
 # (get_streak_bonus). This is a deliberate split: streak_count is a
 # simple fact ("how many days in a row"), the bonus is a policy
@@ -24,7 +24,7 @@ from utils.timezone import get_cairo_daily_key, seconds_until_cairo_midnight, CA
 # artificially capping the stored count.
 #
 # claim_daily_streak() is the single place that checks-and-writes this
-# state, inside one BEGIN IMMEDIATE transaction - matching the same
+# state, inside one BEGIN IMMEDIATE transaction — matching the same
 # pattern already used by utils/equip_engine.equip_role() and
 # utils/prestige.apply_prestige_purchase()/purchase_prestige() in this
 # project. Two concurrent calls (double-click, or /daily racing a
@@ -32,7 +32,7 @@ from utils.timezone import get_cairo_daily_key, seconds_until_cairo_midnight, CA
 # yet": BEGIN IMMEDIATE acquires the write lock on the first
 # statement, so the second call blocks until the first transaction
 # commits, then sees the already-updated row and is correctly
-# rejected - even if the first call hasn't gotten around to crediting
+# rejected — even if the first call hasn't gotten around to crediting
 # the reward yet (crediting happens after this function returns, as a
 # separate step, same division as the existing shop purchase flow).
 # ═══════════════════════════════════════════════════════════════════════
@@ -41,7 +41,7 @@ STREAK_BONUS_CAP_DAYS = 7
 
 # Coins added per streak day, capped at STREAK_BONUS_CAP_DAYS. Same
 # configurability level as the existing daily_min/daily_max settings
-# (a bot_settings key, no dedicated dashboard field yet) - not a new
+# (a bot_settings key, no dedicated dashboard field yet) — not a new
 # or reduced level of admin control relative to what already exists.
 DEFAULT_STREAK_BONUS_PER_DAY = 20
 
@@ -63,7 +63,7 @@ async def claim_daily_streak(guild_id: int, user_id: int) -> dict:
     Atomically checks and updates daily-claim/streak state.
     Returns {"streak": new_streak_count} on success.
     Raises DailyAlreadyClaimed(seconds_remaining) if already claimed
-    for the current Cairo calendar day. Never leaves a partial write -
+    for the current Cairo calendar day. Never leaves a partial write —
     every rejection path rolls back before raising.
     """
     now = datetime.now(timezone.utc)
@@ -115,7 +115,7 @@ async def claim_daily_streak(guild_id: int, user_id: int) -> dict:
 async def get_streak_bonus(guild_id: int, streak_count: int) -> int:
     """
     min(streak_count, 7) * the configured per-day bonus. streak_count
-    itself must NOT be capped before calling this - only the bonus
+    itself must NOT be capped before calling this — only the bonus
     derived from it is capped, per the locked design.
     """
     async with aiosqlite.connect(DB_PATH) as db:
@@ -128,11 +128,11 @@ async def get_streak_bonus(guild_id: int, streak_count: int) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# SHARED CLAIM ENGINE - Wallet pass
+# SHARED CLAIM ENGINE — Wallet pass
 #
 # Three entry points now exist for the same action: /streak (canonical),
 # /daily (thin compatibility alias) and the Wallet's [🔥 Streak] button.
-# All three call perform_streak_claim() below - there is exactly ONE
+# All three call perform_streak_claim() below — there is exactly ONE
 # implementation of the reward math and crediting, so the three can
 # never drift apart, and the atomic claim guard in claim_daily_streak()
 # above means they can't be raced against each other either (claiming
@@ -141,7 +141,7 @@ async def get_streak_bonus(guild_id: int, streak_count: int) -> int:
 #
 # ECONOMY NOTE (flagged for Akuroi, deliberately NOT changed here):
 # the reward formula below is byte-for-byte the one that already lived
-# inline in cogs/economy.py's /daily - random base in [daily_min,
+# inline in cogs/economy.py's /daily — random base in [daily_min,
 # daily_max], plus the day-capped streak bonus, with the Prestige earn
 # multiplier applied to the COMBINED total. It was MOVED, not
 # redesigned, because the prompt says the economic model is still under
@@ -181,7 +181,7 @@ async def get_daily_range(guild_id: int) -> tuple[int, int]:
 async def get_streak_state(guild_id: int, user_id: int) -> dict:
     """
     Read-only view of the member's streak, for the Wallet hub and for
-    the cooldown message - never mutates anything.
+    the cooldown message — never mutates anything.
 
     `streak` is the CURRENT effective streak: the stored count if the
     last claim was today or yesterday (Cairo calendar), otherwise 0.
@@ -223,7 +223,7 @@ async def get_streak_preview(guild_id: int, user_id: int) -> dict:
     the bonus they're about to earn before deciding to claim.
 
     The bonus is computed for the streak the next claim would produce
-    (current + 1, or 1 if the chain is broken) - not the current one -
+    (current + 1, or 1 if the chain is broken) — not the current one —
     because that's the number that will actually be paid.
     """
     state = await get_streak_state(guild_id, user_id)
@@ -248,7 +248,7 @@ async def perform_streak_claim(bot, guild_id: int, user_id: int,
     Wallet button.
 
     Raises DailyAlreadyClaimed (with seconds_remaining) when the member
-    has already claimed for the current Cairo day - callers turn that
+    has already claimed for the current Cairo day — callers turn that
     into their own cooldown message. On success returns everything a
     caller needs to render a result, so no caller has to re-query.
 
@@ -265,7 +265,7 @@ async def perform_streak_claim(bot, guild_id: int, user_id: int,
     streak_bonus = await get_streak_bonus(guild_id, streak)
 
     # Prestige earn multiplier, applied to the COMBINED (base + bonus)
-    # total - unchanged from the previous inline implementation.
+    # total — unchanged from the previous inline implementation.
     # Defensive: any lookup failure grants the raw amount rather than
     # breaking the claim, and the member has already consumed their
     # claim for the day at this point, so failing closed is not an
@@ -308,7 +308,7 @@ async def perform_streak_claim(bot, guild_id: int, user_id: int,
 
 
 def format_remaining(seconds: int) -> str:
-    """'18h 42m' / '42m' / '30s' - precise without being noisy."""
+    """'18h 42m' / '42m' / '30s' — precise without being noisy."""
     seconds = max(0, int(seconds))
     hours, rem = divmod(seconds, 3600)
     minutes, secs = divmod(rem, 60)

@@ -8,7 +8,7 @@
     <div class="empty-state">
         <div class="empty-icon">🩺</div>
         <div class="empty-text">
-            No health data yet - the bot hasn't reported in.<br>
+            No health data yet — the bot hasn't reported in.<br>
             Make sure <code>cogs.health</code> is loaded and the bot process is running.
         </div>
     </div>
@@ -91,10 +91,10 @@
                 <tr><td>Size</td><td>
                     {% if db_size_bytes %}
                         {{ "%.2f"|format(db_size_bytes / 1024 / 1024) }} MB
-                    {% else %}-{% endif %}
+                    {% else %}—{% endif %}
                 </td></tr>
-                <tr><td>Python</td><td class="text-muted">{{ row.python_version or '-' }}</td></tr>
-                <tr><td>discord.py</td><td class="text-muted">{{ row.discord_py_version or '-' }}</td></tr>
+                <tr><td>Python</td><td class="text-muted">{{ row.python_version or '—' }}</td></tr>
+                <tr><td>discord.py</td><td class="text-muted">{{ row.discord_py_version or '—' }}</td></tr>
             </tbody>
         </table>
     </div>

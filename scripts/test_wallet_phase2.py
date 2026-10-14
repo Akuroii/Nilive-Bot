@@ -44,7 +44,7 @@ def check(label, condition, detail=""):
         print(f"  \033[92mPASS\033[0m  {label}")
     else:
         _failed += 1
-        print(f"  \033[91mFAIL\033[0m  {label}" + (f" - {detail}" if detail else ""))
+        print(f"  \033[91mFAIL\033[0m  {label}" + (f" — {detail}" if detail else ""))
 
 
 def section(title):
@@ -52,7 +52,7 @@ def section(title):
 
 
 async def main():
-    section("1. Migration - new currency columns exist")
+    section("1. Migration — new currency columns exist")
     await init_db()
     async with aiosqlite.connect(DB_PATH) as db:
         cols = [r[1] for r in await (await db.execute(
@@ -60,7 +60,7 @@ async def main():
     for c in ("coin_emoji_id", "diamond_name", "diamond_emoji_id"):
         check(f"{c} column exists", c in cols, str(cols))
 
-    section("2. Currency config - defaults + customization")
+    section("2. Currency config — defaults + customization")
     from utils.currency import (
         get_currency_config, DEFAULT_COIN_NAME, DEFAULT_COIN_EMOJI,
         DEFAULT_DIAMOND_NAME, DEFAULT_DIAMOND_EMOJI,
@@ -107,7 +107,7 @@ async def main():
     check("item no longer in inventory",
           all(it["item_name"] != "Hat" for it in inv))
 
-    section("5. Streak panel embeds - no UTC / capped / 00:00 / !")
+    section("5. Streak panel embeds — no UTC / capped / 00:00 / !")
     from utils.daily_engine import get_streak_preview
     from cogs.wallet import (
         build_streak_embed, build_claim_embed,
@@ -160,7 +160,7 @@ async def main():
     check("already-claimed has no UTC/00:00",
           "UTC" not in ar and "00:00" not in ar, ar)
 
-    section("6. Inventory embed - no Expires/Paid/Bought debug info")
+    section("6. Inventory embed — no Expires/Paid/Bought debug info")
     from utils.item_catalog import upsert_catalog_entry
     await upsert_catalog_entry(GUILD, "Sunglasses", icon_url=None,
                                rarity="rare", value_currency="balance",
@@ -211,7 +211,7 @@ async def main():
           "Quantity" in dText and "Rarity" in dText and "Status" in dText,
           dText)
 
-    section("8. Receipts formatting - relative time, configured names")
+    section("8. Receipts formatting — relative time, configured names")
     from utils.economy_safe import safe_credit
     from utils.ledger import log_transaction  # noqa: F401
     await safe_credit(GUILD, USER, 500, currency="balance",

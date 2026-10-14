@@ -1,4 +1,4 @@
-"""PROBE 4 - real Flask dashboard routes, real SQLite, test client.
+"""PROBE 4 — real Flask dashboard routes, real SQLite, test client.
 
 Verifies: Dashboard Save -> API -> DB write -> sync flag; the alias *format*
 rules stay hard while *collisions* are advisory (2026-08-28 redesign); the

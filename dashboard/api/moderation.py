@@ -56,7 +56,7 @@ def moderation_logs_partial():
     }
     html = ""
     for r in rows:
-        # SECURITY FIX (dark-fixes pass, CRITICAL - stored XSS): every
+        # SECURITY FIX (dark-fixes pass, CRITICAL — stored XSS): every
         # value below except the numeric id and the hardcoded badge
         # color can be attacker-influenced (a member's Discord display
         # name is fully attacker-controlled, and moderation reasons are
@@ -78,9 +78,9 @@ def moderation_logs_partial():
             f"<span>{_esc(r[1])}</span></div></td>"
             f"<td>{_esc(r[3])}</td>"
             f"<td><span class='badge badge-{color}'>{_esc(r[4])}</span></td>"
-            f"<td>{_esc(r[5]) if r[5] else '-'}</td>"
+            f"<td>{_esc(r[5]) if r[5] else '—'}</td>"
             f"<td><span class='badge badge-source'>{_esc(r[6])}</span></td>"
-            f"<td class='text-muted'>{str(r[7])[:10] if r[7] else '-'}</td>"
+            f"<td class='text-muted'>{str(r[7])[:10] if r[7] else '—'}</td>"
             f"</tr>"
         )
     return html or "<tr><td colspan='6' class='empty'>No logs found</td></tr>"
@@ -182,7 +182,7 @@ def api_mod_quick_action():
 
     # HARDENING (dark-fixes pass): target_id must be a real Discord
     # snowflake before it's formatted into a Discord API URL or a
-    # DB write - previously an arbitrary string could be submitted
+    # DB write — previously an arbitrary string could be submitted
     # here and would be silently coerced/used as-is downstream.
     try:
         target_id = int(target_id)
@@ -250,7 +250,7 @@ def api_mod_quick_action():
         elif action == "massban":
             user_ids = data.get("user_ids", [])
             # HARDENING (dark-fixes pass): cap batch size and validate
-            # each id - an unbounded list here could hammer Discord's
+            # each id — an unbounded list here could hammer Discord's
             # ban endpoint hundreds of times in a single request,
             # risking a rate-limit ban on the bot's own IP.
             if not isinstance(user_ids, list) or len(user_ids) == 0:

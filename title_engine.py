@@ -2,7 +2,7 @@ import aiosqlite
 from database import DB_PATH
 
 # ═══════════════════════════════════════════════════════════════════════
-# TITLE ENGINE - Wallet pass
+# TITLE ENGINE — Wallet pass
 #
 # A Title is a purely cosmetic, DB-only label ("The Silent One"). It is
 # deliberately NOT a Discord role and shares nothing with
@@ -12,14 +12,14 @@ from database import DB_PATH
 # at the same time, and equipping one must never disturb the other.
 #
 # That independence is exactly why this is a separate table rather than
-# a second column on equipped_roles - equipped_roles' PK is
+# a second column on equipped_roles — equipped_roles' PK is
 # (guild_id, user_id) with a NOT NULL role_id, so a title could only
 # have shared that row by either faking a role_id or relaxing a
 # constraint that currently protects the single-role invariant.
 # equipped_titles mirrors its shape (one row per member, PK enforces
 # "at most one equipped title") without touching it.
 #
-# Ownership is always inventory_items (item_type='title', quantity>0) -
+# Ownership is always inventory_items (item_type='title', quantity>0) —
 # equipped_titles only ever answers "which of the owned ones is worn".
 # equip_title() re-validates ownership on every call, so a title that
 # was traded away or admin-removed can't stay equipped through a stale

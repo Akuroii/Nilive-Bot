@@ -1,21 +1,21 @@
 /* ═══════════════════════════════════════════════════════════════
-   Shop Publisher - the page module (Step 0 contract).
+   Shop Publisher — the page module (Step 0 contract).
 
    Step 0 scope is template selection + product selection + Publisher preview
    of the SERVER-resolved design draft + preview warnings + the purchase
    action that will actually be published. There is no publish/send here.
 
-   The token resolver is server-side (utils/shop_publisher.py - fixed,
+   The token resolver is server-side (utils/shop_publisher.py — fixed,
    deterministic, non-programmable) and shared with the future publish path.
    This module interprets NOTHING: it renders what
    GET  /api/shop-publisher/catalog
    POST /api/shop-publisher/preview
    return, and the purchase action row renders the API's action descriptor
-   verbatim (entries carrying custom_id shop_buy_<id> - the existing purchase
+   verbatim (entries carrying custom_id shop_buy_<id> — the existing purchase
    mechanism cogs/shop.py already dispatches).
 
    The preview request is a Design draft: {presentation{mode,content,embeds},
-   products[], action{kind, entries}} - products[] is the ROOT-PRODUCT roster
+   products[], action{kind, entries}} — products[] is the ROOT-PRODUCT roster
    (this transitional page always sends the one selected product). The three-
    region Designer workspace supersedes this page in a later step; until then
    this keeps the approved contract exercised end to end.
@@ -37,11 +37,11 @@ window.NERO = window.NERO || {};
 
     var CATALOG_URL = '/api/shop-publisher/catalog';
     var PREVIEW_URL = '/api/shop-publisher/preview';
-    // The existing Embed Builder read route (frozen boundary, LEVEL_OWNER) -
+    // The existing Embed Builder read route (frozen boundary, LEVEL_OWNER) —
     // NOT a new loader route. The catalog serves names only (explicit final
-    // Step 0 contract - Q2#12 CLOSED 2026-09-30: keeps the payload light at
+    // Step 0 contract — Q2#12 CLOSED 2026-09-30: keeps the payload light at
     // ~100-template scale; only the selected document is fetched). This
-    // route is the Step 0 TRANSITIONAL presentation source only - not the
+    // route is the Step 0 TRANSITIONAL presentation source only — not the
     // final Shop load/snapshot architecture; that stays deferred to the
     // Step 1+ design discussion.
     var TEMPLATE_URL = '/api/embedbuilder/template/';
@@ -67,7 +67,7 @@ window.NERO = window.NERO || {};
     }
 
     // ── Pickers ─────────────────────────────────────────────────
-    // Template picker: plain options, template names (embed_templates) -
+    // Template picker: plain options, template names (embed_templates) —
     // names-only catalog (explicit final Step 0 contract, Q2#12 closed
     // 2026-09-30). The template DOCUMENT is read per selection from the
     // Embed Builder's existing read route (Step 0 transitional source; the
@@ -88,14 +88,14 @@ window.NERO = window.NERO || {};
     }
 
     // Product picker: grouped by the EXISTING `type` column and nothing else
-    // (locked decision - no new category system). One <optgroup> per type,
+    // (locked decision — no new category system). One <optgroup> per type,
     // groups in the server's V1 order (products arrive pre-sorted by
     // type_group_key); each product appears exactly once.
     // ── Category pickers (Slice 2) ────────────────────────────────
     // The product list groups by Shop Category (the Slice 1 link) with an
     // Uncategorized bucket; `type` is display metadata (a badge), never the
     // grouping mechanism. A link to a missing category falls into the
-    // Uncategorized bucket - grouping only, no warning machinery.
+    // Uncategorized bucket — grouping only, no warning machinery.
     function categoryLabel(category) {
         return (category.emoji ? category.emoji + ' ' : '') +
             (category.name || ('#' + category.id));
@@ -213,7 +213,7 @@ window.NERO = window.NERO || {};
     }
 
     // ── Purchase action (rendered verbatim from the API descriptor) ──
-    // One descriptor, three kinds - all resolve to the EXISTING shop_buy_<id>
+    // One descriptor, three kinds — all resolve to the EXISTING shop_buy_<id>
     // mechanism. Buttons render as button chips; select kinds render a
     // faithful option list (placeholder + options) alongside the exact
     // custom ids that will be published.
@@ -263,7 +263,7 @@ window.NERO = window.NERO || {};
                 meta.appendChild(el(doc, 'code', '', 'custom_id: ' + (entry.custom_id || '')));
             });
             meta.appendChild(doc.createTextNode(
-                ' - green buttons handled by the existing shop purchase mechanism.'));
+                ' — green buttons handled by the existing shop purchase mechanism.'));
         } else {
             meta.appendChild(el(doc, 'code', '', 'custom_id: ' + (action.component_custom_id || '')));
             meta.appendChild(doc.createTextNode(' with option values '));
@@ -272,7 +272,7 @@ window.NERO = window.NERO || {};
                 meta.appendChild(el(doc, 'code', '', entry.custom_id || ''));
             });
             meta.appendChild(doc.createTextNode(
-                ' - every option routes to the existing shop purchase mechanism.'));
+                ' — every option routes to the existing shop purchase mechanism.'));
         }
         container.appendChild(meta);
     }
@@ -281,7 +281,7 @@ window.NERO = window.NERO || {};
     function renderWarnings(doc, container, warnings) {
         clear(container);
         if (!warnings || !warnings.length) {
-            container.appendChild(el(doc, 'div', 'sp-ok', 'No warnings - this preview is clean.'));
+            container.appendChild(el(doc, 'div', 'sp-ok', 'No warnings — this preview is clean.'));
             return;
         }
         warnings.forEach(function (warning) {
@@ -423,7 +423,7 @@ window.NERO = window.NERO || {};
             // draftState IS the in-memory Step 0 Design draft
             // ({presentation, products, action}). dirty = actual unsaved
             // DRAFT changes only (template/presentation, roster, action,
-            // name) - never network/loading/status transitions. A loaded
+            // name) — never network/loading/status transitions. A loaded
             // design previews from its OWN presentation snapshot verbatim;
             // source_template_name stays provenance and is never dereferenced
             // after save. No autosave, no revisions.
@@ -572,7 +572,7 @@ window.NERO = window.NERO || {};
                     setStatus('Select a template and a product before saving.', true);
                     return;
                 }
-                // Explicit Save only - full overwrite of the current design.
+                // Explicit Save only — full overwrite of the current design.
                 var body = {
                     name: name,
                     source_template_name: draftSourceName || null,
@@ -621,7 +621,7 @@ window.NERO = window.NERO || {};
                     setStatus('Design load failed: the saved draft is unreadable.', true);
                     return;
                 }
-                // Apply the saved draft verbatim - the presentation is the
+                // Apply the saved draft verbatim — the presentation is the
                 // design's OWN snapshot. No template fetch happens on load;
                 // source_template_name is provenance only.
                 currentDesignId = record.id;
@@ -744,7 +744,7 @@ window.NERO = window.NERO || {};
             }
 
             function onTemplateChange() {
-                // Template/presentation change - a draft-affecting change.
+                // Template/presentation change — a draft-affecting change.
                 var template = templateSelect ? templateSelect.value : '';
                 var seq = ++sequence;
                 if (!template) {
@@ -778,7 +778,7 @@ window.NERO = window.NERO || {};
             function onProductChange() {
                 syncAssignSelect();
                 updateTypeBadge();
-                // Roster change - a draft-affecting change. The presentation
+                // Roster change — a draft-affecting change. The presentation
                 // is untouched (a loaded design keeps its own snapshot).
                 setDirty(true);
                 var productId = selectedProductId();
@@ -791,7 +791,7 @@ window.NERO = window.NERO || {};
             }
 
             function requestPreview() {
-                // A PURE preview over the in-memory draft - the same Step 0
+                // A PURE preview over the in-memory draft — the same Step 0
                 // preview_design() + build_purchase_action() path the publish
                 // step must reuse (Preview == Publish identity).
                 if (!draftState || !draftState.presentation ||
@@ -818,7 +818,7 @@ window.NERO = window.NERO || {};
                     }
                     renderPreview(data.preview);
                     var warningCount = (data.preview.warnings || []).length;
-                    setStatus('Preview resolved - ' + (draftSourceName || 'draft') +
+                    setStatus('Preview resolved — ' + (draftSourceName || 'draft') +
                         (warningCount ? ' · ' + warningCount + ' warning(s)' : ' · no warnings'));
                 }).catch(function (err) {
                     if (ctx.isDestroyed() || seq !== sequence) return;
@@ -836,7 +836,7 @@ window.NERO = window.NERO || {};
             // Dirty state: name is persisted design state, so editing it is a
             // draft-affecting change. Network/loading/status transitions never
             // touch dirty. beforeunload guards only while actual unsaved draft
-            // changes exist - no navigation framework beyond this.
+            // changes exist — no navigation framework beyond this.
             ctx.on(designName, 'change', function () { setDirty(true); });
             ctx.on(saveBtn, 'click', saveDesign);
             ctx.on(loadBtn, 'click', loadDesign);
@@ -889,7 +889,7 @@ window.NERO = window.NERO || {};
         },
         destroy: function () {
             // Everything allocated goes through ctx (listeners, fetches, the
-            // preview cleanup registered above) - nav-lifecycle releases them
+            // preview cleanup registered above) — nav-lifecycle releases them
             // after this hook returns.
         },
     });

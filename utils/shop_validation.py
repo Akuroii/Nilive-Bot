@@ -94,7 +94,7 @@ def shop_input(data):
         tier = None if tier in (None, "", 0, "0") else integer(tier, "Prestige tier", minimum=1, maximum=6)
     result["prestige_tier"] = tier
     # Free rule (normal items): an explicit coin price of 0 with no diamond
-    # price is a legitimate Free listing - the same zero-charge meaning
+    # price is a legitimate Free listing — the same zero-charge meaning
     # utils/shop_publisher.is_free() derives, and the same 0 that Prestige VI
     # already stores. Nothing to reject here: `integer(..., "Price")` above
     # already refuses None/missing, negative, fractional, boolean and

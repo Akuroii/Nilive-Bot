@@ -11,10 +11,10 @@ from utils.reward_engine import give_reward
 from utils.emoji import CHECK_EMOJI
 
 # ═══════════════════════════════════════════════════════════════════════
-# MINIGAMES v2 - GAME ENGINES (Phase 2 of the approved v2 plan)
+# MINIGAMES v2 — GAME ENGINES (Phase 2 of the approved v2 plan)
 #
 # One shared architecture, six engines (the multiple-choice engine is
-# shared by math / colors / emoji - plan §6).
+# shared by math / colors / emoji — plan §6).
 #
 # ARCHITECTURE (plan §1, round-3 requirement):
 #   * Each engine OWNS the definition of its interactive components as
@@ -22,7 +22,7 @@ from utils.emoji import CHECK_EMOJI
 #     zero discord imports in that code path):
 #         - the bot renders the JSON into a discord.ui.View (adapter)
 #         - the Dashboard live preview (Phase 4/5) renders the SAME JSON
-#           - it never recreates the game's look independently.
+#           — it never recreates the game's look independently.
 #   * The engine is a state machine; the View is a thin transport.
 #     All resolution logic lives in the engine, reachable without a live
 #     discord client (tests drive `engine._dispatch(...)` directly).
@@ -31,23 +31,23 @@ from utils.emoji import CHECK_EMOJI
 #   `MinigameEngine._claim()` (check-and-set of `finished` under one
 #   asyncio.Lock, no awaits between) is the ONLY gate. Every ending path
 #   (click, timeout, draw, second resolution attempt) funnels through
-#   `resolve()`, which claims first - a second caller gets False and
+#   `resolve()`, which claims first — a second caller gets False and
 #   does nothing. Timers are cancelled after the claim.
 #
 # NO-FORFEIT PRINCIPLE (D3): every timeout ends "no winner, no reward"
 # unless a valid winning state exists. A seated RPS player who never
-# chooses loses nothing - the game simply ends.
+# chooses loses nothing — the game simply ends.
 #
 # FINALIZATION ORDER (plan §18, verified in tests):
 #   resolve winners → independent reward rolls → grant rewards
-#   → edit/reveal the embed (BEST EFFORT - a failed edit never loses
+#   → edit/reveal the embed (BEST EFFORT — a failed edit never loses
 #     rewards) → close the run log row.
 #
-# Reward delivery is exclusively utils.reward_engine.give_reward - the
+# Reward delivery is exclusively utils.reward_engine.give_reward — the
 # single shared grant path (plan §7/§9).
 # ═══════════════════════════════════════════════════════════════════════
 
-# ── PURE COMPONENT DESCRIPTORS (Discord-API JSON - preview-compatible) ──
+# ── PURE COMPONENT DESCRIPTORS (Discord-API JSON — preview-compatible) ──
 # Style constants are Discord's API values: 1 primary, 2 secondary,
 # 3 success (green), 4 danger (red).
 
@@ -76,7 +76,7 @@ def _btn(label, style="secondary", disabled=False, custom_id="",
 
 def qc_rows(button_count: int, revealed: bool, green_index: int | None = None
             ) -> list[list[dict]]:
-    """Quick Click rows. Pre-reveal: all disabled (visually invalid - D2).
+    """Quick Click rows. Pre-reveal: all disabled (visually invalid — D2).
     Revealed: the green button enabled+success, the rest stay disabled."""
     row = []
     for i in range(button_count):
@@ -110,7 +110,7 @@ def join_rows(emoji: str, label: str = "Join", disabled: bool = False
 
 def initial_component_rows(game_type: str, config: dict) -> list[list[dict]]:
     """
-    The component rows the game message is POSTED with - pure data, no
+    The component rows the game message is POSTED with — pure data, no
     discord dependency. Consumed by:
       * the bot: MinigameEngine._make_view() renders these into Buttons
       * the Dashboard live preview (Phase 4/5): rendered as HTML
@@ -172,7 +172,7 @@ def _grant_kwargs(rolled: dict) -> dict:
 
 
 async def _safe_ephemeral(interaction, text: str, view=None):
-    """Best-effort ephemeral ack - a failed ack must never break the game."""
+    """Best-effort ephemeral ack — a failed ack must never break the game."""
     try:
         await interaction.response.send_message(text, ephemeral=True, view=view)
         return getattr(interaction.response, "message", None)
@@ -294,7 +294,7 @@ class MinigameEngine:
         # When resolve() is triggered BY one of our own timers, the
         # currently running task is a timer task itself. Cancelling it
         # would inject a CancelledError into resolve() at its next
-        # await - finalizing would then be aborted after the reward
+        # await — finalizing would then be aborted after the reward
         # grants but before finish_run, leaving the row stuck
         # 'running' (reward given, log never closed). Skip self.
         current = asyncio.current_task()
@@ -349,7 +349,7 @@ class MinigameEngine:
         opened the run row BEFORE calling this, so a send failure still
         leaves an auditable row (finalized as failed by the caller).
         Raises ValueError on a template that cannot be played (preflight)
-        - the caller marks the spawn failed and moves on."""
+        — the caller marks the spawn failed and moves on."""
         self.preflight()
         self._view = self._make_view(self.component_rows())
         self._message = await channel.send(embed=self.build_embed(),
@@ -370,7 +370,7 @@ class MinigameEngine:
 
     async def _claim(self) -> bool:
         """Atomic check-and-set of `finished` (no awaits between the check
-        and the set) - exactly one caller can ever claim the game."""
+        and the set) — exactly one caller can ever claim the game."""
         async with self._lock:
             if self.finished:
                 return False
@@ -382,7 +382,7 @@ class MinigameEngine:
                       result_text: str = "") -> bool:
         """
         The ONLY path to finalization. Returns False (and does nothing)
-        if the game was already resolved - concurrent clicks, a timer
+        if the game was already resolved — concurrent clicks, a timer
         racing a click, or a double invocation can never resolve twice.
 
         Order (plan §18): rolls+grants → best-effort embed edit → log.
@@ -393,12 +393,12 @@ class MinigameEngine:
         await self._cancel_timers()
         await self._disable_ephemeral_views()
 
-        # 1) independent rolls + grants - BEFORE any embed work
+        # 1) independent rolls + grants — BEFORE any embed work
         granted = []
         for w in winners:
             entry = {"id": w["id"], "name": w.get("name") or w.get("display_name") or "?"}
             if not self.rewards:
-                # D11: empty pool is valid - winner announced, nothing granted
+                # D11: empty pool is valid — winner announced, nothing granted
                 entry.update(reward_type=None, reward_value=None,
                              status="no_reward")
                 granted.append(entry)
@@ -432,7 +432,7 @@ class MinigameEngine:
             try:
                 await self._message.edit(embed=embed, view=self._view)
             except Exception as e:
-                # A failed edit NEVER loses rewards - they are already safe.
+                # A failed edit NEVER loses rewards — they are already safe.
                 print(f"[MINIGAMES] run {self.log_id}: final embed edit "
                       f"failed (rewards already delivered): {e}")
 
@@ -561,12 +561,12 @@ class WheelEngine(MinigameEngine):
             await _safe_ephemeral(interaction, "You are in.")
 
 
-# ── MULTIPLE CHOICE - math / colors / emoji (plan §6.3) ─────────────────
+# ── MULTIPLE CHOICE — math / colors / emoji (plan §6.3) ─────────────────
 
 class MultipleChoiceEngine(MinigameEngine):
     """
     Shared engine for the three content types. The admin supplies the
-    answer labels (exact text on the buttons - D6), the correct index,
+    answer labels (exact text on the buttons — D6), the correct index,
     and the timer. Players may change their answer; the LAST answer
     committed before the game ends is the one that counts. During the
     game NOTHING about counts/identities/choices is revealed.
@@ -589,7 +589,7 @@ class MultipleChoiceEngine(MinigameEngine):
 
     def preflight(self):
         if not self.answers:
-            raise ValueError("template has no answers - cannot spawn")
+            raise ValueError("template has no answers — cannot spawn")
 
     def component_rows(self):
         return mc_rows(self.answers, self.finished, self.correct)
@@ -599,7 +599,7 @@ class MultipleChoiceEngine(MinigameEngine):
 
     def _arm_timers(self):
         if not self.answers:
-            return  # broken template - the spawn path should have refused
+            return  # broken template — the spawn path should have refused
         self._arm(self._on_time, self.seconds)
 
     async def _on_time(self):
@@ -622,7 +622,7 @@ class MultipleChoiceEngine(MinigameEngine):
         else:
             reveal = (f"{CHECK_EMOJI} **Correct answer: {self.answers[self.correct]}**\n"
                       f"❌ **No one got it right.**") if self.correct >= 0 else \
-                     "❌ **Game ended - no valid correct answer configured.**"
+                     "❌ **Game ended — no valid correct answer configured.**"
             await self.resolve([], status="no_winner", result_text=reveal)
 
     async def _dispatch(self, interaction, route, custom_id, info):
@@ -634,11 +634,11 @@ class MultipleChoiceEngine(MinigameEngine):
             return
         async with self._lock:
             if self.finished:
-                return  # late click - the game already resolved
+                return  # late click — the game already resolved
             self.selections[info["id"]] = idx  # last answer wins
             self._participant(info)
         await _safe_ephemeral(
-            interaction, f"{CHECK_EMOJI} Answer set - you can change it until "
+            interaction, f"{CHECK_EMOJI} Answer set — you can change it until "
                          "time runs out.")
 
 
@@ -648,7 +648,7 @@ class RpsEngine(MinigameEngine):
     """
     First two joiners are seated. Each seated player receives a PRIVATE
     (ephemeral) row of Rock/Paper/Scissors buttons the moment they seat
-    (their own join interaction is the only way to reach them - Discord
+    (their own join interaction is the only way to reach them — Discord
     cannot target shared-message buttons to a user). First choice locks;
     the game resolves immediately once both have chosen.
     NO FORFEIT (D3): seating timeout or choice timeout → no winner,
@@ -687,9 +687,9 @@ class RpsEngine(MinigameEngine):
                 return
             full = len(self.seats) >= 2
         if full:
-            return  # both seated - the choice timer governs from here
+            return  # both seated — the choice timer governs from here
         await self.resolve(status="no_winner",
-                           result_text="⏰ **Game ended - no second player "
+                           result_text="⏰ **Game ended — no second player "
                                        "joined in time.**")
 
     async def _on_choice_timeout(self):
@@ -700,11 +700,11 @@ class RpsEngine(MinigameEngine):
                 return
             missing = [s for s in self.seats if s["id"] not in self.choices]
         if not missing:
-            return  # both chose - resolution already ran / is running
+            return  # both chose — resolution already ran / is running
         names = " and ".join("**%s**" % m["display_name"] for m in missing)
         await self.resolve(status="no_winner",
                            result_text=(f"⏰ **{names}** didn't pick in "
-                                        f"time - game over, no reward."))
+                                        f"time — game over, no reward."))
 
     def _make_choice_view(self, uid: int) -> discord.ui.View:
         view = discord.ui.View(timeout=None)
@@ -722,7 +722,7 @@ class RpsEngine(MinigameEngine):
         """Give each not-yet-handed-out seated player their private row.
         A player can only be reached via their OWN join interaction, so
         we hand out to whoever is the clicker (and, on the second
-        seating, only them - the first player was served at their own
+        seating, only them — the first player was served at their own
         join)."""
         for seat in self.seats:
             if only_uid is not None and seat["id"] != only_uid:
@@ -732,10 +732,10 @@ class RpsEngine(MinigameEngine):
             view = self._make_choice_view(seat["id"])
             if seat["id"] == interaction.user.id:
                 waiting = len(self.seats) < 2
-                text = ("You're seated! Pick your throw - it locks when "
+                text = ("You're seated! Pick your throw — it locks when "
                         "you press. "
                         + ("Waiting for a second player…" if waiting
-                           else "Both players are seated - pick before time "
+                           else "Both players are seated — pick before time "
                               "runs out."))
                 msg = await _safe_ephemeral(interaction, text, view=view)
                 self._choice_views[seat["id"]] = (view, msg)
@@ -771,7 +771,7 @@ class RpsEngine(MinigameEngine):
                 seated_now = self.seats[-1]
         if seated_now is None:
             await _safe_ephemeral(
-                interaction, "The table is full - two players are already "
+                interaction, "The table is full — two players are already "
                              "seated.")
             return
         if len(self.seats) == 2:
@@ -819,7 +819,7 @@ class RpsEngine(MinigameEngine):
                   f"{e2} **{n2}** played {c2.title()}")
         if c1 == c2:
             await self.resolve([], status="no_winner",
-                               result_text=detail + "\n🤝 **Draw - no reward.**")
+                               result_text=detail + "\n🤝 **Draw — no reward.**")
             return
         winner = p1 if self.BEATS[c1] == c2 else p2
         await self.resolve([winner], status="completed",

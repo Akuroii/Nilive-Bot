@@ -4,19 +4,19 @@ from datetime import datetime, timezone
 from database import DB_PATH
 
 # ═══════════════════════════════════════════════════════════════════════
-# TRADE SYSTEM (E3/E4-dependent - blocked until Dark verified both live
+# TRADE SYSTEM (E3/E4-dependent — blocked until Dark verified both live
 # on Railway; that verification landed this session, so this is the
 # first build against them).
 #
 # Schema lives in this module's own ensure_trade_table(), NOT in
-# database.py's init_db() - same pattern cogs/minigames.py already
+# database.py's init_db() — same pattern cogs/minigames.py already
 # established for its three tables. Called from cogs/trade.py's
 # cog_load(), same lifecycle Minigames uses.
 #
 # Currency legs reuse the SAME upsert shape utils/economy_safe.py uses
 # (INSERT ... ON CONFLICT DO UPDATE) but inlined here rather than
 # calling safe_credit/safe_deduct directly, because those each open
-# their OWN connection/transaction - a trade needs both parties' both
+# their OWN connection/transaction — a trade needs both parties' both
 # currencies and every offered item validated and moved inside ONE
 # BEGIN IMMEDIATE, or a partial failure could leave one side paid and
 # the other not. This is the same reasoning
@@ -24,13 +24,13 @@ from database import DB_PATH
 # utils/economy_safe.py::safe_convert() already document for their own
 # multi-step atomic writes.
 #
-# Item legs are inlined for the same reason - utils/inventory.py's
+# Item legs are inlined for the same reason — utils/inventory.py's
 # give_item()/remove_item() also each open their own connection.
 #
 # Ledger logging happens AFTER commit (same pattern as
 # utils/economy_safe.py's _log_ledger): a trade that already landed in
 # `economy`/`inventory_items` must never be undone by a ledger write
-# failure - the ledger is an audit trail on top of the source of
+# failure — the ledger is an audit trail on top of the source of
 # truth, not the source of truth itself.
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -147,7 +147,7 @@ async def execute_trade(guild_id: int, user_a: int, offer_a: dict,
     """
     offer_a / offer_b: {"coins": int, "diamonds": int, "items": {name: qty}}
     Everything in offer_a moves from user_a to user_b, and vice versa
-    for offer_b - a simultaneous two-way swap. Re-validates both
+    for offer_b — a simultaneous two-way swap. Re-validates both
     parties' live balances/inventory INSIDE the transaction (not just
     at UI-build time), since Discord button clicks can land minutes
     after either side last had those funds/items. Fully atomic: either

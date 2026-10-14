@@ -86,14 +86,14 @@ async def extract_channel_id(url: str) -> str | None:
 #   dict  -> confirmed live/upcoming right now (the videos.list item)
 #   False -> a real response came back and the video is NOT live/upcoming
 #            (no liveStreamingDetails at all, or it has an
-#            actualEndTime - i.e. it's a normal video or a finished
+#            actualEndTime — i.e. it's a normal video or a finished
 #            broadcast that's now a VOD)
 #   None  -> the check FAILED or was inconclusive: missing
 #            YOUTUBE_API_KEY, non-200, network error, or an empty
 #            `items` list. An empty list for a video ID we just saw in
 #            the RSS feed (or are actively tracking as live) is
-#            ambiguous - could be API propagation lag, could be a
-#            genuinely deleted/privated video - so it's never treated
+#            ambiguous — could be API propagation lag, could be a
+#            genuinely deleted/privated video — so it's never treated
 #            as a confident "not live" on its own; every call site
 #            below does nothing on None and waits for the next tick.
 #
@@ -103,7 +103,7 @@ async def extract_channel_id(url: str) -> str | None:
 # ended transition, and the live session is left open rather than
 # risking an incorrect "ended" edit off an ambiguous signal. Matches
 # this engine's "never guess, fail toward doing nothing" rule
-# throughout - a stale "still live" badge is a far smaller problem
+# throughout — a stale "still live" badge is a far smaller problem
 # than silently closing out a session that's still genuinely live.
 # Worth a follow-up (e.g. a hard cap on "how many ticks in a row can
 # stay open on None before giving up") if this turns out to matter in
@@ -147,7 +147,7 @@ async def is_short(video_id: str) -> bool:
     """
     Unofficial-but-reliable Short classification: youtube.com/shorts/{id}
     200s for a real Short and redirects to /watch?v={id} for anything
-    else. Fail-safe on any error - returns False (not a Short), which
+    else. Fail-safe on any error — returns False (not a Short), which
     falls through to the normal Video path. A real upload silently
     getting misfiled as a Short (wrong channel, wrong message) is a
     worse failure than an actual Short occasionally posting as a
@@ -171,7 +171,7 @@ def _video_url(video_id: str) -> str:
 
 
 def _thumbnail_url(video_id: str) -> str:
-    # Always-available CDN thumbnail, no API call needed - every valid
+    # Always-available CDN thumbnail, no API call needed — every valid
     # video ID has one, unlike maxresdefault.jpg which 404s for a lot
     # of older/lower-res uploads.
     return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
@@ -222,7 +222,7 @@ def build_live_embed(video_id: str, item: dict) -> discord.Embed:
 def build_live_ended_embed(video_id: str, title: str = "") -> discord.Embed:
     # No cheap way to recover the original live title at end-of-stream
     # time without either an extra API call (spends quota just for a
-    # cosmetic detail) or storing it separately at start time - same
+    # cosmetic detail) or storing it separately at start time — same
     # tradeoff cogs/twitch.py already accepts for its own ended embed
     # (it uses the static configured username, not the dynamic stream
     # title, either). "Stream ended" plus the still-working link
@@ -278,10 +278,10 @@ class YouTube(commands.Cog):
             guild = self.bot.get_guild(guild_id)
 
             # CREATOR pass 3 (consolidated notifications): looked up
-            # once per config and reused by both phases below - a
+            # once per config and reused by both phases below — a
             # watch linked to a Creator Group posts/edits that group's
             # single shared message instead of sending its own; an
-            # unlinked watch (group is None - the default for every
+            # unlinked watch (group is None — the default for every
             # watch that exists today) falls straight through to the
             # exact same start_live_session()/end_live_session() calls
             # this cog always made. See utils/creator_notify_engine.py's
@@ -292,7 +292,7 @@ class YouTube(commands.Cog):
                 # ── Phase A: is a video we're already tracking as live
                 # still live? Only spends an API call when there's
                 # something to track AND Live is still turned on for
-                # this watch - an admin flipping live_enabled off
+                # this watch — an admin flipping live_enabled off
                 # mid-broadcast just freezes the open session rather
                 # than closing it (same "don't guess" reasoning as the
                 # tri-state contract above).
@@ -332,7 +332,7 @@ class YouTube(commands.Cog):
 
                 # ── Phase B: has a new video shown up since we last
                 # checked the RSS feed? RSS only ever gives the single
-                # latest upload, same as before this pass - this is
+                # latest upload, same as before this pass — this is
                 # unchanged in shape from the original cog.
                 video = await fetch_latest_video(yt_channel_id)
                 if not video or video["id"] == last_video_id:
@@ -381,7 +381,7 @@ class YouTube(commands.Cog):
 
                             if result.get("sent"):
                                 # Only claim live_video_id when WE
-                                # actually started the session - if
+                                # actually started the session — if
                                 # another live session for this same
                                 # watch is already open
                                 # (already_active), leave the existing
@@ -456,7 +456,7 @@ class YouTube(commands.Cog):
                             print(f"[YOUTUBE] Video send error for config {cid}: {e}")
 
                 # Every branch above (live, short, or plain video)
-                # advances last_video_id - this is what stops a stream
+                # advances last_video_id — this is what stops a stream
                 # that just ended from ALSO posting as a "new video"
                 # once YouTube turns it into a VOD under the same ID,
                 # and what stops a Short from being reprocessed as a

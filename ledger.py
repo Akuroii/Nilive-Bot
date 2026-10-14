@@ -107,7 +107,7 @@ async def get_user_ledger_page(guild_id: int, user_id: int,
     limit semantics, and adding a parameter with a default is exactly
     how a shared helper quietly changes behaviour for an existing
     caller. Ordering adds `id DESC` as a tiebreaker because created_at
-    is a second-resolution CURRENT_TIMESTAMP - several rows from one
+    is a second-resolution CURRENT_TIMESTAMP — several rows from one
     action (a convert writes convert_out + convert_in) share the same
     timestamp, and without the tiebreaker SQLite's row order between
     them is unspecified, which can duplicate or skip a row across a

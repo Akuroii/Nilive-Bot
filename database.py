@@ -6,7 +6,7 @@ import sys
 # STAGING / PRODUCTION SEPARATION: set NERO_ENVIRONMENT=staging on a
 # second deploy (e.g. a throwaway Oracle Cloud instance or a local dev
 # box) to point at a separate DB file without touching production data.
-# Unset (the default) behaves exactly as before - DATABASE_PATH (or the
+# Unset (the default) behaves exactly as before — DATABASE_PATH (or the
 # hardcoded /app/data/nero.db default) is used untouched, so existing
 # deploys need zero config changes.
 NERO_ENVIRONMENT = os.getenv("NERO_ENVIRONMENT", "production").strip().lower()
@@ -29,7 +29,7 @@ if NERO_ENVIRONMENT == "staging":
 else:
     DB_PATH = os.getenv("DATABASE_PATH", "/app/data/nero.db")
 
-# SECURITY FIX: OWNER_DISCORD_ID previously had a hardcoded fallback -
+# SECURITY FIX: OWNER_DISCORD_ID previously had a hardcoded fallback —
 # anyone deploying from this source without setting OWNER_ID got a
 # working bot that silently granted dashboard owner access to whatever
 # Discord account that literal ID belonged to. Now required; the
@@ -43,7 +43,7 @@ if not _owner_id_raw:
     print("FATAL: OWNER_ID is missing or empty.")
     print("  -> Set OWNER_ID to your Discord user ID as an env var.")
     print("  -> This used to default to a hardcoded ID baked into the")
-    print("     source - that fallback has been removed for security.")
+    print("     source — that fallback has been removed for security.")
     print("=" * 60)
     sys.exit(1)
 OWNER_DISCORD_ID = int(_owner_id_raw)
@@ -249,18 +249,18 @@ async def init_db():
         # ticks + dashboard requests landing at once) that
         # connection-churn pattern starts throwing "database is
         # locked" errors. WAL mode lets readers proceed while a writer
-        # holds the lock - set once here, since WAL IS a persistent,
+        # holds the lock — set once here, since WAL IS a persistent,
         # file-level setting: every subsequent connection to this
         # file, bot or dashboard, inherits it.
         #
         # CORRECTION (pass #2 review): busy_timeout, unlike
-        # journal_mode, is NOT a persistent file-level setting - it's
+        # journal_mode, is NOT a persistent file-level setting — it's
         # per-connection. Setting it here only affects this one
         # connection, not the dozens of others opened elsewhere via
         # plain aiosqlite.connect(DB_PATH). This isn't a live bug only
         # because Python's sqlite3 (which aiosqlite wraps) already
         # defaults new connections to a 5-second busy timeout on its
-        # own - so those other connections get equivalent behavior by
+        # own — so those other connections get equivalent behavior by
         # accident, not because of this pragma. Left in place since
         # it's harmless and self-documenting; just don't rely on this
         # line alone if that default ever changes.
@@ -283,13 +283,13 @@ async def init_db():
         """)
 
         # CLEANUP (dark-fixes pass #2): voice_sessions dropped from
-        # schema - confirmed zero read/write references anywhere in
+        # schema — confirmed zero read/write references anywhere in
         # cogs/ or dashboard/ (only comments referencing the old name
         # remain, e.g. cogs/mvp.py). Superseded entirely by the
         # tick-based activity engine (on_activity_voice_tick), which
         # doesn't need join/leave bookkeeping. Not DROPping the table
         # from any already-deployed DB file here (that's a manual,
-        # explicit operator action) - this just stops a fresh DB from
+        # explicit operator action) — this just stops a fresh DB from
         # ever creating it again.
 
         await db.execute("""
@@ -324,7 +324,7 @@ async def init_db():
         """)
 
         # Phase 5 / Prestige system: prestige tier lives on the same
-        # per-member row as xp/level rather than a separate table -
+        # per-member row as xp/level rather than a separate table —
         # it's a third dimension of the same "how far has this member
         # progressed" state, and every existing query that already
         # SELECTs from levels by (guild_id, user_id) only needs one
@@ -397,7 +397,7 @@ async def init_db():
             print(f"[MIGRATION] tickets.staff_role_id: {e}")
 
         # CLEANUP (dark-fixes pass #2): ticket_config dropped from
-        # schema - confirmed zero read/write references anywhere (only
+        # schema — confirmed zero read/write references anywhere (only
         # comments remain, e.g. cogs/tickets.py's P1 #10 fix note).
         # /ticket_setup writes to ticket_settings now; this legacy
         # table was never populated by any current code path. See
@@ -439,7 +439,7 @@ async def init_db():
         """)
 
         # PHASE 5 TAIL FIX: message_id added to the key here too,
-        # matching database.py's central schema/migration - see
+        # matching database.py's central schema/migration — see
         # that file for the full explanation. This CREATE is a
         # no-op in practice (database.py's init_db() already runs
         # and migrates the table before any cog's on_ready fires),
@@ -461,8 +461,8 @@ async def init_db():
             cols = [c[1] for c in await cursor.fetchall()]
             if "message_id" not in cols:
                 # Table predates message_id being part of the primary
-                # key - SQLite can't ALTER a PK in place, so rebuild.
-                # Legacy rows get message_id=0 (best we can do - the
+                # key — SQLite can't ALTER a PK in place, so rebuild.
+                # Legacy rows get message_id=0 (best we can do — the
                 # panel they belonged to isn't recoverable from the
                 # old schema); this only affects expiry rows written
                 # before this fix shipped, and worst case is one
@@ -571,7 +571,7 @@ async def init_db():
         """)
 
         # CLEANUP (dark-fixes pass #2): disabled_commands dropped from
-        # schema - confirmed zero references anywhere. Superseded by
+        # schema — confirmed zero references anywhere. Superseded by
         # command_toggles (see main.py, dashboard/app.py's
         # config_commands route), which is the table actually in use.
 
@@ -660,7 +660,7 @@ async def init_db():
                 -- Deliberately NULL by default: utils/currency.py is the
                 -- one place that decides what a blank value resolves to,
                 -- so the defaults live there and nowhere else. See that
-                -- module's header - these columns are owned by the
+                -- module's header — these columns are owned by the
                 -- Economy page, and no other file may read or write them.
                 currency_name            TEXT,
                 coin_emoji_id            TEXT,
@@ -688,7 +688,7 @@ async def init_db():
             # no coin/diamond label or emoji is hardcoded in the UI.
             # `currency_emoji_id` was the pre-Wallet primary-currency icon
             # column; it was superseded by `coin_emoji_id`. These four
-            # columns are read and written ONLY through utils/currency.py -
+            # columns are read and written ONLY through utils/currency.py —
             # see that module's header for why currency display config
             # lives here but is owned by the Economy page.
             # These ALTERs deliberately add the columns with NO DEFAULT.
@@ -699,7 +699,7 @@ async def init_db():
             # column default would (a) put the defaults in a second place
             # that can drift from the resolver, and (b) make "never
             # configured" indistinguishable from "configured to the
-            # default" - which is exactly what the carry-over below needs
+            # default" — which is exactly what the carry-over below needs
             # to tell apart. `currency_name` is added here too so an older
             # database missing that column self-heals the same way the
             # other three already did.
@@ -730,13 +730,13 @@ async def init_db():
             # survives instead of silently reverting to the default.
             #
             # The copy is gated on `added_coin_emoji`, so it runs only on
-            # the one init_db() that actually creates the column - it can
+            # the one init_db() that actually creates the column — it can
             # never re-fire later and overwrite an icon an admin set
             # deliberately through the Economy page (including deliberately
             # choosing the default). The NULL-only WHERE is a second
             # belt-and-braces guard for the same thing.
             #
-            # The legacy column is deliberately NOT dropped - this
+            # The legacy column is deliberately NOT dropped — this
             # project's established rule is never to DROP a column on an
             # already-deployed SQLite file (see the ticket_config /
             # voice_sessions cleanup notes earlier in this file).
@@ -777,7 +777,7 @@ async def init_db():
 
         # Per-server bot profile: nickname, avatar, banner, and bio are
         # ALL genuinely per-guild via Discord's "Modify Current Member"
-        # endpoint (PATCH /guilds/{id}/members/@me - see
+        # endpoint (PATCH /guilds/{id}/members/@me — see
         # utils/bot_profile.py's header for the confirmed field list).
         # Nothing here is cosmetic-only; this is what Discord's own
         # client shows for the bot in THIS server, and nowhere else.
@@ -1261,16 +1261,16 @@ async def init_db():
             print(f"[MIGRATION] shop_items.prestige_tier: {e}")
 
         # Rank Card foundation (item catalog / rarity / equip system,
-        # pass 1 - schema + backend). shop_items gets two new,
+        # pass 1 — schema + backend). shop_items gets two new,
         # optional admin-set fields: icon_url (shown on the future
         # /rank card's item grid + equipped-role slot) and rarity
-        # (Common/Rare/Epic/Legendary/Mythical/Secret - the PRIMARY
+        # (Common/Rare/Epic/Legendary/Mythical/Secret — the PRIMARY
         # sort key for that grid, locked with Dark; price is only a
         # tiebreaker within the same rarity, since minigame/event/
         # mission drops are often "free" and rarity is the only
         # signal that makes those sort sensibly against purchased
         # items). Both nullable/defaulted so every existing shop item
-        # keeps working unchanged (rarity='common', icon_url=NULL -
+        # keeps working unchanged (rarity='common', icon_url=NULL —
         # renders with no icon, sorts at the bottom of its price
         # bracket, same as before this migration ran).
         try:
@@ -1290,7 +1290,7 @@ async def init_db():
         # Shop Publisher Step 1 (Slice 1): flat, guild-scoped presentation
         # categories. shop_categories holds NO commerce data (no price/
         # stock/duration/type) and shop_items.category_id is the ONLY link
-        # between a product and its category - membership is presentation
+        # between a product and its category — membership is presentation
         # metadata and NEVER implies publication. Nullable and never a
         # foreign key (this schema has none); deleting a category NULLs the
         # links (dashboard/api/shop_categories.py). V1 is flat: one category
@@ -1313,12 +1313,12 @@ async def init_db():
         """)
 
         # Design Draft Persistence: saved Shop Designer drafts. Orchestration/
-        # presentation configuration ONLY - never commerce truth (shop_items
+        # presentation configuration ONLY — never commerce truth (shop_items
         # stays the source), never category data, never resolved output or
         # publication state. design_json holds the Step 0 Design draft
         # {presentation, products, action}; its presentation is the design's
         # own snapshot (normalized at save) and source_template_name is
-        # provenance only - never dereferenced after save. Hard-delete MVP;
+        # provenance only — never dereferenced after save. Hard-delete MVP;
         # no revisions or version history.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS shop_designs (
@@ -1442,7 +1442,7 @@ async def init_db():
 
         # Rank Card foundation: item_catalog is the single, source-
         # agnostic place the future card renderer (and /inventory)
-        # resolve an item's icon/rarity/value from - keyed by
+        # resolve an item's icon/rarity/value from — keyed by
         # (guild_id, item_name), NOT by shop_items.id, matching how
         # inventory_items already references items purely by name
         # (a purchased item's inventory row already survives the shop
@@ -1450,7 +1450,7 @@ async def init_db():
         # coupling). Auto-populated whenever a shop item is saved
         # (see dashboard/api/economy_shop.py); items granted only via
         # events/minigames/missions simply have no row here yet and
-        # fall back to rarity='common', no icon - a deliberate,
+        # fall back to rarity='common', no icon — a deliberate,
         # documented gap (no admin UI for that yet, per Dark: "not
         # now"), not an oversight.
         await db.execute("""
@@ -1472,7 +1472,7 @@ async def init_db():
         """)
 
         # Rank Card foundation: equipped_roles tracks, per member, the
-        # ONE role/temp_role-type inventory item currently "worn" -
+        # ONE role/temp_role-type inventory item currently "worn" —
         # single row per (guild_id, user_id) by design (PK enforces
         # it), since only one purchased/won cosmetic role can be
         # equipped at a time (locked with Dark: equipping swaps the
@@ -1494,7 +1494,7 @@ async def init_db():
         """)
 
         # Wallet pass: equipped_titles is the Title equip slot. It is a
-        # SEPARATE table from equipped_roles on purpose - the locked
+        # SEPARATE table from equipped_roles on purpose — the locked
         # project decision is that the Title slot is independent from
         # the Discord Role slot (a member wears one of each, and
         # equipping a title must never disturb an equipped role).
@@ -1505,7 +1505,7 @@ async def init_db():
         # protect. Same shape (one row per member = at most one
         # equipped title), zero impact on existing rows. Ownership
         # still lives in inventory_items (item_type='title'); this
-        # table only records WHICH owned title is worn - see
+        # table only records WHICH owned title is worn — see
         # utils/title_engine.py.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS equipped_titles (
@@ -1522,7 +1522,7 @@ async def init_db():
         # when used, unlike type='xp_boost' which fires immediately at
         # purchase and never reaches inventory. It reuses the existing
         # xp_boost_multiplier + duration_hours columns for its effect
-        # parameters, so no new columns were needed at all - this
+        # parameters, so no new columns were needed at all — this
         # comment exists to record that reuse rather than to document a
         # migration. type='title' likewise needs no new column: a title
         # is name + icon + rarity, all of which shop_items already has.
@@ -1772,9 +1772,9 @@ async def init_db():
             ON ticket_categories(guild_id)
         """)
 
-        # TASK 4 - Ticket Config: "who can open this category" gate.
+        # TASK 4 — Ticket Config: "who can open this category" gate.
         # Without this, every enabled category was shown to every
-        # member with no way to restrict it - TicketTool-style configs
+        # member with no way to restrict it — TicketTool-style configs
         # always let you gate a ticket type behind a role (e.g. only
         # @Verified can open "Ban Appeal"). NULL = open to everyone,
         # same as today's behavior, so this is additive/non-breaking.
@@ -1912,7 +1912,7 @@ async def init_db():
 
         # SECURITY / DATA-INTEGRITY FIX (dark-fixes pass #7):
         # dashboard_users had NO unique constraint on (guild_id,
-        # user_id) - only the surrogate `id` AUTOINCREMENT column was
+        # user_id) — only the surrogate `id` AUTOINCREMENT column was
         # unique. Two places relied on "INSERT OR IGNORE" actually
         # ignoring a duplicate (guild_id, user_id) pair:
         #   - ensure_owner_access(), called from init_db() on EVERY
@@ -1921,7 +1921,7 @@ async def init_db():
         #     select_guild() auto-grant path
         # Without a real UNIQUE index, "INSERT OR IGNORE" never had
         # anything to conflict against, so a new surrogate-keyed row
-        # was silently inserted every single time - meaning the owner
+        # was silently inserted every single time — meaning the owner
         # accumulated a fresh duplicate `dashboard_users` row on every
         # bot/dashboard restart.
         #
@@ -1929,17 +1929,17 @@ async def init_db():
         # (config_access()'s remove_user()): that route deletes by a
         # single surrogate `id`, so removing one duplicate row left
         # every other duplicate (still enabled=1, same guild_id +
-        # user_id) granting that user access - access revocation
+        # user_id) granting that user access — access revocation
         # silently failed to actually revoke anything as soon as more
         # than one duplicate existed, which was virtually guaranteed
         # for the owner given the every-restart insert above.
         #
         # Migration: dedupe first (a real UNIQUE index creation fails
         # outright if duplicate rows already exist on disk), keeping
-        # one row per (guild_id, user_id) - preferring 'owner' over
+        # one row per (guild_id, user_id) — preferring 'owner' over
         # 'admin' over 'moderator' if levels ever differed across
         # duplicates, then the highest id (most recent) as a
-        # tiebreaker - then create the UNIQUE index. From this point
+        # tiebreaker — then create the UNIQUE index. From this point
         # forward every existing "INSERT OR IGNORE ... dashboard_users"
         # call site (ensure_owner_access, add_guild_owner) actually
         # ignores true duplicates instead of accumulating new rows,
@@ -2099,7 +2099,7 @@ async def init_db():
             )
         """)
 
-        # Server Tags - Tag-Loyalty Missions + Cross-Server Join Reward.
+        # Server Tags — Tag-Loyalty Missions + Cross-Server Join Reward.
         # Both features read/write these tables via cogs/tagmissions.py
         # and cogs/tagpartners.py, which are otherwise self-contained
         # (they grant rewards through the existing utils/reward_engine.py,
@@ -2109,10 +2109,10 @@ async def init_db():
                 id                    INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id              INTEGER NOT NULL,
                 title                 TEXT NOT NULL,
-                confirm_message       TEXT NOT NULL DEFAULT 'Confirmed - wait until the mission ends to receive your prize.',
+                confirm_message       TEXT NOT NULL DEFAULT 'Confirmed — wait until the mission ends to receive your prize.',
                 not_wearing_message   TEXT NOT NULL DEFAULT 'You need to be wearing this server''s tag to confirm.',
                 success_message       TEXT NOT NULL DEFAULT 'Mission complete! Your reward has been sent.',
-                failure_message       TEXT NOT NULL DEFAULT 'You removed the server tag before the mission ended - no reward this time.',
+                failure_message       TEXT NOT NULL DEFAULT 'You removed the server tag before the mission ended — no reward this time.',
                 already_message       TEXT NOT NULL DEFAULT 'You already confirmed participation in this mission.',
                 reward_type           TEXT NOT NULL,
                 reward_amount         TEXT,
@@ -2182,7 +2182,7 @@ async def init_db():
 
         # SECURITY / CORRECTNESS FIX: twitch_config.give_role_id used to
         # grant the "live" role to whichever guild member happened to be
-        # first in Discord's member iteration order - there was no
+        # first in Discord's member iteration order — there was no
         # stored link between a Twitch username and the Discord member
         # who owns it. This column is that missing link, set via
         # /twitch_setup's new `streamer` option or the dashboard; the
@@ -2206,13 +2206,13 @@ async def init_db():
         # dashboard/permissions.py's is_trusted_super_admin) that
         # never writes a row at all, so the developer stays out of
         # Current Access. This is a one-time cleanup of rows that old
-        # mechanism already wrote - scoped to the legacy 'auto-setup'
+        # mechanism already wrote — scoped to the legacy 'auto-setup'
         # label specifically, so it can never touch the NEW per-guild
         # real-owner rows add_guild_owner() writes going forward
         # (those use a different label, 'guild-owner-sync', precisely
         # so this cleanup can't collide with a guild the developer
         # happens to genuinely, personally own on Discord too). Safe
-        # to leave running forever - a no-op once the legacy rows are
+        # to leave running forever — a no-op once the legacy rows are
         # gone.
         try:
             cursor = await db.execute("""
@@ -2228,7 +2228,7 @@ async def init_db():
                 await db.commit()
                 print(f"[MIGRATION] Removed {legacy_count} legacy "
                       f"auto-setup dashboard_users row(s) for the "
-                      f"developer - access is now via the guild-blind "
+                      f"developer — access is now via the guild-blind "
                       f"bypass, not a DB row.")
         except Exception as e:
             print(f"[MIGRATION] developer legacy row cleanup: {e}")
@@ -2237,7 +2237,7 @@ async def init_db():
     await ensure_tables()
     await backfill_legacy_claims()
 
-    print("✅ Database initialized - all tables ready")
+    print("✅ Database initialized — all tables ready")
     print(f"✅ Developer bypass active for user ID: {OWNER_DISCORD_ID} "
           f"(guild-blind, never written to dashboard_users)")
 
@@ -2245,9 +2245,9 @@ async def init_db():
 async def add_guild_owner(guild_id: int, owner_discord_id: int):
     """
     Grants dashboard 'owner' access to a guild's REAL Discord server
-    owner (guild.owner_id, passed in by the caller - this file has no
+    owner (guild.owner_id, passed in by the caller — this file has no
     live Discord data of its own). Not used for the developer's own
-    access anymore - see dashboard/permissions.py's guild-blind
+    access anymore — see dashboard/permissions.py's guild-blind
     super-admin bypass, which never writes a dashboard_users row.
     added_by_name is 'guild-owner-sync', deliberately distinct from
     the legacy 'auto-setup' label the old (removed)

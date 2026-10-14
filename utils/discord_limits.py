@@ -1,5 +1,5 @@
 """
-Discord limits - the ONE place the dashboard reads them from.
+Discord limits — the ONE place the dashboard reads them from.
 
 Before this file the same numbers were hand-copied into the builder page
 (MAX_EMBEDS / MAX_ATTACHMENTS / MAX_CONTENT), the send route
@@ -9,25 +9,25 @@ how a payload that passes every client check dies at Discord with
 "Invalid Form Body" and no useful explanation.
 
 Every constant below is quoted from Discord's own documentation (or, where
-noted, from a documented *policy* that is not an API constant at all - those
+noted, from a documented *policy* that is not an API constant at all — those
 are advisory and configurable, never hard blocks):
 
-  * Create Message - "The maximum request size when sending a message is
+  * Create Message — "The maximum request size when sending a message is
     25 MiB", "content: Message contents (up to 2000 characters)",
     "embeds: array of embed objects, Up to 10 rich embeds (up to 6000
     characters)".
       https://docs.discord.com/developers/resources/message
-  * Embed object - title 256, description 4096, 25 fields, field name 256,
+  * Embed object — title 256, description 4096, 25 fields, field name 256,
     field value 1024, footer text 2048, author name 256, "the sum of all
     characters in an embed structure must not exceed 6000 characters";
     image/thumbnail url accept http(s) or "attachment://filename".
       https://docs.discord.com/developers/resources/message#embed-object
-  * Message components - 5 buttons XOR 1 select per action row, custom_id
+  * Message components — 5 buttons XOR 1 select per action row, custom_id
     1-100 chars, button label 80, button url 512, string select 25 options,
     option label/value 100, option description 100, placeholder 150,
     min/max_values 25.
       https://docs.discord.com/developers/interactions/message-components
-  * Attachments - per-FILE cap is a platform policy that has moved several
+  * Attachments — per-FILE cap is a platform policy that has moved several
     times (8 MiB -> 25 MiB -> 10 MiB -> 20 MiB for free/non-boosted
     accounts, with 50 MiB / 500 MiB for Nitro tiers and higher caps on
     boosted servers). It is NOT a fixed API constant, so
@@ -35,7 +35,7 @@ are advisory and configurable, never hard blocks):
     must WARN, never block, on it.
       https://docs.discord.com/developers/reference (Uploading Files)
 
-Deliberately NOT here: Components V2 (`IS_COMPONENTS_V2`) budgets - that
+Deliberately NOT here: Components V2 (`IS_COMPONENTS_V2`) budgets — that
 feature replaces `content`/`embeds` and is out of scope for the first
 implementation (see EMBED_BUILDER_PLAN.md §5.4). The constants exist so the
 later phase has one place to add them to.
@@ -50,7 +50,7 @@ import os
 MESSAGE_CONTENT_MAX = 2000
 MESSAGE_EMBEDS_MAX = 10
 MESSAGE_EMBED_TOTAL_CHARS_MAX = 6000
-# "The maximum request size when sending a message is 25 MiB" - this is the
+# "The maximum request size when sending a message is 25 MiB" — this is the
 # multipart body ceiling, so it is also the only hard cap on total uploaded
 # bytes. The dashboard has always enforced it; it now comes from here, with
 # a little headroom for the multipart envelope, exactly as before.
@@ -64,7 +64,7 @@ MESSAGE_REQUEST_ENVELOPE_BYTES = 64 * 1024
 ATTACHMENTS_MAX = 10
 # Advisory only (see module docstring): the free/non-boosted per-file cap
 # since Discord's August 2026 change (10 MiB -> 20 MiB). Boosted servers and
-# Nitro accounts allow more, so exceeding this NEVER blocks a send - the UI
+# Nitro accounts allow more, so exceeding this NEVER blocks a send — the UI
 # warns, and Discord's real answer (413) is what decides.
 ATTACHMENT_FILE_BYTES_ADVISORY = 20 * 1024 * 1024
 ATTACHMENT_FILE_BYTES_ENV = "NERO_ATTACHMENT_MAX_BYTES"
@@ -79,7 +79,7 @@ EMBED_FOOTER_TEXT_MAX = 2048
 EMBED_AUTHOR_NAME_MAX = 256
 EMBED_COLOR_MAX = 0xFFFFFF
 # Discord renders embeds with a url in a different accent and de-duplicates
-# identical urls within one message - both worth knowing before Phase 2.
+# identical urls within one message — both worth knowing before Phase 2.
 EMBED_URL_MAX = 2048
 
 # ── Components (documented now, enforced in Phase 3) ───────────────────
@@ -101,7 +101,7 @@ def attachment_max_file_bytes() -> int:
 
     Discord's own limit depends on the account's Nitro tier and on whether
     the server is boosted, and it is the SERVER's limit that applies to a
-    bot upload - so a hard-coded number here would be wrong for boosted
+    bot upload — so a hard-coded number here would be wrong for boosted
     servers and would block perfectly sendable files. Set
     NERO_ATTACHMENT_MAX_BYTES to the guild's real cap (in bytes) to make the
     warning exact; unset, the free/non-boosted default is used.

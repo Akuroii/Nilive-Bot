@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* PROBE 9 - the alias chip field's actual behaviour, in a real DOM.
+/* PROBE 9 — the alias chip field's actual behaviour, in a real DOM.
  *
  * jsdom + the shipped component and the shipped template markup: typing a
  * word and pressing Space, the × on each chip, Backspace, paste splitting,
@@ -9,7 +9,7 @@
  *
  *   node tools/alias_probes/p9_chips_dom.js
  * Needs jsdom:  npm i jsdom   (JSDOM_PATH=/path/to/node_modules/jsdom if it
- * lives outside the project - this repo deliberately does not ship a package.json)
+ * lives outside the project — this repo deliberately does not ship a package.json)
  */
 const fs = require('fs');
 const path = require('path');
@@ -22,7 +22,7 @@ try {
     try {
         jsdom = require('/home/user/.cache/jstest/node_modules/jsdom');
     } catch (e2) {
-        console.error('jsdom not found - set JSDOM_PATH (see header).');
+        console.error('jsdom not found — set JSDOM_PATH (see header).');
         process.exit(2);
     }
 }
@@ -34,7 +34,7 @@ const COMPONENT = fs.readFileSync(
     path.join(ROOT, 'dashboard/static/js/nero-alias-input.js'), 'utf8');
 // Embed the stylesheet so jsdom parses the chip CSS rules. Section 10
 // reads computed style on .na-chip-edit and .na-chip, which requires the
-// stylesheet to be in the document - bare HTML alone doesn't propagate
+// stylesheet to be in the document — bare HTML alone doesn't propagate
 // rules into getComputedStyle.
 const CSS = fs.readFileSync(
     path.join(ROOT, 'dashboard/static/css/main.css'), 'utf8');
@@ -237,7 +237,7 @@ async function main() {
     key(window, text, ' ');
     await flush(window);
     check('pressing Space again restores the chip (it moves to the end, which '
-          + 'is cosmetic - the server keeps submission order)',
+          + 'is cosmetic — the server keeps submission order)',
         chipWords().slice().sort().join(',') === 'k,kick', chipWords());
     const lastWord = chipWords()[chipWords().length - 1];
     chips()[chips().length - 1].querySelector('.na-chip-x').click();

@@ -1,4 +1,4 @@
-"""PROBE 8 - acceptance test for the router-based alias system (2026-08-28).
+"""PROBE 8 — acceptance test for the router-based alias system (2026-08-28).
 
 This is the one to re-run after any change to the alias / trigger / custom
 command path. Real cogs, real discord.py 2.7.1, real SQLite schema from
@@ -96,7 +96,7 @@ def guild_for(gid):
     """A guild fake that is believable enough for discord.py's converters.
 
     MemberConverter ends with ``isinstance(result, discord.Member)``, so the
-    *target* of ``k <@id>`` has to be a real Member - a stand-in object is
+    *target* of ``k <@id>`` has to be a real Member — a stand-in object is
     rejected and the converter then reaches for ``bot._get_websocket(...)``,
     which does not exist here. Everything the moderation command reads off the
     guild is provided explicitly.
@@ -113,7 +113,7 @@ def guild_for(gid):
         if isinstance(user_id, dict):
             user_id, data = user_id.get("id"), user_id
         # Member.id / .name / .mention all delegate to Member._user, which
-        # discord.py builds through state.store_user - returning None there
+        # discord.py builds through state.store_user — returning None there
         # makes every attribute read on the member explode.
         data = data or {}
         uid = int(user_id)
@@ -412,7 +412,7 @@ async def main():
     check("owner_only applies on the slash path", allowed is False,
           "no message" if allowed else "blocked")
 
-    # and the same rule via the alias gate - one implementation, one verdict
+    # and the same rule via the alias gate — one implementation, one verdict
     SENT_LOG.clear()
     await send(bot, "ta back on x")
     gate_text = sent_text()
@@ -510,7 +510,7 @@ async def main():
 
     print("\n=== 15. the shared gate's rules, driven directly ===")
     # evaluate_toggle_row is pure (no I/O) precisely so these can be asserted
-    # without a Discord - both the slash path and the alias path call it, so
+    # without a Discord — both the slash path and the alias path call it, so
     # one table here covers both.
     from utils.command_gating import evaluate_toggle_row
 

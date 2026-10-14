@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Phase 5 - manual browser preview launcher for the Minigames v2 UI.
+Phase 5 — manual browser preview launcher for the Minigames v2 UI.
 
 Discord OAuth cannot complete inside a sandboxed preview, so this
 launcher:
-  1. builds a FRESH realistic database - a guild seeded with REAL v1
+  1. builds a FRESH realistic database — a guild seeded with REAL v1
      data (config, 4 tiers incl. one disabled + a temp-role duration,
      legacy log rows), then runs the production migration
      (utils/minigame_store.ensure_tables → run_migration) exactly as
@@ -13,7 +13,7 @@ launcher:
      templates covering every game type / enabled / rotation / pool
      state, v2 + legacy history rows);
   3. boots the real Flask dashboard with the env-gated /demo-login
-     route (DASHBOARD_DEMO_LOGIN=1 - off in production) so a browser
+     route (DASHBOARD_DEMO_LOGIN=1 — off in production) so a browser
      session can be created without OAuth.
 
 Run:
@@ -21,7 +21,7 @@ Run:
 Then open:  http://localhost:<port>/demo-login
             (or the sandbox preview host) and follow the redirect.
 
-Nothing here is production code - the demo-login route only exists
+Nothing here is production code — the demo-login route only exists
 when DASHBOARD_DEMO_LOGIN=1 and this script is the only thing that
 sets it.
 """
@@ -138,7 +138,7 @@ async def build_v2():
     await store.create_category(G, "Word Games", parent_id=gold["id"],
                                 weight=8, emoji="📝")
 
-    # math - full pool incl. a temp role
+    # math — full pool incl. a temp role
     await store.create_template(
         G, bronze["id"], "Weekend Math", "math",
         embed={"title": "🧮 Weekend Math",
@@ -151,11 +151,11 @@ async def build_v2():
                   "reward_value": "970000000000000099", "weight": 1,
                   "duration_hours": 24}],
         channel_id=DEMO_CHANNEL)
-    # colors - image in the embed (the puzzle)
+    # colors — image in the embed (the puzzle)
     await store.create_template(
         G, btn["id"], "Colors: Middle One", "colors",
         embed={"title": "🎨 Which color is in the middle?",
-               "description": "Three swatches - pick the middle one.",
+               "description": "Three swatches — pick the middle one.",
                "image": {"url": "https://picsum.photos/seed/colorgame/640/360"}},
         config={"answers": ["Red", "Green", "Blue"], "correct": 1,
                 "seconds": 30})
@@ -163,18 +163,18 @@ async def build_v2():
     await store.create_template(
         G, bronze["id"], "Quick Click Rush", "quick_click",
         embed={"title": "⚡ Quick Click Rush",
-               "description": "A button appears - click it before "
+               "description": "A button appears — click it before "
                               "anyone else!"},
         config={"buttons": 5, "reveal_min": 3, "reveal_max": 8,
                 "wait_after": 10},
         rewards=[{"reward_type": "coins", "reward_value": "50", "weight": 1}])
-    # wheel - EMPTY pool (valid, D11)
+    # wheel — EMPTY pool (valid, D11)
     await store.create_template(
         G, silver["id"], "Lucky Wheel", "wheel",
         embed={"title": "🎡 Lucky Wheel",
-               "description": "Join the wheel - one lucky winner."},
+               "description": "Join the wheel — one lucky winner."},
         config={"join_seconds": 30}, rewards=[])
-    # emoji - DISABLED template (D9 state)
+    # emoji — DISABLED template (D9 state)
     await store.create_template(
         G, gold["id"], "Emoji Guess", "emoji", enabled=False,
         embed={"title": "😀 Emoji Guess",
@@ -182,7 +182,7 @@ async def build_v2():
         config={"answers": ["A party", "A magic trick", "Hide and seek"],
                 "correct": 1, "seconds": 30},
         rewards=[{"reward_type": "xp", "reward_value": "150", "weight": 1}])
-    # rps - enabled but rotation OFF (build→test→enable-later flow)
+    # rps — enabled but rotation OFF (build→test→enable-later flow)
     await store.create_template(
         G, plat["id"], "RPS Showdown", "rps", auto_spawn=False,
         embed={"title": "✊ Rock Paper Scissors",
@@ -245,7 +245,7 @@ import dashboard.app as dapp  # noqa: E402
 
 print(f"""
 ╔══════════════════════════════════════════════════════════════════╗
-║  Minigames v2 - manual preview                                   ║
+║  Minigames v2 — manual preview                                   ║
 ║                                                                  ║
 ║  Open:   http://localhost:{PORT}/demo-login                          ║
 ║          (or the sandbox preview host, same path)                ║
@@ -253,7 +253,7 @@ print(f"""
 ║  The demo guild contains: migrated v1 tiers (4, one disabled),   ║
 ║  6 templates (all game types, enabled/disabled/rotation-off,     ║
 ║  empty pool), v1 + v2 history. Channel pickers are EMPTY in the  ║
-║  sandbox (no Discord bot token) - everything else is live.       ║
+║  sandbox (no Discord bot token) — everything else is live.       ║
 ╚══════════════════════════════════════════════════════════════════╝
 """)
 dapp.app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)

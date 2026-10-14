@@ -13,7 +13,7 @@
     </div>
     <p class="text-muted text-sm" style="margin-bottom:16px;">
         Read-only log of completed trades between members. Every trade is a fully atomic
-        two-way swap of {{ currency.coins.name }}, {{ currency.diamonds.name }}, and items - balances and inventory were re-verified
+        two-way swap of {{ currency.coins.name }}, {{ currency.diamonds.name }}, and items — balances and inventory were re-verified
         live at the moment of execution, not just when the offer was built. Trades can only
         be created through the <code>/trade</code> Discord command; there is nothing to
         edit or reverse here.
@@ -60,11 +60,11 @@ async function loadTrades() {
 
     // dark-fixes pass #18 (username resolver rollout, task #4 of 6):
     // data.user_map is keyed by user_id and t.user_a/t.user_b travel
-    // as STRINGS - the API stringifies them because Discord snowflakes
+    // as STRINGS — the API stringifies them because Discord snowflakes
     // exceed JS's 2^53 number precision, so a JSON number would arrive
     // with corrupted trailing digits and this lookup would silently
     // miss (falling back to the "User <id>" no-avatar cell). userIdentityHtml()
-    // is the JS twin of dashboard/utils/user_identity.py - same
+    // is the JS twin of dashboard/utils/user_identity.py — same
     // escaping, same markup, just rendered client-side since this
     // page builds its table from fetch() rather than server templates.
     //
@@ -72,7 +72,7 @@ async function loadTrades() {
     // to match the rest of the dashboard's "Username (big) / User ID
     // (small)" pattern (Economy, Members, Ledger, Missions, Tickets),
     // with the "gave <offer>" line stacked underneath instead of
-    // trailing inline - same layout used elsewhere whenever an
+    // trailing inline — same layout used elsewhere whenever an
     // identity cell needs a second line of context.
     const userMap = data.user_map || {};
     tbody.innerHTML = data.trades.map(t => {
@@ -95,7 +95,7 @@ async function loadTrades() {
                     <span class="text-muted text-sm">gave ${summarizeOffer(t.offer_b)}</span>
                 </div>
             </td>
-            <td class="text-muted">${t.created_at ? t.created_at.slice(0,16) : '-'}</td>
+            <td class="text-muted">${t.created_at ? t.created_at.slice(0,16) : '—'}</td>
         </tr>`;
     }).join('');
 }

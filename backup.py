@@ -10,13 +10,13 @@ from database import DB_PATH
 from utils.emoji import CHECK_EMOJI
 
 # FEATURE (dark-fixes pass #2): backup_log had a schema (database.py)
-# with zero implementation anywhere - no backup mechanism existed at
+# with zero implementation anywhere — no backup mechanism existed at
 # all, just an empty table waiting for rows nothing ever wrote. This
 # cog is that missing mechanism: a daily automated DB backup, a manual
 # trigger, and pruning so backups don't grow unbounded.
 #
 # Uses aiosqlite's Connection.backup() (wraps sqlite3's online backup
-# API) rather than a raw file copy - a plain `cp` of a WAL-mode SQLite
+# API) rather than a raw file copy — a plain `cp` of a WAL-mode SQLite
 # file while it's in use can capture the main file and WAL out of sync
 # and produce a corrupt backup. The backup API is safe to run against
 # a live, concurrently-written database.
@@ -24,7 +24,7 @@ from utils.emoji import CHECK_EMOJI
 # CAVEAT (Railway specifically): DB_PATH already lives on Railway's
 # persistent volume (/app/data), so backups written next to it survive
 # process restarts and redeploys. They do NOT protect against the
-# volume itself being deleted - that would need off-volume storage
+# volume itself being deleted — that would need off-volume storage
 # (S3, etc.). See SECONDARY_BACKUP_DIR below for an optional mitigation.
 
 BACKUP_DIR   = os.path.join(os.path.dirname(DB_PATH), "backups")
@@ -34,7 +34,7 @@ KEEP_BACKUPS = 7  # prune anything past the most recent N
 # BACKUP_DIR, which is on the SAME persistent volume as the live
 # database (DB_PATH). If that volume is ever lost (disk failure,
 # accidental deletion, a redeploy that drops the mount), the last 7
-# daily backups are destroyed right alongside the live DB - a backup
+# daily backups are destroyed right alongside the live DB — a backup
 # strategy that shares a single point of failure with the thing it's
 # backing up isn't a real safety net.
 #
@@ -42,7 +42,7 @@ KEEP_BACKUPS = 7  # prune anything past the most recent N
 # on a genuinely different volume/mount (a second disk, a mounted
 # network share, anything not sharing physical storage with DB_PATH's
 # volume), every backup is also copied there. Left unset, behavior is
-# identical to before - this is additive, not a replacement for
+# identical to before — this is additive, not a replacement for
 # actually mounting a second location.
 SECONDARY_BACKUP_DIR = os.getenv("SECONDARY_BACKUP_DIR", "").strip() or None
 
@@ -51,7 +51,7 @@ async def _do_backup() -> dict:
     os.makedirs(BACKUP_DIR, exist_ok=True)
     # BUGFIX (caught by testing, not review): strftime at 1-second
     # resolution collided when two backups landed in the same second
-    # (e.g. /backup_now fired twice quickly) - the second backup
+    # (e.g. /backup_now fired twice quickly) — the second backup
     # silently overwrote the first's file on disk while backup_log
     # still recorded two separate rows pointing at the same filename.
     # That collision then fed a worse bug: pruning an old duplicate-
@@ -76,7 +76,7 @@ async def _do_backup() -> dict:
 
     # RELIABILITY FIX: best-effort copy to a second, operator-
     # configured location. Failure here must never break the primary
-    # backup (which already succeeded above) or the calling command -
+    # backup (which already succeeded above) or the calling command —
     # logged and swallowed, same defensive pattern as the rest of this
     # cog's error handling.
     secondary_ok = None
@@ -109,7 +109,7 @@ async def _prune_old_backups():
                     os.remove(path)
             except Exception as e:
                 print(f"[BACKUP] Failed to remove old backup {filename}: {e}")
-            # Prune the secondary copy too, if configured - same
+            # Prune the secondary copy too, if configured — same
             # KEEP_BACKUPS retention window applies to both locations
             # so the secondary doesn't grow unbounded.
             if SECONDARY_BACKUP_DIR:
@@ -185,10 +185,10 @@ class Backup(commands.Cog):
         embed = discord.Embed(title="💾 Recent Backups", color=0x5865F2)
         note = (f"\nSecondary location: `{SECONDARY_BACKUP_DIR}`"
                 if SECONDARY_BACKUP_DIR else
-                "\n⚠️ No SECONDARY_BACKUP_DIR configured - backups share "
+                "\n⚠️ No SECONDARY_BACKUP_DIR configured — backups share "
                 "a volume with the live DB. See cogs/backup.py notes.")
         embed.description = "\n".join(
-            f"`{f}` - {s:,} bytes - {c}" for f, s, c in rows) + note
+            f"`{f}` — {s:,} bytes — {c}" for f, s, c in rows) + note
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

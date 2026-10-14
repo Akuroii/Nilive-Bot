@@ -54,7 +54,7 @@ def api_tagpartners_save():
 
     if partner_guild_id == guild_id:
         return jsonify({"success": False,
-                         "error": ("Partner server can't be this server - "
+                         "error": ("Partner server can't be this server — "
                                    "that's the Tag Mission feature, not a "
                                    "partner reward.")}), 400
 

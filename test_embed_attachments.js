@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* ═══════════════════════════════════════════════════════════════
-   Embed Builder attachments - preview resolution + degradation
+   Embed Builder attachments — preview resolution + degradation
 
    Covers the exact class of bug that reads as "my attachment
    disappeared": the file is in memory, the <img> src is set, and
@@ -19,7 +19,7 @@ const vm = require('vm');
 let pass = 0, fail = 0; const failures = [];
 function assert(cond, name, extra) {
     if (cond) { pass++; console.log('  PASS', name); }
-    else { fail++; failures.push(name + (extra ? ' - ' + extra : '')); console.log('  FAIL', name, extra || ''); }
+    else { fail++; failures.push(name + (extra ? ' — ' + extra : '')); console.log('  FAIL', name, extra || ''); }
 }
 function section(t) { console.log('\n== ' + t + ' =='); }
 
@@ -71,7 +71,7 @@ const imgAtt = (over = {}) => Object.assign(
 const chain = Promise.resolve();
 
 // ═══════════════════════════════════════════════════════════════
-section('blob: probe - detect "src is set but nothing paints"');
+section('blob: probe — detect "src is set but nothing paints"');
 chain.then(() => {
     const ok = loadModule({ blobLoads: true });
     return ok.EC.canRenderBlobUrls().then(r => {
@@ -86,7 +86,7 @@ chain.then(() => {
     });
 }).then(() => {
 // ═══════════════════════════════════════════════════════════════
-    section('previewUrlFor - resolution tiers');
+    section('previewUrlFor — resolution tiers');
     const good = loadModule({ blobLoads: true });
     const a = imgAtt();
     return good.EC.previewUrlFor(a).then(r => {
@@ -116,7 +116,7 @@ chain.then(() => {
     const good = loadModule({ blobLoads: true });
     const big = imgAtt({ size: good.EC.DATA_URL_MAX_BYTES + 1 });
     return good.EC.previewUrlFor(big).then(r => {
-        assert(r.kind === 'blob', 'the size cap only applies to the data: tier - a big image still previews via blob:');
+        assert(r.kind === 'blob', 'the size cap only applies to the data: tier — a big image still previews via blob:');
     });
 }).then(() => {
     const broken = loadModule({ blobLoads: false, frThrows: true });
@@ -141,7 +141,7 @@ chain.then(() => {
     });
 }).then(() => {
 // ═══════════════════════════════════════════════════════════════
-    section('in-flight de-dupe - two renders must not mint twice');
+    section('in-flight de-dupe — two renders must not mint twice');
     const m = loadModule({ blobLoads: true });
     const a = imgAtt();
     return Promise.all([m.EC.previewUrlFor(a), m.EC.previewUrlFor(a), m.EC.previewUrlFor(a)]).then(rs => {
@@ -150,7 +150,7 @@ chain.then(() => {
     });
 }).then(() => {
 // ═══════════════════════════════════════════════════════════════
-    section('renderPreview - a slot for every state, never a vanishing file');
+    section('renderPreview — a slot for every state, never a vanishing file');
     const m = loadModule();
     const base = { content: 'c', embeds: [m.EC.blankEmbed()], lookups: LOOKUPS };
 
@@ -193,10 +193,10 @@ chain.then(() => {
         'a throwing createObjectURL degrades one item, not the whole preview');
 }).then(() => {
 // ═══════════════════════════════════════════════════════════════
-    section('shared state - composer must not fight the page');
+    section('shared state — composer must not fight the page');
     // The page owns lifecycle. Once it has handed back null (in flight / no
     // preview), the module must not quietly mint its own blob: URL behind the
-    // page's back - that is how the old leak came back.
+    // page's back — that is how the old leak came back.
     const m = loadModule({ blobLoads: true });
     const base = { content: 'c', embeds: [m.EC.blankEmbed()], lookups: LOOKUPS };
     const a = imgAtt({ _previewError: 'too-large-for-preview' });

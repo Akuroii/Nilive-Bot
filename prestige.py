@@ -184,7 +184,7 @@ async def set_prestige_multipliers(guild_id: int, enabled=None,
 async def get_permanent_prestige(guild_id: int, user_id: int) -> int:
     """
     The user's ONE permanent Prestige tier, 0 (none) .. V (5).
-    levels.prestige values above 5 are NOT rewritten/destroyed - they are
+    levels.prestige values above 5 are NOT rewritten/destroyed — they are
     safely clamped to 5 for every read/eligibility decision so legacy data
     from the old unbounded reset mechanic degrades gracefully instead of
     producing an invalid state.
@@ -468,7 +468,7 @@ async def purchase_prestige(guild_id: int, user_id: int, target_tier: int,
             await db.execute("ROLLBACK")
             raise
 
-    # Ledger is written after commit (the project's established pattern -
+    # Ledger is written after commit (the project's established pattern —
     # safe_credit/safe_deduct do the same), so we never log within an open
     # write transaction.
     try:
@@ -600,7 +600,7 @@ async def sync_prestige_roles(bot, guild, member, effective_tier=None) -> None:
     """
     Cosmetic only. Ensures the member wears exactly the configured role for
     their effective Prestige tier and no other configured prestige role.
-    Never grants Prestige state or multipliers - those derive from the DB +
+    Never grants Prestige state or multipliers — those derive from the DB +
     Discord booster status (see get_effective_prestige).
     """
     if bot is None or guild is None or member is None:

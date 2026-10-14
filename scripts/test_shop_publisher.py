@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-Shop Publisher - Step 0: the FIXED token resolver + design-draft contract
+Shop Publisher — Step 0: the FIXED token resolver + design-draft contract
 (utils/shop_publisher.py).
 
 What this locks down
   1.  The token catalog is FIXED: one exact set of canonical names (with
       friendly labels/groups for the Insert Dynamic Field menu) plus one exact
-      set of user-facing aliases - rendered for the UI from the same table the
+      set of user-facing aliases — rendered for the UI from the same table the
       resolver uses.
   2.  Resolution is DETERMINISTIC: same draft + rows + currency →
       byte-identical output; the input document is never mutated; repeating
       the resolution never differs.
-  3.  Resolution is NON-PROGRAMMABLE: bare lookups only - no nesting, no
+  3.  Resolution is NON-PROGRAMMABLE: bare lookups only — no nesting, no
       expressions, resolved values are never re-scanned, and anything outside
       the catalog (or its alias table) stays verbatim and is reported.
   4.  The preview shows the resolved presentation PLUS the purchase action
-      that will actually be published - entries whose custom_ids are the
+      that will actually be published — entries whose custom_ids are the
       EXISTING `shop_buy_<id>` family, and select kinds whose option values
       carry the same family.
   5.  The Design-draft roster contract (locked): products[] is the ROOT-PRODUCT
-      roster - a purchase-option row (option_of_id set) in products[] is
+      roster — a purchase-option row (option_of_id set) in products[] is
       rejected; an option row may appear in action.entries only when its root
       is in products[]; product_select is root-only; option_select is
       one-family; buttons may reference roots or their options. These run on
@@ -61,7 +61,7 @@ def check(cond, name, extra=""):
         print(f"  PASS {name}")
     else:
         _failed += 1
-        _failures.append(name + (f" - {extra}" if extra else ""))
+        _failures.append(name + (f" — {extra}" if extra else ""))
         print(f"  FAIL {name} {extra}")
 
 
@@ -175,13 +175,13 @@ def non_programmable_tests():
         {"content": "{{ 1 + 1 }} {{product.name}} {{missing.thing}} {{}} {{ name }}"},
         SP.product_token_values(product(), CURRENCY))
     check(resolved["content"].startswith("{{ 1 + 1 }} "),
-          "expressions are not evaluated - left verbatim", resolved["content"])
+          "expressions are not evaluated — left verbatim", resolved["content"])
     check("VIP Role" in resolved["content"], "whitespace-tolerant known token resolves")
     check(resolved["content"].count("VIP Role") == 2,
           "canonical and alias spellings both resolve", resolved["content"])
     check("{{missing.thing}}" in resolved["content"], "unknown token stays verbatim")
     check(resolved["content"].count("{{}}") == 1 and " {{}} " in resolved["content"],
-          "an empty brace group is not a token - left verbatim", resolved["content"])
+          "an empty brace group is not a token — left verbatim", resolved["content"])
     check([u["key"] for u in used if not u["known"]] == ["missing.thing"],
           "only the unknown dotted name is unknown", str(used))
     check([u["canonical"] for u in used if u["key"] == "name"] == ["product.name"],
@@ -200,7 +200,7 @@ def non_programmable_tests():
     check(resolved["content"] == "VIP RoleVIP RoleVIP Role" and len(used) == 3,
           "repeated tokens each resolve and each are recorded")
 
-    # Documented surfaces only - unknown embed keys pass through untouched.
+    # Documented surfaces only — unknown embed keys pass through untouched.
     resolved, used = SP.resolve_message(
         {"embeds": [{"title": "{{product.name}}", "editorOnly": "{{product.id}}"}]},
         SP.product_token_values(product(), CURRENCY))
@@ -219,7 +219,7 @@ def non_programmable_tests():
 
 # ── D. Price tokens + Free presentation ────────────────────────────────────
 def price_tests():
-    section("D. Price tokens - amount / display split, mechanical Free on price")
+    section("D. Price tokens — amount / display split, mechanical Free on price")
     values = SP.product_token_values(product(), CURRENCY)
     check(values["product.price"] == "1,500", "price is the grouped amount only",
           values["product.price"])
@@ -281,11 +281,11 @@ def purchase_action_tests():
     action = SP.build_purchase_action({
         "kind": "buttons",
         "entries": [{"product_id": 12,
-                     "label": "Buy {{name}} - {{price}} {{currency}}",
+                     "label": "Buy {{name}} — {{price}} {{currency}}",
                      "emoji": "⚔️", "style": "blue"}],
     }, rows, CURRENCY)
     entry = action["entries"][0]
-    check(entry["label"] == "Buy VIP Role - 1,500 Coins",
+    check(entry["label"] == "Buy VIP Role — 1,500 Coins",
           "entry labels resolve tokens (canonical + short spellings)", entry["label"])
     check(entry["emoji"] == "⚔️" and entry["style"] == "blue",
           "per-entry emoji and style pass through")
@@ -293,9 +293,9 @@ def purchase_action_tests():
     # Select kinds: one renderer, option VALUES in the shop_buy_ family.
     family = {
         101: product(id=101, name="Health Potion", price=1500, duration_hours=None),
-        102: product(id=102, name="Health Potion - 7 Days", price=500,
+        102: product(id=102, name="Health Potion — 7 Days", price=500,
                      duration_hours=168, option_of_id=101),
-        103: product(id=103, name="Health Potion - 30 Days", price=1000,
+        103: product(id=103, name="Health Potion — 30 Days", price=1000,
                      duration_hours=720, option_of_id=101),
     }
     action = SP.build_purchase_action({
@@ -482,7 +482,7 @@ def roster_tests():
              "action": {"kind": "buttons", "entries": [{"product_id": 102}]}}
     problems = SP.validate_design(draft, rows)
     check("option_in_roster" in codes(problems),
-          "products: [option_id] is rejected - options are not roster products",
+          "products: [option_id] is rejected — options are not roster products",
           str(problems))
     check(problems[0]["path"] == "products[0]", "the rejection is pathed")
 
@@ -669,7 +669,7 @@ def main():
     mode_tests()
     print(f"\n{'=' * 60}")
     if _failed:
-        print(f"{_passed}/{_passed + _failed} passed - FAILURES:")
+        print(f"{_passed}/{_passed + _failed} passed — FAILURES:")
         for f in _failures:
             print(f"  - {f}")
         return 1

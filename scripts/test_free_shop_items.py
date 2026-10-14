@@ -91,7 +91,7 @@ def last_embed(itx):
 
 
 def reply_text(itx):
-    """Whatever the handler answered with - embed text or plain content."""
+    """Whatever the handler answered with — embed text or plain content."""
     call = itx.response.send_message.call_args
     embed = call.kwargs.get("embed")
     content = call.kwargs.get("content")
@@ -199,7 +199,7 @@ class FreePurchaseEngineTests(unittest.IsolatedAsyncioTestCase):
     async def test_zero_coin_price_with_a_diamond_price_is_paid_not_free(self):
         # Diamond precedence: 0 coins + 5 💎 is a PAID item, charged in
         # Diamonds. With no Diamonds the charge must fail exactly like any
-        # other paid purchase - it must NOT be waved through as free.
+        # other paid purchase — it must NOT be waved through as free.
         item = shop_item("title", price=0, diamonds=5, name="Diamond Title")
         execute("UPDATE economy SET diamonds=0 WHERE guild_id=? AND user_id=?", (GUILD, USER))
         itx, _ = purchase_context()

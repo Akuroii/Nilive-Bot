@@ -1,5 +1,5 @@
 """
-Unified currency display configuration - THE single source of truth.
+Unified currency display configuration — THE single source of truth.
 
 Everywhere the bot renders a coin or diamond amount or label (wallet,
 economy, shop, inventory, trade, leveling, minigames, missions, events,
@@ -20,7 +20,7 @@ guild_settings while being read/written only by the economy surface
 (utils/economy_safe.get_guild_exchange_rate + the Economy page). Keeping
 the columns in an existing table avoids a migration for every deployed
 guild, and keeping the OWNER in the economy surface is what makes Economy
-the source of truth - not which table the bytes happen to sit in.
+the source of truth — not which table the bytes happen to sit in.
 
 Internal keys vs display values
 -------------------------------
@@ -35,14 +35,14 @@ A guild that names its primary currency "Moon" still stores `balance` in
 the ledger, still stores `coins` on its mission reward rows, and still
 migrates nothing. Renaming is therefore a pure presentation change: no
 stored row needs rewriting, and changing a name or emoji can never
-invalidate an existing mission, reward, purchase or ledger entry - the
+invalidate an existing mission, reward, purchase or ledger entry — the
 label is computed at render time, every time.
 
 Defaults
 --------
 A guild that has configured nothing gets the historical look. Each of the
 four values falls back INDEPENDENTLY, so configuring only a name, only an
-emoji, or neither is valid - nothing requires both fields, and an empty
+emoji, or neither is valid — nothing requires both fields, and an empty
 string is always equivalent to "unset". Callers never need their own
 fallback: this module always returns a usable name and emoji.
 """
@@ -52,7 +52,7 @@ import aiosqlite
 from database import DB_PATH
 
 
-# ── Defaults - the ONLY place these values exist ────────────────────────
+# ── Defaults — the ONLY place these values exist ────────────────────────
 # database.py's schema intentionally declares no DEFAULT for the four
 # columns, so "unset" is stored as NULL and resolves here. Anything that
 # needs a fallback value imports it from this module rather than repeating
@@ -88,7 +88,7 @@ def to_column_key(currency: str) -> str:
     Accepts 'coins' (reward-definition spelling) and 'balance' (economy
     column spelling) alike, so callers never have to care which of the two
     vocabularies they are holding. Unknown values fall back to the primary
-    currency - the same lenient posture the rest of this module takes.
+    currency — the same lenient posture the rest of this module takes.
     """
     return _DEFINITION_KEY_TO_COLUMN.get(currency, COIN_CURRENCY)
 
@@ -148,7 +148,7 @@ _COLUMN_TO_BUCKET = {
 
 async def get_currency_config_raw(guild_id: int) -> dict:
     """The stored values exactly as they sit in the database, with no
-    default substitution - what the Economy form pre-fills with.
+    default substitution — what the Economy form pre-fills with.
 
     A field the owner has never set (or deliberately cleared) comes back as
     "" rather than the default, so the form shows an empty box and the
@@ -186,7 +186,7 @@ async def set_currency_config(guild_id: int, *,
       explicitly passes are written, so a partial form save cannot blank out
       a field it didn't render.
     * `""` (or whitespace) means "revert to the default" and is stored as
-      NULL - never as a copy of the default string. If the default were
+      NULL — never as a copy of the default string. If the default were
       written into the row, a later change to DEFAULT_* in this module
       would fail to reach guilds that never configured anything, which
       would quietly break the whole point of having defaults in one place.
@@ -251,7 +251,7 @@ def currency_emoji_for(config: dict, currency: str) -> str:
 
 
 def currency_label(config: dict, currency: str) -> str:
-    """`emoji name` - e.g. '🪙 Coins', or '🌙 Moon' once configured.
+    """`emoji name` — e.g. '🪙 Coins', or '🌙 Moon' once configured.
     The one place a currency's inline label is composed."""
     info = for_currency(config, currency)
     return f"{info['emoji']} {info['name']}"

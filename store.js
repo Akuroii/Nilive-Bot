@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   Message Builder v2 - the store.
+   Message Builder v2 — the store.
 
    Phase 1, step 1. The only thing that may change the document, and
    the only thing that tells the rest of the page *what* changed.
@@ -12,7 +12,7 @@
       which nodes were affected, so the preview rebuilds everything.
       Here a change arrives as an action, a reducer produces a new
       document with structural sharing, and every untouched embed and
-      field keeps its object identity - which is precisely the
+      field keeps its object identity — which is precisely the
       information the patching preview needs.
 
    2. NARROW NOTIFICATION. `subscribe(selector, fn)` fires only when
@@ -26,7 +26,7 @@
    3. HISTORY + DIRTY in one place, on document slices only: UI state
       (selection, open panels) is deliberately not undoable, and the
       dirty flag compares the current document hash with the hash of
-      the last saved/loaded document - no scattered `dirty = true`.
+      the last saved/loaded document — no scattered `dirty = true`.
 
    NO DOM, NO STORAGE, NO TIMERS that this file owns: persistence is
    scheduled by the caller through the injected scheduler, which is
@@ -49,7 +49,7 @@ window.NERO.embed = window.NERO.embed || {};
      *   ui,                             // ephemeral UI slice (not undoable)
      *   reducers,                       // { 'embed/setTitle': (state, action) => partial|null, … }
      *   historyLimit: 60,
-     *   scheduler,                      // { setTimeout, clearTimeout } - injectable for tests
+     *   scheduler,                      // { setTimeout, clearTimeout } — injectable for tests
      *   idleMs: 1500,
      *   onChange: fn(document, action)  // optional observer (drafts, later)
      * })
@@ -82,7 +82,7 @@ window.NERO.embed = window.NERO.embed || {};
         const queue = [];               // dispatches issued by subscribers
 
         const subscriptions = [];       // { selector, fn, last }
-        const listeners = [];           // fn(state, action) - coarse observers
+        const listeners = [];           // fn(state, action) — coarse observers
 
         // ── Subscription plumbing ─────────────────────────────────
         function subscribe(selector, fn) {
@@ -128,7 +128,7 @@ window.NERO.embed = window.NERO.embed || {};
                 // marks a REPLACEMENT (loading a draft, importing v1, adopting a
                 // guarded record): the document the store was holding is gone,
                 // so every state the stack still has is one the user has
-                // discarded and undo must never reach. Re-seed the baseline -
+                // discarded and undo must never reach. Re-seed the baseline —
                 // the replacement is the only history there is.
                 //
                 // Without this, loading a draft left the CONSTRUCTOR document as
@@ -177,7 +177,7 @@ window.NERO.embed = window.NERO.embed || {};
         // ── Dispatch ──────────────────────────────────────────────
         /**
          * Two rules, both deliberate:
-         *   * a REDUCER must be pure - dispatching from inside one throws,
+         *   * a REDUCER must be pure — dispatching from inside one throws,
          *     because the document would be halfway through a change;
          *   * a SUBSCRIBER may dispatch (the validation pass will want to
          *     publish its issue list after a document change), and those
@@ -268,7 +268,7 @@ window.NERO.embed = window.NERO.embed || {};
         function historyDepth() { return { size: history.length, index: historyIndex }; }
 
         /**
-         * The documents the undo stack can still reach, oldest first - the
+         * The documents the undo stack can still reach, oldest first — the
          * only way a caller can ask "which assets would an undo bring back?".
          *
          * READ-ONLY BY CONSTRUCTION: each entry is a private clone, so a
@@ -299,7 +299,7 @@ window.NERO.embed = window.NERO.embed || {};
          * Confirm an ASYNCHRONOUS write without touching the document.
          *
          * The writer snapshots the document, stores it, and only then learns it
-         * succeeded - by which time the user may have typed on. So the write
+         * succeeded — by which time the user may have typed on. So the write
          * reports WHICH document reached storage (its hash) and the store keeps
          * whatever it is holding: the canonical document is never replaced,
          * history is never touched, and no undo entry appears. The document
@@ -389,7 +389,7 @@ window.NERO.embed = window.NERO.embed || {};
             'embed/setFooter': (state, a) => ({ document: m.setFooter(state.document, a.embedId, a.patch) }),
             'embed/setMedia': (state, a) => ({ document: m.setMedia(state.document, a.embedId, a.slot, a.value) }),
             // 7c: the asset RECORD map, as ordinary document edits. The byte
-            // store is never reached from here - this is metadata only, so an
+            // store is never reached from here — this is metadata only, so an
             // undo can bring a record back without touching a single byte.
             'asset/add': (state, a) => ({ document: m.setDocumentAsset(state.document, a.assetId, a.record) }),
             'asset/remove': (state, a) => ({ document: m.removeDocumentAsset(state.document, a.assetId) }),
