@@ -109,6 +109,62 @@ def _compact_qty(amount: int) -> str:
     return f"{int(amount)}x"
 
 
+# ─── /level progress path (presentation only) ───────────────────────────
+# The path is drawn from the same numbers the engine already uses
+# (xp_progress -> (level, current, needed)), so it can never disagree with the
+# level, the XP total or what Claim All will pay. Nothing here reads or writes
+# reward state.
+#
+# Discord renders embed text in a proportional font and has no sub-character
+# positioning, so the plane moves in discrete steps: it sits inside the segment
+# it is currently flying and takes the start, middle or end of that segment.
+# With 5 stations that is 12 distinct positions, strictly monotonic in XP.
+_PATH_STATIONS = 5
+_PATH_LINK = "━━"          # ━━ the path between two stations
+_PATH_REACHED = "◆"        # ◆ a station already reached
+_PATH_AHEAD = "◇"          # ◇ a station not reached yet
+_PATH_PLANE = "✈︎"     # ✈︎ the member's position on the path
+
+
+def _progress_path(current: int, needed: int,
+                   stations: int = _PATH_STATIONS) -> str:
+    """`◆━━◆━━✈︎━━◇━━◇━━◇` positioned by real XP progress.
+
+    `current`/`needed` are the values `xp_progress()` returns for the member's
+    active level: XP already earned inside it, and XP the next level requires.
+    The plane is never decorative - its index in the returned string grows with
+    `current / needed`, and stations flip from ◇ to ◆ as it passes them.
+
+    The position is an integer slot (every segment has a start, a middle and an
+    end), so no floating-point comparison decides where the plane sits: equal
+    progress always draws an equal path, and one slot of progress always moves
+    it one character further along.
+    """
+    stations = max(2, int(stations))
+    segments = stations - 1
+    slots = segments * 3
+    span = max(0, int(needed or 0))
+    done = min(max(int(current or 0), 0), span)
+    slot = min(done * slots // span, slots - 1) if span else 0
+    segment, step = divmod(slot, 3)
+    reached = segment + 1 + (1 if step == 2 else 0)
+
+    parts = []
+    for index in range(stations):
+        parts.append(_PATH_REACHED if index < reached else _PATH_AHEAD)
+        if index == segments:
+            break
+        if index != segment:
+            parts.append(_PATH_LINK)
+        elif step == 0:
+            parts.append(f"{_PATH_PLANE}{_PATH_LINK}")
+        elif step == 1:
+            parts.append(f"{_PATH_LINK[0]}{_PATH_PLANE}{_PATH_LINK[1:]}")
+        else:
+            parts.append(f"{_PATH_LINK}{_PATH_PLANE}")
+    return "".join(parts)
+
+
 # ─── Claim All button state (presentation only) ─────────────────────────
 # "Claimable" here is exactly the set the /level card already reports as
 # "Ready to claim": a claim row that is pending, or failed and therefore
@@ -277,20 +333,26 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             inline=False)
         return embed
 
+    # Reference layout: the current level on the left, the next level on the
+    # right, then the progress path with the numeric XP progress beside it.
     embed = discord.Embed(
-        title=f"Level {level}",
-        description="Rewards configured for your current level.",
+        title=f"LEVEL {level} ➤ LEVEL {level + 1}",
+        description=(f"{_progress_path(current, needed)}  "
+                     f"{int(current)} / {int(needed)} XP"),
         color=0x7c5cbf)
-    other_ready = sum(
-        1 for c in claims
-        if c["reward_level"] != level and c["status"] in ("pending", "failed")
-        and not _is_locked_claim(c, booster_ok))
-    if other_ready:
+    # Everything the member can actually claim right now, at any level. Claim
+    # All already collects the earlier ones, so they are listed as well instead
+    # of only being counted in the footer.
+    earlier = [c for c in claims
+               if c["reward_level"] != level
+               and c["status"] in ("pending", "failed")
+               and not _is_locked_claim(c, booster_ok)]
+    if earlier:
         embed.set_footer(
-            text=f"Claim All also collects {other_ready} earlier reward(s).")
+            text=f"Claim All also collects {len(earlier)} earlier reward(s).")
     defs = await current_level_definitions(guild.id, level)
     currency = await get_currency_config(guild.id)
-    lines = []
+    entries = []
     for item in defs:
         key = (item["reward_level"], item["track"], item["reward_ref"])
         claim = by_key.get(key)
@@ -317,7 +379,7 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             text += f" — failed, can retry"
         if booster_item:
             text = f"⭐ {text} (Boosters only)"
-        lines.append(f"{text} · {status}")
+        entries.append((status in ("pending", "failed"), f"{text} · {status}"))
     # A deleted Shop product or boost config leaves the frozen claim.
     shown = {(item["reward_level"], item["track"], item["reward_ref"]) for item in defs}
     for claim in claims:
@@ -331,11 +393,18 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             text = f"{_compact_qty(payload['quantity'])} {payload['name']}"
         if claim.get("last_error") and claim["status"] == "failed":
             text += " — failed, can retry"
-        lines.append(f"{text} · {claim['status']}")
-    if not lines:
-        embed.description = "No rewards are configured for your current level."
-        return embed
-    embed.add_field(name="This level", value="\n".join(lines)[:1024], inline=False)
+        entries.append((claim["status"] in ("pending", "failed"),
+                        f"{text} · {claim['status']}"))
+    ready = [line for claimable, line in entries if claimable]
+    waiting = [line for claimable, line in entries if not claimable]
+    ready += [f"{_claim_reward_text(guild, claim, currency)} · ready to claim"
+              for claim in sorted(earlier, key=lambda c: c["reward_level"])]
+    bullets = [f"- {line}" for line in ready + waiting]
+    embed.add_field(
+        name="Rewards Available",
+        value="\n".join(bullets)[:1024] if bullets
+        else "No rewards are configured for your current level.",
+        inline=False)
     return embed
 
 
