@@ -857,6 +857,52 @@ async function applyRoleNames() {
 }
 
 // ── ROLE REWARDS ───────────────────────────────────────────────
+// Builds one role-reward row with DOM nodes, never by interpolating API values
+// into HTML: role_id, level and audience are written through textContent and
+// dataset, so a legacy row holding markup (stored before the POST validated
+// its input) renders as inert text. role_id stays a string end to end -
+// Discord IDs exceed 2^53 and would be rounded if they ever became a Number.
+function buildRoleRewardRow(r) {
+    const id       = String(r.id);
+    const level    = String(r.level);
+    const roleId   = r.role_id == null ? '' : String(r.role_id);
+    const audience = r.audience ? String(r.audience) : 'everyone';
+
+    const tr = document.createElement('tr');
+    tr.className = 'reward-row';
+    tr.dataset.id = id;
+    tr.dataset.level = level;
+    tr.dataset.audience = audience;
+
+    const levelTd = document.createElement('td');
+    const levelBadge = document.createElement('span');
+    levelBadge.className = 'badge badge-accent';
+    levelBadge.textContent = 'Level ' + level;
+    levelTd.appendChild(levelBadge);
+    // rewardAudienceBadge() returns fixed markup only; no API text reaches it.
+    levelTd.insertAdjacentHTML('beforeend', rewardAudienceBadge(audience));
+    tr.appendChild(levelTd);
+
+    const roleTd = document.createElement('td');
+    const roleCell = document.createElement('span');
+    roleCell.className = 'reward-role';
+    roleCell.dataset.roleId = roleId;
+    const code = document.createElement('code');
+    code.textContent = roleId;
+    roleCell.appendChild(code);
+    roleTd.appendChild(roleCell);
+    tr.appendChild(roleTd);
+
+    const actionTd = document.createElement('td');
+    const del = document.createElement('button');
+    del.className = 'btn btn-sm btn-danger';
+    del.textContent = 'Delete';
+    del.onclick = () => showConfirm(`Delete Level ${level} reward?`, () => deleteReward(id));
+    actionTd.appendChild(del);
+    tr.appendChild(actionTd);
+    return tr;
+}
+
 // Same in-place refresh the currency / shop / boost tables already use, so
 // adding or deleting a role reward no longer reloads the page: the admin stays
 // on the Rewards tab and the audience / level filters stay applied. Markup
@@ -875,17 +921,8 @@ async function loadRewards() {
         applyRewardFilter();
         return;
     }
-    tbody.innerHTML = data.rewards.map(r => `
-        <tr class="reward-row" data-id="${r.id}" data-level="${r.level}" data-audience="${r.audience || 'everyone'}">
-            <td><span class="badge badge-accent">Level ${r.level}</span>${rewardAudienceBadge(r.audience)}</td>
-            <td><span class="reward-role" data-role-id="${r.role_id}"><code>${r.role_id}</code></span></td>
-            <td>
-                <button class="btn btn-sm btn-danger"
-                    onclick="showConfirm('Delete Level ${r.level} reward?', () => deleteReward(${r.id}))">
-                    Delete
-                </button>
-            </td>
-        </tr>`).join('');
+    tbody.innerHTML = '';
+    data.rewards.forEach(r => tbody.appendChild(buildRoleRewardRow(r)));
     syncRewardCounts();
     applyRewardFilter();
     applyRoleNames();

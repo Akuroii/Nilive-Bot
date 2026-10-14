@@ -261,9 +261,37 @@ def get_leveling_rewards():
             return await cursor.fetchall()
 
     rows = run_async(fetch())
+    # role_id goes out as a string: Discord IDs exceed 2^53, so a JSON number
+    # would be rounded by the browser's JSON.parse and the row would show (and
+    # look up) the wrong role. str() keeps the stored value exact, including
+    # legacy rows that hold something other than a number.
     return jsonify({"rewards": [{
-        "id": r[0], "level": r[1], "role_id": r[2], "audience": r[3],
+        "id": r[0], "level": r[1],
+        "role_id": "" if r[2] is None else str(r[2]),
+        "audience": r[3],
     } for r in rows]})
+
+
+# Largest value a SQLite INTEGER column can hold; anything bigger would make
+# the INSERT fail with an OverflowError (an HTML 500) instead of a JSON error.
+_SQLITE_INT_MAX = 2 ** 63 - 1
+
+
+def _positive_whole_number(value):
+    """int for a positive whole number (JSON int or digit string), else None.
+
+    Booleans and floats are rejected: True is not level 1, and a float role ID
+    has already lost precision before it reached us.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and value.strip().isdigit() and value.strip().isascii():
+        number = int(value.strip())
+    else:
+        return None
+    return number if 1 <= number <= _SQLITE_INT_MAX else None
 
 
 def _reward_audience(data):
@@ -276,17 +304,25 @@ def _reward_audience(data):
 @require_api_permission(LEVEL_ADMIN)
 def add_leveling_reward():
     guild_id = get_session_guild_id()
-    data     = request.json
+    data     = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Expected a JSON object"})
     audience = _reward_audience(data)
     if audience is None:
         return jsonify({"success": False, "error": "Audience must be 'everyone' or 'boosters'"})
+    level = _positive_whole_number(data.get("level"))
+    if level is None:
+        return jsonify({"success": False, "error": "Level must be a whole number of 1 or more"})
+    role_id = _positive_whole_number(data.get("role_id"))
+    if role_id is None:
+        return jsonify({"success": False, "error": "Role must be a valid Discord role ID"})
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 INSERT INTO leveling_rewards (guild_id, level, role_id, audience)
                 VALUES (?, ?, ?, ?)
-            """, (guild_id, int(data.get("level")), data.get("role_id"), audience))
+            """, (guild_id, level, str(role_id), audience))
             await db.commit()
 
     run_async(save())
