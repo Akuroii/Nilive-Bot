@@ -307,7 +307,15 @@ def main():
     rec = claims[claims.index("async def reconcile_role_progression"):]
     rec = rec[:rec.index("async def _grant_inventory")]
     check("the reconciler inspects all role claim statuses",
-          "SELECT reward_level, payload_json, status" in rec and "TRACK_ROLE" in rec)
+          "SELECT reward_level, reward_ref, payload_json, status" in rec
+          and "TRACK_ROLE" in rec and "AND status" not in rec)
+    check("the reconciler partitions role claims by audience",
+          "partitions: dict[bool, dict[int, dict]]" in rec
+          and "is_booster_ref(ref)" in rec
+          and "if audience and not booster_ok:" in rec)
+    check("Booster-only rows are ignored while the member is not boosting",
+          "booster_ok = member_is_booster(member)" in rec
+          and "for audience in (False, True):" in rec)
     check("the reconciler targets the highest FULFILLED role claim group",
           "highest = max(delivered_levels)" in rec
           and 'keep = sorted(group["role_ids"])' in rec)
@@ -370,9 +378,16 @@ def main():
     enforce = claims[claims.index("async def enforce_role_progression"):]
     enforce = enforce[:enforce.index("async def reconcile_role_progression")]
     check("removals come only from the superseded-claim helper",
-          "await superseded_role_ids(db, guild_id, user_id, level, role_id)" in enforce)
+          re.search(r"stale = await superseded_role_ids\(\s*"
+                    r"db, guild_id, user_id, level, role_id,\s*"
+                    r"booster=booster\)", enforce) is not None)
     check("roles the member does not hold are skipped, never guessed",
           "if role is None or role not in held:" in enforce)
+    check("superseded roles are scoped to a single audience",
+          "if is_booster_ref(ref) != booster:" in claims
+          and "booster: bool = False" in claims
+          and "await enforce_role_progression(" in rec
+          and "booster=audience" in rec)
 
     print("== 12. the dashboard harness cannot degrade silently ==")
     harness = source("scripts/test_dashboard_page_scripts.py")

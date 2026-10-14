@@ -385,6 +385,99 @@ async def main():
         check("legacy definition still produces its normal identity",
               (5, "role", "123") in plain_defs)
 
+    # ── 9. Role progression is audience-scoped (exclusive roles ON) ──
+    from utils.level_claims import reconcile_role_progression
+    # The progression scenarios below run in extra guild ids; the Discord
+    # stand-in must resolve members for those too.
+    bot = SimpleNamespace(get_guild=lambda gid: guild)
+    for g in (GUILD, GUILD + 2, GUILD + 3):
+        execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (g,))
+        execute("INSERT OR REPLACE INTO leveling_config "
+                "(guild_id, remove_old_reward_role) VALUES (?, 1)", (g,))
+    for rid in (602, 603):
+        roles[rid] = FakeRole(rid)
+    execute("DELETE FROM leveling_rewards")
+    execute("INSERT INTO leveling_rewards (guild_id,level,role_id,audience) VALUES "
+            "(?,?,?,'everyone'),(?,?,?,'everyone'),"
+            "(?,?,?,'boosters'),(?,?,?,'boosters')",
+            (GUILD, 10, 600, GUILD, 20, 602, GUILD, 10, 601, GUILD, 20, 603))
+    # GUILD+2: Booster role low, normal role high. GUILD+3: the reverse.
+    execute("INSERT INTO leveling_rewards (guild_id,level,role_id,audience) VALUES "
+            "(?,?,?,'boosters'),(?,?,?,'everyone')",
+            (GUILD + 2, 10, 601, GUILD + 2, 20, 602))
+    execute("INSERT INTO leveling_rewards (guild_id,level,role_id,audience) VALUES "
+            "(?,?,?,'everyone'),(?,?,?,'boosters')",
+            (GUILD + 3, 10, 600, GUILD + 3, 20, 603))
+
+    async def reach_g(user, g, level):
+        cur = rows("SELECT xp FROM levels WHERE guild_id=? AND user_id=?", (g, user))
+        if not cur:
+            execute("INSERT INTO levels (guild_id,user_id,xp,level,prestige) "
+                    "VALUES (?,?,0,0,0)", (g, user))
+            execute("INSERT INTO economy (guild_id,user_id,balance,diamonds) "
+                    "VALUES (?,?,0,0)", (g, user))
+            cur = [(0,)]
+        total = sum(xp_for_level(n) for n in range(1, level + 1))
+        await give_reward(bot, g, user, "xp", amount=total - cur[0][0],
+                          reason="progression", source="leveling")
+
+    def new_member(uid, boosting):
+        mem = FakeMember(guild, uid, boosting=boosting)
+        people[uid] = mem
+        guild.get_member = lambda mid: people.get(int(mid))
+        return mem
+
+    u_nn = new_member(USER + 7, False)
+    await reach_g(u_nn.id, GUILD, 10)
+    await claim_available(GUILD, u_nn.id, member=u_nn, bot=bot)
+    await reach_g(u_nn.id, GUILD, 20)
+    await claim_available(GUILD, u_nn.id, member=u_nn, bot=bot)
+    check("normal-to-normal progression still removes the superseded normal role",
+          u_nn.held() == [602] and u_nn.removed == [600],
+          str((u_nn.held(), u_nn.removed)))
+
+    u_bb = new_member(USER + 8, True)
+    await reach_g(u_bb.id, GUILD, 10)
+    await claim_available(GUILD, u_bb.id, member=u_bb, bot=bot)
+    await reach_g(u_bb.id, GUILD, 20)
+    await claim_available(GUILD, u_bb.id, member=u_bb, bot=bot)
+    check("booster-to-booster progression removes the superseded roles of its own audience",
+          u_bb.held() == [602, 603] and u_bb.removed == [600, 601],
+          str((u_bb.held(), u_bb.removed)))
+
+    u_x1 = new_member(USER + 9, True)
+    await reach_g(u_x1.id, GUILD + 2, 10)
+    await claim_available(GUILD + 2, u_x1.id, member=u_x1, bot=bot)
+    await reach_g(u_x1.id, GUILD + 2, 20)
+    await claim_available(GUILD + 2, u_x1.id, member=u_x1, bot=bot)
+    check("a higher normal role does NOT remove an unrelated Booster-only role",
+          601 in u_x1.held() and 602 in u_x1.held() and 601 not in u_x1.removed,
+          str((u_x1.held(), u_x1.removed)))
+
+    u_x2 = new_member(USER + 10, True)
+    await reach_g(u_x2.id, GUILD + 3, 10)
+    await claim_available(GUILD + 3, u_x2.id, member=u_x2, bot=bot)
+    await reach_g(u_x2.id, GUILD + 3, 20)
+    await claim_available(GUILD + 3, u_x2.id, member=u_x2, bot=bot)
+    check("a higher Booster-only role does NOT remove an unrelated normal role",
+          600 in u_x2.held() and 603 in u_x2.held() and 600 not in u_x2.removed,
+          str((u_x2.held(), u_x2.removed)))
+
+    u_rl = new_member(USER + 11, True)
+    await reach_g(u_rl.id, GUILD + 2, 10)
+    await claim_available(GUILD + 2, u_rl.id, member=u_rl, bot=bot)
+    check("Booster-only role delivered while boosting", 601 in u_rl.held(),
+          str(u_rl.held()))
+    u_rl.roles = []
+    u_rl.premium_since = None
+    lost = await reconcile_role_progression(u_rl, GUILD + 2, u_rl.id)
+    check("rejoin after boost loss never restores a Booster-only role",
+          601 not in lost["restored"] and 601 not in u_rl.held(), str(lost))
+    u_rl.premium_since = BOOSTING
+    back = await reconcile_role_progression(u_rl, GUILD + 2, u_rl.id)
+    check("boosting again restores the earned Booster-only role",
+          601 in back["restored"] and 601 in u_rl.held(), str(back))
+
     print("ALL BOOSTER REWARD CHECKS PASSED")
 
 
