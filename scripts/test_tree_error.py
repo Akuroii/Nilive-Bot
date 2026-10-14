@@ -14,7 +14,7 @@ Pins the confirmed production bug and its preservation contract:
      MissingPermissions/CheckFailure branch, and delivery failures stay
      swallowed by `except Exception: pass`.
 
-Imports the REAL main.py (with a dummy DISCORD_TOKEN — the module-level
+Imports the REAL main.py (with a dummy DISCORD_TOKEN - the module-level
 validator only warns on odd shapes and never calls Discord) and calls
 the real registered handler.
 
@@ -33,7 +33,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 # main.py validates DISCORD_TOKEN at import (shape check only), and its
-# database import validates OWNER_ID / binds DB_PATH at import time —
+# database import validates OWNER_ID / binds DB_PATH at import time -
 # throwaway env first (same convention as scripts/test_afk.py).
 os.environ.setdefault("DISCORD_TOKEN", "x" * 20 + "." + "y" * 20 + "." + "z" * 20)
 os.environ["DATABASE_PATH"] = os.path.join(
@@ -43,7 +43,7 @@ if not os.getenv("OWNER_ID"):
 
 import discord  # noqa: E402
 import cogs.health  # noqa: E402
-import main  # noqa: E402  — the real handler lives here
+import main  # noqa: E402  - the real handler lives here
 
 PASS = 0
 FAIL = 0

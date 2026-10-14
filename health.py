@@ -25,8 +25,8 @@ async def _mark_startup():
     """Refresh ``started_at`` with THIS process's start time.
 
     ``_ensure_row`` only ever INSERTs the row (INSERT OR IGNORE), so
-    without this the "Uptime — since last restart" card showed the age of
-    the row — i.e. of the first-ever boot — and never reset across
+    without this the "Uptime - since last restart" card showed the age of
+    the row - i.e. of the first-ever boot - and never reset across
     restarts. Called from ``Health.cog_load``, i.e. once per bot startup
     (a ``!reload health`` also re-stamps, which is accurate for the health
     system itself).
@@ -47,7 +47,7 @@ def _latency_ms(raw) -> int:
     (discord.py gateway.py KeepAliveHandler / Client.latency). The old
     inline guard only rejected ``None``, so ``round(inf * 1000)`` /
     ``round(nan * 1000)`` raised (OverflowError / ValueError) and the
-    loop's except swallowed the ENTIRE heartbeat write — silently
+    loop's except swallowed the ENTIRE heartbeat write - silently
     starving ``bot_status`` of updates whenever latency was still a
     sentinel.
     """
@@ -63,7 +63,7 @@ async def record_error(source: str, text: str):
     """Called from main.py's global error handlers (on_error,
     tree.on_error) so the health dashboard can surface the most
     recent failure without anyone having to SSH in and read logs.
-    Only the single most recent error is kept — this is a health
+    Only the single most recent error is kept - this is a health
     signal, not an audit trail (moderation_logs/audit_log already
     cover the things that need history).
     """
@@ -84,9 +84,9 @@ class Health(commands.Cog):
         self.heartbeat.start()
 
     async def cog_load(self):
-        # "Uptime — since last restart" must track THIS startup. A failure
+        # "Uptime - since last restart" must track THIS startup. A failure
         # to write health data must not prevent the cog (and therefore the
-        # heartbeat) from loading — same policy as the loop body below.
+        # heartbeat) from loading - same policy as the loop body below.
         try:
             await _mark_startup()
         except Exception:
@@ -125,7 +125,7 @@ class Health(commands.Cog):
                 await db.commit()
         except Exception:
             # A failure to WRITE health data shouldn't itself crash
-            # the loop — print and let the next tick try again.
+            # the loop - print and let the next tick try again.
             print(f"[HEALTH] heartbeat write failed:\n{traceback.format_exc()}")
 
     @heartbeat.before_loop
@@ -137,7 +137,7 @@ class Health(commands.Cog):
         # OUTSIDE its own try/except, so that exception killed the loop
         # task on arrival at every boot ("Task exception was never
         # retrieved") and last_heartbeat froze forever. is_ready() is
-        # False — never an error — before login and flips True at READY,
+        # False - never an error - before login and flips True at READY,
         # so polling it keeps "wait until ready" semantics for both
         # boot-time loading and post-login reloads.
         while not self.bot.is_ready():

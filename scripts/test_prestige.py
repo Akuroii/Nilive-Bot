@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Finalized Prestige system — verification suite.
+Finalized Prestige system - verification suite.
 
 Covers the locked product rules end-to-end against a scratch SQLite DB:
 
@@ -19,7 +19,7 @@ Covers the locked product rules end-to-end against a scratch SQLite DB:
   13. The old XP/level-gated `/prestige` reset can no longer execute.
 
 Run:  python3 scripts/test_prestige.py
-(system python — aiosqlite + sqlite3 required; section 14 also imports
+(system python - aiosqlite + sqlite3 required; section 14 also imports
 utils.reward_engine which pulls in discord.py. Install both in a venv:
   python3 -m venv .venv && .venv/bin/pip install aiosqlite==0.19.0 discord.py==2.7.1
   .venv/bin/python scripts/test_prestige.py
@@ -70,7 +70,7 @@ def check(cond, name, extra=""):
         print(f"  PASS  {name}")
     else:
         FAIL += 1
-        FAILURES.append(name + (f" — {extra}" if extra else ""))
+        FAILURES.append(name + (f" - {extra}" if extra else ""))
         print(f"  FAIL  {name}  {extra}")
 
 
@@ -246,7 +246,7 @@ async def main():
 
     section("11) Transfer / conversion / admin grants not multiplied")
     # safe_transfer, safe_convert and safe_admin_deduct must move the raw
-    # amount — they never consult prestige multipliers.
+    # amount - they never consult prestige multipliers.
     from utils.economy_safe import (
         safe_transfer, safe_convert, safe_admin_deduct)
     reset_user(level_xp=20000, level=50, coins=5000, diamonds=5, prestige_val=5)
@@ -282,7 +282,7 @@ async def main():
         "SELECT prestige FROM levels WHERE guild_id=? AND user_id=?", (G, U))
     check(row and row[0][0] == 9, "legacy level row NOT rewritten (still 9)",
           str(row))
-    # "existing users/data remain intact" — xp/level/coins/diamonds untouched
+    # "existing users/data remain intact" - xp/level/coins/diamonds untouched
     # just by reading/querying the new system.
     row = sql_query(
         "SELECT xp, level FROM levels WHERE guild_id=? AND user_id=?", (G, U))
@@ -469,7 +469,7 @@ async def main():
     section("16) Un-cached Booster still gets effective VI / VI multiplier (Issue 2)")
     # reward_engine resolves booster from the bot's member cache; when the
     # member is NOT cached it must fall back to fetching the member from
-    # Discord (premium_since is the source of truth — never roles). Here the
+    # Discord (premium_since is the source of truth - never roles). Here the
     # bot's guild returns None from get_member() but a booster from
     # fetch_member().
 
@@ -488,7 +488,7 @@ async def main():
             return self._guild
 
     # get_effective_prestige must resolve VI via the fetch fallback
-    # (booster status) — activation already exists from section 14.
+    # (booster status) - activation already exists from section 14.
     reset_user(level_xp=20000, level=50, coins=0, diamonds=0, prestige_val=1)
     bot = _Bot(_NotCachedGuild(FakeMember(premium_since="2026-01-01")))
     eff = await get_effective_prestige(G, U, is_booster=None, bot=bot)

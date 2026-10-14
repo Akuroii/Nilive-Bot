@@ -1,4 +1,4 @@
-# Voice_XP_fix — manifest
+# Voice_XP_fix - manifest
 
 Base: `Akuroii/Nilive-Bot` `main` @ `6c2af9a`. Extract at the repository root. Nothing committed or pushed.
 
@@ -31,7 +31,7 @@ Architecture (smallest split, no new consumers broken):
 | `scripts/test_slice1_leveling_gate.py` | test | listener rename only |
 | `scripts/test_xp_safety_audit.py` | test | source-slice anchor renamed to the new listener |
 
-## Tests run (repo root) — all PASS
+## Tests run (repo root) - all PASS
 
     python scripts/test_leveling_voice_hard_blocks.py     (73 checks)
     python scripts/test_leveling_runtime.py

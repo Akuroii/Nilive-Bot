@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   Message Builder v2 — the normalized document model.
+   Message Builder v2 - the normalized document model.
 
    Phase 1, step 1. Pure data: no DOM, no editor elements, no Blobs,
    no storage, no network. Everything here is JSON-serializable and
@@ -10,7 +10,7 @@
    WHY THIS FILE EXISTS
    --------------------
    v1 (`embed-composer.js`) keeps its embed as the editor's flat shape
-   — `{title, color:'#7c5cbf', author:'Nero', authorIcon:'…'}` — and
+   - `{title, color:'#7c5cbf', author:'Nero', authorIcon:'…'}` - and
    converts it to Discord's wire shape in `cleanEmbedForPayload`. That
    works, but every consumer then has to know the flat shape, the
    nested API shape AND the wire shape, and the conversion is the only
@@ -35,7 +35,7 @@
       is omitted; v1 assigns `NaN`, which JSON-serializes to `null`.
       No producer in this repo emits such a value.
    2. `null`/`undefined` in, `null` out: a media slot is either
-      `null` or an asset object — never `''`.
+      `null` or an asset object - never `''`.
    3. Ids exist. v1 keys fields by array index, which is exactly why
       its preview cannot preserve node identity. Ids are the phase-1
       foundation for the differential preview and are never sent.
@@ -45,7 +45,7 @@
    saved messages and publishing (phase 5).
 
    Consumed by: embed/store.js, embed/preview.js (phase 1 steps 3+),
-   the v2 page module. NOT consumed by v1 — v1 keeps its own proven
+   the v2 page module. NOT consumed by v1 - v1 keeps its own proven
    implementation untouched.
    Tested by: scripts/test_message_model.js.
    ═══════════════════════════════════════════════════════════════ */
@@ -105,7 +105,7 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * A media slot is either `null` or an asset. Phase 1 only creates
      * `{kind:'url'}`; phase 2 adds `{kind:'upload', assetId, filename,
-     * mime, bytes}` — the shape is already modelled here so the payload
+     * mime, bytes}` - the shape is already modelled here so the payload
      * transform has exactly one branch to grow, and storing a Discord
      * CDN url as a durable reference is never necessary.
      */
@@ -179,7 +179,7 @@ window.NERO.embed = window.NERO.embed || {};
         };
     }
 
-    /** v1's `embedHasContent` — note it ignores url/timestamp/colour. */
+    /** v1's `embedHasContent` - note it ignores url/timestamp/colour. */
     function embedHasContent(e) {
         return !!(e.title || e.description ||
                   (e.author && e.author.name) || (e.footer && e.footer.text) ||
@@ -306,7 +306,7 @@ window.NERO.embed = window.NERO.embed || {};
      * Idempotent repair: whatever came out of storage gets ids, the
      * right array shapes and the current schemaVersion, without
      * touching values. `normalizeDocument(normalizeDocument(d))` must
-     * equal `normalizeDocument(d)` — the harness asserts that.
+     * equal `normalizeDocument(d)` - the harness asserts that.
      */
     function normalizeDocument(doc, opts) {
         opts = opts || {};
@@ -365,7 +365,7 @@ window.NERO.embed = window.NERO.embed || {};
 
     // ── The one canonical payload transform ───────────────────────
     /**
-     * Byte-for-byte the shape v1's `cleanEmbedForPayload` produces —
+     * Byte-for-byte the shape v1's `cleanEmbedForPayload` produces -
      * same keys, same order, same omissions. Key ORDER matters: the
      * harness compares `JSON.stringify` output, and so does a human
      * reading "Copy JSON".
@@ -374,7 +374,7 @@ window.NERO.embed = window.NERO.embed || {};
         const out = {};
         // Phase 1 step 3: `withKeys` adds the model's own ids to the payload
         // so the differential preview can key DOM nodes by them. It is the
-        // ONLY difference between the keyed and the plain payload — the
+        // ONLY difference between the keyed and the plain payload - the
         // harness asserts stripping `key` reproduces the wire bytes exactly,
         // so the preview still renders precisely what would be sent.
         if (withKeys) out.key = e.id === undefined || e.id === null ? null : String(e.id);
@@ -419,7 +419,7 @@ window.NERO.embed = window.NERO.embed || {};
      * The canonical Discord payload. `content` is omitted when empty,
      * exactly as v1's `content: state.content || undefined` behaved.
      * Phase 3 adds `components` here, phase 2 adds the attachment parts
-     * — one function, one branch, one place to test.
+     * - one function, one branch, one place to test.
      */
     function toDiscordPayload(doc, opts) {
         opts = opts || {};
@@ -427,14 +427,14 @@ window.NERO.embed = window.NERO.embed || {};
         const content = doc && doc.content;
         // Key ORDER matters (it is what a human reads in "Copy JSON" and
         // what the byte-equality harness compares): content first, then
-        // embeds — the same order v1's send path builds.
+        // embeds - the same order v1's send path builds.
         const wire = content ? { content: content, embeds: embeds } : { embeds: embeds };
         if (opts.rows && opts.rows.length) wire.components = opts.rows;
         return wire;
     }
 
     // ── Determinism helpers ───────────────────────────────────────
-    /** JSON with object keys sorted — the basis of a stable hash. */
+    /** JSON with object keys sorted - the basis of a stable hash. */
     function stableStringify(value) {
         if (value === null || typeof value !== 'object') return JSON.stringify(value);
         if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
@@ -546,8 +546,8 @@ window.NERO.embed = window.NERO.embed || {};
 
     // ── Asset metadata records (phase 2, step 7c) ─────────────────
     /**
-     * Is this a value a DOCUMENT can hold? The document is JSON — hashed,
-     * cloned, written to storage and compared for dirty-ness — so a Blob, a
+     * Is this a value a DOCUMENT can hold? The document is JSON - hashed,
+     * cloned, written to storage and compared for dirty-ness - so a Blob, a
      * typed array, a nested object or a function inside an asset record would
      * either change shape on the way to storage or make the draft writer
      * (drafts.assertSerializable) refuse the whole write.
@@ -576,7 +576,7 @@ window.NERO.embed = window.NERO.embed || {};
      * `document.assets[assetId] = record` as a pure patch. The record is
      * copied key by key (never aliased), the map is replaced rather than
      * mutated, and a record that cannot survive a save is REFUSED by returning
-     * the document unchanged — dispatching it is then a no-op, which is the
+     * the document unchanged - dispatching it is then a no-op, which is the
      * only honest outcome for an edit that could not be stored. A record
      * carrying a DIFFERENT id than the key it is stored under is refused too:
      * two beliefs about one file is exactly the bug this map must not have.

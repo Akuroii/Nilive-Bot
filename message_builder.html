@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {#
-   Message Builder v2 — the page SHELL (phase 1, step 5a).
+   Message Builder v2 - the page SHELL (phase 1, step 5a).
 
    What lives here and nowhere else:
      * the regions (structure rail, inspector, sticky preview, validation strip,
@@ -8,7 +8,7 @@
      * the page-module declaration (data-page-module + data-page-script) that
        nav-lifecycle.js uses to load the foundations IN ORDER and to call
        init(root, ctx) / destroy(root, ctx);
-     * the guild id the draft namespace is keyed by — server-rendered from the
+     * the guild id the draft namespace is keyed by - server-rendered from the
        session, never read from a query string or from client storage.
 
    What deliberately does NOT live here:
@@ -18,11 +18,11 @@
      * any inline <script> and any on* attribute: htmx swaps #content-area, and
        an inline script inside a swapped fragment is exactly the bug
        nav-lifecycle.js was written to remove (it never re-executes).
-     * any stylesheet decision of its own — see the one <link> below.
+     * any stylesheet decision of its own - see the one <link> below.
 
    THE LIMITS TABLE (phase 1 step 6a)
-   data-limits carries utils/discord_limits.limits_payload() — the SAME table
-   the server validates with — straight into the page, so the client owns no
+   data-limits carries utils/discord_limits.limits_payload() - the SAME table
+   the server validates with - straight into the page, so the client owns no
    copy of the numbers and needs no fetch (the boot stays network-free). The
    pipe is `tojson | forceescape`: tojson makes it JSON, forceescape turns every
    quote into an entity so the value cannot break out of the double-quoted
@@ -53,8 +53,8 @@
 
     <!-- ── VALIDATION STRIP ───────────────────────────────────────────────
          One region, one owner: the page (message-builder-page.js, step 6a).
-         It is hidden while there is nothing to say — an empty always-visible
-         strip would be a fake affordance — and it is the page's only second
+         It is hidden while there is nothing to say - an empty always-visible
+         strip would be a fake affordance - and it is the page's only second
          live region (the status bar owns the other). Its text is written from
          store.ui.issues, so the issues have exactly one home and the strip
          exactly one writer. -->
@@ -93,7 +93,7 @@
             <h2 class="mb2-region-title" id="mb2-preview-title">Preview</h2>
             <!-- The files summary (7e): one STATIC line about what the message will
                  carry. Declared here, like every other id-bearing region, and a
-                 SIBLING of the mount — never inside it: preview.js owns everything
+                 SIBLING of the mount - never inside it: preview.js owns everything
                  within the mount and reconciles it. Static text, not a live region,
                  so it can never talk over the strip, which is the only announcer. -->
             <p id="mb2-files" class="mb2-files" hidden></p>
@@ -109,7 +109,7 @@
          container is EMPTY in the markup on purpose: actionbar.js renders the
          buttons (5d-1: Undo · Redo · Copy JSON, plus the dialogs they need),
          so the markup never carries a button for a feature that does not exist
-         yet — and the buttons arrive and leave with the page fragment. -->
+         yet - and the buttons arrive and leave with the page fragment. -->
     <div id="mb2-bar" class="mb2-bar">
         <p id="mb2-bar-status" class="mb2-bar-status" role="status" aria-live="polite"></p>
         <div id="mb2-bar-actions" class="mb2-bar-actions"></div>

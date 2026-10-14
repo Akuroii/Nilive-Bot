@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Missions v2 — verification suite.
+Missions v2 - verification suite.
 
 Runs the REAL engine, cog display code, and dashboard API (Flask test
 client) against a scratch SQLite DB created by the project's own
@@ -21,7 +21,7 @@ Covers the agreed v2 validation list:
    8.  Progress reaches 100% exactly once (idempotent re-completion).
    9.  Reward granted automatically exactly once.
   10.  Completed missions render "⨽ `reward claimed` <check emoji>
-       <configured currency amount>" — resolved from the Economy currency
+       <configured currency amount>" - resolved from the Economy currency
        config.
   11/12. Daily / weekly reset countdown math (UTC).
   13.  Refresh edits the existing message, never sends a new one.
@@ -36,7 +36,7 @@ Covers the agreed v2 validation list:
 
 Run:
   python scripts/test_missions_v2.py
-(needs the bot's own deps — discord.py, aiosqlite, flask — same as
+(needs the bot's own deps - discord.py, aiosqlite, flask - same as
 requirements.txt; no network, no Discord token: everything runs
 against a scratch SQLite DB and a patched reward grant.)
 """
@@ -80,14 +80,14 @@ def check(label, condition, detail=""):
     else:
         _failed += 1
         _failures.append(label)
-        print(f"  \033[91mFAIL\033[0m  {label}" + (f"  — {detail}" if detail else ""))
+        print(f"  \033[91mFAIL\033[0m  {label}" + (f"  - {detail}" if detail else ""))
 
 
 def section(title):
     print(f"\n\033[1m{title}\033[0m")
 
 
-# ── Reward counting (patched — grant path itself is unchanged v1 code) ──
+# ── Reward counting (patched - grant path itself is unchanged v1 code) ──
 reward_calls = []
 
 
@@ -124,11 +124,11 @@ async def progress_row(mission_id, period_key=None, user_id=USER, guild_id=GUILD
 
 # ═══════════════════════════════════════════════════════════════════
 async def engine_tests():
-    section("1/2. Migration — v1 schema upgraded, idempotent, data intact")
+    section("1/2. Migration - v1 schema upgraded, idempotent, data intact")
 
     # Rebuild the definitions table in its exact v1 shape (no channel_id),
     # with a legacy definition + legacy progress row, then let v2's
-    # ensure_tables() migrate it — the real upgrade path a live DB takes.
+    # ensure_tables() migrate it - the real upgrade path a live DB takes.
     legacy_def_id = None
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DROP TABLE missions_definitions")
@@ -165,7 +165,7 @@ async def engine_tests():
         await db.commit()
 
     await me.ensure_tables()
-    await me.ensure_tables()   # idempotency — second run must be a no-op
+    await me.ensure_tables()   # idempotency - second run must be a no-op
     await me.ensure_tables()   # and a third, for good measure
 
     cols = [c[1] for c in await db_query("PRAGMA table_info(missions_definitions)")]
@@ -184,7 +184,7 @@ async def engine_tests():
           old and old[0][0] == 40 and old[0][1] == 1, str(old))
 
     # ═════════════════════════════════════════════════════════════
-    section("3. Channel restriction — restricted counts only its channel")
+    section("3. Channel restriction - restricted counts only its channel")
 
     words_any = await me.create_definition(
         GUILD, name="Words anywhere", mtype="words", target=1000,
@@ -221,14 +221,14 @@ async def engine_tests():
           row_chan and row_chan[0] == 5, str(row_chan))
 
     # ═════════════════════════════════════════════════════════════
-    section("Engine — batch counting, completion, reward idempotency")
+    section("Engine - batch counting, completion, reward idempotency")
 
     msgs = await me.create_definition(
         GUILD, name="Chatterbox", mtype="messages", target=3,
         reward_type="coins", reward_value="50")
     # One chat event carries messages + words together:
     # words so far: 3+4 (any channel) + 2 (thread of allowed) + 5
-    # (orphan/unknown — unrestricted still counts it) = 14.
+    # (orphan/unknown - unrestricted still counts it) = 14.
     await me.record_activities(None, GUILD, USER,
                                {"messages": 1, "words": 6}, channel_id=CH_OTHER)
     check("messages+words batched in one event both count",
@@ -266,7 +266,7 @@ async def engine_tests():
           row[1] == 1 and len(reward_calls) == 1, f"{row} {reward_calls}")
 
     # ═════════════════════════════════════════════════════════════
-    section("20. daily_completions — weekly 'Complete N daily missions'")
+    section("20. daily_completions - weekly 'Complete N daily missions'")
 
     # Two daily missions that one event completes together, plus the
     # weekly meta-mission they should feed.
@@ -287,7 +287,7 @@ async def engine_tests():
 
     reward_calls.clear()
     # Voice tick (in a channel neither mission restricts) completes
-    # daily A; the 1-word message completes daily B — together they
+    # daily A; the 1-word message completes daily B - together they
     # push the weekly meta to 2/2 in the same event chain.
     await me.record_activities(None, GUILD, USER,
                                {"voice_minutes": 1, "words": 1},
@@ -326,7 +326,7 @@ async def engine_tests():
           not await me.set_definition_enabled(GUILD, 999999, True))
 
     # ═════════════════════════════════════════════════════════════
-    section("Validation — create_definition rejects bad input cleanly")
+    section("Validation - create_definition rejects bad input cleanly")
 
     bad_inputs = [
         ("empty name", dict(name="  ", mtype="words", target=5,
@@ -372,7 +372,7 @@ async def engine_tests():
           row[0][0] == 2 and row[0][1] == CH_ALLOWED, str(row))
 
     # ═════════════════════════════════════════════════════════════
-    section("v2.1 — display-safety length caps (slash-command input)")
+    section("v2.1 - display-safety length caps (slash-command input)")
 
     check("name at the 100-char cap is accepted",
           await me.create_definition(
@@ -400,7 +400,7 @@ async def engine_tests():
               description="D" * 200) > 0)
 
     # ═════════════════════════════════════════════════════════════
-    section("v2.1 — concurrent events on the same mission")
+    section("v2.1 - concurrent events on the same mission")
 
     # Two events racing across the completion boundary: the BEGIN
     # IMMEDIATE per-mission transaction must let only one of them
@@ -420,7 +420,7 @@ async def engine_tests():
     race_rewards = [c for c in reward_calls if c[2] == "coins"]
     # Final progress is 10, not 11: the loser of the race reads
     # completed=1 after the winner commits and is skipped by the
-    # idempotency guard — post-completion increments are deliberately
+    # idempotency guard - post-completion increments are deliberately
     # not recorded (progress is capped once the reward fired).
     check("concurrent double-cross: completed once, progress capped at target",
           race_row[0][1] == 1 and race_row[0][0] == 10, str(race_row))
@@ -484,7 +484,7 @@ async def engine_tests():
     # ═════════════════════════════════════════════════════════════
     # LAST section of engine_tests on purpose: it drops and recreates
     # mission_progress, wiping every progress row seeded above.
-    section("v2.1 — rollback error path doesn't mask the real error")
+    section("v2.1 - rollback error path doesn't mask the real error")
 
     # Force a failure INSIDE the per-mission transaction (table dropped
     # after the definition loads) and confirm the exception that surfaces
@@ -510,7 +510,7 @@ async def engine_tests():
 
 # ═══════════════════════════════════════════════════════════════════
 def cog_tests():
-    section("Refresh button — custom emoji (locked by Dark)")
+    section("Refresh button - custom emoji (locked by Dark)")
     import discord
     from cogs import missions as cog
 
@@ -530,7 +530,7 @@ def cog_tests():
     v = cog.MissionsView(_MiniBot(), 1, 2)
     b = v.refresh_button
     check("button label is 'ʀᴇꜰʀᴇꜱʜ'", b.label == "ʀᴇꜰʀᴇꜱʜ", repr(b.label))
-    # Gray/neutral appearance, per the locked UI spec — not blurple.
+    # Gray/neutral appearance, per the locked UI spec - not blurple.
     check("button style is Secondary/neutral gray",
           b.style is discord.ButtonStyle.secondary, str(b.style))
     check("button carries the custom emoji (name + id, static)",
@@ -540,7 +540,7 @@ def cog_tests():
 
     # The per-currency reward emoji is no longer a Missions constant.
     # Missions must resolve currency display from the Economy config, and
-    # the success glyph must come from utils/emoji.py — asserting either
+    # the success glyph must come from utils/emoji.py - asserting either
     # one locally would re-create the hardcode this replaced.
     check("no DIAMOND_EMOJI currency constant in Missions",
           not hasattr(cog, "DIAMOND_EMOJI"))
@@ -573,7 +573,7 @@ def cog_tests():
     check("tiny progress lights at least one node", filled(0.5) == 1)
 
     # v2.1 verification: the BAR (not just the number) must never claim
-    # completion early — a full glyph bar reads as "done", and done
+    # completion early - a full glyph bar reads as "done", and done
     # means the reward was granted. An incomplete mission at 95% shows
     # 6 of 7 nodes; only a completed mission shows 7.
     def block_filled(m):
@@ -678,7 +678,7 @@ async def display_tests():
         D, name="First steps", mtype="messages", target=1,
         period="once", reward_type="coins", reward_value="10")
 
-    # A different member completes the words mission — same guild, so
+    # A different member completes the words mission - same guild, so
     # the DENOMINATOR is shared, but the NUMERATOR must be per-user.
     await me.record_activity(None, D, OTHER_USER, "words", 999,
                              channel_id=CH_ALLOWED)
@@ -726,7 +726,7 @@ async def display_tests():
     check("channel restriction is internal only - no member-facing channel text",
           "counts in" not in daily[0].description and "#writing" not in daily[0].description)
 
-    # Same guild, other member: shared denominator, own numerator —
+    # Same guild, other member: shared denominator, own numerator -
     # the words mission is complete for THEM, not for USER.
     _, other_embeds = await cog.build_mission_display(bot, guild, OTHER_USER)
     other_daily = [e for e in other_embeds
@@ -755,7 +755,7 @@ async def display_tests():
           [e.title for e in embeds_bw])
 
     # Overflow split: many long missions → continuation embeds, all valid.
-    # (Names stay under the 100-char creation cap — the split is driven
+    # (Names stay under the 100-char creation cap - the split is driven
     # by the description filler, not by invalid-length names.)
     for i in range(30):
         await me.create_definition(
@@ -846,7 +846,7 @@ async def display_tests():
         return discord.HTTPException(_FakeHTTPResp(), "404: Not Found")
 
     class FakeFollowup:
-        """Interaction.followup stand-in — records sends, can be made
+        """Interaction.followup stand-in - records sends, can be made
         to fail (fully expired interaction token)."""
         def __init__(self, fail=False):
             self.calls = []
@@ -896,7 +896,7 @@ async def display_tests():
 
     # ── Stale/deleted panel: recovery paths ─────────────────────────
     # 1. Original message deleted (edit 404s): exactly ONE followup
-    #    replaces the unreachable panel — not a duplicate, a successor.
+    #    replaces the unreachable panel - not a duplicate, a successor.
     inter_gone = FakeInteraction(USER, edit_error=_http_err())
     await view.refresh_button.callback(inter_gone)
     gone_edit = [c for c in inter_gone.response.calls if c[0] == "edit"]
@@ -913,7 +913,7 @@ async def display_tests():
           and len(fu.get("embeds") or []) >= 3)
 
     # 2. Fully expired interaction token (edit AND followup fail):
-    #    swallowed — never raises into the component dispatch.
+    #    swallowed - never raises into the component dispatch.
     inter_dead = FakeInteraction(USER, edit_error=_http_err(),
                                  followup=FakeFollowup(fail=True))
     try:
@@ -949,7 +949,7 @@ async def display_tests():
 
 # ═══════════════════════════════════════════════════════════════════
 def api_tests():
-    section("15/16/17. Dashboard API — validation, formatting, round-trip")
+    section("15/16/17. Dashboard API - validation, formatting, round-trip")
     import time
     import dashboard.app as dapp
     from database import DB_PATH as CONFIRMED_DB
@@ -996,7 +996,7 @@ def api_tests():
 
     # 17: channel selection round-trips into the definition.
     # Realistic magnitude on purpose: channel snowflakes (~1.5e18)
-    # exceed JS's 2^53 safe-integer range — this test proves the exact
+    # exceed JS's 2^53 safe-integer range - this test proves the exact
     # ID survives the picker string → API → engine int() → storage →
     # list-as-string journey with no trailing-digit corruption.
     BIG_CH = 1549206183498481714
@@ -1050,7 +1050,7 @@ def api_tests():
     check("toggle unknown mission → 404", r.status_code == 404, r.status_code)
 
     # Malformed JSON body (Content-Type json + garbage) must be a clean
-    # 400 from Flask's parser, never a 500 — CSRF header included so the
+    # 400 from Flask's parser, never a 500 - CSRF header included so the
     # request gets PAST the before_request hook and actually reaches the
     # handler's request.json parse.
     r = A.post("/api/missions/definition",
@@ -1101,7 +1101,7 @@ def api_tests():
     else:
         check("completions include display field (skipped: none completed)", True)
 
-    # List endpoint carries channel info for the table — as a STRING
+    # List endpoint carries channel info for the table - as a STRING
     # (snowflake safety: JSON numbers past 2^53 corrupt trailing digits
     # in JS, breaking both the table lookup and the map key match).
     r = call(A, "GET", "/api/missions/list")

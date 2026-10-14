@@ -10,15 +10,15 @@ from database import DB_PATH
 #
 # Foundation piece for showing "Username (big) / User ID (small)" across
 # dashboard pages that only ever stored a raw user_id (economy, trade,
-# missions, tickets, inventory, ledger, etc) — as opposed to tables like
+# missions, tickets, inventory, ledger, etc) - as opposed to tables like
 # moderation_logs/purchase_history/mvp_history/warnings, which already
 # snapshot user_display_name AT THE TIME of the action for audit-trail
-# accuracy. This module is deliberately NOT used to overwrite those —
+# accuracy. This module is deliberately NOT used to overwrite those -
 # a moderation log should keep showing who someone WAS named when they
 # were warned, not silently rewrite history to their current name.
 #
 # Own standalone schema (own ensure_table(), not in database.py's
-# init_db()) — same pattern utils/trade_engine.py, cogs/minigames.py,
+# init_db()) - same pattern utils/trade_engine.py, cogs/minigames.py,
 # and utils/mission_engine.py already established for exactly this
 # reason: isolated, low-risk additions that don't touch the shared
 # migration path.
@@ -26,23 +26,23 @@ from database import DB_PATH
 # TTL-based cache (default 24h) rather than fetch-every-page-load:
 # Discord usernames/nicknames don't change often, and every dashboard
 # page render that shows a table of members would otherwise mean one
-# Discord API call per row, per view — that's both slow and a good way
+# Discord API call per row, per view - that's both slow and a good way
 # to get rate-limited. A stale cache entry still gets returned
 # immediately; refreshing it happens on the same call but never blocks
 # the page from getting SOME answer.
 #
 # Fetch order per user_id:
-#   1. GET /guilds/{guild_id}/members/{user_id} — gives server nickname
+#   1. GET /guilds/{guild_id}/members/{user_id} - gives server nickname
 #      (display_name) + global username + avatar. Best case.
 #   2. If that 404s (member left the server), fall back to
-#      GET /users/{user_id} — global user object still usually exists,
+#      GET /users/{user_id} - global user object still usually exists,
 #      gives username + avatar but no server-specific nickname.
 #   3. If BOTH fail (deleted account, invalid ID, no bot token
-#      configured, network error) — resolved=False, caller falls back
+#      configured, network error) - resolved=False, caller falls back
 #      to showing the raw ID only. This never raises; a broken lookup
 #      must never break the page it's rendering on.
 #
-# Concurrency capped via a semaphore — resolving a page of e.g. 50
+# Concurrency capped via a semaphore - resolving a page of e.g. 50
 # distinct user_ids fires up to MAX_CONCURRENT_FETCHES requests at
 # once rather than 50 simultaneously, which is friendlier to Discord's
 # per-route rate limits.
@@ -90,7 +90,7 @@ def _avatar_url(user_id: int, avatar_hash: str | None,
 
 async def _fetch_one(session: aiohttp.ClientSession, headers: dict,
                       guild_id: int, user_id: int) -> dict:
-    # 1. Guild member — best case, has nickname.
+    # 1. Guild member - best case, has nickname.
     try:
         async with session.get(
                 f"{DISCORD_API}/guilds/{guild_id}/members/{user_id}",
@@ -154,7 +154,7 @@ async def resolve_users(guild_id: int, user_ids: list[int],
     Returns {user_id: {"username", "display_name", "avatar_url", "resolved"}}
     for every ID in user_ids. Cached entries newer than max_age_hours are
     returned as-is; everything else (missing or stale) is re-fetched from
-    Discord, written back to the cache, then returned. Never raises —
+    Discord, written back to the cache, then returned. Never raises -
     on total failure (no token, network down) every requested ID still
     gets a well-formed fallback entry with resolved=False.
     """
@@ -209,7 +209,7 @@ async def resolve_users(guild_id: int, user_ids: list[int],
 
     bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:
-        # No token configured — every uncached/stale ID falls back to
+        # No token configured - every uncached/stale ID falls back to
         # raw-ID display. Anything already fresh in cache still returns
         # normally above.
         for uid in stale_or_missing:

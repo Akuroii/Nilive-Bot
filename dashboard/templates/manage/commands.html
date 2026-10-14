@@ -122,7 +122,7 @@
                     <div class="cmd-meta-wrap">
                         <div class="cmd-name-line">
                             {# AFK pass: prefix commands (meta.prefix) render
-                               with "!" — everything else keeps "/". #}
+                               with "!" - everything else keeps "/". #}
                             <span class="cmd-row-name">{{ '!' if meta.prefix else '/' }}{{ cmd }}</span>
                             {% if meta.params %}
                                 {% for param in meta.params %}
@@ -202,8 +202,8 @@
                                     </div>
                                     <div class="form-hint">
                                         Type a word, press <kbd>Space</kbd> to add it. Members can then
-                                        type <code>alias [args]</code> — bare, no <code>!</code>
-                                        prefix — to run <code>/{{ cmd }}</code>. A single character is
+                                        type <code>alias [args]</code> - bare, no <code>!</code>
+                                        prefix - to run <code>/{{ cmd }}</code>. A single character is
                                         fine, case does not matter, and it applies to this server only.
                                     </div>
                                 </div>
@@ -268,7 +268,7 @@
 <!-- Category-level bulk restriction modal -->
 <div id="cat-restrict-modal" class="modal-overlay" style="display:none;" onclick="handleModalOverlayClick(event)">
     <div class="modal cmd-restrict-modal">
-        <div class="modal-title">🔐 Restrict Category — <span id="cat-restrict-name" style="color:var(--accent);"></span></div>
+        <div class="modal-title">🔐 Restrict Category - <span id="cat-restrict-name" style="color:var(--accent);"></span></div>
         <div class="modal-body">
             Apply role and channel permissions to all commands in this category at once.
             Leave a section empty to leave those restrictions unchanged.
@@ -895,7 +895,7 @@ async function loadCommandSettings(cmd) {
             pickers.map(([id, kind, pre]) => NeroSelect.initMulti(document.getElementById(id), kind, pre))
         );
 
-        // Mark all four role/channel pickers as "ready for save" — the save
+        // Mark all four role/channel pickers as "ready for save" - the save
         // path below uses NeroSelect.isReady() to refuse to post empty role
         // values when the user never got a chance to interact with a
         // picker that failed to initialise. Without this, a select2/CDN
@@ -932,7 +932,7 @@ async function saveCommandSettings(cmd, btn) {
     // Role / channel pickers must be initialised before we read their
     // values. If any of the four failed to init (e.g. select2 didn't load
     // because the CDN was blocked), NeroSelect.getMultiValues() returns []
-    // — and we would silently overwrite the user's saved roles/channels
+    // - and we would silently overwrite the user's saved roles/channels
     // with an empty list. Catch that here and refuse to save.
     const pickerIds = [
         `edit-enabled-roles-${cmd}`,
@@ -952,7 +952,7 @@ async function saveCommandSettings(cmd, btn) {
             'error', 7000);
         const statusEl = document.getElementById(`edit-status-${cmd}`);
         if (statusEl) {
-            statusEl.textContent = '❌ Pickers not ready — reload first';
+            statusEl.textContent = '❌ Pickers not ready - reload first';
             statusEl.classList.add('error');
         }
         if (btn) setLoading(btn, false);
@@ -1005,7 +1005,7 @@ async function saveCommandSettings(cmd, btn) {
 // ── ALIAS STATUS LINE ───────────────────────────────────────────
 // What the *bot* last registered, from bot_settings. Before this the sync
 // result was invisible: the cog could fail, or never have run at all, and the
-// page still looked saved. Advisory only — it never blocks an edit.
+// page still looked saved. Advisory only - it never blocks an edit.
 async function refreshAliasStatus() {
     const el = document.getElementById('alias-status');
     if (!el) return;

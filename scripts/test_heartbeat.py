@@ -3,12 +3,12 @@
 Reproduces the exact boot order of main.py (load extensions BEFORE login)
 against a throwaway SQLite file, and asserts:
 
-  1. the heartbeat task SURVIVES cog load pre-login — the old loop died on
+  1. the heartbeat task SURVIVES cog load pre-login - the old loop died on
      arrival because wait_until_ready() raises RuntimeError before login
      and tasks.Loop awaits before_loop outside its own try/except;
   2. started_at is refreshed at every startup (it used to be frozen at
      first-ever row creation by INSERT OR IGNORE);
-  3. once "ready", last_heartbeat actually updates and is fresh — the
+  3. once "ready", last_heartbeat actually updates and is fresh - the
      end-to-end "does the running bot keep bot_status alive" check;
   4. non-finite gateway latency (inf/nan sentinels) no longer skips the
      whole heartbeat write (round() used to raise on them);
@@ -150,7 +150,7 @@ async def run(db_path):
     # ── 3. real running behavior: last_heartbeat updates after startup ────
     print(f"{BOLD}[3] last_heartbeat updates after startup{RESET}")
     # Simulate login(): _async_setup_hook creates Client._ready, then the
-    # READY handler sets it — exactly the two steps login() performs.
+    # READY handler sets it - exactly the two steps login() performs.
     await bot._async_setup_hook()
     bot._handle_ready()
     check("bot is_ready() after simulated READY", bot.is_ready())

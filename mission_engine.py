@@ -8,25 +8,25 @@ from utils.timezone import (
 )
 
 # ═══════════════════════════════════════════════════════════════════════
-# MISSIONS (Phase 6) — v2
+# MISSIONS (Phase 6) - v2
 #
 # Gate note: STATUS.md's locked sequencing said Missions comes "after
 # Trade is verified live." Trade shipped but is unverified as of this
-# build — Dark explicitly chose to build Missions now anyway
+# build - Dark explicitly chose to build Missions now anyway
 # (override). Flagging here so a future session reading this file
 # doesn't assume the gate was silently ignored/forgotten.
 #
 # Own standalone schema (own ensure_tables(), not in database.py's
-# init_db()) — same pattern cogs/minigames.py and utils/trade_engine.py
+# init_db()) - same pattern cogs/minigames.py and utils/trade_engine.py
 # already established for exactly this reason (isolated, low-risk
 # additions that don't touch the shared migration path).
 #
 # Trackable types, all sourced from events cogs/activity_engine.py
-# already dispatches — no new tracking hooks needed:
-#   messages          — +1 per on_activity_message
-#   words             — +word_count per on_activity_message
-#   voice_minutes     — +1 per on_activity_voice_tick
-#   daily_completions — +1 per daily-period mission completed (chained
+# already dispatches - no new tracking hooks needed:
+#   messages          - +1 per on_activity_message
+#   words             - +word_count per on_activity_message
+#   voice_minutes     - +1 per on_activity_voice_tick
+#   daily_completions - +1 per daily-period mission completed (chained
 #                       from record_activities itself, so a weekly
 #                       "Complete 5 daily missions" mission is just a
 #                       normal definition; no separate subsystem)
@@ -42,18 +42,18 @@ from utils.timezone import (
 #   * create/delete/toggle definitions live here (one validation +
 #     write path) instead of being duplicated between the cog's slash
 #     command and the dashboard API.
-#   * Reset countdown helpers (display-only — the reset itself stays
+#   * Reset countdown helpers (display-only - the reset itself stays
 #     the implicit period_key rollover, no timer job exists or is
 #     needed).
 #
 # Reward is granted the instant a mission crosses its target (no
-# separate "claim" step) — reuses utils/reward_engine.give_reward(),
+# separate "claim" step) - reuses utils/reward_engine.give_reward(),
 # the same single grant path every other reward source in this
 # project uses (shop, events, minigames, leveling).
 #
 # Daily/weekly reset is implicit: progress is keyed by
 # (guild_id, user_id, mission_id, period_key), and period_key changes
-# every day/week — a new period just means a fresh row starting at 0,
+# every day/week - a new period just means a fresh row starting at 0,
 # no cron/reset job needed. "once" missions use a fixed period_key so
 # they can only ever be completed a single time per member.
 # ═══════════════════════════════════════════════════════════════════════
@@ -72,7 +72,7 @@ CHANNEL_BOUND_TYPES = ("messages", "words", "voice_minutes")
 
 # Display-length caps, enforced at creation so no definition can grow
 # past what the member display can safely render. These match the
-# dashboard form's maxlengths — the slash command is the only other
+# dashboard form's maxlengths - the slash command is the only other
 # entry point, and both now agree. (v1 had no explicit cap; its
 # display crashed on names over Discord's 256-char embed-field limit,
 # so this is strictly tighter than what ever actually worked.)
@@ -127,7 +127,7 @@ async def ensure_tables():
         # v2 migration: optional per-mission channel restriction. New
         # databases get the column from CREATE TABLE above; databases
         # created by v1 need the ALTER. Same idempotent PRAGMA guard
-        # pattern database.py uses for guild_settings — and the same
+        # pattern database.py uses for guild_settings - and the same
         # tolerance: if the bot process and a dashboard request race
         # the very first migration, the loser's ALTER fails with
         # "duplicate column" and is safely swallowed, because the
@@ -176,11 +176,11 @@ def seconds_until_weekly_reset(now: datetime = None) -> int:
 
 
 def format_reset_countdown(seconds: int) -> str:
-    """H:MMH — e.g. '1:12H', '0:05H', '24:00H'. Never 0:00H while time remains."""
+    """H:MMH - e.g. '1:12H', '0:05H', '24:00H'. Never 0:00H while time remains."""
     return format_cairo_countdown(seconds)
 
 
-# ── Definitions CRUD (single validation + write path — the cog's slash
+# ── Definitions CRUD (single validation + write path - the cog's slash
 #    commands and the dashboard API both call these, so the two surfaces
 #    can't drift apart like v1's duplicated INSERTs could) ─────────────
 
@@ -210,7 +210,7 @@ async def create_definition(guild_id: int, *, name: str, mtype: str,
                             channel_id=None) -> int:
     """Validates and inserts one mission definition, returning its id.
 
-    Raises ValueError with a member-facing message on bad input — the
+    Raises ValueError with a member-facing message on bad input - the
     slash command turns that into an ephemeral reply, the API into a
     400. This is the only place mission input shape is enforced."""
     name = (name or "").strip()
@@ -257,7 +257,7 @@ async def create_definition(guild_id: int, *, name: str, mtype: str,
 
     # daily_completions progress isn't channel-bound (see
     # CHANNEL_BOUND_TYPES), so a channel restriction would be a silent
-    # no-op — drop it rather than storing a setting that can't work.
+    # no-op - drop it rather than storing a setting that can't work.
     if mtype == "daily_completions":
         channel_id = None
     elif channel_id in (None, ""):
@@ -324,11 +324,11 @@ async def get_user_progress(guild_id: int, user_id: int) -> list[dict]:
     """
     Returns every enabled mission for the guild alongside this
     member's progress for its CURRENT period (a fresh 0/target row if
-    they haven't touched it yet this period — nothing is written until
+    they haven't touched it yet this period - nothing is written until
     record_activity() actually has progress to add).
 
     v2: one progress query for the whole member (period keys are at
-    most three distinct values — daily/weekly/once) instead of one
+    most three distinct values - daily/weekly/once) instead of one
     query per mission definition.
     """
     defs = await get_definitions(guild_id, enabled_only=True)
@@ -365,7 +365,7 @@ def _passes_channel_filter(d: dict, channel_id: int | None) -> bool:
     channel; a mission with no channel counts anywhere. If the event
     carries no channel id at all (an orphaned thread whose parent is
     gone, a defensive caller), restricted missions are skipped rather
-    than counted — counting them would silently widen the restriction.
+    than counted - counting them would silently widen the restriction.
     Non-channel-bound types (daily_completions) always pass."""
     if d["type"] not in CHANNEL_BOUND_TYPES:
         return True
@@ -432,7 +432,7 @@ async def record_activities(bot, guild_id: int, user_id: int,
                 already_done = bool(row[1]) if row else False
 
                 if already_done:
-                    # Already completed this period — nothing left to
+                    # Already completed this period - nothing left to
                     # do (no partial re-completion, no double reward).
                     await db.execute("ROLLBACK")
                     continue
@@ -473,7 +473,7 @@ async def record_activities(bot, guild_id: int, user_id: int,
     # Rewards AFTER the write loop (and outside the connection): a
     # broken reward config must not strand the remaining missions'
     # progress writes or the daily_completions chain below. The row is
-    # already committed as completed, so this is grant-only territory —
+    # already committed as completed, so this is grant-only territory -
     # same "a reward path must never crash the caller" stance the
     # prestige multiplier lookups in reward_engine take.
     for d in newly_completed:
@@ -501,7 +501,7 @@ async def record_activities(bot, guild_id: int, user_id: int,
     # completed counts as one "daily mission completed" toward any
     # daily_completions missions. The recursive call grants its own
     # rewards and can chain again (a daily_completions mission with
-    # period=daily completing IS a daily completion) — recursion is
+    # period=daily completing IS a daily completion) - recursion is
     # naturally bounded because a mission can only complete once per
     # period_key and completed missions are skipped above.
     daily_done = [d for d in newly_completed if d["period"] == "daily"]

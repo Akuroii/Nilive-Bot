@@ -24,12 +24,12 @@ from utils.ledger import get_user_ledger_page, count_user_ledger
 from utils.formatters import format_relative
 
 # ═══════════════════════════════════════════════════════════════════════
-# WALLET — private, user-only economy hub
+# WALLET - private, user-only economy hub
 #
 # Design notes (ours, not copied from any reference bot):
 #
-# * ONE ephemeral message, edited in place. Every panel — hub, streak,
-#   inventory tabs, item detail, drop confirm, receipts — is a
+# * ONE ephemeral message, edited in place. Every panel - hub, streak,
+#   inventory tabs, item detail, drop confirm, receipts - is a
 #   re-render of the same message rather than a new reply. Discord's
 #   ephemeral messages cannot be deleted by the user, so spawning a
 #   fresh reply per click leaves a trail of stale, still-clickable
@@ -39,7 +39,7 @@ from utils.formatters import format_relative
 # * Ownership is enforced twice: the command is ephemeral (only the
 #   invoker can see it) AND every component re-checks
 #   interaction.user.id against the owner recorded on the view. The
-#   second check is not redundant — ephemeral only controls
+#   second check is not redundant - ephemeral only controls
 #   visibility, and a view left open in a shared context must never
 #   act on someone else's wallet.
 #
@@ -50,7 +50,7 @@ from utils.formatters import format_relative
 #   on_timeout disables controls so a stale panel fails visibly
 #   rather than silently.
 #
-# * The hub shows counts, not lists — inspired by wallet-card UIs in
+# * The hub shows counts, not lists - inspired by wallet-card UIs in
 #   bots like Tatsu but with our own typography and branding (the
 #   title is the bot name, the member's identity is in the author
 #   line). Currency names and icons come from guild settings, never
@@ -65,7 +65,7 @@ from utils.formatters import format_relative
 WALLET_COLOR = 0x7c5cbf
 STREAK_COLOR = 0xF0883E
 RECEIPTS_PER_PAGE = 8
-VIEW_TIMEOUT = 1800  # 30 minutes — long enough to browse comfortably
+VIEW_TIMEOUT = 1800  # 30 minutes - long enough to browse comfortably
 
 # Inventory tabs. Roles/temp_roles are grouped under "Items" because
 # from the member's side they are "things I own and can wear"; the
@@ -96,7 +96,7 @@ RARITY_GLYPH = {
 
 # Ledger `source` values in use across the project, mapped to what a
 # member sees. Anything unmapped falls back to a title-cased version
-# of the raw source rather than being hidden — an unlabelled
+# of the raw source rather than being hidden - an unlabelled
 # transaction is still money that moved, and silently dropping it
 # would make the receipts lie about the balance.
 SOURCE_LABELS = {
@@ -212,7 +212,7 @@ class WalletBaseView(discord.ui.View):
     """
     Shared ownership guard + timeout behaviour for every wallet panel.
     interaction_check runs before any component callback, so the
-    per-callback code never has to repeat the owner check — one
+    per-callback code never has to repeat the owner check - one
     guard, impossible to forget on a new button.
     """
 
@@ -225,7 +225,7 @@ class WalletBaseView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
-                "This is not your wallet — run `/wallet` to open your own.",
+                "This is not your wallet - run `/wallet` to open your own.",
                 ephemeral=True)
             return False
         return True
@@ -249,8 +249,8 @@ def build_hub_embed(snap: dict) -> discord.Embed:
     NERO-branded wallet card. The bot name, not the member name, sits
     in the title (the member identity is still shown via set_author so
     ownership is unambiguous). Layout inspiration comes from Tatsu's
-    wallet card — a strong wordmark, two currencies stacked vertically,
-    summary stats below — but the color palette, typography, field
+    wallet card - a strong wordmark, two currencies stacked vertically,
+    summary stats below - but the color palette, typography, field
     layout and labels are our own.
     """
     cc = snap["currency"]["coins"]
@@ -261,7 +261,7 @@ def build_hub_embed(snap: dict) -> discord.Embed:
         color=WALLET_COLOR)
     embed.set_author(name="NERO")
 
-    # Currency block — vertical stack, the visual focus of the card.
+    # Currency block - vertical stack, the visual focus of the card.
     coins_line = f"{cc['emoji']} **{snap['coins']:,}** {cc['name']}"
     diamonds_line = f"{cd['emoji']} **{snap['diamonds']:,}** {cd['name']}"
     embed.add_field(
@@ -354,18 +354,18 @@ def build_streak_embed(preview: dict, currency: dict) -> discord.Embed:
         Daily Reward  · Up to <max> <coin>
         Streak        · Day <next_streak>
         Bonus         · +<bonus> <coin>
-        (No Cooldown field — Claim button is the call to action.)
+        (No Cooldown field - Claim button is the call to action.)
 
     Already claimed today:
         Daily Reward  · Already claimed
         Streak        · Day <streak>
         Cooldown      · <remaining>
-        (No Bonus field — bonus was already paid.)
+        (No Bonus field - bonus was already paid.)
 
     The post-claim state (build_claim_embed) renders the mock exactly:
     Daily Reward as the actual earned amount, Bonus as the awarded
     bonus, Streak Day N, Cooldown. Pre-claim we cannot show an exact
-    coin number because the roll is random — "Up to <max>" is a
+    coin number because the roll is random - "Up to <max>" is a
     single, honest ceiling rather than a fake or averaged number.
     """
     cc = currency["coins"]
@@ -388,7 +388,7 @@ def build_streak_embed(preview: dict, currency: dict) -> discord.Embed:
 
     # Pre-claim: max possible = daily_max + next_bonus (ignoring
     # prestige multiplier, which is user-specific and cannot be
-    # predicted without reading booster state here — kept simple).
+    # predicted without reading booster state here - kept simple).
     bonus = int(preview.get("next_bonus") or 0)
     hi = int(preview.get("daily_max") or 0)
     max_possible = hi + bonus
@@ -403,14 +403,14 @@ def build_streak_embed(preview: dict, currency: dict) -> discord.Embed:
         inline=True)
     embed.add_field(
         name="Bonus",
-        value=f"+**{bonus:,}** {cc['name']}" if bonus > 0 else "—",
+        value=f"+**{bonus:,}** {cc['name']}" if bonus > 0 else "-",
         inline=True)
     return embed
 
 
 def build_claim_embed(result: dict, currency: dict) -> discord.Embed:
     """
-    Post-claim receipt — matches the spec's mock exactly:
+    Post-claim receipt - matches the spec's mock exactly:
        Daily Reward   132 Coins
        Streak         Day 7
        Bonus          +32 Coins
@@ -433,7 +433,7 @@ def build_claim_embed(result: dict, currency: dict) -> discord.Embed:
     bonus = int(result.get("streak_bonus") or 0)
     embed.add_field(
         name="Bonus",
-        value=f"+**{bonus:,}** {cc['name']}" if bonus > 0 else "—",
+        value=f"+**{bonus:,}** {cc['name']}" if bonus > 0 else "-",
         inline=True)
     embed.add_field(
         name="Cooldown",
@@ -493,7 +493,7 @@ class StreakPanelView(WalletBaseView):
                 view=self)
             return
 
-        # Successful claim — every button retires.
+        # Successful claim - every button retires.
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(
@@ -541,9 +541,9 @@ def build_inventory_embed(tab: str, entries: list[dict],
 
     if not entries:
         empty = {
-            TAB_ITEMS: "No items yet — get one from `/shop`.",
-            TAB_POTIONS: "No potions yet — get one from `/shop`.",
-            TAB_TITLES: "No titles yet — get one from `/shop`.",
+            TAB_ITEMS: "No items yet - get one from `/shop`.",
+            TAB_POTIONS: "No potions yet - get one from `/shop`.",
+            TAB_TITLES: "No titles yet - get one from `/shop`.",
         }[tab]
         embed.description = empty
         return embed
@@ -604,7 +604,7 @@ class InventoryItemSelect(discord.ui.Select):
                 value=name[:100]))
         super().__init__(
             placeholder=f"Select a {TAB_META[tab]['label'].rstrip('s').lower()}…",
-            options=options or [discord.SelectOption(label="—", value="—")],
+            options=options or [discord.SelectOption(label="-", value="-")],
             disabled=not options)
         self.guild_id = guild_id
         self.user_id = user_id
@@ -704,15 +704,15 @@ def build_item_embed(guild: discord.Guild, tab: str, item: dict,
             inline=True)
 
     # A role item's Discord role is shown as a mention so the member
-    # can see what wearing it grants — but the DB row is the source
+    # can see what wearing it grants - but the DB row is the source
     # of truth, not the role itself. No "Expires" / "Paid" / "Bought"
-    # per spec — that data is admin-side and clutters the member view.
+    # per spec - that data is admin-side and clutters the member view.
     if tab == TAB_ITEMS and item["item_type"] in EQUIPPABLE_TYPES:
         role_id = (item.get("metadata") or {}).get("role_id")
         role = guild.get_role(int(role_id)) if role_id else None
         embed.add_field(
             name="Role",
-            value=(role.mention if role else "*missing — ask an admin*"),
+            value=(role.mention if role else "*missing - ask an admin*"),
             inline=True)
 
     if thumb:
@@ -760,7 +760,7 @@ class ActivateButton(discord.ui.Button):
             view.guild_id, view.user_id, view.item_name)
         if not result.get("success"):
             await interaction.response.send_message(
-                f"Could not activate that potion — {result.get('error', 'something went wrong.')}",
+                f"Could not activate that potion - {result.get('error', 'something went wrong.')}",
                 ephemeral=True)
             return
         if result["remaining"] <= 0:
@@ -806,7 +806,7 @@ class EquipToggleButton(discord.ui.Button):
 
         if not result.get("success"):
             await interaction.response.send_message(
-                f"Could not change equip state — {result.get('error', 'something went wrong.')}",
+                f"Could not change equip state - {result.get('error', 'something went wrong.')}",
                 ephemeral=True)
             return
 
@@ -890,7 +890,7 @@ class DropConfirmView(WalletBaseView):
         result = await drop_item(self.guild_id, self.user_id, self.item_name)
         if not result.get("success"):
             await interaction.response.send_message(
-                f"Could not drop that item — {result.get('error', 'something went wrong.')}",
+                f"Could not drop that item - {result.get('error', 'something went wrong.')}",
                 ephemeral=True)
             return
         await open_inventory_panel(
@@ -1035,7 +1035,7 @@ class ReceiptsView(WalletBaseView):
 
 class CurrencyTabButton(discord.ui.Button):
     def __init__(self, currency_key: str, active: bool):
-        # The label/emoji are placeholders — open_receipts_panel() always
+        # The label/emoji are placeholders - open_receipts_panel() always
         # replaces them with the guild's resolved currency config right
         # after the view is constructed (see the loop over view.children
         # there), so this __init__ must NOT carry its own copy of the
@@ -1096,7 +1096,7 @@ class Wallet(commands.Cog):
 
     @app_commands.command(
         name="wallet",
-        description="Open your wallet — balances, streak, inventory and receipts")
+        description="Open your wallet - balances, streak, inventory and receipts")
     async def wallet(self, interaction: discord.Interaction):
         await render_hub(
             interaction, interaction.guild.id, interaction.user.id,
@@ -1107,7 +1107,7 @@ class Wallet(commands.Cog):
         description="Open your daily streak panel")
     async def streak(self, interaction: discord.Interaction):
         # The /streak command opens the SAME panel the Wallet Streak
-        # button opens — not a separate claim embed. Claiming happens
+        # button opens - not a separate claim embed. Claiming happens
         # exclusively through the [Claim] button inside that panel, so
         # the command and the button share 100% of their logic.
         await open_streak_panel(

@@ -1,5 +1,5 @@
 """
-Shop Publisher — the fixed token resolver and design-draft preview assembly.
+Shop Publisher - the fixed token resolver and design-draft preview assembly.
 
 This module owns the middle of the Template/Design -> Discord message pipeline
 and is the ONE place a token is ever interpreted. The publish path must call
@@ -11,7 +11,7 @@ THE TOKEN RESOLVER IS FIXED, DETERMINISTIC AND NON-PROGRAMMABLE (locked):
     with a label, a group and a description; nothing outside it ever resolves.
     The user-facing short spellings ({{name}}, {{price}}, ...) are a FIXED
     alias table (TOKEN_ALIASES) over the collision-safe canonical namespace
-    ({{product.name}} ...) — still just lookups, never a language.
+    ({{product.name}} ...) - still just lookups, never a language.
   * DETERMINISTIC: pure functions, no clock, no randomness, no IO, no imports
     beyond the standard library + the read-only validators/labels it reuses.
     The same design draft + rows + currency always produce byte-identical
@@ -29,48 +29,48 @@ THE DESIGN DRAFT (Step 0 contract) is what preview_design() consumes:
     {
       "id":            int | 0,            # optional, seeds select custom_ids
       "presentation":  {"mode", "content", "embeds"},
-      "products":      [root_product_id, ...],   # THE ROSTER — ROOTS ONLY
+      "products":      [root_product_id, ...],   # THE ROSTER - ROOTS ONLY
       "action":        {"kind", "entries", ...}, # see build_purchase_action
     }
 
 Locked roster / purchase-option invariants (option_of_id on shop_items rows;
-the field is synthetic until the column lands — validators read it via .get()
+the field is synthetic until the column lands - validators read it via .get()
 so a missing column simply means "every row is a root"):
 
   * products[] is the Design's explicit ROOT-PRODUCT roster: only rows with
     option_of_id IS NULL may appear. A purchase-option row in products[] is
-    rejected (option_in_roster) — options are never independent products.
+    rejected (option_in_roster) - options are never independent products.
   * An action entry may reference a purchase-option row only when that row's
     ROOT product is present in products[] (option_outside_roster otherwise).
   * product_select entries are ROOT-PRODUCT ONLY; the entry purchases that
     exact row (the product's default purchasable form).
   * option_select entries resolve to exactly ONE product family:
-    root(e1) == root(e2) == ... — the root itself and/or its DIRECT option
+    root(e1) == root(e2) == ... - the root itself and/or its DIRECT option
     rows; option-of-option chains are rejected.
   * buttons entries may reference a root product or a purchase-option row.
   * There is no is_purchasable flag: a row is reachable through the shop only
     when a published Design action references it.
 
-PURCHASE ACTIONS resolve to the EXISTING purchase mechanism — never a second
-engine. Every entry's custom_id is `shop_buy_<row_id>` — the family
+PURCHASE ACTIONS resolve to the EXISTING purchase mechanism - never a second
+engine. Every entry's custom_id is `shop_buy_<row_id>` - the family
 cogs/shop.py's on_interaction already dispatches to process_purchase(). A
 select control carries `shop_buy_sel_<context_id>` and puts `shop_buy_<row_id>`
 in its option values; the dispatch extension that reads those values lands
 with the select-enablement step and routes into the SAME process_purchase().
 
 FREE rendering is presentation-only (locked): a free row (zero price, no
-diamond price — e.g. Prestige VI) renders its price slot as FREE_LABEL
+diamond price - e.g. Prestige VI) renders its price slot as FREE_LABEL
 (exact `𝐅𝐫𝐞𝐞` glyphs) and an empty button label defaults to exactly FREE_LABEL.
-No purchase-flow or paid-product-validation change happens here — that is a
+No purchase-flow or paid-product-validation change happens here - that is a
 later isolated step. Paid-product validation (utils/shop_validation.py) is
 untouched by this module.
 
-Template shape: embed_templates rows as loaded by the Embed Builder API — a
+Template shape: embed_templates rows as loaded by the Embed Builder API - a
 whole message {"content": str, "embeds": [...]}. Legacy rows that predate that
 shape (a bare embed dict) normalize through normalize_template_doc(), the same
 rule dashboard/api/embedbuilder.py applies on read, so both readers agree.
 
-Pure Python: no Flask, no Discord, no database access — the dashboard route and
+Pure Python: no Flask, no Discord, no database access - the dashboard route and
 scripts/test_shop_publisher.py both exercise this module directly.
 """
 
@@ -88,7 +88,7 @@ from utils.discord_limits import (
 )
 
 # The exact Free glyphs (mathematical bold): U+1D405 U+1D42B U+1D41E U+1D41E
-# (𝐅𝐫𝐞𝐞). ONE constant — the purchase-action label rule and the
+# (𝐅𝐫𝐞𝐞). ONE constant - the purchase-action label rule and the
 # price_display token are the only writers of this string.
 FREE_LABEL = "\U0001D405\U0001D42B\U0001D41E\U0001D41E"
 
@@ -156,7 +156,7 @@ TOKEN_CATALOG = {
     },
     "product.price_display": {
         "label": "Price (full)", "group": "Price",
-        "description": ("The all-in-one price line \"1,500 🪙 Coins\" — or "
+        "description": ("The all-in-one price line \"1,500 🪙 Coins\" - or "
                         "exactly 𝐅𝐫𝐞𝐞 for a free product."),
     },
     "product.price_amount": {
@@ -179,7 +179,7 @@ TOKEN_CATALOG = {
 }
 
 # The user-facing short spellings (locked V1 field list) are FIXED aliases of
-# the canonical namespace — a lookup table, never a template language. The
+# the canonical namespace - a lookup table, never a template language. The
 # Insert Dynamic Field menu always inserts the canonical spelling.
 TOKEN_ALIASES = {
     "name": "product.name",
@@ -200,20 +200,20 @@ TOKEN_ALIASES = {
 TOKEN_RE_PATTERN = r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}"
 TOKEN_RE = re.compile(TOKEN_RE_PATTERN)
 
-# V1 picker grouping reuses the existing `type` column only — the display
+# V1 picker grouping reuses the existing `type` column only - the display
 # order of the groups, matching the Shop admin form's type order. This is a
 # transitional grouping until the Category model lands (Step 1); nothing here
 # invents a category system.
 TYPE_GROUP_ORDER = ("role", "temp_role", "xp_boost", "prestige", "potion",
                     "title", "custom")
 
-# The two fixed presentation modes (server policy — NOT a template language):
-#   per_product — the presentation's EMBEDS fan out once per roster product
+# The two fixed presentation modes (server policy - NOT a template language):
+#   per_product - the presentation's EMBEDS fan out once per roster product
 #                 (product tokens resolve against that product). Message
 #                 content resolves against the product only when the roster
 #                 has exactly one product; otherwise product tokens in the
 #                 content stay verbatim and are reported.
-#   frame       — the presentation resolves ONCE as the shop frame; product
+#   frame       - the presentation resolves ONCE as the shop frame; product
 #                 tokens anywhere in it stay verbatim and are reported.
 #                 The roster products are presented by the purchase action.
 PRESENTATION_MODES = ("per_product", "frame")
@@ -274,7 +274,7 @@ def normalize_template_doc(doc) -> dict:
 
 
 def charging_amount(product: dict):
-    """(column_key, amount) — the same rule cogs/shop.py charges with:
+    """(column_key, amount) - the same rule cogs/shop.py charges with:
     a diamond price takes precedence; otherwise the coin price applies."""
     price_diamonds = (product or {}).get("price_diamonds")
     if price_diamonds:
@@ -289,7 +289,7 @@ def is_free(product: dict) -> bool:
 
 
 def format_price(amount: int, currency_name: str, currency_emoji: str) -> str:
-    """Mechanical price rendering — thousands separators + icon + name.
+    """Mechanical price rendering - thousands separators + icon + name.
 
     Never special-cases zero: the FREE_LABEL presentation happens in
     display_price() and the purchase-action label rules, deliberately in
@@ -428,8 +428,8 @@ def resolve_message(template_doc, values: dict):
     """Substitute catalog tokens through the template's text surfaces.
 
     Returns (resolved_doc, used):
-      resolved_doc — a NEW normalized message dict; the input is never mutated.
-      used — one entry per token occurrence, in document order.
+      resolved_doc - a NEW normalized message dict; the input is never mutated.
+      used - one entry per token occurrence, in document order.
     """
     doc = normalize_template_doc(template_doc)
     used = []
@@ -449,7 +449,7 @@ def resolve_message(template_doc, values: dict):
 DEFAULT_ENTRY_LABELS = {
     "buttons": "Buy {{product.name}}",
     "product_select": "{{product.name}}",
-    "option_select": "{{product.name}} — {{product.price}} {{product.currency}}",
+    "option_select": "{{product.name}} - {{product.price}} {{product.currency}}",
 }
 
 DEFAULT_PLACEHOLDERS = {
@@ -461,7 +461,7 @@ DEFAULT_PLACEHOLDERS = {
 def root_of(row: dict) -> int:
     """The root product id of a row: its parent when it is a purchase-option
     row (option_of_id set), else its own id. The field is synthetic until the
-    column lands — a missing key simply means the row is a root."""
+    column lands - a missing key simply means the row is a root."""
     row = row or {}
     parent = row.get("option_of_id")
     return int(parent) if parent else int(row.get("id") or 0)
@@ -473,7 +473,7 @@ def is_option_row(row: dict) -> bool:
 
 
 def entry_custom_id(row: dict) -> str:
-    """The custom-id family cogs/shop.py already dispatches — for buttons the
+    """The custom-id family cogs/shop.py already dispatches - for buttons the
     button's custom_id, for select options the option VALUE."""
     return f"shop_buy_{int((row or {}).get('id') or 0)}"
 
@@ -486,7 +486,7 @@ def build_purchase_action(action_cfg: dict, rows_by_id: dict, currency: dict,
     select control additionally carries `shop_buy_sel_<context_id>` as its
     component custom_id (its option values carry the row custom_ids). Labels
     and descriptions run through the same fixed resolver against the ENTRY's
-    product (so `{{product.duration}} — {{product.price}} {{product.currency}}`
+    product (so `{{product.duration}} - {{product.price}} {{product.currency}}`
     is truthful per option).
 
     Free rows (locked presentation rule): an empty BUTTON label becomes
@@ -564,7 +564,7 @@ def validate_action_entries(action_cfg: dict, rows_by_id: dict,
     kind = cfg.get("kind")
     if kind not in ACTION_KINDS:
         return [{"code": "unknown_action_kind", "path": "action.kind",
-                 "message": (f"Unknown purchase action kind {kind!r} — "
+                 "message": (f"Unknown purchase action kind {kind!r} - "
                              f"expected one of {', '.join(ACTION_KINDS)}.")}]
 
     entries = cfg.get("entries")
@@ -613,7 +613,7 @@ def validate_action_entries(action_cfg: dict, rows_by_id: dict,
                 problems.append({
                     "code": "option_outside_roster", "path": path,
                     "message": (f"Purchase-option row {product_id} belongs to root "
-                                f"product {root}, which is not in products[] — "
+                                f"product {root}, which is not in products[] - "
                                 "add the root product to the roster first."),
                 })
             else:
@@ -639,13 +639,13 @@ def validate_action_entries(action_cfg: dict, rows_by_id: dict,
             elif is_option_row(parent):
                 problems.append({"code": "option_chain", "path": path,
                                  "message": ("Purchase options must sit directly under "
-                                             "a root product — option-of-option chains "
+                                             "a root product - option-of-option chains "
                                              "are not allowed.")})
             if kind == "product_select":
                 problems.append({
                     "code": "option_in_product_select", "path": path,
                     "message": ("product_select entries must be ROOT products "
-                                "(option_of_id IS NULL) — purchase-option rows are "
+                                "(option_of_id IS NULL) - purchase-option rows are "
                                 "not independent products."),
                 })
 
@@ -697,7 +697,7 @@ def validate_design(design: dict, rows_by_id: dict) -> list:
         if is_option_row(row):
             problems.append({
                 "code": "option_in_roster", "path": path,
-                "message": (f"products[] is the ROOT-product roster — purchase-option "
+                "message": (f"products[] is the ROOT-product roster - purchase-option "
                             f"row {pid} cannot appear as an independent product "
                             f"(it belongs to root {root_of(row)})."),
             })
@@ -725,7 +725,7 @@ def _state_warnings(rows: list) -> list:
         if not row.get("enabled", 1):
             warnings.append({
                 "code": "product_disabled", "path": f"products[{pid}]",
-                "message": (f"Product {row.get('name') or pid} is disabled — the "
+                "message": (f"Product {row.get('name') or pid} is disabled - the "
                             "purchase action would refuse purchases."),
             })
         max_stock = row.get("max_stock")
@@ -733,7 +733,7 @@ def _state_warnings(rows: list) -> list:
             warnings.append({
                 "code": "product_out_of_stock", "path": f"products[{pid}]",
                 "message": (f"Product {row.get('name') or pid} is out of stock "
-                            f"(0/{int(max_stock)}) — the purchase action would "
+                            f"(0/{int(max_stock)}) - the purchase action would "
                             "refuse purchases."),
             })
     return warnings
@@ -747,7 +747,7 @@ def _occurrence_warnings(used: list) -> list:
                 warnings.append({
                     "code": "unresolved_product_token", "path": entry["path"],
                     "message": (f"Token {entry['token']} at {entry['path']} needs a "
-                                "product context — this surface is not rendered per "
+                                "product context - this surface is not rendered per "
                                 "product (frame mode / shared content). It was left "
                                 "as typed."),
                 })
@@ -755,7 +755,7 @@ def _occurrence_warnings(used: list) -> list:
                 warnings.append({
                     "code": "unknown_token", "path": entry["path"],
                     "message": (f"Unknown token {entry['token']} at {entry['path']} "
-                                "was left as typed — it is not in the token catalog."),
+                                "was left as typed - it is not in the token catalog."),
                 })
         elif entry["value"] == "":
             warnings.append({
@@ -768,7 +768,7 @@ def _occurrence_warnings(used: list) -> list:
 
 def _action_limit_warnings(action: dict) -> list:
     """Discord component limits (from the ONE limits table) on the BUILT
-    action — publish blockers later, warnings now."""
+    action - publish blockers later, warnings now."""
     warnings = []
     kind = action.get("kind")
     label_max = BUTTON_LABEL_MAX if kind == "buttons" else SELECT_OPTION_LABEL_MAX
@@ -803,10 +803,10 @@ def collect_warnings(state_rows: list, used: list, resolved_doc: dict,
 
     1. product state (disabled, out of stock) per distinct product,
     2. token occurrences in recorded order (unknown token, unresolved product
-       token, empty value) — presentation surfaces first, then action labels,
+       token, empty value) - presentation surfaces first, then action labels,
     3. message/action limit breaches (presentation_limit, action_limit),
     4. Discord-rule breaches of the RESOLVED payload (utils/embed_schema),
-       which the publish path must treat as blockers — surfaced here as
+       which the publish path must treat as blockers - surfaced here as
        warnings because there is no publish yet.
     """
     warnings = []
@@ -835,10 +835,10 @@ def preview_design(design: dict, rows_by_id: dict, currency: dict) -> dict:
       {mode, content, embeds, action, warnings, tokens}
 
     Fixed mode policy (server policy, NOT a template language):
-      per_product — embeds fan out once per roster product (paths
+      per_product - embeds fan out once per roster product (paths
                     products.<i>.… for >1 product); content resolves against
                     the product only for a single-product roster.
-      frame       — the presentation resolves once with no product context.
+      frame       - the presentation resolves once with no product context.
     """
     design = design if isinstance(design, dict) else {}
     presentation = design.get("presentation")
@@ -915,7 +915,7 @@ def preview_design(design: dict, rows_by_id: dict, currency: dict) -> dict:
 
 
 def preview_message(template_doc, product: dict, currency: dict) -> dict:
-    """Single-product convenience over preview_design() — kept so the
+    """Single-product convenience over preview_design() - kept so the
     "preview == publish" identity has one obvious per-product call shape."""
     product = product or {}
     pid = int(product.get("id") or 0)

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-/* PROBE 13 — the role / channel pickers render real data, not fallbacks.
+/* PROBE 13 - the role / channel pickers render real data, not fallbacks.
  *
  * The 2026-08-28 dashboard bug: in the Commands edit panel and Category
  * restrictions, selecting a role or channel showed a blank / "weird square"
  * instead of the name + colour dot / type icon. Two independent causes:
  *
- *   1. DATA LOSS (nero-select.js) — Select2 4.1.0-rc.0 hands its templates a
+ *   1. DATA LOSS (nero-select.js) - Select2 4.1.0-rc.0 hands its templates a
  *      data object built only from the <option> ({id, text, disabled,
  *      selected, title, element}). The API's ``color`` / ``type_icon`` fields
  *      were dropped, so every role dot rendered the grey fallback and every
@@ -15,14 +15,14 @@
  *      so the name is never undefined/empty, inserted as textContent so a
  *      name with &/< never breaks the markup).
  *
- *   2. CLIPPING (main.css) — the multi-select pill padding override shrank the
+ *   2. CLIPPING (main.css) - the multi-select pill padding override shrank the
  *      left inset below the absolutely-positioned × button, hiding the first
  *      characters of every selected name. (Covered by the CSS, not by DOM.)
  *
  * This probe loads REAL jQuery + REAL Select2 4.1.0-rc.0 in jsdom (not the
  * stub p11 uses) and asserts the rendered output. It self-SKIPS (exit 0) when
  * jsdom / jquery / select2 are not installed, so it never breaks the minimal
- * documented setup — run it where the deps exist:
+ * documented setup - run it where the deps exist:
  *
  *   cd <any dir> && npm i jsdom jquery select2@4.1.0-rc.0
  *   JSDOM_PATH=$(pwd)/node_modules/jsdom node tools/alias_probes/p13_picker_render.js
@@ -73,7 +73,7 @@ function findDeps() {
 
 const deps = findDeps();
 if (!deps) {
-    console.log('\n[SKIP] p13_picker_render — jsdom + jquery + select2 not all ' +
+    console.log('\n[SKIP] p13_picker_render - jsdom + jquery + select2 not all ' +
         'found (set JSDOM_PATH to a node_modules dir that has them). Nothing to assert; skipping.');
     process.exit(0);
 }
@@ -84,7 +84,7 @@ const S2 = fs.readFileSync(deps.select2, 'utf8');
 const SEL = fs.readFileSync(path.join(ROOT, 'dashboard/static/js/nero-select.js'), 'utf8');
 
 // Real API shapes, as dashboard/api/core.py returns them (id, name, text,
-// color / type_icon) — plus edge cases: a null colour, a missing icon, and a
+// color / type_icon) - plus edge cases: a null colour, a missing icon, and a
 // name full of HTML-special characters.
 const ROLES = { results: [
     { id: '1001', name: 'Owner', text: 'Owner', color: '#ed4245', position: 10, managed: false },
@@ -107,7 +107,7 @@ function check(label, ok, detail) {
         (detail !== undefined ? `  -> ${JSON.stringify(detail).slice(0, 200)}` : ''));
     if (!ok) failures.push(label);
 }
-// jsdom normalises inline `#rrggbb` to `rgb(r, g, b)` — compare as colours.
+// jsdom normalises inline `#rrggbb` to `rgb(r, g, b)` - compare as colours.
 function colorEq(a, b) {
     const norm = (c) => {
         if (!c) return '';
@@ -213,7 +213,7 @@ async function main() {
     // .select2-dropdown container appears but options don't), so drive the
     // registered templateResult directly with the exact data shape
     // SelectAdapter.item() hands it: {id, text, disabled, selected, title,
-    // element} — the same shape (and same functions) the open dropdown uses.
+    // element} - the same shape (and same functions) the open dropdown uses.
     function callTemplate(id, optValue) {
         const s2 = $(doc.getElementById(id)).data('select2');
         const opts = (s2.options && s2.options.options) || s2.options || {};

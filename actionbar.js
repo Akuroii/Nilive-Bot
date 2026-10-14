@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
-// NERO DASHBOARD — embed/views/actionbar.js
-// Message Builder v2 — the ACTION half of the status/action bar.
+// NERO DASHBOARD - embed/views/actionbar.js
+// Message Builder v2 - the ACTION half of the status/action bar.
 // Phase 1, step 5d-1: the bar skeleton, Undo/Redo and Copy JSON.
 //
 // WHAT THIS OWNS
@@ -12,7 +12,7 @@
 //
 //   Save now (5d-3) and Discard changes (5d-2) are added by the sub-stages that
 //   implement them, in the approved order Undo · Redo · Save now · Copy JSON ·
-//   Discard changes — ORDER below exists so inserting one of them later is a
+//   Discard changes - ORDER below exists so inserting one of them later is a
 //   declaration, not a restructure.
 //
 // WHAT THIS DELIBERATELY DOES NOT OWN
@@ -27,7 +27,7 @@
 //     nothing about it.
 //   * THE PREVIEW. This file never calls the renderer. An undo changes the
 //     document THROUGH the store, and the preview follows on its own
-//     subscription — which is what keeps one renderer and keyed patches.
+//     subscription - which is what keeps one renderer and keyed patches.
 //   * NOTICES. Results are reported by calling options.onNotice({tone, text});
 //     the page writes that into the ONE live region (#mb2-bar-status, owned by
 //     statusbar.js). This file never touches that element and never creates a
@@ -36,7 +36,7 @@
 // ENABLED STATE IS REAL, NEVER DECORATIVE
 //   Undo/Redo are enabled exactly when the store says the history can move, and
 //   `button.disabled` IS the state (the property is a reflected attribute in a
-//   browser, so setting the property is the honest operation — no aria-disabled
+//   browser, so setting the property is the honest operation - no aria-disabled
 //   duplicate to drift out of sync). No button is rendered for a feature that
 //   does not exist yet, and no button is rendered permanently dead.
 //
@@ -77,14 +77,14 @@ window.NERO.embed.views = window.NERO.embed.views || {};
      *
      * The facts are: store dirty-ness (the store owns it), the session's
      * persistence snapshot (the session owns it), whether a write is queued,
-     * and whether the current failure is RETRYABLE — a question the session
+     * and whether the current failure is RETRYABLE - a question the session
      * answers from the storage adapter's own list, so this file never keeps a
      * second copy of what "retryable" means.
      *
      * The rule that matters most: "Try saving again" is offered ONLY for a
      * failure a retry could actually fix. A missing IndexedDB, an open
      * timeout/error or a failed upgrade cannot be fixed by clicking, so the
-     * control stays a disabled "Save now" — never a retry that is known not to
+     * control stays a disabled "Save now" - never a retry that is known not to
      * work. Pure and exported so the mapping is testable without a bar and
      * cannot drift from what renders.
      */
@@ -99,7 +99,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             // this page refused to touch, so the control is not offered.
             return {
                 state: 'blocked', label: 'Save now', enabled: false,
-                title: 'Saving is unavailable — the saved draft is protected',
+                title: 'Saving is unavailable - the saved draft is protected',
             };
         }
         if (session.saving) {
@@ -112,13 +112,13 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             if (retryable) {
                 return {
                     state: 'retry', label: 'Try saving again', enabled: true,
-                    title: 'The last save failed — try it again',
+                    title: 'The last save failed - try it again',
                 };
             }
             // A failure a retry cannot fix gets no retry affordance at all.
             return {
                 state: 'unavailable', label: 'Save now', enabled: false,
-                title: 'Saving is unavailable — ' + reasonPhrase(session.lastError),
+                title: 'Saving is unavailable - ' + reasonPhrase(session.lastError),
             };
         }
         if (session.degraded && !retryable) {
@@ -126,7 +126,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             // affordance that cannot work.
             return {
                 state: 'unavailable', label: 'Save now', enabled: false,
-                title: 'Saving is unavailable — draft storage cannot be opened',
+                title: 'Saving is unavailable - draft storage cannot be opened',
             };
         }
         if (owed) {
@@ -164,7 +164,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         // What "discard" MEANS is not this file's business. The page owns the
         // draft session, so it hands the bar two functions: is there anything to
         // discard, and do it. The bar owns the button, the confirmation and the
-        // dialog — never the restore itself, and never a persistence call.
+        // dialog - never the restore itself, and never a persistence call.
         const discard = options.discard || null;
         const canDiscard = discard && typeof discard.available === 'function' ? discard.available : null;
         const runDiscard = discard && typeof discard.perform === 'function' ? discard.perform : null;
@@ -192,7 +192,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         const stats = {
             renders: 0,
             buttonsCreated: 0,
-            stateWrites: 0,        // disabled/aria writes — change-guarded, so a keystroke costs none
+            stateWrites: 0,        // disabled/aria writes - change-guarded, so a keystroke costs none
             undos: 0,
             redos: 0,
             copyAttempts: 0,
@@ -300,7 +300,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
 
         /**
          * Runs on every store notification, so it writes nothing unless the two
-         * booleans actually changed — a keystroke that does not move the ends of
+         * booleans actually changed - a keystroke that does not move the ends of
          * the history costs zero DOM writes here.
          */
         function render() {
@@ -316,7 +316,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         }
 
         /**
-         * The save control, rendered from facts the PAGE supplies — because the
+         * The save control, rendered from facts the PAGE supplies - because the
          * page is the only place both owners (store dirty-ness, session
          * persistence) are observed together, and because deriving them here
          * would mean hashing the document a second and third time per keystroke
@@ -339,7 +339,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             }
             if (attr(node, 'title') !== spec.title) {
                 // The tooltip is also the accessible DESCRIPTION of a control
-                // that is often disabled — which is exactly when a user needs
+                // that is often disabled - which is exactly when a user needs
                 // to be told why.
                 node.setAttribute('title', spec.title);
                 node.setAttribute('aria-label', spec.label);
@@ -352,7 +352,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         /**
          * Save now. The bar owns the button, not the write: this calls the one
          * function the page handed it, which ends in the session's own
-         * saveNow() — the same write the idle timer performs, so there is still
+         * saveNow() - the same write the idle timer performs, so there is still
          * exactly one persistence path and no way for a click to force, bypass
          * or duplicate one. The result is not interpreted here: the session
          * notifies its observers and the page re-renders from the new facts.
@@ -361,7 +361,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             if (destroyed || !runSave) return false;
             stats.savePresses++;
             // A disabled control can still receive a synthetic click, so the
-            // guard lives in the handler too — a click can never start a write
+            // guard lives in the handler too - a click can never start a write
             // the bar is currently saying is unavailable.
             if (buttons.save && buttons.save.node.disabled) return false;
             stats.saves++;
@@ -447,7 +447,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         }
 
         /**
-         * What Tab can reach inside the open dialog, in DOCUMENT order — built
+         * What Tab can reach inside the open dialog, in DOCUMENT order - built
          * by an explicit walk rather than by one selector list, so the order the
          * focus trap wraps around is the order the user sees, everywhere.
          */
@@ -481,7 +481,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             dialog = null;
             if (closing.overlay.parentNode) closing.overlay.parentNode.removeChild(closing.overlay);
             stats.dialogsClosed++;
-            // Focus goes back where it came from — but only while the bar is
+            // Focus goes back where it came from - but only while the bar is
             // still alive: after destroy() the invoking button may be gone.
             if (!destroyed && closing.invoker && closing.invoker.parentNode) focusNode(closing.invoker);
             return true;
@@ -536,7 +536,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
          * A pure read: the payload comes from the model, the document from the
          * store, and the JSON is pretty-printed because this ends up on a
          * clipboard for a human to paste. (Canonical/deterministic
-         * serialization is an internal model concern — stableStringify — and is
+         * serialization is an internal model concern - stableStringify - and is
          * NOT what the user is handed here.)
          */
         function payloadText() {
@@ -605,7 +605,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 key: 'copy-fallback',
                 title: 'Copy the JSON manually',
                 body: 'The clipboard could not be used (' + reason +
-                      '). The JSON is below — select it and press Ctrl+C, or Cmd+C on a Mac.',
+                      '). The JSON is below - select it and press Ctrl+C, or Cmd+C on a Mac.',
                 invoker: buttons.copy ? buttons.copy.node : null,
             });
             const area = el('textarea', 'mb2-dialog-json');
@@ -617,7 +617,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             area.value = text;
             open.content.appendChild(area);
             startFocus();
-            notify('warn', 'The clipboard is unavailable — the JSON is in the dialog so you can copy it by hand.');
+            notify('warn', 'The clipboard is unavailable - the JSON is in the dialog so you can copy it by hand.');
             return open;
         }
 
@@ -652,7 +652,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                     },
                 },
             });
-            startFocus();       // the cancel button — never the destructive one
+            startFocus();       // the cancel button - never the destructive one
             return true;
         }
 
@@ -723,7 +723,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
             destroy: destroy,
             /** The mounted button for `key` (null when it does not exist yet). */
             button: function (key) { return buttons[key] ? buttons[key].node : null; },
-            /** Keys in DOM order — read back from the mount, never assumed. */
+            /** Keys in DOM order - read back from the mount, never assumed. */
             keys: keys,
             /** The open dialog (a test/debug seam, like drafts.storage()). */
             dialog: function () {

@@ -37,7 +37,7 @@
         </div>
     </div>
     <p class="text-muted text-sm" style="margin-bottom:16px;">
-        Resolve or dismiss reports using the buttons on the report embed in Discord — this page is view-only for now.
+        Resolve or dismiss reports using the buttons on the report embed in Discord - this page is view-only for now.
     </p>
     <div class="table-wrap">
         <table class="table">
@@ -49,10 +49,10 @@
                 <tr>
                     <td><strong>{{ r[2] }}</strong></td>
                     <td class="text-muted">{{ r[1] }}</td>
-                    <td class="text-muted" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ r[3] or '—' }}</td>
+                    <td class="text-muted" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ r[3] or '-' }}</td>
                     <td><a href="{{ r[4] }}" target="_blank" rel="noopener">Jump ↗</a></td>
-                    <td class="text-muted">{{ r[6][:16] if r[6] else '—' }}</td>
-                    <td class="text-muted">{{ r[7] or '—' }}</td>
+                    <td class="text-muted">{{ r[6][:16] if r[6] else '-' }}</td>
+                    <td class="text-muted">{{ r[7] or '-' }}</td>
                 </tr>
                 {% else %}
                 <tr><td colspan="6" class="empty">No {{ status }} reports</td></tr>

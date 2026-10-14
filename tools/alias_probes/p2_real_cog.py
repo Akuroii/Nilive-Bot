@@ -1,4 +1,4 @@
-"""PROBE 2 — static guard: the four defects must stay dead.
+"""PROBE 2 - static guard: the four defects must stay dead.
 
 The runtime behaviour is proven in p8 (bot) and p4 (dashboard); this file is
 cheap insurance against a refactor quietly reintroducing one of them, because
@@ -10,7 +10,7 @@ every single one of them survived an earlier "looks fine, compiles" review:
      raised and was swallowed by ``except Exception: pass``
   4. ``sc.callback(interaction, ...)`` without the cog binding
   5. ``SELECT *`` + a hardcoded 14-value unpack against custom_commands
-  6. a minimum alias length (there must never be one — `k` is the point)
+  6. a minimum alias length (there must never be one - `k` is the point)
   7. two copies of the dashboard gating logic in main.py and the cog
 
 Run:  python tools/alias_probes/p2_real_cog.py
@@ -132,7 +132,7 @@ def main():
     names = [n.strip() for n in unpack.group(1).split(",")] if unpack else []
     # Position, not spelling: the cog calls column 6 `embed_desc` locally,
     # which is fine as long as the count and the leading names line up. That
-    # count check is the whole point — a `SELECT *` growing two columns is
+    # count check is the whole point - a `SELECT *` growing two columns is
     # what made every message crash the unpack before the fix.
     check("the cog's unpack lines up with the column list",
           bool(names) and len(names) == len(cols) and names[1:5] == cols[1:5],

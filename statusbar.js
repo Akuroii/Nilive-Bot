@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
-// NERO DASHBOARD — embed/views/statusbar.js
-// Message Builder v2 — the status / action bar (phase 1, step 5a).
+// NERO DASHBOARD - embed/views/statusbar.js
+// Message Builder v2 - the status / action bar (phase 1, step 5a).
 //
 // WHAT THIS OWNS
 //   The status half of #mb2-bar: one pill ("Saved", "Unsaved changes", …), one
@@ -8,7 +8,7 @@
 //   and one optional notice line (a sentence the user must see, e.g. "a draft
 //   from a newer version was left untouched").
 //
-// OWNERSHIP — the reason this file has an opinion about where "dirty" comes from
+// OWNERSHIP - the reason this file has an opinion about where "dirty" comes from
 //   Two different facts are displayed here, and they have two different owners:
 //
 //     * IS THE DOCUMENT UNSAVED?  → the STORE. It is the single source of truth
@@ -22,11 +22,11 @@
 //   One consequence worth stating: after a write completes while the user kept
 //   typing, the store can read "clean" for one tick while a fresh write is
 //   already queued. `pending` (a write is scheduled or in flight) is therefore
-//   displayed as unsaved work too — the bar never claims "Saved" while an edit
+//   displayed as unsaved work too - the bar never claims "Saved" while an edit
 //   is still waiting to be written.
 //
 // WHAT THIS DOES NOT DO (step 5 scope)
-//   No validator, no limits, no counters, no issue list and no truncation — the
+//   No validator, no limits, no counters, no issue list and no truncation - the
 //   validation strip belongs to step 6 and this file never writes to it. No
 //   actions yet: the buttons land in 5d (an action container is declared, but
 //   nothing is rendered into it in 5a). No dialogs (5d).
@@ -101,7 +101,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
      * what the bar shows. Pure, so the priority order below is testable on its
      * own: a blocked record outranks everything, a failure outranks saving,
      * saving outranks a queued write, and degraded storage outranks a plain
-     * "unsaved" — because in that state nothing is being saved at all.
+     * "unsaved" - because in that state nothing is being saved at all.
      */
     function describe(view, formatTime) {
         view = view || {};
@@ -116,7 +116,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 tone: 'danger',
                 label: 'Draft protected',
                 detail: (GUARDED[session.blocked] || 'The saved draft was left untouched') +
-                        ' — nothing will be written over it.',
+                        ' - nothing will be written over it.',
             };
         }
         if (session.lastError) {
@@ -128,7 +128,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 state: 'error',
                 tone: 'danger',
                 label: 'Save failed',
-                detail: why + extra + ' — your edits are still here in this tab.',
+                detail: why + extra + ' - your edits are still here in this tab.',
             };
         }
         if (session.saving) {
@@ -140,7 +140,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
                 tone: 'warn',
                 label: 'Editing in memory',
                 detail: 'draft storage is unavailable (' + reasonText(session.degraded) +
-                        ') — your edits stay in this tab and are not being saved',
+                        ') - your edits stay in this tab and are not being saved',
             };
         }
         if (dirty) {
@@ -159,10 +159,10 @@ window.NERO.embed.views = window.NERO.embed.views || {};
     /**
      * create({ document, status, actions, formatTime })
      *   document   ownerDocument (the bar lives in the page, not in this file)
-     *   status     #mb2-bar-status — role="status" aria-live="polite" in the
+     *   status     #mb2-bar-status - role="status" aria-live="polite" in the
      *              markup, so the live region exists before anything is written
      *              into it (that is what makes the first announcement reliable)
-     *   actions    #mb2-bar-actions — declared here, filled in 5d
+     *   actions    #mb2-bar-actions - declared here, filled in 5d
      */
     function create(options) {
         options = options || {};
@@ -184,7 +184,7 @@ window.NERO.embed.views = window.NERO.embed.views || {};
         notice.hidden = true;
 
         // Created once per mount; later renders only change text/tone, and only
-        // when the value actually changed — writing identical text on every
+        // when the value actually changed - writing identical text on every
         // keystroke would be a DOM write per key for no reason.
         const status = options.status;
         status.appendChild(pill);

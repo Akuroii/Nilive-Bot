@@ -68,7 +68,7 @@ def get_leveling_config_api():
 
     async def fetch():
         # The same effective-config helper the runtime calls, so the page shows
-        # exactly what the bot enforces for this guild (defaults included) —
+        # exactly what the bot enforces for this guild (defaults included) -
         # never a blank row that the UI renders as OFF.
         from utils.xp_calculator import get_leveling_config
         return await get_leveling_config(guild_id)
@@ -77,8 +77,8 @@ def get_leveling_config_api():
 
 
 # Whole-number Leveling settings the save handler writes, with the range each
-# one may hold. The form's numeric inputs arrive as strings — and as '' when an
-# admin clears one — and the old code ran int() straight over them, so a blank
+# one may hold. The form's numeric inputs arrive as strings - and as '' when an
+# admin clears one - and the old code ran int() straight over them, so a blank
 # or "30.5" raised ValueError, Flask answered with an HTML 500, the dashboard's
 # res.json() threw while parsing it and the page reported "Connection error"
 # with nothing written. Bounds mirror the form's own min/max (with headroom so
@@ -218,7 +218,7 @@ def save_leveling_config_api():
         run_async(save())
     except Exception as exc:
         # Nothing was stored, so this is the one failure the caller must hear
-        # about — as JSON, not as Flask's HTML 500.
+        # about - as JSON, not as Flask's HTML 500.
         current_app.logger.exception("leveling config save failed (guild=%s)", guild_id)
         return jsonify({
             "success": False,

@@ -244,7 +244,7 @@ function assert(ok, label) { if (!ok) throw new Error('FAIL: ' + label); console
     assert(snowflakeCall.init.body.indexOf(SNOWFLAKE) !== -1,
         'the literal snowflake digits appear in the raw request body');
     // The API echoes channel_id as a JSON number, so the client-side value is
-    // this same already-rounded form — the one the exact-string flow must
+    // this same already-rounded form - the one the exact-string flow must
     // still recognize (see the pending-duplication guard below).
     snowflakePost.resolve({success: true, publication: {id: 70, channel_id: Number(SNOWFLAKE),
         status: 'published', message_id: 770}});

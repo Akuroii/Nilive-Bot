@@ -42,11 +42,11 @@
                     <td style="color:{% if e.amount >= 0 %}var(--success){% else %}var(--danger){% endif %};font-weight:600;">
                         {{ "+" if e.amount >= 0 else "" }}{{ "{:,}".format(e.amount) }}
                     </td>
-                    <td>{{ "{:,}".format(e.balance_after) if e.balance_after is not none else "—" }}</td>
+                    <td>{{ "{:,}".format(e.balance_after) if e.balance_after is not none else "-" }}</td>
                     <td><span class="badge">{{ e.type }}</span></td>
                     <td><span class="badge badge-source">{{ e.source }}</span></td>
-                    <td class="text-muted">{{ e.reason or "—" }}</td>
-                    <td class="text-muted">{{ e.created_at[:16] if e.created_at else "—" }}</td>
+                    <td class="text-muted">{{ e.reason or "-" }}</td>
+                    <td class="text-muted">{{ e.created_at[:16] if e.created_at else "-" }}</td>
                     {% if is_owner %}
                     <td>
                         {% if e.reversed %}
@@ -57,7 +57,7 @@
                             Reverse
                         </button>
                         {% else %}
-                        <span class="text-muted text-sm">—</span>
+                        <span class="text-muted text-sm">-</span>
                         {% endif %}
                     </td>
                     {% endif %}
@@ -98,12 +98,12 @@ async function loadLedger() {
         return;
     }
     // dark-fixes pass #18 (username resolver rollout): data.user_map is
-    // keyed by user_id and e.user_id travels as a STRING — the API
+    // keyed by user_id and e.user_id travels as a STRING - the API
     // stringifies it because Discord snowflakes exceed JS's 2^53 number
     // precision, so a JSON number would arrive with corrupted trailing
     // digits and this lookup would silently miss (falling back to the
     // "User <id>" no-avatar cell). userIdentityHtml() is the JS twin of
-    // dashboard/utils/user_identity.py — same escaping, same markup,
+    // dashboard/utils/user_identity.py - same escaping, same markup,
     // rendered client-side since this table is rebuilt from fetch() on
     // every filter/refresh. Same pattern as trade.html.
     const userMap = data.user_map || {};
@@ -116,17 +116,17 @@ async function loadLedger() {
             <td style="color:${e.amount >= 0 ? 'var(--success)' : 'var(--danger)'};font-weight:600;">
                 ${e.amount >= 0 ? '+' : ''}${e.amount.toLocaleString()}
             </td>
-            <td>${e.balance_after !== null && e.balance_after !== undefined ? e.balance_after.toLocaleString() : '—'}</td>
+            <td>${e.balance_after !== null && e.balance_after !== undefined ? e.balance_after.toLocaleString() : '-'}</td>
             <td><span class="badge">${e.type}</span></td>
             <td><span class="badge badge-source">${e.source}</span></td>
-            <td class="text-muted">${e.reason || '—'}</td>
-            <td class="text-muted">${e.created_at ? e.created_at.slice(0,16) : '—'}</td>
+            <td class="text-muted">${e.reason || '-'}</td>
+            <td class="text-muted">${e.created_at ? e.created_at.slice(0,16) : '-'}</td>
             {% if is_owner %}
             <td>${e.reversed
                 ? '<span class="badge badge-danger">Reversed</span>'
                 : (['balance','diamonds'].includes(e.currency)
                     ? `<button class="btn btn-sm btn-danger" onclick="showConfirm('Reverse this transaction?', () => reverseLedger(${e.id}))">Reverse</button>`
-                    : '<span class="text-muted text-sm">—</span>')}
+                    : '<span class="text-muted text-sm">-</span>')}
             </td>
             {% endif %}
         </tr>`;

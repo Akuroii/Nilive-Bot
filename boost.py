@@ -259,12 +259,12 @@ class Boost(commands.Cog):
             except Exception:
                 return dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)
         embed.description = "\n".join(
-            f"• {m.mention} — since {_cairo_date(m.premium_since)}" for m in boosters)
+            f"• {m.mention} - since {_cairo_date(m.premium_since)}" for m in boosters)
         await interaction.response.send_message(embed=embed)
 
     # ── boost_color_roles feature ────────────────────────────────────
     # FEATURE (dark-fixes pass #2): boost_color_roles had a schema
-    # (database.py) with no implementation anywhere — this closes that
+    # (database.py) with no implementation anywhere - this closes that
     # gap. Lets boosters self-pick a cosmetic color role from an
     # admin-configured list, gated per-role by boost level.
 
@@ -346,7 +346,7 @@ class Boost(commands.Cog):
         level = _booster_level(interaction.user)
         if level < 1:
             await interaction.response.send_message(
-                "This is a booster perk — boost the server to unlock a color role.",
+                "This is a booster perk - boost the server to unlock a color role.",
                 ephemeral=True)
             return
 
@@ -372,7 +372,7 @@ class Boost(commands.Cog):
         role = interaction.guild.get_role(target_role_id)
         if not role:
             await interaction.response.send_message(
-                "That role no longer exists on this server — ask an admin to reconfigure it.",
+                "That role no longer exists on this server - ask an admin to reconfigure it.",
                 ephemeral=True)
             return
         can_assign, warning = check_bot_role_position(interaction.guild, role)

@@ -8,7 +8,7 @@ from database import DB_PATH
 #
 # Shared by cogs/youtube.py (Live only) and cogs/twitch.py. One state
 # machine, one message-persistence model, used identically by both
-# platforms — each cog only supplies: an embed, a Link button
+# platforms - each cog only supplies: an embed, a Link button
 # URL, mention text, and the raw "is it live right now" answer from its
 # own API. Everything about "did we already post this / do we edit or
 # send / what happens if the message is gone" lives here exactly once.
@@ -21,13 +21,13 @@ from database import DB_PATH
 # asyncio.gather across rows), so there is no in-process race for the
 # same watch. As defense-in-depth against any future change to that
 # assumption (or a botched double-deploy running two bot processes),
-# creator_live_sessions carries a PARTIAL UNIQUE INDEX — at most one
+# creator_live_sessions carries a PARTIAL UNIQUE INDEX - at most one
 # row with status='live' per (guild_id, platform, watch_id) can ever
 # exist, enforced by SQLite itself, not just application logic. If a
 # second start_live_session() ever loses that race after already
 # sending its Discord message (only possible with two live processes),
 # it detects the resulting IntegrityError, deletes the message it just
-# sent, and logs loudly — the failure mode becomes "one log line", not
+# sent, and logs loudly - the failure mode becomes "one log line", not
 # a visible duplicate notification.
 #
 # TRANSIENT FAILURES: nothing in here assumes an API check always
@@ -37,7 +37,7 @@ from database import DB_PATH
 #   False         -> confirmed NOT live right now (a real, successful
 #                    API response that said so)
 #   None          -> the check FAILED (timeout, rate limit, bad
-#                    response, network error) — UNKNOWN, not a
+#                    response, network error) - UNKNOWN, not a
 #                    transition. Callers must skip the tick entirely
 #                    on None: don't touch offline-debounce counters,
 #                    don't end a session, don't start one. This is the
@@ -49,7 +49,7 @@ from database import DB_PATH
 
 DEFAULT_OFFLINE_THRESHOLD = 2  # consecutive confirmed-offline polls
                                 # required before we actually end a
-                                # session — guards against a single
+                                # session - guards against a single
                                 # flaky/borderline API read flapping a
                                 # still-live stream to "ended" and back.
 
@@ -57,7 +57,7 @@ DEFAULT_OFFLINE_THRESHOLD = 2  # consecutive confirmed-offline polls
 async def ensure_tables():
     """
     Idempotent. Safe to call from both the bot process and the
-    dashboard process, on every startup, as many times as needed —
+    dashboard process, on every startup, as many times as needed -
     every statement here is either CREATE ... IF NOT EXISTS or an
     ALTER TABLE gated by a PRAGMA table_info() check first. Never
     drops, renames, or overwrites an existing column's data; the one
@@ -85,7 +85,7 @@ async def ensure_tables():
         # constrained, so history (many past 'ended' rows for the same
         # watch, one per stream session over time) is preserved while
         # "at most one currently-active session per watch" is enforced
-        # by SQLite itself — see the concurrency note above.
+        # by SQLite itself - see the concurrency note above.
         await db.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_cls_active_unique
             ON creator_live_sessions(guild_id, platform, watch_id)
@@ -108,7 +108,7 @@ async def _migrate_youtube_config():
             cursor = await db.execute("PRAGMA table_info(youtube_config)")
             cols = [c[1] for c in await cursor.fetchall()]
             if not cols:
-                return  # table doesn't exist yet on this process — the
+                return  # table doesn't exist yet on this process - the
                         # owning table's own CREATE TABLE will run
                         # elsewhere (database.py's init_db); nothing to
                         # migrate yet, safe no-op.
@@ -174,7 +174,7 @@ async def _migrate_youtube_config():
                 # Rows that already had a ping role configured were
                 # implicitly "mention that role" before this column
                 # existed; rows without one were implicitly "no
-                # mention". This only SETS the new column — every
+                # mention". This only SETS the new column - every
                 # other existing column/row is untouched.
                 await db.execute("""
                     UPDATE youtube_config SET video_mention_type = 'role'
@@ -221,7 +221,7 @@ def build_mention(guild: discord.Guild, mention_type: str, role_id) -> str:
 class WatchNowView(discord.ui.View):
     """
     A single link-style button. Link buttons carry no custom_id and
-    need no interaction handling or bot.add_view() registration —
+    need no interaction handling or bot.add_view() registration -
     Discord resolves them client-side forever, so this survives bot
     restarts with zero extra code, unlike a callback-based button
     would.
@@ -257,7 +257,7 @@ async def start_live_session(bot, guild_id: int, platform: str, watch_id: int,
                               view: discord.ui.View | None) -> dict:
     """
     Sends the go-live notification and persists the session row.
-    Every failure mode returns a result dict instead of raising —
+    Every failure mode returns a result dict instead of raising -
     callers should log unexpected `sent: False` results but never need
     to wrap this in their own try/except for it to be safe.
     """
@@ -290,7 +290,7 @@ async def start_live_session(bot, guild_id: int, platform: str, watch_id: int,
                   discord_channel_id, msg.id))
             await db.commit()
         except sqlite3.IntegrityError as e:
-            # The partial unique index rejected this insert — a live
+            # The partial unique index rejected this insert - a live
             # session for this watch already exists (only reachable if
             # two bot processes are somehow running concurrently, since
             # a single process's poll loop is strictly sequential per
@@ -299,7 +299,7 @@ async def start_live_session(bot, guild_id: int, platform: str, watch_id: int,
             # loud log line", not a visible duplicate notification.
             print(f"[CREATOR_ENGINE] Duplicate live session detected for "
                   f"guild={guild_id} platform={platform} watch={watch_id} "
-                  f"(insert conflict: {e}) — deleting the message we just "
+                  f"(insert conflict: {e}) - deleting the message we just "
                   f"sent (id={msg.id}) to avoid a visible duplicate.")
             try:
                 await msg.delete()
@@ -315,7 +315,7 @@ async def note_still_live(guild_id: int, platform: str, watch_id: int):
     """
     Resets the offline-confirmation debounce counter. Call this on
     every poll tick where the source is freshly confirmed live (i.e.
-    the check returned a real `dict`, not `None`) — so a brief
+    the check returned a real `dict`, not `None`) - so a brief
     ambiguous/failed read followed by a genuine "still live" doesn't
     carry stale progress toward the offline threshold.
     """
@@ -333,7 +333,7 @@ async def note_offline_tick(guild_id: int, platform: str, watch_id: int,
     Records one CONFIRMED-offline poll (caller must only call this when
     its own API check returned `False`, never on `None`/unknown).
     Returns True once `threshold` consecutive confirmed-offline polls
-    have been recorded — the caller should then call end_live_session.
+    have been recorded - the caller should then call end_live_session.
     Returning False means "not yet, keep the session open."
     """
     async with aiosqlite.connect(DB_PATH) as db:
@@ -356,7 +356,7 @@ async def end_live_session(bot, guild_id: int, platform: str, watch_id: int,
                             view: discord.ui.View | None = None) -> dict:
     """
     Edits the active session's Discord message into its "ended" state
-    and closes the session. Never raises — every failure mode (guild
+    and closes the session. Never raises - every failure mode (guild
     gone, channel gone, message deleted, missing permission, any other
     Discord error) is caught and resolved to a clean result, never a
     crash and never a replacement message.
@@ -389,7 +389,7 @@ async def end_live_session(bot, guild_id: int, platform: str, watch_id: int,
         await msg.edit(content=ended_content, embed=ended_embed, view=view)
         return await _close("edited")
     except discord.NotFound:
-        # Message (or its channel) was deleted manually — nothing to
+        # Message (or its channel) was deleted manually - nothing to
         # edit. Close the session quietly. Per spec: never send a
         # replacement message here.
         return await _close("message_deleted")
@@ -398,7 +398,7 @@ async def end_live_session(bot, guild_id: int, platform: str, watch_id: int,
               f"(guild={guild_id} platform={platform} watch={watch_id})")
         return await _close("forbidden")
     except Exception as e:
-        # Transient failure (rate limit, network blip) — leave the
+        # Transient failure (rate limit, network blip) - leave the
         # session marked 'live' so the NEXT poll tick's end attempt
         # retries the edit, rather than losing track of an ended
         # stream because Discord hiccuped once.
@@ -408,7 +408,7 @@ async def end_live_session(bot, guild_id: int, platform: str, watch_id: int,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# CREATOR GROUPS — consolidated cross-platform live notifications
+# CREATOR GROUPS - consolidated cross-platform live notifications
 # (CREATOR pass 3, additive-only)
 #
 # Everything above this line is untouched and still the DEFAULT for
@@ -423,35 +423,35 @@ async def end_live_session(bot, guild_id: int, platform: str, watch_id: int,
 # row) that should announce as ONE message instead of N separate ones:
 #
 #   {mention} 🔴 **{display_name} is LIVE!**
-#   🟣 Twitch — https://twitch.tv/meowlyva
-#   🔴 YouTube — https://youtube.com/live/XVJpU9UgXY4
+#   🟣 Twitch - https://twitch.tv/meowlyva
+#   🔴 YouTube - https://youtube.com/live/XVJpU9UgXY4
 #
-# — sent once when the FIRST linked platform goes live, then EDITED
+# - sent once when the FIRST linked platform goes live, then EDITED
 # (not resent) to add a line each time another linked platform also
 # goes live, and edited again to drop a line each time one goes
 # offline. Editing a Discord message never re-fires push
 # notifications/pings, so the @everyone/role mention baked into the
-# first line is safe to leave in place across every edit — it only
+# first line is safe to leave in place across every edit - it only
 # actually pinged anyone at the original send.
 #
 # This deliberately reuses the EXACT SAME tri-state detection and
 # offline-debounce machinery every cog already has for its solo path
 # (note_still_live/note_offline_tick, unchanged, still keyed by
-# (guild_id, platform, watch_id) in creator_live_sessions) — grouping
+# (guild_id, platform, watch_id) in creator_live_sessions) - grouping
 # only changes what happens at the two transition points (first
 # confirmed live / confirmed offline), not how "is it live" gets
 # decided. start_watch_tracking()/stop_watch_tracking() below are the
 # group-mode equivalents of start_live_session()/end_live_session()'s
-# own row bookkeeping, MINUS the "send/edit my own message" part —
+# own row bookkeeping, MINUS the "send/edit my own message" part -
 # get_active_session() (above) works identically for either path since
 # both write to the same creator_live_sessions table.
 #
 # The shared message itself is tracked separately, in
 # creator_group_sessions (one row per "is there currently a live
-# consolidated message for this group" — same live/ended shape and
+# consolidated message for this group" - same live/ended shape and
 # same partial-unique-index protection as creator_live_sessions) plus
 # creator_group_session_lines (which platforms currently have a line
-# in it). Plain message content, not an embed — matches the reference
+# in it). Plain message content, not an embed - matches the reference
 # screenshot's format and makes editing a single line in/out a simple
 # string rebuild rather than juggling embed fields.
 # ═══════════════════════════════════════════════════════════════════════
@@ -488,7 +488,7 @@ async def ensure_group_tables():
             )
         """)
         # Same protection as creator_live_sessions' own partial unique
-        # index — at most one 'live' consolidated session per group,
+        # index - at most one 'live' consolidated session per group,
         # enforced by SQLite itself.
         await db.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_cgs_active_unique
@@ -512,9 +512,9 @@ async def ensure_group_tables():
         """)
         await db.commit()
 
-    # One nullable link column per platform table. NULL — the default
+    # One nullable link column per platform table. NULL - the default
     # for every row that exists today, and for every new row unless
-    # explicitly linked — means "not part of a group", i.e. exactly
+    # explicitly linked - means "not part of a group", i.e. exactly
     # today's independent-message behavior. Same defensive shape as
     # _migrate_youtube_config() etc above: skip silently if the table
     # itself doesn't exist yet on this guild.
@@ -553,7 +553,7 @@ async def get_creator_group(group_id: int) -> dict | None:
 async def get_watch_group(platform: str, watch_id: int) -> dict | None:
     """
     Returns the linked, enabled Creator Group for a given platform
-    watch, or None — either because it isn't linked to one, or because
+    watch, or None - either because it isn't linked to one, or because
     the group it's linked to has been disabled (treated the same as
     unlinked: falls back to that watch's own independent notification).
     """
@@ -578,13 +578,13 @@ async def get_watch_group(platform: str, watch_id: int) -> dict | None:
 async def start_watch_tracking(guild_id: int, platform: str, watch_id: int,
                                 discord_channel_id: int, external_id: str) -> dict:
     """
-    Group-mode counterpart to start_live_session() — creates the exact
+    Group-mode counterpart to start_live_session() - creates the exact
     same creator_live_sessions bookkeeping row (so get_active_session/
     note_still_live/note_offline_tick all keep working identically
     regardless of whether this watch is grouped), but does NOT send a
     Discord message of its own. discord_channel_id is stored for
     informational/debugging purposes only here (the group's channel,
-    not this watch's) — the actual message lives in
+    not this watch's) - the actual message lives in
     creator_group_sessions instead.
     """
     existing = await get_active_session(guild_id, platform, watch_id)
@@ -606,7 +606,7 @@ async def start_watch_tracking(guild_id: int, platform: str, watch_id: int,
 
 
 async def stop_watch_tracking(guild_id: int, platform: str, watch_id: int) -> dict:
-    """Counterpart to stop tracking — closes the row start_watch_tracking opened."""
+    """Counterpart to stop tracking - closes the row start_watch_tracking opened."""
     session = await get_active_session(guild_id, platform, watch_id)
     if not session:
         return {"stopped": False, "reason": "no_active_session"}
@@ -631,7 +631,7 @@ async def _render_group_message(group: dict, session_id: int, mention: str) -> s
     header = f"🔴 **{group['display_name']} is LIVE!**"
     if mention:
         header = f"{mention} {header}"
-    body = [f"{emoji or '🔴'} {label} — {url}" for (label, url, emoji) in lines]
+    body = [f"{emoji or '🔴'} {label} - {url}" for (label, url, emoji) in lines]
     return "\n".join([header] + body)
 
 
@@ -639,7 +639,7 @@ async def note_platform_live_grouped(bot, group: dict, platform: str, watch_id: 
                                       label: str, emoji: str, url: str) -> dict:
     """
     Adds/updates this platform's line in the group's active
-    consolidated message — sending a fresh message if this is the
+    consolidated message - sending a fresh message if this is the
     first linked platform to go live, editing the existing one
     otherwise. Call only after start_watch_tracking() reports
     started=True (mirrors start_live_session()'s own dedup contract).
@@ -710,7 +710,7 @@ async def note_platform_live_grouped(bot, group: dict, platform: str, watch_id: 
             await db.commit()
         return {"sent": True, "message_id": msg.id}
     except discord.NotFound:
-        # The shared message was deleted manually mid-broadcast —
+        # The shared message was deleted manually mid-broadcast -
         # recover by sending a fresh one rather than losing the
         # notification for every remaining/future platform in this
         # group until the session eventually closes on its own.

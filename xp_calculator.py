@@ -44,14 +44,14 @@ async def get_xp_multiplier(guild_id: int, member_role_ids: list[int]) -> float:
 # BUGFIX (dark-fixes pass #7): XP blacklist roles not applying to
 # voice XP. cogs/leveling.py's on_activity_voice_tick() grants voice
 # XP directly (calculate_voice_xp + give_reward) and never once
-# consulted leveling_blacklist_roles — only calculate_message_xp()
+# consulted leveling_blacklist_roles - only calculate_message_xp()
 # (via get_xp_multiplier above) ever checked it. A member given a
 # blacklist role to explicitly opt them out of the leveling system
 # (e.g. a "no XP" role for staff/bots-adjacent accounts) still
 # silently earned XP for every voice tick.
 #
 # This is a standalone, cheap query rather than reusing
-# get_xp_multiplier() wholesale — get_xp_multiplier also folds in
+# get_xp_multiplier() wholesale - get_xp_multiplier also folds in
 # leveling_bonus_roles (multiplier > 1x), and voice XP has never
 # applied bonus-role multipliers. Fixing the blacklist gap shouldn't
 # silently change voice XP's payout math for bonus-role holders too;
@@ -115,7 +115,7 @@ async def calculate_message_xp(
     # multiplicatively on top of the role multiplier above (a boost
     # item is a separate, purchasable effect from role-based bonuses,
     # not an alternative to them). Only applied when a user_id is
-    # given — voice XP intentionally does not call this with a
+    # given - voice XP intentionally does not call this with a
     # user_id, keeping the existing voice XP economy untouched.
     boost_multiplier = 1.0
     if user_id is not None:
@@ -127,12 +127,12 @@ async def calculate_message_xp(
     return final_xp
 
 
-# ─── Phase 5 / Leveling expansion — XP boost items ──────────────────────
+# ─── Phase 5 / Leveling expansion - XP boost items ──────────────────────
 #
 # Purchasable, temporary XP multipliers granted via cogs/shop.py's
 # process_purchase() for shop items with type='xp_boost'. A user can
 # hold more than one active boost at once (e.g. two stacked
-# purchases) — get_active_boost_multiplier() takes the MAX across all
+# purchases) - get_active_boost_multiplier() takes the MAX across all
 # non-expired rows for that guild+user rather than stacking them
 # additively, the same "highest wins" rule leveling_bonus_roles
 # already uses for role multipliers.
@@ -296,7 +296,7 @@ async def check_and_award_level_rewards(bot, member, guild_id: int,
                     pass
 
 
-# ─── Phase 5 / Leveling expansion — currency level rewards ─────────────
+# ─── Phase 5 / Leveling expansion - currency level rewards ─────────────
 #
 # Companion to check_and_award_level_rewards() above (which only ever
 # handled role grants). Coin/diamond grants at configured levels live in
@@ -305,14 +305,14 @@ async def check_and_award_level_rewards(bot, member, guild_id: int,
 # a currency reward, and leveling_rewards.role_id is NOT NULL so it
 # can't represent a currency-only row.
 #
-# Routed through utils.economy_safe.safe_credit() — the same atomic,
+# Routed through utils.economy_safe.safe_credit() - the same atomic,
 # ledgered path every other coin/diamond grant in the project uses
 # (shop purchases, /give, event rewards). That means every currency
 # level-up grant automatically gets a transaction_ledger row with
 # source='leveling', with no extra logging code needed here.
 #
 # Called from utils/reward_engine.py's give_reward() "xp" branch,
-# right alongside check_and_award_level_rewards() — same trigger point,
+# right alongside check_and_award_level_rewards() - same trigger point,
 # same guild_id/member already resolved by the caller.
 async def check_and_award_level_currency_rewards(bot, member, guild_id: int,
                                                    old_level: int, new_level: int):

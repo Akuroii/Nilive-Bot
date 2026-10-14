@@ -7,13 +7,13 @@ import aiosqlite
 from database import DB_PATH
 
 # ═══════════════════════════════════════════════════════════════════════
-# MINIGAMES v2 — STORE (Phase 1 of the approved v2 plan)
+# MINIGAMES v2 - STORE (Phase 1 of the approved v2 plan)
 #
 # Single SQL authority for the minigames v2 domain: categories (freeform
 # tree), templates, reward pools, per-category shuffle-bag state, the
 # dashboard→bot spawn request queue, and the extended run log.
 #
-# Design (see MINIGAMES_V2_PLAN.md — the locked plan this implements):
+# Design (see MINIGAMES_V2_PLAN.md - the locked plan this implements):
 #   - Own standalone schema with its own ensure_tables(), the same pattern
 #     cogs/minigames.py, utils/mission_engine.py and utils/trade_engine.py
 #     already established (isolated, idempotent, dashboard-safe).
@@ -28,7 +28,7 @@ from database import DB_PATH
 #
 # Conventions: async functions, aiosqlite, DB_PATH from database.py.
 # Validation of user input (names, embed limits, ranges) happens in the
-# API layer (Phase 4) — the store enforces only data-integrity rules
+# API layer (Phase 4) - the store enforces only data-integrity rules
 # (whitelists, positive weights, cycle-checked moves, NOT NULL legacy
 # columns).
 # ═══════════════════════════════════════════════════════════════════════
@@ -40,7 +40,7 @@ VALID_REQUEST_MODES = ("manual", "test")
 
 # Legacy minigames_log has `tier TEXT NOT NULL` and `event_date TEXT NOT
 # NULL` (predates v2 and cannot be altered away in SQLite without a table
-# rebuild). v2 rows fill `tier` with the template's direct category name —
+# rebuild). v2 rows fill `tier` with the template's direct category name -
 # meaningful for any legacy rendering and harmless for the new columns.
 
 
@@ -79,16 +79,16 @@ def _load(text, default):
 async def ensure_tables():
     """
     Idempotent: create the v2 tables (and the legacy tables if this
-    process ran before the bot's cog_load ever did — same defensive
+    process ran before the bot's cog_load ever did - same defensive
     pattern dashboard/api/minigames.py relies on), extend the legacy log
     and config tables with guarded ALTERs, then run the one-time
     tier→category migration.
 
-    Safe to await from BOTH processes on every startup/query — every
+    Safe to await from BOTH processes on every startup/query - every
     statement is IF NOT EXISTS or guard-checked.
     """
     async with aiosqlite.connect(DB_PATH) as db:
-        # Legacy tables — verbatim shape of cogs/minigames.py's schema so
+        # Legacy tables - verbatim shape of cogs/minigames.py's schema so
         # v2 works even if the dashboard is opened before the bot has
         # completed a cog_load (see dashboard/api/minigames.py header).
         await db.execute("""
@@ -260,15 +260,15 @@ async def run_migration(guild_id: int | None = None):
 
     Idempotent: once a guild has categories the check short-circuits, and
     the tiers table is only ever READ. The table itself is kept on disk
-    (never dropped) for rollback safety — plan §3.
+    (never dropped) for rollback safety - plan §3.
 
     Failure safety: each guild's inserts commit as ONE transaction. If
     anything fails mid-guild the connection closes without committing
-    and SQLite rolls the whole guild back — the DB is left in its clean
+    and SQLite rolls the whole guild back - the DB is left in its clean
     pre-migration state for that guild, and the next startup retries
     (plan §3.4 rollback guarantee; verified by
     scripts/test_minigame_migration.py). A failed guild never aborts the
-    migration of other guilds — it is logged loudly instead.
+    migration of other guilds - it is logged loudly instead.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         if guild_id is not None:
@@ -280,7 +280,7 @@ async def run_migration(guild_id: int | None = None):
                 guild_ids = [r[0] for r in await cursor.fetchall()]
             except sqlite3.OperationalError:
                 # minigames_tiers does not exist (fresh DB where the legacy
-                # cog never created it) — nothing to migrate.
+                # cog never created it) - nothing to migrate.
                 return
 
         for g in guild_ids:
@@ -301,7 +301,7 @@ async def run_migration(guild_id: int | None = None):
                 """, (g,))
                 tiers = await cursor.fetchall()
             except sqlite3.OperationalError:
-                continue  # legacy table absent — nothing to migrate
+                continue  # legacy table absent - nothing to migrate
             if not tiers:
                 continue
 
@@ -311,7 +311,7 @@ async def run_migration(guild_id: int | None = None):
                     if tier in seen:
                         # Legacy schema allowed duplicate tier rows; the
                         # first wins, the rest are skipped (warned, not
-                        # lost — they remain in the kept minigames_tiers
+                        # lost - they remain in the kept minigames_tiers
                         # table).
                         print(f"[MINIGAMES] migration: skipping duplicate "
                               f"tier '{tier}' for guild {g}")
@@ -319,7 +319,7 @@ async def run_migration(guild_id: int | None = None):
                     seen.add(tier)
                     # Canonical reward-row shape (the keys the UI and
                     # _insert_rewards read; duration only when the legacy
-                    # row had one — temp roles). A LIST of rows: the
+                    # row had one - temp roles). A LIST of rows: the
                     # column is a reward-pool JSON array.
                     preset = [{
                         "reward_type": rtype,
@@ -328,7 +328,7 @@ async def run_migration(guild_id: int | None = None):
                     }]
                     if rdur:
                         preset[0]["duration_hours"] = int(rdur)
-                    # NOTE: `int(enabled or 1)` was a latent bug — a
+                    # NOTE: `int(enabled or 1)` was a latent bug - a
                     # DISABLED legacy tier (enabled=0) would have been
                     # migrated as enabled, because `0 or 1` is 1.
                     # (Caught by the realistic-fixture migration suite.)
@@ -342,17 +342,17 @@ async def run_migration(guild_id: int | None = None):
                 await db.commit()
                 print(f"[MINIGAMES] migration: seeded {len(seen)} categories "
                       f"from legacy tiers for guild {g}")
-            except Exception as exc:  # noqa: BLE001 — deliberate, see above
+            except Exception as exc:  # noqa: BLE001 - deliberate, see above
                 try:
                     await db.rollback()
                 except Exception:  # noqa: BLE001
                     pass
                 # Explicit rollback (and the connection close, which
                 # rolls back anything left open) guarantee this guild is
-                # left in its clean pre-migration state — no partial
+                # left in its clean pre-migration state - no partial
                 # state, and the next startup retries from scratch.
                 print(f"[MINIGAMES] migration ERROR for guild {g}: {exc!r} "
-                      f"— nothing committed for this guild; it will retry "
+                      f"- nothing committed for this guild; it will retry "
                       f"on the next startup. Fix the cause and restart.")
 
 
@@ -402,7 +402,7 @@ async def save_config(guild_id: int, **fields) -> dict:
 
     now = _now_iso()
     # NOTE: the DO UPDATE SET clause carries its OWN bindings on top of the
-    # INSERT VALUES — supply the value tuple twice.
+    # INSERT VALUES - supply the value tuple twice.
     sets = ", ".join(f"{c} = ?" for c in cols) + ", updated_at = ?"
     placeholders = ", ".join("?" * len(cols))
     async with aiosqlite.connect(DB_PATH) as db:
@@ -499,7 +499,7 @@ def _category_row_to_dict(cols, row) -> dict:
     cat["default_rewards"] = _load(cat.pop("default_rewards_json"), [])
     # Read-time normalization: very early migration builds (and any
     # hand-edited rows) may carry the legacy `type`/`value` keys.
-    # Canonical shape is reward_type/reward_value — the UI and the
+    # Canonical shape is reward_type/reward_value - the UI and the
     # reward validator both read the canonical keys.
     norm = []
     for r in cat["default_rewards"]:
@@ -543,7 +543,7 @@ async def get_categories_tree(guild_id: int) -> list[dict]:
     for tid, cat_id, enabled, auto in templates:
         node = by_id.get(cat_id)
         if not node:
-            continue  # orphaned row (shouldn't happen) — ignore, not hide
+            continue  # orphaned row (shouldn't happen) - ignore, not hide
         node["direct_templates"] += 1
         if enabled and auto:
             node["direct_playable"] += 1
@@ -568,7 +568,7 @@ async def get_categories_tree(guild_id: int) -> list[dict]:
 
 
 async def get_category_subtree_ids(guild_id: int, category_id: int) -> list[int]:
-    """All descendant category ids (BFS) — for subtree template queries."""
+    """All descendant category ids (BFS) - for subtree template queries."""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT id, parent_id FROM minigame_categories WHERE guild_id = ?",
@@ -588,7 +588,7 @@ async def get_category_subtree_ids(guild_id: int, category_id: int) -> list[int]
 async def update_category(guild_id: int, category_id: int,
                           fields: dict) -> dict | None:
     """
-    Partial update. Keys: name, weight, parent_id (MOVE — cycle-checked),
+    Partial update. Keys: name, weight, parent_id (MOVE - cycle-checked),
     emoji, color, default_rewards (list), enabled.
     Moving a category under its own descendant (or itself) raises
     ValueError (plan §17 cycle check).
@@ -641,7 +641,7 @@ async def update_category(guild_id: int, category_id: int,
 async def delete_category(guild_id: int, category_id: int) -> tuple[bool, str]:
     """
     (ok, message). Refuses (409-equivalent) while the category has direct
-    templates or subcategories — plan §10/§16: nothing is silently moved
+    templates or subcategories - plan §10/§16: nothing is silently moved
     or cascade-deleted.
     """
     cat = await get_category(guild_id, category_id)
@@ -662,13 +662,13 @@ async def delete_category(guild_id: int, category_id: int) -> tuple[bool, str]:
             parts.append(f"{n_templates} template(s)")
         if n_children:
             parts.append(f"{n_children} subcategor{'y' if n_children == 1 else 'ies'}")
-        return False, (f"cannot delete — move or delete its "
+        return False, (f"cannot delete - move or delete its "
                        f"{', '.join(parts)} first")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "DELETE FROM minigame_categories WHERE id = ? AND guild_id = ?",
             (category_id, guild_id))
-        # Its bags can no longer be reached — drop them (state, not data).
+        # Its bags can no longer be reached - drop them (state, not data).
         await db.execute("""
             DELETE FROM minigame_bag_state
             WHERE guild_id = ? AND category_id = ?
@@ -680,7 +680,7 @@ async def delete_category(guild_id: int, category_id: int) -> tuple[bool, str]:
 # ── TEMPLATES ───────────────────────────────────────────────────────────
 
 async def _insert_rewards(db, template_id: int, rewards: list | None):
-    """Insert reward rows (empty list is valid — D11). Raises ValueError
+    """Insert reward rows (empty list is valid - D11). Raises ValueError
     on an invalid reward_type (data integrity; user-facing validation is
     the API layer's job)."""
     for i, row in enumerate(rewards or []):
@@ -812,7 +812,7 @@ async def update_template(guild_id: int, template_id: int,
                           fields: dict) -> dict | None:
     """
     Partial update. Keys: name, category_id, game_type, enabled,
-    auto_spawn, embed, config, channel_id, rewards (list — replaces the
+    auto_spawn, embed, config, channel_id, rewards (list - replaces the
     whole pool ATOMICALLY: delete + reinsert in one transaction, so a
     failure cannot leave a half-pool).
     """
@@ -863,7 +863,7 @@ async def update_template(guild_id: int, template_id: int,
 
 async def delete_template(guild_id: int, template_id: int) -> bool:
     """
-    Safe while a run is in progress (the live game holds its own snapshot —
+    Safe while a run is in progress (the live game holds its own snapshot -
     plan §14). Rewards cascade; the template's bag entry self-heals via the
     staleness guard on the next pop.
     """
@@ -925,7 +925,7 @@ async def get_sibling_names(guild_id: int, category_id: int) -> list[str]:
 async def get_direct_playable_ids(guild_id: int, category_id: int) -> list[int]:
     """
     Template ids DIRECTLY in this category that are playable
-    (enabled=1 AND auto_spawn=1) — the recursive selector's bag source
+    (enabled=1 AND auto_spawn=1) - the recursive selector's bag source
     (plan §4/§5). One query, ids only.
     """
     async with aiosqlite.connect(DB_PATH) as db:
@@ -947,7 +947,7 @@ async def get_rewards(template_id: int) -> list[dict]:
 def roll_reward(rewards: list[dict]) -> dict | None:
     """
     One INDEPENDENT weighted roll (plan §7). Returns the chosen row or
-    None for an empty pool (D11: empty pool is valid — callers simply
+    None for an empty pool (D11: empty pool is valid - callers simply
     grant nothing and record status 'no_reward'). Weights are relative;
     never normalized.
     """
@@ -990,7 +990,7 @@ async def pop_bag(guild_id: int, category_id: int,
       - empty/stale bag → rebuilt by shuffling the eligible ids
       - stale entries (ids no longer eligible) are dropped BEFORE the pop
       - pop is without replacement; the remainder is persisted so the
-        sequence survives bot restarts (plan §5, §19 — bot is the only
+        sequence survives bot restarts (plan §5, §19 - bot is the only
         writer of this table).
     Returns (template_id, remaining_bag).
     """
@@ -1028,7 +1028,7 @@ async def create_spawn_request(guild_id: int, template_id: int, mode: str,
                                ) -> tuple[int | None, str | None]:
     """
     (request_id, error). mode ∈ {manual, test}. Rejects a duplicate
-    pending/processing request for the same template ("already queued" —
+    pending/processing request for the same template ("already queued" -
     plan §16 abuse guard). The caller (API layer) is responsible for the
     D12 permission checks (test always; manual requires enabled).
     """
@@ -1055,7 +1055,7 @@ async def create_spawn_request(guild_id: int, template_id: int, mode: str,
 async def claim_next_request(guild_id: int) -> dict | None:
     """
     Atomically claim the oldest pending request for the guild
-    (plan §19: UPDATE … WHERE status='pending' with a rowcount check —
+    (plan §19: UPDATE … WHERE status='pending' with a rowcount check -
     idempotent even if the poller ever double-fires).
     """
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1074,7 +1074,7 @@ async def claim_next_request(guild_id: int) -> dict | None:
         """, (row[0],))
         await db.commit()
         if claim.rowcount == 0:
-            return None  # lost a race — someone else claimed it
+            return None  # lost a race - someone else claimed it
         cursor = await db.execute(
             "SELECT id, template_id, mode, requested_by FROM "
             "minigame_spawn_requests WHERE id = ?", (row[0],))
@@ -1089,7 +1089,7 @@ async def finish_request(request_id: int, ok: bool,
     async with aiosqlite.connect(DB_PATH) as db:
         if ok:
             # The spawned message id lives on the run log row (set by the
-            # spawn path) — the request row just closes here.
+            # spawn path) - the request row just closes here.
             await db.execute("""
                 UPDATE minigame_spawn_requests
                 SET status = 'done', processed_at = ?, error = NULL
@@ -1105,7 +1105,7 @@ async def finish_request(request_id: int, ok: bool,
 
 
 async def get_in_flight_requests(guild_id: int) -> list[dict]:
-    """pending + processing requests — the UI's "queued / spawning…" view."""
+    """pending + processing requests - the UI's "queued / spawning…" view."""
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT id, template_id, mode, requested_at, status
@@ -1161,7 +1161,7 @@ async def finish_run(log_id: int, status: str,
     Close the run. status ∈ completed | no_winner | aborted_restart.
     winners rows: {id, name, reward_type, reward_value, status} where
     status ∈ won | failed | no_reward (D11). The FIRST winner's id/name is
-    also written to the legacy winner_id / winner_display_name columns —
+    also written to the legacy winner_id / winner_display_name columns -
     utils/rank_card_data.py and legacy UIs keep working (plan §2 note).
     """
     winners = winners or []
@@ -1213,7 +1213,7 @@ async def get_history(guild_id: int, limit: int = 50,
 async def get_open_runs(max_age_minutes: int = 5) -> list[dict]:
     """
     Runs still 'running' (ended_at NULL, status running) older than
-    max_age_minutes — the bot's startup sweep finalizes these as
+    max_age_minutes - the bot's startup sweep finalizes these as
     aborted_restart (plan §14). The age cutoff gives a live bot a grace
     window so the sweep never touches a run that is still healthy.
     """

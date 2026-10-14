@@ -1,4 +1,4 @@
-"""Command Aliases — bare-word aliases for slash commands (ProBot style).
+"""Command Aliases - bare-word aliases for slash commands (ProBot style).
 
 An admin maps a short word to a slash command in the dashboard (e.g. ``k``
 for ``/kick``) and members then type it as a plain message::
@@ -7,7 +7,7 @@ for ``/kick``) and members then type it as a plain message::
 
 No prefix is involved: aliases *replace* prefixes rather than extending them.
 
-ARCHITECTURE (rewritten 2026-08-28 — see /ALIAS_INVESTIGATION.md)
+ARCHITECTURE (rewritten 2026-08-28 - see /ALIAS_INVESTIGATION.md)
 ------------------------------------------------------------------
     dashboard  ->  POST /api/commands/settings/<cmd>
                 ->  command_toggles.aliases (per guild) + sync flag
@@ -23,7 +23,7 @@ Three things this deliberately does NOT do, and why:
   * it does not mutate ``message.content``. ``Bot.dispatch`` runs
     ``process_commands`` *before* any cog ``on_message`` listener
     (discord.py 2.7.1, ``ext/commands/bot.py:237-242``), so a rewrite can
-    never reach the parser — and it leaks into the other listeners, which run
+    never reach the parser - and it leaks into the other listeners, which run
     as sibling tasks and may read the text either before or after the rewrite.
   * it does not register aliases in ``bot.all_commands``. That table is
     process-global, so a per-guild setting would have applied in every server
@@ -35,14 +35,14 @@ Three things this deliberately does NOT do, and why:
     this feature.
 
 Permissions, enable/disable state and cooldowns run through
-``utils/command_gating`` — literally the same function ``NeroCommandTree.interaction_check``
+``utils/command_gating`` - literally the same function ``NeroCommandTree.interaction_check``
 calls, on the same cooldown dict, so ``/kick`` and ``k`` cannot disagree about whether a member
 may run something or how recently they last did. The parent command's own
 ``@app_commands.checks`` are re-applied to the wrapper.
 
 The alias *index* is built without consulting the command tree, and the transient ``Command`` for
 a word is built the first time that word is used (``_command_for``). Building both at sync time
-looked tidy and was not: a parent cog that is still loading — or was just ``/reload``'ed — left the
+looked tidy and was not: a parent cog that is still loading - or was just ``/reload``'ed - left the
 alias permanently unregistered until the next dashboard save, with nothing to show for it.
 """
 
@@ -151,7 +151,7 @@ class PrefixInteraction:
 
     ``interaction.permissions`` is what
     ``@app_commands.checks.has_permissions`` reads (verified against
-    discord.py 2.7.1 ``app_commands/checks.py`` — that check uses nothing but
+    discord.py 2.7.1 ``app_commands/checks.py`` - that check uses nothing but
     ``interaction.permissions``), and ``ctx.channel.permissions_for(author)``
     computes the same channel-resolved permissions Discord sends in the
     interaction payload.
@@ -175,7 +175,7 @@ class PrefixInteraction:
 # ── Shared permission / toggle / cooldown check ──────────────────
 # One implementation in utils/command_gating.py, used by the slash path
 # (NeroCommandTree.interaction_check in main.py) and by the alias gate below,
-# sharing one cooldown dict — two copies of a gate is how "works as a slash
+# sharing one cooldown dict - two copies of a gate is how "works as a slash
 # command, unrestricted as an alias" bugs start.
 
 from utils.command_gating import check_command_toggles
@@ -219,7 +219,7 @@ class AliasGateError(commands.CommandError):
 
     A dedicated type so ``on_command_error`` can answer with its message
     verbatim instead of a generic "command failed" note. It is raised from a
-    *check* — which discord.py runs before argument parsing — so a disabled
+    *check* - which discord.py runs before argument parsing - so a disabled
     command says "this command is disabled here" rather than complaining about
     missing arguments first. That is also the order the slash path uses, since
     ``NeroCommandTree.interaction_check`` runs before the callback too.
@@ -405,11 +405,11 @@ def build_alias_command(bot, alias: str, parent_name: str,
     cmd.extras["nero_alias_parent"] = parent_name
     cmd.extras["nero_alias_word"] = alias
     if gate is not None:
-        # Checks run inside Command.can_run, i.e. before argument parsing —
+        # Checks run inside Command.can_run, i.e. before argument parsing -
         # see AliasGateError for why that ordering matters.
         cmd.add_check(gate)
     sc_desc = getattr(sc, "description", "") or parent_name
-    cmd.help = f"Alias for /{parent_name} — {sc_desc}"
+    cmd.help = f"Alias for /{parent_name} - {sc_desc}"
     cmd.brief = f"Alias for /{parent_name}"
     return cmd
 
@@ -468,7 +468,7 @@ class CommandAliases(commands.Cog):
     async def _sync_aliases(self) -> int:
         """Rebuild the per-guild alias index from the database.
 
-        Raises on failure — the caller leaves the sync flag set so the next
+        Raises on failure - the caller leaves the sync flag set so the next
         poll retries instead of silently consuming a half-applied change.
         """
         rows = await self._read_alias_rows()
@@ -501,7 +501,7 @@ class CommandAliases(commands.Cog):
         # The word -> command map is all the router needs, and it is built
         # without consulting the command tree. An alias whose parent cog is
         # still loading (or was just /reload'ed out of the tree) must not
-        # quietly vanish until the next dashboard save — that was a real
+        # quietly vanish until the next dashboard save - that was a real
         # failure mode of building everything at sync time. The throwaway
         # Command that does the argument parsing is therefore built lazily,
         # the first time the word is actually used (see _command_for).
@@ -557,7 +557,7 @@ class CommandAliases(commands.Cog):
         """Build the callback a transient alias Command invokes.
 
         Runs after the gate check, in this order:
-          1. the command's own app-command checks (permissions) — not part of
+          1. the command's own app-command checks (permissions) - not part of
              the dashboard row, so they are not in the gate
           2. the real callback, with the cog instance bound
         """
@@ -590,7 +590,7 @@ class CommandAliases(commands.Cog):
                 # tree itself calls ``callback(binding, interaction)``, where
                 # ``binding`` is the cog the command lives on. There is no
                 # ``.cog`` attribute on these objects (that belongs to the
-                # prefix-command API) — reading it raises AttributeError, which
+                # prefix-command API) - reading it raises AttributeError, which
                 # is exactly what killed the previous implementation.
                 binding = getattr(sc, "binding", None)
                 print(f"[DIAG-ALIAS:9] Invoking sc.callback for /{parent_name} on binding {binding}")
@@ -697,8 +697,8 @@ class CommandAliases(commands.Cog):
             return
 
         # Build a *throwaway* message view that carries the prefix so
-        # bot.get_context() returns a real Context — with a StringView already
-        # positioned after prefix + command name — for discord.py's parser to
+        # bot.get_context() returns a real Context - with a StringView already
+        # positioned after prefix + command name - for discord.py's parser to
         # consume. The message the user actually sent is never touched; see the
         # module docstring for why mutating it is both useless and harmful.
         parts = content.split(None, 1)
@@ -716,12 +716,12 @@ class CommandAliases(commands.Cog):
         print(f"[DIAG-ALIAS:7] _command_for result: cmd={cmd}, parent={parent_name}, params={list(cmd.params.keys()) if cmd else None}")
         if cmd is None:
             # Routed correctly, but the command behind the word is not in the
-            # tree at this instant. Say so — a silent no-op is how this feature
+            # tree at this instant. Say so - a silent no-op is how this feature
             # looked "working" for weeks.
             print(f"[ALIASES] `/{parent_name}` not in the command tree while "
                   f"serving alias `{alias_word}`")
             await message.channel.send(
-                f"`/{parent_name}` isn't loaded at the moment — try again in a "
+                f"`/{parent_name}` isn't loaded at the moment - try again in a "
                 f"second or use the slash command.")
             return
 
@@ -776,7 +776,7 @@ class CommandAliases(commands.Cog):
             decision = await router.decide(message)
             print(f"[DIAG-ALIAS:4] Router decide result: route={decision.route}, alias={decision.alias}")
         except Exception as e:
-            # Never let the router's own failure break message handling — but
+            # Never let the router's own failure break message handling - but
             # do say something, and stay conservative: on a router error the
             # command systems simply do not run this message.
             print(f"[ALIASES] router error: {type(e).__name__}: {e}")
@@ -824,7 +824,7 @@ class CommandAliases(commands.Cog):
         elif isinstance(error, AliasGateError):
             # Raised by the gate check. Note that discord.py only wraps
             # *callback* errors in CommandInvokeError (Command.invoke calls
-            # prepare() outside the wrapping), so this arrives bare — treating
+            # prepare() outside the wrapping), so this arrives bare - treating
             # it like a generic CheckFailure here is how "disabled command"
             # answers went missing during development.
             await ctx.send(str(error))
@@ -871,15 +871,15 @@ class _SyntheticMessage:
     ``Context.__init__`` only reads ``content``, ``author``, ``guild``,
     ``channel`` and ``_state`` off the message (verified against 2.7.1
     ``ext/commands/context.py:182-216``), and converters look at
-    ``attachments`` and ``mentions``; everything else — ``ctx.send``,
-    converters that hit the API — goes through the *real* state object copied
+    ``attachments`` and ``mentions``; everything else - ``ctx.send``,
+    converters that hit the API - goes through the *real* state object copied
     from the triggering message, so replies land in the right channel with
     working rate limits. Deliberately not a discord.py ``Message`` subclass:
     no cache entry, no lifecycle, nothing to keep in sync.
 
     Every attribute copied from the triggering message is read defensively
     (``getattr`` with a default): a missing non-essential attribute must read
-    as "nothing" instead of raising. This mattered in production — a real
+    as "nothing" instead of raising. This mattered in production - a real
     ``discord.Message`` (2.7.1) has ``reference``, but NOT
     ``message_reference`` (that name only exists on discord.py 1.x), so the
     old unguarded ``real.message_reference`` crashed every alias invocation
@@ -905,7 +905,7 @@ class _SyntheticMessage:
         self.mentions = getattr(real, "mentions", None) or []
         self.edited_at = getattr(real, "edited_at", None)
         self.created_at = getattr(real, "created_at", None)
-        # discord.py renamed ``message_reference`` to ``reference`` in 2.0 —
+        # discord.py renamed ``message_reference`` to ``reference`` in 2.0 -
         # a 2.x Message only has ``reference`` and a 1.x one only has
         # ``message_reference``. Read whichever exists and expose *both*
         # names here, so neither this module's history nor a future

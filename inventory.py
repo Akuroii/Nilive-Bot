@@ -93,7 +93,7 @@ async def set_quantity(guild_id: int, user_id: int, item_name: str,
                         source: str = "admin", metadata: dict = None) -> int:
     """
     metadata is optional and additive (Rank Card foundation / equip
-    system) — used for role/temp_role items to carry {"role_id":...,
+    system) - used for role/temp_role items to carry {"role_id":...,
     "expires_at":...} so equip_engine.py can resolve which Discord
     role an inventory row actually points to without a second table.
     Existing callers that don't pass it are unaffected: meta_json
@@ -125,7 +125,7 @@ async def drop_item(guild_id: int, user_id: int, item_name: str) -> dict:
     Remove ALL copies of an owned item, regardless of quantity. Used
     by Wallet → Item → Drop after the user has confirmed. Returns the
     quantity that was removed, or {"success": False, ...} if the item
-    isn't owned. Does NOT touch Discord roles or equipped_* tables —
+    isn't owned. Does NOT touch Discord roles or equipped_* tables -
     the Wallet layer is responsible for that cleanup (equip_engine /
     title_engine / potion_engine) so this helper stays type-agnostic.
     """

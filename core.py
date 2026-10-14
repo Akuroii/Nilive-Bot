@@ -92,7 +92,7 @@ def get_guild_channels():
 
 # ── Custom guild emojis (Embed Builder emoji picker) ────────────────────────
 #
-# Same shape/pattern as get_guild_roles/get_guild_channels above — the bot
+# Same shape/pattern as get_guild_roles/get_guild_channels above - the bot
 # token never reaches the frontend, only the fields the emoji picker needs
 # (name, id, animated). Cached client-side for the session by the composer
 # JS rather than re-fetched on every popover open.
@@ -120,25 +120,25 @@ def get_guild_emojis():
     return jsonify({"results": results})
 
 
-# ── "External" custom emojis — every OTHER guild the bot is in ─────────────
+# ── "External" custom emojis - every OTHER guild the bot is in ─────────────
 #
-# Discord has no concept of "any emoji from anywhere" for a bot — a bot can
+# Discord has no concept of "any emoji from anywhere" for a bot - a bot can
 # only reliably render/send a custom emoji from a guild it is actually a
 # member of, and the DESTINATION channel needs "Use External Emojis" enabled
 # for the bot for it to render there. There is no safe way to accept an
 # arbitrary emoji ID from a server the bot has never joined.
 #
 # Nilive is already a small, controlled multi-server bot (2-10 friend
-# servers, per project scope) — every one of those IS a guild the bot is a
+# servers, per project scope) - every one of those IS a guild the bot is a
 # member of, so surfacing their emoji lists in the picker (clearly labeled
 # by server) is both possible and safe: every emoji offered here is one the
 # bot can actually deliver, unlike a free-text "type any ID" field would be.
-# Discord's own message-send call is still the final authority — if the
+# Discord's own message-send call is still the final authority - if the
 # destination channel doesn't have Use External Emojis enabled for the bot,
 # Discord's API rejects the send and dashboard/api/embedbuilder.py's
 # /send route already surfaces that error back to the composer.
 #
-# Reuses fetch_bot_guilds_full() (dashboard/auth.py — already powers the
+# Reuses fetch_bot_guilds_full() (dashboard/auth.py - already powers the
 # developer's "every bot guild" server-select view) rather than adding a
 # second way to enumerate the bot's guilds. Capped implicitly by the
 # project's own guild count (2-10), so no pagination/rate-limit concerns.
@@ -184,7 +184,7 @@ def get_external_guild_emojis():
 #
 # Discord's GET /users/{id} is a global lookup keyed on the bot's own token
 # and works for ANY valid user ID, regardless of whether that user shares a
-# guild with the bot — there is no live member-list endpoint in this
+# guild with the bot - there is no live member-list endpoint in this
 # project (by design, see utils/discord_user_cache.py's header), but a
 # single-user global lookup is a different, much narrower, already-public
 # capability and doesn't require one. Used only to show a real username in
@@ -266,7 +266,7 @@ def members_search():
     html = ""
     for r in rows:
         # r[0] (user_id) is still interpolated raw into the inline
-        # onclick's JS-string args below — safe because it is always
+        # onclick's JS-string args below - safe because it is always
         # numeric (the identity cell itself goes through the escaped
         # render_user_identity_html helper).
         u = user_map.get(r[0], {})

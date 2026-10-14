@@ -49,7 +49,7 @@ async def give_reward(bot: discord.Client,
                 # disabled by default until configured (always 1.0 then).
                 # bot is passed so an active Booster resolves to effective VI.
                 # Defensive: if prestige lookup ever fails, grant the raw
-                # amount — a reward path must never crash on a config error.
+                # amount - a reward path must never crash on a config error.
                 try:
                     from utils.prestige import get_prestige_earn_multiplier, is_booster
                     booster = None
@@ -108,8 +108,8 @@ async def give_reward(bot: discord.Client,
         # read (SELECT xp, level) followed by a separate write
         # (INSERT ... ON CONFLICT DO UPDATE) with no transaction
         # guard around the pair. Two XP grants landing close together
-        # for the same member — e.g. a message-XP award racing a
-        # voice-XP tick, or a shop XP-boost purchase racing either —
+        # for the same member - e.g. a message-XP award racing a
+        # voice-XP tick, or a shop XP-boost purchase racing either -
         # could both read the same old_xp, both compute new_xp
         # independently, and the second write would silently clobber
         # the first (a classic lost-update race), undercounting XP
@@ -187,14 +187,14 @@ async def give_reward(bot: discord.Client,
 
         # Rank Card foundation / Equip system (locked with Dark): a
         # role/temp_role reward is a cosmetic collectible now, not
-        # just a Discord permission grant — it lands in inventory_items
+        # just a Discord permission grant - it lands in inventory_items
         # (quantity fixed at 1, roles don't stack) and, since the
         # Discord role has always been granted immediately on this
         # reward path, it also auto-equips (swapping out whatever was
         # previously equipped) via the same equip_role() swap the
         # manual /inventory picker uses. The inventory row is written
-        # FIRST so equip_role() — which reads role_id back out of
-        # inventory metadata rather than taking it as a raw param —
+        # FIRST so equip_role() - which reads role_id back out of
+        # inventory metadata rather than taking it as a raw param -
         # has something to resolve. display_name falls back to the
         # Discord role's own name only when the caller doesn't supply
         # a nicer one (cogs/shop.py passes the shop item's configured

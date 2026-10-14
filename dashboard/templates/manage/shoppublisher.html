@@ -1,18 +1,18 @@
 {% extends "base.html" %}
 {#
-   Shop Publisher — the page SHELL (Phase 1: template + product -> token
+   Shop Publisher - the page SHELL (Phase 1: template + product -> token
    resolution -> Publisher preview).
 
    What lives here and nowhere else:
      * the regions (template picker, product picker, preview mount, purchase
        action row, warnings strip, resolved-token table, fixed token catalog)
-       and their stable ids — the page module owns every one of their contents;
+       and their stable ids - the page module owns every one of their contents;
      * the page-module declaration (data-page-module + data-page-script) that
        nav-lifecycle.js uses to load the foundations IN ORDER and to call
        init(root, ctx) / destroy(root, ctx);
      * the one stylesheet of its own, loaded from INSIDE the content block so
        it arrives with the fragment that needs it and leaves with it (same
-       pattern as message_builder.html) — no other page pays for sp- CSS.
+       pattern as message_builder.html) - no other page pays for sp- CSS.
 
    What deliberately does NOT live here:
      * any token resolution: tokens resolve SERVER-SIDE in
@@ -20,7 +20,7 @@
        Phase 2 publish path). The browser renders what the API returns and
        interprets nothing.
      * any inline <script> and any on* attribute: htmx swaps #content-area,
-       and an inline script inside a swapped fragment never re-executes —
+       and an inline script inside a swapped fragment never re-executes -
        nav-lifecycle.js's page module is the only bootstrap.
      * any publish/send affordance in Phase 1. The purchase action row shows
        the button that WILL be published (custom_id shop_buy_<id>, the
@@ -28,7 +28,7 @@
 
    Namespaces: `sp-` on every class/id of this page. `eb-*` belongs to the
    frozen v1 composer, `mb-*` to the minigame builder, `mb2-*` to the Message
-   Builder v2 — the preview mount reuses those pages' FROZEN renderer
+   Builder v2 - the preview mount reuses those pages' FROZEN renderer
    (embed/preview.js + embed/discord-markdown.js + embed/model.js) read-only
    through the script loader below; none of those files is modified.
 
@@ -52,7 +52,7 @@
          Uncategorized bucket; `type` stays visible as display metadata
          only. Category membership is presentation metadata and NEVER
          implies publication. This is an integration into the transitional
-         selection card — NOT the future three-region Shop Designer. -->
+         selection card - NOT the future three-region Shop Designer. -->
     <div class="card">
         <div class="card-title">🛍️ Shop Publisher</div>
         <p class="sp-intro">
@@ -73,7 +73,7 @@
                 <select class="form-input" id="sp-category">
                     <option value="">All products</option>
                 </select>
-                <div class="form-hint">Filters the product list — membership never publishes anything</div>
+                <div class="form-hint">Filters the product list - membership never publishes anything</div>
             </div>
         </div>
         <div class="sp-picker-row">
@@ -82,14 +82,14 @@
                 <select class="form-input" id="sp-product">
                     <option value="">Select a product…</option>
                 </select>
-                <div class="form-hint">Grouped by category — the product type shows as a badge</div>
+                <div class="form-hint">Grouped by category - the product type shows as a badge</div>
             </div>
             <div class="form-group sp-picker">
                 <label class="form-label" for="sp-product-category">Product category</label>
                 <select class="form-input" id="sp-product-category">
                     <option value="">Uncategorized</option>
                 </select>
-                <div class="form-hint">Assigns the selected product — nothing is published</div>
+                <div class="form-hint">Assigns the selected product - nothing is published</div>
                 <span id="sp-product-type" class="sp-badge" hidden></span>
             </div>
         </div>

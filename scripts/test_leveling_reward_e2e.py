@@ -19,7 +19,7 @@ class Fail(Exception):
 
 def check(label, ok, detail=""):
     print(f"[{'PASS' if ok else 'FAIL'}] {label}"
-          + (f" — {detail}" if detail else ""))
+          + (f" - {detail}" if detail else ""))
     if not ok:
         raise Fail(label)
 

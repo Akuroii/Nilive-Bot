@@ -1,11 +1,11 @@
-# `tools/alias_probes` — the alias system's verification suite
+# `tools/alias_probes` - the alias system's verification suite
 
 Started as the throwaway scripts behind the 2026-08-28 investigation
 (`ALIAS_INVESTIGATION.md`); the ones that describe behaviour that is now fixed
 are kept as the regression check for it. They are **not** pytest tests and are
-**not** imported by the bot. Each one boots the real objects — `main.py`'s bot,
+**not** imported by the bot. Each one boots the real objects - `main.py`'s bot,
 the real cogs, the real `database.init_db()` schema, the real Flask app via
-`app.test_client()`, the real chip component in a real DOM — and stubs only the
+`app.test_client()`, the real chip component in a real DOM - and stubs only the
 Discord network layer.
 
 The rule behind this directory: "it compiles" and "ready for manual testing" are
@@ -21,7 +21,7 @@ python3 -m venv ~/.cache/nero-probe-env
 export PROBE_DIR=~/.cache/probe-db      # scratch DBs; NOT under /tmp (wiped between turns)
 ```
 
-`discord.py` must be **2.7.1** — several findings are version-specific
+`discord.py` must be **2.7.1** - several findings are version-specific
 (`app_commands` commands have `binding`, not `cog`; `Command.params` vs
 `_params`; `extra_events` dispatch order; `MemberConverter`'s
 `isinstance(result, discord.Member)` gate).
@@ -61,7 +61,7 @@ node   tools/alias_probes/p13_picker_render.js # role/channel pickers render the
 `legacy/` holds the three probes that measured the *old* implementation
 (`p5b_runtime.py`, `p5c_conflicts.py`, `p7_prototype.py`). They are kept as
 evidence for §1–§5 and §7 of the report and are **expected to fail** against the
-current tree — their headers say so.
+current tree - their headers say so.
 
 ## What each current probe is for
 
@@ -89,6 +89,6 @@ current tree — their headers say so.
 
 ## Environment the probes inject
 
-`DISCORD_TOKEN` (fake, shape-valid — never sent anywhere), `DATABASE_PATH` from
+`DISCORD_TOKEN` (fake, shape-valid - never sent anywhere), `DATABASE_PATH` from
 `PROBE_DIR`, `OWNER_ID`, `SECRET_KEY`, `NERO_ENVIRONMENT=test`. Nothing is
 written inside the repo.

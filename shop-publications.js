@@ -194,7 +194,7 @@
                         status.textContent = 'Publish cancelled; no message was sent.'; return;
                     }
                     if (result.uncertain) {
-                        status.textContent = 'UNCERTAIN — Publication remains pending. Do not retry unless you deliberately accept possible duplication.';
+                        status.textContent = 'UNCERTAIN - Publication remains pending. Do not retry unless you deliberately accept possible duplication.';
                     } else if (result.publication && result.publication.status === 'published') {
                         status.textContent = 'Publication confirmed.';
                     } else {
@@ -209,7 +209,7 @@
                 if (!e.status) uncertainPublishContexts[contextKey] = true;
                 if (!isCurrentContext(designId, requestGeneration)) return;
                 if (!e.status) {
-                    status.textContent = 'UNCERTAIN — the request outcome is unknown. Do not retry unless you deliberately accept possible duplication.';
+                    status.textContent = 'UNCERTAIN - the request outcome is unknown. Do not retry unless you deliberately accept possible duplication.';
                 } else status.textContent = e.message;
             }).then(function () {
                 publishInFlight = false;

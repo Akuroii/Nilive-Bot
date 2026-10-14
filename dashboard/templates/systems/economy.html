@@ -54,7 +54,7 @@
     <div class="card">
         <div class="card-title">{{ currency_icon(currency.diamonds.emoji) }} {{ currency.diamonds.name }} Holders</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            {{ currency.diamonds.name }} are a convertible currency — members earn them from
+            {{ currency.diamonds.name }} are a convertible currency - members earn them from
             special events (bonus, no conversion needed) or by converting
             {{ currency.coins.name }} with <code>/convert</code> at this server's exchange rate.
         </p>
@@ -89,7 +89,7 @@
     <div class="card">
         <div class="card-title">{{ currency_icon(currency.coins.emoji) }} Currency Names &amp; Icons</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Rename either currency and pick its icon — these names and emojis are used
+            Rename either currency and pick its icon - these names and emojis are used
             everywhere the bot shows a currency: wallet, shop, inventory, trade,
             minigames, missions and their rewards, daily rewards, events, leaderboards,
             receipts, transaction history and every dashboard table.
@@ -234,7 +234,7 @@ async function saveExchangeRate() {
 
 // ── Currency tab ──────────────────────────────────────────────────────
 // The four fields map 1:1 onto the four stored values. Blank always means
-// "use the default" — that resolution happens server-side in
+// "use the default" - that resolution happens server-side in
 // utils/currency.py, so nothing here needs to know what the defaults are
 // beyond displaying them as placeholders.
 const CUR_DEFAULTS = {
@@ -245,7 +245,7 @@ const CUR_DEFAULTS = {
 };
 
 // Renders one emoji field's preview. A custom emoji cannot be shown as
-// text in HTML — `<:name:id>` is Discord *message* markup, not HTML — so
+// text in HTML - `<:name:id>` is Discord *message* markup, not HTML - so
 // custom emoji are previewed as the CDN image, which Discord serves
 // publicly by ID. Unicode emoji are shown as-is.
 function renderCurrencyPreview(inputId, previewId, defaultEmoji) {
@@ -285,7 +285,7 @@ function updateCurrencyPreviewText() {
     const diamondEmoji = (document.getElementById('cur-diamond-emoji').value || '').trim()
                          || CUR_DEFAULTS.diamond_emoji;
     // Custom-emoji tokens are shown as their bare name in this text
-    // preview — it is plain HTML, so the token itself would just be
+    // preview - it is plain HTML, so the token itself would just be
     // noise next to the icon preview above.
     const plain = (e) => /^<a?:\w+:\d+>$/.test(e) ? '' : e + ' ';
     document.getElementById('cur-preview-text').textContent =
@@ -329,14 +329,14 @@ async function saveCurrency(btn) {
 }
 
 function resetCurrency() {
-    // Local only until Save is pressed — nothing is written by clearing
+    // Local only until Save is pressed - nothing is written by clearing
     // the boxes, so an accidental click is harmless.
     ['cur-coin-name','cur-coin-emoji','cur-diamond-name','cur-diamond-emoji']
         .forEach(id => { document.getElementById(id).value = ''; });
     renderCurrencyPreview('cur-coin-emoji', 'cur-coin-preview', CUR_DEFAULTS.coin_emoji);
     renderCurrencyPreview('cur-diamond-emoji', 'cur-diamond-preview', CUR_DEFAULTS.diamond_emoji);
     updateCurrencyPreviewText();
-    showToast('Cleared — press Save Currency to apply the defaults', 'warning');
+    showToast('Cleared - press Save Currency to apply the defaults', 'warning');
 }
 
 renderCurrencyPreview('cur-coin-emoji', 'cur-coin-preview', CUR_DEFAULTS.coin_emoji);

@@ -14,7 +14,7 @@ from utils.xp_calculator import (
 from utils.emoji import CHECK_EMOJI
 
 
-# ─── Phase 5 / Leveling expansion — reset config helpers ────────────────
+# ─── Phase 5 / Leveling expansion - reset config helpers ────────────────
 async def get_reset_config(guild_id: int) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
@@ -35,20 +35,20 @@ async def perform_leaderboard_reset(guild_id: int, period: str):
     Snapshots the full current leaderboard into
     leveling_leaderboard_history (so a reset preserves the completed
     cycle instead of destroying it), then zeroes xp/level for every
-    member of THIS guild only. Per-guild isolated throughout — every
+    member of THIS guild only. Per-guild isolated throughout - every
     query is scoped to guild_id, matching every other reset/cleanup
     task in the project (cogs/mvp.py's cycle task, cogs/shop.py's
     temp_role_cleanup).
 
     Scheduling note: the reset_config write below only ever UPDATES an
     existing row (never inserts one). A manual /resetleaderboard must not
-    arm the scheduled auto-reset for a guild that never configured it —
+    arm the scheduled auto-reset for a guild that never configured it -
     see the comment on the statement itself.
 
     CRITICAL FIX (dark-fixes pass): this used to run as four
-    separate, unguarded statements — a SELECT, up to N history
+    separate, unguarded statements - a SELECT, up to N history
     INSERTs, an UPDATE zeroing every member, and an upsert into
-    leveling_reset_config — with no transaction wrapping the group.
+    leveling_reset_config - with no transaction wrapping the group.
     This function permanently destroys XP data (that's the entire
     point of a reset), so a crash or connection drop partway through
     the loop used to be able to leave the guild in a half-archived,
@@ -57,8 +57,8 @@ async def perform_leaderboard_reset(guild_id: int, period: str):
     possibly applied to some but not all rows depending on exactly
     where the failure landed.
 
-    The whole operation — snapshot, zero, and the reset_config
-    bookkeeping row — now runs inside a single BEGIN IMMEDIATE
+    The whole operation - snapshot, zero, and the reset_config
+    bookkeeping row - now runs inside a single BEGIN IMMEDIATE
     transaction and either commits completely or rolls back
     completely, the same all-or-nothing guarantee
     utils/economy_safe.py already gives every coin/diamond mutation.
@@ -113,7 +113,7 @@ def _compact_qty(amount: int) -> str:
 # "Claimable" here is exactly the set the /level card already reports as
 # "Ready to claim": a claim row that is pending, or failed and therefore
 # retryable by the next Claim All. Nothing about eligibility, reservation or
-# delivery changes — the claim engine (utils/level_claims.py) remains the only
+# delivery changes - the claim engine (utils/level_claims.py) remains the only
 # thing that decides what may actually be claimed; this just decides whether
 # the button is drawn green+enabled or gray+disabled. Rows that are fulfilled
 # (terminal) or mid-lease ('processing') are not offered.
@@ -167,7 +167,7 @@ def _claim_age(value) -> str:
 
 
 def _claim_reward_text(guild, claim, currency) -> str:
-    """One claim rendered for the Stats view — the frozen payload, not config."""
+    """One claim rendered for the Stats view - the frozen payload, not config."""
     payload = claim["payload"] or {}
     track, level = claim["track"], claim["reward_level"]
     if track == "currency":
@@ -261,13 +261,13 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             waiting_txt += (f"\nOldest: {_claim_reward_text(guild, oldest, currency)} · "
                             f"{_claim_age(oldest['created_at'])}")
         elif not waiting and not locked_claims:
-            waiting_txt = "Nothing waiting — every crossed reward is delivered."
+            waiting_txt = "Nothing waiting - every crossed reward is delivered."
         embed.add_field(name="Waiting", value=waiting_txt, inline=False)
         if failed:
             first = failed[0]
             reason = (first.get("last_error") or "no error recorded").strip()
             embed.add_field(name="Last failure",
-                            value=f"{_claim_reward_text(guild, first, currency)} — {reason[:200]}",
+                            value=f"{_claim_reward_text(guild, first, currency)} - {reason[:200]}",
                             inline=False)
         next_up = max(waiting, key=lambda c: c["reward_level"], default=None)
         embed.add_field(
@@ -314,7 +314,7 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             role = guild.get_role(int(item["payload"]["role_id"]))
             text = role.mention if role else f"role {item['payload']['role_id']}"
         if claim and claim.get("last_error") and status == "failed":
-            text += f" — failed, can retry"
+            text += f" - failed, can retry"
         if booster_item:
             text = f"⭐ {text} (Boosters only)"
         lines.append(f"{text} · {status}")
@@ -330,7 +330,7 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
         else:
             text = f"{_compact_qty(payload['quantity'])} {payload['name']}"
         if claim.get("last_error") and claim["status"] == "failed":
-            text += " — failed, can retry"
+            text += " - failed, can retry"
         lines.append(f"{text} · {claim['status']}")
     if not lines:
         embed.description = "No rewards are configured for your current level."
@@ -524,11 +524,11 @@ class Leveling(commands.Cog):
 
     # ─── MESSAGE XP (Phase 3 / E1: now driven by the Activity
     # Engine's activity_message event instead of its own on_message
-    # listener — word_count used to be computed here independently
+    # listener - word_count used to be computed here independently
     # of cogs/activity_engine.py's identical computation; now it's
     # computed once, centrally, and passed in. Everything else below
-    # — the cooldown gate, spam-penalty ordering, multiplier lookup,
-    # XP award, level-up announce — is unchanged from before.) ─────
+    # - the cooldown gate, spam-penalty ordering, multiplier lookup,
+    # XP award, level-up announce - is unchanged from before.) ─────
     @commands.Cog.listener()
     async def on_activity_message(self, message: discord.Message,
                                    word_count: int):
@@ -655,7 +655,7 @@ class Leveling(commands.Cog):
         # Phase 3 / E2: XP granting + level-up detection + level
         # reward roles now go through the shared Reward Engine
         # instead of this cog doing its own raw INSERT/UPDATE and its
-        # own inline level comparison — the exact same logic used to
+        # own inline level comparison - the exact same logic used to
         # be duplicated again below for voice XP. Announcing the
         # level-up in-channel stays here since that's leveling's own
         # UI concern, not something the engine should know about.
@@ -697,8 +697,8 @@ class Leveling(commands.Cog):
     # reports the raw facts (alone, AFK channel, deafened) and this
     # listener applies the guild's `voice_farming_guard` to them;
     # what's left here is leveling's own POLICY on top of a valid
-    # tick — voice_xp_enabled, the require_unmuted choice, the XP
-    # blacklist, and the actual XP math — exactly as before, just
+    # tick - voice_xp_enabled, the require_unmuted choice, the XP
+    # blacklist, and the actual XP math - exactly as before, just
     # invoked once per tick instead of leveling running its own
     # duplicate poll. ──────────────────────────────────────────────
     @commands.Cog.listener()
@@ -724,7 +724,7 @@ class Leveling(commands.Cog):
                 return
 
             # BUGFIX (dark-fixes pass #7): XP blacklist roles were
-            # never checked here — only calculate_message_xp() (via
+            # never checked here - only calculate_message_xp() (via
             # get_xp_multiplier) consulted leveling_blacklist_roles.
             # A member given a blacklist role to opt them out of the
             # leveling system entirely still silently earned XP from
@@ -742,7 +742,7 @@ class Leveling(commands.Cog):
                 return
 
             # Phase 3 / E2: same reward-engine handoff as message XP
-            # above — no announcement on voice level-ups, matching the
+            # above - no announcement on voice level-ups, matching the
             # pre-existing behavior (only chat XP announces).
             from utils.reward_engine import give_reward
             await give_reward(
@@ -790,7 +790,7 @@ class Leveling(commands.Cog):
             data = await get_rank_card_data(
                 interaction.guild.id, member.id, member=member)
             embed = discord.Embed(
-                title=f"Rank — {member.display_name}", color=0x7c5cbf)
+                title=f"Rank - {member.display_name}", color=0x7c5cbf)
             if member.display_avatar:
                 embed.set_thumbnail(url=member.display_avatar.url)
             embed.add_field(name="Rank", value=f"#{data['rank']}")
@@ -809,7 +809,7 @@ class Leveling(commands.Cog):
     # minutes, compare elapsed time against a stored last_reset per
     # guild, only act once the configured period has actually passed.
     # Each guild is isolated in its own try/except so one bad row
-    # can't stop the loop from checking the rest — same defensive
+    # can't stop the loop from checking the rest - same defensive
     # pattern used throughout (shop temp_role_cleanup,
     # reactionroles expiry_check, moderation scheduled_unban_check).
     @tasks.loop(minutes=30)
@@ -845,7 +845,7 @@ class Leveling(commands.Cog):
                         embed = discord.Embed(
                             title="🔄 Leaderboard Reset",
                             description=(f"The {period} leaderboard has reset! "
-                                         f"Last cycle's standings are archived — "
+                                         f"Last cycle's standings are archived - "
                                          f"everyone starts fresh."),
                             color=0x7c5cbf)
                         try:
@@ -889,7 +889,7 @@ class Leveling(commands.Cog):
         medals = ["🥇", "🥈", "🥉"]
         # Finalized Prestige: display each member's EFFECTIVE tier (VI for
         # an active Booster). Sort order remains permanent prestige DESC,
-        # xp DESC. Display only — never the source of multipliers.
+        # xp DESC. Display only - never the source of multipliers.
         from utils.prestige import get_effective_prestige, is_booster, tier_label
         for i, (uid, xp, level, prestige) in enumerate(rows, 1):
             medal  = medals[i-1] if i <= 3 else f"#{i}"
@@ -913,7 +913,7 @@ class Leveling(commands.Cog):
     async def setxp(self, interaction: discord.Interaction,
                     member: discord.Member, xp: int):
         # HARDENING (dark-fixes pass): clamp admin-supplied XP to
-        # non-negative — nothing previously stopped a negative value
+        # non-negative - nothing previously stopped a negative value
         # from being passed through to xp_progress()/the rank card,
         # which assume xp >= 0.
         xp = max(0, xp)
@@ -955,10 +955,10 @@ class Leveling(commands.Cog):
     # Fixes the flagged gap: dashboard/app.py's COMMAND_CATEGORIES has
     # listed a Leveling "resetxp" entry (Commands dashboard page) with
     # no matching command anywhere in the codebase. This is that
-    # command — resets one member's xp/level back to 0 in this guild
+    # command - resets one member's xp/level back to 0 in this guild
     # only. Deliberately does NOT touch leveling_leaderboard_history
     # (that's only ever written by the scheduled/forced full-guild
-    # reset below) and does NOT archive the member's XP anywhere —
+    # reset below) and does NOT archive the member's XP anywhere -
     # a single-member reset is a moderation correction, not a
     # leaderboard cycle event.
     @app_commands.command(name="resetxp",
@@ -979,7 +979,7 @@ class Leveling(commands.Cog):
             ephemeral=True)
 
     # ─── RESET LEADERBOARD (admin, Phase 5 / Leveling expansion) ─
-    # Manual/forced equivalent of leaderboard_reset_task — same
+    # Manual/forced equivalent of leaderboard_reset_task - same
     # perform_leaderboard_reset() call, same archive-then-zero
     # behavior, just triggered on demand instead of waiting for the
     # configured weekly/monthly period to elapse. Mirrors
@@ -993,7 +993,7 @@ class Leveling(commands.Cog):
         period = reset_config.get("period") or "weekly"
         count = await perform_leaderboard_reset(interaction.guild.id, period)
         await interaction.followup.send(
-            f"{CHECK_EMOJI} Leaderboard reset — {count} member(s) archived "
+            f"{CHECK_EMOJI} Leaderboard reset - {count} member(s) archived "
             f"and zeroed.")
 
     # ─── LEVEL REWARDS ──────────────────────────────────

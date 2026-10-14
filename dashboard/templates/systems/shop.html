@@ -63,7 +63,7 @@
                     <option value="3">III</option>
                     <option value="4">IV</option>
                     <option value="5">V</option>
-                    <option value="6">VI — Free · Booster-only</option>
+                    <option value="6">VI - Free · Booster-only</option>
                 </select>
                 <div class="form-hint">
                     I–V: purchasing resets the buyer's {{ currency.coins.name }} to 0;
@@ -101,7 +101,7 @@
             <div class="form-group">
                 <label class="form-label">Icon URL (optional)</label>
                 <input class="form-input" id="item-icon"
-                       placeholder="https://... — shown on the rank card">
+                       placeholder="https://... - shown on the rank card">
             </div>
             <div class="form-group">
                 <label class="form-label">Rarity</label>
@@ -158,7 +158,7 @@
                             {% if item[7] %}⭐{% endif %}
                         </td>
                         <td class="text-muted">
-                            {{ item[2] or '—' }}
+                            {{ item[2] or '-' }}
                         </td>
                         <td>
                             {% if item[0] in free_item_ids %}
@@ -299,7 +299,7 @@ switchTab('items');
 
 // Phase 5 / Leveling expansion: xp_boost items need a multiplier
 // field instead of a role ID, and their "duration" means "how long
-// the boost lasts" rather than "how long until the role is removed" —
+// the boost lasts" rather than "how long until the role is removed" -
 // same underlying duration_hours column, different label/meaning.
 function isFreeVI() {
     return document.getElementById('item-type').value === 'prestige' &&
@@ -344,7 +344,7 @@ function toggleItemTypeFields() {
         boostField.style.display = 'none';
         prestigeField.style.display = 'block';
         durLabel.textContent = 'Duration hours (0 = permanent)';
-        durHint.textContent = 'Prestige is permanent — leave as 0.';
+        durHint.textContent = 'Prestige is permanent - leave as 0.';
     } else if (type === 'potion') {
         roleField.style.display = 'none';
         boostField.style.display = 'block';
@@ -356,7 +356,7 @@ function toggleItemTypeFields() {
         boostField.style.display = 'none';
         prestigeField.style.display = 'none';
         durLabel.textContent = 'Duration hours (0 = permanent)';
-        durHint.textContent = 'Titles are cosmetic and permanent — leave as 0.';
+        durHint.textContent = 'Titles are cosmetic and permanent - leave as 0.';
     } else {
         roleField.style.display = 'block';
         boostField.style.display = 'none';
@@ -423,7 +423,7 @@ async function addItem() {
         return;
     }
     // Non-Prestige items (Prestige keeps its own rule below): a Coin price is
-    // required unless a Diamond price is set — the existing precedence, where
+    // required unless a Diamond price is set - the existing precedence, where
     // the Coin field is documented as ignored. A blank or non-numeric field is
     // rejected rather than read as 0, so an unfinished form can never silently
     // create a Free item; a typed 0 with no Diamond price IS the Free listing.
@@ -436,7 +436,7 @@ async function addItem() {
         showToast('XP Boost items need a multiplier > 1 and a duration', 'danger');
         return;
     }
-    // A potion carries the same effect parameters as an XP Boost — the
+    // A potion carries the same effect parameters as an XP Boost - the
     // difference is only that it is stored in the buyer's inventory and
     // fired when they use it, not applied at purchase.
     if (type === 'potion' && (!payload.xp_boost_multiplier || !payload.duration_hours)) {
@@ -445,7 +445,7 @@ async function addItem() {
     }
     if (type === 'prestige') {
         if (payload.price_diamonds) {
-            showToast(`Prestige is purchased with ${currencyNameFor('coins')} — do not set a ${currencyNameFor('diamonds')} price`, 'danger');
+            showToast(`Prestige is purchased with ${currencyNameFor('coins')} - do not set a ${currencyNameFor('diamonds')} price`, 'danger');
             return;
         }
         if (!freeVI && (!payload.price || payload.price <= 0)) {

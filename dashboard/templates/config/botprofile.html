@@ -12,7 +12,7 @@
         <button class="btn btn-secondary" onclick="resetBotProfile()">Reset to Default</button>
     </div>
     <p class="text-muted text-sm" style="margin-bottom:18px;">
-        Nickname, avatar, banner, and bio here are genuinely per-server — Discord's own
+        Nickname, avatar, banner, and bio here are genuinely per-server - Discord's own
         guild member profile fields, applied directly to the bot's account for
         <strong>this server only</strong>. Every other server the bot is in keeps its own
         settings (or the bot's global defaults), completely unaffected.
@@ -39,14 +39,14 @@
                 <div class="bp-card-status"><span class="bp-status-dot"></span>Online in this server</div>
             </div>
         </div>
-        <div class="bp-preview-caption">Proportioned to match Discord's real member popout — not interactive Discord chrome.</div>
+        <div class="bp-preview-caption">Proportioned to match Discord's real member popout - not interactive Discord chrome.</div>
     </div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
         <div class="form-group">
             <label class="form-label" for="bp-nickname">Nickname</label>
             <input class="form-input" id="bp-nickname" maxlength="32" placeholder="Leave empty to use the global name">
-            <div class="form-hint"><span id="bp-nick-counter">0/32</span> — Discord's hard limit</div>
+            <div class="form-hint"><span id="bp-nick-counter">0/32</span> - Discord's hard limit</div>
         </div>
         <div class="form-group">
             <label class="form-label" for="bp-avatar-url">Avatar URL</label>
@@ -55,7 +55,7 @@
         <div class="form-group">
             <label class="form-label" for="bp-banner-url">Banner URL</label>
             <input class="form-input" id="bp-banner-url" placeholder="https://...">
-            <div class="form-hint">Crops to a wide ~2.5:1 banner — landscape images (roughly 1000×400 or wider) look best</div>
+            <div class="form-hint">Crops to a wide ~2.5:1 banner - landscape images (roughly 1000×400 or wider) look best</div>
         </div>
         <div class="form-group">
             <label class="form-label" for="bp-bio">Bio</label>
@@ -192,7 +192,7 @@
 .bp-banner { border-radius: 16px 16px 0 0; }
 #bp-save-btn:active { transform: scale(0.97); transition: transform 100ms ease-out; }
 
-/* Unsaved-changes indicator — added when fields differ from the last
+/* Unsaved-changes indicator - added when fields differ from the last
    loaded/saved state (see markDirty/markClean below). Subtle ring +
    pulsing dot rather than blocking UI; title attr covers screen readers. */
 #bp-save-btn.bp-dirty {
@@ -241,7 +241,7 @@ let liveBotUsername = '';
 // Unsaved-changes tracking. formDirty flips true the moment any of the
 // four fields receives real user input, and back to false whenever the
 // form is repopulated fresh from the server (initial load, post-save
-// refresh, or reset) — see markClean() calls below.
+// refresh, or reset) - see markClean() calls below.
 let formDirty = false;
 
 function markDirty() {
@@ -262,7 +262,7 @@ function markClean() {
 // Native browser warning for a real page unload (closing the tab,
 // typing a new URL, hard refresh) while there are unsaved edits. This
 // does NOT cover this dashboard's htmx-driven in-app sidebar
-// navigation — that swaps #content-area without a real unload event,
+// navigation - that swaps #content-area without a real unload event,
 // so it can't be caught here. The Save button's dirty indicator is
 // the signal for that case.
 window.addEventListener('beforeunload', function(e) {
@@ -324,7 +324,7 @@ async function loadBotProfile() {
     // Prefer showing what's actually LIVE right now (guild avatar/banner)
     // in the preview card, falling back further to the bot's real GLOBAL
     // avatar (not a generic placeholder icon) when nothing per-guild or
-    // stored is set — so the "empty" preview state matches what Discord
+    // stored is set - so the "empty" preview state matches what Discord
     // actually shows for this bot when nothing's been customized yet.
     const avatarImg = document.getElementById('bp-avatar-img');
     const avatarFallback = document.getElementById('bp-avatar-fallback');
@@ -338,9 +338,9 @@ async function loadBotProfile() {
     if (previewBannerUrl) { bannerImg.src = previewBannerUrl; }
     else { bannerPlaceholder.style.display = 'flex'; }
 
-    document.getElementById('bp-live-nick').textContent = live.nick || '(no nickname — using global name)';
+    document.getElementById('bp-live-nick').textContent = live.nick || '(no nickname - using global name)';
     document.getElementById('bp-live-bio').textContent = live.bio || '(none set)';
-    document.getElementById('bp-live-username').textContent = live.username || '—';
+    document.getElementById('bp-live-username').textContent = live.username || '-';
 
     const gAvatarCell = document.getElementById('bp-live-global-avatar');
     gAvatarCell.innerHTML = '';
@@ -351,7 +351,7 @@ async function loadBotProfile() {
         gAvatarCell.appendChild(img);
         gAvatarCell.appendChild(document.createTextNode('shown in every server without a custom avatar set'));
     } else {
-        gAvatarCell.textContent = '—';
+        gAvatarCell.textContent = '-';
     }
 
     // Fresh from the server = nothing unsaved. Placed last so the
@@ -398,16 +398,16 @@ async function saveBotProfile(btn) {
 
     if (applied.length && !errorKeys.length) {
         // innerHTML: the check is server-rendered HTML (an <img> when the
-        // configured emoji is a custom one). Only the constant is markup —
+        // configured emoji is a custom one). Only the constant is markup -
         // the applied keys are interpolated as text by the browser.
         status.innerHTML = checkIconHtml() + ` Applied live: ${applied.join(', ')}`;
         status.style.color = 'var(--success)';
         showToast('Bot profile updated!');
     } else if (applied.length && errorKeys.length) {
         const msg = errorKeys.map(k => `${k}: ${errors[k]}`).join(' · ');
-        status.textContent = `⚠️ Applied ${applied.join(', ')}. Issues — ${msg}`;
+        status.textContent = `⚠️ Applied ${applied.join(', ')}. Issues - ${msg}`;
         status.style.color = 'var(--warning)';
-        showToast('Saved with some issues — see details below', 'warning');
+        showToast('Saved with some issues - see details below', 'warning');
     } else {
         const msg = errors._general || errorKeys.map(k => `${k}: ${errors[k]}`).join(' · ') || 'Unknown error';
         status.textContent = '❌ ' + msg;
@@ -418,10 +418,10 @@ async function saveBotProfile(btn) {
 }
 
 async function resetBotProfile() {
-    showConfirm("Reset this server's bot profile — nickname, avatar, banner, and bio — back to the global default?", async () => {
+    showConfirm("Reset this server's bot profile - nickname, avatar, banner, and bio - back to the global default?", async () => {
         const res = await fetch('/api/botprofile/reset', { method: 'POST' });
         const data = await res.json();
-        showToast(data.success ? 'Reset — back to the global default.' : 'Error resetting', data.success ? 'success' : 'error');
+        showToast(data.success ? 'Reset - back to the global default.' : 'Error resetting', data.success ? 'success' : 'error');
         document.getElementById('bp-nickname').value = '';
         document.getElementById('bp-avatar-url').value = '';
         document.getElementById('bp-banner-url').value = '';

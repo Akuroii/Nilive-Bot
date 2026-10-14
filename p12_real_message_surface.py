@@ -1,4 +1,4 @@
-"""PROBE 12 — the alias path must survive a REAL discord.Message.
+"""PROBE 12 - the alias path must survive a REAL discord.Message.
 
 Live incident (2026-08-28): typing an alias such as `b` in Discord crashed
 every alias invocation with
@@ -7,8 +7,8 @@ every alias invocation with
       self.message_reference = real.message_reference
     AttributeError: 'Message' object has no attribute 'message_reference'
 
-because a real ``discord.Message`` (2.7.1) exposes ``reference`` — renamed
-from ``message_reference`` in discord.py 2.0 — and the harness's
+because a real ``discord.Message`` (2.7.1) exposes ``reference`` - renamed
+from ``message_reference`` in discord.py 2.0 - and the harness's
 ``FakeMessage`` in p0_env defined *both* names, so every probe that used it
 validated the bug away instead of catching it.
 
@@ -25,7 +25,7 @@ bot, and asserts:
      ``discord.Member.kick``);
   3. ``ta hello some long response text`` executes ``/trigger_add`` with
      the trailing text intact, and carries a live ``reference`` payload
-     (a reply-to message — the other shape real messages have);
+     (a reply-to message - the other shape real messages have);
   4. no "Couldn't run …" error banner was sent, i.e. nothing escaped
      ``bot.invoke``.
 
@@ -138,7 +138,7 @@ def guild_for(gid):
 
 
 class FakeGuildLike:
-    """Identical to p0_env.FakeGuild except it must NOT be a discord.Guild —
+    """Identical to p0_env.FakeGuild except it must NOT be a discord.Guild -
     that is what makes a real Message keep its fake state object."""
 
     def __init__(self, id=333):

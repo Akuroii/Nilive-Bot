@@ -16,7 +16,7 @@ async def log_mod_action(guild_id: int, user: discord.Member,
     """
     Logs a moderation action to BOTH mod_logs (legacy) and
     moderation_logs (new Blueprint table with snapshots).
-    Rule 1 — Snapshot Rule applied here.
+    Rule 1 - Snapshot Rule applied here.
 
     P1 #13 FIX: previously this function stored duration_minutes
     but never computed expires_at. The dashboard's "Active
@@ -77,7 +77,7 @@ async def check_warning_thresholds(guild: discord.Guild,
     Reads from: warning_thresholds table
     Configured on: dashboard Moderation page
 
-    PHASE 2 FIX: action == "temp_ban" was previously a silent no-op —
+    PHASE 2 FIX: action == "temp_ban" was previously a silent no-op -
     the dashboard let admins configure it, but this function only
     handled kick/ban/timeout/add_role, so a temp_ban threshold just
     never did anything when reached. Now it bans the member and
@@ -177,7 +177,7 @@ class Moderation(commands.Cog):
             try:
                 guild = self.bot.get_guild(guild_id)
                 if not guild:
-                    # Bot isn't in this guild (right now, at least) —
+                    # Bot isn't in this guild (right now, at least) -
                     # leave the row so it's retried once it rejoins,
                     # rather than losing track of the obligation.
                     continue
@@ -188,7 +188,7 @@ class Moderation(commands.Cog):
                         discord.Object(id=user_id),
                         reason="Temp ban expired")
                 except discord.NotFound:
-                    # Already unbanned manually — nothing to do,
+                    # Already unbanned manually - nothing to do,
                     # still safe to clear the row.
                     pass
                 except Exception as e:
@@ -423,11 +423,11 @@ class Moderation(commands.Cog):
             return
 
         embed = discord.Embed(
-            title=f"Warnings — {member.display_name}",
+            title=f"Warnings - {member.display_name}",
             color=0xFEE75C)
         for i, (reason, ts, mod_name) in enumerate(rows, 1):
             embed.add_field(
-                name=f"#{i} — {ts[:10] if ts else 'Unknown'}",
+                name=f"#{i} - {ts[:10] if ts else 'Unknown'}",
                 value=f"**Reason:** {reason}\n**By:** {mod_name or 'Unknown'}",
                 inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -460,7 +460,7 @@ class Moderation(commands.Cog):
                 "Amount must be between 1 and 100.", ephemeral=True)
             return
         # CONFIRMED LIMITATION (guard): forum channels have no message
-        # list to bulk-delete — discord.ForumChannel has no .purge at
+        # list to bulk-delete - discord.ForumChannel has no .purge at
         # all, so this used to die with AttributeError. Report the
         # limitation instead of crashing.
         if not hasattr(interaction.channel, "purge"):
@@ -490,7 +490,7 @@ class Moderation(commands.Cog):
                    reason: str = "No reason provided"):
         # CONFIRMED BUG FIX: threads and forum posts have no permission
         # overwrites of their own (discord.Thread has neither
-        # overwrites_for nor set_permissions) — the overwrite dance
+        # overwrites_for nor set_permissions) - the overwrite dance
         # below crashed with AttributeError on them. Locking a thread is
         # the native `locked` flag; guild channels keep the exact
         # original overwrite behaviour.
@@ -573,11 +573,11 @@ class Moderation(commands.Cog):
             return
 
         embed = discord.Embed(
-            title=f"Mod Logs — {member.display_name}",
+            title=f"Mod Logs - {member.display_name}",
             color=0x7c5cbf)
         for action, reason, mod_name, ts, source in rows:
             embed.add_field(
-                name=f"{action.upper()} — {ts[:10] if ts else '?'}",
+                name=f"{action.upper()} - {ts[:10] if ts else '?'}",
                 value=(f"**Reason:** {reason or 'None'}\n"
                        f"**By:** {mod_name or 'Unknown'}\n"
                        f"**Source:** {source}"),

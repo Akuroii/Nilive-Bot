@@ -236,7 +236,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">➕ Add Level Reward — Role</div>
+        <div class="card-title">➕ Add Level Reward - Role</div>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Level required</label>
@@ -283,9 +283,9 @@
         </div>
     </div>
 
-    <!-- Phase 5 / Leveling expansion — currency rewards -->
+    <!-- Phase 5 / Leveling expansion - currency rewards -->
     <div class="card">
-        <div class="card-title">{{ currency_icon(currency.coins.emoji) }} Add Level Reward — {{ currency.coins.name }} / {{ currency.diamonds.name }}</div>
+        <div class="card-title">{{ currency_icon(currency.coins.emoji) }} Add Level Reward - {{ currency.coins.name }} / {{ currency.diamonds.name }}</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Granted automatically on level-up via the Reward Engine, atomically and
             logged to the Transaction Ledger (source: leveling). A level can have a
@@ -333,7 +333,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">⚡ Add Level Reward — XP Boost</div>
+        <div class="card-title">⚡ Add Level Reward - XP Boost</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Claimed from /level. One boost per level. Does not change earn rates.
         </p>
@@ -374,7 +374,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🛒 Add Level Reward — Shop</div>
+        <div class="card-title">🛒 Add Level Reward - Shop</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Claimed from /level. Does not charge, write a purchase, or consume stock.
             Custom, title, potion, and temporary role products only.
@@ -425,7 +425,7 @@
     <div class="card">
         <div class="card-title">✨ XP Multiplier Roles</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Roles with an XP multiplier. Multipliers do NOT stack — the highest one wins.
+            Roles with an XP multiplier. Multipliers do NOT stack - the highest one wins.
         </p>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px;">
             <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px;">
@@ -493,7 +493,7 @@
     <div class="card">
         <div class="card-title">➕ Add Prestige Tier Role</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            One role per tier. Roles are cosmetic representations only — they never
+            One role per tier. Roles are cosmetic representations only - they never
             grant Prestige or its multiplier. On a tier change the previous tier's role
             is removed and the new tier's role is added (if configured). Tier VI maps to
             the temporary Booster role.
@@ -677,7 +677,7 @@ async function forceResetNow() {
     const res  = await fetch('/api/leveling/force-reset', { method: 'POST' });
     const data = await res.json();
     if (data.success) {
-        showToast(`Leaderboard reset — ${data.count} member(s) archived and zeroed.`);
+        showToast(`Leaderboard reset - ${data.count} member(s) archived and zeroed.`);
         loadResetConfig();
     } else {
         showToast(data.error || 'Reset failed', 'error');

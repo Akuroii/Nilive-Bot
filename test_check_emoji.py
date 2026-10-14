@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Application-emoji check glyph — verification suite.
+Application-emoji check glyph - verification suite.
 
 The Missions completion line
 (`⤷ `reward claimed` <check> <amount> <name> <currency emoji>`) and every
@@ -11,7 +11,7 @@ Emoji and owned by the bot application, not by any server.
 The bug this suite locks down: reachability was probed with
 `bot.application_emojis()` (an API discord.py 2.x does not have) and
 `bot.get_emoji()` (the GUILD emoji cache, which by design cannot see
-application emojis — discord.py's own `Client.emojis` docstring says so).
+application emojis - discord.py's own `Client.emojis` docstring says so).
 Both missed, so the probe concluded "unreachable" and silently downgraded
 the Missions panel to a unicode ✅ in every server, even though the emoji
 was perfectly usable.
@@ -19,7 +19,7 @@ was perfectly usable.
 Covered here:
    1.  The constant is the application emoji token, and parses.
    2.  A bot whose ONLY emoji surface is the guild cache (emoji absent
-       from every server) still renders the application emoji — never ✅.
+       from every server) still renders the application emoji - never ✅.
    3.  A real, unlogged discord.py 2.7.1 Client behaves the same.
    4.  Discord's application-emoji endpoint confirms the emoji → token,
        state CONFIRMED, taken from the API's own name/animated flag.
@@ -30,17 +30,17 @@ Covered here:
    7.  A 404 contradicted by the list is treated as confirmed.
    8.  Inconclusive probes (500, rate limit, not logged in, no API,
        exception thrown, a probe that runs past its timeout) keep the
-       token — no silent downgrade.
+       token - no silent downgrade.
    9.  Probing is throttled: one HTTP call, cached; force re-asks; a
        CONFIRMED verdict is terminal; a MISSING verdict survives an
        inconclusive re-probe.
   10.  The Missions renderer end-to-end: the completed-mission block and
-       the whole /missions embed carry the application emoji, not ✅ —
-       including with a bot that has no guild emoji match — plus
+       the whole /missions embed carry the application emoji, not ✅ -
+       including with a bot that has no guild emoji match - plus
        Missions.on_ready's startup log, which used to announce "check
        emoji is not reachable" on every single boot.
-  10b. The locked completion-line order — `⤷` → `reward claimed` → check
-       emoji → amount → currency name → currency emoji — and that nothing
+  10b. The locked completion-line order - `⤷` → `reward claimed` → check
+       emoji → amount → currency name → currency emoji - and that nothing
        else in the block moved (name, description, progress bar,
        percentage, colour, headings, Refresh button, the incomplete
        mission's Progress line), that /missions and Refresh render the
@@ -48,7 +48,7 @@ Covered here:
        stay driven by the Economy config, that rewards are still stored
        under the stable coins/diamonds keys, and that no hardcoded
        currency literal was introduced.
-  10c. The reward is fully dynamic — a matrix of amounts (1, 25, 7, 1250,
+  10c. The reward is fully dynamic - a matrix of amounts (1, 25, 7, 1250,
        1000000, "50") × currency keys (coins, diamonds) × three Economy
        configurations (defaults, custom Arabic names + unicode emoji,
        custom names + custom Discord emoji tokens), each asserted against
@@ -61,7 +61,7 @@ Covered here:
 
 Run:
   python3 scripts/test_check_emoji.py
-(needs the bot's own deps — discord.py, aiosqlite — same as
+(needs the bot's own deps - discord.py, aiosqlite - same as
 requirements.txt; no network and no Discord token: every "HTTP" call is a
 fake that records how often it was invoked.)
 """
@@ -109,7 +109,7 @@ def check(label, condition, detail=""):
     else:
         _failed += 1
         _failures.append(label)
-        print(f"  \033[91mFAIL\033[0m  {label}" + (f"  — {detail}" if detail else ""))
+        print(f"  \033[91mFAIL\033[0m  {label}" + (f"  - {detail}" if detail else ""))
 
 
 def section(title):
@@ -135,7 +135,7 @@ def completion_line(text: str) -> str:
 # ── fakes ──────────────────────────────────────────────────────────────
 def app_emoji(name="Check", animated=True, emoji_id=CHECK_EMOJI_ID):
     """Exactly what discord.py builds for an application emoji:
-    `Emoji(guild=Object(0), state=…, data=payload)` — no guild, no roles."""
+    `Emoji(guild=Object(0), state=…, data=payload)` - no guild, no roles."""
     return discord.Emoji(guild=discord.Object(0), state=None, data={
         "id": str(emoji_id), "name": name, "animated": animated,
         "require_colons": True, "managed": False, "available": True,
@@ -351,7 +351,7 @@ def endpoint_tests():
           and check_emoji_state() == CHECK_STATE_CONFIRMED,
           check_emoji_detail())
 
-    # The real discord.py Client with only the HTTP call stubbed — the
+    # The real discord.py Client with only the HTTP call stubbed - the
     # production code path, attribute discovery and all. This is the shape
     # that used to fail: a real client has no application_emojis() cache
     # and its get_emoji() only sees guild emoji.
@@ -496,7 +496,7 @@ def inconclusive_tests():
 
 
 def throttle_tests():
-    section("9. One HTTP call, cached — force re-asks")
+    section("9. One HTTP call, cached - force re-asks")
     reset_state()
     bot = FakeBot(app_single=server_error(), app_list=None, drop_list=True)
     asyncio.run(verify_check_emoji(bot))
@@ -515,7 +515,7 @@ def throttle_tests():
     asyncio.run(verify_check_emoji(ok))
     for _ in range(5):
         asyncio.run(verify_check_emoji(ok))
-    check("a CONFIRMED verdict is terminal — no repeat calls",
+    check("a CONFIRMED verdict is terminal - no repeat calls",
           ok.single_calls == 1, f"calls={ok.single_calls}")
     asyncio.run(verify_check_emoji(ok, force=True))
     check("force=True can still re-ask after a CONFIRMED verdict",
@@ -615,7 +615,7 @@ async def mission_render_tests():
           completion_line(block).endswith("🪙"), completion_line(block))
 
     # End-to-end /missions with a bot whose guild caches know nothing
-    # about the emoji — the reported production shape.
+    # about the emoji - the reported production shape.
     guild_bot = FakeBot(guild_emoji=None, app_single="missing", app_list=[],
                         drop_single=True, drop_list=True)
     guild_bot.get_guild = lambda gid: FakeGuild(gid)
@@ -661,7 +661,7 @@ async def mission_render_tests():
     check("the Missions view holds the same bot (one resolution path)",
           view.bot is app_bot)
 
-    # Missions.on_ready — the production startup probe, and the log line
+    # Missions.on_ready - the production startup probe, and the log line
     # that used to claim the emoji was unreachable on EVERY boot (it ran
     # in cog_load, before the client had a token, and it probed caches
     # that cannot see application emojis).
@@ -727,7 +727,7 @@ async def mission_render_tests():
     check("embed colour, headings and footers unchanged",
           cog.MISSION_COLOR == 0x7c5cbf
           and cog.PERIOD_HEADING["daily"] == "Daily Mission Progress"
-          and cog.PERIOD_FOOTER == {"once": "No reset — completes once, forever"})
+          and cog.PERIOD_FOOTER == {"once": "No reset - completes once, forever"})
 
     incomplete = cog._mission_block({**m, "completed": False, "progress": 0},
                                     FakeGuild())
@@ -789,7 +789,7 @@ async def mission_render_tests():
           big_line == f"⤷ `reward claimed` {CHECK_EMOJI} 1,250 Diamonds 💎",
           big_line)
 
-    # Requirement: name + emoji resolve from the Economy config — custom
+    # Requirement: name + emoji resolve from the Economy config - custom
     # when configured, default otherwise. The mission was created AND
     # completed BEFORE this rename, so the rename must reach it with no
     # edit to the mission row.
@@ -815,7 +815,7 @@ async def mission_render_tests():
               {**m, "reward_type": "xp", "reward_value": "50"}, FakeGuild())))
 
     # Requirement: rewards are still keyed by the stable 'coins'/'diamonds'
-    # keys in the DB — never by a display name — and a currency rename
+    # keys in the DB - never by a display name - and a currency rename
     # after creation needs NO edit to the mission row.
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(

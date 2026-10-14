@@ -1,10 +1,10 @@
 """
-Shop Publisher — Category CRUD (Step 1, Slice 1).
+Shop Publisher - Category CRUD (Step 1, Slice 1).
 
 The flat, guild-scoped presentation Category. shop_categories holds NO
 commerce data (no price/stock/duration/type) and shop_items.category_id is
 the ONLY link between a product and its category. Category membership is
-pure presentation metadata and NEVER implies publication — a categorized
+pure presentation metadata and NEVER implies publication - a categorized
 product is not published anywhere.
 
 CONTRACT (locked by the Slice 1 v2 plan):
@@ -17,7 +17,7 @@ CONTRACT (locked by the Slice 1 v2 plan):
 
   * Create when `id` is absent or null. Update only when `id` exists in the
     SESSION guild. An unknown id and an id belonging to another guild return
-    the SAME indistinguishable 404 {"code": "unknown_category"} — cross-guild
+    the SAME indistinguishable 404 {"code": "unknown_category"} - cross-guild
     existence is never disclosed, and no request can move or mutate a
     category across guilds: `guild_id` comes only from the session and is
     never read from any request body.
@@ -55,7 +55,7 @@ from dashboard.api import api_bp
 
 _NAME_MAX = 100
 _EMOJI_MAX = 100
-_DEFAULT_EMOJI = "\U0001F3AB"  # 🎫 — the column default, applied explicitly
+_DEFAULT_EMOJI = "\U0001F3AB"  # 🎫 - the column default, applied explicitly
 
 _CATEGORY_KEYS = (
     "id", "name", "emoji", "enabled", "sort_order", "created_at", "updated_at",
@@ -79,7 +79,7 @@ def _bad_request(problems):
 
 
 def _not_found(code, path):
-    # Unknown and cross-guild ids share this exact response — no cross-guild
+    # Unknown and cross-guild ids share this exact response - no cross-guild
     # existence disclosure, ever.
     return jsonify({
         "success": False,
@@ -223,7 +223,7 @@ def api_shop_categories_save():
     async def write():
         async with aiosqlite.connect(DB_PATH) as db:
             if cat_id is None:
-                # CREATE — server-assigned id, session guild only. The
+                # CREATE - server-assigned id, session guild only. The
                 # body's guild_id (if any) is deliberately never read.
                 values.setdefault("emoji", _DEFAULT_EMOJI)
                 values.setdefault("enabled", 1)
@@ -239,7 +239,7 @@ def api_shop_categories_save():
                 return await _fetch_category(db, new_id, guild_id), False
 
             if not await _get_category(db, cat_id, guild_id):
-                return None, True  # unknown or cross-guild — same 404
+                return None, True  # unknown or cross-guild - same 404
 
             assignments = ["name = ?"]
             params = [name]
@@ -266,7 +266,7 @@ def api_shop_categories_save():
 def api_shop_categories_delete(cat_id: int):
     """Delete a category and NULL its product links (same guild).
 
-    Products become uncategorized — never stale. Nothing else about the
+    Products become uncategorized - never stale. Nothing else about the
     products changes: the only shop_items write is category_id = NULL.
     """
     guild_id = get_session_guild_id()
@@ -354,7 +354,7 @@ def api_shop_product_category():
 
     The product AND the category must resolve within the session guild;
     misses return the same indistinguishable 404s used everywhere else. The
-    only column written on shop_items is category_id — commerce fields are
+    only column written on shop_items is category_id - commerce fields are
     never touched by Category operations.
     """
     guild_id = get_session_guild_id()

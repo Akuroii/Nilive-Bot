@@ -23,8 +23,8 @@ const PRODUCTS = [
     { id: 7, name: 'Zulu', type: 'title', price: 10, price_diamonds: null, enabled: 1, current_stock: null, max_stock: null, prestige_tier: null, featured: 0, category_id: null, option_of_id: null },
     { id: 2, name: 'Alpha', type: 'role', price: 20, price_diamonds: null, enabled: 1, current_stock: null, max_stock: null, prestige_tier: null, featured: 0, category_id: null, option_of_id: null },
     { id: 9, name: 'Other root', type: 'custom', price: 30, price_diamonds: null, enabled: 1, current_stock: null, max_stock: null, prestige_tier: null, featured: 0, category_id: null, option_of_id: null },
-    { id: 8, name: 'Zulu — 7 Days', type: 'custom', price: 5, price_diamonds: null, enabled: 1, current_stock: null, max_stock: null, prestige_tier: null, featured: 0, category_id: null, option_of_id: 7 },
-    { id: 10, name: 'Zulu — 30 Days', type: 'custom', price: 15, price_diamonds: null, enabled: 1, current_stock: null, max_stock: null, prestige_tier: null, featured: 0, category_id: null, option_of_id: 7 },
+    { id: 8, name: 'Zulu - 7 Days', type: 'custom', price: 5, price_diamonds: null, enabled: 1, current_stock: null, max_stock: null, prestige_tier: null, featured: 0, category_id: null, option_of_id: 7 },
+    { id: 10, name: 'Zulu - 30 Days', type: 'custom', price: 15, price_diamonds: null, enabled: 1, current_stock: null, max_stock: null, prestige_tier: null, featured: 0, category_id: null, option_of_id: 7 },
     { id: 11, name: 'Other option', type: 'custom', price: 8, price_diamonds: null, enabled: 1, current_stock: null, max_stock: null, prestige_tier: null, featured: 0, category_id: null, option_of_id: 9 },
     { id: 12, name: 'Chained option', type: 'custom', price: 2, price_diamonds: null, enabled: 1, current_stock: null, max_stock: null, prestige_tier: null, featured: 0, category_id: null, option_of_id: 8 },
 ];

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /* ═══════════════════════════════════════════════════════════════
-   Shop Publisher — Step 0: the page module in a DOM harness.
+   Shop Publisher - Step 0: the page module in a DOM harness.
 
-   Boots the REAL modules in one sandbox — nav-lifecycle.js, embed/model.js,
+   Boots the REAL modules in one sandbox - nav-lifecycle.js, embed/model.js,
    embed/discord-markdown.js, embed/preview.js (all frozen, read-only reuse)
-   plus dashboard/static/js/shop-publisher.js — against the REAL template
+   plus dashboard/static/js/shop-publisher.js - against the REAL template
    (dashboard/templates/manage/shoppublisher.html) parsed by the shared
    scripts/support/dom_stub.js double. No browser, no server.
 
@@ -12,13 +12,13 @@
 
      A. Boot: the catalog loads once, the template picker lists the saved
         presentations, and the product picker groups by Shop Category with an
-        Uncategorized bucket — `type` stays display metadata (a badge + the
+        Uncategorized bucket - `type` stays display metadata (a badge + the
         option label), never the grouping mechanism. The category picker
         filters; assignment posts to the Slice 1 endpoint and regroups on
         success / reverts on failure. The fixed token catalog renders.
      B. Selection drives one preview request carrying a DESIGN DRAFT
         ({presentation{mode,content,embeds}, products[], action{kind, entries}})
-        — products[] is the root-product roster — and the API's resolved
+        - products[] is the root-product roster - and the API's resolved
         presentation is handed to the frozen preview engine verbatim; the page
         interprets no token itself.
      C. The purchase action row shows the action that will actually be
@@ -42,7 +42,7 @@ const { createDom, createWindow, parseTemplate, findById, materialize } = requir
 let pass = 0, fail = 0; const failures = [];
 function assert(cond, name, extra) {
     if (cond) { pass++; console.log('  PASS', name); }
-    else { fail++; failures.push(name + (extra ? ' — ' + extra : '')); console.log('  FAIL', name, extra || ''); }
+    else { fail++; failures.push(name + (extra ? ' - ' + extra : '')); console.log('  FAIL', name, extra || ''); }
 }
 function section(t) { console.log('\n== ' + t + ' =='); }
 
@@ -62,7 +62,7 @@ const TEMPLATE_TREE = parseTemplate(TEMPLATE_HTML);
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // The double keeps innerHTML writes in _html (not parsed into children), so a
-// full render text has to collect both surfaces — the same split the preview
+// full render text has to collect both surfaces - the same split the preview
 // engine itself has (setText vs markup render).
 function deepText(node) {
     if (!node) return '';
@@ -136,7 +136,7 @@ function previewBody(productId, kind) {
                 ? { kind: 'product_select', placeholder: 'Select…', component_custom_id: 'shop_buy_sel_0', entries: entries }
                 : { kind: 'buttons', style: 'green', entries: entries },
             warnings: [
-                { code: 'unknown_token', path: 'embeds.0.title', message: 'Unknown token {{nope}} at embeds.0.title was left as typed — it is not in the token catalog.' },
+                { code: 'unknown_token', path: 'embeds.0.title', message: 'Unknown token {{nope}} at embeds.0.title was left as typed - it is not in the token catalog.' },
                 { code: 'validation', path: 'embeds.0.description', message: 'Embed 1 description is 5000 characters; Discord\'s limit is 4096.' },
             ],
             tokens: {
@@ -267,7 +267,7 @@ function defaultRoutes() {
     return {
         '/api/shop-publisher/catalog': () => ({ status: 200, body: { templates: TEMPLATES, products: PRODUCTS, tokens: TOKENS } }),
         // The template DOCUMENT rides on the Embed Builder's existing read
-        // route (names-only catalog contract — the intentional Step 0
+        // route (names-only catalog contract - the intentional Step 0
         // transitional presentation source).
         '/api/embedbuilder/template/banner': () => ({ status: 200, body: { template: BANNER_DOC } }),
         '/api/embedbuilder/template/sale': () => ({ status: 200, body: { template: SALE_DOC } }),
@@ -279,7 +279,7 @@ function defaultRoutes() {
         }),
         '/api/shop-publisher/products/category': () => ({ status: 200, body: { success: true } }),
         // Design Draft Persistence: GET = full records; POST = create or
-        // full-overwrite update (id echoed — 99 for creates).
+        // full-overwrite update (id echoed - 99 for creates).
         '/api/shop-publisher/designs': (call) => {
             if ((call.init.method || 'GET') === 'POST') {
                 return {
@@ -570,7 +570,7 @@ async function previewFlowTests(env) {
         'resolved-payload validation warnings render');
 
     // D. Resolved tokens table. (The double's selector is a single
-    // tag/class/id — pick body rows by parent, not a descendant selector.)
+    // tag/class/id - pick body rows by parent, not a descendant selector.)
     const tokenRows = env.el('sp-tokens').querySelectorAll('tr')
         .filter(r => r.parentNode && r.parentNode.tagName === 'TBODY');
     assert(tokenRows.length === 3, 'one row per token occurrence', String(tokenRows.length));
@@ -749,14 +749,14 @@ async function designTests() {
 
     // Save: the full draft + provenance goes out; success clears dirty.
     await env.change('sp-design-name', 'Main save');
-    assert(env.el('sp-dirty').hidden === false, 'the design name is persisted state — changing it sets dirty');
+    assert(env.el('sp-dirty').hidden === false, 'the design name is persisted state - changing it sets dirty');
     env.el('sp-design-save').dispatch('click');
     await env.settle();
     const posts = () => env.calls.filter(c => c.url === '/api/shop-publisher/designs'
         && c.init.method === 'POST');
     assert(posts().length === 1, 'Save POSTs exactly once');
     assert(posts()[0].body.name === 'Main save' && posts()[0].body.id === undefined,
-        'a first save creates — name goes along, no id');
+        'a first save creates - name goes along, no id');
     assert(posts()[0].body.source_template_name === 'banner',
         'provenance (source_template_name) is stored, never dereferenced');
     const sent = posts()[0].body.design;
@@ -785,7 +785,7 @@ async function designTests() {
     assert(env.el('sp-dirty').hidden === false, 'a failed Save leaves dirty as it was');
     env.routes['/api/shop-publisher/designs'] = defaultRoutes()['/api/shop-publisher/designs'];
 
-    // Load: the stored snapshot previews verbatim — NO template fetch.
+    // Load: the stored snapshot previews verbatim - NO template fetch.
     const templateFetches = () => env.calls.filter(c => c.url.indexOf('/api/embedbuilder/template/') === 0).length;
     const previews = () => env.calls.filter(c => c.url === '/api/shop-publisher/preview'
         && c.init.method === 'POST');
@@ -990,7 +990,7 @@ async function legacyDraftProtectionTests() {
     await legacyDraftProtectionTests();
     console.log('\n' + '='.repeat(60));
     if (fail) {
-        console.log(pass + '/' + (pass + fail) + ' checks — FAILURES:');
+        console.log(pass + '/' + (pass + fail) + ' checks - FAILURES:');
         failures.forEach(f => console.log('  - ' + f));
         process.exitCode = 1;
     } else {

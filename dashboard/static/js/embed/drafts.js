@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   Message Builder v2 — the draft persistence boundary (phase 1, step 4).
+   Message Builder v2 - the draft persistence boundary (phase 1, step 4).
 
    This module owns ONE thing: moving a normalized MessageDocument
    between the editor and storage, and nothing else.
@@ -9,7 +9,7 @@
 
    The canonical payload transform stays in model.js. This file does not
    build payloads, does not know Discord's rules, and does not decide what
-   the document means — it only checks that what it stores is a document
+   the document means - it only checks that what it stores is a document
    it can read back. If a second payload path ever appears here, the
    boundary has been broken.
 
@@ -31,7 +31,7 @@
    write. Lifecycle events (pagehide / tab hidden) flush immediately.
    Every result is reported, never thrown: the editor keeps working with
    storage broken, and the save state is exposed for the UI to show. A
-   failure is reported only while it is still OWED — a dirty draft, a write
+   failure is reported only while it is still OWED - a dirty draft, a write
    in flight or a scheduled write; once the draft is back to the version
    storage holds, the next save path clears it.
 
@@ -47,7 +47,7 @@
 
    NOT IN THIS FILE (deliberately)
    -------------------------------
-   Attachments and asset bytes (phase 2 — the 'assets' store is created as
+   Attachments and asset bytes (phase 2 - the 'assets' store is created as
    an empty seam), the saved library / revisions browser (phase 2+), any
    UI, any route, any validation of Discord's limits, any component or
    action state (phase 3–4).
@@ -95,7 +95,7 @@ window.NERO.embed = window.NERO.embed || {};
      * This deliberately does NOT reuse the model's id factory. That factory
      * salts ids by the LENGTH of its seed (see createIdFactory in model.js),
      * so two sessions that seed it differently but at the same length mint
-     * identical ids — and ids from a fresh page load restart at 1. Two new
+     * identical ids - and ids from a fresh page load restart at 1. Two new
      * drafts would then key to the same `v2:<guild>:<documentId>` and the
      * second would silently overwrite the first. Persistence cannot inherit
      * that, so the draft id carries its own uniqueness: the injected clock
@@ -121,8 +121,8 @@ window.NERO.embed = window.NERO.embed || {};
 
     // ── Serialization gate ────────────────────────────────────────
     // Structured clone would throw on some of these anyway (DataCloneError
-    // on a DOM node); everything else — a Blob, a Map, an undefined value,
-    // NaN — would be stored as something DIFFERENT from what was handed in,
+    // on a DOM node); everything else - a Blob, a Map, an undefined value,
+    // NaN - would be stored as something DIFFERENT from what was handed in,
     // which is silent data loss. So the gate rejects all of it by path, and
     // a save that fails the gate writes nothing at all.
     function SerializationError(message, path) {
@@ -196,7 +196,7 @@ window.NERO.embed = window.NERO.embed || {};
         return model.stableStringify(record);
     }
 
-    /** A JSON-clean copy — after the gate, this cannot lose anything. */
+    /** A JSON-clean copy - after the gate, this cannot lose anything. */
     function toStorable(document) {
         assertSerializable(document);
         return JSON.parse(JSON.stringify(document));
@@ -213,7 +213,7 @@ window.NERO.embed = window.NERO.embed || {};
         // normalizeDocument is additive (it fills in a blank embed for an empty
         // embeds array, ids, the current schema version), and normalizing on
         // the way in means the hash and the bytes a reload produces are the
-        // same ones that were written — no phantom "dirty" state after a load.
+        // same ones that were written - no phantom "dirty" state after a load.
         const doc = toStorable(model.normalizeDocument(fields.document));
         const prev = fields.previous || null;
         return {
@@ -358,7 +358,7 @@ window.NERO.embed = window.NERO.embed || {};
      * spinning, a single degraded flag, no console spam, and every
      * operation resolving rather than throwing.
      *
-     * `readOnly: true` refuses every write before it reaches the database —
+     * `readOnly: true` refuses every write before it reaches the database -
      * that is what makes the v1 import boundary structural rather than a
      * promise. `stores` are created on upgrade; no existing database is
      * ever migrated or deleted.
@@ -390,7 +390,7 @@ window.NERO.embed = window.NERO.embed || {};
 
         // The failures that mean "this write did not land" rather than "this
         // browser cannot store anything". A transient one is worth re-probing;
-        // an environment failure is not, and must stay latched — retrying a
+        // an environment failure is not, and must stay latched - retrying a
         // missing IndexedDB or an open timeout costs a full open attempt per
         // save for an answer that cannot change.
         const TRANSIENT = [
@@ -405,7 +405,7 @@ window.NERO.embed = window.NERO.embed || {};
          * latch and drops the (possibly half-torn) database handle so the
          * normal open path runs again. It does not touch the document, the
          * identity, the revision, the saved hash or the last-draft pointer, and
-         * it cannot make anything look saved — the store's dirty state still
+         * it cannot make anything look saved - the store's dirty state still
          * only changes through markSavedHash() after a write actually succeeds.
          */
         function recover() {
@@ -419,7 +419,7 @@ window.NERO.embed = window.NERO.embed || {};
         }
 
         /**
-         * The same question recover() answers — asked WITHOUT acting on it.
+         * The same question recover() answers - asked WITHOUT acting on it.
          *
          * A UI has to decide whether to OFFER a retry before one is asked for,
          * and finding out by calling recover() would clear the latch as a side
@@ -434,7 +434,7 @@ window.NERO.embed = window.NERO.embed || {};
         // ── open ──────────────────────────────────────────────────
         // One timeout, one degraded flag, no spinning. A VersionError (a
         // newer build already owns this database) degrades rather than
-        // forcing the database open — refusing is the safe answer.
+        // forcing the database open - refusing is the safe answer.
         function doOpen() {
             if (db) return Promise.resolve(true);
             if (degraded) return Promise.resolve(false);
@@ -616,17 +616,17 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * create({
      *   guildId, documentId,           // identity of the draft being edited
-     *   now,                           // injected clock (ms) — required
+     *   now,                           // injected clock (ms) - required
      *   storage,                       // adapter; default: IndexedDB
      *   scheduler, idleMs,             // coalescing timer
      *   ids,                           // id factory for imported documents
-     *   onState,                       // fn({state, ...}) — the UI's future hook
+     *   onState,                       // fn({state, ...}) - the UI's future hook
      * })
      */
     function create(options) {
         options = options || {};
         if (typeof options.now !== 'function') {
-            throw new TypeError('drafts.create needs opts.now — time is injected, never read');
+            throw new TypeError('drafts.create needs opts.now - time is injected, never read');
         }
         const now = options.now;
         const idleMs = options.idleMs == null ? DEFAULT_IDLE_MS : options.idleMs;
@@ -643,14 +643,14 @@ window.NERO.embed = window.NERO.embed || {};
         let revision = 0;
         let createdAt = null;
         let lastSavedHash = null;       // hash of what storage holds
-        // The DOCUMENT that hash describes — the last successfully persisted
+        // The DOCUMENT that hash describes - the last successfully persisted
         // version of the CURRENT draft identity, held as a private clone.
         //
         // It exists for exactly one question, the one the hash cannot answer:
         // "what was the message before the edit the user wants to discard?".
         // It is set only where persistence is KNOWN to have succeeded (a
         // confirmed write, a successful load) and cleared wherever the saved
-        // identity is deliberately reset (start/use/attach) — so it can never
+        // identity is deliberately reset (start/use/attach) - so it can never
         // describe a document that belongs to a different draft.
         //
         // It is never a second copy of the canonical document: the store still
@@ -660,7 +660,7 @@ window.NERO.embed = window.NERO.embed || {};
         let lastError = null;
         let lastUpdatedAt = null;
         let currentDocument = options.document || null;
-        let blocked = null;             // { reason, key, record } — writes refused while set
+        let blocked = null;             // { reason, key, record } - writes refused while set
         let destroyed = false;
         let timer = null;
         let inFlight = null;
@@ -740,7 +740,7 @@ window.NERO.embed = window.NERO.embed || {};
         /**
          * Would a retry plausibly succeed, given the failure we are sitting on?
          *
-         * Pure and side-effect free — the UI asks this to decide whether to
+         * Pure and side-effect free - the UI asks this to decide whether to
          * OFFER a retry, and an offer must not change anything by being asked.
          * The answer comes from the storage adapter (which owns the list of
          * transient reasons), so this file does not keep a second copy of it;
@@ -788,7 +788,7 @@ window.NERO.embed = window.NERO.embed || {};
             if (destroyed) return Promise.resolve({ ok: false, reason: 'destroyed' });
             cancelScheduled();
             // The preservation guard is ABSOLUTE. `force` means "write even if
-            // clean", nothing more — it must never lift a guard, because the
+            // clean", nothing more - it must never lift a guard, because the
             // only thing allowed to replace a preserved record is the explicit,
             // user-driven resolveGuard('replace').
             if (blocked) {
@@ -797,7 +797,7 @@ window.NERO.embed = window.NERO.embed || {};
             if (!currentDocument) return Promise.resolve({ ok: false, reason: 'no-document' });
             if (!documentId) return Promise.resolve({ ok: false, reason: 'no-document-id' });
             if (!isDirty() && !opts.force) {
-                // Nothing to write — but cancelScheduled() above may just have
+                // Nothing to write - but cancelScheduled() above may just have
                 // cleared a pending write, which is state subscribers show
                 // ("the newest edit is not written yet"). Without this notify a
                 // skipped save leaves the status bar claiming unsaved work for
@@ -807,19 +807,19 @@ window.NERO.embed = window.NERO.embed || {};
                 // is also where one stops being reported: nothing is owed here
                 // (the newest content is what storage holds, and any scheduled
                 // write was just cancelled), which means a failure recorded for
-                // an earlier edit has been RESOLVED — an Undo or a Discard put
-                // the draft back to the saved version — and must not outlive it.
+                // an earlier edit has been RESOLVED - an Undo or a Discard put
+                // the draft back to the saved version - and must not outlive it.
                 // Left set, it pinned the status bar on "Save failed" and
                 // offered a retry that could never clear itself, while this same
                 // session's state() already said "saved".
                 //
                 // The invariant this keeps:
-                //   lastError is non-null only while something is owed —
+                //   lastError is non-null only while something is owed -
                 //     isDirty() || inFlight || a scheduled write.
                 // A write already in flight is deliberately left alone: its own
                 // completion reports its outcome, and clearing here would hide a
                 // failure that is still unresolved. Transient and non-retryable
-                // failures alike are cleared — whether a retry could work is not
+                // failures alike are cleared - whether a retry could work is not
                 // what decides whether a resolved failure is reported.
                 if (lastError && !inFlight) lastError = null;
                 notify();
@@ -850,9 +850,9 @@ window.NERO.embed = window.NERO.embed || {};
             // failure, give the storage exactly one chance to come back before
             // this write is attempted. This is what makes "retry on next idle"
             // (and a manual Save) able to actually succeed, instead of talking
-            // to a latched adapter forever. It runs on EVERY write path — the
+            // to a latched adapter forever. It runs on EVERY write path - the
             // idle timer, the lifecycle flush, destroy's final save and a
-            // user-driven save — so there is still exactly one persistence path.
+            // user-driven save - so there is still exactly one persistence path.
             if (storage.recover && storage.isAvailable && !storage.isAvailable()) storage.recover();
 
             const targetKey = record.key;
@@ -865,7 +865,7 @@ window.NERO.embed = window.NERO.embed || {};
                     lastSavedHash = record.documentHash;
                     // The write is CONFIRMED: this record's document is now the
                     // last persisted version of this draft. Cloned on the way in
-                    // — the caller's document object may be edited in place by a
+                    // - the caller's document object may be edited in place by a
                     // later bug, and a clone cannot follow it there.
                     lastSavedDocument = model.cloneDocument(record.document);
                     lastError = null;
@@ -875,7 +875,7 @@ window.NERO.embed = window.NERO.embed || {};
                     // document A while `currentDocument` is already B, because
                     // the user typed during the write. markSavedHash() records
                     // "what storage holds is A" and leaves the store's document
-                    // (B), its history and its undo stack exactly as they are —
+                    // (B), its history and its undo stack exactly as they are -
                     // so the store stays dirty until B itself is written.
                     // Handing the document over instead would either rewind the
                     // store to A or (markSaved(currentDocument)) claim B is on
@@ -958,7 +958,7 @@ window.NERO.embed = window.NERO.embed || {};
                 lastUpdatedAt = meta.updatedAt || null;
                 lastSavedHash = meta.documentHash || null;
                 // The record was read successfully, so this document IS what
-                // storage holds for this identity — the baseline a discard
+                // storage holds for this identity - the baseline a discard
                 // returns to. (meta.documentHash may be absent on a repaired
                 // record; status 'ok'/'repaired' is the verdict that matters.)
                 lastSavedDocument = verdict.document ? model.cloneDocument(verdict.document) : null;
@@ -1011,7 +1011,7 @@ window.NERO.embed = window.NERO.embed || {};
                 // case is clearing the message back to nothing while the first
                 // save is still going: it read as clean (no content, nothing
                 // ever saved) and the clearing was silently dropped, so a
-                // reload brought the old text back. Queue a re-check instead —
+                // reload brought the old text back. Queue a re-check instead -
                 // the write's own completion decides, with the fresh hash.
                 if (inFlight) pendingAfterFlight = true;
                 cancelScheduled();
@@ -1247,7 +1247,7 @@ window.NERO.embed = window.NERO.embed || {};
             isDirty: isDirty,
             /**
              * Pure: could one more attempt plausibly succeed? True only when
-             * the last failure was a TRANSIENT write failure — asked of the
+             * the last failure was a TRANSIENT write failure - asked of the
              * storage adapter, so the definition lives in exactly one place
              * and asking changes nothing. A storage that cannot answer is not
              * assumed retryable: an offer to retry must never be a guess.

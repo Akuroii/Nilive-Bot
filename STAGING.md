@@ -1,7 +1,7 @@
-# Nilive Bot — Staging vs. Production Database
+# Nilive Bot - Staging vs. Production Database
 
 Lets you point the bot and/or dashboard at a second, separate SQLite
-file for testing — so you can try changes without touching real
+file for testing - so you can try changes without touching real
 member data.
 
 ## How it works
@@ -9,15 +9,15 @@ member data.
 `database.py` resolves `DB_PATH` from environment variables, checked
 in this order:
 
-1. `DATABASE_PATH` (if set) — explicit override, always wins.
-2. `NERO_ENVIRONMENT=staging` + `STAGING_DATABASE_PATH` (if set) —
+1. `DATABASE_PATH` (if set) - explicit override, always wins.
+2. `NERO_ENVIRONMENT=staging` + `STAGING_DATABASE_PATH` (if set) -
    staging points at that exact path.
-3. `NERO_ENVIRONMENT=staging`, no `STAGING_DATABASE_PATH` set — falls
+3. `NERO_ENVIRONMENT=staging`, no `STAGING_DATABASE_PATH` set - falls
    back to `/app/data/nero_staging.db`.
-4. Default (`NERO_ENVIRONMENT` unset, or `production`) —
+4. Default (`NERO_ENVIRONMENT` unset, or `production`) -
    `/app/data/nero.db`, same as before this feature existed.
 
-If you never set `NERO_ENVIRONMENT`, nothing changes — the current
+If you never set `NERO_ENVIRONMENT`, nothing changes - the current
 deploy behaves exactly as it did before this.
 
 ## Running in staging mode
@@ -44,7 +44,7 @@ Both processes print which environment and path they're using on
 startup:
 
 ```
-[DB] Environment: staging — using database at /app/data/nero_staging.db
+[DB] Environment: staging - using database at /app/data/nero_staging.db
 ```
 
 The dashboard also shows it visually:
@@ -76,7 +76,7 @@ python3 scripts/clone_to_staging.py
 ```
 
 This uses SQLite's online backup API (same approach as
-`cogs/backup.py`'s automated backups) — safe to run while the
+`cogs/backup.py`'s automated backups) - safe to run while the
 production bot/dashboard are live and actively writing. It's a
 one-time snapshot, not a live link; re-run it whenever you want
 staging refreshed.
@@ -88,7 +88,7 @@ python3 scripts/clone_to_staging.py --source X --dest Y  # explicit paths
 
 The script always defaults to the two well-known default paths
 (`/app/data/nero.db` -> `/app/data/nero_staging.db`), regardless of
-your shell's `NERO_ENVIRONMENT`/`DATABASE_PATH` — it doesn't read
+your shell's `NERO_ENVIRONMENT`/`DATABASE_PATH` - it doesn't read
 either of those, so running it can't accidentally pick up the wrong
 source/destination from your current environment.
 
@@ -99,11 +99,11 @@ This is database-only separation. It does not:
 - Give you a second Discord bot/token. Running a staging *bot
   process* with the same `DISCORD_TOKEN` as production, at the same
   time, means two processes both connect to the gateway and both try
-  to handle the same events/commands — that will misbehave. To test
+  to handle the same events/commands - that will misbehave. To test
   bot-side behavior (not just dashboard behavior) against staging
   data, use a second Discord application + bot token pointed at a
   private test server, with `DISCORD_TOKEN` set to that second token
   alongside `NERO_ENVIRONMENT=staging`.
-- Anonymize member data. A clone is an exact copy — real Discord user
+- Anonymize member data. A clone is an exact copy - real Discord user
   IDs, balances, warning reasons, everything. Treat a staging file
   that came from a real clone with the same care as production.

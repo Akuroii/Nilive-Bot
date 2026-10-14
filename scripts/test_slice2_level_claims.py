@@ -85,7 +85,7 @@ class Fail(Exception):
 
 
 def check(name, ok, detail=""):
-    print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
+    print(f"[{'PASS' if ok else 'FAIL'}] {name}" + (f" - {detail}" if detail else ""))
     if not ok:
         raise Fail(name)
 

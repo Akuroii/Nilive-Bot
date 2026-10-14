@@ -1,5 +1,5 @@
 """
-Shop Publisher — saved Design drafts (Design Draft Persistence).
+Shop Publisher - saved Design drafts (Design Draft Persistence).
 
 shop_designs is the persistent source for saved Shop Designer drafts. It
 stores ORCHESTRATION/PRESENTATION configuration only and never duplicates
@@ -12,7 +12,7 @@ THE PERSISTED PRESENTATION IS THE DESIGN'S OWN SNAPSHOT (locked):
   from the Embed Builder's existing read route) and the draft may be edited;
   on Save the presentation is normalized (utils.shop_publisher
   .normalize_template_doc) and persisted as the design's own presentation
-  snapshot. source_template_name is PROVENANCE ONLY — after save it is NEVER
+  snapshot. source_template_name is PROVENANCE ONLY - after save it is NEVER
   dereferenced to reload or mutate the saved presentation, and later Embed
   Builder edits to (or deletion of) the source template cannot touch a saved
   design.
@@ -28,7 +28,7 @@ CONTRACT:
     source_template_name and design_json. `id`, `guild_id` and `created_at`
     are immutable; `updated_at` is refreshed on every successful update.
   * Unknown and cross-guild design ids return the SAME indistinguishable
-    404 {"code": "unknown_design"} — cross-guild existence is never disclosed,
+    404 {"code": "unknown_design"} - cross-guild existence is never disclosed,
     and `guild_id` comes only from the session (a body guild_id is ignored).
   * Delete is a HARD delete (MVP): no revisions, no version history, no soft
     delete, no autosave, no collaboration model. Nothing references designs
@@ -38,7 +38,7 @@ CONTRACT:
     rejected with the existing problem codes (empty_roster,
     invalid_product_ref, unknown_product, entry_not_in_roster, ...). A stale
     product reference discovered later (product deleted after save) surfaces
-    those SAME existing codes at preview time — this module never invents a
+    those SAME existing codes at preview time - this module never invents a
     product-reference error code. `unknown_design` is only for the design id
     in this CRUD.
   * products[] remains a ROOT-product roster. Root/option membership is
@@ -103,7 +103,7 @@ def _bad_request(problems):
 
 
 def _not_found(code, path):
-    # Unknown and cross-guild ids share this exact response — no cross-guild
+    # Unknown and cross-guild ids share this exact response - no cross-guild
     # existence disclosure, ever.
     return jsonify({
         "success": False,
@@ -137,7 +137,7 @@ async def _fetch_design(db, design_id, guild_id):
 
 
 def _rows_by_id(guild_id, wanted):
-    """The session-guild shop_items rows a draft references — the same read
+    """The session-guild shop_items rows a draft references - the same read
     the preview route performs (shared column lists and row mapping)."""
 
     async def fetch():
@@ -190,7 +190,7 @@ def api_shop_designs_save():
     """Create (id absent/null) or full-overwrite update (id present).
 
     The presentation is normalized and persisted as the design's own
-    snapshot here — source_template_name is stored as provenance and never
+    snapshot here - source_template_name is stored as provenance and never
     dereferenced after this point.
     """
     guild_id = get_session_guild_id()
@@ -301,7 +301,7 @@ def api_shop_designs_save():
                 return await _fetch_design(db, cursor.lastrowid, guild_id), False
 
             if not await _get_design(db, design_id, guild_id):
-                return None, True  # unknown or cross-guild — same 404
+                return None, True  # unknown or cross-guild - same 404
 
             await db.execute(
                 "UPDATE shop_designs SET name = ?, source_template_name = ?, "

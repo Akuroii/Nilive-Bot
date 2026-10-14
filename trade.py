@@ -15,7 +15,7 @@ from utils.emoji import CHECK_EMOJI, as_partial_emoji as _as_button_emoji
 
 TRADE_TIMEOUT_SECONDS = 600  # 10 minutes
 
-# guild-scoped active-session guard — one open trade per pair of users
+# guild-scoped active-session guard - one open trade per pair of users
 # at a time, mirroring how cogs/reactionroles.py/etc keep transient UI
 # state in memory rather than the DB (the DB only ever sees the final
 # completed trade, via trade_history).
@@ -77,7 +77,7 @@ class AddCoinsModal(discord.ui.Modal):
 
     def __init__(self, view: "TradeView"):
         # Title carries the configured currency name. `discord.ui.Modal`'s
-        # title is a normal instance attribute, so it can be set per-open —
+        # title is a normal instance attribute, so it can be set per-open -
         # the decorator form cannot, because it is evaluated once at class
         # definition and would freeze the default name server-wide.
         info = for_currency(view.cur, "coins")
@@ -98,7 +98,7 @@ class AddCoinsModal(discord.ui.Modal):
             cur = self.view_ref.cur
             cc = cur["coins"]
             await interaction.response.send_message(
-                f"You only have {bal:,} {cc['emoji']} — cannot offer {amt:,}.",
+                f"You only have {bal:,} {cc['emoji']} - cannot offer {amt:,}.",
                 ephemeral=True)
             return
         self.view_ref.session.offers[interaction.user.id]["coins"] = amt
@@ -128,7 +128,7 @@ class AddDiamondsModal(discord.ui.Modal):
             cur = self.view_ref.cur
             cd = cur["diamonds"]
             await interaction.response.send_message(
-                f"You only have {gems:,} {cd['emoji']} — cannot offer {amt:,}.",
+                f"You only have {gems:,} {cd['emoji']} - cannot offer {amt:,}.",
                 ephemeral=True)
             return
         self.view_ref.session.offers[interaction.user.id]["diamonds"] = amt
@@ -139,19 +139,19 @@ class AddDiamondsModal(discord.ui.Modal):
 # ─── Item picker (replaces free-text item-name entry) ───────────────────
 #
 # Previously "Offer Item" opened a modal with a raw text field for the
-# item name — a member had to know/type the exact name (case, spacing,
+# item name - a member had to know/type the exact name (case, spacing,
 # etc. all had to match inventory_items.item_name exactly, since
 # has_item() does a literal lookup). This is the carry-forward gap
-# flagged since pass #15 ("Item autocomplete/picker for Trade UI — not
+# flagged since pass #15 ("Item autocomplete/picker for Trade UI - not
 # yet built"). Discord slash-command autocomplete only works on command
 # options, not modal text inputs, so a modal can't offer live
-# suggestions — the fix is a Select menu instead: fetch the member's
+# suggestions - the fix is a Select menu instead: fetch the member's
 # actual inventory first, list what they hold as pickable options, and
 # only ask for a quantity (via a small modal) once they've picked a
 # real item they own. This makes offering a nonexistent/misspelled item
 # structurally impossible instead of just validated-and-rejected.
 #
-# Discord caps a Select at 25 options — if a member holds more than 25
+# Discord caps a Select at 25 options - if a member holds more than 25
 # distinct items, this shows their 25 highest-quantity ones. That's a
 # real (if unlikely) limitation for very item-heavy inventories; not
 # solved here since it would need pagination UI, which is out of scope
@@ -176,7 +176,7 @@ class ItemQuantityModal(discord.ui.Modal):
             await interaction.response.send_message("Quantity must be positive.", ephemeral=True)
             return
         # Re-checked live (not just against the snapshot the Select was
-        # built from) — the same "trust nothing older than this click"
+        # built from) - the same "trust nothing older than this click"
         # rule execute_trade() itself follows at execution time.
         owns = await has_item(self.view_ref.session.guild_id, interaction.user.id, self.item_name, qty)
         if not owns:
@@ -222,7 +222,7 @@ class ItemPickerView(discord.ui.View):
 
 class AddItemModal(discord.ui.Modal, title="Offer an Item"):
     """
-    Manual-entry fallback — kept for the >25-distinct-items case (where
+    Manual-entry fallback - kept for the >25-distinct-items case (where
     a Select can't list everything) and for anyone who'd rather just
     type the exact name. The picker above is the default path from the
     "Offer Item" button; this is reached only when there are too many
@@ -267,8 +267,8 @@ class TradeView(discord.ui.View):
         self.cur = cur
         # Apply the guild's configured currency names to the two offer
         # buttons. Discord requires a button's emoji to be a real,
-        # bot-usable emoji — an emoji the bot cannot reach renders as the
-        # literal token text — so a unicode/plain name falls back to no
+        # bot-usable emoji - an emoji the bot cannot reach renders as the
+        # literal token text - so a unicode/plain name falls back to no
         # glyph rather than showing something broken.
         for button, key in ((self.offer_coins, "coins"),
                             (self.offer_diamonds, "diamonds")):
@@ -302,7 +302,7 @@ class TradeView(discord.ui.View):
         if self.session.message:
             try:
                 await self.session.message.edit(
-                    content="⌛ Trade timed out — no changes were made.", view=self)
+                    content="⌛ Trade timed out - no changes were made.", view=self)
             except Exception:
                 pass
 
@@ -326,7 +326,7 @@ class TradeView(discord.ui.View):
                 "You don't have any items to offer.", ephemeral=True)
             return
         if len(items) > 25:
-            # Select is capped at 25 options — fall back to manual
+            # Select is capped at 25 options - fall back to manual
             # entry rather than silently hiding items past the 25th.
             await interaction.response.send_modal(AddItemModal(self))
             return
@@ -349,7 +349,7 @@ class TradeView(discord.ui.View):
             await self.refresh(interaction)
             return
 
-        # Both ready — execute atomically. interaction_check already
+        # Both ready - execute atomically. interaction_check already
         # gated who can click; execute_trade re-validates live balances
         # inside its own transaction regardless (offers can go stale
         # between "both readied up" and now).
@@ -367,7 +367,7 @@ class TradeView(discord.ui.View):
         if not result.get("success"):
             embed = discord.Embed(
                 title="❌ Trade failed",
-                description=result.get("error", "Something changed — trade could not complete."),
+                description=result.get("error", "Something changed - trade could not complete."),
                 color=0xED4245)
             await interaction.response.edit_message(embed=embed, view=self)
             return
@@ -436,14 +436,14 @@ class Trade(commands.Cog):
             return
 
         cur = await get_currency_config(interaction.guild.id)
-        embed = discord.Embed(title=f"📜 Trade History — {target.display_name}", color=0x7c5cbf)
+        embed = discord.Embed(title=f"📜 Trade History - {target.display_name}", color=0x7c5cbf)
         for r in rows:
             a_id, b_id = r["user_a"], r["user_b"]
             offer_a, offer_b = r["offer_a"], r["offer_b"]
 
             def summarize(offer):
                 # Historical rows store only the stable keys ('coins' /
-                # 'diamonds') plus amounts — never a currency name — so a
+                # 'diamonds') plus amounts - never a currency name - so a
                 # past trade re-labels itself with whatever the guild's
                 # currency is called NOW. Renaming never invalidates
                 # history.
@@ -457,7 +457,7 @@ class Trade(commands.Cog):
                 return ", ".join(parts) or "nothing"
 
             embed.add_field(
-                name=f"#{r['id']} — {str(r['created_at'])[:16]}",
+                name=f"#{r['id']} - {str(r['created_at'])[:16]}",
                 value=f"<@{a_id}> gave {summarize(offer_a)}\n<@{b_id}> gave {summarize(offer_b)}",
                 inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)

@@ -2,7 +2,7 @@
 
 Locks down, against the real production paths and a scratch DB:
 
-* `_claim_button_available` (cogs.leveling) — Claim All stays reachable with
+* `_claim_button_available` (cogs.leveling) - Claim All stays reachable with
   nothing pending only when a role claim is fulfilled AND
   `remove_old_reward_role` is ON (it is then the explicit reconcile action);
 * the full member-initiated Claim All flow (`claim_available`) when every Level
@@ -29,7 +29,7 @@ FAILS = []
 
 
 def check(label, ok, detail=""):
-    print(f"[{'PASS' if ok else 'FAIL'}] {label}" + (f" — {detail}" if detail and not ok else ""))
+    print(f"[{'PASS' if ok else 'FAIL'}] {label}" + (f" - {detail}" if detail and not ok else ""))
     if not ok:
         FAILS.append(label)
 

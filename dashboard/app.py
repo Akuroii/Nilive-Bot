@@ -31,7 +31,7 @@ from utils.xp_calculator import calculate_level_from_xp
 from utils.formatters import format_relative, format_timestamp
 from utils.discord_limits import limits_payload
 
-# staging-db delta: dashboard/app.py never called load_dotenv() itself —
+# staging-db delta: dashboard/app.py never called load_dotenv() itself -
 # it worked anyway in production because Railway injects real env vars
 # directly (no .env file involved), but any local/dev run relying on a
 # .env file for DATABASE_PATH / NERO_ENVIRONMENT / SECRET_KEY etc. would
@@ -72,7 +72,7 @@ app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7
 
 # SECURITY FIX: the session cookie (which carries the signed user
 # identity + CSRF token) previously had no explicit Secure/HttpOnly/
-# SameSite flags, so Flask's defaults applied — HttpOnly is on by
+# SameSite flags, so Flask's defaults applied - HttpOnly is on by
 # default, but Secure is NOT, meaning the cookie could legally be sent
 # over a plain HTTP connection if one ever existed in the request path
 # (a misconfigured proxy, HTTP-only health checks hitting the same
@@ -83,7 +83,7 @@ app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 7
 # replacement for it.
 #
 # DASHBOARD_FORCE_HTTP is an explicit, opt-in escape hatch for local
-# dev over plain http://localhost — Secure cookies are simply never
+# dev over plain http://localhost - Secure cookies are simply never
 # sent by browsers over HTTP, so leaving Secure on in that setup would
 # make login appear to silently fail with no obvious cause. Unset (the
 # default) is correct for the real Oracle Cloud deployment, which
@@ -122,7 +122,7 @@ def render(template, **ctx):
     return render_template(template, **ctx)
 
 
-# SECURITY FIX: baseline response security headers — none of these
+# SECURITY FIX: baseline response security headers - none of these
 # were set anywhere before. Frame/MIME/referrer hardening is
 # unconditional; HSTS only makes sense once the connection is actually
 # HTTPS (harmless but pointless over plain HTTP dev), so it's skipped
@@ -130,9 +130,9 @@ def render(template, **ctx):
 #
 # img-src is deliberately looser than a strict "self + Discord's CDN
 # only" policy would be. Several existing, intentional features let an
-# admin paste an arbitrary image URL — Embed Builder's thumbnail/image
+# admin paste an arbitrary image URL - Embed Builder's thumbnail/image
 # fields, Welcome's embed images, Bot Profile's avatar/banner preview,
-# ticket category embeds, Creator Hub's YouTube/Twitch thumbnails —
+# ticket category embeds, Creator Hub's YouTube/Twitch thumbnails -
 # none of which are limited to Discord's CDN. A stricter img-src would
 # silently break every one of those previews with no visible error
 # beyond "the image just doesn't show up". Allowing any https: image
@@ -142,8 +142,8 @@ def render(template, **ctx):
 # describes in the abstract: the Embed Builder previews files that were
 # never uploaded anywhere (browser-side File objects, shown via
 # URL.createObjectURL). Without `blob:` the <img> src resolves fine in
-# the DOM and *still* renders nothing — no failed request, no network
-# entry, one console line — which is indistinguishable from "the
+# the DOM and *still* renders nothing - no failed request, no network
+# entry, one console line - which is indistinguishable from "the
 # attachment feature is broken" from the admin's seat. Same-origin blobs
 # carry no third-party read capability, so this doesn't widen the policy
 # in any meaningful way; the client side degrades to CSP-proof
@@ -169,12 +169,12 @@ def _set_security_headers(response):
 
 
 # SECURITY FIX: /login, /discord_login, and /callback are the only
-# routes reachable with zero authentication at all — everything else
+# routes reachable with zero authentication at all - everything else
 # sits behind @login_required or @require_page. Nothing previously
 # rate-limited repeated hits against them, which matters most for
 # /callback (repeatedly replaying/guessing an authorization code) and
 # /discord_login (hammering the OAuth redirect). Keyed by remote IP; a
-# small in-memory sliding window, not a distributed store — sufficient
+# small in-memory sliding window, not a distributed store - sufficient
 # for this project's actual scale (a handful of trusted admins), not
 # meant to survive a multi-instance deployment. Same opportunistic-
 # prune shape already used for the cooldown dicts in cogs/economy.py,
@@ -208,12 +208,12 @@ def rate_limit(max_requests: int, window_seconds: int):
 
 @app.errorhandler(429)
 def rate_limited(e):
-    return jsonify({"success": False, "error": "Too many requests — try again shortly."}), 429
+    return jsonify({"success": False, "error": "Too many requests - try again shortly."}), 429
 
 
 # staging-db feature: makes nero_environment/is_staging available to
 # EVERY template render (context processors apply globally, not just
-# to calls through this file's render() helper) — used by the staging
+# to calls through this file's render() helper) - used by the staging
 # banner in base.html, the staging badge on login.html, and the
 # Environment row on health.html.
 @app.context_processor
@@ -229,7 +229,7 @@ def inject_environment():
 # Economy owns the currency configuration; the dashboard consumes it. A
 # context processor (rather than passing `currency` from each of the ~20
 # admin page routes) is what makes "configure once, applied everywhere" true
-# by construction — no page can forget the guild's currency, and no page
+# by construction - no page can forget the guild's currency, and no page
 # can invent its own default name. Values passed explicitly by a route win
 # (Flask re-applies the view context last), so routes that already pass
 # `currency`/`currency_defaults` keep working unchanged.
@@ -291,7 +291,7 @@ def login():
 @rate_limit(10, 60)
 def discord_login():
     # SECURITY FIX: the OAuth authorize URL previously carried no
-    # `state` parameter at all — textbook OAuth CSRF: nothing stopped
+    # `state` parameter at all - textbook OAuth CSRF: nothing stopped
     # an attacker from tricking a victim's browser into completing an
     # authorization flow the attacker initiated (e.g. to bind the
     # victim's session to an attacker-controlled Discord account, or
@@ -302,7 +302,7 @@ def discord_login():
     #
     # BUGFIX, same change: `remember` was previously read from
     # request.args at /callback, but Discord's redirect_uri is a
-    # fixed, pre-registered value — nothing about the ORIGINAL
+    # fixed, pre-registered value - nothing about the ORIGINAL
     # /discord_login request (including ?remember=1) survives the
     # round trip to Discord and back. "Remember me" was silently a
     # no-op regardless of the checkbox. It's now stashed in the
@@ -322,7 +322,7 @@ def callback():
         return redirect(url_for("login"))
     if not verify_oauth_state(state):
         # Expired session, replayed/forged callback, or a genuine CSRF
-        # attempt — indistinguishable from here, and all three get the
+        # attempt - indistinguishable from here, and all three get the
         # same safe response: back to login, no session created.
         return redirect(url_for("login"))
     tokens = exchange_code(code)
@@ -343,11 +343,11 @@ def logout():
     return redirect(url_for("login"))
 
 
-# ── Local review login (Phase 5 — manual browser check) ─────────────
+# ── Local review login (Phase 5 - manual browser check) ─────────────
 # OFF by default: unless DASHBOARD_DEMO_LOGIN=1 is set, this route is a
 # 404 and production/staging behavior is untouched. With the flag set
 # (local preview only) it creates exactly the session the OAuth
-# callback would, for a fixed demo identity — Discord OAuth cannot
+# callback would, for a fixed demo identity - Discord OAuth cannot
 # complete inside the sandboxed preview, and the user asked for a real
 # browser walkthrough of the minigames UI. Pair the flag with
 # OWNER_ID=<demo user id> so the demo user gets the same guild-blind
@@ -378,7 +378,7 @@ def server_select():
     async def get_accessible_guilds():
         user_id = current_user_id()
 
-        # Developer bypass — every guild the BOT is currently in, not
+        # Developer bypass - every guild the BOT is currently in, not
         # just guilds the logged-in developer personally belongs to
         # on Discord. fetch_discord_guilds() above is scoped to the
         # LOGGED-IN USER's own OAuth membership, which would
@@ -439,7 +439,7 @@ def select_guild(guild_id: int):
     row = run_async(check())
     level = row[0] if row else None
 
-    # Developer bypass — never writes a dashboard_users row, so the
+    # Developer bypass - never writes a dashboard_users row, so the
     # developer never appears in Current Access. bot_is_in_guild is
     # still checked so a guessed/typo'd guild_id the bot isn't
     # actually in still 403s instead of silently "succeeding".
@@ -463,7 +463,7 @@ def select_guild(guild_id: int):
     return redirect(url_for("index"))
 
 
-# ── Phase 0 Extension — Server Permission Gating (Sapphire-style) ──────────
+# ── Phase 0 Extension - Server Permission Gating (Sapphire-style) ──────────
 
 @app.route("/api/user/servers")
 @login_required
@@ -482,10 +482,10 @@ def api_user_servers():
     # guild data for the is_bot_member flag. Confirmed by screenshot
     # that this OAuth list can carry icon: null for a guild that does
     # have one set (name and bot-installed status came through fine,
-    # icon specifically didn't) — root cause on Discord's side wasn't
+    # icon specifically didn't) - root cause on Discord's side wasn't
     # pinned down, so rather than depend on that diagnosis, guilds the
     # bot is actually in now use the bot's own (bot-token) view of
-    # name/icon instead, which is already proven reliable — same data
+    # name/icon instead, which is already proven reliable - same data
     # /server-select's developer-bypass view already uses. Guilds the
     # bot ISN'T in still fall back to the OAuth data, same as before.
     bot_guilds = {int(g["id"]): g for g in fetch_bot_guilds_full()}
@@ -548,7 +548,7 @@ def index():
 
     stats = run_async(get_stats())
 
-    # Bot liveness for the status card — the same "last beat < 90s" rule
+    # Bot liveness for the status card - the same "last beat < 90s" rule
     # as /health (general/health.html). This card used to be hardcoded
     # "Online" (always green), so a stale heartbeat was invisible from
     # the overview. Same parse as the /health route.
@@ -1023,7 +1023,7 @@ def _bot_identity_for_page(guild_id):
 
     Why it exists: the Embed Builder used to fetch /api/botprofile/config
     while initialising, and that route calls Discord live
-    (utils/bot_profile.get_live_bot_member — a blocking requests.get with an
+    (utils/bot_profile.get_live_bot_member - a blocking requests.get with an
     8s timeout). So the composer could not paint until Discord answered, and
     when Discord was slow the page just sat there. The same values the
     dashboard already stores (guild_bot_profile, written by
@@ -1033,7 +1033,7 @@ def _bot_identity_for_page(guild_id):
     Deliberately no Discord call and no new endpoint: the data rides along
     with the page render, exactly like __CURRENCY__ / __CHECK_ICON__, and
     contains only what every member of the guild can already see (the bot's
-    nickname in this guild and its avatar URL). Never raises — a preview is
+    nickname in this guild and its avatar URL). Never raises - a preview is
     not worth failing a page render for.
     """
     if not guild_id:
@@ -1068,7 +1068,7 @@ def embed_builder():
 
 
 # ── Message Builder v2 (phase 1) ───────────────────────────────────────────────
-# A SECOND route, next to the frozen one — not a replacement. Phase 1 also has
+# A SECOND route, next to the frozen one - not a replacement. Phase 1 also has
 # no Send: the v2 page edits a normalized MessageDocument, keeps it in a draft
 # of its own (a different IndexedDB database than v1's), and renders the
 # differential preview. The switch/`?legacy=1` decision belongs to the phase
@@ -1263,7 +1263,7 @@ def economy():
 
     # Currency display config is rendered server-side so the page never
     # flashes the default 🪙/💎 before the fetch below fills in the real
-    # values — and so this page reads from the same resolver every other
+    # values - and so this page reads from the same resolver every other
     # surface uses, rather than keeping its own copy of the names.
     async def get_currency():
         from utils.currency import (
@@ -1382,14 +1382,14 @@ def events():
 #
 # The page is CLIENT-DATA-DRIVEN: it renders an empty shell and the
 # vanilla JS below loads everything through the /api/minigames/*
-# endpoints (dashboard/api/minigames.py) — same pattern as the other
+# endpoints (dashboard/api/minigames.py) - same pattern as the other
 # systems pages (no server-side prefetch, tabs never reload). The v1
 # tier-based prefetch (cogs.minigames.get_tiers) is retired with the
 # v1 API.
 #
 # Two pages, one permission key:
-#   /minigames          — Config / Categories & Templates / History
-#   /minigames/builder  — the single-page game builder; ?template_id=
+#   /minigames          - Config / Categories & Templates / History
+#   /minigames/builder  - the single-page game builder; ?template_id=
 #                         opens an existing template, ?category_id=
 #                         pre-fills the Spawn Settings category.
 
@@ -1422,7 +1422,7 @@ def missions_page():
     return render("systems/missions.html", **ctx)
 
 
-# ── Ledger (Phase 3 E3 CLOSEOUT — read-only) ────────────────────────────────
+# ── Ledger (Phase 3 E3 CLOSEOUT - read-only) ────────────────────────────────
 
 @app.route("/ledger")
 @require_page("ledger")
@@ -1448,7 +1448,7 @@ def ledger_page():
                   user_map=user_map, **ctx)
 
 
-# ── Inventory (Phase 3 E4 CLOSEOUT — read-only) ─────────────────────────────
+# ── Inventory (Phase 3 E4 CLOSEOUT - read-only) ─────────────────────────────
 
 @app.route("/inventory")
 @require_page("inventory_view")
@@ -1505,7 +1505,7 @@ def trade_page():
     return render("systems/trade.html", **ctx)
 
 
-# ── Backups (bot-wide — every guild's data lives in one DB file) ───────────
+# ── Backups (bot-wide - every guild's data lives in one DB file) ───────────
 
 @app.route("/backups")
 @require_page("backups")
@@ -1561,7 +1561,7 @@ def backups():
         **ctx)
 
 
-# ── Server Tags — Tag-Loyalty Missions + Cross-Server Join Reward ──────────
+# ── Server Tags - Tag-Loyalty Missions + Cross-Server Join Reward ──────────
 
 @app.route("/tag-missions")
 @require_page("tagmissions")
@@ -1778,11 +1778,11 @@ def config_boost():
 #
 # REGRESSION FIX (creator-notify pass): this route was silently dropped
 # from app.py somewhere between the Bot Profile feature landing and the
-# Creator Hub delta being built — the file that added /creator and the
+# Creator Hub delta being built - the file that added /creator and the
 # announcements->creator redirect was apparently edited from a copy of
 # app.py that predated Bot Profile. dashboard/api/botprofile.py (the
 # actual route handlers) was never touched or lost, only this page's
-# entry point — restored verbatim from before the Creator Hub delta.
+# entry point - restored verbatim from before the Creator Hub delta.
 
 @app.route("/config/botprofile")
 @require_page("botprofile")
@@ -1791,7 +1791,7 @@ def config_botprofile():
     return render("config/botprofile.html", **ctx)
 
 
-# ── Config: Announcements (legacy — redirects to /creator) ─────────────────
+# ── Config: Announcements (legacy - redirects to /creator) ─────────────────
 #
 # CREATOR pass: this used to render a read-only view of youtube_config +
 # twitch_config. It's fully superseded by /creator (full CRUD), so the
@@ -1880,7 +1880,7 @@ COMMAND_METADATA = {
     "boostcolor": {"desc": "Pick your boost color role", "params": ["color"]},
     "botprofile_view": {"desc": "View this server's configured bot profile", "params": []},
     "balance": {"desc": "Check your coin and diamond balance", "params": ["member"]},
-    "wallet": {"desc": "Open your private wallet — balances, streak, inventory and receipts", "params": []},
+    "wallet": {"desc": "Open your private wallet - balances, streak, inventory and receipts", "params": []},
     "streak": {"desc": "Claim your daily streak reward", "params": []},
     "daily": {"desc": "Claim your daily streak reward (alias of /streak)", "params": []},
     "give": {"desc": "Give coins to another member", "params": ["member", "amount"]},
@@ -1963,7 +1963,7 @@ COMMAND_METADATA = {
     "youtube_setup": {"desc": "Add a YouTube channel to watch for uploads", "params": ["youtube_url", "discord_channel", "ping_role", "custom_message"]},
     "youtube_remove": {"desc": "Remove a YouTube notification", "params": ["entry_id"]},
     "youtube_list": {"desc": "List YouTube notification configs", "params": []},
-    # AFK pass (2026-09-23): prefix-only command, so "prefix": True — the
+    # AFK pass (2026-09-23): prefix-only command, so "prefix": True - the
     # Commands page renders its name/usage as "!afk [reason]" and hides the
     # alias controls (aliases don't route through the prefix bridge).
     "afk": {
@@ -2154,14 +2154,14 @@ def api_command_settings_get(command: str):
 # ── Alias advice (dashboard side, never a veto) ─────────────────────────
 #
 # Which system answers a given message is decided at runtime by
-# utils/message_router.py — prefix command > alias > custom command > trigger,
-# exactly one winner — and that answer is final. So the dashboard does not get
+# utils/message_router.py - prefix command > alias > custom command > trigger,
+# exactly one winner - and that answer is final. So the dashboard does not get
 # to refuse a save because a word is used elsewhere: it gets to *explain* what
 # will happen instead.
 #
 # This is a change of behaviour on purpose. The code before it raised
 # ValueError (HTTP 400) for five different "conflicts", which both contradicted
-# the router and blocked setups that work fine — e.g. alias `k` next to a
+# the router and blocked setups that work fine - e.g. alias `k` next to a
 # trigger word `k` is not an error, it just means the trigger stops hearing
 # messages that *begin* with `k`. Format problems (spaces, punctuation, length)
 # stay hard errors, because those words can never work at all.
@@ -2185,7 +2185,7 @@ def _json_word_list(raw):
 
 
 def normalize_aliases(raw):
-    """Strip, lowercase, dedupe — and drop the `!`/`/` people paste in."""
+    """Strip, lowercase, dedupe - and drop the `!`/`/` people paste in."""
     out = []
     for item in raw or []:
         if not isinstance(item, str):
@@ -2197,16 +2197,16 @@ def normalize_aliases(raw):
 
 
 def alias_format_error(alias: str):
-    """Hard rules only — collisions are not checked here on purpose."""
+    """Hard rules only - collisions are not checked here on purpose."""
     if not alias:
         return "An alias can't be empty."
     if len(alias) > ALIAS_MAX_LEN:
-        return (f"Alias '{alias}' is too long — {ALIAS_MAX_LEN} characters "
+        return (f"Alias '{alias}' is too long - {ALIAS_MAX_LEN} characters "
                 f"maximum.")
     if any(ch.isspace() for ch in alias):
-        return f"Alias '{alias}' can't contain spaces — one word per alias."
+        return f"Alias '{alias}' can't contain spaces - one word per alias."
     if not alias.replace("-", "").replace("_", "").isalnum():
-        return (f"Alias '{alias}' is invalid — use only letters, numbers, "
+        return (f"Alias '{alias}' is invalid - use only letters, numbers, "
                 f"hyphens and underscores.")
     return None
 
@@ -2262,13 +2262,13 @@ async def alias_warnings(db, guild_id, command_name, aliases):
                 note("global", alias,
                      f"'{alias}' is also stored on the global (guild 0) row "
                      f"for /{other_cmd}. Command settings are read per server, "
-                     f"so that row has no effect in a real server — set the "
+                     f"so that row has no effect in a real server - set the "
                      f"alias on this server's row, as you are doing now.")
             else:
                 note("duplicate", alias,
                      f"'{alias}' is currently the alias of /{other_cmd} here. "
                      f"Saving moves it to /{command_name} and /{other_cmd} "
-                     f"stops answering to it — the most recently saved row "
+                     f"stops answering to it - the most recently saved row "
                      f"owns the word.")
 
     cursor = await db.execute("""
@@ -2280,9 +2280,9 @@ async def alias_warnings(db, guild_id, command_name, aliases):
         if token not in words:
             continue
         note("custom", token,
-             f"A custom command '!{token}' also exists. Both keep working — "
+             f"A custom command '!{token}' also exists. Both keep working - "
              f"'{token}' runs /{command_name}, '!{token}' runs the custom "
-             f"command — because aliases are typed bare and have no !-form.")
+             f"command - because aliases are typed bare and have no !-form.")
 
     cursor = await db.execute("""
         SELECT trigger_words, match_type, fuzzy_match, fuzzy_threshold
@@ -2299,7 +2299,7 @@ async def alias_warnings(db, guild_id, command_name, aliases):
                     note("trigger", alias,
                          f"A trigger listens for the whole message "
                          f"'{word}'. One message can only run one thing, and "
-                         f"aliases win — so a message that *starts* with "
+                         f"aliases win - so a message that *starts* with "
                          f"'{alias}' now runs /{command_name} instead of "
                          f"getting the auto-reply. Rename the trigger if you "
                          f"want that reply back.")
@@ -2307,7 +2307,7 @@ async def alias_warnings(db, guild_id, command_name, aliases):
                                                     word in alias):
                     note("trigger-substring", alias,
                          f"The trigger '{word}' matches anywhere in a message, "
-                         f"so it still fires for most sentences — but a message "
+                         f"so it still fires for most sentences - but a message "
                          f"that starts with '{alias}' runs /{command_name} "
                          f"first (aliases take priority).")
                 elif match_type == "startswith" and (
@@ -2339,7 +2339,7 @@ def api_command_alias_registry():
 
     Read-only, and deliberately narrow: it reports what is in the database and
     what the bot last reported about building its index. Runtime precedence
-    stays in the bot (utils/message_router.py) — the labels below are the only
+    stays in the bot (utils/message_router.py) - the labels below are the only
     place this file mentions it, so the two cannot disagree about behaviour.
     """
     guild_id = get_session_guild_id()
@@ -2449,7 +2449,7 @@ def api_command_settings_save(command: str):
     # Aliases: the *format* is enforced, because a word containing a space or
     # punctuation can never match; overlap with other systems is reported as a
     # warning further down instead of blocking the save. Note there is
-    # deliberately no minimum length — `k` is the single most requested alias.
+    # deliberately no minimum length - `k` is the single most requested alias.
     aliases_raw = normalize_aliases(data.get("aliases", []))
     for alias in aliases_raw:
         problem = alias_format_error(alias)
@@ -2771,7 +2771,7 @@ def api_save_trigger():
     # ADVISORY ONLY (2026-08-28): a trigger word that is also an alias used to
     # be rejected outright. It can't be: the router already settles it (an
     # alias claims only messages that *start* with that word, and only when the
-    # word isn't a prefix command or custom command). Saving anyway is fine —
+    # word isn't a prefix command or custom command). Saving anyway is fine -
     # the save response says what will change, and the triggers page shows it.
     trigger_warnings = []
     trigger_words_raw = data.get("trigger_words", "")
@@ -2868,7 +2868,7 @@ def api_save_custom_command():
 
     # ADVISORY ONLY, same reasoning as /api/save-trigger: the router decides
     # who answers, the dashboard explains. `enabled` is written here too, since
-    # the bot now honours it (a row with enabled=0 is genuinely off — before
+    # the bot now honours it (a row with enabled=0 is genuinely off - before
     # this, the column was ignored and "disabled" commands kept replying).
     trigger_warnings = []
     cc_token = normalize_aliases([data.get("trigger", "")])
@@ -2893,8 +2893,8 @@ def api_save_custom_command():
                 "message": (
                     f"'{cc_token[0]}' is also an alias for /{alias} "
                     f"{'on the global (guild 0) row' if row_guild == 0 else 'in this server'}. "
-                    f"They do not clash — '!{cc_token[0]}' runs this custom "
-                    f"command, bare '{cc_token[0]}' runs /{alias} — but it is "
+                    f"They do not clash - '!{cc_token[0]}' runs this custom "
+                    f"command, bare '{cc_token[0]}' runs /{alias} - but it is "
                     f"worth knowing, because aliases have no !-form."),
             }]
 

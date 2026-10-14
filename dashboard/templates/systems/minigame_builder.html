@@ -36,7 +36,7 @@
             </div>
             <div class="mb-type-grid" id="mb-type-grid"></div>
             <p class="text-muted text-sm" id="mb-type-hint" style="margin-top:8px;">
-                Pick the mechanic — the settings below adapt to it.
+                Pick the mechanic - the settings below adapt to it.
             </p>
         </div>
 
@@ -73,7 +73,7 @@
             </div>
             <p class="text-muted text-sm" style="margin-bottom:12px;">
                 Every winner rolls one reward independently (weighted).
-                An empty pool is valid — the game just has no prizes.
+                An empty pool is valid - the game just has no prizes.
             </p>
             <div id="mb-rewards"></div>
             <div style="display:flex;align-items:center;gap:10px;">
@@ -96,7 +96,7 @@
                 <div class="form-group">
                     <label class="form-label">Target channel</label>
                     <select class="nero-channel-picker form-input" id="mb-channel" onchange="onSpawnInput()"></select>
-                    <div class="form-hint">Defaults to the guild spawn channel — pick another to override</div>
+                    <div class="form-hint">Defaults to the guild spawn channel - pick another to override</div>
                 </div>
             </div>
 
@@ -128,7 +128,7 @@
         <div class="card">
             <div class="card-title">👁️ Live Preview</div>
             <p class="text-muted text-sm" style="margin-bottom:10px;">
-                The exact Discord message the game will post — embed plus the
+                The exact Discord message the game will post - embed plus the
                 buttons the engine generates. The correct answer is never shown here.
             </p>
             <div class="eb-preview-box" id="mb-preview" style="min-height:140px;"></div>
@@ -186,7 +186,7 @@ const TEMPLATE_ID = {{ template_id | default(none) | tojson }};
 const PRESET_CATEGORY = {{ category_id | default(none) | tojson }};
 
 const MB_TYPES = [
-    { id: 'quick_click', icon: '⚡', name: 'Quick Click',        desc: 'Buttons appear — first click wins' },
+    { id: 'quick_click', icon: '⚡', name: 'Quick Click',        desc: 'Buttons appear - first click wins' },
     { id: 'wheel',       icon: '🎡', name: 'Wheel of Fortune',   desc: 'Players join, one winner is drawn' },
     { id: 'math',        icon: '🧮', name: 'Math',               desc: 'Answer the question before time runs out' },
     { id: 'colors',      icon: '🎨', name: 'Colors',             desc: 'Pick the color shown in the image' },
@@ -194,10 +194,10 @@ const MB_TYPES = [
     { id: 'rps',         icon: '✊', name: 'Rock Paper Scissors', desc: 'Seated showdown, best play wins' },
 ];
 // coins/diamonds labels come from the guild's currency config
-// (window.__CURRENCY__, written by base.html) — never hardcoded here, so a
+// (window.__CURRENCY__, written by base.html) - never hardcoded here, so a
 // renamed currency shows up in reward lists with no code change.
 // The TEXT variant, not currencyLabel(): these labels land in the reward
-// type <select> below, and an <option> may only contain text — a custom
+// type <select> below, and an <option> may only contain text - a custom
 // currency icon has to degrade to its emoji name there.
 // Built on first use, not at load: currencyLabelText() lives in dashboard.js,
 // which is loaded after this page script, and calling it here would throw and
@@ -213,7 +213,7 @@ function rewardTypeLabels() {
     }
     return __rewardTypeLabels;
 }
-// Engine defaults (utils/minigame_engine) — pre-filled so the admin
+// Engine defaults (utils/minigame_engine) - pre-filled so the admin
 // tweaks instead of starting from scratch.
 const MB_TYPE_DEFAULTS = {
     quick_click: { buttons: 4, reveal_min: 3, reveal_max: 8, wait_after: 10 },
@@ -275,7 +275,7 @@ function schedulePreview(configChanged) {
 async function refreshPreview(configChanged) {
     const gen = ++previewGen;
     if (configChanged) {
-        // Ask the ENGINE for the component rows — same pure function
+        // Ask the ENGINE for the component rows - same pure function
         // the bot posts with, so preview and real message cannot
         // diverge.
         if (mbState.game_type) {
@@ -300,7 +300,7 @@ async function refreshPreview(configChanged) {
         components: mbState.rows,
         botIdentity: mbState.botIdentity,
         lookups: {},
-        emptyText: 'Pick a game type and fill in the fields — the exact Discord message appears here',
+        emptyText: 'Pick a game type and fill in the fields - the exact Discord message appears here',
     });
 }
 
@@ -344,7 +344,7 @@ function renderGameSettings() {
 
     if (t === 'quick_click') {
         box.innerHTML = `<div class="form-row">
-            ${numInput('mb-qc-buttons', 'Button count', c.buttons, '2 to 6 buttons, posted disabled — the reveal enables one at random')}
+            ${numInput('mb-qc-buttons', 'Button count', c.buttons, '2 to 6 buttons, posted disabled - the reveal enables one at random')}
             ${numInput('mb-qc-rmin', 'Reveal delay min (s)', c.reveal_min, 'Random delay before the reveal, min')}
             ${numInput('mb-qc-rmax', 'Reveal delay max (s)', c.reveal_max, 'Random delay before the reveal, max')}
             ${numInput('mb-qc-wait', 'Wait after reveal (s)', c.wait_after, 'Grace window for the click')}
@@ -367,7 +367,7 @@ function renderGameSettings() {
                 <input class="form-input" id="mb-mc-image" value="${esc(mbState.embed.image)}"
                     placeholder="https://… the players must identify a color in this image"
                     oninput="onMcImageInput()">
-                <div class="form-hint">Stored as the embed image — it IS the puzzle</div>
+                <div class="form-hint">Stored as the embed image - it IS the puzzle</div>
             </div>`;
         } else if (t === 'emoji') {
             html += `
@@ -569,13 +569,13 @@ function updateRewardSum() {
     const sum = rows.reduce((s, r) => s + (parseInt(r.weight) || 1), 0);
     document.getElementById('mb-reward-sum').textContent =
         rows.length ? `${rows.length} reward${rows.length > 1 ? 's' : ''} · total weight ${sum}`
-                    : 'No pool — winners get nothing';
+                    : 'No pool - winners get nothing';
 }
 
 // ── spawn settings ─────────────────────────────────────────────────
 function renderCategorySelect() {
     const sel = document.getElementById('mb-category');
-    let html = '<option value="">— pick a category —</option>';
+    let html = '<option value="">- pick a category -</option>';
     (function walk(nodes, prefix) {
         for (const n of nodes) {
             html += `<option value="${n.id}">${prefix}${esc(n.emoji ? n.emoji + ' ' : '')}${esc(n.name)}</option>`;
@@ -620,10 +620,10 @@ function clientValidate() {
     if (!p.category_id) return 'Pick a category';
     if (!p.game_type) return 'Pick a game type';
     // A reward row that picked a type but never got a value would be
-    // silently dropped by buildPayload — surface it instead.
+    // silently dropped by buildPayload - surface it instead.
     const rawRewards = readMbRewards();
     if (rawRewards.some(r => !r.reward_value))
-        return 'Every reward needs a value — fill it in or remove the row';
+        return 'Every reward needs a value - fill it in or remove the row';
     const c = mbState.config;
     if (p.game_type === 'quick_click') {
         if (c.buttons != null && (c.buttons < 2 || c.buttons > 6)) return 'Button count must be 2 to 6';
@@ -669,7 +669,7 @@ async function saveTemplate(btn) {
         if (data.success || data.ok) {
             if (!isEdit) {
                 mbState.templateId = data.template.id;
-                // The URL now names the entity — a refresh lands back
+                // The URL now names the entity - a refresh lands back
                 // on THIS game (no duplication, no loss).
                 history.replaceState(null, '', `/minigames/builder?template_id=${mbState.templateId}`);
                 document.getElementById('mb-test-btn').disabled = false;
@@ -695,7 +695,7 @@ async function loadTemplate(id, silent) {
     const data = await res.json();
     const t = data.template;
     if (!t) {
-        if (!silent) showToast('Template not found — it may have been deleted', 'error');
+        if (!silent) showToast('Template not found - it may have been deleted', 'error');
         return false;
     }
     mbState.templateId = t.id;
@@ -738,7 +738,7 @@ async function loadTemplate(id, silent) {
 // ── test spawn (only for saved games) ──────────────────────────────
 async function testSpawnFromBuilder(btn) {
     if (!mbState.templateId) { showToast('Save the game first', 'warning'); return; }
-    if (mbState.dirty) { showToast('Save the game first — it has unsaved changes', 'warning'); return; }
+    if (mbState.dirty) { showToast('Save the game first - it has unsaved changes', 'warning'); return; }
     showConfirm('Queue a TEST spawn? The game runs in its target channel exactly as players would see it.', async () => {
         setLoading(btn, true, '…');
         try {
@@ -749,7 +749,7 @@ async function testSpawnFromBuilder(btn) {
             });
             const data = await res.json();
             if (data.success) {
-                showToast(`Test spawn queued — “${data.template_name}” runs in a few seconds`, 'success');
+                showToast(`Test spawn queued - “${data.template_name}” runs in a few seconds`, 'success');
                 pollTestDone();
             } else {
                 showToast(data.error || 'Test spawn failed', 'error');
@@ -771,7 +771,7 @@ function pollTestDone() {
             const data = await res.json();
             if ((data.requests || []).length === 0) {
                 clearInterval(timer);
-                showToast('Test spawn finished — open History to see the result', 'info');
+                showToast('Test spawn finished - open History to see the result', 'info');
             }
         } catch (e) { /* keep polling */ }
         if (tries > 60) clearInterval(timer);

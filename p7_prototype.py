@@ -1,8 +1,8 @@
 import pathlib
 from typing import Union
-"""LEGACY (kept as evidence, not a test): this probe documents the PRE-ROUTER behaviour of the alias system — content mutation, global bot.all_commands registration and the sibling-listener race. Those code paths no longer exist, so this file is expected to fail against the current tree; run p8 (bot), p4 (dashboard), p9 (chip UI) and p2 (static guards) instead. Its findings are written up in ALIAS_INVESTIGATION.md §1-§5 and §7.
+"""LEGACY (kept as evidence, not a test): this probe documents the PRE-ROUTER behaviour of the alias system - content mutation, global bot.all_commands registration and the sibling-listener race. Those code paths no longer exist, so this file is expected to fail against the current tree; run p8 (bot), p4 (dashboard), p9 (chip UI) and p2 (static guards) instead. Its findings are written up in ALIAS_INVESTIGATION.md §1-§5 and §7.
 
-PROBE 7 — feasibility check for the recommended architecture.
+PROBE 7 - feasibility check for the recommended architecture.
 
 Not a deliverable; a throwaway proof that these three things work on
 discord.py 2.7.1 with this codebase:

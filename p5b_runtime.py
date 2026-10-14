@@ -1,7 +1,7 @@
 import pathlib
-"""LEGACY (kept as evidence, not a test): this probe documents the PRE-ROUTER behaviour of the alias system — content mutation, global bot.all_commands registration and the sibling-listener race. Those code paths no longer exist, so this file is expected to fail against the current tree; run p8 (bot), p4 (dashboard), p9 (chip UI) and p2 (static guards) instead. Its findings are written up in ALIAS_INVESTIGATION.md §1-§5 and §7.
+"""LEGACY (kept as evidence, not a test): this probe documents the PRE-ROUTER behaviour of the alias system - content mutation, global bot.all_commands registration and the sibling-listener race. Those code paths no longer exist, so this file is expected to fail against the current tree; run p8 (bot), p4 (dashboard), p9 (chip UI) and p2 (static guards) instead. Its findings are written up in ALIAS_INVESTIGATION.md §1-§5 and §7.
 
-PROBE 5b — full runtime with every on_message listener instrumented.
+PROBE 5b - full runtime with every on_message listener instrumented.
 
 Records the exact interleaving of all on_message listeners for a bare
 alias message, so we can see (a) whether process_commands runs first,

@@ -12,7 +12,7 @@ load_dotenv()
 
 # ORDERING FIX: database.py reads OWNER_ID / DATABASE_PATH /
 # NERO_ENVIRONMENT at import time (module-level, not inside a
-# function) — importing it before load_dotenv() has run meant a value
+# function) - importing it before load_dotenv() has run meant a value
 # only set in a local .env file (not a real process env var) was
 # silently invisible to it. Moved below load_dotenv() so both sources
 # work the same way.
@@ -28,13 +28,13 @@ def validate_discord_token() -> str:
     directly with no validation. If DISCORD_TOKEN was missing or blank on
     Railway (unset env var, typo in var name, empty string), discord.py's
     error came back as a generic/opaque failure deep in the connection
-    stack with no indication the token itself was the problem — the
+    stack with no indication the token itself was the problem - the
     Railway logs just showed a crash with no actionable next step.
 
     This performs a cheap, local sanity check (present, non-empty, roughly
     the right shape) BEFORE attempting any network connection, and exits
     with a clear, actionable log line if it fails. This does NOT call
-    Discord's API to verify the token is valid/unrevoked — that still
+    Discord's API to verify the token is valid/unrevoked - that still
     surfaces as a normal discord.py LoginFailure on bot.start(), which is
     already a clear error. This only catches the "token isn't even set"
     class of failure, which was previously the most opaque one.
@@ -53,7 +53,7 @@ def validate_discord_token() -> str:
     token = token.strip()
     # Discord bot tokens are three dot-separated base64-ish segments and
     # are normally 59+ chars. This is a shape check only, not a validity
-    # check — it catches "pasted the wrong thing" (e.g. client secret,
+    # check - it catches "pasted the wrong thing" (e.g. client secret,
     # truncated token, stray quotes) without calling Discord's API.
     if token.count(".") != 2 or len(token) < 50:
         print("=" * 60)
@@ -62,7 +62,7 @@ def validate_discord_token() -> str:
         print("  -> Double check you copied the BOT token, not the "
               "client secret, and that no quotes/whitespace got")
         print("     included when pasting into Railway.")
-        print("  -> Continuing anyway — Discord will reject it on "
+        print("  -> Continuing anyway - Discord will reject it on "
               "connect if it's actually invalid.")
         print("=" * 60)
     else:
@@ -88,7 +88,7 @@ class NeroCommandTree(discord.app_commands.CommandTree):
     """
     CRASH FIX: the bot was wired up via `@bot.tree.check`, but
     discord.py's `CommandTree` has no `.check()` decorator (that only
-    exists on `commands.Bot` for prefix commands) — this raised
+    exists on `commands.Bot` for prefix commands) - this raised
     `AttributeError: 'CommandTree' object has no attribute 'check'`
     at import time, before the bot ever attempted to log in. The
     dashboard process is separate (start.sh runs it after the bot,
@@ -107,9 +107,9 @@ class NeroCommandTree(discord.app_commands.CommandTree):
 
         cmd_name = interaction.command.qualified_name
 
-        # SHARED GATING (2026-08-28): this whole body — enabled/disabled,
+        # SHARED GATING (2026-08-28): this whole body - enabled/disabled,
         # owner-only, role + channel black/whitelists, cooldown_seconds with
-        # its bypass roles and the error_message override — now lives in
+        # its bypass roles and the error_message override - now lives in
         # utils/command_gating.py, because the bare-alias path
         # (cogs/command_aliases.py) has to apply the *same* rules and had
         # already started to drift from this copy. One implementation, one
@@ -206,7 +206,7 @@ async def load_cogs():
         "cogs.shop_publication_sync",
         # Load order does NOT matter for aliases any more (2026-08-28). The
         # old comment here said "MUST be last, it rewrites message.content so
-        # process_commands can dispatch it" — that was wrong twice over:
+        # process_commands can dispatch it" - that was wrong twice over:
         # discord.py runs process_commands before every cog on_message
         # listener, and the rewrite leaked into the listeners that ran
         # concurrently. Aliases now go through utils/message_router.py, which
@@ -304,7 +304,7 @@ async def backfill_guild_owners():
     """
     Grants each guild's REAL Discord owner (guild.owner_id) a
     dashboard_users 'owner' row, for every guild the bot is ALREADY
-    in — on_guild_join above only covers guilds joined after this
+    in - on_guild_join above only covers guilds joined after this
     deploy. Called from on_ready, which re-fires on every reconnect;
     safe to re-run every time since add_guild_owner()'s INSERT OR
     IGNORE is idempotent against idx_du_unique(guild_id, user_id).
@@ -347,7 +347,7 @@ async def main():
         print("FATAL: Discord rejected DISCORD_TOKEN (LoginFailure).")
         print("  -> The token is set but Discord says it's invalid.")
         print("  -> It may have been regenerated/revoked in the")
-        print("     Developer Portal — copy a fresh token and update")
+        print("     Developer Portal - copy a fresh token and update")
         print("     the Railway env var, then redeploy.")
         print("  -> See DEBUG_GUIDE.md for full steps.")
         print("=" * 60)

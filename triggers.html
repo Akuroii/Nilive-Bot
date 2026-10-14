@@ -86,7 +86,7 @@
                 {% for t in triggers %}
                 <tr>
                     <td>#{{ t[0] }}</td>
-                    <td><code>{{ t[1][:40] if t[1] else '—' }}</code></td>
+                    <td><code>{{ t[1][:40] if t[1] else '-' }}</code></td>
                     <td>{{ t[2] or 'text' }}</td>
                     <td>{{ t[3] or 'contains' }}</td>
                     <td>{{ t[4] or 100 }}%</td>
@@ -145,7 +145,7 @@ async function addTrigger() {
     const data = await res.json();
     if (data.success) {
         // Advisory only ("this word is an alias of /kick, so messages that
-        // start with it run that command") — the save happened, and the page
+        // start with it run that command") - the save happened, and the page
         // reloads, so park the note for after the reload.
         if (data.warnings && data.warnings.length && window.NeroWarnings) {
             window.NeroWarnings.remember(data.warnings, 'Trigger added');

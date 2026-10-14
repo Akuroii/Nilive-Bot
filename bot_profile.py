@@ -11,21 +11,21 @@ DISCORD_API = "https://discord.com/api/v10"
 #
 # Discord's "Modify Current Member" endpoint
 # (PATCH /guilds/{guild.id}/members/@me) currently accepts FOUR fields
-# for whichever token calls it — including a bot's own token:
+# for whichever token calls it - including a bot's own token:
 #
-#   nick    — string, this server's nickname
-#   avatar  — base64 data-URI image, this server's member avatar
-#   banner  — base64 data-URI image, this server's member banner
-#   bio     — string (~190 chars, same ballpark as Discord's own
+#   nick    - string, this server's nickname
+#   avatar  - base64 data-URI image, this server's member avatar
+#   banner  - base64 data-URI image, this server's member banner
+#   bio     - string (~190 chars, same ballpark as Discord's own
 #             profile bio), this server's member "about me"
 #
-# All four are genuinely scoped to ONE guild — none of this touches the
+# All four are genuinely scoped to ONE guild - none of this touches the
 # bot's global identity, and none of it is visible in any other server.
 # Confirmed directly against Discord's current API docs
 # (docs.discord.com/developers/resources/guild) before building this.
 #
 # avatar/banner are NOT accepted as plain URLs by this endpoint (unlike
-# some other Discord upload fields) — they must be base64-encoded image
+# some other Discord upload fields) - they must be base64-encoded image
 # data. _download_image_as_data_uri() does that conversion so the
 # dashboard can still offer a simple "paste a URL" field, matching every
 # other image field already in this codebase (embed builder, welcome
@@ -94,7 +94,7 @@ def _download_image_as_data_uri(url: str, max_bytes: int = MAX_IMAGE_BYTES) -> t
         for chunk in resp.iter_content(chunk_size=65536):
             total += len(chunk)
             if total > max_bytes:
-                return None, f"image is too large — keep it under {max_bytes // (1024*1024)}MB"
+                return None, f"image is too large - keep it under {max_bytes // (1024*1024)}MB"
             chunks.append(chunk)
     except Exception as e:
         return None, f"download failed ({e})"
@@ -110,9 +110,9 @@ def apply_bot_profile_via_rest(guild_id: int, nickname: str | None,
     """
     Applies nickname/avatar/banner/bio for the bot's OWN guild member
     row in ONE guild, in a single PATCH call. Fields left empty/None
-    are explicitly cleared — this mirrors how every other settings form
+    are explicitly cleared - this mirrors how every other settings form
     in this dashboard round-trips its FULL current state on save, not a
-    diff — EXCEPT when an avatar/banner URL was given but couldn't be
+    diff - EXCEPT when an avatar/banner URL was given but couldn't be
     downloaded/encoded: in that case the field is left out of the
     request entirely (whatever's currently live stays live) and the
     specific failure is reported back, rather than wiping a working
@@ -174,7 +174,7 @@ def apply_bot_profile_via_rest(guild_id: int, nickname: str | None,
 def get_live_bot_member(guild_id: int) -> dict | None:
     """
     Reads the bot's own CURRENT guild member object straight from
-    Discord — the real, live nick/avatar/banner/bio, plus the bot's
+    Discord - the real, live nick/avatar/banner/bio, plus the bot's
     global (non-guild-specific) username/avatar for comparison. Used
     by the dashboard's "Current State" panel so it can never drift
     from what Discord itself is actually showing right now.

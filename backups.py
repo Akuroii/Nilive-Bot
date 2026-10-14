@@ -12,15 +12,15 @@ from dashboard.api import api_bp
 # ── Backups (manual trigger) ────────────────────────────────────────────────
 #
 # BUILD (backup visibility): dashboard/app.py's /backups route handles the
-# read side (list + stats). This is the one write action — a manual
+# read side (list + stats). This is the one write action - a manual
 # "trigger backup now" button.
 #
 # Wraps cogs/backup.py's existing _do_backup() rather than reimplementing
-# backup creation here — same "dashboard API wraps an existing engine
+# backup creation here - same "dashboard API wraps an existing engine
 # function" principle as dashboard/api/trade.py (get_trade_history) and
 # dashboard/api/minigames.py. This is now the only other caller of
 # _do_backup() besides the daily @tasks.loop and the /backup_now Discord
-# command — uuid-suffixed filenames, the backup_log insert, and pruning to
+# command - uuid-suffixed filenames, the backup_log insert, and pruning to
 # KEEP_BACKUPS all stay defined in exactly one place.
 #
 # Lazy import (inside trigger(), not at module top) matches the existing
@@ -29,8 +29,8 @@ from dashboard.api import api_bp
 # module-level, and also keeps this file import-safe even if cogs.backup
 # ever grew a heavier top-level dependency.
 #
-# Wrapped in try/except here — unlike most POST routes in this package
-# (e.g. mvp.py's save_mvp_config_api, which just lets exceptions bubble) —
+# Wrapped in try/except here - unlike most POST routes in this package
+# (e.g. mvp.py's save_mvp_config_api, which just lets exceptions bubble) -
 # because _do_backup()'s own author already treated it as fallible:
 # cogs/backup.py's /backup_now Discord command wraps the same call in
 # try/except. Mirroring that judgment call, not inventing new caution.
@@ -40,7 +40,7 @@ from dashboard.api import api_bp
 # 1) require_bot_owner_api added below, on top of the pre-existing
 #    require_api_permission(LEVEL_OWNER). Confirmed live before this fix
 #    (two-guild dashboard_users test fixture): a LEVEL_OWNER in ANY
-#    guild — not just the real bot owner's — could read AND trigger
+#    guild - not just the real bot owner's - could read AND trigger
 #    backups of the ENTIRE bot, every guild's data, because
 #    require_api_permission only checks LEVEL_OWNER *within whichever
 #    guild is selected in the caller's own session*, and backups aren't
@@ -50,9 +50,9 @@ from dashboard.api import api_bp
 #
 # 2) Rate limiting added below (_try_reserve_backup_slot /
 #    _release_backup_slot). The UI button disabling itself was never
-#    real protection — a direct POST to this URL, or two different
+#    real protection - a direct POST to this URL, or two different
 #    LEVEL_OWNER sessions, could still fire back-to-back. Single global
-#    in-memory cooldown (not per-user — there's exactly one backup
+#    in-memory cooldown (not per-user - there's exactly one backup
 #    operation here, not one per caller), same time.time() / "now - last
 #    < cooldown" idiom as main.py's _command_cooldowns and
 #    cogs/economy.py's _daily_cooldowns/_work_cooldowns, just without
@@ -69,20 +69,20 @@ _last_backup_trigger_at = 0.0
 
 def _try_reserve_backup_slot():
     """Atomically checks the cooldown and reserves it if allowed.
-    Returns (True, previous_timestamp) on success — the caller MUST call
+    Returns (True, previous_timestamp) on success - the caller MUST call
     _release_backup_slot(previous_timestamp) if the backup attempt then
     fails, so a failed attempt doesn't cost the cooldown. Returns
     (False, seconds_remaining) if still cooling down.
 
     Resets to 0 on dashboard process restart (in-memory only, no DB
-    table) — deliberate: this cooldown is about spam through THIS
+    table) - deliberate: this cooldown is about spam through THIS
     endpoint specifically, not "backups in general", so a redeploy or
     the daily automated backup (which runs in the separate bot process
     and never touches this endpoint) correctly doesn't count against it.
 
-    Lock isn't exploitable today — dashboard/app.py's app.run() doesn't
+    Lock isn't exploitable today - dashboard/app.py's app.run() doesn't
     pass threaded=True, so requests are handled one at a time under the
-    Flask dev server it currently runs on — but costs nothing and stays
+    Flask dev server it currently runs on - but costs nothing and stays
     correct if that changes (threaded=True, or a real multi-worker WSGI
     server later).
     """
@@ -113,7 +113,7 @@ def api_trigger_backup():
     if not allowed:
         return jsonify({
             "success": False,
-            "error": f"Slow down — try again in {info}s.",
+            "error": f"Slow down - try again in {info}s.",
         }), 429
 
     async def trigger():

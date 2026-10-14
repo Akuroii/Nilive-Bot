@@ -14,7 +14,7 @@ try:
     FUZZY_AVAILABLE = True
 except ImportError:
     FUZZY_AVAILABLE = False
-    print("[triggers] thefuzz not installed — fuzzy matching disabled")
+    print("[triggers] thefuzz not installed - fuzzy matching disabled")
 
 
 class Triggers(commands.Cog):
@@ -24,12 +24,12 @@ class Triggers(commands.Cog):
         # (guild_id, trigger_id) -> last-fired unix timestamp, so a
         # trigger can be rate-limited independently of any other
         # trigger even if several match the same message. In-memory
-        # only (like Leveling's _xp_cooldowns) — resets on restart,
+        # only (like Leveling's _xp_cooldowns) - resets on restart,
         # which is fine for a spam-prevention cooldown.
         self._last_fired: dict[tuple, float] = {}
 
         # MEMORY LEAK FIX (dark-fixes pass #11): this dict only ever
-        # grew — a key is written every time a cooldown-gated trigger
+        # grew - a key is written every time a cooldown-gated trigger
         # fires and nothing ever removed old entries, so it slowly
         # accumulated one permanent (guild_id, trigger_id) entry per
         # trigger that ever fired, for the lifetime of the process.
@@ -38,7 +38,7 @@ class Triggers(commands.Cog):
         # is currently blocking on Dark's input.
         #
         # Unlike economy.py's cooldown dicts, the stored value here
-        # is a last-FIRED timestamp, not an expiry — per-trigger
+        # is a last-FIRED timestamp, not an expiry - per-trigger
         # cooldown_seconds lives in the DB, not in this dict, so
         # there's no single expiry to compare against cheaply. Using
         # a generous fixed age cutoff instead: any trigger that
@@ -62,7 +62,7 @@ class Triggers(commands.Cog):
         # run inside on_message, meaning every single guild message
         # opened a fresh connection and issued a full CREATE TABLE IF
         # NOT EXISTS + commit before the trigger lookup could even
-        # start — on any active server that's thousands of redundant
+        # start - on any active server that's thousands of redundant
         # schema statements a day for a table that database.py's
         # central init_db() (see database.py, "triggers" table) already
         # guarantees exists before the bot ever comes online. Schema
@@ -100,10 +100,10 @@ class Triggers(commands.Cog):
         Checks if a message content matches the trigger.
 
         match_type options:
-            contains   — trigger word appears anywhere in message
-            startswith — message starts with trigger word
-            exact      — message is exactly the trigger word
-            endswith   — message ends with trigger word
+            contains   - trigger word appears anywhere in message
+            startswith - message starts with trigger word
+            exact      - message is exactly the trigger word
+            endswith   - message ends with trigger word
 
         fuzzy: uses thefuzz ratio (>= fuzzy_threshold match, default 80)
         case_sensitive: default OFF (Arabic + English both work)
@@ -152,7 +152,7 @@ class Triggers(commands.Cog):
 
         # PRECEDENCE (2026-08-28): a message that belongs to a real prefix
         # command, a slash-command alias, or a custom command is NOT a trigger
-        # candidate. This used to be impossible to guarantee — the trigger
+        # candidate. This used to be impossible to guarantee - the trigger
         # listener and the alias listener ran as sibling tasks with no
         # coordination, so a bare alias word (e.g. "k" -> /kick) could also
         # fire a trigger, and the alias listener's message.content rewrite
@@ -204,7 +204,7 @@ class Triggers(commands.Cog):
 
             # PHASE 2 FIX: anti-repeat cooldown. Previously a trigger
             # fired on every single matching message with no rate
-            # limit at all — a common word set to "contains" could
+            # limit at all - a common word set to "contains" could
             # spam a response into a busy channel dozens of times a
             # minute. cooldown_seconds=0 (the default) preserves the
             # old fire-every-time behavior for triggers that want it.
@@ -253,7 +253,7 @@ class Triggers(commands.Cog):
                     await message.channel.send(response_text)
 
                 # Only stamp the cooldown once the response actually
-                # sent successfully — a send failure shouldn't burn
+                # sent successfully - a send failure shouldn't burn
                 # the cooldown window for a trigger that never fired.
                 if cooldown > 0:
                     self._last_fired[cooldown_key] = now
@@ -324,8 +324,8 @@ class Triggers(commands.Cog):
         for r in rows:
             status = CHECK_EMOJI if r[5] else "❌"
             embed.add_field(
-                name=f"#{r[0]} {status} — {r[2]} ({r[3]})",
-                value=f"`{r[1][:60]}` — {r[4]}% chance",
+                name=f"#{r[0]} {status} - {r[2]} ({r[3]})",
+                value=f"`{r[1][:60]}` - {r[4]}% chance",
                 inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 

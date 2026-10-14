@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// scripts/support/dom_stub.js — the DOM + IndexedDB double behind
+// scripts/support/dom_stub.js - the DOM + IndexedDB double behind
 // scripts/test_message_builder_page.js and
 // scripts/test_message_builder_layout.js.
 //
@@ -23,9 +23,9 @@
 
 /**
  * A DOM double.
- *   ops       — an independent count of every DOM call the code under test
+ *   ops       - an independent count of every DOM call the code under test
  *               makes, so the module's own stats are never the only evidence.
- *   warnings  — traps a browser would silently accept but that mean the code
+ *   warnings  - traps a browser would silently accept but that mean the code
  *               replaced children it still needed (textContent / innerHTML on a
  *               node with children).
  */
@@ -323,7 +323,7 @@ function createDom() {
 }
 
 /**
- * Build the page shell from a flat list of {tag, attrs} — the harness derives
+ * Build the page shell from a flat list of {tag, attrs} - the harness derives
  * that list from the REAL template file, so the double can never drift into
  * being more generous than the markup.
  */
@@ -541,7 +541,7 @@ function createFakeIdb(spec) {
         },
         release() { holding = false; held.splice(0).forEach(fn => setTimeout(fn, 0)); },
         hold() { holding = true; },
-        // { storeName: { key: record } } — the plain shape, no internal wrapper.
+        // { storeName: { key: record } } - the plain shape, no internal wrapper.
         snapshot(name) {
             const out = {};
             const db = dbs[name];

@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-Shop Publisher — Step 0: the catalog + design-draft preview API, on the real
+Shop Publisher - Step 0: the catalog + design-draft preview API, on the real
 Flask app, real permissions, real CSRF and a scratch SQLite database (no HTTP
 server).
 
 What this locks down
   1.  GET  /api/shop-publisher/catalog serves BOTH pickers plus the fixed
       token catalog; templates arrive as names ONLY (the explicit final Step 0
-      contract — Q2#12 closed 2026-09-30: light payload at ~100-template
+      contract - Q2#12 closed 2026-09-30: light payload at ~100-template
       scale; the selected template's document is fetched on selection from
-      the Embed Builder's existing GET /api/embedbuilder/template/<name> —
+      the Embed Builder's existing GET /api/embedbuilder/template/<name> -
       the intentional Step 0 transitional presentation source); products
       arrive in the preserved deterministic sort (the existing `type`-grouped
-      order — never reordered client-side) and carry the additive
+      order - never reordered client-side) and carry the additive
       `category_id` link (the Slice 1 Shop Category mapping; presentation
       metadata, NEVER publication).
   2.  POST /api/shop-publisher/preview takes a Design draft
       ({presentation, products, action}) and runs the ONE server-side resolver
-      — the same module the future publish path must reuse — returning the
+      - the same module the future publish path must reuse - returning the
       resolved message + the purchase action that will be published
       (shop_buy_<id> entries) + the deterministic warnings.
   3.  The roster contract: products[] is the ROOT-PRODUCT roster; drafts that
@@ -78,7 +78,7 @@ def draft_for(item_id, template='{"content": "Buy {{product.name}} for {{product
     doc = json.loads(template) if isinstance(template, str) else template
     draft = {
         # The draft presentation carries the template document as-is plus the
-        # mode — the shared resolver normalizes (legacy bare embeds included).
+        # mode - the shared resolver normalizes (legacy bare embeds included).
         "presentation": {"mode": "per_product", **doc},
         "products": [item_id],
         "action": {"kind": "buttons", "entries": [{"product_id": item_id}]},
@@ -143,7 +143,7 @@ class ShopPublisherApiTests(unittest.TestCase):
         data = self.client.get("/api/shop-publisher/catalog").get_json()
         by_id = {p["id"]: p for p in data["products"]}
         self.assertIsNone(by_id[first]["category_id"],
-                          "the link is nullable — unassign reads back as NULL")
+                          "the link is nullable - unassign reads back as NULL")
 
     def test_catalog_adds_option_parent_metadata_without_filtering_rows(self):
         root = seed_product("Potion", kind="potion", price=100)

@@ -50,7 +50,7 @@ window.NeroAlias = (function () {
         if (/\s/.test(word)) {
             // separate message, same as the server's: "my alias" is usually
             // someone pasting a phrase, not typing punctuation
-            return 'can\u2019t contain spaces — one word per alias';
+            return 'can\u2019t contain spaces - one word per alias';
         }
         if (word.length > MAX_LEN) return 'too long';
         if (!VALID.test(word) || BAD_CHARS.test(word)) {
@@ -121,7 +121,7 @@ window.NeroAlias = (function () {
                         ? ' (stored on the global guild-0 row, which Nero does '
                           + 'not apply to real servers)'
                         : '') +
-                    ' — the most recently saved row wins, so saving moves it here.';
+                    ' - the most recently saved row wins, so saving moves it here.';
                 const mark = document.createElement('span');
                 mark.className = 'na-chip-warn';
                 mark.textContent = '!';
@@ -138,7 +138,7 @@ window.NeroAlias = (function () {
             sync();
             text.value = word;
             text.focus();
-            setHint(`Editing “${word}” — Space puts it back, × drops it.`, 'ok');
+            setHint(`Editing “${word}” - Space puts it back, × drops it.`, 'ok');
         }
 
         function render() {
@@ -150,7 +150,7 @@ window.NeroAlias = (function () {
                 // focusable for keyboard users, and the screen reader needs
                 // a label that explains what activating it does. The × is a
                 // separate focusable button inside the chip with its own
-                // aria-label, so we don't say "button" here — that would
+                // aria-label, so we don't say "button" here - that would
                 // mis-describe the chip's role. A pointer cursor is added
                 // by the CSS; we leave the cursor on the host text input
                 // as the default for the box itself.
@@ -214,7 +214,7 @@ window.NeroAlias = (function () {
             }
             if (problem) {
                 if (!silent) {
-                    setHint(word ? `“${word}” — ${problem}` : 'Type something first.');
+                    setHint(word ? `“${word}” - ${problem}` : 'Type something first.');
                     // Leave the text in the box and selected so it can be
                     // fixed in place; clearing it would throw the attempt away.
                     text.value = word;
@@ -223,7 +223,7 @@ window.NeroAlias = (function () {
                 return false;
             }
             if (values.includes(word)) {
-                // An accidental second Space must not cost the user the chip —
+                // An accidental second Space must not cost the user the chip -
                 // remove(word) here used to delete it, which reads as the field
                 // eating your work.
                 if (!silent) setHint(`“${word}” is already on this command.`);
@@ -233,7 +233,7 @@ window.NeroAlias = (function () {
             values.push(word);
             text.value = '';
             setHint(truncated
-                ? `Long names get cut at ${MAX_LEN} characters — using “${word}”.`
+                ? `Long names get cut at ${MAX_LEN} characters - using “${word}”.`
                 : '', truncated ? 'ok' : undefined);
             render();
             sync();

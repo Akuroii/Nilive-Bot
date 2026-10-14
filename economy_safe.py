@@ -228,7 +228,7 @@ async def safe_decrement_stock(item_id: int) -> bool:
 # ── Phase 5 / Economy v2 ────────────────────────────────────────────────
 # Converts coins into diamonds at a configurable coins-per-diamond rate.
 # Atomic (BEGIN IMMEDIATE): the coin deduction and diamond credit either
-# both land or neither does — same transactional guard pattern as
+# both land or neither does - same transactional guard pattern as
 # safe_transfer above, just moving value between two currency columns on
 # the same user instead of between two users on the same currency.
 #

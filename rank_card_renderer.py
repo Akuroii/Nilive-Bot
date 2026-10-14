@@ -1,5 +1,5 @@
 """
-RANK CARD RENDERER — draws the payload from utils/rank_card_data.py onto a
+RANK CARD RENDERER - draws the payload from utils/rank_card_data.py onto a
 fixed 1280x853 PNG.
 
 Deliberately kept discord.py-free: it only reads the plain dict that
@@ -44,7 +44,7 @@ _FONT_DIR = os.path.join(_ASSET_ROOT, "fonts")
 # The checkout keeps the fonts / mailbox at the repository root; the
 # assets/rank_card layout is the deployed one. Prefer the asset root,
 # fall back to the repo root so the renderer works in both layouts.
-# NOTE: this module lives in utils/ — one level below the repo root —
+# NOTE: this module lives in utils/ - one level below the repo root -
 # so the repo root is TWO dirnames up, not one. (When the renderer sat
 # at the repo root the single dirname was correct; moving the file
 # without adjusting this would have made every fallback look inside
@@ -220,7 +220,7 @@ COLORS = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────
-# LAYOUT — fixed canvas 1280x853, measured off the reference (x1.25 scale)
+# LAYOUT - fixed canvas 1280x853, measured off the reference (x1.25 scale)
 # ─────────────────────────────────────────────────────────────────────────
 
 CANVAS_W, CANVAS_H = 1280, 853
@@ -1051,7 +1051,7 @@ def _rounded_panel(img, draw, box, radius=20, fill=None, outline=None, width=2, 
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# LINE-ART UI ICONS — the reference uses thin purple outline icons for all
+# LINE-ART UI ICONS - the reference uses thin purple outline icons for all
 # fixed UI chrome (messages/voice/games/inventory/calendar/crown) and for
 # the DEFAULT unconfigured currency glyphs, not color emoji. These are
 # hand-drawn to match that style directly; no network fetch, no risk of
@@ -1163,7 +1163,7 @@ def _line_icon_diamond(size):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# STAT-ROW ICON ASSETS — Messages / Voice Time / Games Won now use the
+# STAT-ROW ICON ASSETS - Messages / Voice Time / Games Won now use the
 # supplied artwork below instead of the hand-drawn line icons above. Each
 # source PNG is a large canvas with a variable transparent margin, so it's
 # trimmed to its opaque content first, then re-centered with a consistent

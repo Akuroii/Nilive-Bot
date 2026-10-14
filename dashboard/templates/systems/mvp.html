@@ -78,8 +78,8 @@
                     <tr>
                         <td><strong>{{ h[1] }}</strong></td>
                         <td><span class="badge badge-accent">{{ "{:,}".format(h[2]) }}</span></td>
-                        <td class="text-muted">{{ h[3][:10] if h[3] else '—' }}</td>
-                        <td class="text-muted">{{ h[4][:10] if h[4] else '—' }}</td>
+                        <td class="text-muted">{{ h[3][:10] if h[3] else '-' }}</td>
+                        <td class="text-muted">{{ h[4][:10] if h[4] else '-' }}</td>
                     </tr>
                     {% else %}
                     <tr><td colspan="4" class="empty">No MVP history yet</td></tr>

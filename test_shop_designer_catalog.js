@@ -42,7 +42,7 @@ const PRODUCTS = [
     { id: 2, name: 'Alpha', type: 'role', price: 1500, price_diamonds: null, enabled: 1, current_stock: 12, max_stock: 20, prestige_tier: null, featured: 0, category_id: 12 },
     { id: 3, name: 'Midnight', type: 'prestige', price: 2500, price_diamonds: null, enabled: 0, current_stock: null, max_stock: null, prestige_tier: 3, featured: 1, category_id: 999 },
     { id: 5, name: 'Beta', type: 'role', price: 20, price_diamonds: 5, enabled: 1, current_stock: 0, max_stock: 4, prestige_tier: null, featured: 0, category_id: null },
-    { id: 8, name: 'Zulu — 7 Days', type: 'custom', price: 5, price_diamonds: null, enabled: 1, current_stock: null, max_stock: null, prestige_tier: null, featured: 0, category_id: 11, option_of_id: 7 },
+    { id: 8, name: 'Zulu - 7 Days', type: 'custom', price: 5, price_diamonds: null, enabled: 1, current_stock: null, max_stock: null, prestige_tier: null, featured: 0, category_id: 11, option_of_id: 7 },
 ];
 const CATEGORIES = [
     { id: 11, name: 'Cosmetics', emoji: '🎨', product_count: 1 },

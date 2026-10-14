@@ -87,10 +87,10 @@
                 <tr>
                     <td><code>!{{ c[1] }}</code></td>
                     <td>{{ c[2] | length if c[2] else 0 }} actions</td>
-                    <td>{{ c[3] or '—' }}</td>
+                    <td>{{ c[3] or '-' }}</td>
                     <td>
                         <!-- SECURITY FIX: same class of bug as moderation.html's edit-reason
-                             button — the trigger name used to be interpolated raw into a
+                             button - the trigger name used to be interpolated raw into a
                              single-quoted JS string inside onclick=. A trigger containing a
                              single quote or backslash could break out of the string and
                              inject arbitrary JS. Now passed via a data-* attribute (Jinja

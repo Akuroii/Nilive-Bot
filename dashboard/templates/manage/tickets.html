@@ -68,7 +68,7 @@
                                 {{ t[3] }}
                             </span>
                         </td>
-                        <td class="text-muted">{{ t[5][:10] if t[5] else '—' }}</td>
+                        <td class="text-muted">{{ t[5][:10] if t[5] else '-' }}</td>
                     </tr>
                     {% else %}
                     <tr><td colspan="5" class="empty">No tickets yet</td></tr>
@@ -126,7 +126,7 @@
     <div class="card">
         <div class="card-title" id="cat-form-title">➕ Add Ticket Category</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Each category is its own ticket type (like TicketTool's panel configs) — its own
+            Each category is its own ticket type (like TicketTool's panel configs) - its own
             permissions AND its own embed message posted inside the created channel.
         </p>
         <input type="hidden" id="cat-id">
@@ -162,7 +162,7 @@
         <div class="form-row">
             <div class="form-group">
                 <label class="form-label">Title</label>
-                <input class="form-input" id="cat-embed-title" placeholder="Ticket #{number} — General Support">
+                <input class="form-input" id="cat-embed-title" placeholder="Ticket #{number} - General Support">
             </div>
             <div class="form-group">
                 <label class="form-label">Color</label>
@@ -319,7 +319,7 @@ async function loadCategories() {
     const data = await res.json();
     const tbody = document.getElementById('cat-tbody');
     if (!data.categories || !data.categories.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">No categories configured — a default "General Support" is used until you add one.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">No categories configured - a default "General Support" is used until you add one.</td></tr>';
         return;
     }
     tbody.innerHTML = data.categories.map(c => `

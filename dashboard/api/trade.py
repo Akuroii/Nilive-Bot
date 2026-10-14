@@ -11,21 +11,21 @@ from dashboard.api import api_bp
 #
 # Trade System (utils/trade_engine.py, cogs/trade.py) shipped pass #15,
 # Discord-side only. This is the optional dashboard follow-up flagged in
-# STATUS.md/memory since pass #15 — a read-only history view, same shape
+# STATUS.md/memory since pass #15 - a read-only history view, same shape
 # as dashboard/api/misc.py's /ledger and /inventory routes. Reuses
 # utils.trade_engine.get_trade_history() rather than re-declaring the
 # query here, same principle as every other "dashboard API wraps an
 # existing engine function" route in this project
 # (dashboard/api/leveling.py's prestige routes, dashboard/api/minigames.py).
 #
-# No write routes here on purpose — trades are only ever created through
+# No write routes here on purpose - trades are only ever created through
 # the /trade Discord UI's atomic execute_trade() (live balance/inventory
 # re-validation happens inside that transaction). A dashboard "create/edit
 # trade" surface would need to reimplement that same re-validation to be
 # safe, which is out of scope for what Dark asked for (history view only).
 #
 # dark-fixes pass #18 (username resolver rollout, task #4 of 6): trades
-# only ever stored user_a/user_b as raw IDs — no snapshot, same "ID only"
+# only ever stored user_a/user_b as raw IDs - no snapshot, same "ID only"
 # bucket as Economy. One batched resolve_users() call per request covering
 # both sides of every trade on the page, returned alongside the trade rows
 # as `user_map` so the client renders it in a single pass instead of
@@ -33,7 +33,7 @@ from dashboard.api import api_bp
 # server-rendered pattern, except this page renders client-side (JS
 # builds the table from fetch()), so the map travels in the JSON payload
 # and dashboard.js's userIdentityHtml() (the JS twin of
-# dashboard/utils/user_identity.py) renders it — same visual component,
+# dashboard/utils/user_identity.py) renders it - same visual component,
 # different render path.
 
 
@@ -57,7 +57,7 @@ def api_trade_history():
     # as numbers, JSON.parse() would silently corrupt their trailing
     # digits (704453350384730200 → …240) and the userMap[t.user_a]
     # lookup in trade.html would never match the user_map keys (whose
-    # digits ARE exact — Python int keys stringify losslessly in JSON).
+    # digits ARE exact - Python int keys stringify losslessly in JSON).
     # Every client-side consumer of this payload uses the value only for
     # display + map lookup, so string form is safe everywhere.
     rows = [{**t, "user_a": str(t["user_a"]), "user_b": str(t["user_b"])}

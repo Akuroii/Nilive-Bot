@@ -1,6 +1,6 @@
-# TASK 4 — Ticket Dashboard Config (delta ZIP)
+# TASK 4 - Ticket Dashboard Config (delta ZIP)
 
-Drop these files into your repo at the SAME paths — each is a full,
+Drop these files into your repo at the SAME paths - each is a full,
 ready-to-use file (not a patch/diff), so just overwrite what's there.
 
 ## Files in this ZIP
@@ -16,7 +16,7 @@ ready-to-use file (not a patch/diff), so just overwrite what's there.
     menu down to categories the clicking member is actually allowed
     to open (based on `required_role_id`).
   - `create_ticket()` re-checks the same permission server-side
-    (defense in depth), and now reads/applies the full embed —
+    (defense in depth), and now reads/applies the full embed -
     footer, thumbnail, image, plus `{user}`/`{name}`/`{server}`
     placeholders in title/description/footer. Previously only
     title/description/color were read; the rest silently did nothing.
@@ -32,10 +32,10 @@ ready-to-use file (not a patch/diff), so just overwrite what's there.
 
 - `dashboard/templates/manage/tickets.html`
   - New tabbed layout: **Tickets** (existing list, untouched) /
-    **General** (new — ticket_settings CRUD: enabled, max per user,
+    **General** (new - ticket_settings CRUD: enabled, max per user,
     auto-close hours, name format, default staff role, transcript
     channel, save-transcripts toggle) / **Permissions & Embeds**
-    (new — per-category CRUD: who can open it, viewer roles, admin
+    (new - per-category CRUD: who can open it, viewer roles, admin
     "closer" roles, auto-assign roles, and a full embed builder for
     the message posted when a ticket opens: title, color, description
     with placeholders, footer, thumbnail, image).
@@ -76,10 +76,10 @@ zero errors before this ZIP was built.
 ## Ideas flagged for later (not built, no action needed now)
 
 1. `ticket_panels` table has full dashboard CRUD but nothing in
-   `cogs/tickets.py` reads it to actually post a live Discord panel —
+   `cogs/tickets.py` reads it to actually post a live Discord panel -
    `/ticket_setup` posts its own hardcoded panel instead. Either wire
    it in for real or remove the unused API surface.
 2. Per-category transcript log channel override (currently one global
    channel in `ticket_settings`).
-3. `required_role_id` is single-role only — multi-role "any of these"
+3. `required_role_id` is single-role only - multi-role "any of these"
    gating would need a JSON list instead.

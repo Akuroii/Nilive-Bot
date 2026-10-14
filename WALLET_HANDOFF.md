@@ -1,10 +1,10 @@
-# WALLET — implementation handoff
+# WALLET - implementation handoff
 
 Branch: `arena/01a08804-nilive-bot` · Commit: `0b018ac`
 
 Everything below is written so you can inspect, correct and improve it
 against the real architecture. **The references were not treated as the
-final design** — where I diverged from them, the reasoning is stated so
+final design** - where I diverged from them, the reasoning is stated so
 you can overrule it.
 
 ---
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS equipped_titles (
 `equipped_roles`' primary key is `(guild_id, user_id)` with a `NOT NULL
 role_id`. That PK is exactly what enforces the "one equipped role"
 invariant. A title sharing that row would have needed either a fake
-`role_id` or a relaxed `NOT NULL` — both weaken the invariant the table
+`role_id` or a relaxed `NOT NULL` - both weaken the invariant the table
 exists to protect, and both break the locked decision that the Title
 slot is **independent** from the Role slot. A separate table with the
 same shape gives one title per member with zero impact on the role slot.
@@ -95,18 +95,18 @@ it, and confirmed **every original row came back byte-for-byte identical**.
 
 ## 4. What was newly created
 
-- **`/wallet`** — hub with balances, item count, live streak state; buttons
-  for Streak / Inventory / Receipts / Vote (Vote is **disabled and inert** —
+- **`/wallet`** - hub with balances, item count, live streak state; buttons
+  for Streak / Inventory / Receipts / Vote (Vote is **disabled and inert** -
   not implemented, per scope).
-- **`/streak`** — canonical command. `/daily` kept as a thin alias.
-- **Shared claim engine** — `perform_streak_claim()`. `/streak`, `/daily`
+- **`/streak`** - canonical command. `/daily` kept as a thin alias.
+- **Shared claim engine** - `perform_streak_claim()`. `/streak`, `/daily`
   and the Wallet button are three entry points into **one** implementation
   and **one** claim guard.
-- **Inventory manager** — three tabs (Items / Potions / Titles), per-stack
+- **Inventory manager** - three tabs (Items / Potions / Titles), per-stack
   quantities, rarity labels, item detail view with state-derived actions.
-- **Title system** — minimal, clean, extensible.
-- **Potion "Use"** — consumable path with a refund on failed effect grant.
-- **Receipts** — Coins/Diamonds tabs, 8 per page, Back/Forward.
+- **Title system** - minimal, clean, extensible.
+- **Potion "Use"** - consumable path with a refund on failed effect grant.
+- **Receipts** - Coins/Diamonds tabs, 8 per page, Back/Forward.
 
 ---
 
@@ -121,8 +121,8 @@ it, and confirmed **every original row came back byte-for-byte identical**.
    `icon_url` holds a custom-emoji mention (`<:name:id>`) it's used as the
    list emoji; otherwise the category emoji is used, and the URL renders as
    the **thumbnail on the item detail view**. I did not invent unrelated
-   icons. **You may want an `emoji` field on shop items** — see §10.
-3. **Roles have no Unequip.** `equip_engine.equip_role()` is swap-only —
+   icons. **You may want an `emoji` field on shop items** - see §10.
+3. **Roles have no Unequip.** `equip_engine.equip_role()` is swap-only -
    there is no "wear nothing" path in it. So an equipped role shows a
    disabled "Equipped" state rather than an Unequip button that the engine
    can't honour. **Titles do have Unequip** (their engine supports it).
@@ -131,7 +131,7 @@ it, and confirmed **every original row came back byte-for-byte identical**.
 5. **Ledger `source='daily'` was kept** (not renamed to `streak`) so existing
    ledger rows and any dashboard filtering keep matching.
 6. **Receipts show 8/page** (within your 5–10 range).
-7. **Streak resets at 00:00 UTC** — that is the existing engine's behaviour,
+7. **Streak resets at 00:00 UTC** - that is the existing engine's behaviour,
    not a new choice.
 
 ---
@@ -144,15 +144,15 @@ it, and confirmed **every original row came back byte-for-byte identical**.
    panels. This also makes "Back" meaningful.
 2. **The hub shows counts, not lists.** Members open a wallet to ask "how
    much do I have / can I claim yet". The bag is one click away instead of
-   flooding the first screen — the main departure from the competitor's
+   flooding the first screen - the main departure from the competitor's
    dump-everything-in-one-list approach.
 3. **Actions are derived from type + state.** A potion never offers Equip;
    an equipped title offers only Unequip; an unusable potion's Use button is
    disabled. **No action the member sees is one the backend would reject.**
-4. **The streak button reflects state before it's clicked** — green when
+4. **The streak button reflects state before it's clicked** - green when
    claimable, muted when already claimed.
 5. **Honest streak reporting.** `get_streak_state()` returns `0` when the
-   chain is already broken rather than the stale stored count — showing
+   chain is already broken rather than the stale stored count - showing
    "Day 7" right before a claim silently restarts at Day 1 is a lie. The
    stored count is still preserved.
 6. **Preview before claiming.** The Streak panel shows the reward range and
@@ -163,14 +163,14 @@ it, and confirmed **every original row came back byte-for-byte identical**.
 8. **Ownership checked twice.** Ephemeral controls visibility only; every
    component also re-checks `interaction.user.id` via one shared
    `interaction_check`, so a new button can't forget the guard.
-9. **Views are ephemeral-lifetime with `on_timeout` disabling controls** —
+9. **Views are ephemeral-lifetime with `on_timeout` disabling controls** -
    wallet panels carry per-user navigation state, which must *not* survive a
    restart (unlike the stateless persistent `shop_buy_*` buttons).
 10. **Pagination is correct at boundaries.** Ordering adds `id DESC` as a
-    tiebreaker because `created_at` is second-resolution — a convert writes
+    tiebreaker because `created_at` is second-resolution - a convert writes
     two rows in the same second, and without the tiebreaker rows can
     duplicate or vanish across a page boundary.
-11. **Unknown ledger sources are shown, not hidden** — an unlabelled
+11. **Unknown ledger sources are shown, not hidden** - an unlabelled
     transaction is still money that moved.
 12. **Potion refund on failure.** If the effect grant fails after the stack
     is decremented, the copy is returned. The member is never charged for
@@ -185,7 +185,7 @@ it, and confirmed **every original row came back byte-for-byte identical**.
 `xp_boost_multiplier`**, although the field is in the form, in the JS
 payload, and read back by the purchase path. Every XP Boost item created
 from the dashboard therefore saved with `NULL` and was **permanently
-unbuyable** — "This XP boost item isn't configured correctly". Potions reuse
+unbuyable** - "This XP boost item isn't configured correctly". Potions reuse
 that column, so this had to be corrected rather than worked around.
 **→ Any existing XP Boost shop items are still broken and need re-saving.**
 
@@ -196,7 +196,7 @@ that column, so this had to be corrected rather than worked around.
   this prompt; the displayed Bonus reads from the same settings, so when you
   change the model the UI follows automatically.
 - `daily_min`/`daily_max`/`daily_streak_bonus_per_day` live in `bot_settings`
-  with **no dashboard UI** — they're only editable by direct DB write.
+  with **no dashboard UI** - they're only editable by direct DB write.
 - `bot_settings` is **global, not per-guild**, while `currency_name` and the
   exchange rate are per-guild. Every server shares one daily range.
 - The streak bonus is **flat** (`days × 20`), so the day-7 bonus (140) can
@@ -208,7 +208,7 @@ that column, so this had to be corrected rather than worked around.
 
 ## 8. Tests performed
 
-`scripts/test_wallet.py` — **73 checks, all passing**. Runs the real engines
+`scripts/test_wallet.py` - **73 checks, all passing**. Runs the real engines
 against a scratch DB created by the project's own `init_db()`, so schema
 drift is impossible.
 
@@ -237,7 +237,7 @@ per-user isolation · tab routing · quantity aggregation · concurrent claims.
   it back correctly.
 - Legacy-DB migration preserves all rows byte-for-byte.
 - **Existing suites still pass: prestige (52), minigame engines (96),
-  minigame store (87), minigame migration (32) — 267 checks, 0 failures.**
+  minigame store (87), minigame migration (32) - 267 checks, 0 failures.**
 
 ### Edge cases tested
 Double-click / concurrent claim (only one wins) · claiming via `/daily` then
@@ -264,11 +264,11 @@ system · arbitrary refactors.
 
 ## 10. What Akuroi should specifically review
 
-1. **Re-save any existing XP Boost shop items** — they were saved with a
+1. **Re-save any existing XP Boost shop items** - they were saved with a
    NULL multiplier by the bug in §7a and are still unbuyable.
 2. **Restart the bot** so `init_db()` creates `equipped_titles`, and
    **re-sync commands** so `/wallet` and `/streak` appear.
-3. **Decide the economy model** (§7b) — especially whether `bot_settings`
+3. **Decide the economy model** (§7b) - especially whether `bot_settings`
    should become per-guild, and whether the streak bonus should scale with
    the daily range. The UI already reads live settings, so no Wallet code
    should need to change.
@@ -276,15 +276,15 @@ system · arbitrary refactors.
    `icon_url` is a URL and can't render inline; I use it as the detail-view
    thumbnail and support a custom-emoji mention in that field as an interim.
    The project already has `utils/app_emoji_cache.py` (application emojis,
-   usable anywhere) — that's the clean long-term path.
-5. **Roles in the Items tab** — confirm, or ask for a fourth tab.
-6. **Role Unequip** — currently unsupported by `equip_engine` (swap-only).
+   usable anywhere) - that's the clean long-term path.
+5. **Roles in the Items tab** - confirm, or ask for a fourth tab.
+6. **Role Unequip** - currently unsupported by `equip_engine` (swap-only).
    If you want true unequip, that belongs in `equip_engine`, not the Wallet.
 7. **Potion = XP boost only.** `metadata` carries an explicit `effect`
    discriminator so a second kind can be added with no migration; unknown
    kinds are rejected rather than silently consuming the item.
 8. **Should `/inventory` (in `cogs/shop.py`) be retired?** It still exists
-   and overlaps the Wallet's inventory. I left it alone deliberately — that
+   and overlaps the Wallet's inventory. I left it alone deliberately - that
    removal is a product call, not a refactor I should make unilaterally.
 9. **`equipped_title` is exposed via `utils/rank_card_data.py`** ready for
    the Rank Card to consume. Nothing renders it yet.

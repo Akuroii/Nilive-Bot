@@ -3,53 +3,53 @@ from flask import Blueprint, jsonify, request, session
 # REFACTOR (dark-fixes pass #3): dashboard/api.py was a single 2159-line
 # file with 90+ routes. Split into this package by the section headers
 # the original file already had (moderation, tickets, mvp, economy/shop,
-# leveling, misc) — those divisions were already there in the comments,
+# leveling, misc) - those divisions were already there in the comments,
 # this just makes them real file boundaries.
 #
 # Deliberately kept as ONE shared Blueprint object that every submodule
 # imports and registers routes onto (rather than N blueprints each with
-# their own url_prefix) — that's what makes this a zero-risk split:
+# their own url_prefix) - that's what makes this a zero-risk split:
 # dashboard/app.py's `from dashboard.api import api_bp` /
 # `app.register_blueprint(api_bp)` doesn't change at all, and every
 # route keeps its exact existing URL, method, and endpoint name. This
 # was verified directly: captured all 93 /api/* routes (path, methods,
 # endpoint name) from the app before the split and diffed against the
-# same capture after — exact match, not just "looks right".
+# same capture after - exact match, not just "looks right".
 #
 # Each submodule currently repeats the full original import block
-# rather than a pruned per-file one — slightly more than strictly
+# rather than a pruned per-file one - slightly more than strictly
 # needed, but zero risk of a missing import silently breaking a route
 # that used to work. Pruning unused imports per-file is a safe,
 # separate future cleanup if wanted.
 #
-# dark-fixes pass #13: added dashboard.api.minigames — the dashboard
+# dark-fixes pass #13: added dashboard.api.minigames - the dashboard
 # CRUD surface for the Event Stack Builder (cogs/minigames.py), which
 # was previously Discord-command-only. Same registration pattern as
 # every other submodule below: import it, its @api_bp.route(...)
 # decorators register onto the shared blueprint, no other file needs
 # to change.
 #
-# Phase 6 (Missions, built ahead of the Trade-verification gate — see
+# Phase 6 (Missions, built ahead of the Trade-verification gate - see
 # utils/mission_engine.py header): added dashboard.api.missions, same
 # registration pattern.
 #
-# dark-fixes pass #17: added dashboard.api.trade — the optional,
+# dark-fixes pass #17: added dashboard.api.trade - the optional,
 # read-only Trade history page flagged since pass #15 (Trade dashboard
 # page, "not yet built"). Same registration pattern as minigames and
 # missions above.
 #
-# CREATOR pass: added dashboard.api.creator — full CRUD (add/delete/
+# CREATOR pass: added dashboard.api.creator - full CRUD (add/delete/
 # toggle) for YouTube and Twitch, replacing the old read-only
 # "Announcements" page. Same registration pattern as every other
 # submodule.
 #
-# Embed Builder v2 pass: added dashboard.api.embedbuilder — the new
+# Embed Builder v2 pass: added dashboard.api.embedbuilder - the new
 # "Send" / template-save-whole-message / (channel-scoped) routes for
 # the multi-embed + content + attachments composer. /api/guild/emojis
 # lives in core.py alongside /api/guild/roles and /api/guild/channels,
 # same pattern, no new submodule needed for it.
 #
-# Shop Publisher (Phase 1) pass: added dashboard.api.shop_publisher — the
+# Shop Publisher (Phase 1) pass: added dashboard.api.shop_publisher - the
 # read-only catalog + token-resolved preview routes for Template + Product
 # publishing (publish/send lands in Phase 2). Same registration pattern as
 # every other submodule below; no existing route changes.

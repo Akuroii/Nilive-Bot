@@ -1,4 +1,4 @@
-/* Shop Designer — Region A roster and Region B presentation editor.
+/* Shop Designer - Region A roster and Region B presentation editor.
    Presentation edits remain in-memory and are isolated from products[]. */
 window.NERO = window.NERO || {};
 
@@ -31,7 +31,7 @@ window.NERO = window.NERO || {};
         var fields = [];
         fields.push('Type: ' + (product.type || 'other'));
         if (product.price_diamonds !== null && product.price_diamonds !== undefined) fields.push('Diamonds: ' + product.price_diamonds);
-        // Zero charge reads as Free, never "Coins: 0" — the same rule the
+        // Zero charge reads as Free, never "Coins: 0" - the same rule the
         // /shop page, the admin catalog table and the publisher use.
         if (product.price === 0 && !(product.price_diamonds > 0)) fields.push('Free');
         else if (product.price !== null && product.price !== undefined) fields.push('Coins: ' + product.price);
@@ -611,7 +611,7 @@ window.NERO = window.NERO || {};
                     var labelLabel = make(doc, 'label', 'sd-action-field-label', isSelectAction() ? (optionSelectMode ? 'Option label (optional)' : 'Select label (optional)') : 'Button label (optional)');
                     var labelInput = make(doc, 'input', 'form-input sd-action-input');
                     labelInput.type = 'text'; labelInput.value = entry.label || '';
-                    labelInput.placeholder = optionSelectMode ? '{{product.name}} — {{product.price}} {{product.currency}}' : (productSelectMode ? '{{product.name}}' : 'Buy {{product.name}}');
+                    labelInput.placeholder = optionSelectMode ? '{{product.name}} - {{product.price}} {{product.currency}}' : (productSelectMode ? '{{product.name}}' : 'Buy {{product.name}}');
                     labelInput.setAttribute('data-action-field', 'label');
                     labelInput.setAttribute('aria-label', (isSelectAction() ? 'Select label for ' : 'Button label for ') + (product ? product.name : ('product ' + entry.product_id)));
                     labelLabel.appendChild(labelInput); item.appendChild(labelLabel);
@@ -741,7 +741,7 @@ window.NERO = window.NERO || {};
                     if (actionValidationLine) {
                         actionValidationLine.textContent = warnings.length
                             ? 'Built ' + entries.length + ' ' + kindLabel + (entries.length === 1 ? '' : 's') + ' with ' + warnings.length + ' warning(s): ' + (warnings[0].message || 'review the Shop validation warnings.')
-                            : 'Valid — the existing builder produced ' + entries.length + ' ' + kindLabel + (entries.length === 1 ? '' : 's') + '.';
+                            : 'Valid - the existing builder produced ' + entries.length + ' ' + kindLabel + (entries.length === 1 ? '' : 's') + '.';
                     }
                     if (previewStatus) previewStatus.textContent = 'Preview ready' + (warnings.length ? ' · ' + warnings.length + ' warning(s)' : ' · no warnings');
                 }).catch(function (error) {

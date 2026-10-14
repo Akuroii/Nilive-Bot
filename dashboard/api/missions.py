@@ -6,11 +6,11 @@ from dashboard.permissions import (
 from dashboard.api import api_bp
 
 # ── Missions (Phase 6, built ahead of the Trade-live-verification gate
-# per Dark's explicit override — see utils/mission_engine.py header) ───
+# per Dark's explicit override - see utils/mission_engine.py header) ───
 #
 # Same shape as dashboard/api/minigames.py: reuse utils.mission_engine
 # rather than re-declaring schema/query logic here. Since v2 that also
-# includes create_definition()/delete_definition() — validation and
+# includes create_definition()/delete_definition() - validation and
 # writes live in the engine once, shared with the /mission_create
 # slash command, so the two surfaces can't drift apart.
 
@@ -25,7 +25,7 @@ def get_missions_list_api():
         await ensure_tables()
         return await get_definitions(guild_id, enabled_only=False)
 
-    # Snowflake safety: channel_id travels to the client as a STRING —
+    # Snowflake safety: channel_id travels to the client as a STRING -
     # channel IDs exceed JS's 2^53 safe-integer range, and a JSON
     # number would silently corrupt the trailing digits (breaking both
     # the table's channel-name lookup and the map key match against
@@ -48,7 +48,7 @@ def add_mission_definition_api():
         from utils.mission_engine import ensure_tables, create_definition
         await ensure_tables()
         # All validation (type/period/reward shape, target, channel id)
-        # lives in create_definition — a ValueError here is a member-
+        # lives in create_definition - a ValueError here is a member-
         # facing message, mapped to a 400 below rather than a 500.
         return await create_definition(
             guild_id,
@@ -125,14 +125,14 @@ def get_mission_completions_api():
 
     rows = run_async(fetch())
 
-    # Snowflake safety: user IDs travel to the client as STRINGS — same
+    # Snowflake safety: user IDs travel to the client as STRINGS - same
     # reason as /api/trade/history (JS numbers lose precision past 2^53,
     # which would corrupt trailing digits and break loadMissionLog()'s
     # userMap lookup).
     rows = [{**c, "user_id": str(c["user_id"])} for c in rows]
 
     # Presentation timestamp ('2026-09-14 · 12:51') built server-side
-    # from the same stored UTC instant — storage stays untouched, this
+    # from the same stored UTC instant - storage stays untouched, this
     # is purely how it's shown (spec: don't migrate data for display).
     from utils.formatters import format_timestamp
     rows = [{**c,
@@ -144,7 +144,7 @@ def get_mission_completions_api():
     # dark-fixes pass #18 (username resolver rollout): one batched
     # resolve_users() call covering every user on the page. The map
     # travels in the JSON payload so loadMissionLog() renders the user
-    # cell client-side via dashboard.js's userIdentityHtml() — same
+    # cell client-side via dashboard.js's userIdentityHtml() - same
     # pattern as /api/trade/history.
     async def resolve():
         from utils.discord_user_cache import resolve_users

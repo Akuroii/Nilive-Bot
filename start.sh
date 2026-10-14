@@ -5,7 +5,7 @@ cd /app
 # RELIABILITY FIX: previously this backgrounded main.py once, did a
 # single 5s liveness check, then moved on to run the dashboard in the
 # foreground forever. If the bot crashed hours into uptime, nothing
-# here noticed or restarted it — the container itself stayed healthy
+# here noticed or restarted it - the container itself stayed healthy
 # (the dashboard process was still alive), so container-level restart
 # policies never triggered either. The only signal was the /health
 # dashboard page going stale, discovered only if someone happened to
@@ -19,7 +19,7 @@ supervise_bot() {
         echo "[supervisor] Launching bot..."
         python -u main.py 2>&1
         exit_code=$?
-        echo "[supervisor] Bot exited with code $exit_code — restarting in 5s..."
+        echo "[supervisor] Bot exited with code $exit_code - restarting in 5s..."
         sleep 5
     done
 }
@@ -35,7 +35,7 @@ else
     echo "Bot supervisor failed to start!"
 fi
 
-# NOTE: the dashboard no longer depends on this sleep for correctness —
+# NOTE: the dashboard no longer depends on this sleep for correctness -
 # dashboard/app.py calls init_db() itself on import, so the schema exists
 # before any Flask route can run, regardless of how long the bot takes to
 # come up (or whether it crashes). The sleep above is just to surface a

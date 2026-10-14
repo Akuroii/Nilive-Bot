@@ -3,7 +3,7 @@
 No Flask, no Jinja, no Discord connection:
 
 * ``dashboard/app.py``'s ``COMMAND_CATEGORIES`` / ``COMMAND_METADATA`` are
-  literal dicts — parsed with ``ast.literal_eval`` from the module source.
+  literal dicts - parsed with ``ast.literal_eval`` from the module source.
 * ``manage/commands.html`` assertions target the exact Jinja expressions the
   AFK pass added (row name, usage line, alias hides), and a tiny pure-Python
   renderer mirrors those two edited expressions to verify rendered output

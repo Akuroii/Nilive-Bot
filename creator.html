@@ -20,7 +20,7 @@
     <div class="card">
         <div class="card-title">➕ Watch a YouTube Channel</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
-            Paste a channel URL — either form works
+            Paste a channel URL - either form works
             (<code>youtube.com/channel/UC...</code> or
             <code>youtube.com/@handle</code>). Checked every 10 minutes.
             Video notifications post to the channel you pick here by
@@ -76,7 +76,7 @@
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Bundles two or more of your watches above (any mix of YouTube
             and Twitch) into one consolidated live message instead of each
-            posting its own — one message gets sent when the first linked
+            posting its own - one message gets sent when the first linked
             platform goes live, then edited in place to add or drop a line
             as the others go live/offline:
         </p>
@@ -84,12 +84,12 @@
                     border-radius:8px;padding:12px 14px;margin-bottom:16px;
                     font-size:13px;line-height:1.7;color:var(--text2);">
             @everyone 🔴 <strong>YourChannel is LIVE!</strong><br>
-            🟣 Twitch — https://twitch.tv/yourchannel<br>
-            🔴 YouTube — https://youtube.com/live/XVJpU9UgXY4
+            🟣 Twitch - https://twitch.tv/yourchannel<br>
+            🔴 YouTube - https://youtube.com/live/XVJpU9UgXY4
         </div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             After creating a group, link watches to it from the ➕ picker on
-            each channel/streamer card in the Uploads and Live tabs above —
+            each channel/streamer card in the Uploads and Live tabs above -
             not here. A watch left unlinked keeps posting its own
             independent message exactly as before.
         </p>
@@ -129,14 +129,14 @@ function switchCreatorTab(name) {
 }
 switchCreatorTab('uploads');
 
-// Escapes for BOTH text-content and HTML-attribute-value contexts —
+// Escapes for BOTH text-content and HTML-attribute-value contexts -
 // this template inserts custom_message/display_name into value="..."
 // attributes as well as between tags, and a DOM textContent->innerHTML
 // round-trip (the pattern dashboard.js's _escapeHtml uses) only
 // escapes &/</>, not quotes, so it's unsafe wherever the result lands
 // inside value="..." or data-value="...". Escaping quotes everywhere,
 // including plain text-content spots, is a harmless no-op there
-// (&quot; still renders as a normal " to the reader) — one function,
+// (&quot; still renders as a normal " to the reader) - one function,
 // safe in every context used below, rather than two that are easy to
 // mix up.
 function _esc(str) {
@@ -305,7 +305,7 @@ function renderYoutubeChannels() {
 
             <div id="yt-panel-live-${cfg.id}" style="display:none;border-top:1px solid var(--border);padding-top:14px;margin-top:10px;">
                 <p class="text-muted text-sm" style="margin-bottom:14px;">
-                    Requires <code>YOUTUBE_API_KEY</code> to be set on the bot host —
+                    Requires <code>YOUTUBE_API_KEY</code> to be set on the bot host -
                     checked alongside the RSS feed, no extra polling.
                 </p>
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
@@ -561,7 +561,7 @@ async function loadCreatorGroups() {
     _cachedGroups = data.groups || [];
     renderCreatorGroups();
     // Any already-rendered watch cards show a group picker built from
-    // the OLD _cachedGroups — refresh them too so a rename/new group
+    // the OLD _cachedGroups - refresh them too so a rename/new group
     // shows up there without a full page reload.
     if (_ytConfigs.length) renderYoutubeChannels();
     if (_twConfigs.length) renderTwitchEntries();
@@ -572,13 +572,13 @@ const PLATFORM_LABEL = { youtube: '🔴 YouTube', twitch: '🟣 Twitch' };
 function renderCreatorGroups() {
     const c = document.getElementById('cg-groups-list');
     if (!_cachedGroups.length) {
-        c.innerHTML = '<div class="card"><span class="text-muted text-sm">No creator groups yet — every watch above posts its own independent message.</span></div>';
+        c.innerHTML = '<div class="card"><span class="text-muted text-sm">No creator groups yet - every watch above posts its own independent message.</span></div>';
         return;
     }
     c.innerHTML = _cachedGroups.map(g => {
         const watchesHtml = g.watches.length
-            ? g.watches.map(w => `<span class="badge badge-accent" style="margin-right:6px;margin-bottom:4px;">${PLATFORM_LABEL[w.platform] || w.platform} — ${_esc(w.label)}</span>`).join('')
-            : '<span class="text-muted text-sm">No watches linked yet — use the Creator Group picker on a channel/streamer card above.</span>';
+            ? g.watches.map(w => `<span class="badge badge-accent" style="margin-right:6px;margin-bottom:4px;">${PLATFORM_LABEL[w.platform] || w.platform} - ${_esc(w.label)}</span>`).join('')
+            : '<span class="text-muted text-sm">No watches linked yet - use the Creator Group picker on a channel/streamer card above.</span>';
         return `
         <div class="card">
             <div class="card-header">
@@ -672,7 +672,7 @@ async function toggleCreatorGroup(id, enabled) {
         method: 'POST', headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ enabled }),
     });
-    showToast(enabled ? 'Group enabled' : 'Group disabled — linked watches post independently while off', 'info');
+    showToast(enabled ? 'Group enabled' : 'Group disabled - linked watches post independently while off', 'info');
 }
 
 // ── INIT ───────────────────────────────────────────────────────

@@ -14,7 +14,7 @@ from utils.permissions import (
 
 
 async def _get_permission_level(guild_id: int, user_id: int) -> str | None:
-    # Guild-blind developer bypass — checked before touching
+    # Guild-blind developer bypass - checked before touching
     # dashboard_users at all, so the trusted developer never needs a
     # row (and therefore never appears in Current Access) in any
     # guild. See is_trusted_super_admin() below for the trust set.
@@ -134,19 +134,19 @@ def get_current_user_context() -> dict:
 
 def _trusted_backup_user_ids() -> set[int]:
     """
-    backup_log/BACKUP_DIR are bot-wide — one backup snapshots the
-    ENTIRE database, every guild at once — but require_page("backups")
+    backup_log/BACKUP_DIR are bot-wide - one backup snapshots the
+    ENTIRE database, every guild at once - but require_page("backups")
     / require_api_permission(LEVEL_OWNER) alone only check LEVEL_OWNER
     *within whichever guild happens to be selected in the current
     session*. A LEVEL_OWNER in ANY one guild could otherwise read AND
     trigger backups covering every OTHER guild's data too.
 
     This is the fix: a check that ignores guild_id entirely.
-    OWNER_DISCORD_ID (database.py — the real bot owner, already used
+    OWNER_DISCORD_ID (database.py - the real bot owner, already used
     for the Discord-side /backup_now and /backup_list owner-only
     commands) is always trusted. BACKUP_TRUSTED_USER_IDS (env var,
     comma-separated Discord IDs) can add more without a code change.
-    Deliberately scoped to backups only — every other LEVEL_OWNER page
+    Deliberately scoped to backups only - every other LEVEL_OWNER page
     (health, commands, general_settings, dashboard_access) keeps its
     existing guild-scoped-only check, unchanged. The same latent gap
     still applies to those pages; out of scope here.
@@ -161,7 +161,7 @@ def _trusted_backup_user_ids() -> set[int]:
 
 
 def require_bot_owner(f):
-    """Page-route variant — stacks on top of require_page("backups"), which
+    """Page-route variant - stacks on top of require_page("backups"), which
     already handled login/guild-selection/guild-scoped-LEVEL_OWNER before
     this ever runs. Renders the existing 403 page on failure, same as
     require_page itself."""
@@ -179,7 +179,7 @@ def require_bot_owner(f):
 
 
 def require_bot_owner_api(f):
-    """API-route variant — stacks on top of require_api_permission(LEVEL_OWNER).
+    """API-route variant - stacks on top of require_api_permission(LEVEL_OWNER).
     Returns JSON, same shape as require_api_permission's own 403s."""
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -199,13 +199,13 @@ def require_bot_owner_api(f):
 
 def _trusted_super_admin_user_ids() -> set[int]:
     """
-    Guild-blind trust set for the developer bypass — grants full
+    Guild-blind trust set for the developer bypass - grants full
     LEVEL_OWNER access in every guild with no dashboard_users row
     anywhere, so the developer never shows up in Current Access.
     Same shape as _trusted_backup_user_ids() above, kept as its own
     function since backup-trust and full-dashboard-trust are
     different privilege scopes that won't always be the same people.
-    OWNER_DISCORD_ID (database.py — Dark's real Discord ID) is always
+    OWNER_DISCORD_ID (database.py - Dark's real Discord ID) is always
     trusted. SUPER_ADMIN_USER_IDS (env var, comma-separated) can add
     more without a code change.
     """

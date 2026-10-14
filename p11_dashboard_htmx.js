@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* PROBE 11 — full alias lifecycle in the real dashboard, including the
+/* PROBE 11 - full alias lifecycle in the real dashboard, including the
  * path that the previous investigation proved broken in production:
  *
  *     htmx navigation → /commands page swap → host un-initialised
@@ -28,7 +28,7 @@ try {
     try {
         jsdom = require('/home/user/.cache/jstest/node_modules/jsdom');
     } catch (e2) {
-        console.error('jsdom not found — set JSDOM_PATH (see header).');
+        console.error('jsdom not found - set JSDOM_PATH (see header).');
         process.exit(2);
     }
 }
@@ -61,7 +61,7 @@ function extractCommandRow() {
     if (start < 0) throw new Error('command list for-loop not found in template');
     let depth = 0, end = -1;
     // `set` has no `endset` in Jinja, so we don't count it as an opener
-    // for the depth balance — we just strip it later.
+    // for the depth balance - we just strip it later.
     const tagRe = /\{%\s*(for|endfor|if|endif)\b[^%]*%\}/g;
     tagRe.lastIndex = start;
     let m;
@@ -137,7 +137,7 @@ function makeWindow({ aliases, roles = [] } = {}) {
         }
         return { ok: true, json: async () => ({}) };
     };
-    // jQuery / select2 stub — NeroSelect needs it. We never let the
+    // jQuery / select2 stub - NeroSelect needs it. We never let the
     // multi pickers actually attach select2 because the probe is about
     // the alias lifecycle, but the select2 calls must not throw.
     const $ = function (sel) {
@@ -210,7 +210,7 @@ function loadAll(window) {
     window.eval(PAGE_SCRIPT);
     window.eval(ALIAS_JS);
     window.eval(SELECT_JS);
-    // dashboard.js — in production this is loaded via <script src=>. We
+    // dashboard.js - in production this is loaded via <script src=>. We
     // include the same code the production page runs so the afterSwap /
     // htmx:load / htmx:historyRestore wiring is exercised exactly as it
     // would be in the browser.
@@ -231,7 +231,7 @@ async function scenario1_directLoad() {
         host && host.classList.contains('na-box'));
     check('host has a .na-input (text box for typing)', !!(host && host.querySelector('.na-input')));
 
-    // Open the panel — the page calls loadCommandSettings, which fetches
+    // Open the panel - the page calls loadCommandSettings, which fetches
     // /api/commands/settings/kick and runs setValues.
     w.eval('loadCommandSettings("kick")');
     await flush();
@@ -305,7 +305,7 @@ async function scenario2_htmxSwap() {
     check('after htmx:afterSwap: a .na-input is present',
         !!(host && host.querySelector('.na-input')));
 
-    // Open the Edit panel — must show saved chips.
+    // Open the Edit panel - must show saved chips.
     w.eval('loadCommandSettings("kick")');
     await flush();
     const chipWords = () => Array.from(host.querySelectorAll('.na-chip'))
@@ -360,7 +360,7 @@ async function scenario3_rolePickerFailSafe() {
     w.document.dispatchEvent(new w.Event('DOMContentLoaded', { bubbles: true }));
     await flush();
 
-    // Open the panel — loadCommandSettings will detect the failure and
+    // Open the panel - loadCommandSettings will detect the failure and
     // mark nsReady='0' on the failed picker.
     w.eval('loadCommandSettings("kick")');
     await flush();
@@ -370,7 +370,7 @@ async function scenario3_rolePickerFailSafe() {
     check('a sibling picker that did init IS nsInit=1',
         w.document.getElementById('edit-disabled-roles-kick').dataset.nsInit === '1');
 
-    // Save — must refuse and toast.
+    // Save - must refuse and toast.
     try {
         await w.eval('saveCommandSettings("kick", null)');
     } catch (e) { /* ignore */ }

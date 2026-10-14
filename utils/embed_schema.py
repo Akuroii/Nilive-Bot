@@ -2,12 +2,12 @@
 Server-side validation for a Discord message payload (the Embed Builder send
 path).
 
-Why this exists: the send route used to check three things — embeds is a
-list, ≤10 embeds, attachments ≤10 with a ≤25MB total — and forwarded
+Why this exists: the send route used to check three things - embeds is a
+list, ≤10 embeds, attachments ≤10 with a ≤25MB total - and forwarded
 everything else straight to Discord. Every other rule lived only in the
 browser, so anything that reached the route without going through the page
 (curl, an old tab, a future client, a bug) was validated by Discord with
-`{"code": 50035, "errors": {"embeds.0.title": ...}}` — an error the admin
+`{"code": 50035, "errors": {"embeds.0.title": ...}}` - an error the admin
 cannot act on, after a full file upload.
 
 The rules here are Discord's own, from utils/discord_limits.py (which cites
@@ -24,7 +24,7 @@ the plain-text `error` string older clients already display.
 Deliberatly strict about the things Discord punishes, deliberately quiet
 about anything else: unknown top-level keys are ignored (Discord rejects
 them itself if it cares), and `attachment://name` references are rejected
-unless a matching uploaded file exists in THIS request — a dangling
+unless a matching uploaded file exists in THIS request - a dangling
 attachment reference is exactly the "silently broken embed" the rebuild is
 supposed to make impossible.
 
@@ -87,7 +87,7 @@ def _text_len(value) -> int:
 def embed_char_count(embed: dict) -> int:
     """
     Discord's "sum of all characters in an embed structure must not exceed
-    6000" — title, description, every field name/value, footer text and
+    6000" - title, description, every field name/value, footer text and
     author name. Counted the way Discord counts it so a payload that passes
     here cannot be rejected for size at the API.
     """
@@ -272,7 +272,7 @@ def _check_media_url(errors, path, value, label, files_by_name) -> None:
         elif name not in files_by_name:
             _err(errors, path,
                  f"{label} points at the attachment \"{name}\", but no file with that name "
-                 f"is being uploaded — reattach the file before sending.")
+                 f"is being uploaded - reattach the file before sending.")
         return
     if not _is_http_url(value):
         _err(errors, path, f"{label} must start with http:// or https://.")
@@ -283,7 +283,7 @@ def validate_message(payload, files=None):
     Validate a whole Create Message payload.
 
     payload: {"content": str|None, "embeds": [embed, ...]}
-    files:   [{"name": str, "size": int}, ...] — the uploaded files, or None.
+    files:   [{"name": str, "size": int}, ...] - the uploaded files, or None.
 
     Returns (ok, errors). `errors` is ordered by importance (message-level
     first, then embed by embed) and each entry is {"path", "message"}.
@@ -345,14 +345,14 @@ def validate_message(payload, files=None):
     if oversized_single is not None:
         _err(errors, "files",
              f"\"{oversized_single.get('name') or 'file'}\" is "
-             f"{human_bytes(oversized_single.get('size'))} — over the {human_bytes(total_max)} "
+             f"{human_bytes(oversized_single.get('size'))} - over the {human_bytes(total_max)} "
              f"maximum this dashboard can upload in one message.")
     elif total > total_max:
         _err(errors, "files",
              f"Attachments total {human_bytes(total)}; the maximum is {human_bytes(total_max)}.")
 
     if not has_content and not has_embeds and not files:
-        _err(errors, "", "Nothing to send — add content, an embed, or an attachment.")
+        _err(errors, "", "Nothing to send - add content, an embed, or an attachment.")
 
     return (len(errors) == 0), errors
 
@@ -408,7 +408,7 @@ def advisory_file_warnings(files) -> list:
         size = (f or {}).get("size")
         if isinstance(size, int) and size > limit:
             notes.append(
-                f"\"{(f or {}).get('name') or 'file'}\" is {human_bytes(size)} — above the "
+                f"\"{(f or {}).get('name') or 'file'}\" is {human_bytes(size)} - above the "
                 f"{human_bytes(limit)} per-file limit on non-boosted servers. Boosted servers "
                 f"and Nitro accounts allow more; Discord will refuse it if this one does not.")
     return notes

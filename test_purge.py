@@ -27,7 +27,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 # Throwaway env BEFORE any repo import (database.py validates OWNER_ID
-# and binds DB_PATH at import time) — same convention as scripts/test_afk.py.
+# and binds DB_PATH at import time) - same convention as scripts/test_afk.py.
 os.environ["DATABASE_PATH"] = os.path.join(
     tempfile.mkdtemp(prefix="purgetest-"), "test.db")
 if not os.getenv("OWNER_ID"):
@@ -84,7 +84,7 @@ async def run_purge(channel, amount=10, member=None):
     err = None
     try:
         await Moderation.purge.callback(None, inter, amount=amount, member=member)
-    except Exception as e:  # noqa: BLE001 — the test IS about crashes
+    except Exception as e:  # noqa: BLE001 - the test IS about crashes
         err = e
     return inter, err
 

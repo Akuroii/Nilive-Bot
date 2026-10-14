@@ -14,7 +14,7 @@ guild, channels and messages. No Discord connection is made. Covers:
     no afk_history table exists (audit removed)
     persistence: a second cog instance (fresh process view) sees the state
 
-Final AFK corrections pass (2026-09-23) coverage — the corrected lifecycle:
+Final AFK corrections pass (2026-09-23) coverage - the corrected lifecycle:
 
  1. !afk [reason] starts AFK with NO mentions button on the start message
  2. the cancellation/return message carries the mentions button
@@ -47,7 +47,7 @@ Final AFK corrections pass (2026-09-23) coverage — the corrected lifecycle:
     400-day-old ended session's button still serves its snapshots), and
     startup re-registers views from afk_ended_sessions identity metadata
     without loading any snapshot rows into RAM (data stays DB-backed and
-    session-scoped — fetched one session's page at click time)
+    session-scoped - fetched one session's page at click time)
 
 Run:  DATABASE_PATH=/tmp/afk_test.db OWNER_ID=123 python3 scripts/test_afk.py
 """
@@ -130,7 +130,7 @@ class FakeBot:
 
     def add_view(self, view):
         # Mirrors discord.py's connection view store: one dispatcher per
-        # custom_id — a duplicate registration can never create double
+        # custom_id - a duplicate registration can never create double
         # replies, the newest view simply owns the custom_id.
         for item in view.children:
             custom_id = getattr(item, "custom_id", None)
@@ -348,7 +348,7 @@ async def run(db_path):
 
     # In production database.py init creates command_toggles before any cog
     # loads, so the toggle read below always has its table. This throwaway
-    # DB normally initializes nothing outside cog code — mirror only the
+    # DB normally initializes nothing outside cog code - mirror only the
     # column subset utils.command_gating.TOGGLE_SELECT selects.
     async with aiosqlite.connect(db_path) as db:
         await db.execute("""
@@ -382,7 +382,7 @@ async def run(db_path):
             row = await cur.fetchone()
         return row[0] if row else None
 
-    # ── 2. activation with a reason — and NO mentions button ─────────────
+    # ── 2. activation with a reason - and NO mentions button ─────────────
     print(f"{BOLD}[2] !afk with a reason (start card has NO button){RESET}")
     await run_afk(author, general, "يتم اخذ راحة من البشر")
     emb = last_sent(general)["embed"]
@@ -395,7 +395,7 @@ async def run(db_path):
     check("reason line present",
           "**السبب:** يتم اخذ راحة من البشر" in emb.description)
 
-    # [1] The activation card must NOT carry the mentions button — the
+    # [1] The activation card must NOT carry the mentions button - the
     # button is a post-return component on the cancellation card only.
     check("start message [1] carries NO mentions button",
           sent_view(general) is None)
@@ -763,7 +763,7 @@ async def run(db_path):
     check("panel lists all 4 snapshots of the ended session",
           len(lines13) == 4)
     check("empty content is presented as a dash",
-          lines13[1] == "**Sara:** —")
+          lines13[1] == "**Sara:** -")
     check("long content is truncated for display only [14]",
           "…" in lines13[0] and "L" * 300 not in lines13[0]
           and "L" * 100 in lines13[0])
@@ -784,7 +784,7 @@ async def run(db_path):
         bot, guild, author, games, "back from A", mid=41))
     view_a = sent_view(games)
 
-    # Session B — a LATER session of the same owner.
+    # Session B - a LATER session of the same owner.
     await run_afk(author, general, "session B")
     await cog.on_message(invoking_message(
         bot, guild, other, games, "B-one <@100>", mid=42, mentions=[author]))
@@ -1000,7 +1000,7 @@ async def run(db_path):
           and "disabled ping" in
           (dis_click.response.sent[-1]["embed"].description or ""))
 
-    # [21] A NEW session is blocked — and only a new session.
+    # [21] A NEW session is blocked - and only a new session.
     general.sent.clear()
     await run_afk(author, general, "should be blocked")
     blocked = last_sent(general)
@@ -1071,7 +1071,7 @@ async def run(db_path):
           resp_sc_b["content"] == afk_mod.AFK_ZERO_MENTIONS_TEXT
           and resp_sc_b["ephemeral"] is True and resp_sc_b["embed"] is None)
 
-    # After Session B exists, button A still shows A — never B's state.
+    # After Session B exists, button A still shows A - never B's state.
     click_sc_a2 = FakeInteraction(author, guild)
     await sc_a._on_click(click_sc_a2)
     panel_again = click_sc_a2.response.sent[-1]["embed"].description or ""
@@ -1104,7 +1104,7 @@ async def run(db_path):
 
     # Restart with an SQL spy: startup must register views from the
     # afk_ended_sessions identity metadata and must NOT load (or touch) any
-    # snapshot rows — data stays DB-backed and session-scoped.
+    # snapshot rows - data stays DB-backed and session-scoped.
     captured_sql: list[str] = []
     original_connect = aiosqlite.connect
 

@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   Message Builder v2 — the Discord markdown renderer.
+   Message Builder v2 - the Discord markdown renderer.
 
    Phase 1, step 2. Pure. No DOM, no timers, no global mutable state,
    no storage, no network. Same input → same output, always.
@@ -7,7 +7,7 @@
    WHY A SECOND RENDERER EXISTS AT ALL
    -----------------------------------
    `embed-composer.js` already renders Discord markdown, and v1 keeps
-   using it — untouched. This module is the v2 implementation, and its
+   using it - untouched. This module is the v2 implementation, and its
    behaviour is *proven equal* to v1's by `scripts/test_discord_markdown.js`,
    which treats the live v1 module as the oracle over a committed
    corpus (`scripts/fixtures/markdown_corpus.json`) plus a recorded
@@ -31,7 +31,7 @@
    call site; this module makes that a property of the *context*, so a
    caller cannot get it wrong by forgetting which helper to call.
 
-   EQUALITY IS EXACT — INCLUDING THE AWKWARD PARTS
+   EQUALITY IS EXACT - INCLUDING THE AWKWARD PARTS
    -----------------------------------------------
    There is no "equivalent except for…" here. The literal surfaces reproduce
    v1's `esc(value)` byte for byte, control characters included, and the
@@ -41,13 +41,13 @@
    middle of a sentence, no backslash escapes) v2 reproduces the imperfection
    and the corpus records it as a known defect: this step establishes the
    compatibility boundary, and correcting Discord fidelity is a separate,
-   deliberate change — not something that happens by accident inside a
+   deliberate change - not something that happens by accident inside a
    compatibility pass.
 
    WHAT IT DELIBERATELY DOES NOT DO
    --------------------------------
    No new markdown features. Discord's real set includes spoilers,
-   blockquotes, headers, subtext, lists, masked links and timestamps —
+   blockquotes, headers, subtext, lists, masked links and timestamps -
    v1 implements none of them, so neither does this, and the corpus
    records each one as a known gap with the literal output both
    implementations currently produce. Turning them on later is a
@@ -60,7 +60,7 @@
    resolve custom emoji and mentions inside field names; the context
    table can express that (`tokens: true, markdown: false`) and the
    corpus has the case pinned either way, so changing it is one line
-   and one deliberate test update — not an accident.
+   and one deliberate test update - not an accident.
 
    Consumed by: the v2 preview (step 3). NOT consumed by v1.
    Tested by: scripts/test_discord_markdown.js.
@@ -241,12 +241,12 @@ window.NERO.embed = window.NERO.embed || {};
 
         // Plain-text surfaces end here, with EXACTLY what v1's preview does:
         // `esc(value)` on the raw value at the call site. No markdown, no
-        // tokens — and, importantly, no control-character stripping either.
+        // tokens - and, importantly, no control-character stripping either.
         // v1's esc() passes C0 controls through on these surfaces and the
         // compatibility contract is byte equality, so they pass through here
         // too; adding a scrub would be a behaviour change dressed up as
         // consistency. (The markup path is different because v1's own
-        // renderDiscordMarkup strips controls — see below.)
+        // renderDiscordMarkup strips controls - see below.)
         if (!context.markdown && !context.tokens) {
             return { html: esc(text), isEmojiOnly: false, context: contextName };
         }
@@ -289,7 +289,7 @@ window.NERO.embed = window.NERO.embed || {};
             ? stashCode(`<pre class="eb-code-block"><code>${fencedCodeBody(body)}</code></pre>`)
             : stashCode(`<code class="eb-code">${inlineCodeBody(body)}</code>`));
 
-        // Markdown — bold before italic so `**x**` is not half-consumed.
+        // Markdown - bold before italic so `**x**` is not half-consumed.
         if (context.markdown) {
             escaped = escaped.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
             escaped = escaped.replace(/__([\s\S]+?)__/g, '<u>$1</u>');
@@ -321,7 +321,7 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * Convenience for the plain-text surfaces: byte-identical to v1's
      * `esc(value)` at the call site. Deliberately does NOT strip control
-     * characters — see the literal branch in `render()`.
+     * characters - see the literal branch in `render()`.
      */
     function renderLiteral(text) {
         return esc(text);

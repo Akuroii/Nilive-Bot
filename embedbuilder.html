@@ -31,7 +31,7 @@
                 <span class="eb-counter" id="eb-attach-counter">0 / 10 &middot; 0MB / 25MB</span>
             </div>
             <p class="text-muted text-sm" style="margin-bottom:12px;">
-                Files stay in your browser only — nothing is uploaded until you press Send.
+                Files stay in your browser only - nothing is uploaded until you press Send.
             </p>
             <div class="eb-dropzone" id="eb-dropzone">
                 <input type="file" id="eb-file-input" multiple style="display:none;">
@@ -139,7 +139,7 @@
 // The per-embed editor, the Discord preview renderer, the payload
 // helpers and the markup/mention renderer now live in the shared
 // static/js/embed-composer.js (embed-composer.css carries the
-// styles) — the Minigames v2 builder page uses the exact same
+// styles) - the Minigames v2 builder page uses the exact same
 // code, so the two pages cannot drift apart. Everything below that
 // is specific to THIS page (content card, toolbar, mention modal,
 // emoji popover, attachments, IndexedDB drafts, undo/redo, send /
@@ -169,7 +169,7 @@ let attachments = []; // { id, name, type, size, blob }
 let activeEmbed = 0;
 
 // ═══════════════════════════════════════════════════════════════
-// INDEXEDDB DRAFT PERSISTENCE (content/embeds/attachments — client-
+// INDEXEDDB DRAFT PERSISTENCE (content/embeds/attachments - client-
 // side only, nothing ever touches the server until Send is pressed)
 // ═══════════════════════════════════════════════════════════════
 const IDB_NAME = 'nero_embedbuilder';
@@ -249,7 +249,7 @@ async function restoreDraft() {
     if (draft.content) state.content = draft.content;
     if (draft.embeds && draft.embeds.length) state.embeds = draft.embeds;
     if (draft.attachments && draft.attachments.length) {
-        // _previewUrl deliberately NOT restored — blob: URLs never survive
+        // _previewUrl deliberately NOT restored - blob: URLs never survive
         // a page reload, so each attachment gets a fresh one lazily on its
         // next render (see getAttachmentPreviewUrl below). `source`
         // defaults to 'local' for drafts saved before that field existed.
@@ -271,7 +271,7 @@ async function restoreDraft() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// UNDO / REDO (content + embeds only — attachments are large binary
+// UNDO / REDO (content + embeds only - attachments are large binary
 // blobs and are excluded from the history stack by design)
 // ═══════════════════════════════════════════════════════════════
 let history = [];
@@ -452,7 +452,7 @@ async function loadAppEmojis(force) {
 }
 
 // External emojis (from the bot's OTHER servers) are fetched lazily, only
-// once the person actually asks for them — this is an N-guild fan-out on
+// once the person actually asks for them - this is an N-guild fan-out on
 // the backend (see /api/guild/emojis/external), so it's worth not paying
 // for it on every popover open, only the first time it's expanded.
 async function loadExternalEmojis() {
@@ -555,7 +555,7 @@ function renderEmojiGrid(query) {
         html += `</div>`;
     }
 
-    // Application Emojis — bot-owned, usable in every channel with no
+    // Application Emojis - bot-owned, usable in every channel with no
     // USE_EXTERNAL_EMOJIS needed. Anything imported via the "paste to
     // import" box below lands here for instant reuse afterward.
     const appEmojis = (appEmojiCache || []).filter(e => !q || e.name.toLowerCase().includes(q));
@@ -645,7 +645,7 @@ document.getElementById('eb-emoji-import-btn').addEventListener('click', async (
         const data = await res.json();
         if (data.success) {
             const token = data.animated ? `<a:${data.name}:${data.id}>` : `<:${data.name}:${data.id}>`;
-            showToast(data.cached ? 'Already imported — inserted!' : 'Imported as an Application Emoji!');
+            showToast(data.cached ? 'Already imported - inserted!' : 'Imported as an Application Emoji!');
             await loadAppEmojis(true);
             input.value = '';
             insertEmojiToken(token);
@@ -697,7 +697,7 @@ function addFiles(fileList) {
             size: f.size, blob: f,
             source: 'local', // local = an unsent File, uploaded fresh on Send.
                               // 'remote' (existing Discord attachment, kept
-                              // as-is) is reserved for the future Edit flow —
+                              // as-is) is reserved for the future Edit flow -
                               // deliberately not built here.
         });
     }
@@ -709,10 +709,10 @@ function addFiles(fileList) {
 // ── Attachment preview-URL cache ─────────────────────────────────────────
 // ROOT CAUSE FIX: renderAttachments()/renderPreview() used to call
 // URL.createObjectURL() fresh on EVERY render (every keystroke, every
-// embed edit) with no matching revokeObjectURL() anywhere — an unbounded
+// embed edit) with no matching revokeObjectURL() anywhere - an unbounded
 // per-keystroke leak of blob: URLs. Once enough piled up in a session,
 // createObjectURL() could start throwing, which aborted whichever render
-// function hit it first mid-loop — silently skipping the rest of THAT
+// function hit it first mid-loop - silently skipping the rest of THAT
 // render (list and/or preview going blank) while the `attachments` array
 // itself (what Send actually reads) stayed completely intact, which is
 // exactly why Discord could still receive a file the UI wasn't showing.
@@ -721,7 +721,7 @@ function addFiles(fileList) {
 // on the attachment object, and only revoke+drop it when that attachment
 // is actually removed/cleared or the message is sent.
 //
-// The shared composer (EC.renderPreview) no longer mints URLs itself — this
+// The shared composer (EC.renderPreview) no longer mints URLs itself - this
 // page hands it getAttachmentPreviewUrl through `attachmentPreviewUrl`, so
 // the preview and the thumbnail grid always share ONE url per attachment.
 //
@@ -731,7 +731,7 @@ function addFiles(fileList) {
 // (EC.previewUrlFor: blob: if the document can render blob: at all, else a
 // data: URI) and re-renders when the answer lands. That second render is
 // what used to be missing: blob: URLs are blocked unless CSP img-src lists
-// them, the <img> src is set, nothing loads, no request fails — and the
+// them, the <img> src is set, nothing loads, no request fails - and the
 // attachment simply "doesn't appear" while the file itself was fine the
 // whole time.
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|avif|bmp|ico|tiff?|heic|heif|apng|svg)$/i;
@@ -744,8 +744,8 @@ const IMAGE_MIME_BY_EXT = {
 
 // Browsers leave File.type empty for a lot of real files (HEIC screenshots,
 // images dragged out of some chat apps, files restored from disk). Treating
-// `type` as the only truth made those files render as a 📄 badge forever —
-// the "it uploaded but nothing shows up" report — so sniff the extension.
+// `type` as the only truth made those files render as a 📄 badge forever -
+// the "it uploaded but nothing shows up" report - so sniff the extension.
 function looksLikeImage(a) {
     if (!a) return false;
     const t = String(a.type || '');
@@ -761,8 +761,8 @@ function imageMimeFor(name) {
 function attachmentPreviewHint(a) {
     const r = (EC.NO_PREVIEW_HINT && EC.NO_PREVIEW_HINT[a._previewError]) || '';
     return r || (a.size > (EC.DATA_URL_MAX_BYTES || 0)
-        ? 'Too large to preview inline — it will still be sent.'
-        : 'No preview available — the file will still be sent.');
+        ? 'Too large to preview inline - it will still be sent.'
+        : 'No preview available - the file will still be sent.');
 }
 
 let _previewRefreshQueued = false;
@@ -799,7 +799,7 @@ function refreshAttachmentPreview(a) {
 
 function getAttachmentPreviewUrl(a) {
     if (!a) return null;
-    if (a.source === 'remote') return a.url || null; // future Edit flow — not wired up yet
+    if (a.source === 'remote') return a.url || null; // future Edit flow - not wired up yet
     if (a._previewUrl) return a._previewUrl;
     if (a._dataUrl) return a._dataUrl;
     if (!a.blob || a._previewPending || a._previewError) return null;
@@ -810,7 +810,7 @@ function getAttachmentPreviewUrl(a) {
 function revokeAttachmentPreview(a) {
     if (!a) return;
     if (a._previewUrl) {
-        try { URL.revokeObjectURL(a._previewUrl); } catch (e) { /* already gone — fine */ }
+        try { URL.revokeObjectURL(a._previewUrl); } catch (e) { /* already gone - fine */ }
     }
     a._previewUrl = null;
     a._dataUrl = null;
@@ -843,7 +843,7 @@ function renderAttachments() {
     attachCounter.textContent = `${attachments.length} / ${MAX_ATTACHMENTS} · ${fmtBytes(totalBytes)} / 25MB`;
     attachCounter.classList.toggle('eb-counter-warn', totalBytes > MAX_ATTACH_TOTAL_BYTES * 0.8);
 
-    // Each attachment is rendered inside its own try/catch — one bad item
+    // Each attachment is rendered inside its own try/catch - one bad item
     // (e.g. a Blob that didn't survive an IndexedDB round-trip cleanly in
     // a browser with weak Blob-storage support) now degrades to a fallback
     // icon for just that item instead of throwing and blanking the whole
@@ -858,7 +858,7 @@ function renderAttachments() {
             } else if (isImg && a._previewPending) {
                 inner = `<div class="eb-attach-thumb--pending">⏳ preview…</div>`;
             } else if (isImg) {
-                // No preview, stated plainly, with a retry — the file is in
+                // No preview, stated plainly, with a retry - the file is in
                 // memory and WILL be sent either way. "Nothing appeared" is
                 // the bug; a quiet blank tile is how it got misread.
                 inner = `<div class="eb-attach-status">🖼️<span>no preview</span>`
@@ -898,7 +898,7 @@ function renderAttachments() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// EMBEDS (accordion, up to 10) — the card markup + field wiring
+// EMBEDS (accordion, up to 10) - the card markup + field wiring
 // lives in the shared composer; this page keeps ownership of the
 // embed ARRAY and of the max/delete rules (toasts, counters).
 // ═══════════════════════════════════════════════════════════════
@@ -912,7 +912,7 @@ function duplicateEmbed(i) {
     editor.render(); renderPreview(); saveDraft(); pushHistory();
 }
 function deleteEmbed(i) {
-    if (state.embeds.length <= 1) { showToast('At least one embed is required — clear its fields instead', 'warning'); return; }
+    if (state.embeds.length <= 1) { showToast('At least one embed is required - clear its fields instead', 'warning'); return; }
     state.embeds.splice(i, 1);
     activeEmbed = Math.min(activeEmbed, state.embeds.length - 1);
     editor.render(); renderPreview(); saveDraft(); pushHistory();
@@ -941,10 +941,10 @@ document.getElementById('eb-add-embed').addEventListener('click', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// LIVE PREVIEW — mirrors the real Discord message this will send:
+// LIVE PREVIEW - mirrors the real Discord message this will send:
 // bot avatar/name, rendered markdown, resolved mentions, real inline
 // emoji, so this is a preview of the actual output, not a mockup.
-// (renderer: shared composer — same chrome the minigames builder
+// (renderer: shared composer - same chrome the minigames builder
 // uses, so both previews are pixel-identical for the same input)
 // ═══════════════════════════════════════════════════════════════
 const previewBox = document.getElementById('eb-preview');
@@ -1001,7 +1001,7 @@ function renderPreview() {
         embeds: state.embeds,
         attachments: attachments,
         botIdentity: botIdentity,
-        // The composer must NOT mint its own blob: URLs — this page owns
+        // The composer must NOT mint its own blob: URLs - this page owns
         // the attachment lifecycle (one cached URL per attachment, revoked
         // on remove/send/clear). Passing the resolver is what keeps the
         // preview and the thumbnail grid on the exact same URL.
@@ -1039,7 +1039,7 @@ document.getElementById('eb-send-btn').addEventListener('click', async () => {
 
     const embeds = cleanEmbedsForPayload();
     if (!state.content && !embeds.length && !attachments.length) {
-        showToast('Nothing to send — add content, an embed, or an attachment', 'warning');
+        showToast('Nothing to send - add content, an embed, or an attachment', 'warning');
         return;
     }
 
@@ -1051,7 +1051,7 @@ document.getElementById('eb-send-btn').addEventListener('click', async () => {
             fd.append('channel_id', channelId);
             fd.append('payload_json', JSON.stringify({ content: state.content || undefined, embeds }));
             // Only local (not-yet-uploaded) attachments get sent as real
-            // multipart files here — 'remote' is reserved for the future
+            // multipart files here - 'remote' is reserved for the future
             // Edit flow (an existing Discord attachment kept as-is), which
             // isn't wired up yet, but the guard is correct either way.
             attachments.filter(a => a.source !== 'remote').forEach(a => fd.append('files', a.blob, a.name));
@@ -1065,7 +1065,7 @@ document.getElementById('eb-send-btn').addEventListener('click', async () => {
             if (data.success) {
                 setStatus('Sent!', true);
                 showToast('Message sent!');
-                // Attachments are one-shot — the Files just got uploaded and
+                // Attachments are one-shot - the Files just got uploaded and
                 // consumed. Clearing them (and revoking their cached preview
                 // URLs) here is what keeps the in-memory state, the visible
                 // list/preview, and the persisted draft all in agreement
@@ -1141,7 +1141,7 @@ document.getElementById('eb-delete-template-btn').addEventListener('click', () =
 });
 
 document.getElementById('eb-clear-btn').addEventListener('click', () => {
-    showConfirm('Clear the entire composer — content, all embeds, and attachments? This cannot be undone.', async () => {
+    showConfirm('Clear the entire composer - content, all embeds, and attachments? This cannot be undone.', async () => {
         revokeAllAttachmentPreviews();
         state = { content: '', embeds: [blankEmbed()] };
         attachments = [];
@@ -1175,7 +1175,7 @@ function renderAll() {
 
 (async function init() {
     // Bot identity + role/channel lookups load in parallel with the
-    // draft restore — renderAll() below re-renders once everything is
+    // draft restore - renderAll() below re-renders once everything is
     // in, so the preview never flashes stale/placeholder data.
     const identityLoad = Promise.all([loadBotIdentity(), loadMentionLookups()]);
     await restoreDraft();

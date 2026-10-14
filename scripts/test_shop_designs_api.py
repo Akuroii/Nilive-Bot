@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Shop Publisher — saved Design drafts API (Design Draft Persistence).
+Shop Publisher - saved Design drafts API (Design Draft Persistence).
 
 What this locks down
-  1.  GET    /api/shop-publisher/designs — full records, session-guild only.
-  2.  POST   /api/shop-publisher/designs — create (id absent/null) OR
+  1.  GET    /api/shop-publisher/designs - full records, session-guild only.
+  2.  POST   /api/shop-publisher/designs - create (id absent/null) OR
       full-overwrite update (id present); immutable id/guild_id/created_at;
       updated_at refreshed on every successful update.
-  3.  DELETE /api/shop-publisher/designs/<id> — hard delete; the second
+  3.  DELETE /api/shop-publisher/designs/<id> - hard delete; the second
       delete is the same indistinguishable 404 as an unknown/cross-guild id.
   4.  The persisted presentation is the design's OWN snapshot: normalized at
       save; source_template_name is provenance only and later source-template
@@ -19,7 +19,7 @@ What this locks down
       invalid_product_ref, unknown_product, entry_not_in_roster, ...).
   7.  LEVEL_OWNER + session-guild isolation (body guild_id ignored) + the
       shared blueprint CSRF enforcement on POST/DELETE.
-  8.  The routes write ONLY shop_designs — no audit rows, no other table.
+  8.  The routes write ONLY shop_designs - no audit rows, no other table.
   9.  DELETE is refused with 409 design_has_publications while a Publication
       references the Design (and removes nothing); after Unpublish it succeeds.
       Malformed and missing ids are 404 and never delete anything.
@@ -472,7 +472,7 @@ class ShopDesignsApiTests(unittest.TestCase):
         self.assertEqual(preview.status_code, 400)
         codes = [p["code"] for p in preview.get_json()["problems"]]
         self.assertIn("unknown_product", codes,
-                      "the existing validate_design code — no unknown_design family")
+                      "the existing validate_design code - no unknown_design family")
         self.assertNotIn("unknown_design", codes)
 
     def test_save_rejects_unsupported_presentation_mode_but_accepts_supported_modes(self):
@@ -510,7 +510,7 @@ class ShopDesignsApiTests(unittest.TestCase):
         execute("DELETE FROM shop_categories WHERE id = ?", (cat_id,))
         record = self.get().get_json()["designs"][0]
         self.assertEqual(record["design"], created["design"],
-                         "designs hold no category data — deletion cannot touch them")
+                         "designs hold no category data - deletion cannot touch them")
         preview = self.client.post("/api/shop-publisher/preview",
                                    json=record["design"],
                                    headers={"X-CSRF-Token": "step0-csrf"})

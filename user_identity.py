@@ -1,13 +1,13 @@
 from markupsafe import escape
 
-# Python-side twin of dashboard/templates/macros/user_identity.html —
+# Python-side twin of dashboard/templates/macros/user_identity.html -
 # for the dashboard/api/*.py routes that build partial HTML by hand
 # (e.g. economy_shop.py's economy_leaderboard_partial, tickets.py's
 # tickets_partial) rather than through Jinja. Kept visually and
 # structurally identical to the macro's markup so both render paths
 # produce the same DOM/CSS hooks.
 #
-# All inputs are escaped — display_name/username can be an
+# All inputs are escaped - display_name/username can be an
 # attacker-controlled Discord nickname, and this HTML is inserted via
 # innerHTML on both the htmx-swap and raw-fetch render paths.
 

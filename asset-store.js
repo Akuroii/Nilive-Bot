@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   Message Builder v2 — the asset BYTE store + object-URL lifecycle
+   Message Builder v2 - the asset BYTE store + object-URL lifecycle
    (phase 2, step 7b).
 
    assets.js (7a) decides what a file IS: identity, format, name,
@@ -20,7 +20,7 @@
    outright, and a Uint8Array would silently become {"0":137,...} on
    the way to storage. So the document keeps METADATA (assetId,
    filename, mime, bytes) and the bytes live in their own object store,
-   written once per asset — never on a keystroke. Nothing in this file
+   written once per asset - never on a keystroke. Nothing in this file
    can reach a document: it takes ids and bytes and returns ids, bytes
    and blob: URLs.
 
@@ -39,7 +39,7 @@
    IndexedDB missing, refused, timing out or failing a write is a real
    state (drafts.js latches it as `degraded`). The answer here is: keep
    the bytes in THIS INSTANCE's memory, serve them for the rest of the
-   session, and say so — every result carries `persisted: false` plus
+   session, and say so - every result carries `persisted: false` plus
    the adapter's own reason, and mode() reports `memory` /
    `persistent: false`. The bytes are then gone after a reload, and
    getBytes() says `missing`. Nothing is ever reported as stored when
@@ -49,19 +49,19 @@
    OBJECT-URL LIFECYCLE (one URL per asset, revoked exactly once)
    -------------------------------------------------------------
      • urlFor(id) mints ONE blob: URL for a given asset + content type.
-       Repeating the lookup returns the same URL and mints nothing —
+       Repeating the lookup returns the same URL and mints nothing -
        the preview patch runs on every keystroke and must not leak a
        URL per render (the v1 page's known leak).
      • A different content type means a different blob, so the old URL
        is revoked and replaced (this is the only re-mint path; bytes
-       cannot change under an id — see the id check in putBytes()).
+       cannot change under an id - see the id check in putBytes()).
      • release(id) drops the URL and keeps the bytes; remove(id) drops
        both; releaseAll() is the teardown; destroy() is teardown + a
        closed connection, after which the store refuses every call
        rather than serving from a dead instance.
      • cachedUrl(id) is the synchronous render-path read: the preview
        resolves its sources synchronously, so 7e warms the cache with
-       urlFor() and lets the render use cachedUrl() — it never mints.
+       urlFor() and lets the render use cachedUrl() - it never mints.
      • Missing bytes never produce a URL. There is no "broken image"
        URL, no placeholder data: URL, no empty string standing in for
        one: urlFor() reports why it has nothing (missing / unavailable
@@ -80,8 +80,8 @@
    mutable state: every byte a store owns lives in ITS instance (or in
    the storage adapter it was handed). create() is the only entry
    point, and two stores never see each other's memory. The one browser
-   capability that cannot live without globals — URL.createObjectURL +
-   Blob — is the injectable `urls` factory, whose default is built from
+   capability that cannot live without globals - URL.createObjectURL +
+   Blob - is the injectable `urls` factory, whose default is built from
    window at call time and reports `urls-unavailable` when the browser
    has neither.
    ═══════════════════════════════════════════════════════════════ */
@@ -105,7 +105,7 @@
      * Bytes, from anything that reasonably holds bytes. Deliberately
      * structural (`ArrayBuffer.isView`, the ArrayBuffer tag, an Array
      * of octets) and not `instanceof`: a Uint8Array built in another
-     * realm — a test harness, a worker — fails this realm's
+     * realm - a test harness, a worker - fails this realm's
      * instanceof, which is how a byte store starts "not recognising"
      * perfectly good bytes. Blob/File are NOT read here: reading them
      * is asynchronous, and silently returning null for one would look
@@ -144,7 +144,7 @@
     /**
      * The ONE way this module reaches storage: the app's existing
      * adapter, pointed at the assets store. Returns null when drafts.js
-     * is not loaded — an honest "no storage here", never a second
+     * is not loaded - an honest "no storage here", never a second
      * opener.
      */
     function bytesStorage(options) {
@@ -169,7 +169,7 @@
 
     /**
      * The default Object-URL factory. Built from the window at call
-     * time and null when the browser has no URL/Blob — in which case
+     * time and null when the browser has no URL/Blob - in which case
      * every urlFor() reports `urls-unavailable` instead of pretending.
      */
     function browserUrls(scope) {
@@ -289,7 +289,7 @@
             return Promise.resolve(result).then(
                 (raw) => {
                     if (raw === null || raw === undefined) {
-                        // Null means "nothing under this key" — unless the
+                        // Null means "nothing under this key" - unless the
                         // read itself knocked the adapter over, in which case
                         // the honest answer is that we could not tell.
                         if (!available()) return { ok: false, reason: storageReason() };
@@ -390,7 +390,7 @@
                         found.entry.byteLength === entry.byteLength);
                     if (duplicate) {
                         stats.duplicates++;
-                        // The bytes were already here, so nothing was written —
+                        // The bytes were already here, so nothing was written -
                         // including the content type. The answer describes what
                         // the store holds, and says whether the request asked
                         // for a type other than the one already recorded.
@@ -433,7 +433,7 @@
             },
 
             /**
-             * Promote this session's memory fallback into storage — the
+             * Promote this session's memory fallback into storage - the
              * single recovery pass the page admits on the successful
              * draft-write edge (phase 2, P2.4). Never throws; the answer
              * is structured, so the caller never has to guess what was
@@ -448,21 +448,21 @@
              *
              * Locked order: dead guard → one recover() chance on this
              * store's own adapter (the drafts.js one-chance primitive,
-             * TRANSIENT-only — a final latch refuses and stays final) →
+             * TRANSIENT-only - a final latch refuses and stays final) →
              * availability check (an honest no-op that RETAINS memory) →
-             * for each candidate, sorted: read first — storage already
+             * for each candidate, sorted: read first - storage already
              * holding these exact bytes means alreadyStored with a ZERO
-             * write — otherwise the existing write() (no second write
+             * write - otherwise the existing write() (no second write
              * path) → memory removal ONLY after successful persistence →
              * failures RETAINED in memory for a later eligible pass.
              * This method never deletes: no remove, no GC, no
-             * reconciliation — it can only move bytes from memory to
+             * reconciliation - it can only move bytes from memory to
              * storage.
              */
             promoteMemory: () => {
                 if (dead) return Promise.resolve(refuse(null, 'destroyed'));
                 // This store's own adapter gets exactly one chance to come
-                // back — the same one-chance primitive the draft side
+                // back - the same one-chance primitive the draft side
                 // calls on its own adapter. It fires no event and
                 // schedules nothing: it only ever clears a TRANSIENT
                 // latch; a final (boot) latch refuses and stays final.
@@ -494,8 +494,8 @@
                         // exact bytes (another tab storing the same
                         // content-addressed id is the case that makes
                         // this true)? The store's own read() cannot
-                        // answer that for a candidate — it hits memory
-                        // first by design — so the storage half of
+                        // answer that for a candidate - it hits memory
+                        // first by design - so the storage half of
                         // read() is asked directly: the same get +
                         // readEntry validation, no new I/O surface, and
                         // a confirmed duplicate costs a ZERO write.
@@ -533,7 +533,7 @@
                             },
                             () => {
                                 // The check itself failed: "not
-                                // confirmed stored" — the write path
+                                // confirmed stored" - the write path
                                 // decides, and a failed write retains
                                 // the entry.
                                 stats.failures++;
@@ -659,7 +659,7 @@
             },
 
             /**
-             * A blob: URL for an asset — or an explicit reason there is
+             * A blob: URL for an asset - or an explicit reason there is
              * none. Stable for unchanged bytes: the second lookup of the
              * same asset mints nothing.
              */
@@ -710,13 +710,13 @@
 
             /**
              * The render-path lookup: a live URL, or null. Synchronous
-             * on purpose — the preview resolver is synchronous, so the
+             * on purpose - the preview resolver is synchronous, so the
              * URL is resolved ahead of the render and read here. It
              * never mints and never touches storage.
              */
             cachedUrl: (assetId) => (urlCache[assetId] ? urlCache[assetId].url : null),
 
-            /** Live URLs, sorted — the teardown evidence. */
+            /** Live URLs, sorted - the teardown evidence. */
             outstanding: () => Object.keys(urlCache).sort(),
 
             /** Drop the URL, keep the bytes. */

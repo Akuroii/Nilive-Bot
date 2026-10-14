@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   NERO DASHBOARD — embed-composer.css
+   NERO DASHBOARD - embed-composer.css
 
    Shared styles for the extracted embed composer
    (static/js/embed-composer.js): the per-embed editor card, the
@@ -51,7 +51,7 @@
 /* ── Attachment preview states ───────────────────────────────────
    A missing preview must LOOK different from a broken feature, and it
    must say why. Three states, one rule each: pending (decoding), no
-   preview (too large / unreadable — still sendable), and the tiny hint
+   preview (too large / unreadable - still sendable), and the tiny hint
    line under the filename. ──────────────────────────────────────── */
 .eb-attach-thumb--pending {
     display:block; width:100%; height:64px; object-fit:cover;
@@ -108,7 +108,7 @@
 .eb-mention-row select, .eb-mention-row input { flex:1; }
 .eb-mention-row .btn { flex-shrink:0; white-space:nowrap; }
 
-/* ── Emoji popover — polished to sit closer to Discord's own picker:
+/* ── Emoji popover - polished to sit closer to Discord's own picker:
    tighter auto-fill grid, a filled hover square (not just a tint),
    and a footer bar that names whatever's under the cursor. ────── */
 .eb-emoji-popover {
@@ -158,7 +158,7 @@
 .eb-emoji-hover-name { font-weight:600; color:var(--text); }
 .eb-emoji-hover-id { color:var(--text3); font-family:'JetBrains Mono','Fira Code',monospace; font-size:11px; }
 
-/* ── Live Preview — mirrors real Discord message chrome so this is a
+/* ── Live Preview - mirrors real Discord message chrome so this is a
    preview of the actual send, not a generic mock. ─────────────────── */
 .eb-preview-box { background:#313338; border-radius:8px; padding:16px; min-height:60px; }
 .eb-msg { display:flex; gap:16px; }
@@ -202,7 +202,7 @@
 .eb-pe-footer { font-size:12px; color:#b5bac1; margin-top:8px; display:flex; align-items:center; gap:6px; }
 
 /* ═══════════════════════════════════════════════════════════════
-   NEW-4PHASE — engine component rows in the preview.
+   NEW-4PHASE - engine component rows in the preview.
    Discord renders action rows as a dark rounded container holding
    up to five pill buttons; this mirrors that so the game's buttons
    read as part of the message, not a separate system.
@@ -230,7 +230,7 @@
 .eb-comp-btn:disabled { cursor:not-allowed; }
 
 /* ═══════════════════════════════════════════════════════════════
-   NEW-4PHASE — Minigames v2 builder page layout
+   NEW-4PHASE - Minigames v2 builder page layout
    (systems/minigame_builder.html): form left / live preview right,
    preview stacks below the form on narrow screens.
    ═══════════════════════════════════════════════════════════════ */
@@ -313,7 +313,7 @@
 .mb-spawn-chip.mb-chip-err { color:var(--danger); border-color:var(--danger); }
 
 /* ═══════════════════════════════════════════════════════════════
-   NEW-4PHASE — Minigames page v2 (systems/minigames.html):
+   NEW-4PHASE - Minigames page v2 (systems/minigames.html):
    category tree rows, badges, template rows, history.
    ═══════════════════════════════════════════════════════════════ */
 .mg-tree { display:flex; flex-direction:column; gap:6px; }

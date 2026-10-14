@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
 # Runs every Node test harness in scripts/. No dependencies, no build
-# step — the dashboard ships hand-written JS, so "the frontend test
+# step - the dashboard ships hand-written JS, so "the frontend test
 # suite" is literally these files. Kept in one place so CI and humans
 # run the same thing (`npm test`).
 #

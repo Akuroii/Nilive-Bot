@@ -1,8 +1,8 @@
 """Shared command gating: dashboard toggles, role/channel rules, cooldowns.
 
-Single implementation on purpose. Before this existed there were two copies —
+Single implementation on purpose. Before this existed there were two copies -
 ``NeroCommandTree.interaction_check`` in main.py for slash commands and
-``check_command_toggles`` in cogs/command_aliases.py for message aliases — and
+``check_command_toggles`` in cogs/command_aliases.py for message aliases - and
 they had already started to drift (only the slash path pruned the cooldown
 dict). Two copies of a security-relevant check is how "works as a slash
 command, silently unrestricted as an alias" bugs happen, so both paths now call
@@ -28,7 +28,7 @@ _command_cooldowns: dict[tuple, float] = {}
 # MEMORY LEAK FIX (dark-fixes pass #11): _command_cooldowns is a
 # module-level dict written every time a rate-limited slash command
 # is used (see NeroCommandTree.interaction_check in main.py), and nothing
-# ever removed old entries — one permanent
+# ever removed old entries - one permanent
 # (guild_id, user_id, command_name) entry accumulated forever for
 # every distinct combination that ever hit a cooldown-gated command,
 # for the lifetime of the process. Flagged as a low-priority slow
@@ -131,7 +131,7 @@ def evaluate_toggle_row(
     if dis_channels and channel_id in dis_channels:
         return False, "This command can't be used in this channel."
 
-    # Channel whitelist — same fallback rule as the roles above.
+    # Channel whitelist - same fallback rule as the roles above.
     allow_channels = (_parse_id_set(enabled_channels)
                       or _parse_id_set(allowed_channels))
     if allow_channels and channel_id not in allow_channels:
@@ -151,7 +151,7 @@ def evaluate_toggle_row(
             last = cooldowns.get(key, 0)
             if now - last < cooldown_seconds:
                 remaining = round(cooldown_seconds - (now - last), 1)
-                return False, f"Slow down — try again in {remaining}s."
+                return False, f"Slow down - try again in {remaining}s."
             cooldowns[key] = now
 
     return True, None

@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// NERO DASHBOARD — dashboard.js  (Phase 2 upgrade + CSRF hardening)
+// NERO DASHBOARD - dashboard.js  (Phase 2 upgrade + CSRF hardening)
 // ═══════════════════════════════════════════════════════════════
 
 // ── CSRF TOKEN INJECTION (Critical security fix, this pass) ────
@@ -7,7 +7,7 @@
 // a matching X-CSRF-Token header (see dashboard/api.py before_request
 // hook). Rather than touch every individual fetch() call across every
 // template (dozens of them, high risk of missing one), the two
-// request paths the dashboard actually uses — raw fetch() and HTMX —
+// request paths the dashboard actually uses - raw fetch() and HTMX -
 // are patched centrally, once, here.
 //
 // window.__CSRF_TOKEN__ is set by base.html from the session-stored
@@ -35,7 +35,7 @@ document.addEventListener('htmx:configRequest', function(evt) {
 
 // ── CHECK INDICATOR ───────────────────────────────────────────
 // Server-rendered from utils/emoji.py (see base.html / check_icon.py).
-// Returned as HTML so callers must use it in innerHTML — it is either an
+// Returned as HTML so callers must use it in innerHTML - it is either an
 // <img> pointing at Discord's emoji CDN or a plain unicode check. Constant,
 // never user data.
 function checkIconHtml() {
@@ -46,7 +46,7 @@ function checkIconHtml() {
 // window.__CURRENCY__ is written by base.html from the server-side
 // resolver (utils/currency.py via dashboard/utils/currency_ctx.py), so
 // client-side labels use the SAME configured names/icons as the Jinja
-// markup. Economy owns these values; nothing here defaults them — if the
+// markup. Economy owns these values; nothing here defaults them - if the
 // global is missing, callers get an empty label and must render the amount
 // without a currency word rather than inventing one.
 function currencyInfo(key) {
@@ -59,7 +59,7 @@ function currencyInfo(key) {
 // transaction_ledger.currency, purchase_history.currency_paid and reward
 // rows use 'balance' (the primary currency) / 'diamonds' / 'xp'. The map
 // below is what makes 'balance' and 'coins' answer the same thing, and what
-// lets a NON-currency key ('xp', 'role', 'item') fall through untouched —
+// lets a NON-currency key ('xp', 'role', 'item') fall through untouched -
 // it must never be labelled with a currency name.
 const CURRENCY_KEY_MAP = {
     balance: 'coins', coins: 'coins', diamonds: 'diamonds',
@@ -72,14 +72,14 @@ function currencyInfoByKey(key) {
 
 // A configured currency icon as HTML.
 //
-// `<:name:id>` / `<a:name:id>` is Discord *message* markup — dropped into
+// `<:name:id>` / `<a:name:id>` is Discord *message* markup - dropped into
 // innerHTML a browser parses it as the start of an <a> tag and the icon
 // silently disappears, so a custom icon becomes the image Discord's public
 // emoji CDN serves by ID (animated → .gif, static → .png, so animated
 // custom emoji animate here too). A unicode emoji is plain text a browser
 // renders natively and passes through escaped.
 //
-// JS twin of dashboard/utils/currency_ctx.py:icon_html — the two must stay
+// JS twin of dashboard/utils/currency_ctx.py:icon_html - the two must stay
 // in step. Returns HTML: callers already interpolate these labels into
 // innerHTML.
 function currencyEmojiHtml(emoji) {
@@ -93,7 +93,7 @@ function currencyEmojiHtml(emoji) {
          + `loading="lazy" onerror="this.remove()">`;
 }
 
-// The same icon as PLAIN TEXT, for the few places HTML cannot help with —
+// The same icon as PLAIN TEXT, for the few places HTML cannot help with -
 // an `<option>` may contain text only, and a browser drops an `<img>`
 // inside one, leaving the row with no icon at all. A custom emoji yields
 // its NAME (never the raw token); the `_` placeholder name used for an
@@ -106,7 +106,7 @@ function currencyEmojiText(emoji) {
     return m[2] === '_' ? '' : m[2];
 }
 
-// '🌙 Moon' — the inline currency label used in tables and toasts. A
+// '🌙 Moon' - the inline currency label used in tables and toasts. A
 // non-currency key is returned as-is. Returns HTML (the icon may be an
 // <img>), so use it where innerHTML is assigned. For an `<option>`, or
 // anywhere else that takes text, use currencyLabelText().
@@ -128,10 +128,10 @@ function currencyNameFor(key) {
     return currencyInfoByKey(key).name || key;
 }
 
-// '🌙 1,250 Moon' — amount + label, the format
+// '🌙 1,250 Moon' - amount + label, the format
 // utils/currency.currency_amount produces server-side. Pass
 // labelFirst=true for 'Moon 1,250' (prose/titles). The icon may be an
-// <img>, so the result is HTML — assign it via innerHTML.
+// <img>, so the result is HTML - assign it via innerHTML.
 function currencyAmount(key, amount, labelFirst) {
     const info = currencyInfoByKey(key);
     const name = info.name || key;
@@ -232,13 +232,13 @@ async function ajaxSave(url, payload, btn, successMsg = 'Saved!') {
             // `warnings` is advisory: the save happened and the feature works,
             // but something will behave differently than expected (a word two
             // systems both claim, say). Which one actually answers is decided
-            // at runtime by utils/message_router.py, never by this dialog — so
+            // at runtime by utils/message_router.py, never by this dialog - so
             // these are shown as a warning toast, not as a failure.
             const warnings = Array.isArray(data.warnings) ? data.warnings : [];
             if (warnings.length) {
                 // Pages that reload after a save need the note parked; the
                 // replay picks it up on the next load. Pages that stay put
-                // just see the toast — remember() is harmless either way,
+                // just see the toast - remember() is harmless either way,
                 // because replay() only fires once and expires after 30s.
                 window.NeroWarnings && window.NeroWarnings.remember(warnings, successMsg);
                 window.NeroWarnings.showSaveWarnings(warnings, successMsg);
@@ -260,7 +260,7 @@ async function ajaxSave(url, payload, btn, successMsg = 'Saved!') {
 // ── SAVE WARNINGS ─────────────────────────────────────────────
 // Advisory notes from the API (an alias that overlaps a trigger word, say).
 // Several manager pages reload after saving, which kills any toast shown
-// first — so they are parked in sessionStorage and replayed on load. The API
+// first - so they are parked in sessionStorage and replayed on load. The API
 // never blocks on these: runtime precedence in the bot decides who answers,
 // the dashboard only explains it.
 window.NeroWarnings = (function () {
@@ -286,7 +286,7 @@ window.NeroWarnings = (function () {
         if (!raw) return;
         let payload;
         try { payload = JSON.parse(raw); } catch (e) { return; }
-        // Only replay something fresh — a note from yesterday's save is noise.
+        // Only replay something fresh - a note from yesterday's save is noise.
         if (!payload || Date.now() - (payload.at || 0) > 30000) return;
         showSaveWarnings(payload.warnings, payload.successMsg);
     }
@@ -295,7 +295,7 @@ window.NeroWarnings = (function () {
         if (!warnings || !warnings.length) return;
         const first = warnings[0].message || String(warnings[0]);
         const extra = warnings.length > 1 ? ` (+${warnings.length - 1} more)` : '';
-        showToast(`${successMsg} — ${first}${extra}`, 'warning', 9000);
+        showToast(`${successMsg} - ${first}${extra}`, 'warning', 9000);
         document.dispatchEvent(new CustomEvent('nero:save-warnings', {
             detail: { warnings },
         }));
@@ -377,7 +377,7 @@ function syncColorInput(pickerId, textId) {
 
 // ── USER IDENTITY CELL (client-rendered pages) ────────────────
 // JS twin of dashboard/templates/macros/user_identity.html and
-// dashboard/utils/user_identity.py — for pages that build their
+// dashboard/utils/user_identity.py - for pages that build their
 // table rows entirely client-side via fetch() + template literals
 // (Trade History, Missions) rather than server-rendered/htmx-partial
 // HTML. Escapes name/id since a Discord nickname is attacker-
@@ -420,10 +420,10 @@ document.addEventListener('click', function(e) {
 // ── HTMX ERROR HANDLING ───────────────────────────────────────
 document.addEventListener('htmx:afterRequest', function(e) {
     if (e.detail.xhr && e.detail.xhr.status >= 500) {
-        showToast('Server error — please try again', 'error');
+        showToast('Server error - please try again', 'error');
     }
     if (e.detail.xhr && e.detail.xhr.status === 403) {
-        showToast('Action blocked (permission or session expired) — refresh and try again', 'error');
+        showToast('Action blocked (permission or session expired) - refresh and try again', 'error');
     }
 });
 
@@ -435,7 +435,7 @@ document.addEventListener('htmx:afterRequest', function(e) {
 // when htmx swaps in a new page fragment. The page-level inline script in
 // commands.html is re-executed by htmx, but the COMPONENTS it depends on
 // (NeroAlias.initAll, NeroSelect.initAll) only walk the DOM and bind
-// handlers on whatever is currently in the document — they do not run
+// handlers on whatever is currently in the document - they do not run
 // again on their own. Without re-running them here, after a sidebar click
 // every `[data-alias-input]` host in the freshly swapped Commands page
 // stays as an empty <div> with a hidden input and no chip UI, and the
@@ -453,7 +453,7 @@ function reInitDashboardComponents() {
     if (window.NeroSelect && window.NeroSelect.initAll) {
         // Single-select pickers on every page (overview, members, etc.).
         // The Commands page's per-command multi-select pickers are still
-        // initialised lazily inside loadCommandSettings() — that hasn't
+        // initialised lazily inside loadCommandSettings() - that hasn't
         // changed.
         window.NeroSelect.initAll(document);
     }

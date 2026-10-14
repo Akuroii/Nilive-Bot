@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════
-   embed/assets.js — phase 2, step 7a: the asset CORE (pure).
+   embed/assets.js - phase 2, step 7a: the asset CORE (pure).
 
    WHAT AN ASSET IS
    An image the user picked, identified by its CONTENT, not by its
@@ -9,7 +9,7 @@
                                four times is one asset and uploads once
 
    The document never holds bytes. It holds a reference per slot
-   (`{kind:'upload', assetId, filename, …}` — modelled in phase 1 by
+   (`{kind:'upload', assetId, filename, …}` - modelled in phase 1 by
    model.js's mediaFromValue/mediaToWireUrl) and this module owns the
    rules about what those references may point at.
 
@@ -18,7 +18,7 @@
    filenames, limits arithmetic, the record shape, and the read-only
    document queries (assetsOf / refsOf / pruneOrphans). It has no
    clock, no randomness, no DOM, no storage, no network and no module
-   state — every answer is a function of its arguments, which is what
+   state - every answer is a function of its arguments, which is what
    makes it testable and what lets the mutation battery judge it.
 
    The OTHER half (phase 2, step 7b+) is deliberately elsewhere:
@@ -33,7 +33,7 @@
    LIMITS: ONE TABLE, NO LITERALS
    Every number comes from the served payload
    (`utils/discord_limits.limits_payload()["attachments"]`), read
-   through the keys listed in LIMIT_KEYS — the same list
+   through the keys listed in LIMIT_KEYS - the same list
    scripts/test_embed_schema.py checks against the server, so a
    counter, a rule and the send gate can never disagree about what
    "too many files" means. A missing or unusable table makes every
@@ -48,7 +48,7 @@
        the reason, never silently renamed: a renamed file is how a
        user ends up uploading something they did not choose.
      * `availability` may only be 'bytes-local' or 'bytes-missing'.
-       Anything else is normalised to 'bytes-missing' — an unknown
+       Anything else is normalised to 'bytes-missing' - an unknown
        state must never claim we hold the bytes.
      * Two different assets whose names collide get a deterministic
        `<sha6>-` prefix (both members, so the result is independent of
@@ -129,7 +129,7 @@ window.NERO.embed = window.NERO.embed || {};
      *
      * The checks are structural (`ArrayBuffer.isView`, the toString
      * tag) rather than `instanceof`, because a Uint8Array created in
-     * another realm — a test sandbox, an iframe, a Worker's response —
+     * another realm - a test sandbox, an iframe, a Worker's response -
      * fails `instanceof` while being exactly the same bytes. Every
      * view is re-wrapped in this realm so nothing here reads through a
      * foreign object, and a view's byteOffset/byteLength are respected
@@ -227,7 +227,7 @@ window.NERO.embed = window.NERO.embed || {};
 
     /**
      * Bytes as a short human string: 900 → '900 bytes', 1536 → '1.5 KB'.
-     * The thresholds are about READABILITY, not about any limit — nothing in
+     * The thresholds are about READABILITY, not about any limit - nothing in
      * this function decides whether a file is acceptable (that is
      * checkFileSize(), against the served table).
      */
@@ -343,7 +343,7 @@ window.NERO.embed = window.NERO.embed || {};
 
     /**
      * The extension a NAME claims, lowercased: 'Rules.PNG' → 'png'.
-     * A leading dot is not an extension ('.png' has none — it is a
+     * A leading dot is not an extension ('.png' has none - it is a
      * hidden file, and treating it as one would let a dotfile pretend
      * to be an image), and a dotted stem is not either ('..png').
      */
@@ -415,7 +415,7 @@ window.NERO.embed = window.NERO.embed || {};
      *     (all of them, so the answer cannot depend on which record
      *     was seen first);
      *   * if that prefix itself collides, it grows (6 → 8 → 16 hex
-     *     characters, i.e. the full id) — the loop always terminates.
+     *     characters, i.e. the full id) - the loop always terminates.
      *
      * Two entries for ONE assetId are a caller error: the
      * lexicographically smallest filename wins (deterministic) and the
@@ -536,7 +536,7 @@ window.NERO.embed = window.NERO.embed || {};
      * byte count (a caller that already has `file.size` should not have
      * to allocate). The cap is ADVISORY unless the server says
      * otherwise (`file_advisory_is_hard`), because only Discord knows
-     * the guild's real ceiling — a guess here would refuse a file
+     * the guild's real ceiling - a guess here would refuse a file
      * Discord accepts. No table → nulls, so nothing reads as "fine".
      */
     function checkFileSize(bytes, limits) {
@@ -618,7 +618,7 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * Keys a record carries that this build does not know AND that
      * cannot survive JSON, sorted. Forward compatibility is for DATA
-     * from a newer phase — never for bytes smuggled into a document.
+     * from a newer phase - never for bytes smuggled into a document.
      */
     function foreignUnsafeKeys(value) {
         if (!value || typeof value !== 'object') return [];
@@ -629,7 +629,7 @@ window.NERO.embed = window.NERO.embed || {};
 
     /**
      * A stored asset record read back: the known keys in the fixed
-     * order, then any key this build does not know about (sorted) —
+     * order, then any key this build does not know about (sorted) -
      * a newer phase's field is preserved, never dropped by a rebuild.
      *
      * The canonical keys are the ones RECORD_KEYS lists, and they are
@@ -666,7 +666,7 @@ window.NERO.embed = window.NERO.embed || {};
      *   missing-record    the key holds nothing at all
      *   unreadable-record the value is not a record (no id, no name, …)
      *   non-json-value    the value carries something a document cannot
-     *                     hold (bytes, a nested object, a function) —
+     *                     hold (bytes, a nested object, a function) -
      *                     named separately because "this cannot be saved"
      *                     is a different conversation from "this is malformed"
      */
@@ -742,7 +742,7 @@ window.NERO.embed = window.NERO.embed || {};
      * decision is exactly "is this id in the keep list".
      *
      * WHERE THE POLICY LIVES (phase 2 decision 4): the CALLER decides
-     * what counts as referenced — the current document, the saved
+     * what counts as referenced - the current document, the saved
      * snapshot, the last persisted record, and anything created during
      * this session (passed through `opts.keep`). This function only
      * performs the subtraction, so there is one refcount rule in the
@@ -780,7 +780,7 @@ window.NERO.embed = window.NERO.embed || {};
      *           message, declaredExt }
      *
      * `ok:false` always carries a machine reason AND a sentence that
-     * names the real problem — the caller shows it, the caller does
+     * names the real problem - the caller shows it, the caller does
      * not invent its own wording:
      *   unrecognised-bytes     not a PNG/JPEG/WebP/GIF
      *   extension-not-allowed  the name claims a format an embed cannot show
@@ -815,7 +815,7 @@ window.NERO.embed = window.NERO.embed || {};
                     '; embed images must be .jpg, .jpeg, .png, .webp or .gif.',
             });
         }
-        // Then the BYTES decide the format — a .png name over a text file
+        // Then the BYTES decide the format - a .png name over a text file
         // is caught here, not accepted because the name looked right.
         if (!mime) {
             return Object.assign(base, {
@@ -855,7 +855,7 @@ window.NERO.embed = window.NERO.embed || {};
      * look" and from "we did not look at all", and each one produces
      * different output: a missing file is a warning the user can act on,
      * an unavailable store is a warning that says the check could not
-     * run, and an unobserved fact says NOTHING — assuming either way is
+     * run, and an unobserved fact says NOTHING - assuming either way is
      * how a page ends up telling someone their image is broken.
      *
      *   bytes-local        observed: the bytes are here (session memory or storage)
@@ -874,7 +874,7 @@ window.NERO.embed = window.NERO.embed || {};
         UNKNOWN: 'unknown',
     });
 
-    /** The store's "nothing under this id" reasons — the ONLY ones a
+    /** The store's "nothing under this id" reasons - the ONLY ones a
      *  probe result may be read as a miss. */
     const MISS_REASONS = ['missing', 'missing-entry'];
     /** The store's "something is there, but not bytes" reason. */
@@ -884,7 +884,7 @@ window.NERO.embed = window.NERO.embed || {};
      * A probe row → one of FACT_STATES. FAIL CLOSED: only the reasons
      * above are read as an observation. Any other reason is
      * `bytes-unavailable` (we could not tell), and a row that claims
-     * "not present" without saying why is `unknown` — a store that
+     * "not present" without saying why is `unknown` - a store that
      * cannot explain itself has not told us anything.
      */
     function factState(row) {
@@ -900,7 +900,7 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * The facts for a document: every id it references, the state of
      * each, and the raw rows. `rows` is what the byte store's survey()
-     * returned — an array of `{assetId, present, reason, …}` — or null
+     * returned - an array of `{assetId, present, reason, …}` - or null
      * when nothing was probed.
      *
      * Two rules that matter more than they look:
@@ -959,7 +959,7 @@ window.NERO.embed = window.NERO.embed || {};
             records[id] = raw === undefined ? null : normalizeRecord(raw);
         });
         const unreadable = assetIssues(document_);
-        // A record that cannot be read is reported ONCE, as unreadable — it is
+        // A record that cannot be read is reported ONCE, as unreadable - it is
         // not also "unused", because that second message would describe the
         // same entry as a second problem.
         const broken = {};
@@ -988,7 +988,7 @@ window.NERO.embed = window.NERO.embed || {};
         const ids = (view && Array.isArray(view.ids)) ? view.ids : [];
         let total = 0;
         const unknown = [];      // a record exists, but it carries no byte count
-        const missing = [];      // no record at all — a different problem, already reported
+        const missing = [];      // no record at all - a different problem, already reported
         ids.forEach((id) => {
             const record = records[id];
             if (!record) { missing.push(id); return; }
@@ -1009,8 +1009,8 @@ window.NERO.embed = window.NERO.embed || {};
     /**
      * THE RETENTION KEEP-SET (phase 2 decision 4, as amended by 7c).
      *
-     * Given every document that could still reach an asset — the
-     * current one, the saved snapshot, each undo/redo entry — plus the
+     * Given every document that could still reach an asset - the
+     * current one, the saved snapshot, each undo/redo entry - plus the
      * ids this session created, it answers which asset ids must
      * survive, and which records the target document carries that
      * nothing points at any more.
@@ -1080,7 +1080,7 @@ window.NERO.embed = window.NERO.embed || {};
         documentAssetIds: documentAssetIds,
         pruneOrphans: pruneOrphans,
         // availability facts + the metadata view (7c: what the page probes,
-        // what the validation rules read — never a second document model)
+        // what the validation rules read - never a second document model)
         FACT_STATES: FACT_STATES,
         factState: factState,
         assetFacts: assetFacts,

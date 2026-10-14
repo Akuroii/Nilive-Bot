@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /* ═══════════════════════════════════════════════════════════════
-   Minigames v2 — Phase 4 — embed-composer.js unit tests (node)
+   Minigames v2 - Phase 4 - embed-composer.js unit tests (node)
 
    Verifies the extracted shared composer:
      * escaping matrix
@@ -8,10 +8,10 @@
      * cleanEmbedForPayload / cleanEmbedsForPayload (shape the
        /send endpoint and minigame template API accept)
      * embedFromApi normalization (API shape → editor shape)
-     * renderDiscordMarkup — equivalence against the OLD inline
+     * renderDiscordMarkup - equivalence against the OLD inline
        implementation that lived in embedbuilder.html (the
        reference behavior) on a corpus of real inputs
-     * componentRowsHtml — engine component JSON → action-row HTML
+     * componentRowsHtml - engine component JSON → action-row HTML
      * renderPreview integration (bot chrome, embeds, components)
 
    Run:  node scripts/test_embed_composer.js
@@ -26,7 +26,7 @@ const vm = require('vm');
 let pass = 0, fail = 0; const failures = [];
 function assert(cond, name, extra) {
     if (cond) { pass++; console.log('  PASS', name); }
-    else { fail++; failures.push(name + (extra ? ' — ' + extra : '')); console.log('  FAIL', name, extra || ''); }
+    else { fail++; failures.push(name + (extra ? ' - ' + extra : '')); console.log('  FAIL', name, extra || ''); }
 }
 function section(t) { console.log('\n== ' + t + ' =='); }
 
@@ -40,7 +40,7 @@ const EC = sandbox.window.EmbedComposer;
 
 // ═══════════════════════════════════════════════════════════════
 // The OLD inline implementation from embedbuilder.html (pre-
-// refactor) — the reference. Globals it read are shimmed here.
+// refactor) - the reference. Globals it read are shimmed here.
 // ═══════════════════════════════════════════════════════════════
 const roleMap = {};
 const channelMap = { '100': { name: 'announcements' } };
@@ -149,7 +149,7 @@ assert(EC.embedsFromApi([]).length === 1 && EC.embedsFromApi([])[0].color === '#
     'empty API list → one blank embed');
 
 // ═══════════════════════════════════════════════════════════════
-section('renderDiscordMarkup — equivalence with the old implementation');
+section('renderDiscordMarkup - equivalence with the old implementation');
 const corpus = [
     '',
     'plain text',
@@ -188,7 +188,7 @@ const ch = EC.renderDiscordMarkup('go <#100>', { lookups: LOOKUPS }).html;
 assert(ch === 'go <span class="eb-mention">#announcements</span>', 'channel mention resolved', ch);
 
 // ═══════════════════════════════════════════════════════════════
-section('componentRowsHtml — engine component JSON → action rows');
+section('componentRowsHtml - engine component JSON → action rows');
 const engineRow = [
     { type: 2, label: '1', style: 2, disabled: true, custom_id: 'qc_0' },
     { type: 2, label: '2', style: 2, disabled: true, custom_id: 'qc_1' },
@@ -215,7 +215,7 @@ const statTok = EC.componentRowsHtml([[{ label: 'x', style: 2, disabled: false, 
 assert(statTok.includes('https://cdn.discordapp.com/emojis/456.png'), 'static token → png url');
 
 // ═══════════════════════════════════════════════════════════════
-section('renderPreview — full message chrome');
+section('renderPreview - full message chrome');
 // renderPreview needs a box element; a minimal DOM shim is enough
 // because it only sets .innerHTML.
 const box = { innerHTML: '' };
@@ -237,7 +237,7 @@ EC.renderPreview(box, { content: '', embeds: [EC.blankEmbed()], lookups: LOOKUPS
 assert(box.innerHTML.includes('eb-preview-empty'), 'empty placeholder shown');
 
 // ═══════════════════════════════════════════════════════════════
-section('renderPreview — attachment slots are never silently dropped');
+section('renderPreview - attachment slots are never silently dropped');
 // Node has URL but no createObjectURL; stub it so the fallback cache path
 // runs (the regression: one fresh blob: URL per attachment PER RENDER).
 let _mints = 0, _revoked = 0;
@@ -267,7 +267,7 @@ EC.renderPreview(box, {
 assert(box.innerHTML.includes('blob:page-owned'), 'attachmentPreviewUrl resolver is used');
 assert(resolverCalls === 1 && _mints === 0, 'resolver path bypasses the module cache entirely');
 
-// An async preview in flight must still occupy a slot — the file is neither
+// An async preview in flight must still occupy a slot - the file is neither
 // missing nor failed, and "the attachment disappeared" starts here.
 EC.renderPreview(box, {
     content: 'c', embeds: [EC.blankEmbed()], lookups: LOOKUPS,

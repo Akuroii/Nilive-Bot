@@ -1,18 +1,18 @@
 {#
     Shared "Username (big) / User ID (small)" cell.
-    Used by pages that only ever stored a raw user_id — Economy, Trade
-    History, Missions, Tickets — resolved live via
+    Used by pages that only ever stored a raw user_id - Economy, Trade
+    History, Missions, Tickets - resolved live via
     utils/discord_user_cache.py. Not used on pages that intentionally
     keep a point-in-time name snapshot (Moderation Logs, Purchase
     History, MVP History, Warnings).
 
     Params:
-      user_id      — required. Always shown, smaller, under the name.
-      display_name — resolved server nickname / global name, if any.
-      username     — resolved global username, fallback if no display_name.
-      avatar_url    — resolved avatar URL, if any. Omit avatar entirely
+      user_id      - required. Always shown, smaller, under the name.
+      display_name - resolved server nickname / global name, if any.
+      username     - resolved global username, fallback if no display_name.
+      avatar_url    - resolved avatar URL, if any. Omit avatar entirely
                        when compact=True.
-      compact      — True hides the avatar for dense tables.
+      compact      - True hides the avatar for dense tables.
 #}
 {% macro user_identity(user_id, display_name=None, username=None, avatar_url=None, compact=False) %}
 <div class="user-identity{% if compact %} user-identity-compact{% endif %}">

@@ -26,10 +26,10 @@
                             {% if e[6] %}Active{% else %}Disabled{% endif %}
                         </span>
                     </td>
-                    <td class="text-muted">{{ e[7][:10] if e[7] else '—' }}</td>
+                    <td class="text-muted">{{ e[7][:10] if e[7] else '-' }}</td>
                 </tr>
                 {% else %}
-                <tr><td colspan="6" class="empty">No events yet — coming in Phase 5</td></tr>
+                <tr><td colspan="6" class="empty">No events yet - coming in Phase 5</td></tr>
                 {% endfor %}
             </tbody>
         </table>

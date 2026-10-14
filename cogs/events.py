@@ -27,13 +27,13 @@ async def give_reward(bot: discord.Client,
     cogs/leveling.py, each with its own small differences (this one,
     for instance, never actually checked add_roles() for failure
     beyond a bare except-pass, and its XP grant didn't do level-up
-    detection at all — a member could hit a new level from an event
+    detection at all - a member could hit a new level from an event
     reward and never get their level-up rewards or announcement).
     Now a thin wrapper around utils.reward_engine.give_reward(), the
     one place all of that logic lives.
 
     Phase 3 / E4 CLOSEOUT: 'item' rewards now route through the same
-    engine call into utils/inventory.py — reward_value is used as the
+    engine call into utils/inventory.py - reward_value is used as the
     item_name and duration_hours is ignored for items (they don't
     expire). This mirrors how cogs/shop.py's "Custom" item type
     already delivers into Inventory instead of a no-op.
@@ -173,7 +173,7 @@ class Events(commands.Cog):
         "disable after firing" UPDATE, or literally any other
         unexpected exception here would propagate up through
         tasks.loop and stop the whole 15-minute loop from ever
-        rescheduling — silently killing scheduled events for every
+        rescheduling - silently killing scheduled events for every
         guild until the bot restarts, same class of bug already fixed
         in cogs/leveling.py's voice_xp_task. Each event is now
         isolated so one bad row can't take the rest down with it.
@@ -230,7 +230,7 @@ class Events(commands.Cog):
                              reward_dur, max_winners,
                              embed_data_str):
         # guild_id is an explicit parameter. The reward-embed branch below
-        # used to read `interaction.guild.id` — but this method has no
+        # used to read `interaction.guild.id` - but this method has no
         # `interaction` (it is called from both the scheduled-events task
         # and /event_create), so every coin/diamond event raised NameError
         # and was swallowed by the except below: the event silently never
@@ -304,7 +304,7 @@ class Events(commands.Cog):
             duration_hours: int = None):
         target = channel or interaction.channel
 
-        # Phase 3 / E4 CLOSEOUT: 'item' added as a valid reward_type —
+        # Phase 3 / E4 CLOSEOUT: 'item' added as a valid reward_type -
         # it delivers into the winner's Inventory (utils/inventory.py)
         # via the Reward Engine instead of only ever supporting
         # coins/diamonds/xp/role/temp_role. For 'item', reward_value
@@ -367,7 +367,7 @@ class Events(commands.Cog):
              winners, enabled, ts) in rows:
             status = f"{CHECK_EMOJI} Active" if enabled else "⚫ Ended"
             embed.add_field(
-                name=f"#{eid} — {title}",
+                name=f"#{eid} - {title}",
                 value=(f"{status} | {rtype}: {rval} | "
                        f"Max {winners} winners | "
                        f"{str(ts)[:10] if ts else '?'}"),

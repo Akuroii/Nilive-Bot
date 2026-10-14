@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// NERO DASHBOARD — nav-lifecycle.js
+// NERO DASHBOARD - nav-lifecycle.js
 //
 // Page modules with a real lifecycle: init once per DOM, destroy on the
 // way out.
@@ -10,7 +10,7 @@
 // emitted at the BOTTOM of the page (base.html `{% block scripts %}`,
 // which sits outside `#content-area`). htmx navigates by fetching the
 // full page, selecting `#content-area` (hx-select) and swapping its
-// innerHTML — so that script never arrives with the fragment, never
+// innerHTML - so that script never arrives with the fragment, never
 // re-executes, and a page that needs JS comes back inert until a hard
 // refresh. The Embed Builder hit exactly that, plus two more:
 //
@@ -23,7 +23,7 @@
 //   * On an htmx navigation the fragment's `<script src>` is re-created
 //     dynamically (`base.html`'s afterSwap handler does that to make
 //     swapped scripts run at all), and a dynamically inserted external
-//     script loads ASYNC — so the inline script that followed it ran
+//     script loads ASYNC - so the inline script that followed it ran
 //     before `window.EmbedComposer` existed and threw on line 1.
 //
 // The fix is not "refresh the page" and not "re-run the script and hope".
@@ -47,10 +47,10 @@
 // complements it and runs after it, so a page module can rely on its
 // pickers already being initialised. Nothing here touches htmx's
 // configuration, the CSRF patch, or any existing page that declares no
-// module — for those pages this file is inert.
+// module - for those pages this file is inert.
 //
 // Consumed by: dashboard/templates/base.html (one script tag).
-// Tested by:  scripts/test_nav_lifecycle.js (no DOM required — pass one in).
+// Tested by:  scripts/test_nav_lifecycle.js (no DOM required - pass one in).
 // ═══════════════════════════════════════════════════════════════
 window.NERO = window.NERO || {};
 
@@ -132,7 +132,7 @@ window.NERO = window.NERO || {};
     // ── The per-mount context ─────────────────────────────────────
     // Everything a page module allocates goes through here, so destroy()
     // cannot miss anything: listeners are removed, timers cleared, blob
-    // URLs revoked and in-flight fetches aborted — in that order, always.
+    // URLs revoked and in-flight fetches aborted - in that order, always.
     function createContext(name, root) {
         var listeners = [];
         var timers = [];
@@ -285,7 +285,7 @@ window.NERO = window.NERO || {};
         var rootEl = pageRootWithin(scope) || pageRootWithin(document);
         if (!rootEl) {
             // Navigated to a page with no module (almost every page). The
-            // previous module must still be torn down — htmx already
+            // previous module must still be torn down - htmx already
             // replaced its DOM.
             unmount('no-module');
             return Promise.resolve(false);
@@ -354,7 +354,7 @@ window.NERO = window.NERO || {};
     }
 
     // ── htmx + document wiring ────────────────────────────────────
-    // beforeSwap: the DOM is about to be replaced — release everything
+    // beforeSwap: the DOM is about to be replaced - release everything
     // first, while the elements still exist.
     document.addEventListener('htmx:beforeSwap', function (evt) {
         if (!mounted) return;
@@ -375,7 +375,7 @@ window.NERO = window.NERO || {};
         mount(document);
     });
     // htmx leaves the old content in place when a request fails, so the old
-    // module stays mounted and usable — nothing to destroy. Recorded so the
+    // module stays mounted and usable - nothing to destroy. Recorded so the
     // dev HUD can tell "nothing happened" from "nothing happened and it
     // should have".
     ['htmx:responseError', 'htmx:sendError', 'htmx:timeout'].forEach(function (type) {

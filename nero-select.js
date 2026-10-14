@@ -23,7 +23,7 @@ window.NeroSelect = (function () {
     // Select2 4.1.0-rc.0 hands ``templateResult`` / ``templateSelection`` a
     // data object built *only* from the <option>: {id, text, disabled,
     // selected, title, element}. Any extra field the API sent (``color``,
-    // ``type_icon``) is silently dropped — the ONLY way a per-option value
+    // ``type_icon``) is silently dropped - the ONLY way a per-option value
     // reaches a template is via the option's own ``data-*`` attributes
     // (``opt.element.dataset`` / ``opt.element.getAttribute``). That is why
     // initOne()/initMulti() below stamp ``data-color`` / ``data-type-icon``
@@ -65,7 +65,7 @@ window.NeroSelect = (function () {
         return null;
     }
 
-    // The display name — never undefined, never empty, never the string
+    // The display name - never undefined, never empty, never the string
     // "undefined". Fallback: option text content, then the raw id.
     function optText(opt) {
         let t = (opt && opt.text != null) ? String(opt.text) : '';
@@ -150,7 +150,7 @@ window.NeroSelect = (function () {
             });
             if (preselect) $el.val(preselect).trigger('change.select2');
         } catch (e) {
-            // select2 itself failed (blocked CDN, version mismatch, etc) —
+            // select2 itself failed (blocked CDN, version mismatch, etc) -
             // leave it as a plain <select>. Still functional, just unstyled.
             console.error('NeroSelect: select2 init failed, using plain <select>', e);
             if (preselect) $el.val(preselect);
@@ -165,7 +165,7 @@ window.NeroSelect = (function () {
 
     // ── Lazy multi-select (Commands → per-command Edit panel) ──────────
     //
-    // Deliberately NOT scanned by initAll()/DOMContentLoaded — a page
+    // Deliberately NOT scanned by initAll()/DOMContentLoaded - a page
     // like Commands can render 90+ command rows, and every row's Edit
     // panel carries 4 of these (enabled/disabled roles, enabled/disabled
     // channels). Auto-initializing all of them on load would fire
@@ -184,12 +184,12 @@ window.NeroSelect = (function () {
     // IMPORTANT: this must never reject. commands.html's
     // loadCommandSettings() awaits several of these via
     // Promise.allSettled and needs to always be able to reveal the panel
-    // afterward — the earlier version let a select2 failure propagate as
+    // afterward - the earlier version let a select2 failure propagate as
     // a rejection, which silently killed the whole panel (stuck on
     // "Loading settings…" forever, Save button never reachable, since it
     // lives inside the still-hidden fields container). The select2 call
     // is now wrapped so a broken/missing select2 degrades to a plain
-    // native <select multiple> instead of taking the panel down with it —
+    // native <select multiple> instead of taking the panel down with it -
     // getMultiValues() below reads via jQuery .val(), which works on a
     // plain <select> exactly the same as a select2-enhanced one.
     async function initMulti(el, kind, preselect) {
@@ -223,7 +223,7 @@ window.NeroSelect = (function () {
         }
     }
 
-    // Returns the current value as an array of ID strings — used when
+    // Returns the current value as an array of ID strings - used when
     // collecting a command edit panel's fields to POST. Safe to call
     // even if the element was never initialized (returns []).
     function getMultiValues(el) {
@@ -235,8 +235,8 @@ window.NeroSelect = (function () {
     // Was the picker initialised? Commands.html's save path uses this to
     // refuse a save that would post [] for a picker that never finished
     // its setup (select2 CDN failure, jQuery missing, fetch error). The
-    // picker may still be partially functional — it falls back to a plain
-    // <select multiple> in initMulti — but we want the user to explicitly
+    // picker may still be partially functional - it falls back to a plain
+    // <select multiple> in initMulti - but we want the user to explicitly
     // confirm the values rather than silently overwrite saved settings
     // with an empty list.
     function isReady(el) {

@@ -1,4 +1,4 @@
-# Nilive Bot — Startup / Offline Debug Guide (Railway)
+# Nilive Bot - Startup / Offline Debug Guide (Railway)
 
 Use this if the bot shows as offline in Discord or the Railway deploy
 looks crashed/restarting.
@@ -27,7 +27,7 @@ these to be turned ON in the portal or Discord will refuse the connection:
    - `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `DISCORD_REDIRECT_URI`
      (dashboard OAuth)
    - `OWNER_ID` (defaults to a hardcoded fallback if unset)
-   - `PORT` (Railway sets this automatically — don't override it)
+   - `PORT` (Railway sets this automatically - don't override it)
 
 ## 3. Read the Railway logs
 1. Railway project → service → **Deployments** → click the active deploy
@@ -39,17 +39,17 @@ these to be turned ON in the portal or Discord will refuse the connection:
      Discord bot token` → you likely pasted the wrong value (client
      secret instead of bot token, or a truncated/quoted paste)
    - `FATAL: Discord rejected DISCORD_TOKEN (LoginFailure)` → the token
-     is set but Discord itself rejected it (revoked/regenerated) —
+     is set but Discord itself rejected it (revoked/regenerated) -
      grab a fresh token from the Developer Portal
    - `Token check: OK` and `Intents status: ...` → token and intents
      passed local checks; if it's still offline after this line, check
      Discord's status page or your intents settings (step 1)
-4. If cogs fail to load, you'll see `Failed to load cogs.X: <error>` —
+4. If cogs fail to load, you'll see `Failed to load cogs.X: <error>` -
    that's a code error in a specific cog, not a token/connection issue.
 
 ## 4. Restart and verify
 1. Railway → service → **Deployments** → **Redeploy** (or push a new
-   commit if you just changed an env var — env var changes alone
+   commit if you just changed an env var - env var changes alone
    usually trigger an automatic redeploy)
 2. Watch the logs for `Nero is online as <bot name>`
 3. In Discord, confirm the bot's status dot is green/online in your
@@ -58,6 +58,6 @@ these to be turned ON in the portal or Discord will refuse the connection:
 ## Still stuck?
 - Double-check the bot was actually invited to the server with the
   `bot` + `applications.commands` OAuth scopes.
-- Check Railway's **Metrics** tab for repeated crash/restart loops —
+- Check Railway's **Metrics** tab for repeated crash/restart loops -
   that usually means an exception during `cogs` loading or database
   init, visible in the logs from step 3.

@@ -3,7 +3,7 @@ import threading
 
 # PERFORMANCE FIX (dark-fixes pass #2): the original implementation
 # spun up a brand-new asyncio event loop, ran one coroutine, then
-# tore the loop down — on every single call. There are 120+ call
+# tore the loop down - on every single call. There are 120+ call
 # sites across dashboard/app.py and dashboard/api.py alone, so a
 # dashboard under real traffic was creating and destroying an event
 # loop per DB-touching request, sometimes several times within the
@@ -15,7 +15,7 @@ import threading
 # Fix: one persistent event loop, running forever in a dedicated
 # background thread, started lazily on first use. Flask's request
 # threads submit coroutines to it via run_coroutine_threadsafe and
-# block on the result — which is exactly what run_async's callers
+# block on the result - which is exactly what run_async's callers
 # already expect (a synchronous call that returns the coroutine's
 # result), so this is a drop-in replacement. No call site anywhere
 # needed to change.
@@ -24,7 +24,7 @@ import threading
 # synchronous sqlite3 on the dashboard side (also viable, arguably
 # more "correct" since Flask routes don't need to be async at all)
 # because that alternative means touching every one of those 120+
-# call sites individually — real scope, real regression risk, for a
+# call sites individually - real scope, real regression risk, for a
 # problem this fixes just as effectively as a single 40-line file.
 # If the dashboard ever gets rewritten to be natively async (e.g.
 # moving off Flask), revisit this decision.
@@ -44,7 +44,7 @@ def _ensure_loop_running() -> asyncio.AbstractEventLoop:
     if _loop is not None and _loop.is_running():
         return _loop
     with _lock:
-        # Re-check after acquiring the lock — another thread may have
+        # Re-check after acquiring the lock - another thread may have
         # already started it while we were waiting.
         if _loop is not None and _loop.is_running():
             return _loop

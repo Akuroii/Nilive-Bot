@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Standalone diagnostic — verifies whether the bot APPLICATION currently owns
+Standalone diagnostic - verifies whether the bot APPLICATION currently owns
 CHECK_EMOJI_ID (1549831102078787744) against LIVE Discord.
 
 Does NOT modify utils/emoji.py, the Mission resolver, or the fallback

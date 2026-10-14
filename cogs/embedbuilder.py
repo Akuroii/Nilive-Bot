@@ -79,7 +79,7 @@ class EmbedBuilder(commands.Cog):
         Embed Builder v2: embed_templates.data now stores the WHOLE
         message as {"content": "...", "embeds": [ {...}, {...} ]}
         (dashboard/api/embedbuilder.py's save route). Older templates
-        saved before that change are still just a single embed dict —
+        saved before that change are still just a single embed dict -
         those are treated as a one-embed, no-content message so every
         template saved before this pass keeps working exactly as it
         did.
@@ -187,7 +187,7 @@ class EmbedBuilder(commands.Cog):
             await interaction.response.send_message(
                 f"Template `{name}` is empty or corrupted.", ephemeral=True)
             return
-        # Discord's own per-message cap — a template saved with more
+        # Discord's own per-message cap - a template saved with more
         # than 10 embeds (shouldn't happen, dashboard enforces this,
         # but defends against a hand-edited row) is trimmed rather
         # than rejected outright.

@@ -8,7 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
 <!-- Shared embed composer styles (per-embed editor card + Discord
-     preview chrome + engine component rows) — used by both
+     preview chrome + engine component rows) - used by both
      manage/embedbuilder.html and systems/minigame_builder.html. -->
 <link rel="stylesheet" href="{{ url_for('static', filename='css/embed-composer.css') }}">
 <!-- SECURITY FIX (dark-fixes pass #2, CDN SRI): pins this CSS to the
@@ -56,14 +56,14 @@
      request automatically. Never write this into a URL or log it. -->
 <script>window.__CSRF_TOKEN__ = {{ session.get('csrf_token', '') | tojson }};</script>
 <!-- Currency display config (name + icon) for client-side rendering, from
-     the same server-side resolver every Jinja block uses — see
+     the same server-side resolver every Jinja block uses - see
      dashboard/utils/currency_ctx.py. JS that builds currency labels for
      rows fetched via fetch() (ledger, members, rewards) reads this instead
      of hardcoding a name or emoji. Economy owns these values; this page
      only mirrors them. -->
 <script>window.__CURRENCY__ = {{ (currency if currency is defined else None) | tojson }};</script>
 <!-- The success/check indicator as HTML (Discord's `<a:check:id>` markup is
-     a message feature — a browser needs the CDN image). Rendered server-side
+     a message feature - a browser needs the CDN image). Rendered server-side
      from the one resolver in utils/emoji.py so client-side status lines and
      toasts show the same check as the Discord-side replies. -->
 <script>window.__CHECK_ICON__ = {{ check_icon | tojson }};</script>
@@ -71,7 +71,7 @@
 <!-- Bot name + avatar for message previews, rendered WITH the page instead
      of fetched. The Embed Builder used to call /api/botprofile/config during
      initialisation, which does a live Discord round-trip (up to 8s) inside
-     the request that page was waiting on — so a slow Discord meant a blank
+     the request that page was waiting on - so a slow Discord meant a blank
      composer. This is only emitted for pages that ask for it (see
      dashboard/app.py's _bot_identity_for_page) and holds nothing secret:
      the bot's nickname in this guild and its avatar URL, both already
@@ -284,7 +284,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link nav-link-legacy"
-       aria-label="Legacy Shop Publisher — compatibility page">
+       aria-label="Legacy Shop Publisher - compatibility page">
         <span class="nav-icon">📣</span>
         <span class="nav-text">Shop Publisher · Legacy</span>
     </a>
@@ -496,7 +496,7 @@
 </div>
 <div class="main-content">
     {% if is_staging %}
-    <div class="staging-banner">🧪 STAGING ENVIRONMENT — changes here do not affect production data</div>
+    <div class="staging-banner">🧪 STAGING ENVIRONMENT - changes here do not affect production data</div>
     {% endif %}
     <div class="topbar">
         <div style="display:flex;align-items:center;gap:12px;">
@@ -515,7 +515,7 @@
 </div>
 <div id="edit-modal" class="modal-overlay" style="display:none;">
     <div class="modal">
-        <div class="modal-title">Edit Member — <span id="edit-uid-label" style="color:var(--accent)"></span></div>
+        <div class="modal-title">Edit Member - <span id="edit-uid-label" style="color:var(--accent)"></span></div>
         <div class="form-group">
             <label class="form-label">XP</label>
             <input class="form-input" id="edit-xp" type="number" min="0">
@@ -532,7 +532,7 @@
     </div>
 </div>
 <!-- SECURITY FIX (dark-fixes pass #2, CDN SRI): same reasoning as the
-     select2 CSS link above — all three hashes computed from the exact
+     select2 CSS link above - all three hashes computed from the exact
      published npm package bytes for their pinned versions. -->
 <script src="https://unpkg.com/htmx.org@1.9.10"
         integrity="sha384-D1Kt99CQMDuVetoL1lrYwg5t+9QdHe7NLX/SoJYkXDFfX37iInKRy5xLSi8nO7UC"
