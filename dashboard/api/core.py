@@ -23,11 +23,20 @@ def get_guild_roles():
     bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:
         return jsonify({"results": [], "error": "BOT_TOKEN not set"})
-    resp = _req.get(
-        f"https://discord.com/api/v10/guilds/{guild_id}/roles",
-        headers={"Authorization": f"Bot {bot_token}"},
-        timeout=8,
-    )
+    # A network failure (timeout, DNS, refused/reset connection, TLS) answers
+    # the same {"results": [], "error": ...} shape as the other failure paths
+    # above instead of an HTML 500, so the role pickers and the Level Rewards
+    # role names degrade the way they already do for a missing token.
+    try:
+        resp = _req.get(
+            f"https://discord.com/api/v10/guilds/{guild_id}/roles",
+            headers={"Authorization": f"Bot {bot_token}"},
+            timeout=8,
+        )
+    except _req.Timeout:
+        return jsonify({"results": [], "error": "Discord timeout"})
+    except _req.RequestException:
+        return jsonify({"results": [], "error": "Discord unreachable"})
     if resp.status_code != 200:
         return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
     roles = resp.json()
