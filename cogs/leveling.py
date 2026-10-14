@@ -627,12 +627,17 @@ class Leveling(commands.Cog):
             return
         try:
             from utils.level_claims import (member_is_booster,
+                                            member_reward_role_ids,
                                             reconcile_role_progression)
             member = guild.get_member(after.id) or after
             if not member_is_booster(member):
                 return
+            # Shared Member/Booster roles survive the boost loss, so restoring
+            # one could only undo an admin's manual removal.
+            keep_out = await member_reward_role_ids(guild.id, member.id)
             result = await reconcile_role_progression(
-                member, guild.id, member.id, boosters_only=True)
+                member, guild.id, member.id, boosters_only=True,
+                exclude_role_ids=keep_out)
         except Exception as exc:
             print(f"[LEVEL BOOSTER ROLES] boost-regained handling failed "
                   f"guild={guild.id} user={after.id}: {exc}")

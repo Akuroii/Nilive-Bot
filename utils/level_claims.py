@@ -492,6 +492,45 @@ async def superseded_role_ids(db, guild_id: int, user_id: int,
     return sorted(remove - keep)
 
 
+async def member_reward_role_ids(guild_id: int, user_id: int) -> set[int]:
+    """Role IDs that strip_booster_roles treats as Member rewards.
+
+    The same rule as the ``member_ids`` set there: a role from one of this
+    member's own non-Booster role track claims (any status), or a role with a
+    guild config row whose audience is not ``boosters``. The boost-regained
+    path passes this to ``reconcile_role_progression(exclude_role_ids=...)`` so
+    a restore never goes beyond what the boost loss removed. Read-only.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute("""
+            SELECT reward_ref, payload_json
+            FROM level_reward_claims
+            WHERE guild_id=? AND user_id=? AND track=?
+        """, (guild_id, user_id, TRACK_ROLE))
+        claim_rows = await cursor.fetchall()
+        cursor = await db.execute(
+            "SELECT role_id, audience FROM leveling_rewards WHERE guild_id=?",
+            (guild_id,))
+        configured = await cursor.fetchall()
+
+    member_ids: set[int] = set()
+    for ref, payload in claim_rows:
+        if is_booster_ref(ref):
+            continue
+        try:
+            member_ids.add(int(json.loads(payload)["role_id"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+    for configured_role, audience in configured:
+        if audience == "boosters":
+            continue
+        try:
+            member_ids.add(int(configured_role))
+        except (TypeError, ValueError):
+            continue
+    return member_ids
+
 async def enforce_role_progression(member, guild_id: int, user_id: int,
                                    level: int, role_id: int,
                                    failures: list | None = None, *,
@@ -528,7 +567,8 @@ async def enforce_role_progression(member, guild_id: int, user_id: int,
 
 
 async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
-                                     boosters_only: bool = False) -> dict:
+                                     boosters_only: bool = False,
+                                     exclude_role_ids=frozenset()) -> dict:
     """Restore earned Level roles and optionally enforce exclusivity.
 
     This is the shared membership-only reconciliation used by both rejoin and
@@ -544,6 +584,10 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
     Booster-only Level roles and nothing else: Member-audience rows are
     skipped and no role is ever removed, with the setting ON or OFF. It still
     reads only fulfilled claims, so it cannot create an entitlement.
+
+    ``exclude_role_ids`` only narrows the restore: a listed role is never
+    added back. It cannot add a role, create a claim or change one. The
+    boost-regained path passes member_reward_role_ids() here.
 
     Returns ``{"restored": [...], "removed": [...], "failed": [...],
     "blocked": bool}``. Failures are role IDs with an explanatory string.
@@ -624,6 +668,8 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
         held = set(getattr(member, "roles", None) or [])
         for reward_level, role_group in restore_groups:
             for role_id in sorted(role_group["role_ids"]):
+                if role_id in exclude_role_ids:
+                    continue
                 role = guild.get_role(role_id)
                 if role is None:
                     result["failed"].append((role_id, "Role no longer exists"))
