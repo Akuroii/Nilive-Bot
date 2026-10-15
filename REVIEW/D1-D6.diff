@@ -1,0 +1,198 @@
+diff --git a/dashboard/templates/systems/leveling.html b/dashboard/templates/systems/leveling.html
+index 2d63be8..bf6931c 100644
+--- a/dashboard/templates/systems/leveling.html
++++ b/dashboard/templates/systems/leveling.html
+@@ -921,23 +921,68 @@ function buildRoleRewardRow(r) {
+ // mirrors the server-rendered rows above exactly (rewardAudienceBadge() emits
+ // the same Booster badge the server-side conditional does), and a failed fetch
+ // leaves the server-rendered rows untouched.
++//
++// Newest request wins: this runs on page load and after every add/delete, so an
++// older, slower response must not overwrite a newer one. Resolves true when the
++// table is current (or a newer load has taken over), false when the refresh
++// failed and the rows on screen may be out of date. Never throws.
++var __rewardsLoadSeq = 0;
+ async function loadRewards() {
+-    const res  = await fetch('/api/leveling/rewards');
+-    if (!res.ok) return;
+-    const data = await res.json();
++    const seq = ++__rewardsLoadSeq;
++    let data = null;
++    try {
++        const res = await fetch('/api/leveling/rewards');
++        if (res.ok) data = await res.json();
++    } catch (err) { data = null; }
++    if (seq !== __rewardsLoadSeq) return true;   // a newer load owns the table
++    if (!data) return false;
+     const tbody = document.getElementById('rewards-tbody');
+-    if (!tbody) return;
++    if (!tbody) return true;
+     if (!data.rewards || !data.rewards.length) {
+         tbody.innerHTML = '<tr><td colspan="3" class="empty">No role rewards configured yet</td></tr>';
+         syncRewardCounts();
+         applyRewardFilter();
+-        return;
++        return true;
+     }
+     tbody.innerHTML = '';
+     data.rewards.forEach(r => tbody.appendChild(buildRoleRewardRow(r)));
+     syncRewardCounts();
+     applyRewardFilter();
+     applyRoleNames();
++    return true;
++}
++
++// Role-reward write call (D4). Never throws: a network failure or a body that is
++// not JSON (an HTML 500 page, a proxy error) comes back as data = null so the
++// caller can show a real message instead of an unhandled rejection with no toast.
++async function rewardApiCall(url, options) {
++    let res;
++    try { res = await fetch(url, options); }
++    catch (err) { return { network: true, status: 0, data: null }; }
++    let data = null;
++    try { data = await res.json(); } catch (err) { data = null; }
++    return { network: false, status: res.status, data: data };
++}
++
++// Toast for a failed add/delete. The server's own error text wins; otherwise say
++// what actually happened.
++function rewardFailureToast(call, verb) {
++    if (call.network) {
++        showToast(`Network error: could not confirm the reward was ${verb}. Check the table before retrying.`, 'error');
++    } else if (call.data && call.data.error) {
++        showToast(call.data.error, 'error');
++    } else {
++        showToast(`Could not ${verb === 'added' ? 'add' : 'delete'} the reward (server returned HTTP ${call.status}).`, 'error');
++    }
++}
++
++// The write succeeded; now refresh the table. A refresh failure is not an
++// operation failure (D5): say the change was saved and that the list on screen
++// may be stale.
++async function finishRewardWrite(successText, doneText, type) {
++    const refreshed = await loadRewards();
++    if (refreshed) showToast(successText, type);
++    else showToast(`${doneText}, but the table could not be refreshed. The list shown may be out of date; reload the page.`, 'warning');
+ }
+ 
+ async function addReward() {
+@@ -945,28 +990,25 @@ async function addReward() {
+     const rp      = document.getElementById('reward-role-picker');
+     const role_id = rp ? ($(rp).val() || '') : '';
+     if (!level || !role_id) { showToast('Select a level and role', 'warning'); return; }
+-    const res  = await fetch('/api/leveling/reward', {
++    const call = await rewardApiCall('/api/leveling/reward', {
+         method: 'POST', headers: {'Content-Type':'application/json'},
+         body: JSON.stringify({ level: parseInt(level), role_id,
+             audience: document.getElementById('reward-audience').value }),
+     });
+-    const data = await res.json();
+-    if (data.success) {
+-        showToast('Reward added!');
++    if (call.data && call.data.success) {
+         document.getElementById('reward-level').value = '';
+         if (rp) $(rp).val('').trigger('change.select2');
+         __roleNamesPromise = null;  // the new role may postdate the cached list
+-        loadRewards();
++        await finishRewardWrite('Reward added!', 'Reward added');
+     } else {
+-        showToast(data.error || 'Error adding reward', 'error');
++        rewardFailureToast(call, 'added');
+     }
+ }
+ 
+ async function deleteReward(id) {
+-    const res  = await fetch(`/api/leveling/reward/${id}`, { method: 'DELETE' });
+-    const data = await res.json();
+-    if (data.success) { showToast('Reward deleted', 'info'); loadRewards(); }
+-    else showToast(data.error || 'Error deleting reward', 'error');
++    const call = await rewardApiCall(`/api/leveling/reward/${id}`, { method: 'DELETE' });
++    if (call.data && call.data.success) await finishRewardWrite('Reward deleted', 'Reward deleted', 'info');
++    else rewardFailureToast(call, 'deleted');
+ }
+ 
+ // ── CURRENCY REWARDS (Phase 5 / Leveling expansion) ─────────────
+@@ -978,6 +1020,7 @@ async function loadCurrencyRewards() {
+     if (!data.rewards || !data.rewards.length) {
+         tbody.innerHTML = '<tr><td colspan="4" class="empty">No currency rewards configured yet</td></tr>';
+         syncRewardCounts();
++        applyRewardFilter();  // refresh the filter summary / empty rows for the now-empty table
+         return;
+     }
+     tbody.innerHTML = data.rewards.map(r => `
+@@ -1255,6 +1298,7 @@ async function loadShopRewards() {
+     if (!data.rewards || !data.rewards.length) {
+         tbody.innerHTML = '<tr><td colspan="4" class="empty">No Shop rewards configured yet</td></tr>';
+         syncRewardCounts();
++        applyRewardFilter();  // refresh the filter summary / empty rows for the now-empty table
+         return;
+     }
+     tbody.innerHTML = data.rewards.map(r => `
+@@ -1314,6 +1358,7 @@ async function loadBoostRewards() {
+     if (!data.rewards || !data.rewards.length) {
+         tbody.innerHTML = '<tr><td colspan="4" class="empty">No XP boost rewards configured yet</td></tr>';
+         syncRewardCounts();
++        applyRewardFilter();  // refresh the filter summary / empty rows for the now-empty table
+         return;
+     }
+     tbody.innerHTML = data.rewards.map(r => `
+diff --git a/utils/level_claims.py b/utils/level_claims.py
+index 66c42f0..71c7386 100644
+--- a/utils/level_claims.py
++++ b/utils/level_claims.py
+@@ -428,6 +428,26 @@ async def deliver_role(member, role_id: int, reason: str) -> None:
+     await member.add_roles(role, reason=reason)
+ 
+ 
++async def _confirm_role_added(member, role) -> bool:
++    """Authoritative membership check after a role add that the cache can't confirm.
++
++    discord.py's default (atomic) ``add_roles`` sends the request but does not
++    update ``member.roles`` until the gateway echo arrives, so "not in the cache
++    yet" is not evidence of a failed add. Ask Discord instead. Anything that
++    cannot be confirmed (no ``fetch_member``, REST error, role still absent)
++    returns False, so a genuine failure is never hidden.
++    """
++    fetch = getattr(getattr(member, "guild", None), "fetch_member", None)
++    if fetch is None:
++        return False
++    try:
++        fresh = await fetch(member.id)
++    except Exception:
++        return False
++    return any(getattr(held, "id", None) == role.id
++               for held in (getattr(fresh, "roles", None) or []))
++
++
+ # ─── Level reward role progression ─────────────────────────────────────
+ # A guild configures this on the Leveling page as `remove_old_reward_role`:
+ #
+@@ -643,6 +663,7 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
+         result["blocked"] = True
+         return result
+ 
++    attempted_ids: set[int] = set()
+     for audience in (False, True):
+         by_level = partitions[audience]
+         if not by_level:
+@@ -676,13 +697,19 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
+                     continue
+                 if role in held:
+                     continue
++                # One add attempt per role per pass: a role shared by the Member
++                # and Booster partitions, or configured at several Levels, would
++                # otherwise be re-added (the cache is stale after the first add).
++                if role_id in attempted_ids:
++                    continue
++                attempted_ids.add(role_id)
+                 try:
+                     await deliver_role(
+                         member, role_id,
+                         f"Level {reward_level} reward (restored)")
+                     result["restored"].append(role_id)
+                     held = set(getattr(member, "roles", None) or [])
+-                    if role not in held:
++                    if role not in held and not await _confirm_role_added(member, role):
+                         result["failed"].append(
+                             (role_id, "Role add returned without membership"))
+                 except Exception as exc:

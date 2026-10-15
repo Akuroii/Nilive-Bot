@@ -428,6 +428,26 @@ async def deliver_role(member, role_id: int, reason: str) -> None:
     await member.add_roles(role, reason=reason)
 
 
+async def _confirm_role_added(member, role) -> bool:
+    """Authoritative membership check after a role add that the cache can't confirm.
+
+    discord.py's default (atomic) ``add_roles`` sends the request but does not
+    update ``member.roles`` until the gateway echo arrives, so "not in the cache
+    yet" is not evidence of a failed add. Ask Discord instead. Anything that
+    cannot be confirmed (no ``fetch_member``, REST error, role still absent)
+    returns False, so a genuine failure is never hidden.
+    """
+    fetch = getattr(getattr(member, "guild", None), "fetch_member", None)
+    if fetch is None:
+        return False
+    try:
+        fresh = await fetch(member.id)
+    except Exception:
+        return False
+    return any(getattr(held, "id", None) == role.id
+               for held in (getattr(fresh, "roles", None) or []))
+
+
 # ─── Level reward role progression ─────────────────────────────────────
 # A guild configures this on the Leveling page as `remove_old_reward_role`:
 #
@@ -643,6 +663,7 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
         result["blocked"] = True
         return result
 
+    attempted_ids: set[int] = set()
     for audience in (False, True):
         by_level = partitions[audience]
         if not by_level:
@@ -676,13 +697,19 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
                     continue
                 if role in held:
                     continue
+                # One add attempt per role per pass: a role shared by the Member
+                # and Booster partitions, or configured at several Levels, would
+                # otherwise be re-added (the cache is stale after the first add).
+                if role_id in attempted_ids:
+                    continue
+                attempted_ids.add(role_id)
                 try:
                     await deliver_role(
                         member, role_id,
                         f"Level {reward_level} reward (restored)")
                     result["restored"].append(role_id)
                     held = set(getattr(member, "roles", None) or [])
-                    if role not in held:
+                    if role not in held and not await _confirm_role_added(member, role):
                         result["failed"].append(
                             (role_id, "Role add returned without membership"))
                 except Exception as exc:
@@ -1064,15 +1091,10 @@ async def claim_available(guild_id: int, user_id: int, *,
 
 async def list_claims(guild_id: int, user_id: int) -> list[dict]:
     await ensure_tables()
-    # Same expiry rule claim_available()'s reservation uses: a 'processing' row
-    # whose lease ran out (or never recorded a start) is recoverable, so report
-    # it as 'pending'. Read-only: reservation/ownership logic is untouched.
-    expired_before = _iso(_now() - timedelta(seconds=LEASE_SECONDS))
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             SELECT id, reward_level, track, reward_ref, payload_json,
-                   status, last_error, created_at, fulfilled_at, source,
-                   processing_started_at
+                   status, last_error, created_at, fulfilled_at, source
             FROM level_reward_claims
             WHERE guild_id=? AND user_id=?
             ORDER BY reward_level, id
@@ -1080,16 +1102,14 @@ async def list_claims(guild_id: int, user_id: int) -> list[dict]:
         found = await cursor.fetchall()
     rows = []
     for (claim_id, level, track, ref, payload, status, error,
-         created_at, fulfilled_at, source, started_at) in found:
-        stale = (status == "processing"
-                 and (started_at is None or started_at < expired_before))
+         created_at, fulfilled_at, source) in found:
         rows.append({
             "id": claim_id,
             "reward_level": level,
             "track": track,
             "reward_ref": ref,
             "payload": json.loads(payload),
-            "status": "pending" if stale else status,
+            "status": status,
             "last_error": error,
             # History, for the /level Stats view: when the crossing was recorded,
             # when it was delivered, and which path recorded it. Read-only —
@@ -1097,7 +1117,6 @@ async def list_claims(guild_id: int, user_id: int) -> list[dict]:
             "created_at": created_at,
             "fulfilled_at": fulfilled_at,
             "source": source,
-            "stale_processing": stale,
         })
     return rows
 
