@@ -824,13 +824,29 @@ class Leveling(commands.Cog):
 
         for guild_id, period, last_reset in configs:
             try:
-                if last_reset:
-                    last_dt = datetime.fromisoformat(last_reset)
-                    if last_dt.tzinfo is None:
-                        last_dt = last_dt.replace(tzinfo=timezone.utc)
-                    elapsed_hours = (now - last_dt).total_seconds() / 3600
-                    if elapsed_hours < _period_hours(period):
-                        continue
+                if not last_reset:
+                    # An enabled schedule with no recorded last_reset has no cycle start
+                    # to measure from. It used to fall through to
+                    # perform_leaderboard_reset() and wipe the guild's XP on the next
+                    # tick. Start the cycle now instead; the first reset is then one
+                    # full period away.
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("""
+                            UPDATE leveling_reset_config SET last_reset = ?
+                            WHERE guild_id = ?
+                              AND (last_reset IS NULL OR last_reset = '')
+                        """, (now.isoformat(), guild_id))
+                        await db.commit()
+                    print(f"[LEVELING RESET] guild={guild_id} period={period} "
+                          f"had no last_reset; cycle start recorded, no reset")
+                    continue
+
+                last_dt = datetime.fromisoformat(last_reset)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                elapsed_hours = (now - last_dt).total_seconds() / 3600
+                if elapsed_hours < _period_hours(period):
+                    continue
 
                 count = await perform_leaderboard_reset(guild_id, period)
                 print(f"[LEVELING RESET] guild={guild_id} period={period} "

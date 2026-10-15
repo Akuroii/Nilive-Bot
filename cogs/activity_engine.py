@@ -4,6 +4,7 @@ import aiosqlite
 from datetime import datetime, timezone
 from database import DB_PATH
 from utils.timezone import get_cairo_daily_key
+from utils.xp_calculator import get_leveling_config
 
 
 async def get_today_activity(guild_id: int, user_id: int) -> dict:
@@ -85,6 +86,7 @@ class ActivityEngine(commands.Cog):
     async def voice_tick_task(self):
         today = get_cairo_daily_key()
         for guild in self.bot.guilds:
+            guard_on = None   # voice_farming_guard, read lazily once per guild per tick
             try:
                 afk_channel_id = guild.afk_channel.id if guild.afk_channel else None
 
@@ -120,6 +122,30 @@ class ActivityEngine(commands.Cog):
                             if (in_afk_channel or alone
                                     or member.voice.self_deaf
                                     or member.voice.deaf):
+                                # Guard OFF: the guild chose not to treat alone / AFK /
+                                # deafened as "not really in voice", so the display stat
+                                # behind /rank "VOICE TIME" follows that choice. Fails
+                                # closed (guard ON) if the setting cannot be read. The
+                                # legacy activity_voice_tick (missions, mvp) is still NOT
+                                # dispatched for these members.
+                                if guard_on is None:
+                                    try:
+                                        guard_on = bool((await get_leveling_config(guild.id))
+                                                        .get("voice_farming_guard", 1))
+                                    except Exception as e:
+                                        guard_on = True
+                                        print(f"[ACTIVITY] voice_farming_guard read failed for "
+                                              f"guild {guild.id}, assuming ON: {e}")
+                                if not guard_on:
+                                    async with aiosqlite.connect(DB_PATH) as db:
+                                        await db.execute("""
+                                            INSERT INTO activity_stats
+                                                (guild_id, user_id, date, voice_minutes)
+                                            VALUES (?, ?, ?, 1)
+                                            ON CONFLICT(guild_id, user_id, date) DO UPDATE SET
+                                                voice_minutes = voice_minutes + 1
+                                        """, (guild.id, member.id, today))
+                                        await db.commit()
                                 self.bot.dispatch(
                                     "activity_voice_xp_tick",
                                     guild, member, xp_flags)
