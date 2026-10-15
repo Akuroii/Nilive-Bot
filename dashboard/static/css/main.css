@@ -1158,3 +1158,23 @@ code {
 }
 .na-hint--error { color: var(--danger); }
 .na-hint--ok    { color: var(--success); }
+
+/* ── LEVELING REWARD AUDIENCES (additive) ─────── */
+:root[data-theme="dark"]  { --booster: #f47fff; --booster-bg: rgba(244,127,255,.16); }
+:root[data-theme="light"] { --booster: #b03bbd; --booster-bg: rgba(176,59,189,.12); }
+
+/* Premium booster badge - distinct from the warning badge so Boosters-only
+   rewards are never mistaken for a caution state. */
+.badge-booster {
+    background: var(--booster-bg);
+    color: var(--booster);
+    border: 1px solid var(--booster);
+}
+
+/* Keep the reward filters in reach while scrolling long reward tables. */
+.reward-filter-bar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    box-shadow: 0 6px 14px -12px rgba(0,0,0,.8);
+}
