@@ -236,6 +236,41 @@ def save_leveling_config_api():
     return jsonify({"success": True})
 
 
+@api_bp.route("/leveling/rewards", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_leveling_rewards():
+    """Role level rewards as JSON, mirroring get_leveling_currency_rewards().
+
+    systems/leveling.html refreshes the role-reward table in place from this
+    endpoint on page load and after every add/delete. Without it the refresh
+    got a 404 and the page warned that the table could not be refreshed. Same
+    columns and ORDER BY as the page route in dashboard/app.py, so the
+    client-side re-render matches the server-rendered first paint row for row.
+    Read-only: it writes nothing and no entitlement or audience rule changes.
+    """
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT id, level, role_id, audience
+                FROM leveling_rewards
+                WHERE guild_id = ? ORDER BY level ASC
+            """, (guild_id,))
+            return await cursor.fetchall()
+
+    rows = run_async(fetch())
+    # role_id goes out as a string: Discord IDs exceed 2^53, so a JSON number
+    # would be rounded by the browser's JSON.parse and the row would show (and
+    # look up) the wrong role. str() keeps the stored value exact, including
+    # legacy rows that hold something other than a number.
+    return jsonify({"rewards": [{
+        "id": r[0], "level": r[1],
+        "role_id": "" if r[2] is None else str(r[2]),
+        "audience": r[3],
+    } for r in rows]})
+
+
 def _reward_audience(data):
     """'everyone' (default) or 'boosters'; anything else is rejected."""
     audience = (data or {}).get("audience") or "everyone"
