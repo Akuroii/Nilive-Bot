@@ -1,3 +1,4 @@
+import asyncio
 import discord
 from discord.ext import commands, tasks
 import aiosqlite
@@ -165,7 +166,11 @@ class ActivityEngine(commands.Cog):
 
     @voice_tick_task.before_loop
     async def before_voice_tick(self):
-        await self.bot.wait_until_ready()
+        # main.py loads cogs before login; wait_until_ready() raises while
+        # the client is uninitialized, killing the task before its first tick.
+        # Like Health's heartbeat, poll safely across both startup and reload.
+        while not self.bot.is_ready():
+            await asyncio.sleep(0.5)
 
 
 async def setup(bot):
