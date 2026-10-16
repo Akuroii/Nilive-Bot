@@ -328,8 +328,8 @@ async def main():
     plain.premium_since = None
     embed = await leveling_cog._level_embed(guild, plain, "level")
     text = "\n".join(f.value for f in embed.fields)
-    check("/level shows the Booster reward as locked for a non-booster",
-          "Boosters only" in text and "locked" in text and "⭐" in text, text)
+    check("/level hides the locked Booster reward on the Level page for a non-booster",
+          "Nothing to claim right now." in text and "Boosters only" not in text, text)
     plain.premium_since = BOOSTING
     embed = await leveling_cog._level_embed(guild, plain, "level")
     text = "\n".join(f.value for f in embed.fields)
