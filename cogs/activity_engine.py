@@ -112,22 +112,16 @@ class ActivityEngine(commands.Cog):
                                 "deaf":      bool(member.voice.deaf),
                                 "channel_id": channel.id,
                             }
-                            # Leveling's own event: it carries the three
-                            # anti-farming facts so the guild's
-                            # `voice_farming_guard` setting decides what they
-                            # mean. Dispatched for EVERY real member in a
-                            # voice channel; no other consumer listens to it.
+                            # The guild's farming guard decides whether this
+                            # minute counts for ALL voice-activity consumers.
+                            # With guard disabled, alone/AFK/deafened minutes
+                            # must reach missions and MVP as well as leveling.
                             xp_flags = dict(flags, alone=alone,
                                             afk=in_afk_channel)
-                            if (in_afk_channel or alone
-                                    or member.voice.self_deaf
-                                    or member.voice.deaf):
-                                # Guard OFF: the guild chose not to treat alone / AFK /
-                                # deafened as "not really in voice", so the display stat
-                                # behind /rank "VOICE TIME" follows that choice. Fails
-                                # closed (guard ON) if the setting cannot be read. The
-                                # legacy activity_voice_tick (missions, mvp) is still NOT
-                                # dispatched for these members.
+                            restricted = (in_afk_channel or alone
+                                          or member.voice.self_deaf
+                                          or member.voice.deaf)
+                            if restricted:
                                 if guard_on is None:
                                     try:
                                         guard_on = bool((await get_leveling_config(guild.id))
@@ -136,20 +130,11 @@ class ActivityEngine(commands.Cog):
                                         guard_on = True
                                         print(f"[ACTIVITY] voice_farming_guard read failed for "
                                               f"guild {guild.id}, assuming ON: {e}")
-                                if not guard_on:
-                                    async with aiosqlite.connect(DB_PATH) as db:
-                                        await db.execute("""
-                                            INSERT INTO activity_stats
-                                                (guild_id, user_id, date, voice_minutes)
-                                            VALUES (?, ?, ?, 1)
-                                            ON CONFLICT(guild_id, user_id, date) DO UPDATE SET
-                                                voice_minutes = voice_minutes + 1
-                                        """, (guild.id, member.id, today))
-                                        await db.commit()
-                                self.bot.dispatch(
-                                    "activity_voice_xp_tick",
-                                    guild, member, xp_flags)
-                                continue
+                                if guard_on:
+                                    self.bot.dispatch(
+                                        "activity_voice_xp_tick",
+                                        guild, member, xp_flags)
+                                    continue
 
                             async with aiosqlite.connect(DB_PATH) as db:
                                 await db.execute("""
