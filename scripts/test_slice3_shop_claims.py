@@ -253,6 +253,14 @@ async def main():
                       reason="snapshot", source="test")
     execute("DELETE FROM shop_items WHERE id=?", (gone,))
     execute("UPDATE shop_items SET enabled=0 WHERE id=?", (quiet,))
+    guild = SimpleNamespace(id=GUILD, get_role=lambda rid: None)
+    # Rendered while the live config is already deleted/disabled and the frozen
+    # snapshots are still claimable: the quantity on the card can only come from
+    # the frozen claim payload, and Rewards Available only lists claimable rows.
+    embed = await _level_embed(guild, SimpleNamespace(id=USER), "level")
+    shown = "\n".join(field.value for field in embed.fields)
+    check("9 /level shows the frozen shop reward quantity while it is claimable",
+          "2x Ghost" in shown or "1x Muted" in shown, shown)
     paid = await claim_available(GUILD, USER)
     check("9 deleted and disabled products still fulfill the snapshot",
           paid["delivered_shop"] >= 2
@@ -265,11 +273,10 @@ async def main():
     check("12 wallet is unchanged except the currency level reward",
           wallet() == held_wallet)
 
-    guild = SimpleNamespace(id=GUILD, get_role=lambda rid: None)
     embed = await _level_embed(guild, SimpleNamespace(id=USER), "level")
     shown = "\n".join(field.value for field in embed.fields)
-    check("9 /level shows the shop reward quantity",
-          "2x Ghost" in shown or "1x Muted" in shown, shown)
+    check("9 delivered snapshots leave Rewards Available (claimable only)",
+          "2x Ghost" not in shown and "1x Muted" not in shown, shown)
 
     import dashboard.app as dashboard
     app = dashboard.app
