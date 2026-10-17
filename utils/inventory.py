@@ -9,28 +9,38 @@ class InsufficientItems(Exception):
 
 async def _consume_provenance(db, guild_id: int, user_id: int, item_name: str,
                               quantity: int) -> None:
-    """Take units off attributable level-reward grants, FIFO. Never raises.
+    """Take units off attributable level-reward grants, FIFO. Fails closed.
 
-    Bookkeeping for `utils/level_ops.reward_grants`. It must not be able to break
-    a purchase, a potion use or a drop, so a failure is logged and the inventory
-    change still commits - the worst case is a reward grant that later has to be
-    reconciled by hand, never a lost item.
+    Bookkeeping for `utils/level_ops.reward_grants`: after this runs, every later
+    reversal judges `remaining_quantity` as the number of that reward's units
+    still in the member's hands. If it silently failed while the inventory
+    decrement committed, `remaining_quantity` would keep counting units the member
+    no longer has, and a later correction would "reverse" a reward by removing
+    units that came from a quest, a trade or a purchase - the exact class of
+    unrelated-asset loss this provenance exists to prevent.
+
+    Every caller runs this inside the same `BEGIN IMMEDIATE` transaction as the
+    quantity change, so raising rolls BOTH back: the purchase/potion/drop/trade
+    does not happen, and no stale attribution survives. That is deliberately the
+    opposite of "never break a purchase": a refused action the member can retry is
+    recoverable; a silently wrong attribution is not.
     """
-    try:
-        from utils.level_ops import consume_grants
-        await consume_grants(db, guild_id, user_id, item_name, int(quantity))
-    except Exception as exc:                      # pragma: no cover - safety net
-        print(f"[PROVENANCE] consume_grants({item_name} x{quantity}) failed: {exc}")
+    from utils.level_ops import consume_grants
+    await consume_grants(db, guild_id, user_id, item_name, int(quantity))
 
 
 async def _invalidate_provenance(db, guild_id: int, user_id: int,
                                  item_name: str, reason: str) -> None:
-    """Mark an item stack's reward provenance unusable. Never raises."""
-    try:
-        from utils.level_ops import invalidate_grants
-        await invalidate_grants(db, guild_id, user_id, item_name, reason)
-    except Exception as exc:                      # pragma: no cover - safety net
-        print(f"[PROVENANCE] invalidate_grants({item_name}) failed: {exc}")
+    """Mark an item stack's reward provenance unusable. Fails closed.
+
+    `set_quantity()` writes an absolute quantity, so no grant for that stack can
+    be trusted afterwards. If this write failed while the absolute quantity
+    committed, the old `remaining_quantity` values would survive and a later
+    correction could treat the new stack as containing the old reward's units.
+    The caller's transaction is rolled back instead.
+    """
+    from utils.level_ops import invalidate_grants
+    await invalidate_grants(db, guild_id, user_id, item_name, reason)
 
 
 async def give_item(guild_id: int, user_id: int, item_name: str,

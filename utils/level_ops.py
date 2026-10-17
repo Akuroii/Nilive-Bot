@@ -84,6 +84,10 @@ STATUS_REFUSED = "refused"             # not provable, nothing attempted
 KIND_CURRENCY = "currency"
 KIND_INVENTORY = "inventory"
 KIND_ROLE = "role"
+# An XP-boost reward's effect is one row in `leveling_active_boosts` keyed by
+# `level_claim:<claim id>`, so it can be named and removed exactly. It is a
+# journal kind rather than a wallet movement: the value is elapsed time.
+KIND_BOOST = "boost"
 
 # How long an operation may hold a member's lock. Long enough to cover several
 # Discord API round-trips, short enough that a crashed process does not wedge the
@@ -425,43 +429,56 @@ async def list_operations(guild_id: int, user_id: int | None = None,
 
 async def acquire_lock(guild_id: int, user_id: int, *, holder: str,
                        operation_id: str,
-                       ttl_seconds: int = LOCK_TTL_SECONDS) -> dict:
+                       ttl_seconds: int = LOCK_TTL_SECONDS,
+                       db: aiosqlite.Connection | None = None) -> dict:
     """Take the per-member lease, or report who holds it.
 
     One `BEGIN IMMEDIATE` transaction: an expired lease is cleared and the new one
     written together, so two processes cannot both believe they hold it. The clock
     is sampled INSIDE the transaction - sampling it before `BEGIN IMMEDIATE` and
     then blocking on another writer is how a lease gets granted after it expired.
+
+    ``db`` joins the caller's transaction instead of opening its own. That is what
+    lets an administrative XP change write the new row and take the lease in ONE
+    commit: after that commit every claim pass sees the fence, so there is no
+    window in which a reward above the corrected level can be delivered before
+    the correction reconciles it. The caller owns commit/rollback in that mode.
     """
-    await ensure_tables()
-    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-        await db.execute("BEGIN IMMEDIATE")
+    if db is None:
+        await ensure_tables()
+
+    async def run(connection) -> dict:
+        now = _now()
+        await connection.execute(
+            "DELETE FROM level_op_locks WHERE guild_id=? AND user_id=? "
+            "AND expires_at <= ?", (guild_id, user_id, now))
+        cursor = await connection.execute(
+            "SELECT operation_id, holder, expires_at FROM level_op_locks "
+            "WHERE guild_id=? AND user_id=?", (guild_id, user_id))
+        existing = await cursor.fetchone()
+        if existing:
+            return {"ok": False, "holder": existing[1],
+                    "operation_id": existing[0], "expires_at": existing[2],
+                    "reason": (f"{existing[1]} operation {existing[0]} is "
+                               f"already running for this member "
+                               f"(lease until {existing[2]})")}
+        await connection.execute(
+            "INSERT INTO level_op_locks (guild_id, user_id, operation_id, "
+            "holder, acquired_at, expires_at) VALUES (?,?,?,?,?,?)",
+            (guild_id, user_id, operation_id, holder, now,
+             _expiry(ttl_seconds)))
+        return {"ok": True, "holder": holder, "operation_id": operation_id}
+
+    if db is not None:
+        return await run(db)
+    async with aiosqlite.connect(DB_PATH, timeout=10) as own:
+        await own.execute("BEGIN IMMEDIATE")
         try:
-            now = _now()
-            await db.execute(
-                "DELETE FROM level_op_locks WHERE guild_id=? AND user_id=? "
-                "AND expires_at <= ?", (guild_id, user_id, now))
-            cursor = await db.execute(
-                "SELECT operation_id, holder, expires_at FROM level_op_locks "
-                "WHERE guild_id=? AND user_id=?", (guild_id, user_id))
-            existing = await cursor.fetchone()
-            if existing:
-                await db.commit()
-                return {"ok": False, "holder": existing[1],
-                        "operation_id": existing[0], "expires_at": existing[2],
-                        "reason": (f"{existing[1]} operation {existing[0]} is "
-                                   f"already running for this member "
-                                   f"(lease until {existing[2]})")}
-            await db.execute(
-                "INSERT INTO level_op_locks (guild_id, user_id, operation_id, "
-                "holder, acquired_at, expires_at) VALUES (?,?,?,?,?,?)",
-                (guild_id, user_id, operation_id, holder, now,
-                 _expiry(ttl_seconds)))
-            await db.commit()
-            return {"ok": True, "holder": holder,
-                    "operation_id": operation_id}
+            result = await run(own)
+            await own.commit()
+            return result
         except Exception:
-            await db.execute("ROLLBACK")
+            await own.execute("ROLLBACK")
             raise
 
 
@@ -1111,16 +1128,47 @@ async def note_reversal(*, guild_id: int, user_id: int, claim_id: int,
                         role_id: int | None = None) -> bool:
     """Append a journal row for an outcome that moved no fungible value.
 
-    Used for Discord role removals, where the side effect is on the member rather
-    than in a balance. Idempotent through the same UNIQUE(guild, user, claim,
-    kind) key: it returns False when this claim's outcome of this kind is already
-    recorded, so a retry adds no duplicate row. A FAILED role removal is recorded
-    with `status='refused'` only when the caller wants the case on the queue;
-    callers that intend to retry the removal should not record it at all.
+    Used for Discord role/boost outcomes, where the side effect is on the member
+    rather than in a balance. Idempotent through the same UNIQUE(guild, user,
+    claim, kind) key: there is never a second row for one claim's outcome of one
+    kind.
+
+    An `applied`/`already_reversed` row is terminal - a later attempt returns
+    False and must not move anything again. A `refused`/`outstanding` row is NOT
+    terminal: when a retry finally succeeds (the role was removed, the boost
+    duration could be deleted), that same row is upgraded to `applied` with the
+    earlier reason preserved. Without that, a first failure would permanently
+    hide the fact that the effect was later reversed.
     """
     await ensure_tables()
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
         try:
+            cursor = await db.execute(
+                "SELECT reversal_id, status, reason FROM reward_reversals "
+                "WHERE guild_id=? AND user_id=? AND claim_id=? AND kind=?",
+                (guild_id, user_id, claim_id, kind))
+            existing = await cursor.fetchone()
+            if existing:
+                if existing[1] in (STATUS_APPLIED, STATUS_ALREADY):
+                    await db.commit()
+                    return False
+                history = str(existing[2] or "").strip()
+                merged = (f"{history} | {operation_id} at {_now()}: "
+                          f"{reason or status}" if history
+                          else f"{operation_id} at {_now()}: {reason or status}")
+                await db.execute(
+                    "UPDATE reward_reversals SET operation_id=?, quantity=?, "
+                    "status=?, reason=?, currency=COALESCE(?, currency), "
+                    "ledger_id=COALESCE(?, ledger_id), item_name=COALESCE(?, "
+                    "item_name) WHERE reversal_id=?",
+                    (operation_id, int(quantity), status, merged, currency,
+                     ledger_id,
+                     item_name if item_name is not None else (
+                         str(role_id) if role_id is not None else None),
+                     existing[0]))
+                await db.commit()
+                return True
             await db.execute(
                 "INSERT INTO reward_reversals (reversal_id, operation_id, "
                 "guild_id, user_id, claim_id, kind, currency, item_name, "
@@ -1133,9 +1181,9 @@ async def note_reversal(*, guild_id: int, user_id: int, claim_id: int,
                  int(quantity), ledger_id, status, reason, _now()))
             await db.commit()
             return True
-        except aiosqlite.IntegrityError:
+        except Exception:
             await db.execute("ROLLBACK")
-            return False
+            raise
 
 
 async def reversal_rows(guild_id: int, user_id: int) -> list[dict]:
