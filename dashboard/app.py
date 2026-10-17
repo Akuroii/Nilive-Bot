@@ -1819,7 +1819,7 @@ COMMAND_CATEGORIES = {
     ],
     "Leveling": [
         "rank", "leaderboard", "level", "setxp", "resetxp",
-        "resetleaderboard", "prestige",
+        "resetleaderboard", "level_test_reset", "prestige",
     ],
     "Shop & Inventory": [
         "shop", "inventory",
@@ -1904,6 +1904,7 @@ COMMAND_METADATA = {
     "setxp": {"desc": "Set XP for a member (admin)", "params": ["member", "xp"]},
     "resetxp": {"desc": "Reset a member's XP and level back to 0 (admin)", "params": ["member"]},
     "resetleaderboard": {"desc": "Force an immediate leaderboard reset for this server (admin)", "params": []},
+    "level_test_reset": {"desc": "Preview/reset ONE member's /level reward test state (admin, preview unless confirmed)", "params": ["member", "confirm", "include_delivered"]},
     "prestige": {"desc": "View your Prestige state (permanent tier + effective tier)", "params": []},
     "minigames_setup": {"desc": "Configure the minigames spawn system (channel + weekly range)", "params": ["channel", "min_events", "max_events", "enabled"]},
     "minigames_spawn": {"desc": "Spawn a minigame right now (manual, admin). Omit the template to let the rotation pick.", "params": ["template_id"]},

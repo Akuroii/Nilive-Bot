@@ -1091,10 +1091,15 @@ async def claim_available(guild_id: int, user_id: int, *,
 
 async def list_claims(guild_id: int, user_id: int) -> list[dict]:
     await ensure_tables()
-    async with aiosqlite.connect(DB_PATH) as db:
+    # Same expiry rule claim_available()'s reservation uses: a 'processing' row
+    # whose lease ran out (or never recorded a start) is recoverable, so report
+    # it as 'pending'. Read-only: reservation/ownership logic is untouched.
+    expired_before = _iso(_now() - timedelta(seconds=LEASE_SECONDS))
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         cursor = await db.execute("""
             SELECT id, reward_level, track, reward_ref, payload_json,
-                   status, last_error, created_at, fulfilled_at, source
+                   status, last_error, created_at, fulfilled_at, source,
+                   processing_started_at
             FROM level_reward_claims
             WHERE guild_id=? AND user_id=?
             ORDER BY reward_level, id
@@ -1102,14 +1107,16 @@ async def list_claims(guild_id: int, user_id: int) -> list[dict]:
         found = await cursor.fetchall()
     rows = []
     for (claim_id, level, track, ref, payload, status, error,
-         created_at, fulfilled_at, source) in found:
+         created_at, fulfilled_at, source, started_at) in found:
+        stale = (status == "processing"
+                 and (started_at is None or started_at < expired_before))
         rows.append({
             "id": claim_id,
             "reward_level": level,
             "track": track,
             "reward_ref": ref,
             "payload": json.loads(payload),
-            "status": status,
+            "status": "pending" if stale else status,
             "last_error": error,
             # History, for the /level Stats view: when the crossing was recorded,
             # when it was delivered, and which path recorded it. Read-only —
@@ -1117,6 +1124,7 @@ async def list_claims(guild_id: int, user_id: int) -> list[dict]:
             "created_at": created_at,
             "fulfilled_at": fulfilled_at,
             "source": source,
+            "stale_processing": stale,
         })
     return rows
 

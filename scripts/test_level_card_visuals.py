@@ -168,6 +168,27 @@ async def main():
           str(reached))
     check("each XP step of the sample changes the drawn path",
           len({_progress_path(step, 12) for step in range(12)}) == 12)
+    # The regression this locks down: at the END of a link (slot 3k+2) the next
+    # station used to flip to ◆ one slot early, drawing `◆━━◆━━✈︎◆━━◇━━◇` at
+    # ~46% progress - a reached station immediately after the plane for a
+    # station the member has not reached. A station may only be ◆ once the
+    # plane's own progress has actually arrived at it.
+    overdrawn = []
+    for step in range(12):
+        drawn = _progress_path(step, 12)
+        glyphs = [c for c in drawn if c in (REACHED, AHEAD)]
+        reached = glyphs.index(AHEAD) if AHEAD in glyphs else len(glyphs)
+        # station i sits at i/(stations-1) of the path; the plane is at step/12
+        if (reached - 1) / (len(glyphs) - 1) > step / 12 + 1e-9:
+            overdrawn.append((step, drawn))
+        if PLANE in drawn and drawn[drawn.index(PLANE) + len(PLANE):].startswith(REACHED):
+            overdrawn.append((step, drawn, "reached station glued after the plane"))
+    check("no station is marked reached ahead of the plane (all 12 positions)",
+          not overdrawn, str(overdrawn))
+    check("the end of a link leaves the next station unreached",
+          _progress_path(2, 12) == f"{REACHED}{LINK * 2}{PLANE}{AHEAD}{LINK * 2}{AHEAD}{LINK * 2}{AHEAD}{LINK * 2}{AHEAD}"
+          and _progress_path(5, 12) == f"{REACHED}{LINK * 2}{REACHED}{LINK * 2}{PLANE}{AHEAD}{LINK * 2}{AHEAD}{LINK * 2}{AHEAD}",
+          _progress_path(5, 12))
 
     # ── 2. the real /level embed: header, path, XP numbers ──
     print("== 2. the level page renders the reference layout ==")
@@ -324,13 +345,25 @@ async def main():
           field_text(sent["embed"]))
 
     card = sent["view"]
+    # `defer()` must be the FIRST thing a page button does: the ack has to beat
+    # every SQLite round trip the render needs, or Discord shows "Nero didn't
+    # respond in time". The call log proves the ordering, not just that both
+    # were eventually called.
+    calls = []
     itx2 = SimpleNamespace(
         user=itx.user, guild=guild,
-        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock(),
-                                 edit_message=AsyncMock()),
-        edit_original_response=AsyncMock())
+        response=SimpleNamespace(
+            defer=AsyncMock(side_effect=lambda *a, **k: calls.append("defer")),
+            send_message=AsyncMock(),
+            edit_message=AsyncMock(
+                side_effect=lambda *a, **k: calls.append("edit_message"))),
+        edit_original_response=AsyncMock(
+            side_effect=lambda *a, **k: calls.append("edit_original_response")))
     await card.show_stats.callback(itx2)
-    stats = itx2.response.edit_message.await_args.kwargs
+    check("Stats acknowledges the interaction before rendering",
+          calls == ["defer", "edit_original_response"]
+          and itx2.response.defer.await_count == 1, str(calls))
+    stats = itx2.edit_original_response.await_args.kwargs
     check("Stats swaps in the stats page and highlights itself",
           stats["embed"].title == "Level stats"
           and card.show_stats.style.name == "primary"
@@ -339,15 +372,20 @@ async def main():
     check("the stats page keeps its own claim history fields",
           field_names(stats["embed"])[:2] == ["Claimed", "Waiting"],
           str(field_names(stats["embed"])))
+    check("the page edit goes to the deferred response, never to response.edit_message",
+          itx2.response.edit_message.await_count == 0)
 
+    calls.clear()
     await card.show_level.callback(itx2)
-    back = itx2.response.edit_message.await_args.kwargs
+    back = itx2.edit_original_response.await_args.kwargs
     check("Level returns to the card page, path included, and re-highlights",
           PLANE in (back["embed"].description or "")
           and back["embed"].title.startswith("LEVEL ")
           and card.show_level.style.name == "primary"
           and card.show_stats.style.name == "secondary"
           and back["view"] is card, back["embed"].title)
+    check("Level acknowledges first too", calls == ["defer", "edit_original_response"],
+          str(calls))
 
     stranger = SimpleNamespace(id=USER + 999, premium_since=None)
     itx3 = SimpleNamespace(
@@ -359,6 +397,7 @@ async def main():
     check("somebody else's card is refused ephemerally and never re-rendered",
           itx3.response.send_message.await_args.kwargs.get("ephemeral") is True
           and itx3.response.edit_message.await_count == 0
+          and itx3.edit_original_response.await_count == 0
           and itx3.response.defer.await_count == 0)
 
     # ── 5. the component JSON must not regress ──

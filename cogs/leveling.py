@@ -139,6 +139,14 @@ def _progress_path(current: int, needed: int,
     end), so no floating-point comparison decides where the plane sits: equal
     progress always draws an equal path, and one slot of progress always moves
     it one character further along.
+
+    A station flips to ◆ only once the plane has ARRIVED at it. Slot 3*k is the
+    start of link k (station k reached, station k+1 not), 3*k+1 its middle and
+    3*k+2 its end - still short of station k+1, which sits at (k+1)/segments of
+    the path. The old `+1 if step == 2` therefore lit the next station one slot
+    early and drew `◆━━◆━━✈︎◆━━◇━━◇` at ~46% progress: a reached station
+    immediately after the plane for a station the member has not reached. Only a
+    finished level (current >= needed) has every station reached.
     """
     stations = max(2, int(stations))
     segments = stations - 1
@@ -147,7 +155,7 @@ def _progress_path(current: int, needed: int,
     done = min(max(int(current or 0), 0), span)
     slot = min(done * slots // span, slots - 1) if span else 0
     segment, step = divmod(slot, 3)
-    reached = segment + 1 + (1 if step == 2 else 0)
+    reached = stations if (span and done >= span) else segment + 1
 
     parts = []
     for index in range(stations):
@@ -199,17 +207,41 @@ def _has_claimable(claims, booster_ok: bool = False) -> bool:
     return any(_claimable_now(c, booster_ok) for c in (claims or []))
 
 
-async def _claim_button_available(guild_id: int, claims,
-                                  booster_ok: bool = False) -> bool:
-    """Also expose Claim All as the explicit exclusive-role reconcile action."""
+async def _claim_button_state(guild_id: int, claims,
+                              booster_ok: bool = False) -> tuple[bool, bool]:
+    """`(claimable, reconcile_only)` - what the Claim All button should look like.
+
+    ``claimable``      at least one row this member can collect right now. This
+                       is the only state that earns the green/success style:
+                       green has always read as "rewards are waiting for you".
+    ``reconcile_only`` nothing to collect, but Claim All is still the explicit
+                       exclusive-role reconcile action (a fulfilled role claim
+                       plus `remove_old_reward_role`, see
+                       test_leveling_claim_all_d2.py). The button stays
+                       reachable, but grey - an enabled GREEN button after every
+                       reward had been delivered is what made a finished card
+                       look like it was still owed something, and invited the
+                       repeat clicks that each answered "Claimed 0".
+
+    Same inputs and same reachability as `_claim_button_available()`; this only
+    separates "owed" from "reachable". Read-only.
+    """
     if _has_claimable(claims, booster_ok):
-        return True
+        return True, False
     if not any((claim or {}).get("track") == "role"
                and (claim or {}).get("status") == "fulfilled"
                for claim in (claims or [])):
-        return False
+        return False, False
     config = await get_leveling_config(guild_id)
-    return bool(config.get("remove_old_reward_role"))
+    return False, bool(config.get("remove_old_reward_role"))
+
+
+async def _claim_button_available(guild_id: int, claims,
+                                  booster_ok: bool = False) -> bool:
+    """Also expose Claim All as the explicit exclusive-role reconcile action."""
+    claimable, reconcile_only = await _claim_button_state(
+        guild_id, claims, booster_ok)
+    return claimable or reconcile_only
 
 
 def _claim_age(value) -> str:
@@ -275,14 +307,218 @@ def claim_result_footer(result: dict) -> str:
     return text
 
 
-async def _level_embed(guild, member, page: str) -> discord.Embed:
+def _claim_totals(delivered: list, currency: dict) -> str:
+    """One summary line for what was actually paid, aggregated per unit.
+
+    Currency and Shop rows are fungible quantities, so they are summed by
+    currency/item name (three coin rewards read as one coin total, not three
+    lines of arithmetic for the member). Roles and XP boosts are not quantities,
+    so they are counted. Empty groups are omitted.
+    """
+    names = currency or {}
+    coin_name = ((names.get("coins") or {}).get("name") or "Coins")
+    gem_name = ((names.get("diamonds") or {}).get("name") or "Diamonds")
+    money = {"balance": 0, "diamonds": 0}
+    items: dict[str, int] = {}
+    roles = boosts = 0
+    for claim in delivered:
+        track, payload = claim.get("track"), (claim.get("payload") or {})
+        if track == "currency":
+            code = "balance" if payload.get("currency") == "balance" else "diamonds"
+            money[code] += int(payload.get("amount", 0) or 0)
+        elif track == "shop":
+            name = str(payload.get("name") or "item")
+            items[name] = items.get(name, 0) + int(payload.get("quantity", 0) or 0)
+        elif track == "boost":
+            boosts += 1
+        else:
+            roles += 1
+    parts = []
+    if money["balance"]:
+        parts.append(f"{_compact_qty(money['balance'])} {coin_name}")
+    if money["diamonds"]:
+        parts.append(f"{_compact_qty(money['diamonds'])} {gem_name}")
+    parts += [f"{_compact_qty(qty)} {name}" for name, qty in sorted(items.items())]
+    if roles:
+        parts.append(f"{roles} role reward(s)")
+    if boosts:
+        parts.append(f"{boosts} XP boost(s)")
+    return " · ".join(parts) if parts else "nothing"
+
+
+async def claim_confirmation(guild, result: dict, claims,
+                             booster_ok: bool = False) -> tuple[str, str] | None:
+    """What Claim All actually delivered, by name - and what it did not.
+
+    `result` carries claim IDs only, so each one is resolved against the claim
+    rows read straight after the pass and rendered with the same
+    `_claim_reward_text()` the Stats page uses: one vocabulary and one source of
+    truth, so a name here can never disagree with the row that was paid.
+
+    Failures are listed with their recorded reason and the count of what is
+    still claimable afterwards, so a partial pass never reads as a complete
+    one. Returns `(field name, field value)`, or None when the pass neither
+    delivered nor failed anything - a no-op repeat click, or a reconcile-only
+    pass, whose restored Level role `claim_result_footer()` already reports.
+    """
+    from utils.currency import get_currency_config
+    by_id = {int(c["id"]): c for c in (claims or []) if c.get("id") is not None}
+    order = lambda c: (int(c["reward_level"]), str(c["track"]), int(c["id"]))
+    delivered = sorted((by_id[int(i)] for i in (result.get("fulfilled") or [])
+                        if int(i) in by_id), key=order)
+    broken = sorted((by_id[int(i)] for i in (result.get("failed") or [])
+                     if int(i) in by_id), key=order)
+    if not delivered and not broken:
+        return None
+    currency = (await get_currency_config(guild.id)) if guild is not None else {}
+    lines = []
+    if delivered:
+        lines.append(f"**Delivered {len(delivered)} reward(s):**")
+        lines += [f"- {_claim_reward_text(guild, c, currency)}" for c in delivered]
+        lines.append(f"**Total:** {_claim_totals(delivered, currency)}")
+    if broken:
+        lines.append(f"**Could not deliver {len(broken)} reward(s) "
+                     f"(still claimable, retry with Claim All):**")
+        for claim in broken:
+            reason = (claim.get("last_error") or "no error recorded").strip()
+            lines.append(f"- {_claim_reward_text(guild, claim, currency)}"
+                         f" — {reason[:160]}")
+    remaining = [c for c in (claims or []) if _claimable_now(c, booster_ok)]
+    if remaining:
+        lines.append(f"**Still waiting:** {len(remaining)} reward(s) — "
+                     f"Claim All stays available.")
+    elif delivered and not broken:
+        lines.append("**Nothing left to claim.**")
+    return "Claim result", "\n".join(lines)[:1024]
+
+
+def _level_reset_embed(member, report: dict, *, applied: bool) -> discord.Embed:
+    """The /level_test_reset preview (or result). Nothing here writes anything.
+
+    The preview has to name every record and side effect the reset touches, and
+    - just as importantly - every delivered reward it CANNOT reverse, so an
+    admin never confirms a destructive step on a guess.
+    """
+    plan = report.get("plan") or {}
+    mode = report.get("mode", "preview")
+    if mode == "blocked":
+        title = "Level test reset — BLOCKED"
+        color = 0xd1543a
+    elif applied:
+        title = "Level test reset — APPLIED"
+        color = 0x3ba55d
+    else:
+        title = "Level test reset — PREVIEW (nothing changed)"
+        color = 0x7c5cbf
+    embed = discord.Embed(title=title, color=color)
+    embed.add_field(
+        name="Scope",
+        value=(f"guild `{report['guild_id']}` · member {member.mention} "
+               f"(`{report['user_id']}`)\nenvironment: `{report['environment']}`\n"
+               f"Never any other member, guild, or reward definition."),
+        inline=False)
+    embed.add_field(
+        name="Current record",
+        value=(f"Level {report['level']} · {report['xp']:,} XP\n"
+               f"claim rows: {len(report['claims'])} "
+               f"({', '.join(f'{n} {s}' for s, n in sorted(report['claims_by_status'].items())) or 'none'})"),
+        inline=False)
+    would = "Reset" if applied else "Would reset"
+    lines = [
+        "- zero XP/Level in `levels`" if plan.get("zero_levels_row")
+        else "- no `levels` row to zero",
+        f"- delete {plan.get('delete_claims', 0)} `level_reward_claims` row(s) "
+        f"→ those reward levels become earnable again",
+        f"- delete {plan.get('delete_boosts', 0)} level-claim `leveling_active_boosts` row(s)",
+        f"- delete {plan.get('delete_temp_roles', 0)} level-claim `temp_roles` unit(s)",
+    ]
+    roles = plan.get("remove_discord_roles") or []
+    lines.append(f"- remove {len(roles)} reward role(s) from the member"
+                 + (f": {', '.join(f'<@&{r}>' for r in roles)}" if roles else ""))
+    embed.add_field(name=would, value="\n".join(lines), inline=False)
+
+    left = plan.get("reported_not_reversed") or {}
+    money = left.get("currency") or {}
+    not_reversed = []
+    if money:
+        not_reversed.append(
+            "- currency already credited: "
+            + ", ".join(f"{v:,} {k}" for k, v in sorted(money.items()))
+            + f" ({left.get('ledger_rows', 0)} `level_claim` ledger row(s))")
+    if left.get("inventory_candidates"):
+        not_reversed.append(
+            "- inventory row(s) that may hold delivered shop rewards: "
+            + ", ".join(f"{i['item_name']} (qty {i['quantity']})"
+                        for i in left["inventory_candidates"]))
+    if not_reversed:
+        not_reversed.append(
+            "**These are NOT reversed** — coins are fungible and inventory "
+            "quantities are merged with unrelated sources, so reversing them "
+            "here could corrupt economy/inventory data. Reverse them by hand "
+            "(or use a staging database) before re-testing a delivered reward.")
+        embed.add_field(name="Delivered value this tool will not touch",
+                        value="\n".join(not_reversed)[:1024], inline=False)
+
+    if mode == "blocked":
+        blocked = plan.get("blocked_claims") or []
+        embed.add_field(
+            name="Why it was refused",
+            value=(f"{len(blocked)} fulfilled reward(s) delivered value this tool "
+                   f"cannot reverse, and dropping them would make an already-paid "
+                   f"reward claimable again. Reverse that value first, then re-run "
+                   f"with `include_delivered: True`.\n"
+                   + "\n".join(f"- claim `{b['id']}` L{b['reward_level']} "
+                               f"{b['track']}" for b in blocked[:20]))[:1024],
+            inline=False)
+    if applied:
+        after = report.get("after") or {}
+        embed.add_field(
+            name="Result",
+            value=(f"XP/Level now {after.get('xp', 0):,} / L{after.get('level', 0)}\n"
+                   f"claim rows left: {after.get('claims', 0)} · boosts: "
+                   f"{after.get('boosts', 0)} · temp-role units: "
+                   f"{after.get('temp_roles', 0)}"),
+            inline=False)
+        removed = report.get("roles_removed") or []
+        failures = report.get("role_failures") or []
+        if failures:
+            embed.add_field(
+                name="Roles that could NOT be removed",
+                value="\n".join(f"- <@&{f['role_id']}> — {str(f['error'])[:120]}"
+                                for f in failures[:20])[:1024],
+                inline=False)
+        elif removed:
+            embed.add_field(name="Roles removed",
+                            value=", ".join(f"<@&{r}>" for r in removed)[:1024],
+                            inline=False)
+        if report.get("left_behind"):
+            embed.set_footer(text="Delivered currency/inventory was left in place "
+                                  "on purpose — see above.")
+    else:
+        embed.set_footer(text="Preview only. Re-run with confirm: True to apply.")
+    return embed
+
+
+async def _level_embed(guild, member, page: str, *, claims=None) -> discord.Embed:
+    """Render one /level page.
+
+    ``claims`` lets a caller that already read ``level_reward_claims`` (every
+    button interaction does) hand the rows over instead of paying for a second
+    read. That matters because this runs inside Discord's 3-second interaction
+    window: each ``list_claims()`` is two SQLite connections (``ensure_tables()``
+    plus the query), and a click used to open six of them before anything was
+    acknowledged. Read-only either way - omitting it changes nothing but cost.
+    """
     from utils.currency import get_currency_config
     from utils.level_claims import (
         current_level_definitions, list_claims, next_reward_level,
     )
     from utils.xp_calculator import xp_progress
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    # timeout=10 like every other leveling connection: the bot's own XP writer
+    # holds BEGIN IMMEDIATE locks, and the 5s default made a busy database both
+    # slower to answer and able to raise "database is locked" mid-render.
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         cursor = await db.execute(
             "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
             (guild.id, member.id))
@@ -291,7 +527,8 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
     level, current, needed = xp_progress(xp)
     from utils.level_claims import is_booster_ref, member_is_booster
     booster_ok = member_is_booster(member)
-    claims = await list_claims(guild.id, member.id)
+    if claims is None:
+        claims = await list_claims(guild.id, member.id)
     by_key = {(c["reward_level"], c["track"], c["reward_ref"]): c for c in claims}
     if page == "stats":
         # Reward/claim history, not a second copy of the progression numbers
@@ -307,6 +544,12 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
         waiting = [c for c in waiting_all if not _is_locked_claim(c, booster_ok)]
         failed = [c for c in by_status.get("failed", [])
                   if not _is_locked_claim(c, booster_ok)]
+        # A row still reporting 'processing' holds a LIVE lease (list_claims
+        # reports an expired one as 'pending', because the next Claim All really
+        # can take it). It is neither delivered nor waiting-to-be-claimed, and
+        # counting it in neither made this page announce "every crossed reward
+        # is delivered" while a reward was in flight or stranded.
+        in_flight = by_status.get("processing", [])
         newest = max((c for c in fulfilled if c.get("fulfilled_at")),
                      key=lambda c: c["fulfilled_at"], default=None)
         oldest = min((c for c in waiting if c.get("created_at")),
@@ -321,13 +564,31 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
                          if not _is_locked_claim(c, booster_ok)]
         waiting_txt = (f"{len(pending_ready)} pending · "
                        f"{len(failed)} retryable failure(s)")
+        if in_flight:
+            waiting_txt += f" · {len(in_flight)} being delivered now"
         if locked_claims:
             waiting_txt += f" · {len(locked_claims)} locked (Boosters only)"
         if oldest:
             waiting_txt += (f"\nOldest: {_claim_reward_text(guild, oldest, currency)} · "
                             f"{_claim_age(oldest['created_at'])}")
         elif not waiting and not locked_claims:
-            waiting_txt = "Nothing waiting — every crossed reward is delivered."
+            # Only say "delivered" when the rows actually say so: an in-flight
+            # lease or a stranded row is not a delivery. The counts are rebuilt
+            # rather than appended so this sentence cannot drop the in-flight
+            # rows it is qualified by.
+            if not in_flight and len(fulfilled) == len(claims):
+                waiting_txt = "Nothing waiting — every crossed reward is delivered."
+            else:
+                held = []
+                if in_flight:
+                    held.append(f"{len(in_flight)} being delivered now")
+                undelivered = len(claims) - len(fulfilled) - len(in_flight)
+                if undelivered > 0:
+                    held.append(f"{undelivered} not delivered")
+                waiting_txt = ("Nothing claimable right now — "
+                               + (", ".join(held) or "nothing outstanding")
+                               + f" ({len(fulfilled)} of {len(claims)} crossed "
+                                 f"reward(s) delivered).")
         embed.add_field(name="Waiting", value=waiting_txt, inline=False)
         if failed:
             first = failed[0]
@@ -336,11 +597,26 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
                             value=f"{_claim_reward_text(guild, first, currency)} — {reason[:200]}",
                             inline=False)
         next_up = max(waiting, key=lambda c: c["reward_level"], default=None)
-        embed.add_field(
-            name="Highest unclaimed",
-            value=(f"{_claim_reward_text(guild, next_up, currency)} ({next_up['status']})"
-                   if next_up else "nothing crossed yet"),
-            inline=False)
+        if next_up:
+            highest = (f"{_claim_reward_text(guild, next_up, currency)} "
+                       f"({next_up['status']})")
+        elif not claims:
+            highest = "nothing crossed yet"
+        elif in_flight or locked_claims:
+            # Nothing the member can collect this moment, but not because
+            # nothing was crossed - say which of the two it actually is.
+            held = []
+            if in_flight:
+                held.append(f"{len(in_flight)} being delivered now")
+            if locked_claims:
+                held.append(f"{len(locked_claims)} locked (Boosters only)")
+            highest = "nothing claimable now — " + ", ".join(held)
+        else:
+            # Contradicted "Claimed — N of N crossed rewards" above: rewards had
+            # been crossed and delivered, so "nothing crossed yet" was false.
+            highest = (f"nothing left to claim — all {len(fulfilled)} crossed "
+                       f"reward(s) delivered")
+        embed.add_field(name="Highest unclaimed", value=highest, inline=False)
         return embed
 
     # Reference layout: the current level on the left, the next configured
@@ -435,13 +711,17 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
 
 class LevelRewardView(discord.ui.View):
     def __init__(self, bot, guild_id: int, user_id: int, *,
-                 claimable: bool = False):
+                 claimable: bool = False, reconcile_only: bool = False):
         super().__init__(timeout=180)
         self.bot = bot
         self.guild_id = guild_id
         self.user_id = user_id
+        # Re-entrancy guard for Claim All. The claim engine's lease already
+        # makes a concurrent second pass deliver nothing, so this is purely
+        # about not queueing up repeat clicks that each answer "Claimed 0".
+        self._claim_running = False
         self.set_page_state("level")
-        self.set_claimable(claimable)
+        self.set_claimable(claimable, reconcile_only)
 
     def set_page_state(self, page: str) -> None:
         """Highlight the page currently shown by the Level/Stats buttons."""
@@ -450,29 +730,67 @@ class LevelRewardView(discord.ui.View):
         self.show_stats.style = (discord.ButtonStyle.primary if page == "stats"
                                  else discord.ButtonStyle.secondary)
 
-    def set_claimable(self, claimable: bool) -> None:
-        """Green+enabled when something can be claimed, gray+disabled when not.
+    def set_claimable(self, claimable: bool, reconcile_only: bool = False) -> None:
+        """Button appearance, driven by `_claim_button_state()`.
+
+        - ``claimable``      -> success/green + enabled: a reward is waiting.
+        - ``reconcile_only`` -> secondary/grey + enabled: nothing is owed, but
+          Claim All is still the explicit exclusive-role reconcile action.
+        - neither            -> secondary/grey + disabled.
+
+        Green used to mean "reachable", so a card whose rewards had all been
+        delivered stayed green whenever `remove_old_reward_role` was on, and
+        looked like it was still owed something.
 
         Self-contained UI state: it changes the button's colour and
-        `disabled` flag (both re-serialized on every edit_message), never the
-        claim engine, the schema, or what Claim All attempts.
+        `disabled` flag (both re-serialized on every edit), never the claim
+        engine, the schema, or what Claim All attempts.
         """
         self.claim_all.style = (discord.ButtonStyle.success if claimable
                                 else discord.ButtonStyle.secondary)
-        self.claim_all.disabled = not claimable
+        self.claim_all.disabled = not (claimable or reconcile_only)
+
+    async def _apply_claim_state(self, claims, booster_ok: bool) -> None:
+        """Refresh the Claim All button from the rows just read."""
+        claimable, reconcile_only = await _claim_button_state(
+            self.guild_id, claims, booster_ok)
+        self.set_claimable(claimable, reconcile_only)
 
     async def _refresh(self, interaction, page: str):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "This level card belongs to someone else.", ephemeral=True)
             return
+        # Acknowledge FIRST. Drawing a page means several sequential SQLite
+        # connections (the member's XP row, the claim rows plus their
+        # ensure_tables() DDL, the currency names, the reward definitions, the
+        # guild config) and none of that was acked until it had all finished.
+        # On a busy or slow database that ran past Discord's 3-second window,
+        # the client showed "Nero didn't respond in time", and the
+        # response.edit_message() below could then never land at all - which is
+        # exactly why the button only failed *sometimes*. Claim All already
+        # deferred for the same reason; Level/Stats did not.
+        await interaction.response.defer()
         from utils.level_claims import list_claims, member_is_booster
-        claims = await list_claims(self.guild_id, self.user_id)
-        self.set_claimable(await _claim_button_available(
-            self.guild_id, claims, member_is_booster(interaction.user)))
-        self.set_page_state(page)
-        embed = await _level_embed(interaction.guild, interaction.user, page)
-        await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            claims = await list_claims(self.guild_id, self.user_id)
+            await self._apply_claim_state(claims, member_is_booster(interaction.user))
+            self.set_page_state(page)
+            embed = await _level_embed(interaction.guild, interaction.user, page,
+                                       claims=claims)
+        except Exception:
+            # A deferred interaction that is never edited leaves the member
+            # staring at a spinner forever, so say what happened. Re-raised so
+            # discord.py still logs the traceback - reported, not swallowed.
+            print(f"[LEVEL CARD] {page} page failed (guild={self.guild_id} "
+                  f"user={self.user_id})")
+            try:
+                await interaction.edit_original_response(
+                    content="Couldn't load this page. Please try again.")
+            except Exception:
+                pass
+            raise
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="Level", style=discord.ButtonStyle.primary, row=0)
     async def show_level(self, interaction, button):
@@ -488,20 +806,53 @@ class LevelRewardView(discord.ui.View):
             await interaction.response.send_message(
                 "This level card belongs to someone else.", ephemeral=True)
             return
-        # Role delivery is outside SQLite and can exceed the 3s ack window.
-        await interaction.response.defer()
-        from utils.level_claims import (
-            claim_available, list_claims, member_is_booster,
-        )
-        result = await claim_available(
-            self.guild_id, self.user_id, member=interaction.user, bot=self.bot)
-        self.set_claimable(await _claim_button_available(
-            self.guild_id, await list_claims(self.guild_id, self.user_id),
-            member_is_booster(interaction.user)))
-        self.set_page_state("level")
-        embed = await _level_embed(interaction.guild, interaction.user, "level")
-        embed.set_footer(text=claim_result_footer(result))
-        await interaction.edit_original_response(embed=embed, view=self)
+        if self._claim_running:
+            # A second click while a pass is in flight. Delivery is already
+            # lease-protected (the loser reserves nothing), so this only keeps
+            # the member from stacking up "Claimed 0" replies.
+            await interaction.response.send_message(
+                "Your rewards are already being delivered — one moment.",
+                ephemeral=True)
+            return
+        # Set before the first await, so two clicks landing in the same
+        # event-loop step cannot both start a pass.
+        self._claim_running = True
+        try:
+            # Role delivery is outside SQLite and can exceed the 3s ack window.
+            await interaction.response.defer()
+            from utils.level_claims import (
+                claim_available, list_claims, member_is_booster,
+            )
+            result = await claim_available(
+                self.guild_id, self.user_id, member=interaction.user,
+                bot=self.bot)
+            # Re-read once and reuse: the button state, the re-rendered card and
+            # the confirmation must all describe the same post-delivery rows.
+            claims = await list_claims(self.guild_id, self.user_id)
+            booster_ok = member_is_booster(interaction.user)
+            await self._apply_claim_state(claims, booster_ok)
+            self.set_page_state("level")
+            embed = await _level_embed(interaction.guild, interaction.user,
+                                       "level", claims=claims)
+            embed.set_footer(text=claim_result_footer(result))
+            confirmation = await claim_confirmation(
+                interaction.guild, result, claims, booster_ok)
+            if confirmation:
+                embed.add_field(name=confirmation[0], value=confirmation[1],
+                                inline=False)
+            await interaction.edit_original_response(embed=embed, view=self)
+        except Exception:
+            print(f"[LEVEL CARD] Claim All failed (guild={self.guild_id} "
+                  f"user={self.user_id})")
+            try:
+                await interaction.edit_original_response(
+                    content="Claiming failed before it could finish. "
+                            "Nothing was lost — try Claim All again.")
+            except Exception:
+                pass
+            raise
+        finally:
+            self._claim_running = False
 
 
 # The approved anti-spam warning, sent as a REPLY to the first message of an
@@ -1088,6 +1439,54 @@ class Leveling(commands.Cog):
             f"Reset {member.mention}'s XP and level to 0.",
             ephemeral=True)
 
+    # ─── LEVEL TEST RESET (admin, scoped, preview-first) ──
+    # `/resetxp` above zeroes XP but deliberately keeps `level_reward_claims`,
+    # so a member who has already claimed cannot be used to test the claim flow
+    # again: the ledger is a one-way ratchet and re-levelling never re-pays.
+    # This is the testing tool for exactly that, and it is deliberately narrow -
+    # one member, one guild, preview by default. See utils/level_test_reset.py
+    # for what is reversible, what is only reported, and what is never touched.
+    @app_commands.command(
+        name="level_test_reset",
+        description="Preview/reset ONE member's /level reward test state (admin)")
+    @app_commands.describe(
+        member="The single member whose leveling test state is reset",
+        confirm="Required to actually apply; without it this only previews",
+        include_delivered="Also drop fulfilled currency/shop rewards (their "
+                          "delivered value stays in the wallet/inventory)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def level_test_reset(self, interaction: discord.Interaction,
+                               member: discord.Member, confirm: bool = False,
+                               include_delivered: bool = False):
+        import os
+        from utils.level_test_reset import (
+            LevelResetError, inspect_member, reset_member,
+        )
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Use this command in a server.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        # Second key on production: an admin confirming in Discord is not enough
+        # on its own, because this deletes reward history. Staging needs no flag.
+        production_ok = os.getenv("ALLOW_LEVEL_TEST_RESET", "") == "1"
+        try:
+            if not confirm:
+                report = await inspect_member(interaction.guild.id, member.id)
+                embed = _level_reset_embed(member, report, applied=False)
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+            report = await reset_member(
+                interaction.guild.id, member.id, apply=True,
+                include_delivered=include_delivered,
+                allow_production=production_ok, member=member)
+        except LevelResetError as exc:
+            await interaction.followup.send(
+                f"Reset refused — nothing was changed.\n`{exc}`", ephemeral=True)
+            return
+        embed = _level_reset_embed(member, report, applied=report.get("applied"))
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     # ─── RESET LEADERBOARD (admin, Phase 5 / Leveling expansion) ─
     # Manual/forced equivalent of leaderboard_reset_task — same
     # perform_leaderboard_reset() call, same archive-then-zero
@@ -1115,13 +1514,17 @@ class Leveling(commands.Cog):
                 "Use this command in a server.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        embed = await _level_embed(interaction.guild, interaction.user, "level")
         from utils.level_claims import list_claims, member_is_booster
+        # One claim read, shared by the card and the button state (they must
+        # agree, and it is two fewer SQLite connections inside the ack window).
         claims = await list_claims(interaction.guild.id, interaction.user.id)
+        claimable, reconcile_only = await _claim_button_state(
+            interaction.guild.id, claims, member_is_booster(interaction.user))
+        embed = await _level_embed(interaction.guild, interaction.user, "level",
+                                   claims=claims)
         view = LevelRewardView(self.bot, interaction.guild.id, interaction.user.id,
-                               claimable=await _claim_button_available(
-                                   interaction.guild.id, claims,
-                                   member_is_booster(interaction.user)))
+                               claimable=claimable,
+                               reconcile_only=reconcile_only)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ─── PRESTIGE STATE / READ-ONLY VIEW ─────────────────

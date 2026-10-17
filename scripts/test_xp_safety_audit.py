@@ -36,6 +36,11 @@ LEVEL_WRITERS = {
     ("cogs/leveling.py", "setxp"): "admin /setxp (clamped)",
     ("cogs/leveling.py", "resetxp"): "admin /resetxp (writes 0)",
     ("cogs/leveling.py", "perform_leaderboard_reset"): "leaderboard reset (writes 0)",
+    # /level_test_reset's engine. Same class as resetxp (writes 0, never a
+    # negative and never a recompute), but scoped to one (guild_id, user_id)
+    # pair and gated behind a preview, an explicit confirm and, on production,
+    # ALLOW_LEVEL_TEST_RESET=1. See utils/level_test_reset.py.
+    ("utils/level_test_reset.py", "reset_member"): "admin /level_test_reset (writes 0, one member)",
     ("dashboard/app.py", "api_edit_member"): "dashboard member edit (clamped)",
     ("utils/prestige.py", "purchase_prestige"): "prestige tier (never touches xp/level)",
 }
