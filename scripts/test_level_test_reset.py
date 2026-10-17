@@ -808,6 +808,55 @@ async def main():
           and rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
                    (GUILD, USER)) == [(0,)],
           str(waived["traces"]))
+    check("and the report says the row was DROPPED, not kept",
+          waived["claims_preserved"] == []
+          and any("include_delivered dropped its claim record anyway" in c
+                  for c in waived["could_not"]),
+          str(waived["could_not"]))
+    embed_waived = leveling._level_reset_embed(member, waived, applied=True)
+    check("so the embed's footer cannot read as a safe kept row either",
+          "deleted their claim rows anyway" in (embed_waived.footer.text or "")
+          and any(f.name == "\u26a0\ufe0f Delivered value that CANNOT be reversed"
+                  and "include_delivered DELETES these claim rows anyway" in f.value
+                  for f in embed_waived.fields),
+          str([(embed_waived.footer.text, [f.name for f in embed_waived.fields])]))
+
+    # 8g. The same refusal on the inventory side, and the reason this tool cannot
+    # simply zero the member's bags: the reward's units merge into one row with
+    # units from missions, minigames, the shop and trades, so once some are used
+    # the granted ones cannot be picked back out.
+    stage(shop=True)
+    execute("INSERT INTO inventory_items (guild_id,user_id,item_name,item_type,"
+            "quantity,source) VALUES (?,?,'Potion','potion',1,'mission') "
+            "ON CONFLICT(guild_id,user_id,item_name) DO UPDATE SET quantity=1",
+            (GUILD, USER))
+    used = await reset_member(GUILD, USER)
+    stuck_items = [e for e in used["plan"]["cannot_reverse"]
+                   if e["kind"] == "inventory"]
+    check("an item the member already used is irreversible, with the reason",
+          len(stuck_items) == 1 and stuck_items[0]["quantity"] == 2
+          and stuck_items[0]["held"] == 1
+          and "used or traded" in stuck_items[0]["note"], str(stuck_items))
+    check("and its claim row is in the KEPT list, not the delete list",
+          used["plan"]["claims_kept"] and used["plan"]["delete_claims"] == 1
+          and any("would NOT be reversible" in t for t in used["traces"]),
+          str(used["plan"]["claims_kept"]))
+    used_applied = await apply(member=member)
+    check("apply deletes only the claim whose effect it really removed",
+          rows("SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? "
+               "AND item_name='Potion'", (GUILD, USER)) == [(1,)]
+          and rows("SELECT reward_level, track, status FROM level_reward_claims "
+                   "WHERE guild_id=? AND user_id=?", (GUILD, USER))
+              == [(5, "shop", "fulfilled")]
+          and len(used_applied["unreversed"]) == 1
+          and used_applied["new_game_complete"] is False,
+          str(used_applied["unreversed"]))
+    again = await claim_available(GUILD, USER, member=member, bot=bot)
+    check("so a later Claim All can never deliver it a second time",
+          again["fulfilled"] == []
+          and rows("SELECT quantity FROM inventory_items WHERE guild_id=? AND "
+                   "user_id=? AND item_name='Potion'", (GUILD, USER)) == [(1,)]
+          and claim_count() == 1, str(again["fulfilled"]))
 
     print()
     if FAILS:

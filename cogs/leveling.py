@@ -550,9 +550,13 @@ def _level_reset_embed(member, report: dict, *, applied: bool) -> discord.Embed:
             value="\n".join(
                 f"- L{e['reward_level']} {e['kind']}: {e.get('note') or e.get('error')}"
                 for e in cannot[:20])[:1024]
-            + "\n**These claim rows are KEPT**, so the reward cannot be claimed "
-              "a second time while its value is still in the member's hands. "
-              "Reversing them needs a manual decision.",
+            + ("\n**These claim rows are KEPT**, so the reward cannot be "
+               "claimed a second time while its value is still in the member's "
+               "hands. Reversing them needs a manual decision."
+               if plan.get("claims_kept") else
+               "\n**include_delivered DELETES these claim rows anyway**, so each "
+               "of these rewards becomes earnable again while its value is still "
+               "in the member's hands. Staging only - refused on production."),
             inline=False)
 
     # The manual-review half of the report: what looks related to a level reward
@@ -605,9 +609,14 @@ def _level_reset_embed(member, report: dict, *, applied: bool) -> discord.Embed:
                 value="\n".join(f"- {c}" for c in report["could_not"])[:1024],
                 inline=False)
         if report.get("unreversed"):
+            kept = len(report.get("claims_preserved") or [])
             embed.set_footer(
-                text=f"{len(report['unreversed'])} delivered reward(s) could not "
-                     f"be reversed and their claim rows were kept — see above.")
+                text=(f"{len(report['unreversed'])} delivered reward(s) could not "
+                      f"be reversed; {kept} claim row(s) kept — see above."
+                      if kept else
+                      f"{len(report['unreversed'])} delivered reward(s) could not "
+                      f"be reversed and include_delivered deleted their claim "
+                      f"rows anyway — see above."))
         else:
             # The applied embed always ends on the same question the admin has:
             # did anything have to be left behind?

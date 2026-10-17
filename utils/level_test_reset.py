@@ -735,8 +735,13 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
     role_preserved = [c for c in report["claims"] if c.get("role_id") in failed_roles]
     kept_ids = {c["id"] for c in role_preserved}
     if not include_delivered:
-        kept_ids |= {e["claim_id"] for e in report["unreversed"]
-                     if e.get("kind") in MANUAL_TRACKS}
+        # EVERY claim whose value survived, whatever form that value takes. The
+        # entries carry `kind` ("currency"/"inventory"), not a claim `track`
+        # ("currency"/"shop"/"role"/"boost"), so filtering here by track name
+        # would drop the inventory ones and delete a claim row while the items it
+        # granted are still in the member's hands - which is exactly the double
+        # payment this tool exists to make impossible.
+        kept_ids |= {e["claim_id"] for e in report["unreversed"]}
     preserved = [c for c in report["claims"] if c["id"] in kept_ids]
     report["claims_preserved"] = [
         {"id": c["id"], "reward_level": c["reward_level"], "track": c["track"],
@@ -864,14 +869,22 @@ def _could_not(report: dict) -> list[str]:
             f"role {left['role_id']} was left on the member: also granted by "
             f"{', '.join(left['also_granted_by'])}. Removing it would revoke "
             f"another system's grant, so only this reward's record was cleared.")
+    kept_ids = {c["id"] for c in report.get("claims_preserved") or []}
     for entry in report["unreversed"]:
         what = (f"{entry['amount']} {entry['currency']}"
                 if entry.get("kind") == "currency"
                 else f"{entry.get('quantity')}x {entry.get('item_name')}")
+        # Which of the two outcomes happened has to be said plainly: a kept row
+        # is safe and terminal, a dropped one (include_delivered) is not.
+        outcome = (
+            "Its claim record was kept, so it cannot be claimed again."
+            if entry.get("claim_id") in kept_ids else
+            "include_delivered dropped its claim record anyway, so this reward is "
+            "earnable again while that value is still in the member's hands.")
         could_not.append(
             f"L{entry['reward_level']} {entry.get('kind')} reward ({what}) was "
             f"NOT reversed: {entry.get('error') or entry.get('note')}. "
-            f"Its claim record was kept, so it cannot be claimed again.")
+            f"{outcome}")
     # The three unattributable tables are deliberately NOT listed here: this is a
     # list of actions that failed, not of general caveats. They stay in
     # `reconciliation`, which is where an operator reconciling by hand reads them.
