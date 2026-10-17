@@ -50,30 +50,38 @@ and is not part of the suite.
 
 ## Full suite, 63 scripts (`scripts/test_*.py`, this branch)
 
-56 exit 0, 7 exit 1. Every failure is pre-existing or a recorded divergence:
+Method: each script runs in its own process from the repository root with
+`OWNER_ID=1 PYTHONPATH=.`; exit status is the result. At the current head
+(`31d2fcc`) that is **57 exit 0, 6 exit 1**. The base commit `02fbfee` (58 scripts;
+five were added by this PR) is **54 exit 0, 4 exit 1**, and every base failure is
+still a failure at the head:
 
-| Suite | This branch | Baseline (`02fbfee`, separate worktree) |
-|---|---|---|
-| test_afk | 169/170 | 169/170 (same failure) |
-| test_leveling_voice_hard_blocks | 9 guard checks fail | same 9 |
-| test_phase2_backend | exit 1 | exit 1 |
-| test_shop_publications | pytest collection `INTERNALERROR` | same |
-| test_xp_safety_audit | 113 passed, 5 failed | 108 passed, **same 3** |
-| test_setlevel_admin | 8 checks fail (§6) | suite added by this PR — no baseline |
-| test_slice2_level_claims | 1 check fails | check pre-exists and passes on baseline — see below |
+| Suite | Head `31d2fcc` | Base `02fbfee` | Classification |
+|---|---|---|---|
+| test_afk | 169/170 | 169/170 (same failure) | pre-existing |
+| test_leveling_voice_hard_blocks | 9 guard checks fail | same 9 | pre-existing |
+| test_phase2_backend | exit 1 | exit 1 | pre-existing |
+| test_xp_safety_audit | 113 passed, 5 failed | 108 passed, 3 failed | 3 pre-existing static checks; 2 additional static grep checks at this head |
+| test_setlevel_admin | 8 checks fail (§6) | suite added by this PR | PR-added test asserting the old policy |
+| test_slice2_level_claims | 1 check fails | passes | check encodes the old dashboard clamp — see below |
+
+`test_shop_publications` is a pytest module: executed directly it is a silent no-op
+(exit 0, no checks), so the loop above proves nothing about it. Run with
+`python -m pytest -q scripts/test_shop_publications.py` it is **23 passed**, stable
+across repeated runs, at both the base and this head.
 
 `test_setlevel_admin` §6 asserts that a downward `/setlevel` must delete nothing and
 leave above-level rewards claimable. That is the behaviour this PR is required to
 replace, so the divergence is deliberate; its eight check names are listed in the PR
 report. `test_slice2_level_claims`'s "negative Dashboard member edit clamps existing
 XP" check asserts that the dashboard may lower XP to 0 through
-`/api/edit-member`. That route now refuses every decrease, because it cannot run
-the reward correction; the check pre-exists on the base commit and encodes the old
-unsafe behaviour, so it is a deliberate divergence, not a regression in the
-correction engine. The five `test_xp_safety_audit` failures are static source
-checks: three fail identically on the base commit, and two more are grep-based
-checks that fail at the PR head because `utils/level_test_reset.py` mentions
-`reconcile_role_progression`; none is changed by this round.
+`/api/edit-member`; that route now refuses every decrease because it cannot run the
+reward correction. The check pre-exists on the base commit (where it passes) and
+encodes the old unsafe behaviour, so it is a deliberate divergence, not a regression
+in the correction engine. The five `test_xp_safety_audit` failures are static source
+checks: three fail identically on the base commit and two more are grep-based checks
+that fail at this head because `utils/level_test_reset.py` mentions
+`reconcile_role_progression`; none was changed by this round.
 
 All other leveling suites pass, including `test_xp_rollback`,
 `test_level_ops_provenance`, `test_level_test_reset`, `test_level_card_fixes`,
@@ -213,17 +221,14 @@ are not repo tests.
 
 ## Full suite, 63 scripts
 
-56 exit 0, 7 exit 1 — identical to the pre-fix head `87979ef`:
-
-| Suite | Result | Classification |
-|---|---|---|
-| `test_afk` | 169/170 | pre-existing, same on `02fbfee` |
-| `test_leveling_voice_hard_blocks` | 9 guard checks | pre-existing, same on `02fbfee` |
-| `test_phase2_backend` | exit 1 (`errors=1`) | pre-existing, same on `02fbfee` |
-| `test_shop_publications` | import error at repo-root invocation | pre-existing, same on `02fbfee` |
-| `test_xp_safety_audit` | 113 passed, 5 failed | 3 same on `02fbfee`; 2 extra static grep checks at the PR head, unchanged this round |
-| `test_setlevel_admin` | 8 checks (§6) | PR-added test asserting the old correction policy |
-| `test_slice2_level_claims` | 1 check | pre-existing test asserting the old dashboard clamp; intentional divergence |
+Re-run at `31d2fcc` after the four fixes: **57 exit 0, 6 exit 1** (base `02fbfee`:
+54/58, four failures). The failing set is the four base failures plus the two
+PR-authored checks that encode the old policy (`test_setlevel_admin` §6,
+`test_slice2_level_claims`'s dashboard clamp); details and the exact check names are
+in the table above. No failure was introduced by this round: `test_afk`,
+`test_leveling_voice_hard_blocks`, `test_phase2_backend`,
+`test_xp_safety_audit`, `test_setlevel_admin` and `test_slice2_level_claims` fail
+identically at `b6b0dfa`, before these four fixes.
 
 Targeted suites that pass: `test_xp_rollback`, `test_level_ops_provenance`,
 `test_rejoin_reconciliation`, `test_leveling_claim_all_d2`, `test_leveling_reward_e2e`,
