@@ -1642,7 +1642,12 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
         report["journal"] = await ops.reversal_rows(guild_id, user_id)
         await ops.finish_operation(
             rollback_operation_id,
-            "completed" if not report["unreversed"] else "partial",
+            # A role the rollback could not take off is an outstanding reversal
+            # even if the role's claims could not be journalled (no member object,
+            # or a role that disappeared from the guild). Never record
+            # `completed` while `role_failures` says otherwise.
+            "completed" if not report["unreversed"]
+            and not report.get("role_failures") else "partial",
             {"rolled_back": operation_id, "target_xp": target_xp,
              "cancelled": counts.get("cancelled_claims", 0),
              "reversed_claims": counts.get("reversed_claims", 0),
