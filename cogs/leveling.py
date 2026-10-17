@@ -331,6 +331,23 @@ def claim_result_footer(result: dict) -> str:
     return text
 
 
+def case_closed_reply(case: str) -> str:
+    """The reply when an administrator's decision lost to an earlier one.
+
+    `/level_reconcile` decides against the case list read at the start of the
+    command, so two administrators (or a stale retry) can both try to decide the
+    same case. The decision is a one-way transition in the database: the attempt
+    that loses must not delete the claim behind `drop_claim`, and must say so
+    plainly instead of reporting a resolution that did not happen.
+    """
+    return (f"Case `{case}` was already resolved before this request completed - "
+            f"nothing was deleted and the recorded decision is unchanged. The "
+            f"journal keeps every decision, so the case can still be read "
+            f"(re-run without `case` to list what is still open). A closed case "
+            f"cannot be re-decided; if the member's rewards need a different "
+            f"outcome, start a fresh review of them.")
+
+
 def _claim_totals(delivered: list, currency: dict) -> str:
     """One summary line for what was actually paid, aggregated per unit.
 
@@ -2640,9 +2657,10 @@ class Leveling(commands.Cog):
             picked = [c for c in cases if c["reversal_id"] == case]
             if not picked:
                 await interaction.followup.send(
-                    f"No open case `{case}` for this member - refused. Only a "
-                    f"case that is still open can be resolved, and only for the "
-                    f"member it belongs to.", ephemeral=True)
+                    f"No open case `{case}` for this member - refused. It may "
+                    f"already be resolved (the journal keeps that decision) or "
+                    f"belong to another member; nothing was deleted. Only a case "
+                    f"that is still open can be resolved.", ephemeral=True)
                 return
             target = picked[0]
             claim_deleted = False
@@ -2654,66 +2672,98 @@ class Leveling(commands.Cog):
                 # reported afterwards.
                 if resolution not in ("effect_gone", "never_delivered",
                                       "not_a_level_reward"):
+                    closed = await ops.resolve_outstanding(
+                        case, actor_id=interaction.user.id,
+                        resolution=resolution,
+                        note=f"{note} (drop_claim refused)")
+                    if not closed:
+                        await interaction.followup.send(
+                            case_closed_reply(case), ephemeral=True)
+                        return
                     await interaction.followup.send(
                         f"`drop_claim` refused with resolution "
                         f"`{resolution}`: the value is still in the member's "
                         f"hands, so deleting the claim row would let this reward "
                         f"be paid again. The case is recorded as resolved and the "
                         f"claim row stays terminal.", ephemeral=True)
-                    await ops.resolve_outstanding(
-                        case, actor_id=interaction.user.id,
-                        resolution=resolution,
-                        note=f"{note} (drop_claim refused)")
                     return
                 operation_id = ops.new_operation_id(ops.OP_RECONCILE)
                 await ops.open_operation(
                     operation_id, ops.OP_RECONCILE, guild_id, member.id,
                     actor_id=interaction.user.id,
                     reason=f"{resolution}: {note}")
+                decided = False
                 async with aiosqlite.connect(DB_PATH, timeout=10) as db:
                     await db.execute("BEGIN IMMEDIATE")
                     try:
-                        # Re-check the status inside the write transaction: a
-                        # claim fulfilled since the inspection has delivered
-                        # value this decision says nothing about.
-                        cursor = await db.execute(
-                            "DELETE FROM level_reward_claims WHERE guild_id=? "
-                            "AND user_id=? AND id=? "
-                            "AND status IN ('pending','failed','fulfilled')",
-                            (guild_id, member.id, int(target["claim_id"])))
-                        claim_deleted = cursor.rowcount == 1
-                        if claim_deleted:
-                            await db.execute(
-                                "DELETE FROM leveling_active_boosts "
-                                "WHERE guild_id=? AND user_id=? AND source=?",
-                                (guild_id, member.id,
-                                 f"level_claim:{int(target['claim_id'])}"))
-                            await db.execute(
-                                "DELETE FROM temp_roles WHERE guild_id=? "
-                                "AND user_id=? AND source=? AND claim_id=?",
-                                (guild_id, member.id, "level_claim",
-                                 int(target["claim_id"])))
+                        # Decide the case FIRST, inside this transaction, and
+                        # only then delete the claim it re-opens. The decision is
+                        # conditional on the case still being open, so a stale
+                        # listing or a concurrent administrator updates zero rows
+                        # here and this attempt leaves the claim alone. Both
+                        # writes commit together, so an interrupted run cannot
+                        # resolve the case while its claim survives.
+                        decided = await ops.resolve_outstanding(
+                            case, actor_id=interaction.user.id,
+                            resolution=resolution, note=note, db=db)
+                        if decided:
+                            # Re-check the status inside the write transaction: a
+                            # claim fulfilled since the inspection has delivered
+                            # value this decision says nothing about.
+                            cursor = await db.execute(
+                                "DELETE FROM level_reward_claims WHERE guild_id=? "
+                                "AND user_id=? AND id=? "
+                                "AND status IN ('pending','failed','fulfilled')",
+                                (guild_id, member.id, int(target["claim_id"])))
+                            claim_deleted = cursor.rowcount == 1
+                            if claim_deleted:
+                                await db.execute(
+                                    "DELETE FROM leveling_active_boosts "
+                                    "WHERE guild_id=? AND user_id=? AND source=?",
+                                    (guild_id, member.id,
+                                     f"level_claim:{int(target['claim_id'])}"))
+                                await db.execute(
+                                    "DELETE FROM temp_roles WHERE guild_id=? "
+                                    "AND user_id=? AND source=? AND claim_id=?",
+                                    (guild_id, member.id, "level_claim",
+                                     int(target["claim_id"])))
                         await db.commit()
                     except aiosqlite.Error:
+                        # Nothing was decided and nothing was deleted: the case
+                        # stays open, so the command can simply be retried.
                         await db.execute("ROLLBACK")
-                        # An unmigrated `temp_roles` (no claim_id) must not lose
-                        # the deletion that did succeed; report and move on.
-                        claim_deleted = False
+                        await ops.finish_operation(
+                            operation_id, "failed",
+                            {"reversal_id": case, "resolution": resolution,
+                             "claim_deleted": False,
+                             "error": "the claim deletion failed; nothing was "
+                                      "changed"})
+                        raise
                     except Exception:
                         await db.execute("ROLLBACK")
                         raise
+                if not decided:
+                    await ops.finish_operation(
+                        operation_id, "failed",
+                        {"reversal_id": case, "resolution": resolution,
+                         "claim_deleted": False,
+                         "refused": "the case was already resolved"})
+                    await interaction.followup.send(
+                        case_closed_reply(case), ephemeral=True)
+                    return
                 await ops.finish_operation(
                     operation_id,
                     "completed" if claim_deleted else "partial",
                     {"reversal_id": case, "resolution": resolution,
                      "claim_deleted": claim_deleted})
-            closed = await ops.resolve_outstanding(
-                case, actor_id=interaction.user.id, resolution=resolution,
-                note=note)
-            if not closed:
-                raise LevelResetError(
-                    f"case `{case}` could not be resolved - it is already closed "
-                    f"or was applied, and neither is editable")
+            else:
+                closed = await ops.resolve_outstanding(
+                    case, actor_id=interaction.user.id, resolution=resolution,
+                    note=note)
+                if not closed:
+                    await interaction.followup.send(
+                        case_closed_reply(case), ephemeral=True)
+                    return
             await interaction.followup.send(
                 embed=_level_reconcile_embed(
                     member, [], resolved={

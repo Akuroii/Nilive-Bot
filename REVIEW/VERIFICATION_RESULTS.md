@@ -241,8 +241,8 @@ Targeted suites that pass: `test_xp_rollback`, `test_level_ops_provenance`,
 ## Remaining findings / unverified behavior
 
 * The member-facing card does not display `withheld`; only the join log and the open
-  `/level_reconcile` case show it. A resolved case is still directly re-resolvable via
-  `utils.level_ops.resolve_outstanding` (not through the command, which now refuses).
+  `/level_reconcile` case show it. (A resolved case can no longer be re-resolved,
+  directly or through the command - see the discovery-race fix below.)
 * An expired `LevelRewardView` (180 s, non-persistent, no `on_timeout`) still becomes
   inert; Discord shows "This interaction failed". No repo test covers expiry.
 * A duplicate dashboard save still creates a second `xp_mutations` row with a
@@ -251,3 +251,90 @@ Targeted suites that pass: `test_xp_rollback`, `test_level_ops_provenance`,
   multi-process SQLite contention, browser-executed CSRF, million-scale timing.
   The Flask route was exercised through the real test client with an
   `X-CSRF-Token` header; the views/buttons use fake Discord objects.
+
+
+---
+
+# Discovery-race fix - `/level_reconcile` (2026-10-18)
+
+The closure audit found one reproducible correctness blocker: two administrators
+could act on the same open-case listing, and the losing attempt could delete the
+claim behind `drop_claim` after the winner had recorded `value_kept`, overwriting
+the decision and making the reward claimable again. This round fixes that race
+only. No test file, fixture or assertion was edited.
+
+## Change (2 files, +120/-49)
+
+* `utils/level_ops.py::resolve_outstanding` is now a **one-way transition**. The
+  read-then-write of the case status became a single guarded `UPDATE ... WHERE
+  status != 'applied' AND status NOT LIKE 'resolved:%'`, so only a still-open case
+  matches; a retry, a stale listing or a concurrent administrator updates zero rows
+  and leaves the first decision intact. The function reports whether it closed the
+  case, and accepts an optional `db` so a caller can run the decision inside its own
+  transaction.
+* `cogs/leveling.py::level_reconcile` decides the case **first**, inside the same
+  `BEGIN IMMEDIATE` transaction that performs the `drop_claim` deletion, and deletes
+  nothing unless the decision was won. The decision and the deletion therefore
+  commit together or not at all: a failed deletion rolls the decision back and the
+  case stays open and retryable. Losing attempts reply with `case_closed_reply()`
+  ("already resolved ... nothing was deleted ... the recorded decision is
+  unchanged") and are logged as a failed `level_ops` row; a fresh listing that no
+  longer contains the case says the same thing in the existing "No open case" reply.
+  The `drop_claim`-refused path (`value_kept`) resolves first and no longer reports
+  a recorded decision when it did not record one.
+
+Behaviour change worth noting: an unmigrated `temp_roles` (no `claim_id` column)
+used to leave the claim deletion rolled back but still resolved the case. Now the
+whole action rolls back and is reported, which is the safe direction - the case
+stays open and the reward cannot be re-earned while its claim survives.
+
+## Verification (scratch harnesses, real command callbacks and real SQLite)
+
+* `fix5_reconcile_race.py` - 34 checks, ALL PASS:
+  * the exact audit race (A `value_kept`, B stale `effect_gone` + `drop_claim`):
+    B is refused with the already-resolved reply, A's decision and note remain,
+    B's note never reaches the journal, the claim survives, one journal row, the
+    losing attempt is a failed operation;
+  * a direct second `resolve_outstanding` returns False and overwrites nothing;
+  * ordinary resolution, `drop_claim` + `effect_gone` (claim deleted, operation
+    `completed`), repeat resolution, `drop_claim` + `value_kept` (claim kept);
+  * an injected deletion failure (a `BEFORE DELETE` trigger on
+    `level_reward_claims`): the command reports the failure, the case is still
+    `outstanding`, no claim is deleted, the operation is `failed`, and the retry
+    succeeds.
+* `fix5_reconcile_concurrent.py` - 8 rounds of two commands started with
+  `asyncio.gather`, ALL PASS. Both outcomes were observed (7 `value_kept` wins,
+  1 `effect_gone` win); every round had exactly one decision, exactly one refusal,
+  a claim state consistent with the winning decision, and no loser note.
+* `fix5_100_to_10.py` - the acceptance scenario re-run through the real `/setxp`
+  and `/setlevel`: 100 -> claim L10-L13 -> down to 10. L11 coins taken back, L10
+  kept, L12 role and call removed, L13 boost removed, L40/L50 kept and dormant,
+  Claim All pays nothing, repeating the correction moves nothing, re-progress to 12
+  pays L11 once and restores L12, reaching 40 pays the kept row once, no negative
+  wallet. ALL PASS.
+* `fix3_resolved_queue.py` (rebuilt) - 10 checks, ALL PASS.
+* `fix5_rejoin_after_resolve.py` - 5 checks, ALL PASS: an open case still withholds
+  the role on rejoin, and a decided case restores it from the fulfilled claim.
+
+## Full suite, 63 scripts
+
+**57 exit 0, 6 exit 1** - identical to the pre-fix head `21afce1` and to
+`b6b0dfa` before it; the failing scripts and their checks are unchanged
+(`test_afk` 169/170, voice 9 guard checks, `test_phase2_backend` `errors=1`,
+`test_xp_safety_audit` 113/5, `test_setlevel_admin` 8 old-policy checks,
+`test_slice2_level_claims` 1 old-policy check). Targeted suites:
+`test_level_ops_provenance` 69 checks, `test_xp_rollback` 59,
+`test_level_test_reset` 87, `test_rejoin_reconciliation` 24,
+`test_leveling_claim_all_d2` 25, `test_leveling_reward_e2e` 11 - all pass.
+`test_shop_publications` under pytest: 23 passed.
+
+## Remaining limitations
+
+* The fix serialises decisions through SQLite's write lock; it is verified in one
+  process and with concurrent asyncio tasks, not with two separate OS processes
+  hitting the same database file. `BEGIN IMMEDIATE` plus the guarded `UPDATE` is the
+  same mechanism the rest of the level engine already relies on for that case.
+* A closed case still cannot be re-opened; a decision that later proves wrong is
+  corrected by reviewing the member's rewards, exactly as the new reply says.
+* Existing unverified areas are unchanged: real Discord role/permission/429
+  handling, Railway, browser CSRF, million-scale timing.

@@ -1101,29 +1101,55 @@ async def _record(db, operation_id, guild_id, user_id, claim_id, kind,
 
 
 async def resolve_outstanding(reversal_id: str, *, actor_id: int,
-                              resolution: str, note: str) -> bool:
+                              resolution: str, note: str,
+                              db: aiosqlite.Connection | None = None) -> bool:
     """Close an outstanding/refused case by an administrator's explicit decision.
 
     The journal row is never deleted and its `status` is never rewritten to
     `applied` - that would claim value moved when it did not. The resolution is
     appended to the reason, so the audit trail shows the case, the decision and
     who made it.
+
+    The decision is a ONE-WAY transition. Only a case that is still open - not
+    `applied` and not already `resolved:<decision>` - can be closed, so a retry,
+    a stale listing or a second administrator can never overwrite a decision or
+    close the same case twice. Returns False when the case was not open; the
+    caller must then change nothing else.
+
+    Pass `db` to run the check-and-update inside the caller's transaction, so a
+    decision and the rows it justifies (such as the claim deleted behind
+    `drop_claim`) commit together or not at all.
     """
+    if db is not None:
+        return await _resolve_case_in(db, reversal_id, actor_id=actor_id,
+                                      resolution=resolution, note=note)
     await ensure_tables()
-    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-        cursor = await db.execute(
-            "SELECT status FROM reward_reversals WHERE reversal_id=?",
-            (reversal_id,))
-        row = await cursor.fetchone()
-        if not row or row[0] == STATUS_APPLIED:
-            return False
-        await db.execute(
-            "UPDATE reward_reversals SET status=?, reason=reason || ? "
-            "WHERE reversal_id=?",
-            (f"resolved:{resolution}", f" | resolved by {actor_id} at {_now()}: "
-             f"{note}", reversal_id))
-        await db.commit()
-        return True
+    async with aiosqlite.connect(DB_PATH, timeout=10) as owned:
+        await owned.execute("BEGIN IMMEDIATE")
+        try:
+            closed = await _resolve_case_in(owned, reversal_id, actor_id=actor_id,
+                                            resolution=resolution, note=note)
+            await owned.commit()
+        except Exception:
+            await owned.execute("ROLLBACK")
+            raise
+        return closed
+
+
+async def _resolve_case_in(db, reversal_id: str, *, actor_id: int,
+                           resolution: str, note: str) -> bool:
+    """Guarded close, inside the caller's write transaction.
+
+    SQLite evaluates the WHERE clause at write time under the write lock, so
+    exactly ONE concurrent decision can match a still-open case. The second one
+    updates zero rows, moves nothing, and leaves the first decision intact.
+    """
+    cursor = await db.execute(
+        "UPDATE reward_reversals SET status=?, reason=reason || ? "
+        "WHERE reversal_id=? AND status != ? AND status NOT LIKE 'resolved:%'",
+        (f"resolved:{resolution}", f" | resolved by {actor_id} at {_now()}: "
+         f"{note}", reversal_id, STATUS_APPLIED))
+    return cursor.rowcount == 1
 
 
 async def note_reversal(*, guild_id: int, user_id: int, claim_id: int,
