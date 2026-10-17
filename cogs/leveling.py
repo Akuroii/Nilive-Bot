@@ -321,6 +321,13 @@ def claim_result_footer(result: dict) -> str:
     if reconciliation_failures:
         text += (f" فشل في مطابقة رتبة المستوى: "
                  f"{reconciliation_failures}.")
+    # `blocked` is set before any row is reserved when another operation (an
+    # XP correction or rollback) holds this member's lease. Saying only
+    # "0 delivered / 0 retryable" made an intentional refusal look like an
+    # empty pass and invited the member to press the same button again.
+    if str(result.get("blocked") or "").strip():
+        text += (" ⏸️ عملية تصحيح XP قيد التنفيذ لهذا العضو — "
+                 "لم يُستلم أي شيء. أعد المحاولة بعد انتهائها.")
     return text
 
 
@@ -1096,6 +1103,15 @@ class LevelRewardView(discord.ui.View):
             claims = await list_claims(self.guild_id, self.user_id)
             booster_ok = member_is_booster(interaction.user)
             await self._apply_claim_state(claims, booster_ok)
+            if result.get("blocked"):
+                # The engine refused this whole pass before reserving anything
+                # because a correction holds the member's lease. Disable this
+                # card's own action so a stale click cannot be stacked up until
+                # a fresh /level card is built. Eligibility is unchanged: the
+                # next pass still goes through claim_available's lease check.
+                self.claim_all.disabled = True
+                if self.sync_roles in self.children:
+                    self.sync_roles.disabled = True
             self.set_page_state("level")
             embed = await _level_embed(interaction.guild, interaction.user,
                                        "level", claims=claims)
@@ -1789,6 +1805,9 @@ class Leveling(commands.Cog):
             if result.get("failed"):
                 print(f"[LEVEL ROLE REJOIN] guild={member.guild.id} "
                       f"user={member.id}: {result['failed']}")
+            if result.get("withheld"):
+                print(f"[LEVEL ROLE REJOIN] guild={member.guild.id} "
+                      f"user={member.id}: withheld {result['withheld']}")
         except Exception as exc:
             # Discord join processing must not fail because a role was deleted,
             # role hierarchy changed, or the claim database is temporarily down.

@@ -58,9 +58,9 @@ and is not part of the suite.
 | test_leveling_voice_hard_blocks | 9 guard checks fail | same 9 |
 | test_phase2_backend | exit 1 | exit 1 |
 | test_shop_publications | pytest collection `INTERNALERROR` | same |
-| test_xp_safety_audit | 115 passed, 3 failed | 108 passed, **same 3** |
+| test_xp_safety_audit | 113 passed, 5 failed | 108 passed, **same 3** |
 | test_setlevel_admin | 8 checks fail (§6) | suite added by this PR — no baseline |
-| test_slice2_level_claims | 1 check fails | check added by this PR — see below |
+| test_slice2_level_claims | 1 check fails | check pre-exists and passes on baseline — see below |
 
 `test_setlevel_admin` §6 asserts that a downward `/setlevel` must delete nothing and
 leave above-level rewards claimable. That is the behaviour this PR is required to
@@ -68,10 +68,12 @@ replace, so the divergence is deliberate; its eight check names are listed in th
 report. `test_slice2_level_claims`'s "negative Dashboard member edit clamps existing
 XP" check asserts that the dashboard may lower XP to 0 through
 `/api/edit-member`. That route now refuses every decrease, because it cannot run
-the reward correction; the check encodes the old unsafe behaviour and is a
-deliberate divergence, not a regression in the correction engine. The three
-`test_xp_safety_audit` failures are static checks about the older reset/reconciler
-helpers and fail identically on the base commit.
+the reward correction; the check pre-exists on the base commit and encodes the old
+unsafe behaviour, so it is a deliberate divergence, not a regression in the
+correction engine. The five `test_xp_safety_audit` failures are static source
+checks: three fail identically on the base commit, and two more are grep-based
+checks that fail at the PR head because `utils/level_test_reset.py` mentions
+`reconcile_role_progression`; none is changed by this round.
 
 All other leveling suites pass, including `test_xp_rollback`,
 `test_level_ops_provenance`, `test_level_test_reset`, `test_level_card_fixes`,
@@ -147,3 +149,99 @@ reversed role's claim, and the dashboard's refusal of an XP decrease.
 Real Discord (live role add/remove, button/embed rendering), Railway deployment, and
 million-scale timing. Role removal is a Discord API call outside SQLite and is
 therefore reported per role, not claimed as atomic.
+
+
+---
+
+# Closure round — head on top of `b6b0dfa` (2026-10-17)
+
+Current branch: `arena/adb559e5-nilive-bot`. No test file, fixture, helper or assertion
+was edited. Scratch harnesses are outside the repository and are listed below; they
+are not repo tests.
+
+## Fixes in this round
+
+1. **Dashboard members edit no longer clears diamonds when the field is absent.**
+   `dashboard/app.py::api_edit_member` now distinguishes an absent `diamonds` key
+   (preserve the balance read inside the same `BEGIN IMMEDIATE` transaction) from an
+   explicit value (including `0`, which still overwrites). The members modal sends
+   only `{user_id, xp, coins}`, so it now preserves diamonds; the member-profile page
+   still sends all three fields and behaves as before. The audit row records the
+   effective value rather than a defaulted `0`.
+2. **Claim All renders a blocked correction lease as a refusal, not an empty pass.**
+   `claim_result_footer` appends a specific Arabic blocked message when
+   `claim_available` returns `blocked`; `_run_claim_pass` disables Claim All (and the
+   Restore Level Role button when present) on that card. Eligibility and the lease
+   mechanism are unchanged.
+3. **Resolved reversals leave the open queue.**
+   `utils/level_ops.py::outstanding_reversals` excludes `resolved:<decision>` rows as
+   well as `applied`. The journal rows remain intact. `/level_reconcile` now refuses
+   a second resolution of the same case as "No open case", and a new case is still
+   listed.
+4. **Rejoin withholds a role whose reversal is still open.**
+   `utils/level_claims.py::reconcile_role_progression` treats `outstanding`/`refused`
+   role cases as open. It suppresses restoration only when **every** fulfilled claim
+   for that role is in the open set **and** `_role_granted_elsewhere` finds no other
+   recorded grant (another claim, a `temp_roles` unit, or an inventory role marker).
+   The suppression is reported in `result["withheld"]` and logged by
+   `on_member_join`; it is not silent. Closed (`resolved:*`) cases do not suppress
+   restoration.
+
+## Verification (real DB/code, fake Discord objects)
+
+* `fix1_diamonds.py`: absent diamonds → `(1200, 7)` and audit `7->7`; explicit `3`
+  → `(1300, 3)`; explicit `0` → `(1400, 0)`; a decrease still returns 409 and writes
+  nothing. All checks pass.
+* `fix2_blocked_response.py`: with a correction lease, the exact footer is
+  `تم الاستلام: 0. إخفاقات قابلة لإعادة المحاولة: 0. ⏸️ عملية تصحيح XP قيد التنفيذ لهذا العضو — لم يُستلم أي شيء. أعد المحاولة بعد انتهائها.`,
+  Claim All is disabled, nothing is paid; an ordinary empty pass is unchanged; after
+  the lease ends the same card delivers `1`. All checks pass.
+* `fix3_resolved_queue.py`: a resolved case disappears from
+  `outstanding_reversals`, the journal row remains, a second `/level_reconcile`
+  resolution is refused, and a new case is still listed. All checks pass.
+* `fix4_rejoin_withheld.py`: an open-case-only role is withheld; an independent
+  fulfilled claim or `temp_roles` grant still restores it; a resolved case restores
+  normally. All checks pass.
+* `fix4_rollback_rejoin.py`: after a failed `/xp_rollback` role removal, a real
+  `on_member_join` call withholds the role (`withheld` logged) and keeps the claim;
+  after resolution a rejoin still does not restore it. All checks pass.
+* `fix2_rollback_repro.py`, `fix2_command_repro.py`, `audit_100_to_10.py`,
+  `audit_failures.py`, `audit_race.py`, `fix1_legacy_repro.py`, `fix1_below.py`,
+  `interactions.py`, `role_fail_claim.py`, `dup_claims.py`, `level_restore_buttons.py`
+  all pass after the changes (the rejoin expectation in `fix2_rollback_repro.py` was
+  updated to the new withheld behaviour).
+
+## Full suite, 63 scripts
+
+56 exit 0, 7 exit 1 — identical to the pre-fix head `87979ef`:
+
+| Suite | Result | Classification |
+|---|---|---|
+| `test_afk` | 169/170 | pre-existing, same on `02fbfee` |
+| `test_leveling_voice_hard_blocks` | 9 guard checks | pre-existing, same on `02fbfee` |
+| `test_phase2_backend` | exit 1 (`errors=1`) | pre-existing, same on `02fbfee` |
+| `test_shop_publications` | import error at repo-root invocation | pre-existing, same on `02fbfee` |
+| `test_xp_safety_audit` | 113 passed, 5 failed | 3 same on `02fbfee`; 2 extra static grep checks at the PR head, unchanged this round |
+| `test_setlevel_admin` | 8 checks (§6) | PR-added test asserting the old correction policy |
+| `test_slice2_level_claims` | 1 check | pre-existing test asserting the old dashboard clamp; intentional divergence |
+
+Targeted suites that pass: `test_xp_rollback`, `test_level_ops_provenance`,
+`test_rejoin_reconciliation`, `test_leveling_claim_all_d2`, `test_leveling_reward_e2e`,
+`test_level_test_reset`, `test_leveling_runtime`, `test_leveling_runtime_contract`,
+`test_level_card_fixes`, `test_level_card_visuals`, `test_booster_rewards`,
+`test_leveling_caller_integrations`, `test_level_reward_role_progression`,
+`test_dashboard_page_scripts`.
+
+## Remaining findings / unverified behavior
+
+* The member-facing card does not display `withheld`; only the join log and the open
+  `/level_reconcile` case show it. A resolved case is still directly re-resolvable via
+  `utils.level_ops.resolve_outstanding` (not through the command, which now refuses).
+* An expired `LevelRewardView` (180 s, non-persistent, no `on_timeout`) still becomes
+  inert; Discord shows "This interaction failed". No repo test covers expiry.
+* A duplicate dashboard save still creates a second `xp_mutations` row with a
+  zero delta (no value corruption).
+* Not verified: real Discord role add/remove/permissions and 429 handling, Railway,
+  multi-process SQLite contention, browser-executed CSRF, million-scale timing.
+  The Flask route was exercised through the real test client with an
+  `X-CSRF-Token` header; the views/buttons use fake Discord objects.

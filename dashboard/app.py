@@ -2656,7 +2656,13 @@ def api_edit_member():
     user_id   = data.get("user_id")
     xp        = max(0, int(data.get("xp", 0)))
     coins     = max(0, int(data.get("coins", 0)))
-    diamonds  = max(0, int(data.get("diamonds", 0)))
+    # The Members-page edit modal predates diamonds and sends only
+    # {user_id, xp, coins}. Treat an ABSENT field as "leave diamonds alone"
+    # rather than "set them to 0": this route overwrites the wallet absolutely,
+    # so defaulting to 0 silently destroyed every diamond the member owned.
+    # An explicit value (including an explicit 0) still overwrites, as before.
+    diamonds_raw = data.get("diamonds")
+    diamonds = None if diamonds_raw is None else max(0, int(diamonds_raw))
     new_level = calculate_level_from_xp(xp)
     from utils import level_ops as ops
     from utils.level_claims import (
@@ -2720,6 +2726,12 @@ def api_edit_member():
                     "SELECT balance, diamonds FROM economy "
                     "WHERE guild_id=? AND user_id=?", (guild_id, user_id))
                 wallet_before = await cursor.fetchone() or (0, 0)
+                # Preserve the stored diamonds when the caller did not send the
+                # field. Resolved inside BEGIN IMMEDIATE, from the same row this
+                # transaction overwrites, so a concurrent dashboard save cannot
+                # make the preserved value stale.
+                effective_diamonds = (int(wallet_before[1] or 0)
+                                      if diamonds is None else diamonds)
                 await db.execute("""
                     INSERT INTO levels (guild_id, user_id, xp, level)
                     VALUES (?,?,?,?)
@@ -2746,7 +2758,7 @@ def api_edit_member():
                     source=SOURCE_DASHBOARD, actor_id=actor_id,
                     reason=("dashboard member edit; wallet overwritten "
                             f"{wallet_before[0]}->{coins} coins, "
-                            f"{wallet_before[1]}->{diamonds} diamonds"),
+                            f"{wallet_before[1]}->{effective_diamonds} diamonds"),
                     xp_before=old_xp, xp_after=xp,
                     level_before=calculate_level_from_xp(old_xp),
                     level_after=new_level, crossings=crossings,
@@ -2756,9 +2768,10 @@ def api_edit_member():
                     VALUES (?,?,?,?)
                     ON CONFLICT(guild_id, user_id)
                     DO UPDATE SET balance=?, diamonds=?
-                """, (guild_id, user_id, coins, diamonds, coins, diamonds))
+                """, (guild_id, user_id, coins, effective_diamonds,
+                       coins, effective_diamonds))
                 await db.commit()
-                return {"success": True}
+                return {"success": True, "diamonds": effective_diamonds}
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
@@ -2768,8 +2781,11 @@ def api_edit_member():
         # 409: the request conflicts with the member's recorded state and
         # nothing was written. The body is still JSON for the page's fetch().
         return jsonify(outcome), 409
-    log_action(guild_id, f"Edited member {user_id}: xp={xp} coins={coins} diamonds={diamonds}",
-               "members", target_id=int(user_id) if user_id else None)
+    log_action(
+        guild_id,
+        f"Edited member {user_id}: xp={xp} coins={coins} "
+        f"diamonds={outcome.get('diamonds')}",
+        "members", target_id=int(user_id) if user_id else None)
     return jsonify({"success": True})
 
 

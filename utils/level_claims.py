@@ -683,21 +683,35 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
         # A role whose reversal the journal already records as applied is gone by
         # proof. If a crash left the claim row behind, restoring the role here
         # would undo a completed reversal; the retry that finishes the operation
-        # deletes the row. Read-only and tolerant: a database without the
-        # journal table simply has nothing to exclude.
+        # deletes the row. Open cases are kept in `open_role_claims` below so the
+        # restore loop can withhold a role that is still under an unresolved
+        # reversal. Read-only and tolerant: a database without the journal table
+        # simply has nothing to exclude.
         try:
             cursor = await db.execute(
-                "SELECT claim_id FROM reward_reversals WHERE guild_id=? "
-                "AND user_id=? AND kind=? AND status IN (?,?)",
-                (guild_id, user_id, TRACK_ROLE, ops.STATUS_APPLIED,
-                 ops.STATUS_ALREADY))
-            reversed_role_claims = {int(row[0]) for row in await cursor.fetchall()
-                                    if row[0] is not None}
+                "SELECT claim_id, status FROM reward_reversals WHERE guild_id=? "
+                "AND user_id=? AND kind=?",
+                (guild_id, user_id, TRACK_ROLE))
+            journal = [(int(row[0]), str(row[1] or ""))
+                       for row in await cursor.fetchall() if row[0] is not None]
+            reversed_role_claims = {cid for cid, st in journal
+                                    if st in (ops.STATUS_APPLIED,
+                                              ops.STATUS_ALREADY)}
+            # An OPEN case (outstanding/refused) says the reversal was intended
+            # but its effect is not proven gone. Restoring the role from that
+            # same claim would contradict the open case; a closed
+            # `resolved:<decision>` is an administrator's decision and is not
+            # treated as open here.
+            open_role_claims = {cid for cid, st in journal
+                                if st not in (ops.STATUS_APPLIED,
+                                              ops.STATUS_ALREADY)
+                                and not st.startswith("resolved:")}
         except aiosqlite.Error:
             reversed_role_claims = set()
+            open_role_claims = set()
 
     result: dict = {"restored": [], "removed": [], "failed": [],
-                    "blocked": False}
+                    "blocked": False, "withheld": []}
     # Audience partitions. Level-role progression runs independently inside
     # each audience so a Booster-only role can never supersede (or be
     # superseded by) an unrelated normal Level role. Booster-only rows are
@@ -715,7 +729,8 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
             continue
         level = int(claimed_level)
         group = partitions[audience].setdefault(
-            level, {"role_ids": set(), "unfulfilled": False})
+            level, {"role_ids": set(), "unfulfilled": False,
+                    "claim_ids_by_role": {}})
         if status != "fulfilled":
             group["unfulfilled"] = True
         try:
@@ -726,6 +741,8 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
             continue
         if status == "fulfilled":
             group["role_ids"].add(role_id)
+            group["claim_ids_by_role"].setdefault(role_id, set()).add(
+                int(claim_id))
 
     if not partitions[False] and not partitions[True]:
         return result
@@ -774,6 +791,31 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
                     continue
                 if role in held:
                     continue
+                # A role whose claim has an OPEN reversal case must not be
+                # restored from that claim: the rollback/correction intended to
+                # take it away and its effect is not proven gone. Suppress it
+                # only when EVERY fulfilled claim for this role is in that open
+                # set and no separate recorded grant (another claim, a temp_roles
+                # unit, an inventory role marker) still justifies it. That keeps
+                # an independent legitimate entitlement intact.
+                claimants = (role_group.get("claim_ids_by_role", {})
+                             .get(role_id) or set())
+                open_claimants = claimants & open_role_claims
+                if claimants and open_claimants == claimants:
+                    async with aiosqlite.connect(DB_PATH, timeout=10) as grant_db:
+                        shared = await _role_granted_elsewhere(
+                            grant_db, guild_id, user_id, role_id,
+                            exclude_claim_id=min(open_claimants),
+                            exclude_claim_ids=open_claimants)
+                    if shared is None:
+                        result["withheld"].append({
+                            "role_id": role_id,
+                            "claim_ids": sorted(open_claimants),
+                            "reason": ("an open role-reversal case records that "
+                                       "this role's effect was not reversed; it "
+                                       "is not restored until the case is "
+                                       "resolved")})
+                        continue
                 # One add attempt per role per pass: a role shared by the Member
                 # and Booster partitions, or configured at several Levels, would
                 # otherwise be re-added (the cache is stale after the first add).
@@ -1287,6 +1329,7 @@ def _claim_brief(claim: dict) -> dict:
 
 async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
                                   *, exclude_claim_id: int,
+                                  exclude_claim_ids=frozenset(),
                                   exclude_item: str | None = None) -> str | None:
     """Another recorded entitlement or grant that still justifies this role.
 
@@ -1298,11 +1341,19 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
     distinguished from the reward, and is reported as a residual risk rather
     than guessed at.
     """
+    # One claim is excluded by the original caller; a caller that is deciding
+    # whether a role is still justified must exclude ALL claims whose reversal
+    # is unresolved, otherwise an open case would look like an independent
+    # entitlement to itself.
+    excluded = {int(exclude_claim_id)} | {int(c) for c in
+                                          (exclude_claim_ids or ())}
     cursor = await db.execute(
         "SELECT id, track, payload_json FROM level_reward_claims "
         "WHERE guild_id=? AND user_id=? AND status='fulfilled' AND id != ?",
         (guild_id, user_id, int(exclude_claim_id)))
     for claim_id, track, payload in await cursor.fetchall():
+        if int(claim_id) in excluded:
+            continue
         try:
             if int((json.loads(payload) or {}).get("role_id")) == int(role_id):
                 return f"fulfilled {track} claim {claim_id}"
@@ -1314,7 +1365,9 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
             "WHERE guild_id=? AND user_id=? AND role_id=?",
             (guild_id, user_id, int(role_id)))
         for claim_id, source in await cursor.fetchall():
-            if claim_id != int(exclude_claim_id):
+            # A NULL claim_id is an older/manual temp-role unit: it belongs to
+            # no claim, so it is always an independent grant.
+            if claim_id is None or int(claim_id) not in excluded:
                 return f"temp_roles grant ({source}, claim {claim_id})"
     except aiosqlite.Error:
         pass

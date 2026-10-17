@@ -774,9 +774,16 @@ async def outstanding_reversals(guild_id: int,
                                 user_id: int | None = None) -> list[dict]:
     """Every reversal that is proven but unresolved - the admin's work queue."""
     await ensure_tables()
+    # An open case is a reversal that is neither applied nor closed by an
+    # administrator. `resolve_outstanding` writes `resolved:<decision>` rather
+    # than `applied` (the value did not move), so filtering only `applied`
+    # kept every resolved case in the queue forever and let /level_reconcile
+    # resolve the same case again. The row itself is never deleted, so the
+    # audit history is retained.
     sql = ("SELECT reversal_id, operation_id, claim_id, kind, currency, "
            "item_name, quantity, ledger_id, status, reason, created_at "
-           "FROM reward_reversals WHERE guild_id=? AND status != ?")
+           "FROM reward_reversals WHERE guild_id=? AND status != ? "
+           "AND status NOT LIKE 'resolved:%'")
     params: list = [guild_id, STATUS_APPLIED]
     if user_id is not None:
         sql += " AND user_id=?"
