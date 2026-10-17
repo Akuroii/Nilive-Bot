@@ -51,12 +51,13 @@ and is not part of the suite.
 ## Full suite, 63 scripts (`scripts/test_*.py`, this branch)
 
 Method: each script runs in its own process from the repository root with
-`OWNER_ID=1 PYTHONPATH=.`; exit status is the result. At the current head
-(`31d2fcc`) that is **57 exit 0, 6 exit 1**. The base commit `02fbfee` (58 scripts;
+`OWNER_ID=1 PYTHONPATH=.`; exit status is the result. At code head `31d2fcc`
+(the documentation commit that follows changes no code) that is **57 exit 0,
+6 exit 1**. The base commit `02fbfee` (58 scripts;
 five were added by this PR) is **54 exit 0, 4 exit 1**, and every base failure is
 still a failure at the head:
 
-| Suite | Head `31d2fcc` | Base `02fbfee` | Classification |
+| Suite | Code head `31d2fcc` | Base `02fbfee` | Classification |
 |---|---|---|---|
 | test_afk | 169/170 | 169/170 (same failure) | pre-existing |
 | test_leveling_voice_hard_blocks | 9 guard checks fail | same 9 | pre-existing |
@@ -221,7 +222,7 @@ are not repo tests.
 
 ## Full suite, 63 scripts
 
-Re-run at `31d2fcc` after the four fixes: **57 exit 0, 6 exit 1** (base `02fbfee`:
+Re-run at code head `31d2fcc` after the four fixes: **57 exit 0, 6 exit 1** (base `02fbfee`:
 54/58, four failures). The failing set is the four base failures plus the two
 PR-authored checks that encode the old policy (`test_setlevel_admin` §6,
 `test_slice2_level_claims`'s dashboard clamp); details and the exact check names are
