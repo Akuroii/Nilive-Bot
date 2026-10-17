@@ -33,9 +33,24 @@ PRODUCTION_DIRS = ("cogs", "utils", "dashboard")
 LEVEL_WRITERS = {
     ("utils/reward_engine.py", "give_reward"): "positive XP grant (clamped)",
     ("utils/xp_calculator.py", "_apply_spam_penalty_in_transaction"): "anti-spam deduction (clamped)",
-    ("cogs/leveling.py", "setxp"): "admin /setxp (clamped)",
+    # /setxp and /setlevel share ONE writer, so the inventory lists the writer
+    # rather than each command: an admin XP correction cannot reach `levels`
+    # except through here.
+    ("cogs/leveling.py", "_apply_admin_xp"): "admin /setxp + /setlevel (clamped)",
     ("cogs/leveling.py", "resetxp"): "admin /resetxp (writes 0)",
     ("cogs/leveling.py", "perform_leaderboard_reset"): "leaderboard reset (writes 0)",
+    # /level_test_reset's engine. Same class as resetxp (writes 0, never a
+    # negative and never a recompute), but scoped to one (guild_id, user_id)
+    # pair and gated behind a preview, an explicit confirm and, on production,
+    # ALLOW_LEVEL_TEST_RESET=1. See utils/level_test_reset.py.
+    ("utils/level_test_reset.py", "reset_member"): "admin /level_test_reset (writes 0, one member)",
+    # /xp_rollback's engine. NOT a snapshot restore: it subtracts the recorded
+    # change's own delta from the member's CURRENT xp, so progress earned after
+    # the mistake survives, and it recomputes the stored level from the same
+    # curve the engine uses. Scoped to one (guild_id, user_id) pair, gated behind
+    # a preview, an explicit confirm and a reason, and it only cancels the
+    # entitlements that carry the operation id it is undoing.
+    ("utils/level_test_reset.py", "rollback_xp_operation"): "admin /xp_rollback (current xp minus the recorded delta, one member)",
     ("dashboard/app.py", "api_edit_member"): "dashboard member edit (clamped)",
     ("utils/prestige.py", "purchase_prestige"): "prestige tier (never touches xp/level)",
 }
@@ -115,8 +130,9 @@ def enclosing_function(spans, lineno: int) -> str:
 LEVEL_CONSISTENCY = {
     ("utils/reward_engine.py", "give_reward"): "xp_progress(new_xp)",
     ("utils/xp_calculator.py", "_apply_spam_penalty_in_transaction"): "xp_progress(new_xp)[0]",
-    ("cogs/leveling.py", "setxp"): "xp_progress(xp)",
+    ("cogs/leveling.py", "_apply_admin_xp"): "xp_progress(xp)",
     ("dashboard/app.py", "api_edit_member"): "calculate_level_from_xp(xp)",
+    ("utils/level_test_reset.py", "rollback_xp_operation"): "progress_level(target_xp)",
 }
 
 
@@ -173,7 +189,8 @@ def main():
     check("the shared penalty writer leaves commit/rollback to its caller",
           "db.commit" not in penalty_writer
           and "db.rollback" not in penalty_writer)
-    check("admin /setxp clamps at zero", "xp = max(0, xp)" in cog)
+    check("the shared admin XP writer clamps at zero",
+          "xp = max(0, int(xp))" in cog)
     check("the dashboard member edit clamps at zero",
           'xp        = max(0, int(data.get("xp", 0)))' in dashboard_app)
     check("both reset paths write zero, not a negative",
@@ -188,8 +205,14 @@ def main():
           "new_level, _, _ = xp_progress(new_xp)" in reward_engine)
     check("the deduction recomputes level from the new XP",
           "new_level = xp_progress(new_xp)[0]" in penalty)
-    check("admin /setxp recomputes level from the new XP",
-          "new_level, _, _ = xp_progress(xp)" in cog)
+    check("the shared admin XP writer recomputes level from the new XP",
+          "new_level, new_current, new_needed = xp_progress(xp)" in cog)
+    check("/setlevel derives its XP from the bot's own curve, not a second formula",
+          "sum(xp_for_level(n) for n in range(1, level + 1))" in cog
+          and "_apply_admin_xp(" in cog[cog.index("async def setlevel"):])
+    check("neither admin command writes `levels` itself any more",
+          "UPDATE levels" not in cog[cog.index("async def setxp"):
+                                     cog.index("async def resetxp")])
     check("the dashboard edit recomputes level from the new XP",
           "new_level = calculate_level_from_xp(xp)" in dashboard_app)
     for (rel, func), token in LEVEL_CONSISTENCY.items():

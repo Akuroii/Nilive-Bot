@@ -173,52 +173,101 @@ async def get_guild_ledger(guild_id: int, limit: int = 100,
 async def reverse_transaction(ledger_id: int, guild_id: int,
                                reversed_by: int = None,
                                reason: str = "Reversed via dashboard") -> dict:
-    from utils.economy_safe import safe_credit, safe_deduct, InsufficientBalance
+    """Undo one ledger movement: wallet, marker and compensating row in ONE commit.
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT user_id, currency, amount, reversed
-            FROM transaction_ledger
-            WHERE id = ? AND guild_id = ?
-        """, (ledger_id, guild_id))
-        row = await cursor.fetchone()
+    The return contract is unchanged (`{"success": True, "new_balance": …}` or
+    `{"success": False, "error": …}`), but two defects in the previous shape are
+    gone:
 
-    if not row:
-        return {"success": False, "error": "Ledger entry not found"}
+    *It was not retry-safe.* The wallet moved through `safe_deduct()`/
+    `safe_credit()` on their own connection, and the `reversed = 1` marker was
+    written on a SECOND connection afterwards. A crash in between left a wallet
+    that had already been charged and a ledger row that still looked reversible,
+    so pressing the button again charged it a second time. Here the marker is the
+    guard: `UPDATE … SET reversed = 1 WHERE id = ? AND reversed = 0` inside the
+    same `BEGIN IMMEDIATE` transaction, so the second caller's rowcount is 0 and
+    it gets "Already reversed" with nothing moved. Two processes (the dashboard
+    and the bot share this SQLite file) cannot both win.
 
-    user_id, currency, amount, already_reversed = row
-    if already_reversed:
-        return {"success": False, "error": "Already reversed"}
-    if currency not in ("balance", "diamonds"):
-        return {"success": False,
-                "error": f"Reversal not supported for currency '{currency}'"}
+    *It counted one movement twice.* `safe_deduct()` appends its own `deduct` row
+    and this function then appended a `reversal` row for the same event, so anyone
+    summing `transaction_ledger` saw the reversal twice - and `_log_ledger()`
+    swallows its exceptions, so the pair could also come out as one row or none.
+    A reversal now writes exactly one compensating `reversal` row, which is the
+    double-entry convention: the original stays, the inverse references it, and
+    the two net to zero.
 
-    try:
-        if amount >= 0:
-            await safe_deduct(guild_id, user_id, amount, currency=currency)
-        else:
-            await safe_credit(guild_id, user_id, -amount, currency=currency)
-    except InsufficientBalance:
-        return {"success": False,
-                "error": "User no longer has enough balance to reverse this"}
+    The wallet is never forced negative. Reversing a credit needs the money to
+    still be there; if it has been spent this returns the same "not enough
+    balance" error as before and moves nothing, marker included - the row stays
+    unreversed so the case is still visible rather than silently closed.
+    """
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute("""
+                SELECT user_id, currency, amount
+                FROM transaction_ledger
+                WHERE id = ? AND guild_id = ?
+            """, (ledger_id, guild_id))
+            row = await cursor.fetchone()
+            if not row:
+                await db.execute("ROLLBACK")
+                return {"success": False, "error": "Ledger entry not found"}
+            user_id, currency = row[0], row[1]
+            amount = int(row[2] or 0)
+            if currency not in ("balance", "diamonds"):
+                await db.execute("ROLLBACK")
+                return {"success": False,
+                        "error": f"Reversal not supported for currency '{currency}'"}
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
-            (guild_id, user_id))
-        bal_row = await cursor.fetchone()
-        new_balance = bal_row[0] if bal_row else 0
+            # Claim the reversal BEFORE moving any value: this is what makes a
+            # retry, and a second process, a no-op instead of a second charge.
+            cursor = await db.execute("""
+                UPDATE transaction_ledger
+                SET reversed = 1, reversed_at = CURRENT_TIMESTAMP, reversed_by = ?
+                WHERE id = ? AND guild_id = ? AND reversed = 0
+            """, (reversed_by, ledger_id, guild_id))
+            if cursor.rowcount != 1:
+                await db.execute("ROLLBACK")
+                return {"success": False, "error": "Already reversed"}
 
-        await db.execute("""
-            UPDATE transaction_ledger
-            SET reversed = 1, reversed_at = CURRENT_TIMESTAMP, reversed_by = ?
-            WHERE id = ?
-        """, (reversed_by, ledger_id))
-        await db.commit()
+            movement = -amount        # the compensating amount, opposite in sign
+            if movement > 0:
+                # Giving money back can always be applied, and must work for a
+                # member whose economy row does not exist yet.
+                await db.execute(f"""
+                    INSERT INTO economy (guild_id, user_id, {currency})
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(guild_id, user_id)
+                    DO UPDATE SET {currency} = {currency} + ?
+                """, (guild_id, user_id, movement, movement))
+            else:
+                # Taking money back only while it is still there.
+                cursor = await db.execute(
+                    f"UPDATE economy SET {currency} = {currency} + ? "
+                    f"WHERE guild_id=? AND user_id=? AND {currency} + ? >= 0",
+                    (movement, guild_id, user_id, movement))
+                if cursor.rowcount != 1:
+                    await db.execute("ROLLBACK")
+                    return {
+                        "success": False,
+                        "error": "User no longer has enough balance to reverse this"}
+            cursor = await db.execute(
+                f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id))
+            bal_row = await cursor.fetchone()
+            new_balance = int(bal_row[0] or 0) if bal_row else 0
 
-    await log_transaction(
-        guild_id, user_id, currency, -amount, new_balance,
-        type="reversal", reason=reason, source="ledger",
-    )
-
-    return {"success": True, "new_balance": new_balance}
+            # Exactly ONE row for this movement, written in the same transaction.
+            await db.execute("""
+                INSERT INTO transaction_ledger
+                    (guild_id, user_id, currency, amount, balance_after,
+                     type, reason, source)
+                VALUES (?, ?, ?, ?, ?, 'reversal', ?, 'ledger')
+            """, (guild_id, user_id, currency, movement, new_balance, reason))
+            await db.commit()
+            return {"success": True, "new_balance": new_balance}
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
