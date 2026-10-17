@@ -131,6 +131,12 @@ async def _move_items(db, guild_id: int, frm: int, to: int, items: dict[str, int
             UPDATE inventory_items SET quantity = quantity - ?, updated_at = CURRENT_TIMESTAMP
             WHERE guild_id=? AND user_id=? AND item_name=?
         """, (qty, guild_id, frm, name))
+        # Traded units leave the sender's stack, so they also leave any
+        # level-reward grant they came from. Without this the sender's
+        # `remaining_quantity` would keep claiming units they no longer hold,
+        # and a later reset could deduct the receiver's or a quest's items.
+        from utils.inventory import _consume_provenance
+        await _consume_provenance(db, guild_id, frm, name, qty)
         await db.execute("""
             INSERT INTO inventory_items
                 (guild_id, user_id, item_name, item_type, quantity, source, updated_at)

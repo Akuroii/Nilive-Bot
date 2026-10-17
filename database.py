@@ -1647,6 +1647,15 @@ async def init_db():
             ON inventory_items(guild_id, user_id)
         """)
 
+        # Level/reward provenance, operation journal and the per-member
+        # coordination lease (utils/level_ops.py). Created here so a normal boot
+        # has them, and created lazily by level_ops.ensure_tables() for a
+        # database that predates them.
+        from utils.level_ops import SCHEMA as LEVEL_OPS_SCHEMA
+        for _statement in LEVEL_OPS_SCHEMA:
+            await db.execute(_statement)
+        await db.commit()
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS temp_bans (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -34,8 +34,33 @@ _INVENTORY_TYPE = {
 }
 # Metadata only. Not part of identity, eligibility, reserve, or payout.
 SOURCE_SETXP = "setxp"
+SOURCE_SETLEVEL = "setlevel"
 SOURCE_DASHBOARD = "dashboard"
 SOURCE_BACKFILL = "legacy_backfill"
+# Administrative writers that existed BEFORE `operation_id` was added to this
+# table. Their rows carry no operation id, so `source` is the only surviving
+# record that the crossing was an administrator's change rather than play.
+# Verified against the base commit: `/setxp` wrote SOURCE_SETXP and the
+# dashboard edit wrote SOURCE_DASHBOARD; message/voice XP is awarded through
+# utils.reward_engine with source 'leveling', and other XP sources (missions,
+# minigames, shop) use their own names. Only these two are administrative.
+LEGACY_ADMIN_SOURCES = (SOURCE_SETXP, SOURCE_DASHBOARD)
+
+
+def is_administrative_claim(claim: dict) -> bool:
+    """True when a claim row came from an administrative XP change.
+
+    New rows record the change's `operation_id`. Rows created before that
+    column existed are recognised by their recorded `source`, and only for the
+    two administrative writers that predate it. Ordinary play and the legacy
+    backfill have no operation id either, and must never be treated as
+    administratively created: a correction is not proof the member did not earn
+    those rewards.
+    """
+    if str(claim.get("operation_id") or ""):
+        return True
+    return str(claim.get("source") or "") in LEGACY_ADMIN_SOURCES
+
 
 _CREATE_CLAIMS = """
     CREATE TABLE IF NOT EXISTS level_reward_claims (
@@ -100,10 +125,24 @@ async def ensure_tables(db: aiosqlite.Connection | None = None) -> None:
             await connection.execute(
                 "ALTER TABLE level_reward_claims "
                 "ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+        # Which administrative XP operation caused this entitlement, if any.
+        # A rollback can then cancel exactly the entitlements an erroneous grant
+        # created and leave the ones the member earned independently. NULL for
+        # ordinary play and for every row created before this column existed -
+        # those cannot be attributed, and nothing pretends otherwise.
+        if "operation_id" not in columns:
+            await connection.execute(
+                "ALTER TABLE level_reward_claims "
+                "ADD COLUMN operation_id TEXT")
         await connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_lrc_owner
             ON level_reward_claims(guild_id, user_id, status)
         """)
+        # The claim path reads `level_op_locks` and writes `reward_grants`, so a
+        # database created before utils/level_ops.py existed is migrated here
+        # rather than failing mid-claim with "no such table".
+        from utils.level_ops import ensure_tables as ensure_ops_tables
+        await ensure_ops_tables(connection)
 
     if db is not None:
         await apply(db)
@@ -260,27 +299,37 @@ def _payload(track: str, raw: dict, multipliers: dict | None) -> str:
 
 async def _insert_identity(db, guild_id, user_id, level, track, ref,
                            payload: str, status: str, now: str,
-                           source: str) -> None:
+                           source: str, operation_id: str = None) -> None:
     fulfilled_at = now if status == "fulfilled" else None
     await db.execute("""
         INSERT OR IGNORE INTO level_reward_claims
             (guild_id, user_id, reward_level, track, reward_ref,
-             payload_json, status, created_at, fulfilled_at, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             payload_json, status, created_at, fulfilled_at, source,
+             operation_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (guild_id, user_id, level, track, ref, payload, status, now,
-          fulfilled_at, source or ""))
+          fulfilled_at, source or "", operation_id))
 
 
 async def record_crossing(db: aiosqlite.Connection, guild_id: int,
                           user_id: int, old_xp: int, new_xp: int,
                           multipliers: dict | None = None, *,
-                          source: str, is_booster: bool = False) -> int:
+                          source: str, is_booster: bool = False,
+                          operation_id: str = None) -> int:
     """Insert pending rows for levels crossed by an XP increase.
 
     Caller owns the transaction. Eligibility is xp_progress(xp).level,
     not the stored levels.level column. Existing rows are left alone,
-    so a reset and re-level cannot pay a second time. source is stored
-    once and is not read by reserve or payout.
+    so a reset and re-level cannot pay a second time.
+
+    A level re-crossed by ORDINARY PLAY is earned again, and this is where that
+    is recorded: the row keeps its identity across a correction, so a row an
+    earlier administrative change created still names that change's
+    `operation_id`. Leaving it there let a later correction attribute the row to
+    the administrator and take back a reward the member had earned by playing
+    (see `reconcile_level_drop`). Undelivered rows re-earned here lose the
+    administrative attribution; delivered rows are terminal and are left alone.
+    A crossing caused by an administrative change never re-attributes anything.
 
     Booster-only entitlements are created only when is_booster is True (the
     caller verified an active Discord boost at this crossing). There is no
@@ -292,6 +341,28 @@ async def record_crossing(db: aiosqlite.Connection, guild_id: int,
         return 0
     await ensure_tables(db)
     identities = await _definitions(db, guild_id, boosters=bool(is_booster))
+    administrative = (bool(str(operation_id or ""))
+                      or str(source or "") in LEGACY_ADMIN_SOURCES)
+    if not administrative:
+        # Only rows the member can still claim: `pending`/`failed`. A `processing`
+        # row is being delivered right now (its value is already committed to the
+        # member) and a `fulfilled` row is terminal, so neither is re-attributed.
+        # Per identity, not by level: a booster-only reward at a re-crossed level
+        # was not earned by this non-boost crossing and must keep the attribution
+        # of the grant that created it.
+        marks = ", ".join("?" for _ in LEGACY_ADMIN_SOURCES)
+        for (level, track, ref) in identities:
+            if level <= old_level or level > new_level:
+                continue
+            await db.execute(
+                f"UPDATE level_reward_claims SET operation_id=NULL, source=? "
+                f"WHERE guild_id=? AND user_id=? AND reward_level=? "
+                f"AND track=? AND reward_ref=? "
+                f"AND status IN ('pending', 'failed') "
+                f"AND ((operation_id IS NOT NULL AND operation_id != '') "
+                f"     OR source IN ({marks}))",
+                (source, guild_id, user_id, level, track, ref,
+                 *LEGACY_ADMIN_SOURCES))
     now = _iso(_now())
     created = 0
     for (level, track, ref), raw in identities.items():
@@ -300,7 +371,7 @@ async def record_crossing(db: aiosqlite.Connection, guild_id: int,
         await _insert_identity(
             db, guild_id, user_id, level, track, ref,
             _payload(track, raw, multipliers or {}),
-            "pending", now, source)
+            "pending", now, source, operation_id)
         created += 1
     return created
 
@@ -346,7 +417,8 @@ async def backfill_legacy_claims() -> int:
 
 
 def _reserve_sql(claim_ids: list[int] | None) -> str:
-    sql = """
+    legacy_marks = ", ".join("?" for _ in LEGACY_ADMIN_SOURCES)
+    sql = f"""
         UPDATE level_reward_claims
         SET status='processing',
             owner_token=?,
@@ -363,7 +435,24 @@ def _reserve_sql(claim_ids: list[int] | None) -> str:
                 )
               )
           AND (substr(reward_ref, 1, 8) != 'booster:' OR ?)
+          AND (
+                reward_level <= ?
+                OR (
+                    (operation_id IS NULL OR operation_id = '')
+                    AND source NOT IN ({legacy_marks})
+                  )
+              )
     """
+    # The last predicate is the correction invariant, enforced at the one place
+    # that actually pays: a reward an administrative XP change created is
+    # collectable only while the member's CURRENT level reaches it. New rows
+    # carry `operation_id`; rows written by the two administrative writers that
+    # predate that column carry only their `source`, so `source` is honoured for
+    # exactly those two names. Ordinary play and the legacy backfill have no
+    # operation id and are never disabled by a correction: those rewards were
+    # earned at the level they name. Nothing is rewritten here - the row is left
+    # intact and becomes collectable again if the member legitimately reaches
+    # that level later.
     if claim_ids:
         marks = ",".join("?" for _ in claim_ids)
         sql += f" AND id IN ({marks})"
@@ -613,16 +702,46 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
     "blocked": bool}``. Failures are role IDs with an explanatory string.
     """
     await ensure_tables()
+    from utils import level_ops as ops
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         cursor = await db.execute("""
-            SELECT reward_level, reward_ref, payload_json, status
+            SELECT id, reward_level, reward_ref, payload_json, status
             FROM level_reward_claims
             WHERE guild_id=? AND user_id=? AND track=?
         """, (guild_id, user_id, TRACK_ROLE))
         claim_rows = await cursor.fetchall()
+        # A role whose reversal the journal already records as applied is gone by
+        # proof. If a crash left the claim row behind, restoring the role here
+        # would undo a completed reversal; the retry that finishes the operation
+        # deletes the row. Open cases are kept in `open_role_claims` below so the
+        # restore loop can withhold a role that is still under an unresolved
+        # reversal. Read-only and tolerant: a database without the journal table
+        # simply has nothing to exclude.
+        try:
+            cursor = await db.execute(
+                "SELECT claim_id, status FROM reward_reversals WHERE guild_id=? "
+                "AND user_id=? AND kind=?",
+                (guild_id, user_id, TRACK_ROLE))
+            journal = [(int(row[0]), str(row[1] or ""))
+                       for row in await cursor.fetchall() if row[0] is not None]
+            reversed_role_claims = {cid for cid, st in journal
+                                    if st in (ops.STATUS_APPLIED,
+                                              ops.STATUS_ALREADY)}
+            # An OPEN case (outstanding/refused) says the reversal was intended
+            # but its effect is not proven gone. Restoring the role from that
+            # same claim would contradict the open case; a closed
+            # `resolved:<decision>` is an administrator's decision and is not
+            # treated as open here.
+            open_role_claims = {cid for cid, st in journal
+                                if st not in (ops.STATUS_APPLIED,
+                                              ops.STATUS_ALREADY)
+                                and not st.startswith("resolved:")}
+        except aiosqlite.Error:
+            reversed_role_claims = set()
+            open_role_claims = set()
 
     result: dict = {"restored": [], "removed": [], "failed": [],
-                    "blocked": False}
+                    "blocked": False, "withheld": []}
     # Audience partitions. Level-role progression runs independently inside
     # each audience so a Booster-only role can never supersede (or be
     # superseded by) an unrelated normal Level role. Booster-only rows are
@@ -630,7 +749,9 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
     # not restored, not targeted, and not removed here.
     booster_ok = member_is_booster(member)
     partitions: dict[bool, dict[int, dict]] = {False: {}, True: {}}
-    for claimed_level, ref, payload, status in claim_rows:
+    for claim_id, claimed_level, ref, payload, status in claim_rows:
+        if claim_id in reversed_role_claims:
+            continue
         audience = is_booster_ref(ref)
         if boosters_only and not audience:
             continue
@@ -638,7 +759,8 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
             continue
         level = int(claimed_level)
         group = partitions[audience].setdefault(
-            level, {"role_ids": set(), "unfulfilled": False})
+            level, {"role_ids": set(), "unfulfilled": False,
+                    "claim_ids_by_role": {}})
         if status != "fulfilled":
             group["unfulfilled"] = True
         try:
@@ -649,6 +771,8 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
             continue
         if status == "fulfilled":
             group["role_ids"].add(role_id)
+            group["claim_ids_by_role"].setdefault(role_id, set()).add(
+                int(claim_id))
 
     if not partitions[False] and not partitions[True]:
         return result
@@ -697,6 +821,31 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
                     continue
                 if role in held:
                     continue
+                # A role whose claim has an OPEN reversal case must not be
+                # restored from that claim: the rollback/correction intended to
+                # take it away and its effect is not proven gone. Suppress it
+                # only when EVERY fulfilled claim for this role is in that open
+                # set and no separate recorded grant (another claim, a temp_roles
+                # unit, an inventory role marker) still justifies it. That keeps
+                # an independent legitimate entitlement intact.
+                claimants = (role_group.get("claim_ids_by_role", {})
+                             .get(role_id) or set())
+                open_claimants = claimants & open_role_claims
+                if claimants and open_claimants == claimants:
+                    async with aiosqlite.connect(DB_PATH, timeout=10) as grant_db:
+                        shared = await _role_granted_elsewhere(
+                            grant_db, guild_id, user_id, role_id,
+                            exclude_claim_id=min(open_claimants),
+                            exclude_claim_ids=open_claimants)
+                    if shared is None:
+                        result["withheld"].append({
+                            "role_id": role_id,
+                            "claim_ids": sorted(open_claimants),
+                            "reason": ("an open role-reversal case records that "
+                                       "this role's effect was not reversed; it "
+                                       "is not restored until the case is "
+                                       "resolved")})
+                        continue
                 # One add attempt per role per pass: a role shared by the Member
                 # and Booster partitions, or configured at several Levels, would
                 # otherwise be re-added (the cache is stale after the first add).
@@ -876,6 +1025,58 @@ async def _ensure_temp_role_units(claim_id: int, guild_id: int, user_id: int,
             raise
 
 
+async def _record_delivery_provenance(db, guild_id: int, user_id: int,
+                                      row: dict) -> None:
+    """Write the grant record for a reward this transaction just delivered.
+
+    Runs inside the claim transaction, so a grant row exists if and only if the
+    delivery committed - never one without the other. This is what makes a later
+    correction exact instead of inferential:
+
+    * currency -> the `transaction_ledger` row id the credit just produced, so a
+      reversal targets that specific row rather than matching on amount;
+    * inventory -> the item and the exact quantity granted, with a
+      `remaining_quantity` that consumption decrements FIFO, so "are this
+      reward's units still here" is a recorded fact rather than a guess from a
+      stack total that also holds quest, shop and trade units. This includes the
+      inventory marker row a `temp_role` reward writes.
+
+    Roles and XP boosts are not recorded: a role's effect lives on the Discord
+    member and in `temp_roles`, and a boost row is deleted outright by a reset.
+    Neither leaves a fungible balance behind.
+
+    Bookkeeping must never fail a delivery the member earned, so an error is
+    logged and the claim still commits. The consequence is limited and safe: that
+    reward has no provenance, and a later reset refuses to reverse it
+    automatically instead of guessing which units are whose.
+    """
+    try:
+        from utils.level_ops import KIND_CURRENCY, KIND_INVENTORY, record_grant
+        track, payload = row["track"], row["payload"]
+        if track == TRACK_CURRENCY:
+            cursor = await db.execute(
+                "SELECT id FROM transaction_ledger WHERE guild_id=? AND user_id=? "
+                "AND currency=? AND amount=? AND type='credit' "
+                "AND source='level_claim' AND reason=? ORDER BY id DESC LIMIT 1",
+                (guild_id, user_id, payload["currency"], int(payload["amount"]),
+                 f"Level {row['reward_level']} reward"))
+            ledger_row = await cursor.fetchone()
+            await record_grant(
+                db, guild_id=guild_id, user_id=user_id, claim_id=row["id"],
+                reward_level=row["reward_level"], track=track,
+                kind=KIND_CURRENCY, quantity=int(payload["amount"]),
+                currency=payload["currency"],
+                ledger_id=ledger_row[0] if ledger_row else None)
+        elif track == TRACK_SHOP:
+            await record_grant(
+                db, guild_id=guild_id, user_id=user_id, claim_id=row["id"],
+                reward_level=row["reward_level"], track=track,
+                kind=KIND_INVENTORY, quantity=int(payload["quantity"]),
+                item_name=str(payload["name"]))
+    except Exception as exc:                     # pragma: no cover - safety net
+        print(f"[PROVENANCE] claim {row.get('id')} grant record failed: {exc}")
+
+
 async def claim_available(guild_id: int, user_id: int, *,
                           member=None, bot=None,
                           claim_ids: list[int] | None = None) -> dict:
@@ -912,10 +1113,54 @@ async def claim_available(guild_id: int, user_id: int, *,
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
+            # Eligibility is the member's CURRENT level, read in the same write
+            # transaction as the reservation: a correction that lowers XP and
+            # takes the member's lease cannot race this, and the answer cannot go
+            # stale before the rows are reserved. This is what makes the
+            # corrected level authoritative even if the reconciliation pass never
+            # ran (crash, retry, dashboard-only writer).
+            cursor = await db.execute(
+                "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id))
+            xp_row = await cursor.fetchone()
+            current_level = progress_level(xp_row[0] if xp_row else 0)
+            result["current_level"] = current_level
             params = [token, started, guild_id, user_id, expired_before,
-                      1 if booster_ok else 0]
+                      1 if booster_ok else 0, current_level,
+                      *LEGACY_ADMIN_SOURCES]
             if claim_ids:
                 params.extend(claim_ids)
+            # A correction (New Game reset, XP rollback) may be holding this
+            # member's lock while it waits on the Discord API. Delivering a reward
+            # inside that window is how a claim row gets deleted by the correction
+            # after its value was already paid, which makes that reward claimable
+            # a second time. Checked here, inside this write transaction, so the
+            # answer cannot go stale before the reservation is written - and it is
+            # a database row rather than a Python lock because the dashboard is a
+            # separate process over the same file.
+            from utils.level_ops import _now as _ops_now
+            blocker = None
+            try:
+                cursor = await db.execute(
+                    "SELECT operation_id, holder FROM level_op_locks "
+                    "WHERE guild_id=? AND user_id=? AND expires_at > ?",
+                    (guild_id, user_id, _ops_now()))
+                blocker = await cursor.fetchone()
+            except aiosqlite.OperationalError as exc:
+                # Only reachable on a database whose migration never ran. Claiming
+                # an earned reward must still work; say loudly that coordination
+                # is unavailable rather than failing silently.
+                print(f"[LEVEL CLAIM] lock table unavailable, claiming without "
+                      f"reset coordination: {exc}")
+            if blocker:
+                await db.execute("ROLLBACK")
+                result["blocked_by_operation"] = blocker[0]
+                result["blocked_by_holder"] = blocker[1]
+                result["blocked"] = (
+                    f"A {blocker[1]} operation ({blocker[0]}) is running for this "
+                    f"member. Rewards are frozen until it finishes - try again "
+                    f"in a moment.")
+                return result
             await db.execute(_reserve_sql(claim_ids), params)
             owned = await _owned_rows(db, token)
             result["owned"] = len(owned)
@@ -962,6 +1207,7 @@ async def claim_available(guild_id: int, user_id: int, *,
                         raise RuntimeError(f"unknown claim track {row['track']}")
                     if not await _mark(db, row["id"], token, "fulfilled"):
                         raise RuntimeError("lost claim ownership before fulfillment")
+                    await _record_delivery_provenance(db, guild_id, user_id, row)
                     await db.execute(f"RELEASE SAVEPOINT claim_{row['id']}")
                     result["fulfilled"].append(row["id"])
                     if row["track"] == TRACK_CURRENCY:
@@ -1060,6 +1306,7 @@ async def claim_available(guild_id: int, user_id: int, *,
                         })
                     if not await _mark(db, row["id"], token, "fulfilled"):
                         raise RuntimeError("lost claim ownership before fulfillment")
+                    await _record_delivery_provenance(db, guild_id, user_id, row)
                     await db.execute(f"RELEASE SAVEPOINT claim_{row['id']}")
                     result["fulfilled"].append(row["id"])
                     result["delivered_shop"] += 1
@@ -1089,27 +1336,602 @@ async def claim_available(guild_id: int, user_id: int, *,
     return result
 
 
+# ─── Correcting a level: reconcile what the higher level granted ─────────────
+
+def _claim_brief(claim: dict) -> dict:
+    """Report-safe view of one claim row: identity, not its ORM payload."""
+    payload = claim.get("payload") or {}
+    effect = {"currency": payload.get("currency"),
+              "amount": payload.get("amount"),
+              "item_name": payload.get("name"),
+              "quantity": payload.get("quantity"),
+              "role_id": payload.get("role_id"),
+              "multiplier": payload.get("multiplier"),
+              "duration_hours": payload.get("duration_hours")}
+    return {"claim_id": claim["id"], "reward_level": claim["reward_level"],
+            "track": claim["track"], "reward_ref": claim["reward_ref"],
+            "status": claim["status"],
+            "origin_operation": claim.get("operation_id"),
+            "source": claim.get("source"),
+            "legacy_admin": bool(claim.get("legacy_admin")),
+            "effect": {k: v for k, v in effect.items() if v is not None}}
+
+
+async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
+                                  *, exclude_claim_id: int,
+                                  exclude_claim_ids=frozenset(),
+                                  exclude_item: str | None = None) -> str | None:
+    """Another recorded entitlement or grant that still justifies this role.
+
+    A role can be the reward of several claims (the same role id configured at
+    two levels), of a temp-role reward, or of an item the member owns from
+    another source. Taking it off because ONE claim is being reversed would
+    revoke something that is still valid, so any other grant keeps it on. This is
+    deliberately conservative: an unrecorded manual role grant cannot be
+    distinguished from the reward, and is reported as a residual risk rather
+    than guessed at.
+    """
+    # One claim is excluded by the original caller; a caller that is deciding
+    # whether a role is still justified must exclude ALL claims whose reversal
+    # is unresolved, otherwise an open case would look like an independent
+    # entitlement to itself.
+    excluded = {int(exclude_claim_id)} | {int(c) for c in
+                                          (exclude_claim_ids or ())}
+    cursor = await db.execute(
+        "SELECT id, track, payload_json FROM level_reward_claims "
+        "WHERE guild_id=? AND user_id=? AND status='fulfilled' AND id != ?",
+        (guild_id, user_id, int(exclude_claim_id)))
+    for claim_id, track, payload in await cursor.fetchall():
+        if int(claim_id) in excluded:
+            continue
+        try:
+            if int((json.loads(payload) or {}).get("role_id")) == int(role_id):
+                return f"fulfilled {track} claim {claim_id}"
+        except (TypeError, ValueError):
+            continue
+    try:
+        cursor = await db.execute(
+            "SELECT claim_id, source FROM temp_roles "
+            "WHERE guild_id=? AND user_id=? AND role_id=?",
+            (guild_id, user_id, int(role_id)))
+        for claim_id, source in await cursor.fetchall():
+            # A NULL claim_id is an older/manual temp-role unit: it belongs to
+            # no claim, so it is always an independent grant.
+            if claim_id is None or int(claim_id) not in excluded:
+                return f"temp_roles grant ({source}, claim {claim_id})"
+    except aiosqlite.Error:
+        pass
+    cursor = await db.execute(
+        "SELECT item_name, source, metadata FROM inventory_items "
+        "WHERE guild_id=? AND user_id=? AND item_type IN ('role','temp_role')",
+        (guild_id, user_id))
+    for item_name, source, metadata in await cursor.fetchall():
+        if exclude_item and str(item_name) == str(exclude_item):
+            continue                # the marker belonging to this very claim
+        try:
+            if int((json.loads(metadata) or {}).get("role_id")) == int(role_id):
+                return f"inventory '{item_name}' ({source})"
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _boost_is_live(expires_at) -> bool:
+    if not expires_at:
+        return False
+    try:
+        return datetime.fromisoformat(str(expires_at)) > _now()
+    except (TypeError, ValueError):
+        return False
+
+
+async def reconcile_level_drop(guild_id: int, user_id: int, level: int, *,
+                               operation_id: str,
+                               actor_id: int | None = None,
+                               reason: str | None = None,
+                               member=None) -> dict:
+    """Make reward eligibility reflect a corrected (lower) level.
+
+    This is the production correction path behind `/setxp` and `/setlevel`; it
+    is not the staging reset. The member's XP has ALREADY been written, and the
+    caller holds the member's `level_op_locks` lease from the same transaction,
+    so no claim pass can deliver anything while this runs.
+
+    Two obligations, handled differently:
+
+    * **Not delivered yet.** Rows an administrative XP change created and that
+      now sit above `level` are left untouched. `claim_available()` already
+      refuses to reserve them (`_reserve_sql`), so they cannot be claimed; the
+      row survives and becomes claimable again if the member legitimately
+      reaches that level. History is kept and no identity is destroyed.
+    * **Already delivered.** Rows above `level` whose `operation_id` names an
+      administrative XP change are attributed and reversed through
+      `utils.level_ops`: currency against the exact ledger credit, inventory
+      against the exact grant's remaining units, a role off the member only when
+      no other grant justifies it, a boost's own row. The claim row is deleted
+      only once its effect is proven gone, which makes the reward legitimately
+      earnable again later. Rows crossed by ordinary play are not touched: a
+      later correction is not proof the member did not earn them.
+
+    Every refusal is recorded (`reward_reversals`) with its reason, so
+    `/level_reconcile` can show it and an administrator can decide. Nothing is
+    removed on a guess, and an unresolved case keeps its claim terminal, which
+    is what stops the same reward being paid twice.
+
+    Discord role removal happens outside SQLite and cannot be atomic with the
+    claim row's deletion. It is ordered first and reported per role: a failure
+    keeps the claim, an effect already gone is recognised on retry, so the
+    operation is retryable and reverts nothing twice. A crash between a role
+    removal and the claim deletion is completed by re-running the correction.
+    """
+    from utils import level_ops as ops
+
+    await ensure_tables()
+    await ops.ensure_tables()
+    guild_id, user_id, level = int(guild_id), int(user_id), max(0, int(level))
+    report = {
+        "level": level, "operation_id": operation_id,
+        "dormant": [], "in_flight": [], "kept_not_attributable": [],
+        "reversed": {"currency": [], "inventory": [], "role": [], "boost": []},
+        "kept_unresolved": [], "deleted_claims": [], "role_failures": [],
+    }
+
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "SELECT id, reward_level, track, reward_ref, payload_json, status, "
+            "operation_id, source FROM level_reward_claims "
+            "WHERE guild_id=? AND user_id=? ORDER BY reward_level, id",
+            (guild_id, user_id))
+        found = await cursor.fetchall()
+        # Unreversed level-claim credits, for the historical claims that predate
+        # `reward_grants`. Consumed one-to-one below so two rewards of the same
+        # amount can never both point at the same credit.
+        cursor = await db.execute(
+            "SELECT id, currency, amount, reason FROM transaction_ledger "
+            "WHERE guild_id=? AND user_id=? AND source='level_claim' "
+            "AND type='credit' AND reversed=0 ORDER BY id", (guild_id, user_id))
+        free_credits = [{"id": r[0], "currency": r[1], "amount": int(r[2] or 0),
+                         "reason": r[3]} for r in await cursor.fetchall()]
+
+    claims = []
+    for (claim_id, reward_level, track, ref, payload, status,
+         claim_operation, claim_source) in found:
+        try:
+            parsed = json.loads(payload) if payload else {}
+        except (TypeError, ValueError):
+            parsed = {}
+        legacy_admin = bool(
+            not str(claim_operation or "")
+            and str(claim_source or "") in LEGACY_ADMIN_SOURCES)
+        claims.append({"id": claim_id, "reward_level": int(reward_level),
+                       "track": track, "reward_ref": ref, "payload": parsed,
+                       "status": status, "operation_id": claim_operation,
+                       "source": claim_source, "legacy_admin": legacy_admin,
+                       "admin_created": is_administrative_claim({
+                           "operation_id": claim_operation,
+                           "source": claim_source})})
+
+    above = [c for c in claims if c["reward_level"] > level]
+    for claim in above:
+        if claim["status"] in ("pending", "failed"):
+            if claim["admin_created"]:
+                # Not claimable now (see _reserve_sql) and not deleted: the row
+                # is the history and the future entitlement in one. Legacy
+                # administrative rows are included here exactly like rows that
+                # carry an operation id - their recorded source is what proves
+                # an administrator created them.
+                brief = _claim_brief(claim)
+                if claim["legacy_admin"]:
+                    brief["legacy_admin"] = True
+                    brief["note"] = (
+                        "created before operation ids existed; the recorded "
+                        "source is an administrative writer, so the row is "
+                        "dormant rather than claimable above the corrected "
+                        "level")
+                report["dormant"].append(brief)
+        elif claim["status"] == "processing":
+            # A delivery that started before the lease may still be finishing
+            # outside SQLite. It is not safe to judge its effect yet; it is
+            # reported, and running the correction again after the lease routine
+            # picks it up. Never silently ignored.
+            report["in_flight"].append(_claim_brief(claim))
+        elif claim["status"] == "fulfilled":
+            if not claim["operation_id"]:
+                brief = _claim_brief(claim)
+                if claim["legacy_admin"]:
+                    brief["legacy_admin"] = True
+                    brief["note"] = (
+                        "delivered by a pre-operation-id administrative change; "
+                        "no exact reversal record exists, so it is kept and "
+                        "reported rather than guessed at")
+                report["kept_not_attributable"].append(brief)
+            else:
+                await _reverse_correction_claim(
+                    claim, report, guild_id=guild_id, user_id=user_id,
+                    level=level, operation_id=operation_id, member=member,
+                    free_credits=free_credits, reason=reason,
+                    reversed_by=actor_id)
+
+    delete_ids = [int(c["claim_id"]) for c in report["deleted_claims"]]
+    if delete_ids:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                marks = ",".join("?" for _ in delete_ids)
+                # A boost's remaining duration is the effect itself; the row is
+                # deleted here, in the same commit that removes the claim.
+                await db.execute(
+                    f"DELETE FROM leveling_active_boosts WHERE guild_id=? "
+                    f"AND user_id=? AND source IN "
+                    f"({','.join('?' for _ in delete_ids)})",
+                    [guild_id, user_id]
+                    + [f"level_claim:{cid}" for cid in delete_ids])
+                try:
+                    await db.execute(
+                        "DELETE FROM temp_roles WHERE guild_id=? AND user_id=? "
+                        "AND source='level_claim' AND claim_id IN "
+                        f"({marks})", [guild_id, user_id] + delete_ids)
+                except aiosqlite.Error:
+                    # `claim_id` is an added column. Fall back to the role ids
+                    # this correction is removing - never to `source` alone,
+                    # which would take units belonging to other claims.
+                    role_ids = sorted({
+                        int(c["role_id"])
+                        for c in report["deleted_claims"]
+                        if c.get("role_id") is not None})
+                    if role_ids:
+                        await db.execute(
+                            "DELETE FROM temp_roles WHERE guild_id=? "
+                            "AND user_id=? AND source='level_claim' "
+                            "AND role_id IN "
+                            f"({','.join('?' for _ in role_ids)})",
+                            [guild_id, user_id] + role_ids)
+                cursor = await db.execute(
+                    "DELETE FROM level_reward_claims WHERE guild_id=? "
+                    "AND user_id=? AND status='fulfilled' AND id IN "
+                    f"({marks})", [guild_id, user_id] + delete_ids)
+                if cursor.rowcount != len(delete_ids):
+                    # The lease should make this impossible; if it happens, say
+                    # so instead of reporting a clean result. The reversal
+                    # journal still names every claim, so the case is traceable.
+                    report["delete_mismatch"] = {
+                        "expected": len(delete_ids),
+                        "deleted": int(cursor.rowcount or 0)}
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+    return report
+
+
+async def _reverse_correction_claim(claim: dict, report: dict, *,
+                                    guild_id: int, user_id: int, level: int,
+                                    operation_id: str, member,
+                                    free_credits: list,
+                                    reason: str | None = None,
+                                    reversed_by: int | None = None) -> None:
+    """Reverse ONE delivered reward, or record precisely why it was kept."""
+    from utils import level_ops as ops
+
+    claim_id = int(claim["id"])
+    payload = claim["payload"]
+    origin = claim.get("operation_id")
+    why = (f"created by administrative XP change {origin} while the member was "
+           f"above Level {level}")
+    if reason:
+        # The administrator's own words travel into every journal row this
+        # reversal writes; the operation record keeps them too, but the case
+        # queue is read on its own.
+        why += f" ({reason})"
+
+    async def unresolved(kind: str, reason_text: str, *, detail=None) -> None:
+        await ops.note_reversal(
+            guild_id=guild_id, user_id=user_id, claim_id=claim_id, kind=kind,
+            quantity=int((detail or {}).get("quantity") or 1),
+            operation_id=operation_id, status=ops.STATUS_OUTSTANDING,
+            reason=f"{why}; {reason_text}",
+            currency=(detail or {}).get("currency"),
+            item_name=(detail or {}).get("item_name"),
+            role_id=(detail or {}).get("role_id"))
+        report["kept_unresolved"].append(dict(
+            _claim_brief(claim), kind=kind, reason=reason_text))
+
+    if claim["track"] == TRACK_CURRENCY:
+        code = "balance" if payload.get("currency") == "balance" else "diamonds"
+        amount = int(payload.get("amount") or 0)
+        detail = {"currency": code, "amount": amount, "quantity": amount}
+        if amount <= 0:
+            await unresolved(ops.KIND_CURRENCY, "the frozen payload has no "
+                                                 "positive amount", detail=detail)
+            return
+        grant = await ops.grant_for_claim(guild_id, user_id, claim_id,
+                                          ops.KIND_CURRENCY)
+        ledger_id = (grant or {}).get("ledger_id")
+        if ledger_id is None:
+            # Historical delivery: every level-claim credit has its own ledger
+            # row. Match it one-to-one, exactly as the reset's attribution does.
+            want = f"Level {claim['reward_level']} reward"
+            match = next((r for r in free_credits
+                          if r["currency"] == code and r["amount"] == amount
+                          and r["reason"] == want), None)
+            if match is None:
+                match = next((r for r in free_credits
+                              if r["currency"] == code
+                              and r["amount"] == amount), None)
+            if match is not None:
+                free_credits.remove(match)
+                ledger_id = match["id"]
+        if ledger_id is None:
+            await unresolved(
+                ops.KIND_CURRENCY,
+                "no unreversed level_claim credit can be matched to this "
+                "reward, so what was paid cannot be proven", detail=detail)
+            return
+        outcome = await ops.reverse_currency(
+            guild_id=guild_id, user_id=user_id, ledger_id=int(ledger_id),
+            amount=amount, currency=code, claim_id=claim_id,
+            operation_id=operation_id, reversed_by=reversed_by,
+            reason="level correction: reward above the corrected level")
+        if outcome["status"] in (ops.STATUS_APPLIED, ops.STATUS_ALREADY):
+            report["reversed"]["currency"].append(dict(
+                detail, claim_id=claim_id, reward_level=claim["reward_level"],
+                ledger_id=int(ledger_id), status=outcome["status"]))
+            report["deleted_claims"].append(dict(
+                _claim_brief(claim), role_id=None))
+        else:
+            report["kept_unresolved"].append(dict(
+                _claim_brief(claim), kind=ops.KIND_CURRENCY,
+                reason=outcome.get("reason") or outcome["status"]))
+        return
+
+    if claim["track"] == TRACK_SHOP:
+        item_name = str(payload.get("name") or "")
+        quantity = int(payload.get("quantity") or 0)
+        detail = {"item_name": item_name, "quantity": quantity}
+        if not item_name or quantity <= 0:
+            await unresolved(ops.KIND_INVENTORY,
+                             "the frozen payload has no item or quantity",
+                             detail=detail)
+            return
+        is_temp_role = str(payload.get("type") or "") == "temp_role"
+        role_id = payload.get("role_id") if is_temp_role else None
+        if is_temp_role:
+            role_outcome = await _reverse_correction_role(
+                claim, report, guild_id=guild_id, user_id=user_id,
+                role_id=role_id, level=level, operation_id=operation_id,
+                member=member, exclude_item=item_name)
+            if not role_outcome:
+                return              # already reported: the role keeps it
+        outcome = await ops.reverse_inventory(
+            guild_id=guild_id, user_id=user_id, claim_id=claim_id,
+            item_name=item_name, quantity=quantity, operation_id=operation_id,
+            reason="level correction: reward above the corrected level")
+        if outcome["status"] in (ops.STATUS_APPLIED, ops.STATUS_ALREADY):
+            report["reversed"]["inventory"].append(dict(
+                detail, claim_id=claim_id, reward_level=claim["reward_level"],
+                status=outcome["status"]))
+            report["deleted_claims"].append(dict(
+                _claim_brief(claim), role_id=role_id))
+        else:
+            report["kept_unresolved"].append(dict(
+                _claim_brief(claim), kind=ops.KIND_INVENTORY,
+                reason=outcome.get("reason") or outcome["status"]))
+        return
+
+    if claim["track"] == TRACK_BOOST:
+        detail = {"multiplier": payload.get("multiplier"),
+                  "duration_hours": payload.get("duration_hours"),
+                  "quantity": 1}
+        previous = await ops.existing_reversal(
+            guild_id, user_id, claim_id, ops.KIND_BOOST)
+        if previous and previous["status"] in (ops.STATUS_APPLIED,
+                                               ops.STATUS_ALREADY):
+            report["reversed"]["boost"].append(dict(
+                detail, claim_id=claim_id, reward_level=claim["reward_level"],
+                status=previous["status"]))
+            report["deleted_claims"].append(dict(
+                _claim_brief(claim), role_id=None))
+            return
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            cursor = await db.execute(
+                "SELECT expires_at FROM leveling_active_boosts "
+                "WHERE guild_id=? AND user_id=? AND source=?",
+                (guild_id, user_id, f"level_claim:{claim_id}"))
+            boost_row = await cursor.fetchone()
+        if not _boost_is_live(boost_row[0] if boost_row else None):
+            await unresolved(
+                ops.KIND_BOOST,
+                "the boost the reward granted has already elapsed (or was "
+                "removed), so its value cannot be taken back; the claim stays "
+                "terminal so the same reward cannot be granted twice",
+                detail=detail)
+            return
+        await ops.note_reversal(
+            guild_id=guild_id, user_id=user_id, claim_id=claim_id,
+            kind=ops.KIND_BOOST, quantity=1, operation_id=operation_id,
+            status=ops.STATUS_APPLIED,
+            reason=f"{why}; the remaining boost duration was removed")
+        report["reversed"]["boost"].append(dict(
+            detail, claim_id=claim_id, reward_level=claim["reward_level"],
+            status=ops.STATUS_APPLIED))
+        report["deleted_claims"].append(dict(_claim_brief(claim), role_id=None))
+        return
+
+    if claim["track"] == TRACK_ROLE:
+        removed = await _reverse_correction_role(
+            claim, report, guild_id=guild_id, user_id=user_id,
+            role_id=payload.get("role_id"), level=level,
+            operation_id=operation_id, member=member)
+        if removed:
+            report["deleted_claims"].append(dict(
+                _claim_brief(claim), role_id=payload.get("role_id")))
+        return
+
+    await unresolved(ops.KIND_ROLE,
+                     f"unknown reward track {claim['track']!r}")
+
+
+async def _reverse_correction_role(claim: dict, report: dict, *,
+                                   guild_id: int, user_id: int, role_id,
+                                   level: int, operation_id: str, member,
+                                   exclude_item: str | None = None) -> bool:
+    """Take a reward role off the member, or record why it stays.
+
+    Returns True only when the role's effect is gone (removed now, already
+    absent, or never held) AND that outcome is on the journal. A Discord API
+    failure is not a reversal: the claim stays terminal, the case is recorded,
+    and a later run retries the removal. `True` means the caller may delete the
+    claim row - never before this point.
+    """
+    from utils import level_ops as ops
+
+    claim_id = int(claim["id"])
+    detail = {"role_id": int(role_id) if role_id is not None else None,
+              "quantity": 1}
+    if role_id is None:
+        await ops.note_reversal(
+            guild_id=guild_id, user_id=user_id, claim_id=claim_id,
+            kind=ops.KIND_ROLE, quantity=1, operation_id=operation_id,
+            status=ops.STATUS_OUTSTANDING, role_id=None,
+            reason="the frozen payload names no role, so its effect cannot be "
+                   "identified")
+        report["kept_unresolved"].append(dict(
+            _claim_brief(claim), kind=ops.KIND_ROLE,
+            reason="the frozen payload names no role"))
+        return False
+    role_id = int(role_id)
+
+    prior = await ops.existing_reversal(guild_id, user_id, claim_id,
+                                        ops.KIND_ROLE)
+    if prior and prior["status"] in (ops.STATUS_APPLIED, ops.STATUS_ALREADY):
+        return True
+
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        shared = await _role_granted_elsewhere(
+            db, guild_id, user_id, role_id, exclude_claim_id=claim_id,
+            exclude_item=exclude_item)
+    if shared:
+        await ops.note_reversal(
+            guild_id=guild_id, user_id=user_id, claim_id=claim_id,
+            kind=ops.KIND_ROLE, quantity=1, operation_id=operation_id,
+            status=ops.STATUS_OUTSTANDING, role_id=role_id,
+            reason=f"the role is also granted by {shared}, so removing it would "
+                   f"revoke a separate entitlement")
+        report["kept_unresolved"].append(dict(
+            _claim_brief(claim), kind=ops.KIND_ROLE,
+            reason=f"the role is also granted by {shared}"))
+        return False
+
+    if member is None:
+        await ops.note_reversal(
+            guild_id=guild_id, user_id=user_id, claim_id=claim_id,
+            kind=ops.KIND_ROLE, quantity=1, operation_id=operation_id,
+            status=ops.STATUS_OUTSTANDING, role_id=role_id,
+            reason="no member object was available, so the Discord role could "
+                   "not be removed; the claim stays terminal and the removal can "
+                   "be retried")
+        report["kept_unresolved"].append(dict(
+            _claim_brief(claim), kind=ops.KIND_ROLE,
+            reason="no member object available for the Discord role removal"))
+        return False
+
+    guild = getattr(member, "guild", None)
+    role = guild.get_role(role_id) if guild is not None else None
+    # A list, not a set: discord.py Role objects are hashable, but test doubles
+    # and other embedders may pass plain objects whose equality is identity.
+    held = list(getattr(member, "roles", None) or [])
+    if role is not None and role in held:
+        try:
+            await member.remove_roles(
+                role, reason=f"Level correction: Level {claim['reward_level']} "
+                             f"reward is above the corrected level")
+        except Exception as exc:
+            report["role_failures"].append({"claim_id": claim_id,
+                                            "role_id": role_id,
+                                            "error": str(exc)})
+            await ops.note_reversal(
+                guild_id=guild_id, user_id=user_id, claim_id=claim_id,
+                kind=ops.KIND_ROLE, quantity=1, operation_id=operation_id,
+                status=ops.STATUS_OUTSTANDING, role_id=role_id,
+                reason=f"Discord refused the role removal: {exc}")
+            report["kept_unresolved"].append(dict(
+                _claim_brief(claim), kind=ops.KIND_ROLE,
+                reason=f"Discord refused the role removal: {exc}"))
+            return False
+    # role is None (deleted in the guild) or not held: there is no live effect.
+    await ops.note_reversal(
+        guild_id=guild_id, user_id=user_id, claim_id=claim_id,
+        kind=ops.KIND_ROLE, quantity=1, operation_id=operation_id,
+        status=ops.STATUS_APPLIED, role_id=role_id,
+        reason="reward role removed from the member / already absent")
+    report["reversed"]["role"].append(dict(
+        detail, claim_id=claim_id, reward_level=claim["reward_level"],
+        status=ops.STATUS_APPLIED))
+    return True
+
+
+def claim_is_dormant(claim) -> bool:
+    """A row an administrative XP change created, now above the member's level.
+
+    Reward eligibility follows the member's CORRECTED level. When an administrator
+    reduces a level, the entitlements the higher level created stop being
+    collectable immediately - even before (or without) the reconciliation pass,
+    and even if the process that applied the change died. The row is never deleted
+    here: it is history, and legitimately crossing that level again makes the very
+    same row claimable again, at most once.
+
+    Rows an administrative change did NOT create (ordinary play) are deliberately
+    excluded: they were earned at the level they name, and a later correction is
+    not proof that the member did not earn them. `record_crossing()` writes the
+    operation id for the current administrative writers; rows written by the two
+    administrative writers that predate that column are recognised by their
+    recorded `source` (`is_administrative_claim`). Everything else - ordinary
+    play, the legacy backfill, and rows with an unknown/empty source - keeps the
+    old (claimable) behaviour and is reported as unattributable by the
+    correction rather than guessed at.
+    """
+    if not claim.get("above_level"):
+        return False
+    # `admin_created` is kept as an explicit override for callers/reports that
+    # already classified the row; otherwise classify from the row itself.
+    return bool(claim.get("admin_created")
+                or is_administrative_claim(claim))
+
+
 async def list_claims(guild_id: int, user_id: int) -> list[dict]:
     await ensure_tables()
-    async with aiosqlite.connect(DB_PATH) as db:
+    # Same expiry rule claim_available()'s reservation uses: a 'processing' row
+    # whose lease ran out (or never recorded a start) is recoverable, so report
+    # it as 'pending'. Read-only: reservation/ownership logic is untouched.
+    expired_before = _iso(_now() - timedelta(seconds=LEASE_SECONDS))
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         cursor = await db.execute("""
             SELECT id, reward_level, track, reward_ref, payload_json,
-                   status, last_error, created_at, fulfilled_at, source
+                   status, last_error, created_at, fulfilled_at, source,
+                   processing_started_at, operation_id
             FROM level_reward_claims
             WHERE guild_id=? AND user_id=?
             ORDER BY reward_level, id
         """, (guild_id, user_id))
         found = await cursor.fetchall()
+        cursor = await db.execute(
+            "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id))
+        level_row = await cursor.fetchone()
+    current_level = progress_level(level_row[0] if level_row else 0)
     rows = []
     for (claim_id, level, track, ref, payload, status, error,
-         created_at, fulfilled_at, source) in found:
+         created_at, fulfilled_at, source, started_at,
+         claim_operation) in found:
+        stale = (status == "processing"
+                 and (started_at is None or started_at < expired_before))
         rows.append({
             "id": claim_id,
             "reward_level": level,
             "track": track,
             "reward_ref": ref,
             "payload": json.loads(payload),
-            "status": status,
+            "status": "pending" if stale else status,
             "last_error": error,
             # History, for the /level Stats view: when the crossing was recorded,
             # when it was delivered, and which path recorded it. Read-only —
@@ -1117,6 +1939,21 @@ async def list_claims(guild_id: int, user_id: int) -> list[dict]:
             "created_at": created_at,
             "fulfilled_at": fulfilled_at,
             "source": source,
+            "stale_processing": stale,
+            # Eligibility input, not a status change: which administrative XP
+            # change (if any) created this entitlement, and whether it now sits
+            # above the member's level. `claim_is_dormant()` is the single
+            # predicate the card, the button and the correction all read.
+            # `legacy_admin` marks the pre-operation-id rows that are still
+            # administrative because of their recorded source.
+            "operation_id": claim_operation,
+            "admin_created": is_administrative_claim({
+                "operation_id": claim_operation, "source": source}),
+            "legacy_admin": bool(
+                not str(claim_operation or "")
+                and str(source or "") in LEGACY_ADMIN_SOURCES),
+            "current_level": current_level,
+            "above_level": int(level) > int(current_level),
         })
     return rows
 

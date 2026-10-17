@@ -451,9 +451,14 @@ async def test_level_stats_button_styles():
           and view.show_stats.style == discord.ButtonStyle.secondary)
     guild = SimpleNamespace(id=GUILD, get_role=lambda _rid: None)
     member_obj = SimpleNamespace(id=USER)
+    # `_refresh` acknowledges with response.defer() before any database work and
+    # then lands the page on the deferred response (this is the "Nero didn't
+    # respond in time" fix), so the fake interaction carries both.
     interaction = SimpleNamespace(
         user=member_obj, guild=guild,
-        response=SimpleNamespace(edit_message=AsyncMock(), send_message=AsyncMock()))
+        response=SimpleNamespace(edit_message=AsyncMock(), send_message=AsyncMock(),
+                                 defer=AsyncMock()),
+        edit_original_response=AsyncMock())
     with patch.object(leveling_module, "_level_embed",
                       new=AsyncMock(return_value=discord.Embed(title="test"))):
         await view._refresh(interaction, "stats")
@@ -464,6 +469,11 @@ async def test_level_stats_button_styles():
         check("returning to Level restores blue/gray active-page styling",
               view.show_level.style == discord.ButtonStyle.primary
               and view.show_stats.style == discord.ButtonStyle.secondary)
+        check("both page swaps acknowledged before rendering, and edited the "
+              "deferred response",
+              interaction.response.defer.await_count == 2
+              and interaction.edit_original_response.await_count == 2
+              and interaction.response.edit_message.await_count == 0)
 
 
 async def main():

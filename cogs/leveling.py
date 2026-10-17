@@ -1,4 +1,5 @@
 import discord
+from typing import Literal
 from discord.ext import commands, tasks
 from discord import app_commands
 import aiosqlite
@@ -139,6 +140,14 @@ def _progress_path(current: int, needed: int,
     end), so no floating-point comparison decides where the plane sits: equal
     progress always draws an equal path, and one slot of progress always moves
     it one character further along.
+
+    A station flips to ◆ only once the plane has ARRIVED at it. Slot 3*k is the
+    start of link k (station k reached, station k+1 not), 3*k+1 its middle and
+    3*k+2 its end - still short of station k+1, which sits at (k+1)/segments of
+    the path. The old `+1 if step == 2` therefore lit the next station one slot
+    early and drew `◆━━◆━━✈︎◆━━◇━━◇` at ~46% progress: a reached station
+    immediately after the plane for a station the member has not reached. Only a
+    finished level (current >= needed) has every station reached.
     """
     stations = max(2, int(stations))
     segments = stations - 1
@@ -147,7 +156,7 @@ def _progress_path(current: int, needed: int,
     done = min(max(int(current or 0), 0), span)
     slot = min(done * slots // span, slots - 1) if span else 0
     segment, step = divmod(slot, 3)
-    reached = segment + 1 + (1 if step == 2 else 0)
+    reached = stations if (span and done >= span) else segment + 1
 
     parts = []
     for index in range(stations):
@@ -188,10 +197,14 @@ def _claimable_now(claim, booster_ok: bool = False) -> bool:
 
     The single predicate behind the Claim All button, the "Rewards Available"
     list and what the claim pass will actually pay, so those three can never
-    disagree: pending or retryable-failed, and not a Booster-only reward the
-    member's verified boost status leaves locked.
+    disagree: pending or retryable-failed, not a Booster-only reward the member's
+    verified boost status leaves locked, and not a row a corrected level has put
+    out of reach (see `claim_is_dormant()` in utils/level_claims.py, which reads
+    the same eligibility rule the reservation SQL enforces).
     """
+    from utils.level_claims import claim_is_dormant
     return ((claim or {}).get("status") in _CLAIMABLE_STATUSES
+            and not claim_is_dormant(claim)
             and not _is_locked_claim(claim, booster_ok))
 
 
@@ -199,17 +212,46 @@ def _has_claimable(claims, booster_ok: bool = False) -> bool:
     return any(_claimable_now(c, booster_ok) for c in (claims or []))
 
 
-async def _claim_button_available(guild_id: int, claims,
-                                  booster_ok: bool = False) -> bool:
-    """Also expose Claim All as the explicit exclusive-role reconcile action."""
+async def _claim_button_state(guild_id: int, claims,
+                              booster_ok: bool = False) -> tuple[bool, bool]:
+    """`(claimable, reconcile_only)` - what the Claim All button should look like.
+
+    ``claimable``      at least one row this member can collect right now. This
+                       is the only state that earns the green/success style:
+                       green has always read as "rewards are waiting for you".
+    ``reconcile_only`` nothing to collect, but the exclusive-role reconcile
+                       action (a fulfilled role claim plus
+                       `remove_old_reward_role`, see
+                       test_leveling_claim_all_d2.py) still has work to do.
+
+    These two drive two DIFFERENT buttons now. Before, both states lit the same
+    `Claim All` button, so a card whose rewards had all been delivered stayed
+    clickable whenever `remove_old_reward_role` was on - an enabled button named
+    "Claim All" that could not claim anything, which is what invited the repeat
+    clicks that each answered "Claimed 0". `claimable` alone earns the green
+    Claim All; `reconcile_only` alone earns a separate, explicitly labelled role
+    button, and Claim All sits grey and disabled meanwhile.
+
+    Read-only. `_claim_button_available()` is the boolean "is either action
+    reachable" form of this, kept for the D2 contract in
+    test_leveling_claim_all_d2.py / test_slice2_level_claims.py.
+    """
     if _has_claimable(claims, booster_ok):
-        return True
+        return True, False
     if not any((claim or {}).get("track") == "role"
                and (claim or {}).get("status") == "fulfilled"
                for claim in (claims or [])):
-        return False
+        return False, False
     config = await get_leveling_config(guild_id)
-    return bool(config.get("remove_old_reward_role"))
+    return False, bool(config.get("remove_old_reward_role"))
+
+
+async def _claim_button_available(guild_id: int, claims,
+                                  booster_ok: bool = False) -> bool:
+    """Also expose Claim All as the explicit exclusive-role reconcile action."""
+    claimable, reconcile_only = await _claim_button_state(
+        guild_id, claims, booster_ok)
+    return claimable or reconcile_only
 
 
 def _claim_age(value) -> str:
@@ -250,7 +292,13 @@ def _claim_reward_text(guild, claim, currency) -> str:
 
 
 def claim_result_footer(result: dict) -> str:
-    """The Claim All footer, including any Level role that was reconciled.
+    """تذييل Claim All - the Claim All footer, including any reconciled role.
+
+    This line is attached to the member-facing Claim All embed, so it is Arabic
+    end to end like `claim_confirmation()` above it: one message, one language.
+    It carries counts and status only - never an item or role name, which is why
+    nothing here needs the original English wording. "Boosters" stays as the
+    product's own name for the paid tier.
 
     A restored role is not a newly fulfilled claim (nothing was paid, the claim
     was already fulfilled), so it would otherwise be invisible in the footer.
@@ -258,40 +306,476 @@ def claim_result_footer(result: dict) -> str:
     """
     got = len(result.get("fulfilled") or [])
     missed = len(result.get("failed") or [])
-    text = f"Claimed {got}. Retryable failures: {missed}."
+    text = (f"تم الاستلام: {got}. "
+            f"إخفاقات قابلة لإعادة المحاولة: {missed}.")
     locked = int(result.get("locked") or 0)
     if locked:
-        text += f" Locked (Boosters only): {locked}."
+        text += f" مقفلة (Boosters فقط): {locked}."
         if result.get("booster_unverified"):
-            text += " Boost status could not be verified."
+            text += " تعذّر التحقق من حالة Boosters."
     reconciled = result.get("reconciled") or {}
     restored = len(reconciled.get("restored") or [])
     reconciliation_failures = len(reconciled.get("failed") or [])
     if restored:
-        text += f" Level role restored: {restored}."
+        text += f" تمت إعادة رتبة المستوى: {restored}."
     if reconciliation_failures:
-        text += (f" Level role reconciliation failure(s): "
+        text += (f" فشل في مطابقة رتبة المستوى: "
                  f"{reconciliation_failures}.")
+    # `blocked` is set before any row is reserved when another operation (an
+    # XP correction or rollback) holds this member's lease. Saying only
+    # "0 delivered / 0 retryable" made an intentional refusal look like an
+    # empty pass and invited the member to press the same button again.
+    if str(result.get("blocked") or "").strip():
+        text += (" ⏸️ عملية تصحيح XP قيد التنفيذ لهذا العضو — "
+                 "لم يُستلم أي شيء. أعد المحاولة بعد انتهائها.")
     return text
 
 
-async def _level_embed(guild, member, page: str) -> discord.Embed:
+def case_closed_reply(case: str) -> str:
+    """The reply when an administrator's decision lost to an earlier one.
+
+    `/level_reconcile` decides against the case list read at the start of the
+    command, so two administrators (or a stale retry) can both try to decide the
+    same case. The decision is a one-way transition in the database: the attempt
+    that loses must not delete the claim behind `drop_claim`, and must say so
+    plainly instead of reporting a resolution that did not happen.
+    """
+    return (f"Case `{case}` was already resolved before this request completed - "
+            f"nothing was deleted and the recorded decision is unchanged. The "
+            f"journal keeps every decision, so the case can still be read "
+            f"(re-run without `case` to list what is still open). A closed case "
+            f"cannot be re-decided; if the member's rewards need a different "
+            f"outcome, start a fresh review of them.")
+
+
+def _claim_totals(delivered: list, currency: dict) -> str:
+    """One summary line for what was actually paid, aggregated per unit.
+
+    Currency and Shop rows are fungible quantities, so they are summed by
+    currency/item name (three coin rewards read as one coin total, not three
+    lines of arithmetic for the member). Roles and XP boosts are not quantities,
+    so they are counted. Empty groups are omitted.
+    """
+    names = currency or {}
+    coin_name = ((names.get("coins") or {}).get("name") or "Coins")
+    gem_name = ((names.get("diamonds") or {}).get("name") or "Diamonds")
+    money = {"balance": 0, "diamonds": 0}
+    items: dict[str, int] = {}
+    roles = boosts = 0
+    for claim in delivered:
+        track, payload = claim.get("track"), (claim.get("payload") or {})
+        if track == "currency":
+            code = "balance" if payload.get("currency") == "balance" else "diamonds"
+            money[code] += int(payload.get("amount", 0) or 0)
+        elif track == "shop":
+            name = str(payload.get("name") or "item")
+            items[name] = items.get(name, 0) + int(payload.get("quantity", 0) or 0)
+        elif track == "boost":
+            boosts += 1
+        else:
+            roles += 1
+    parts = []
+    if money["balance"]:
+        parts.append(f"{_compact_qty(money['balance'])} {coin_name}")
+    if money["diamonds"]:
+        parts.append(f"{_compact_qty(money['diamonds'])} {gem_name}")
+    parts += [f"{_compact_qty(qty)} {name}" for name, qty in sorted(items.items())]
+    if roles:
+        parts.append(f"{roles} role reward(s)")
+    if boosts:
+        parts.append(f"{boosts} XP boost(s)")
+    return " · ".join(parts) if parts else "nothing"
+
+
+_DROP_NOTE = "… و{n} سطرًا أخرى (القائمة أطول من حدّ Discord)"
+
+
+def _bounded_lines(lines: list[str], limit: int = 1024) -> str:
+    """Join field lines without ever cutting one in half (Discord caps at 1024).
+
+    The headline and the closing status line are always kept whole; whole reward
+    lines are dropped from the end of the list until it fits, and the note says
+    how many were dropped. A truncated list must not read as a complete one, and
+    the status line ("nothing left to claim" / "N still available") is the part a
+    member actually acts on, so it is never the thing that gets cut.
+    """
+    text = "\n".join(lines)
+    if len(text) <= limit:
+        return text
+    if len(lines) < 3:
+        # Nothing between the headline and the closing line to drop.
+        return text[:limit]
+    head, body, tail = lines[0], list(lines[1:-1]), lines[-1]
+    for keep in range(len(body), -1, -1):
+        dropped = len(body) - keep
+        parts = [head, *body[:keep]]
+        if dropped:
+            parts.append(_DROP_NOTE.format(n=dropped))
+        parts.append(tail)
+        text = "\n".join(parts)
+        if len(text) <= limit:
+            return text
+    # Even the headline, the note and the status line do not fit together, so
+    # the headline absorbs the cut rather than the status line.
+    note = _DROP_NOTE.format(n=len(body))
+    room = max(0, limit - len(note) - len(tail) - 2)
+    return f"{head[:room]}\n{note}\n{tail}"[:limit]
+
+
+async def claim_confirmation(guild, result: dict, claims,
+                             booster_ok: bool = False) -> tuple[str, str] | None:
+    """رسالة استلام المكافآت - what Claim All actually delivered, in Arabic.
+
+    `result` carries claim IDs only, so each one is resolved against the claim
+    rows read straight after the pass and rendered with the same
+    `_claim_reward_text()` the Stats page uses: one vocabulary and one source of
+    truth, so a name here can never disagree with the row that was paid.
+
+    Honesty rules this is written against:
+    * `result["fulfilled"]` is appended by the claim engine only after the
+      delivery AND the `fulfilled` state change both succeeded - never merely
+      because a claim row exists. So a row is listed as delivered only if it was
+      actually paid.
+    * The congratulatory headline appears ONLY when nothing failed. A partial
+      pass says what landed, what did not (with the recorded reason) and what is
+      still claimable - it never reads as a general success.
+    * A pass that delivered nothing says so plainly.
+
+    Returns `(field name, field value)`, or None when the pass neither delivered
+    nor failed anything - a no-op repeat click, or a reconcile-only pass, whose
+    restored Level role `claim_result_footer()` already reports.
+    """
+    from utils.currency import get_currency_config
+    by_id = {int(c["id"]): c for c in (claims or []) if c.get("id") is not None}
+    order = lambda c: (int(c["reward_level"]), str(c["track"]), int(c["id"]))
+    delivered = sorted((by_id[int(i)] for i in (result.get("fulfilled") or [])
+                        if int(i) in by_id), key=order)
+    broken = sorted((by_id[int(i)] for i in (result.get("failed") or [])
+                     if int(i) in by_id), key=order)
+    if not delivered and not broken:
+        return None
+    currency = (await get_currency_config(guild.id)) if guild is not None else {}
+    remaining = [c for c in (claims or []) if _claimable_now(c, booster_ok)]
+
+    if delivered and not broken:
+        head = "🎉 مبروك! تم استلام مكافآتك"
+    elif delivered:
+        head = "⚠️ تم تسليم بعض المكافآت فقط"
+    else:
+        head = "❌ تعذّر تسليم المكافآت"
+
+    lines = [head]
+    if delivered:
+        lines.append(f"✅ **تم تسليم {len(delivered)} مكافأة فعلًا:**")
+        lines += [f"- {_claim_reward_text(guild, c, currency)}" for c in delivered]
+        # A total only adds information once there is more than one reward.
+        if len(delivered) > 1:
+            lines.append(f"**الإجمالي:** {_claim_totals(delivered, currency)}")
+    if broken:
+        verb = ("**تعذّر تسليم**" if not delivered
+                else "**ولم يتم تسليم**")
+        lines.append(f"❌ {verb} {len(broken)} مكافأة "
+                     f"(ما زالت محفوظة لك ويمكن إعادة المحاولة):")
+        for claim in broken:
+            reason = (claim.get("last_error") or "no error recorded").strip()
+            lines.append(f"- {_claim_reward_text(guild, claim, currency)}"
+                         f" — السبب: {reason[:160]}")
+    if remaining:
+        lines.append(f"⏳ **ما زال متاحًا للاستلام:** {len(remaining)} مكافأة — "
+                     f"زر Claim All ما زال مفعّلًا.")
+    elif delivered and not broken:
+        lines.append("✔ لا يتبقّى شيء للاستلام — كل المكافآت تم تسليمها.")
+    return "نتيجة الاستلام", _bounded_lines(lines)
+
+
+def _level_reset_embed(member, report: dict, *, applied: bool) -> discord.Embed:
+    """The /level_test_reset preview (or result). Nothing here writes anything.
+
+    The preview has to name every record and side effect the reset touches, every
+    delivered level reward it CAN take back and how, and - just as importantly -
+    every one it CANNOT, so an admin never confirms a destructive step on a
+    guess. Things that are not level rewards (prestige, value from other systems)
+    are reported as notes and never counted against the result.
+    """
+    plan = report.get("plan") or {}
+    if applied:
+        title = "Level test reset — APPLIED"
+        color = 0x3ba55d
+    else:
+        title = "Level test reset — PREVIEW (nothing changed)"
+        color = 0x7c5cbf
+    embed = discord.Embed(title=title, color=color)
+    embed.add_field(
+        name="Scope",
+        value=(f"guild `{report['guild_id']}` · member {member.mention} "
+               f"(`{report['user_id']}`)\nenvironment: `{report['environment']}`\n"
+               f"database file: `{report.get('db_path') or 'unknown'}`\n"
+               f"Never any other member, guild, or reward definition."),
+        inline=False)
+    # The environment alone is not a safety statement: `NERO_ENVIRONMENT` has
+    # several spellings and an unset one silently selects the production file, so
+    # the resolved path is shown next to the verdict and the two can be compared.
+    lock = report.get("lock")
+    if lock and not lock.get("acquired"):
+        embed.add_field(
+            name="⛔ Another operation holds this member",
+            value=str(lock.get("reason") or "a concurrent operation is running"),
+            inline=False)
+    if report.get("concurrent_claims"):
+        embed.add_field(
+            name="⚠️ Claims moved while this ran",
+            value=(f"{len(report['concurrent_claims'])} claim row(s) appeared or "
+                   "changed between the inspection and the write, so they were "
+                   "left alone and are listed in the reconciliation queue "
+                   "instead of being deleted on a stale snapshot."),
+            inline=False)
+    prestige_now = report.get("prestige", 0)
+    vi_now = report.get("vi_activation")
+    embed.add_field(
+        name="Current record",
+        value=(f"Level {report['level']} · {report['xp']:,} XP\n"
+               f"Prestige: permanent tier {prestige_now}"
+               + (f" · VI activation {vi_now}" if vi_now is not None else "")
+               + ("" if plan.get("reset_prestige")
+                  else " · **not reset** (pass include_prestige)") + "\n"
+               f"claim rows: {len(report['claims'])} "
+               f"({', '.join(f'{n} {s}' for s, n in sorted(report['claims_by_status'].items())) or 'none'})"),
+        inline=False)
+    would = "Reset" if applied else "Would reset"
+    lines = [
+        "- zero XP/Level in `levels`" if plan.get("zero_levels_row")
+        else "- no `levels` row to zero",
+        f"- delete {plan.get('delete_claims', 0)} `level_reward_claims` row(s) "
+        f"→ those reward levels become earnable again"
+        + (f", of which {len(plan.get('legacy_backfill_claims') or [])} are legacy "
+           f"backfill rows the migration marked fulfilled WITHOUT paying"
+           if plan.get("legacy_backfill_claims") else ""),
+        f"- delete {plan.get('delete_boosts', 0)} level-claim `leveling_active_boosts` row(s)",
+        f"- delete {plan.get('delete_temp_roles', 0)} level-claim `temp_roles` unit(s)",
+    ]
+    roles = plan.get("remove_discord_roles") or []
+    lines.append(f"- remove {len(roles)} reward role(s) from the member"
+                 + (f": {', '.join(f'<@&{r}>' for r in roles)}" if roles else ""))
+    if plan.get("reset_prestige"):
+        lines.append(
+            f"- zero permanent Prestige (tier {plan.get('prestige_now', 0)}) and "
+            f"delete the Prestige VI activation. **Shop purchases are not "
+            f"refunded.**")
+    left_on = plan.get("roles_left_on_member") or []
+    if left_on:
+        lines.append(
+            "- leave on the member (another grant also gives them, so removing "
+            "them would revoke it): "
+            + ", ".join(f"<@&{r['role_id']}> via {', '.join(r['also_granted_by'])}"
+                        for r in left_on))
+    lines.append(
+        "- a role that cannot be taken off keeps its claim and temp-role rows, "
+        "so it can never be paid twice and never becomes undocumented")
+    embed.add_field(name=would, value="\n".join(lines)[:1024], inline=False)
+
+    # Every level reward this member actually received, split by whether the
+    # reset can prove it and take it back. Amounts come from the append-only
+    # ledger and the frozen claim payloads - what was really paid, not what a
+    # reward definition says today.
+    will = []
+    for entry in plan.get("reverse_currency") or []:
+        will.append(f"- L{entry['reward_level']} · {entry['amount']:,} "
+                    f"{entry['currency']} → reversed via ledger row "
+                    f"`{entry['ledger_id']}`"
+                    + (" (already reversed earlier)"
+                       if entry.get("already_reversed") else ""))
+    for entry in plan.get("reverse_inventory") or []:
+        will.append(f"- L{entry['reward_level']} · {entry['quantity']}x "
+                    f"{entry['item_name']} → removed from the inventory")
+    if will:
+        embed.add_field(
+            name=("Delivered level rewards this reset reverses" if not applied
+                  else "Delivered level rewards reversed"),
+            value="\n".join(will)[:1024], inline=False)
+
+    cannot = plan.get("cannot_reverse") or []
+    if cannot:
+        embed.add_field(
+            name="⚠️ Delivered value that CANNOT be reversed",
+            value="\n".join(
+                f"- L{e['reward_level']} {e['kind']}: {e.get('note') or e.get('error')}"
+                for e in cannot[:20])[:1024]
+            + "\n**These claim rows are KEPT**, so the reward cannot be claimed a "
+              "second time while its value is still in the member's hands. Each "
+              "case is queued in the reversal journal; resolve one at a time with "
+              "`/level_reconcile` and it records who decided what.",
+            inline=False)
+    already = plan.get("already_reversed") or []
+    if already:
+        embed.add_field(
+            name="Already reversed earlier (nothing moves again)",
+            value="\n".join(
+                f"- L{e['reward_level']} {e['kind']} · claim `{e['claim_id']}`"
+                for e in already[:20])[:1024],
+            inline=False)
+
+    # `report["grants"]` is keyed by (claim_id, kind), so iterate the VALUES:
+    # iterating the mapping itself yields key tuples, which is how a preview
+    # renders as a crash instead of a report.
+    grants = list((report.get("grants") or {}).values())
+    if grants or cannot:
+        attributable = sum(int(g.get("remaining_quantity") or 0) for g in grants)
+        prov_lines = [
+            f"- {len(grants)} recorded grant(s) in `reward_grants`, "
+            f"{attributable} unit(s) still attributable to a reward",
+        ]
+        if not grants:
+            prov_lines.append(
+                "- this member's rewards were delivered BEFORE reward provenance "
+                "was recorded, so no item can be tied to a specific grant")
+        prov_lines.append(
+            "- inventory is only reversed when a grant row still accounts for the "
+            "units; a stack total is never treated as proof of ownership")
+        embed.add_field(
+            name=("Reward provenance" if applied else "Reward provenance (preview)"),
+            value="\n".join(prov_lines)[:1024], inline=False)
+
+    # The manual-review half of the report: what looks related to a level reward
+    # but cannot be pinned to one, so it is left alone and explained rather than
+    # guessed at. Shown on the preview too, because an admin deciding whether to
+    # confirm needs to know what will NOT be undone.
+    unattributable = (report.get("reconciliation") or {}).get("unattributable") or []
+    if unattributable:
+        embed.add_field(
+            name="Left alone: cannot be attributed to a level reward",
+            value="\n".join(
+                f"- `{u['table']}` — {u['reason']}" for u in unattributable)[:1024],
+            inline=False)
+    if applied:
+        removed = report.get("roles_removed") or []
+        failures = report.get("role_failures") or []
+        preserved = report.get("claims_preserved") or []
+        after = report.get("after") or {}
+        result_lines = [
+            f"XP/Level now {after.get('xp', 0):,} / L{after.get('level', 0)}",
+            f"Prestige now tier {after.get('prestige', 0)}"
+            + (" · VI activation cleared" if plan.get("reset_prestige")
+               else " · **left in place**"),
+            f"claim rows left: {after.get('claims', 0)} · boosts: "
+            f"{after.get('boosts', 0)} · temp-role units: "
+            f"{after.get('temp_roles', 0)}",
+        ]
+        if report.get("operation_id"):
+            result_lines.append(f"operation: `{report['operation_id']}`")
+        journal = report.get("journal") or []
+        if journal:
+            result_lines.append(
+                f"reversal journal: {len(journal)} row(s) written in the same "
+                f"transaction as the movements they describe")
+        embed.add_field(name="Result", value="\n".join(result_lines), inline=False)
+        outstanding = report.get("outstanding") or []
+        if outstanding:
+            embed.add_field(
+                name="🧾 Open cases for /level_reconcile",
+                value="\n".join(
+                    f"- L{e.get('reward_level', '?')} {e.get('kind', '')}: "
+                    f"{str(e.get('note') or e.get('error') or 'unresolved')[:150]}"
+                    for e in outstanding[:20])[:1024]
+                + "\nThese stay FAILED and traceable. Nothing here is silently "
+                  "dropped, and none of these rewards becomes claimable again "
+                  "until a human resolves the case.",
+                inline=False)
+        if report.get("ran"):
+            embed.add_field(name="What ran",
+                            value="\n".join(f"- {r}" for r in report["ran"])[:1024],
+                            inline=False)
+        if failures:
+            embed.add_field(
+                name="Roles that could NOT be removed",
+                value="\n".join(
+                    f"- <@&{f['role_id']}> — {str(f['error'])[:120]}"
+                    for f in failures[:20])[:1024]
+                + ("\nTheir claim and temp-role rows were KEPT, so the member is "
+                   "not left wearing an undocumented reward role and the removal "
+                   "can be retried." if preserved else ""),
+                inline=False)
+        elif removed:
+            embed.add_field(name="Roles removed",
+                            value=", ".join(f"<@&{r}>" for r in removed)[:1024],
+                            inline=False)
+        if report.get("could_not"):
+            embed.add_field(
+                name="What could NOT be done",
+                value="\n".join(f"- {c}" for c in report["could_not"])[:1024],
+                inline=False)
+        if report.get("unreversed"):
+            kept = len(report.get("claims_preserved") or [])
+            embed.set_footer(
+                text=f"{len(report['unreversed'])} delivered reward(s) could not "
+                     f"be reversed; {kept} claim row(s) kept and queued for "
+                     f"/level_reconcile — see above.")
+        else:
+            # The applied embed always ends on the same question the admin has:
+            # did anything have to be left behind?
+            embed.set_footer(
+                text="Every delivered level reward this reset could attribute was "
+                     "reversed; nothing was preserved.")
+
+    # The honesty rule the whole tool is written against: if anything from the
+    # previous run survived, this is not a New Game and the admin is told so,
+    # before they rely on the member as a clean test subject.
+    traces = report.get("traces") or []
+    if traces:
+        embed.add_field(
+            name="⚠️ Not a clean New Game — traces of the previous run",
+            value="\n".join(f"- {t}" for t in traces)[:1024], inline=False)
+    elif applied:
+        embed.add_field(
+            name="✅ Clean New Game",
+            value="No level-reward trace of the previous run survived: XP, level, "
+                  "claim records, boosts, temp roles, Discord roles and the "
+                  "delivered currency/items this reset could prove are all "
+                  "reversed for this member only.", inline=False)
+    # Not level rewards, so not traces - but the admin should still see them.
+    notes = report.get("notes") or []
+    if notes:
+        embed.add_field(name="Left alone on purpose (not level rewards)",
+                        value="\n".join(f"- {n}" for n in notes)[:1024],
+                        inline=False)
+    if not applied:
+        embed.set_footer(
+            text="Preview only — nothing above was written. Re-run with "
+                 "confirm: True and a reason to apply.")
+    return embed
+
+
+async def _level_embed(guild, member, page: str, *, claims=None) -> discord.Embed:
+    """Render one /level page.
+
+    ``claims`` lets a caller that already read ``level_reward_claims`` (every
+    button interaction does) hand the rows over instead of paying for a second
+    read. That matters because this runs inside Discord's 3-second interaction
+    window: each ``list_claims()`` is two SQLite connections (``ensure_tables()``
+    plus the query), and a click used to open six of them before anything was
+    acknowledged. Read-only either way - omitting it changes nothing but cost.
+    """
     from utils.currency import get_currency_config
     from utils.level_claims import (
         current_level_definitions, list_claims, next_reward_level,
     )
     from utils.xp_calculator import xp_progress
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    # timeout=10 like every other leveling connection: the bot's own XP writer
+    # holds BEGIN IMMEDIATE locks, and the 5s default made a busy database both
+    # slower to answer and able to raise "database is locked" mid-render.
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         cursor = await db.execute(
             "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
             (guild.id, member.id))
         row = await cursor.fetchone()
     xp = row[0] if row else 0
     level, current, needed = xp_progress(xp)
-    from utils.level_claims import is_booster_ref, member_is_booster
+    from utils.level_claims import (
+        claim_is_dormant, is_booster_ref, member_is_booster,
+    )
     booster_ok = member_is_booster(member)
-    claims = await list_claims(guild.id, member.id)
+    if claims is None:
+        claims = await list_claims(guild.id, member.id)
     by_key = {(c["reward_level"], c["track"], c["reward_ref"]): c for c in claims}
     if page == "stats":
         # Reward/claim history, not a second copy of the progression numbers
@@ -303,10 +787,23 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
             by_status.setdefault(claim["status"], []).append(claim)
         fulfilled = by_status.get("fulfilled", [])
         waiting_all = by_status.get("pending", []) + by_status.get("failed", [])
+        # A row an administrative XP change created above the member's CURRENT
+        # level is not waiting for delivery; it is out of reach until the member
+        # legitimately reaches that level again. Counting it as pending made the
+        # page promise rewards Claim All can never pay.
+        dormant_claims = [c for c in waiting_all if claim_is_dormant(c)]
+        waiting_all = [c for c in waiting_all if not claim_is_dormant(c)]
         locked_claims = [c for c in waiting_all if _is_locked_claim(c, booster_ok)]
         waiting = [c for c in waiting_all if not _is_locked_claim(c, booster_ok)]
         failed = [c for c in by_status.get("failed", [])
-                  if not _is_locked_claim(c, booster_ok)]
+                  if not _is_locked_claim(c, booster_ok)
+                  and not claim_is_dormant(c)]
+        # A row still reporting 'processing' holds a LIVE lease (list_claims
+        # reports an expired one as 'pending', because the next Claim All really
+        # can take it). It is neither delivered nor waiting-to-be-claimed, and
+        # counting it in neither made this page announce "every crossed reward
+        # is delivered" while a reward was in flight or stranded.
+        in_flight = by_status.get("processing", [])
         newest = max((c for c in fulfilled if c.get("fulfilled_at")),
                      key=lambda c: c["fulfilled_at"], default=None)
         oldest = min((c for c in waiting if c.get("created_at")),
@@ -318,16 +815,41 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
                             f"{_claim_age(newest['fulfilled_at'])}")
         embed.add_field(name="Claimed", value=claimed_txt, inline=False)
         pending_ready = [c for c in by_status.get("pending", [])
-                         if not _is_locked_claim(c, booster_ok)]
+                         if not _is_locked_claim(c, booster_ok)
+                         and not claim_is_dormant(c)]
         waiting_txt = (f"{len(pending_ready)} pending · "
                        f"{len(failed)} retryable failure(s)")
+        if in_flight:
+            waiting_txt += f" · {len(in_flight)} being delivered now"
         if locked_claims:
             waiting_txt += f" · {len(locked_claims)} locked (Boosters only)"
+        if dormant_claims:
+            waiting_txt += (f" · {len(dormant_claims)} above your current level "
+                            f"(not claimable)")
         if oldest:
             waiting_txt += (f"\nOldest: {_claim_reward_text(guild, oldest, currency)} · "
                             f"{_claim_age(oldest['created_at'])}")
         elif not waiting and not locked_claims:
-            waiting_txt = "Nothing waiting — every crossed reward is delivered."
+            # Only say "delivered" when the rows actually say so: an in-flight
+            # lease or a stranded row is not a delivery. The counts are rebuilt
+            # rather than appended so this sentence cannot drop the in-flight
+            # rows it is qualified by.
+            if not in_flight and len(fulfilled) == len(claims):
+                waiting_txt = "Nothing waiting — every crossed reward is delivered."
+            else:
+                held = []
+                if in_flight:
+                    held.append(f"{len(in_flight)} being delivered now")
+                if dormant_claims:
+                    held.append(f"{len(dormant_claims)} above your current level")
+                undelivered = (len(claims) - len(fulfilled) - len(in_flight)
+                               - len(dormant_claims))
+                if undelivered > 0:
+                    held.append(f"{undelivered} not delivered")
+                waiting_txt = ("Nothing claimable right now — "
+                               + (", ".join(held) or "nothing outstanding")
+                               + f" ({len(fulfilled)} of {len(claims)} crossed "
+                                 f"reward(s) delivered).")
         embed.add_field(name="Waiting", value=waiting_txt, inline=False)
         if failed:
             first = failed[0]
@@ -336,11 +858,26 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
                             value=f"{_claim_reward_text(guild, first, currency)} — {reason[:200]}",
                             inline=False)
         next_up = max(waiting, key=lambda c: c["reward_level"], default=None)
-        embed.add_field(
-            name="Highest unclaimed",
-            value=(f"{_claim_reward_text(guild, next_up, currency)} ({next_up['status']})"
-                   if next_up else "nothing crossed yet"),
-            inline=False)
+        if next_up:
+            highest = (f"{_claim_reward_text(guild, next_up, currency)} "
+                       f"({next_up['status']})")
+        elif not claims:
+            highest = "nothing crossed yet"
+        elif in_flight or locked_claims:
+            # Nothing the member can collect this moment, but not because
+            # nothing was crossed - say which of the two it actually is.
+            held = []
+            if in_flight:
+                held.append(f"{len(in_flight)} being delivered now")
+            if locked_claims:
+                held.append(f"{len(locked_claims)} locked (Boosters only)")
+            highest = "nothing claimable now — " + ", ".join(held)
+        else:
+            # Contradicted "Claimed — N of N crossed rewards" above: rewards had
+            # been crossed and delivered, so "nothing crossed yet" was false.
+            highest = (f"nothing left to claim — all {len(fulfilled)} crossed "
+                       f"reward(s) delivered")
+        embed.add_field(name="Highest unclaimed", value=highest, inline=False)
         return embed
 
     # Reference layout: the current level on the left, the next configured
@@ -365,8 +902,7 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
     # of only being counted in the footer.
     earlier = [c for c in claims
                if c["reward_level"] != level
-               and c["status"] in ("pending", "failed")
-               and not _is_locked_claim(c, booster_ok)]
+               and _claimable_now(c, booster_ok)]
     if earlier:
         embed.set_footer(
             text=f"Claim All also collects {len(earlier)} earlier reward(s).")
@@ -435,13 +971,20 @@ async def _level_embed(guild, member, page: str) -> discord.Embed:
 
 class LevelRewardView(discord.ui.View):
     def __init__(self, bot, guild_id: int, user_id: int, *,
-                 claimable: bool = False):
+                 claimable: bool = False, reconcile_only: bool = False):
         super().__init__(timeout=180)
         self.bot = bot
         self.guild_id = guild_id
         self.user_id = user_id
+        # Re-entrancy guard for Claim All. The claim engine's lease already
+        # makes a concurrent second pass deliver nothing, so this is purely
+        # about not queueing up repeat clicks that each answer "Claimed 0".
+        self._claim_running = False
+        # The role-sync button only appears when it has something to do, so it
+        # is taken off the card here and put back by set_claimable().
+        self.remove_item(self.sync_roles)
         self.set_page_state("level")
-        self.set_claimable(claimable)
+        self.set_claimable(claimable, reconcile_only)
 
     def set_page_state(self, page: str) -> None:
         """Highlight the page currently shown by the Level/Stats buttons."""
@@ -450,29 +993,74 @@ class LevelRewardView(discord.ui.View):
         self.show_stats.style = (discord.ButtonStyle.primary if page == "stats"
                                  else discord.ButtonStyle.secondary)
 
-    def set_claimable(self, claimable: bool) -> None:
-        """Green+enabled when something can be claimed, gray+disabled when not.
+    def set_claimable(self, claimable: bool, reconcile_only: bool = False) -> None:
+        """Button appearance, driven by `_claim_button_state()`.
 
-        Self-contained UI state: it changes the button's colour and
-        `disabled` flag (both re-serialized on every edit_message), never the
-        claim engine, the schema, or what Claim All attempts.
+        - ``claimable``      -> Claim All success/green + enabled: a reward is
+          waiting. This is the ONLY state in which Claim All is clickable.
+        - not ``claimable``  -> Claim All secondary/grey + **disabled**, whether
+          or not a reconcile is available. A button named "Claim All" must not
+          be pressable when there is nothing to claim.
+        - ``reconcile_only`` -> a separate grey **Restore Level Role** button is
+          added and enabled. The exclusive-role reconcile is real work, but it
+          is not a claim, so it no longer borrows Claim All's name or its slot.
+
+        Self-contained UI state: it changes colours, `disabled` flags and which
+        children the view serializes (all re-sent on every edit), never the claim
+        engine, the schema, or what either action attempts.
         """
         self.claim_all.style = (discord.ButtonStyle.success if claimable
                                 else discord.ButtonStyle.secondary)
         self.claim_all.disabled = not claimable
+        self.sync_roles.disabled = not reconcile_only
+        present = self.sync_roles in self.children
+        if reconcile_only and not present:
+            # Appended, so it lands after Claim All in row 1.
+            self.add_item(self.sync_roles)
+        elif not reconcile_only and present:
+            self.remove_item(self.sync_roles)
+
+    async def _apply_claim_state(self, claims, booster_ok: bool) -> None:
+        """Refresh the Claim All button from the rows just read."""
+        claimable, reconcile_only = await _claim_button_state(
+            self.guild_id, claims, booster_ok)
+        self.set_claimable(claimable, reconcile_only)
 
     async def _refresh(self, interaction, page: str):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "This level card belongs to someone else.", ephemeral=True)
             return
+        # Acknowledge FIRST. Drawing a page means several sequential SQLite
+        # connections (the member's XP row, the claim rows plus their
+        # ensure_tables() DDL, the currency names, the reward definitions, the
+        # guild config) and none of that was acked until it had all finished.
+        # On a busy or slow database that ran past Discord's 3-second window,
+        # the client showed "Nero didn't respond in time", and the
+        # response.edit_message() below could then never land at all - which is
+        # exactly why the button only failed *sometimes*. Claim All already
+        # deferred for the same reason; Level/Stats did not.
+        await interaction.response.defer()
         from utils.level_claims import list_claims, member_is_booster
-        claims = await list_claims(self.guild_id, self.user_id)
-        self.set_claimable(await _claim_button_available(
-            self.guild_id, claims, member_is_booster(interaction.user)))
-        self.set_page_state(page)
-        embed = await _level_embed(interaction.guild, interaction.user, page)
-        await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            claims = await list_claims(self.guild_id, self.user_id)
+            await self._apply_claim_state(claims, member_is_booster(interaction.user))
+            self.set_page_state(page)
+            embed = await _level_embed(interaction.guild, interaction.user, page,
+                                       claims=claims)
+        except Exception:
+            # A deferred interaction that is never edited leaves the member
+            # staring at a spinner forever, so say what happened. Re-raised so
+            # discord.py still logs the traceback - reported, not swallowed.
+            print(f"[LEVEL CARD] {page} page failed (guild={self.guild_id} "
+                  f"user={self.user_id})")
+            try:
+                await interaction.edit_original_response(
+                    content="Couldn't load this page. Please try again.")
+            except Exception:
+                pass
+            raise
+        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="Level", style=discord.ButtonStyle.primary, row=0)
     async def show_level(self, interaction, button):
@@ -484,24 +1072,85 @@ class LevelRewardView(discord.ui.View):
 
     @discord.ui.button(label="Claim All", style=discord.ButtonStyle.primary, row=1)
     async def claim_all(self, interaction, button):
+        await self._run_claim_pass(interaction)
+
+    @discord.ui.button(label="Restore Level Role",
+                       style=discord.ButtonStyle.secondary, row=1)
+    async def sync_roles(self, interaction, button):
+        """The exclusive-level-role reconcile, on its own labelled button.
+
+        Present and enabled only when `_claim_button_state()` reports
+        `reconcile_only` (see set_claimable). It runs the same claim-engine pass
+        as Claim All - the engine is what restores a removed Level role from an
+        already-fulfilled role claim, and no second delivery path is invented
+        here - but it is named for what it actually does. Before this, that work
+        was reachable only through a button called "Claim All" that stayed
+        clickable after every reward had been delivered, with nothing to claim.
+        """
+        await self._run_claim_pass(interaction)
+
+    async def _run_claim_pass(self, interaction):
+        """Shared body: one lease-protected pass, one deferred interaction."""
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "This level card belongs to someone else.", ephemeral=True)
             return
-        # Role delivery is outside SQLite and can exceed the 3s ack window.
-        await interaction.response.defer()
-        from utils.level_claims import (
-            claim_available, list_claims, member_is_booster,
-        )
-        result = await claim_available(
-            self.guild_id, self.user_id, member=interaction.user, bot=self.bot)
-        self.set_claimable(await _claim_button_available(
-            self.guild_id, await list_claims(self.guild_id, self.user_id),
-            member_is_booster(interaction.user)))
-        self.set_page_state("level")
-        embed = await _level_embed(interaction.guild, interaction.user, "level")
-        embed.set_footer(text=claim_result_footer(result))
-        await interaction.edit_original_response(embed=embed, view=self)
+        if self._claim_running:
+            # A second click while a pass is in flight. Delivery is already
+            # lease-protected (the loser reserves nothing), so this only keeps
+            # the member from stacking up "Claimed 0" replies.
+            await interaction.response.send_message(
+                "Your rewards are already being delivered — one moment.",
+                ephemeral=True)
+            return
+        # Set before the first await, so two clicks landing in the same
+        # event-loop step cannot both start a pass.
+        self._claim_running = True
+        try:
+            # Role delivery is outside SQLite and can exceed the 3s ack window.
+            await interaction.response.defer()
+            from utils.level_claims import (
+                claim_available, list_claims, member_is_booster,
+            )
+            result = await claim_available(
+                self.guild_id, self.user_id, member=interaction.user,
+                bot=self.bot)
+            # Re-read once and reuse: the button state, the re-rendered card and
+            # the confirmation must all describe the same post-delivery rows.
+            claims = await list_claims(self.guild_id, self.user_id)
+            booster_ok = member_is_booster(interaction.user)
+            await self._apply_claim_state(claims, booster_ok)
+            if result.get("blocked"):
+                # The engine refused this whole pass before reserving anything
+                # because a correction holds the member's lease. Disable this
+                # card's own action so a stale click cannot be stacked up until
+                # a fresh /level card is built. Eligibility is unchanged: the
+                # next pass still goes through claim_available's lease check.
+                self.claim_all.disabled = True
+                if self.sync_roles in self.children:
+                    self.sync_roles.disabled = True
+            self.set_page_state("level")
+            embed = await _level_embed(interaction.guild, interaction.user,
+                                       "level", claims=claims)
+            embed.set_footer(text=claim_result_footer(result))
+            confirmation = await claim_confirmation(
+                interaction.guild, result, claims, booster_ok)
+            if confirmation:
+                embed.add_field(name=confirmation[0], value=confirmation[1],
+                                inline=False)
+            await interaction.edit_original_response(embed=embed, view=self)
+        except Exception:
+            print(f"[LEVEL CARD] Claim All failed (guild={self.guild_id} "
+                  f"user={self.user_id})")
+            try:
+                await interaction.edit_original_response(
+                    content="Claiming failed before it could finish. "
+                            "Nothing was lost — try Claim All again.")
+            except Exception:
+                pass
+            raise
+        finally:
+            self._claim_running = False
 
 
 # The approved anti-spam warning, sent as a REPLY to the first message of an
@@ -519,6 +1168,620 @@ SPAM_BURST_SECONDS = 3
 SPAM_BURST_MESSAGES = 6
 SPAM_REPEAT_MESSAGES = 5
 SPAM_REPEAT_SECONDS = 10
+
+
+# ─── Admin XP corrections (/setxp, /setlevel) ───────────────────────────
+# Both commands are the same operation - put ONE member's XP at a chosen value -
+# so they share one writer. Keeping it in one place is what makes the
+# entitlement side of a correction impossible to get inconsistent between the
+# two: same transaction, same record_crossing call, same advisory.
+#
+# MAX_SETTABLE_LEVEL is an INPUT GUARD on one parameter, not a level cap in the
+# game - nothing else in the bot has a maximum level, and this constant is not
+# consulted by the engine, the curve, a reward or an entitlement. It exists for
+# two technical reasons, both specific to /setlevel:
+#
+#   1. level_start_xp() sums the curve one level at a time, so the level number
+#      is a loop bound driven by user input. A typo like 10**12 would spin an
+#      O(level) loop on the interaction thread before doing anything.
+#   2. That sum is then written to levels.xp, which SQLite stores as a signed
+#      64-bit integer. level_start_xp(1000) is ~1.27e9 - comfortably inside it -
+#      while an unbounded input can overflow the column and corrupt the row.
+#
+# The bound is declared to Discord with app_commands.Range so the client refuses
+# the value before it is ever sent, and re-checked in the callback because the
+# callback is also called directly (tests, dashboard, other cogs). Both read this
+# one constant, so they cannot drift. Anything genuinely beyond it is what /setxp
+# is for: it takes an XP total and has no level bound at all.
+MAX_SETTABLE_LEVEL = 1000
+
+
+def level_start_xp(level: int) -> int:
+    """The XP total at which `level` begins, from the bot's own curve.
+
+    `xp_progress()` consumes `xp_for_level(n)` to leave level n-1, so level L
+    starts at the sum for n=1..L, and `xp_progress(level_start_xp(L))` is
+    exactly `(L, 0, xp_for_level(L + 1))`: the first XP of that level, not the
+    threshold of L-1 and not somewhere in the middle of L. One XP less is still
+    level L-1. This is the same expression the leveling suites already use to
+    place a member at a level, so /setlevel cannot drift from them.
+    """
+    from utils.xp_calculator import xp_for_level
+    level = max(0, int(level))
+    return sum(xp_for_level(n) for n in range(1, level + 1))
+
+
+def _xp_mutations_embed(member, rows: list) -> discord.Embed:
+    """The member's recorded administrative XP changes - /xp_rollback's index.
+
+    Nothing here writes. An operation id is the only handle a rollback accepts,
+    because it is the only thing that ties an XP change to the entitlements it
+    created; a level number cannot do that.
+    """
+    embed = discord.Embed(
+        title=f"Recorded XP changes — {member.display_name}",
+        description=("Each row is one administrative change, written in the same "
+                     "transaction as the change itself. Roll one back with "
+                     "`/xp_rollback member:@{0} operation:<id>`.".format(
+                         member.display_name)),
+        color=0x7c5cbf)
+    if not rows:
+        embed.add_field(
+            name="No recorded changes",
+            value="No administrative XP change for this member was recorded yet. "
+                  "Changes made before operation records existed cannot be "
+                  "rolled back exactly - `/setxp` remains available for a "
+                  "deliberate correction, and `/level_test_reset` for clearing "
+                  "this member's reward test state.",
+            inline=False)
+        return embed
+    for row in rows[:15]:
+        who = f"<@{row['actor_id']}>" if row.get("actor_id") else "unknown"
+        crossings = row.get("crossings") or []
+        embed.add_field(
+            name=("~~`{0}`~~".format(row["operation_id"]) if row["rolled_back"]
+                  else "`{0}`".format(row["operation_id"])),
+            value=(f"{row['source']} by {who} · {row['created_at'][:19]}\n"
+                   f"XP {row['xp_before']:,} → {row['xp_after']:,} "
+                   f"(delta {row['delta']:+,}) · L{row['level_before']} → "
+                   f"L{row['level_after']}\n"
+                   f"newly entitled reward level(s): "
+                   f"{', '.join(str(c) for c in crossings) or 'none'}\n"
+                   f"reason: {row['reason'] or 'not given'}"
+                   + ("\n**already rolled back**" if row["rolled_back"] else "")),
+            inline=False)
+    return embed
+
+
+def _xp_rollback_embed(member, report: dict, *, applied: bool) -> discord.Embed:
+    """The /xp_rollback preview (or result). Nothing here writes."""
+    mutation = report.get("mutation") or {}
+    plan = report.get("plan") or {}
+    partial = bool(applied and ((report.get("role_failures") or [])
+                                or (report.get("unreversed") or [])))
+    embed = discord.Embed(
+        title=("XP rollback — APPLIED (PARTIAL)" if partial else
+               "XP rollback — APPLIED" if applied
+               else "XP rollback — PREVIEW (nothing changed)"),
+        color=0xd29922 if partial else 0x3ba55d if applied else 0x7c5cbf)
+    embed.add_field(
+        name="Operation being undone",
+        value=(f"`{mutation.get('operation_id')}` · {mutation.get('source')} "
+               f"by {'<@' + str(mutation['actor_id']) + '>' if mutation.get('actor_id') else 'unknown'}\n"
+               f"{mutation.get('created_at', '')[:19]} · reason: "
+               f"{mutation.get('reason') or 'not given'}\n"
+               f"it moved XP {mutation.get('xp_before', 0):,} → "
+               f"{mutation.get('xp_after', 0):,} "
+               f"(delta {mutation.get('delta', 0):+,}) and newly entitled "
+               f"reward level(s): "
+               f"{', '.join(str(c) for c in mutation.get('crossings') or []) or 'none'}"),
+        inline=False)
+    embed.add_field(
+        name="Scope",
+        value=(f"guild `{report['guild_id']}` \u00b7 member {member.mention} "
+               f"(`{report['user_id']}`)\nenvironment: `{report['environment']}` "
+               f"\u00b7 database file: `{report.get('db_path') or 'unknown'}`\n"
+               f"One recorded operation, one member. Never another member, guild, "
+               f"or reward definition."),
+        inline=False)
+    earned = plan.get("earned_since", 0)
+    value_lines = [
+        f"- current: {report['xp']:,} XP · Level {report['level']}",
+        f"- subtract this operation's own delta ({plan.get('delta', 0):,}), "
+        f"**not** its old snapshot",
+        f"- target: **{plan.get('target_xp', 0):,} XP · Level "
+        f"{plan.get('target_level', 0)}**",
+        (f"- {earned:,} XP earned SINCE the change is **kept**"
+         if earned > 0 else
+         "- the member has earned no XP since the change"),
+    ]
+    if plan.get("clamped"):
+        value_lines.append(
+            "- the member's XP has since fallen below the amount granted, so the "
+            "rollback stops at 0 rather than going negative or restoring the "
+            "pre-change snapshot")
+    if applied and (plan.get("xp_moved_during_rollback")):
+        moved = plan["xp_moved_during_rollback"]
+        value_lines.append(
+            f"- XP moved during the rollback ({moved['inspected']:,} → "
+            f"{moved['live']:,}), so the delta was subtracted from the LIVE "
+            f"value: later progress is never overwritten by a stale target")
+    embed.add_field(name=("What ran" if applied else "What would run"),
+                    value="\n".join(value_lines)[:1024], inline=False)
+
+    cancel = plan.get("cancel_claims") or []
+    if cancel:
+        embed.add_field(
+            name=("Entitlements cancelled (never delivered)" if applied
+                  else "Entitlements this would cancel (never delivered)"),
+            value="\n".join(
+                f"- L{c['reward_level']} · {c['track']} · `{c['reward_ref']}` "
+                f"({c['status']})" for c in cancel[:20])[:1024]
+            + "\nAbove the target level and created by this operation, so the "
+              "member no longer reaches them.",
+            inline=False)
+    reverse = (plan.get("reverse_currency") or []) + (plan.get("reverse_inventory") or [])
+    if reverse:
+        lines = []
+        for entry in plan.get("reverse_currency") or []:
+            lines.append(f"- L{entry['reward_level']} · {entry['amount']:,} "
+                         f"{entry['currency']} → reversed via ledger row "
+                         f"`{entry['ledger_id']}`")
+        for entry in plan.get("reverse_inventory") or []:
+            lines.append(f"- L{entry['reward_level']} · {entry['quantity']}x "
+                         f"{entry['item_name']} → provenance covers "
+                         f"{entry['attributable']} attributable unit(s)")
+        roles = plan.get("remove_discord_roles") or []
+        if roles:
+            lines.append("- remove reward role(s): "
+                         + ", ".join(f"<@&{r}>" for r in roles))
+        retained = plan.get("roles_left_on_member") or []
+        if retained:
+            # Deliberately kept, not a failure: another recorded entitlement
+            # still grants the role (`_role_granted_elsewhere`).
+            lines.append(
+                "- keep reward role(s) still granted elsewhere: "
+                + ", ".join(f"<@&{r['role_id']}> "
+                            f"({', '.join(str(x) for x in r['also_granted_by'])})"
+                            for r in retained))
+        embed.add_field(
+            name=("Delivered value taken back" if applied
+                  else "Delivered value this would take back"),
+            value="\n".join(lines)[:1024], inline=False)
+
+    cannot = plan.get("cannot_reverse") or []
+    if cannot:
+        embed.add_field(
+            name="⚠️ Delivered value that CANNOT be reversed",
+            value="\n".join(
+                f"- L{e['reward_level']} {e['kind']}: {e.get('note') or e.get('error')}"
+                for e in cannot[:20])[:1024]
+            + "\nThose claim rows are KEPT and the cases are queued for "
+              "`/level_reconcile`. Nothing is reported as reversed that was not.",
+            inline=False)
+    kept = plan.get("kept_still_earned") or []
+    if kept:
+        embed.add_field(
+            name="Left alone: still earned on the XP the member keeps",
+            value="\n".join(
+                f"- L{c['reward_level']} · {c['track']} ({c['status']})"
+                for c in kept[:20])[:1024]
+            + "\nAt or below the target level, so this reward is legitimately "
+              "theirs even though the operation created the row.",
+            inline=False)
+    unattributable = plan.get("unattributable") or []
+    if unattributable:
+        embed.add_field(
+            name="⚠️ Cannot be attributed to this operation",
+            value="\n".join(
+                f"- L{c['reward_level']} · {c['track']} ({c['status']})"
+                for c in unattributable[:20])[:1024]
+            + "\nThese rows predate operation records, so the change's recorded "
+              "crossings cannot be matched to them by anything but a level "
+              "number. They are NOT cancelled - a level number is not proof of "
+              "who created a row. Resolve one at a time with `/level_reconcile`.",
+            inline=False)
+    # Every entitlement this operation did NOT create, at any level: the
+    # administrator's first question is "did this touch anything the member
+    # earned?", and an answer that lists only the ones above the target level
+    # leaves the rest to be guessed at.
+    independent = plan.get("kept_independent") or []
+    if independent:
+        embed.add_field(
+            name="Left alone: not created by this operation",
+            value="\n".join(
+                f"- L{c['reward_level']} · {c['track']} ({c['status']})"
+                for c in independent[:20])[:1024]
+            + "\nEarned by ordinary play or another change, so they stay "
+              "claimable/delivered whatever this rollback does.",
+            inline=False)
+
+    if applied:
+        after = report.get("after") or {}
+        result = [
+            f"XP/Level now {after.get('xp', 0):,} / L{after.get('level', 0)}",
+            f"claim rows left: {after.get('claims', 0)}",
+            f"operation: `{report.get('operation_id')}` "
+            f"(marks `{mutation.get('operation_id')}` rolled back in the same "
+            f"transaction)",
+        ]
+        deleted = report.get("deleted") or {}
+        if deleted:
+            result.append("deleted: " + ", ".join(
+                f"{v} {k}" for k, v in sorted(deleted.items()) if v))
+        embed.add_field(name="Result", value="\n".join(result)[:1024],
+                        inline=False)
+        if report.get("role_failures"):
+            embed.add_field(
+                name="Roles that could NOT be removed",
+                value="\n".join(
+                    f"- <@&{f['role_id']}> — {str(f['error'])[:120]}"
+                    + (f" (claim(s) {', '.join(map(str, f['claim_ids']))})"
+                       if f.get("claim_ids") else "")
+                    for f in report["role_failures"][:20])[:1024]
+                + "\nTheir claim rows were KEPT and each claim behind them now "
+                  "has an OPEN case in `/level_reconcile` (the operation is "
+                  "recorded as `partial`, not `completed`). Remove the role in "
+                  "Discord, then "
+                  "resolve the case with `resolution: effect_gone "
+                  "drop_claim: True`; re-running the rollback is refused so the "
+                  "XP delta is never subtracted twice.",
+                inline=False)
+        if report.get("claims_preserved"):
+            embed.add_field(
+                name="Claim rows preserved",
+                value="\n".join(
+                    f"- L{c['reward_level']} · {c['track']}: {c['reason']}"
+                    for c in report["claims_preserved"][:20])[:1024],
+                inline=False)
+        if report.get("unreversed"):
+            embed.set_footer(
+                text=f"{len(report['unreversed'])} delivered reward(s) could not "
+                     f"be reversed; their claim rows are kept and queued for "
+                     f"/level_reconcile.")
+        else:
+            embed.set_footer(
+                text="Every entitlement this operation created above the target "
+                     "level was cancelled or reversed; later progress and "
+                     "independently earned rewards were left alone.")
+    else:
+        embed.set_footer(
+            text="Preview only — nothing above was written. Re-run with "
+                 "confirm: True and a reason to apply.")
+    return embed
+
+
+def _level_reconcile_embed(member, cases: list, *, report: dict | None = None,
+                           resolved: dict | None = None) -> discord.Embed:
+    """The open reversal cases for ONE member, and what an admin can do about them.
+
+    A case is never closed silently and a claim row is never deleted here unless
+    the administrator states that the delivered effect is gone (or was never
+    delivered) - the only two situations in which re-opening the reward cannot
+    pay it twice.
+    """
+    if resolved:
+        embed = discord.Embed(
+            title="Level reconciliation — case resolved",
+            color=0x3ba55d)
+        embed.add_field(
+            name=f"`{resolved['reversal_id']}`",
+            value=(f"resolution: **{resolved['resolution']}**\n"
+                   f"decided by <@{resolved['actor_id']}>\n"
+                   f"note: {resolved['note']}\n"
+                   f"claim row: "
+                   + ("**deleted** — the reward is earnable again"
+                      if resolved.get("claim_deleted") else
+                      "**kept** — the reward stays terminal and cannot be "
+                      "claimed a second time")),
+            inline=False)
+        embed.set_footer(
+            text="The journal row itself is never deleted and never rewritten to "
+                 "'applied': the case, the decision and who made it stay on the "
+                 "record.")
+        return embed
+    embed = discord.Embed(
+        title=f"Open level-reward cases — {member.display_name}",
+        color=0xd29922 if cases else 0x3ba55d)
+    if not cases:
+        embed.description = (
+            "No unresolved reversal case for this member. Every delivered level "
+            "reward this member has was either reversed on the record or never "
+            "needed reversing.")
+        return embed
+    embed.description = (
+        "Each case is a delivered level reward whose value could not be taken "
+        "back automatically. Nothing was deleted to make a reset look complete, "
+        "and none of these rewards is claimable again while its case is open.")
+    for case in cases[:20]:
+        if case.get("kind") == "role" and str(case.get("item_name") or "").isdigit():
+            what = f"role <@&{case['item_name']}>"
+        else:
+            what = (f"{case['quantity']:,} {case['currency']}"
+                    if case.get("currency") else
+                    f"{case['quantity']}x {case['item_name']}"
+                    if case.get("item_name") else f"{case['quantity']} unit(s)")
+        embed.add_field(
+            name=f"`{case['reversal_id']}` · {case['kind']} · {case['status']}",
+            value=(f"claim `{case['claim_id']}` · {what}\n"
+                   f"{case.get('reason') or ''}\n"
+                   f"recorded {case.get('created_at', '')[:19]} by operation "
+                   f"`{case.get('operation_id')}`"),
+            inline=False)
+    if report:
+        claims = {int(c["id"]): c for c in report.get("claims") or []}
+        rows = []
+        for case in cases[:20]:
+            claim = claims.get(int(case["claim_id"]))
+            if not claim:
+                rows.append(f"- `{case['reversal_id']}` · claim row already gone")
+                continue
+            rows.append(
+                f"- `{case['reversal_id']}` · L{claim['reward_level']} "
+                f"{claim['track']} · status `{claim['status']}` · wallet "
+                f"{report['wallet'].get('balance', 0):,} coins / "
+                f"{report['wallet'].get('diamonds', 0):,} diamonds")
+        embed.add_field(name="Evidence for each case",
+                        value="\n".join(rows)[:1024], inline=False)
+    embed.set_footer(
+        text="Resolve one case at a time: /level_reconcile member:@… "
+             "case:<id> resolution:… note:…. `drop_claim: True` "
+             "additionally deletes the claim row, and is only honoured when the "
+             "delivered effect is gone or was never delivered.")
+    return embed
+
+
+def _correction_advice(member, old_level: int, new_level: int,
+                       correction: dict | None) -> str:
+    """What a DOWNWARD level correction actually did ('' when the level rose).
+
+    Written from the reconciliation report, never from an assumption: a reward is
+    only called reversed if the journal says value moved, and every kept case
+    names its reason. Bounded to fit Discord's message limit next to the
+    before/after numbers.
+    """
+    if new_level > old_level:
+        return ""
+    reversed_all = ((correction or {}).get("reversed") or {})
+    has_content = bool(
+        (correction or {}).get("error")
+        or (correction or {}).get("dormant")
+        or (correction or {}).get("kept_not_attributable")
+        or (correction or {}).get("kept_unresolved")
+        or (correction or {}).get("in_flight")
+        or any(reversed_all.values()))
+    if new_level == old_level:
+        if not has_content:
+            return ""       # an optional retry that had nothing left to do
+        head = (f"\n\n🔄 Reward reconciliation at Level {new_level} (the level "
+                f"did not change).")
+    else:
+        head = (f"\n\n⚠️ Level went **down** (L{old_level} → L{new_level}). "
+                f"Reward eligibility now follows Level {new_level}.")
+    if not correction:
+        return head + (" No reconciliation report was produced, so treat the "
+                       "delivered rewards above that level as unresolved.")
+    if correction.get("error"):
+        return (head + f"\n⚠️ Reconciling delivered rewards failed: "
+                f"`{correction['error']}`. Nothing above Level {new_level} can be "
+                f"claimed meanwhile; run the correction again to retry. Open "
+                f"cases are listed by `/level_reconcile`.")
+    lines = [head]
+    dormant = correction.get("dormant") or []
+    if dormant:
+        lines.append(
+            f"• **{len(dormant)} unclaimed reward(s) above L{new_level}** are no "
+            f"longer claimable. Their rows are kept, so they become claimable "
+            f"again only if the member legitimately reaches those levels - and "
+            f"can still pay only once.")
+    reversed_ = correction.get("reversed") or {}
+    money = reversed_.get("currency") or []
+    goods = reversed_.get("inventory") or []
+    roles = reversed_.get("role") or []
+    boosts = reversed_.get("boost") or []
+    if money or goods or roles or boosts:
+        bits = []
+        if money:
+            totals: dict[str, int] = {}
+            for entry in money:
+                totals[entry.get("currency", "balance")] = (
+                    totals.get(entry.get("currency", "balance"), 0)
+                    + int(entry.get("amount") or 0))
+            bits.append(", ".join(f"{amount:,} {code}" for code, amount in
+                                  sorted(totals.items())))
+        if goods:
+            counts: dict[str, int] = {}
+            for entry in goods:
+                name = str(entry.get("item_name") or "item")
+                counts[name] = counts.get(name, 0) + int(entry.get("quantity") or 0)
+            bits.append(", ".join(f"{qty}x {name}" for name, qty in
+                                  sorted(counts.items())))
+        if roles:
+            bits.append(f"{len(roles)} role(s)")
+        if boosts:
+            bits.append(f"{len(boosts)} XP boost(s)")
+        lines.append(
+            f"• **Reversed {len(money) + len(goods) + len(roles) + len(boosts)} "
+            f"delivered reward(s)** that only the higher level had unlocked: "
+            + "; ".join(bits)
+            + ". The compensation is on the ledger and reversal journal.")
+    kept = correction.get("kept_not_attributable") or []
+    if kept:
+        lines.append(
+            f"• {len(kept)} delivered reward(s) above L{new_level} were **kept**: "
+            f"they were crossed by ordinary play, not by an administrative XP "
+            f"change, so they are not evidence of the correction.")
+    unresolved = correction.get("kept_unresolved") or []
+    for entry in unresolved[:4]:
+        lines.append(
+            f"• L{entry.get('reward_level', '?')} {entry.get('track', '')}: "
+            f"**kept** - {str(entry.get('reason') or 'unresolved')[:180]}")
+    if len(unresolved) > 4:
+        lines.append(f"• …and {len(unresolved) - 4} more unresolved case(s).")
+    if unresolved:
+        lines.append(
+            "• Nothing was removed on a guess. Those cases are recorded for "
+            "`/level_reconcile`, and their claim rows stay terminal so the same "
+            "reward cannot be paid twice.")
+    in_flight = correction.get("in_flight") or []
+    if in_flight:
+        lines.append(
+            f"• {len(in_flight)} reward(s) above L{new_level} were still being "
+            f"delivered when the level changed. They were not judged; run the "
+            f"correction again to reconcile them.")
+    if correction.get("delete_mismatch"):
+        lines.append(
+            "• ⚠️ A claim row changed while it was being removed "
+            f"({correction['delete_mismatch']}). The reversal journal still names "
+            "it; check `/level_reconcile`.")
+    advice = "\n".join(lines)
+    return advice if len(advice) <= 1400 else advice[:1397] + "…"
+
+
+async def _apply_admin_xp(guild_id: int, member, xp: int, bot, *,
+                          source: str, actor_id: int | None = None,
+                          reason: str | None = None,
+                          reverses_operation_id: str | None = None,
+                          operation_id: str | None = None) -> dict:
+    """Set ONE member's XP inside one transaction, recording any crossings.
+
+    Shared by /setxp, /setlevel and /xp_rollback so an administrative correction
+    behaves identically whichever knob was used: XP clamped non-negative, the
+    stored level recomputed from `xp_progress()` (never taken from the request),
+    entitlements following the real crossing rule, and the whole read-modify-write
+    in one BEGIN IMMEDIATE transaction so a concurrent message-XP award cannot be
+    clobbered.
+
+    The same transaction also writes the operation's own audit row
+    (`xp_mutations`): an immutable operation id, who ran it, why, the XP before
+    and after, and the reward levels it newly entitled. That linkage is what makes
+    a later rollback exact - it cancels the entitlements THIS operation created
+    and leaves alone the ones the member earned independently, instead of guessing
+    from a level number. Writing it in the same transaction matters: a mutation
+    row without its XP change, or an XP change without its row, would each be a
+    hole in the audit trail.
+
+    A change that does not RAISE the member's XP is treated as a correction and
+    reconciles what the higher level granted. The entitlement rows the change
+    created stop being claimable immediately (the claim engine reads the member's
+    current level), and every already-delivered reward above the corrected level
+    that this system can attribute to an administrative XP change is reversed
+    through `utils.level_claims.reconcile_level_drop()`. The member's lease is
+    taken in THE SAME transaction as the XP write: after that commit no claim
+    pass can deliver anything above the corrected level, so there is no window in
+    which the old level pays one more reward.
+
+    Returns the before/after state for the reply, plus `operation_id`,
+    `crossings` and `correction` (None when the level rose, so no correction
+    sweep was needed).
+    """
+    from utils import level_ops as ops
+    from utils.level_claims import (
+        member_is_booster, record_crossing, snapshot_multipliers,
+    )
+    xp = max(0, int(xp))
+    new_level, new_current, new_needed = xp_progress(xp)
+    multipliers = await snapshot_multipliers(
+        guild_id, member.id, member=member, bot=bot)
+    operation_id = operation_id or ops.new_operation_id(source)
+    crossings: list[int] = []
+    correction = None
+    lease_held = False
+    old_xp = 0
+    await ops.ensure_tables()
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+                (guild_id, member.id))
+            row = await cursor.fetchone()
+            old_xp = row[0] if row else 0
+            old_level = xp_progress(old_xp)[0]
+            # Not only a level DROP: setting the same XP, or a lower one inside
+            # the same level, is how an administrator retries a correction whose
+            # reconciliation was interrupted. The sweep is idempotent, so running
+            # it again finishes any reversal that was already journaled and can
+            # now be completed; with nothing above the level it writes nothing.
+            # A change that raises XP inside the current level is not a
+            # correction and is not fenced (it cannot unlock a reward above the
+            # level the member already has).
+            if xp <= old_xp:
+                # Fence the member BEFORE the XP row is written, inside this
+                # transaction. A claim pass that already reserved rows may still
+                # be finishing outside SQLite; one that has not started yet will
+                # see this lease. If it is already running, refuse the whole
+                # correction instead of applying half of it.
+                lock = await ops.acquire_lock(
+                    guild_id, member.id, holder=source,
+                    operation_id=operation_id, db=db)
+                if not lock["ok"]:
+                    raise ops.LevelOpsError(
+                        f"another operation is running for this member: "
+                        f"{lock['reason']}. Nothing was changed - wait for it "
+                        f"to finish or for its lease to expire, then run the "
+                        f"command again.")
+                lease_held = True
+            cursor = await db.execute(
+                "SELECT id FROM level_reward_claims WHERE guild_id=? AND user_id=?",
+                (guild_id, member.id))
+            before_ids = {r[0] for r in await cursor.fetchall()}
+            await db.execute("""
+                INSERT INTO levels (guild_id, user_id, xp, level)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id, user_id)
+                DO UPDATE SET xp = ?, level = ?
+            """, (guild_id, member.id, xp, new_level, xp, new_level))
+            await record_crossing(
+                db, guild_id, member.id, old_xp, xp, multipliers, source=source,
+                is_booster=member_is_booster(member),
+                operation_id=operation_id)
+            # The reward levels this change actually entitled, read back from the
+            # rows it created rather than recomputed from the curve: that is the
+            # engine's own answer, including its audience and booster rules.
+            cursor = await db.execute(
+                "SELECT id, reward_level FROM level_reward_claims "
+                "WHERE guild_id=? AND user_id=?", (guild_id, member.id))
+            crossings = sorted({r[1] for r in await cursor.fetchall()
+                                if r[0] not in before_ids})
+            await ops.record_xp_mutation(
+                guild_id=guild_id, user_id=member.id, source=source,
+                actor_id=actor_id, reason=reason, xp_before=old_xp, xp_after=xp,
+                level_before=xp_progress(old_xp)[0], level_after=new_level,
+                crossings=crossings,
+                reverses_operation_id=reverses_operation_id,
+                operation_id=operation_id, db=db)
+            await db.commit()
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+    if lease_held:
+        try:
+            from utils.level_claims import reconcile_level_drop
+            try:
+                correction = await reconcile_level_drop(
+                    guild_id, member.id, new_level, operation_id=operation_id,
+                    actor_id=actor_id, reason=reason, member=member)
+            except Exception as exc:
+                # The XP correction itself is already committed. Say so and keep
+                # the lease's guarantee: eligibility still follows the new
+                # level, so nothing above it is claimable while the delivered
+                # rewards wait to be retried.
+                print(f"[LEVEL CORRECTION] reconciliation failed "
+                      f"(guild={guild_id} user={member.id}): {exc}")
+                correction = {"level": new_level,
+                              "error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            await ops.release_lock(guild_id, member.id, operation_id)
+    # The stored level column is derived from the same curve, so report the
+    # engine's answer rather than the column we just wrote.
+    return {
+        "old_xp": old_xp, "old_level": xp_progress(old_xp)[0],
+        "new_xp": xp, "new_level": new_level,
+        "current": new_current, "needed": new_needed,
+        "operation_id": operation_id, "crossings": crossings,
+        "correction": correction,
+    }
 
 
 class Leveling(commands.Cog):
@@ -559,6 +1822,9 @@ class Leveling(commands.Cog):
             if result.get("failed"):
                 print(f"[LEVEL ROLE REJOIN] guild={member.guild.id} "
                       f"user={member.id}: {result['failed']}")
+            if result.get("withheld"):
+                print(f"[LEVEL ROLE REJOIN] guild={member.guild.id} "
+                      f"user={member.id}: withheld {result['withheld']}")
         except Exception as exc:
             # Discord join processing must not fail because a role was deleted,
             # role hierarchy changed, or the claim database is temporarily down.
@@ -1025,40 +2291,102 @@ class Leveling(commands.Cog):
         # HARDENING (dark-fixes pass): clamp admin-supplied XP to
         # non-negative — nothing previously stopped a negative value
         # from being passed through to xp_progress()/the rank card,
-        # which assume xp >= 0.
-        xp = max(0, xp)
-        new_level, _, _ = xp_progress(xp)
-        from utils.level_claims import (
-            SOURCE_SETXP, member_is_booster, record_crossing,
-            snapshot_multipliers,
-        )
-        multipliers = await snapshot_multipliers(
-            interaction.guild.id, member.id, member=member, bot=self.bot)
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = await db.execute(
-                    "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
-                    (interaction.guild.id, member.id))
-                row = await cursor.fetchone()
-                old_xp = row[0] if row else 0
-                await db.execute("""
-                    INSERT INTO levels (guild_id, user_id, xp, level)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(guild_id, user_id)
-                    DO UPDATE SET xp = ?, level = ?
-                """, (interaction.guild.id, member.id, xp, new_level,
-                      xp, new_level))
-                await record_crossing(
-                    db, interaction.guild.id, member.id, old_xp, xp,
-                    multipliers, source=SOURCE_SETXP,
-                    is_booster=member_is_booster(member))
-                await db.commit()
-            except Exception:
-                await db.execute("ROLLBACK")
-                raise
-        await interaction.response.send_message(
-            f"Set {member.mention}'s XP to {xp:,} (Level {new_level}).",
+        # which assume xp >= 0. (The clamp now lives in _apply_admin_xp.)
+        from utils.level_claims import SOURCE_SETXP
+        from utils.level_ops import LevelOpsError
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await _apply_admin_xp(
+                interaction.guild.id, member, xp, self.bot, source=SOURCE_SETXP,
+                # Optional audit metadata: the callback is also driven with a
+                # stand-in interaction that may not carry `.user`.
+                actor_id=getattr(getattr(interaction, "user", None), "id", None),
+                reason=f"/setxp to {max(0, int(xp)):,} XP")
+        except LevelOpsError as exc:
+            # A downward change refuses to start while another operation holds
+            # the member's lease: the reconciliation needs that fence to be safe,
+            # and applying the XP change without it could pay one more reward
+            # above the corrected level.
+            await interaction.followup.send(
+                f"⚠️ Could not change {member.mention}'s XP — nothing was "
+                f"changed.\n`{exc}`", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Set {member.mention}'s XP to {result['new_xp']:,} "
+            f"(Level {result['new_level']})."
+            + _correction_advice(member, result["old_level"],
+                                 result["new_level"], result["correction"]),
+            ephemeral=True)
+
+    # ─── SET LEVEL (admin) ──────────────────────────────
+    # The companion to /setxp for the common case: an admin knows the LEVEL they
+    # want, not the XP total that produces it. This places the member at the
+    # exact start of that level using the bot's own curve (level_start_xp ->
+    # xp_for_level -> xp_progress), never a second formula, so /setlevel 10 and
+    # "level 10 with 0 XP into it" are the same state.
+    #
+    # DOWNWARD corrections reconcile rewards: crossings are recorded exactly as
+    # /setxp records them, and everything the higher level unlocked follows the
+    # corrected level from that moment - unclaimed rows above it are no longer
+    # claimable, and delivered rows an administrative XP change created are
+    # reversed through provenance (see utils.level_claims.reconcile_level_drop).
+    # Rows crossed by ordinary play are kept: a correction is not proof the
+    # member did not earn them.
+    @app_commands.command(name="setlevel",
+                          description="Place a member at the start of a level (admin)")
+    @app_commands.describe(
+        member="The member whose level is set",
+        level=f"Target level, 0-{MAX_SETTABLE_LEVEL}. The member is placed at "
+              "the first XP of that level. Use /setxp for anything beyond.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def setlevel(self, interaction: discord.Interaction,
+                       member: discord.Member,
+                       level: app_commands.Range[int, 0, MAX_SETTABLE_LEVEL]):
+        from utils.level_claims import SOURCE_SETLEVEL
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Use this command in a server.", ephemeral=True)
+            return
+        # Defence in depth behind the Range above: the callback is also called
+        # directly, and the reason has to be stated so the bound is not mistaken
+        # for a level cap the bot enforces on its members.
+        if int(level) < 0 or int(level) > MAX_SETTABLE_LEVEL:
+            await interaction.response.send_message(
+                f"`level` must be a whole number between 0 and "
+                f"{MAX_SETTABLE_LEVEL}. That bound is an input guard on the XP "
+                f"curve sum, not a maximum level in the game - use `/setxp` for "
+                f"anything beyond it. Nothing was changed.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        target_xp = level_start_xp(level)
+        from utils.level_ops import LevelOpsError
+        try:
+            result = await _apply_admin_xp(
+                interaction.guild.id, member, target_xp, self.bot,
+                source=SOURCE_SETLEVEL,
+                actor_id=getattr(getattr(interaction, "user", None), "id", None),
+                reason=f"/setlevel to Level {int(level)}")
+        except LevelOpsError as exc:
+            await interaction.followup.send(
+                f"⚠️ Could not place {member.mention} at Level {int(level)} — "
+                f"nothing was changed.\n`{exc}`", ephemeral=True)
+            return
+        # The curve is authoritative: if the stored state does not come back at
+        # the requested level, say so rather than reporting success.
+        if result["new_level"] != int(level):
+            await interaction.followup.send(
+                f"⚠️ Could not place {member.mention} at Level {int(level)} — "
+                f"the engine reports Level {result['new_level']} for "
+                f"{target_xp:,} XP. Nothing else was changed.", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"{member.mention}: **Level {result['old_level']} → "
+            f"Level {result['new_level']}**\n"
+            f"XP: {result['old_xp']:,} → {result['new_xp']:,} "
+            f"(start of L{result['new_level']}, "
+            f"{result['current']} / {result['needed']} into it)"
+            + _correction_advice(member, result["old_level"],
+                                 result["new_level"], result["correction"]),
             ephemeral=True)
 
     # ─── RESET XP (admin, Phase 5 / Leveling expansion) ─
@@ -1088,6 +2416,374 @@ class Leveling(commands.Cog):
             f"Reset {member.mention}'s XP and level to 0.",
             ephemeral=True)
 
+    # ─── LEVEL TEST RESET (admin, scoped, preview-first) ──
+    # `/resetxp` above zeroes XP but deliberately keeps `level_reward_claims`,
+    # so a member who has already claimed cannot be used to test the claim flow
+    # again: the ledger is a one-way ratchet and re-levelling never re-pays.
+    # This is the testing tool for exactly that, and it is deliberately narrow -
+    # one member, one guild, preview by default. See utils/level_test_reset.py
+    # for what is reversible, what is only reported, and what is never touched.
+    @app_commands.command(
+        name="level_test_reset",
+        description="Preview/reset ONE member's /level reward test state (admin)")
+    @app_commands.describe(
+        member="The single member whose leveling test state is reset",
+        confirm="Required to actually apply; without it this only previews",
+        include_prestige="Also zero permanent Prestige and the booster VI "
+                         "activation. Permanent tiers are Shop purchases and "
+                         "are NOT refunded. Prestige is preserved by default.",
+        reason="Required with confirm: why this member's level rewards are being "
+               "reset. Stored with the operation record.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def level_test_reset(self, interaction: discord.Interaction,
+                               member: discord.Member, confirm: bool = False,
+                               include_prestige: bool = False,
+                               reason: str = None):
+        import os
+        from utils.level_test_reset import (
+            LevelResetError, inspect_member, reset_member,
+        )
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Use this command in a server.", ephemeral=True)
+            return
+        # Checked BEFORE deferring: `interaction.response` is single-use, so a
+        # refusal sent after a defer would have to go through the followup and
+        # would arrive as an edit instead of an answer.
+        reason = (reason or "").strip()
+        if confirm and not reason:
+            await interaction.response.send_message(
+                "A `reason` is required to apply a reset. It is stored with the "
+                "operation record so the deletion of reward history can be "
+                "audited later. Re-run with `confirm: True reason:\"...\"`, or "
+                "drop `confirm` for a preview.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        # Second key on production: an admin confirming in Discord is not enough
+        # on its own, because this deletes reward history. Staging needs no flag.
+        # The environment itself is decided by utils.level_ops.environment_verdict
+        # from the database file actually open, NOT from NERO_ENVIRONMENT - that
+        # variable resolves to the production file for every value except the
+        # exact string "staging", so a guard on the label alone lets `dev`,
+        # `test`, a typo or an unset variable destroy production data.
+        production_ok = os.getenv("ALLOW_LEVEL_TEST_RESET", "") == "1"
+        try:
+            if not confirm:
+                # The preview is built with the same flags the apply would use,
+                # so what an admin reads is what they would get - including
+                # whether prestige is about to be destroyed.
+                report = await inspect_member(
+                    interaction.guild.id, member.id,
+                    include_prestige=include_prestige)
+                embed = _level_reset_embed(member, report, applied=False)
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+            report = await reset_member(
+                interaction.guild.id, member.id, apply=True,
+                include_prestige=include_prestige,
+                allow_production=production_ok, member=member, reason=reason,
+                # Stamped on the ledger reversal rows, so the wallet history says
+                # which admin's test reset took the value back.
+                reversed_by=interaction.user.id)
+        except LevelResetError as exc:
+            await interaction.followup.send(
+                f"Reset refused \u2014 nothing was changed.\n`{exc}`", ephemeral=True)
+            return
+        except Exception as exc:
+            # A deferred interaction that is never answered spins forever in the
+            # client. `LevelResetError` is the only refusal this tool raises on
+            # purpose; anything else (a locked database, a missing column, a
+            # Discord API failure) is an unfinished operation, and the admin has
+            # to be told that some steps may already have committed rather than
+            # being left with a spinner or a false "nothing changed".
+            await interaction.followup.send(
+                f"\u26a0\ufe0f The reset FAILED partway: "
+                f"`{type(exc).__name__}: {exc}`\n"
+                "Steps are journaled and idempotent, so nothing is double-paid "
+                "or double-removed by a retry, but some steps may already have "
+                "committed. Run the preview again to see the member's current "
+                "state; any case that could not be completed is listed by "
+                "`/level_reconcile`.", ephemeral=True)
+            return
+        embed = _level_reset_embed(member, report, applied=report.get("applied"))
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ─── XP ROLLBACK (admin, one recorded change at a time) ──
+    # The other half of an administrative mistake. `/setxp` and `/setlevel`
+    # correct XP but deliberately leave reward history alone, because a level is
+    # not the same thing as the rewards it paid - so an over-grant cannot be
+    # undone with them, and a "New Game" reset is far too broad for it (it wipes
+    # everything the member ever earned from leveling).
+    #
+    # This undoes ONE recorded change: it subtracts that change's own delta from
+    # the member's CURRENT XP - never restoring the old snapshot, so progress
+    # earned since survives - and cancels or reverses only the entitlements that
+    # change created and the member no longer reaches. Anything still reached on
+    # the remaining XP, and anything created by another change or by ordinary
+    # play, is left exactly as it is.
+    @app_commands.command(
+        name="xp_rollback",
+        description="Undo ONE recorded XP change and the rewards it caused (admin)")
+    @app_commands.describe(
+        member="The member whose recorded XP change is rolled back",
+        operation="The operation id to roll back (omit to list this member's "
+                  "recorded changes)",
+        confirm="Required to apply; without it this only previews",
+        reason="Required with confirm: why the change is being undone")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def xp_rollback(self, interaction: discord.Interaction,
+                          member: discord.Member, operation: str = None,
+                          confirm: bool = False, reason: str = None):
+        from utils import level_ops as ops
+        from utils.level_test_reset import (
+            LevelResetError, rollback_xp_operation,
+        )
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Use this command in a server.", ephemeral=True)
+            return
+        reason = (reason or "").strip()
+        if confirm and not reason:
+            await interaction.response.send_message(
+                "A `reason` is required to apply a rollback. It is stored with "
+                "the rollback's own operation record and with the resolution of "
+                "every case it closes.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if not (operation or "").strip():
+                rows = await ops.list_xp_mutations(
+                    interaction.guild.id, member.id, limit=15)
+                await interaction.followup.send(
+                    embed=_xp_mutations_embed(member, rows), ephemeral=True)
+                return
+            report = await rollback_xp_operation(
+                interaction.guild.id, member.id,
+                operation_id=operation.strip(), apply=confirm,
+                reversed_by=interaction.user.id, reason=reason or None,
+                member=member)
+        except LevelResetError as exc:
+            await interaction.followup.send(
+                f"Rollback refused \u2014 nothing was changed.\n`{exc}`",
+                ephemeral=True)
+            return
+        except Exception as exc:
+            await interaction.followup.send(
+                f"\u26a0\ufe0f The rollback FAILED partway: "
+                f"`{type(exc).__name__}: {exc}`\n"
+                "The XP write, the claim deletions and the audit mark commit "
+                "together, and every value movement is journaled, so a retry "
+                "cannot double-remove anything - but re-run the preview to see "
+                "the member's current state before retrying.", ephemeral=True)
+            return
+        await interaction.followup.send(
+            embed=_xp_rollback_embed(member, report,
+                                     applied=bool(report.get("applied"))),
+            ephemeral=True)
+
+    # ─── LEVEL RECONCILE (admin, one open case at a time) ──
+    # What replaced `include_delivered`. A delivered reward whose value cannot be
+    # proven and taken back leaves its claim row in place - which is correct,
+    # because that row is the only thing stopping a second payment while the
+    # value is still in the member's hands - but it also means a test member can
+    # stay blocked. The old flag solved that by deleting those rows wholesale,
+    # which made every blocked reward earnable again with its value still in the
+    # member's hands, and an option that is honoured in staging is one mistake
+    # away from being honoured in production.
+    #
+    # This resolves ONE named case, records the decision and the administrator who
+    # made it, and only deletes the claim row when the administrator states that
+    # the delivered effect is gone or was never delivered - the only two
+    # situations in which re-opening the reward cannot pay it twice.
+    @app_commands.command(
+        name="level_reconcile",
+        description="List or resolve ONE open level-reward reversal case (admin)")
+    @app_commands.describe(
+        member="The member whose open cases are listed or resolved",
+        case="The reversal id to resolve (from the list); omit to list them",
+        resolution="What you established about that case",
+        note="Required with a resolution: what you checked or did",
+        drop_claim="Also delete the claim row so the reward is earnable again. "
+                   "Only honoured for effect_gone / never_delivered.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def level_reconcile(
+            self, interaction: discord.Interaction, member: discord.Member,
+            case: str = None,
+            resolution: Literal["effect_gone", "never_delivered",
+                                "not_a_level_reward", "value_kept"] = None,
+            note: str = None, drop_claim: bool = False):
+        from utils import level_ops as ops
+        from utils.level_test_reset import LevelResetError, inspect_member
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Use this command in a server.", ephemeral=True)
+            return
+        guild_id = interaction.guild.id
+        note = (note or "").strip()
+        case = (case or "").strip()
+        # All three checks before deferring - see /level_test_reset.
+        if resolution and not case:
+            await interaction.response.send_message(
+                "Pass the `case` (reversal id) you are resolving. One case at a "
+                "time, so the decision on the record is about a specific reward.",
+                ephemeral=True)
+            return
+        if resolution and not note:
+            await interaction.response.send_message(
+                "A `note` is required with a resolution: what you checked or did. "
+                "It is appended to the journal row, which is never deleted.",
+                ephemeral=True)
+            return
+        if case and not resolution:
+            pass            # allowed: show the evidence for one case
+        await interaction.response.defer(ephemeral=True)
+        try:
+            report = await inspect_member(guild_id, member.id)
+            cases = [c for c in await ops.outstanding_reversals(guild_id, member.id)]
+            if not resolution:
+                if case:
+                    picked = [c for c in cases if c["reversal_id"] == case]
+                    if not picked:
+                        await interaction.followup.send(
+                            f"No open case `{case}` for this member. It may "
+                            f"already be resolved - the journal row is never "
+                            f"deleted, so it stays readable.", ephemeral=True)
+                        return
+                    cases = picked
+                await interaction.followup.send(
+                    embed=_level_reconcile_embed(member, cases, report=report),
+                    ephemeral=True)
+                return
+            picked = [c for c in cases if c["reversal_id"] == case]
+            if not picked:
+                await interaction.followup.send(
+                    f"No open case `{case}` for this member - refused. It may "
+                    f"already be resolved (the journal keeps that decision) or "
+                    f"belong to another member; nothing was deleted. Only a case "
+                    f"that is still open can be resolved.", ephemeral=True)
+                return
+            target = picked[0]
+            claim_deleted = False
+            if drop_claim:
+                # Re-opening a reward is only safe when its delivered effect is
+                # gone or never existed. `value_kept` means the member still has
+                # it, so deleting the row would let the same reward be paid a
+                # second time; that is refused here rather than honoured and
+                # reported afterwards.
+                if resolution not in ("effect_gone", "never_delivered",
+                                      "not_a_level_reward"):
+                    closed = await ops.resolve_outstanding(
+                        case, actor_id=interaction.user.id,
+                        resolution=resolution,
+                        note=f"{note} (drop_claim refused)")
+                    if not closed:
+                        await interaction.followup.send(
+                            case_closed_reply(case), ephemeral=True)
+                        return
+                    await interaction.followup.send(
+                        f"`drop_claim` refused with resolution "
+                        f"`{resolution}`: the value is still in the member's "
+                        f"hands, so deleting the claim row would let this reward "
+                        f"be paid again. The case is recorded as resolved and the "
+                        f"claim row stays terminal.", ephemeral=True)
+                    return
+                operation_id = ops.new_operation_id(ops.OP_RECONCILE)
+                await ops.open_operation(
+                    operation_id, ops.OP_RECONCILE, guild_id, member.id,
+                    actor_id=interaction.user.id,
+                    reason=f"{resolution}: {note}")
+                decided = False
+                async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                    await db.execute("BEGIN IMMEDIATE")
+                    try:
+                        # Decide the case FIRST, inside this transaction, and
+                        # only then delete the claim it re-opens. The decision is
+                        # conditional on the case still being open, so a stale
+                        # listing or a concurrent administrator updates zero rows
+                        # here and this attempt leaves the claim alone. Both
+                        # writes commit together, so an interrupted run cannot
+                        # resolve the case while its claim survives.
+                        decided = await ops.resolve_outstanding(
+                            case, actor_id=interaction.user.id,
+                            resolution=resolution, note=note, db=db)
+                        if decided:
+                            # Re-check the status inside the write transaction: a
+                            # claim fulfilled since the inspection has delivered
+                            # value this decision says nothing about.
+                            cursor = await db.execute(
+                                "DELETE FROM level_reward_claims WHERE guild_id=? "
+                                "AND user_id=? AND id=? "
+                                "AND status IN ('pending','failed','fulfilled')",
+                                (guild_id, member.id, int(target["claim_id"])))
+                            claim_deleted = cursor.rowcount == 1
+                            if claim_deleted:
+                                await db.execute(
+                                    "DELETE FROM leveling_active_boosts "
+                                    "WHERE guild_id=? AND user_id=? AND source=?",
+                                    (guild_id, member.id,
+                                     f"level_claim:{int(target['claim_id'])}"))
+                                await db.execute(
+                                    "DELETE FROM temp_roles WHERE guild_id=? "
+                                    "AND user_id=? AND source=? AND claim_id=?",
+                                    (guild_id, member.id, "level_claim",
+                                     int(target["claim_id"])))
+                        await db.commit()
+                    except aiosqlite.Error:
+                        # Nothing was decided and nothing was deleted: the case
+                        # stays open, so the command can simply be retried.
+                        await db.execute("ROLLBACK")
+                        await ops.finish_operation(
+                            operation_id, "failed",
+                            {"reversal_id": case, "resolution": resolution,
+                             "claim_deleted": False,
+                             "error": "the claim deletion failed; nothing was "
+                                      "changed"})
+                        raise
+                    except Exception:
+                        await db.execute("ROLLBACK")
+                        raise
+                if not decided:
+                    await ops.finish_operation(
+                        operation_id, "failed",
+                        {"reversal_id": case, "resolution": resolution,
+                         "claim_deleted": False,
+                         "refused": "the case was already resolved"})
+                    await interaction.followup.send(
+                        case_closed_reply(case), ephemeral=True)
+                    return
+                await ops.finish_operation(
+                    operation_id,
+                    "completed" if claim_deleted else "partial",
+                    {"reversal_id": case, "resolution": resolution,
+                     "claim_deleted": claim_deleted})
+            else:
+                closed = await ops.resolve_outstanding(
+                    case, actor_id=interaction.user.id, resolution=resolution,
+                    note=note)
+                if not closed:
+                    await interaction.followup.send(
+                        case_closed_reply(case), ephemeral=True)
+                    return
+            await interaction.followup.send(
+                embed=_level_reconcile_embed(
+                    member, [], resolved={
+                        "reversal_id": case, "resolution": resolution,
+                        "actor_id": interaction.user.id, "note": note,
+                        "claim_deleted": claim_deleted}),
+                ephemeral=True)
+        except LevelResetError as exc:
+            await interaction.followup.send(
+                f"Reconciliation refused \u2014 nothing was changed.\n`{exc}`",
+                ephemeral=True)
+            return
+        except Exception as exc:
+            await interaction.followup.send(
+                f"\u26a0\ufe0f Reconciliation failed: "
+                f"`{type(exc).__name__}: {exc}`\nNothing was deleted unless the "
+                f"reply says so - re-run without `case` to see the open cases.",
+                ephemeral=True)
+            return
+
     # ─── RESET LEADERBOARD (admin, Phase 5 / Leveling expansion) ─
     # Manual/forced equivalent of leaderboard_reset_task — same
     # perform_leaderboard_reset() call, same archive-then-zero
@@ -1115,13 +2811,17 @@ class Leveling(commands.Cog):
                 "Use this command in a server.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        embed = await _level_embed(interaction.guild, interaction.user, "level")
         from utils.level_claims import list_claims, member_is_booster
+        # One claim read, shared by the card and the button state (they must
+        # agree, and it is two fewer SQLite connections inside the ack window).
         claims = await list_claims(interaction.guild.id, interaction.user.id)
+        claimable, reconcile_only = await _claim_button_state(
+            interaction.guild.id, claims, member_is_booster(interaction.user))
+        embed = await _level_embed(interaction.guild, interaction.user, "level",
+                                   claims=claims)
         view = LevelRewardView(self.bot, interaction.guild.id, interaction.user.id,
-                               claimable=await _claim_button_available(
-                                   interaction.guild.id, claims,
-                                   member_is_booster(interaction.user)))
+                               claimable=claimable,
+                               reconcile_only=reconcile_only)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     # ─── PRESTIGE STATE / READ-ONLY VIEW ─────────────────
