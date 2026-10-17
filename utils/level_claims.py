@@ -320,8 +320,16 @@ async def record_crossing(db: aiosqlite.Connection, guild_id: int,
 
     Caller owns the transaction. Eligibility is xp_progress(xp).level,
     not the stored levels.level column. Existing rows are left alone,
-    so a reset and re-level cannot pay a second time. source is stored
-    once and is not read by reserve or payout.
+    so a reset and re-level cannot pay a second time.
+
+    A level re-crossed by ORDINARY PLAY is earned again, and this is where that
+    is recorded: the row keeps its identity across a correction, so a row an
+    earlier administrative change created still names that change's
+    `operation_id`. Leaving it there let a later correction attribute the row to
+    the administrator and take back a reward the member had earned by playing
+    (see `reconcile_level_drop`). Undelivered rows re-earned here lose the
+    administrative attribution; delivered rows are terminal and are left alone.
+    A crossing caused by an administrative change never re-attributes anything.
 
     Booster-only entitlements are created only when is_booster is True (the
     caller verified an active Discord boost at this crossing). There is no
@@ -333,6 +341,28 @@ async def record_crossing(db: aiosqlite.Connection, guild_id: int,
         return 0
     await ensure_tables(db)
     identities = await _definitions(db, guild_id, boosters=bool(is_booster))
+    administrative = (bool(str(operation_id or ""))
+                      or str(source or "") in LEGACY_ADMIN_SOURCES)
+    if not administrative:
+        # Only rows the member can still claim: `pending`/`failed`. A `processing`
+        # row is being delivered right now (its value is already committed to the
+        # member) and a `fulfilled` row is terminal, so neither is re-attributed.
+        # Per identity, not by level: a booster-only reward at a re-crossed level
+        # was not earned by this non-boost crossing and must keep the attribution
+        # of the grant that created it.
+        marks = ", ".join("?" for _ in LEGACY_ADMIN_SOURCES)
+        for (level, track, ref) in identities:
+            if level <= old_level or level > new_level:
+                continue
+            await db.execute(
+                f"UPDATE level_reward_claims SET operation_id=NULL, source=? "
+                f"WHERE guild_id=? AND user_id=? AND reward_level=? "
+                f"AND track=? AND reward_ref=? "
+                f"AND status IN ('pending', 'failed') "
+                f"AND ((operation_id IS NOT NULL AND operation_id != '') "
+                f"     OR source IN ({marks}))",
+                (source, guild_id, user_id, level, track, ref,
+                 *LEGACY_ADMIN_SOURCES))
     now = _iso(_now())
     created = 0
     for (level, track, ref), raw in identities.items():

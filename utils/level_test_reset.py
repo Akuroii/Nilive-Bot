@@ -922,6 +922,21 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
         report["roles_left_on_member"] = plan["roles_left_on_member"]
         report["mode"] = "apply"
         inspected_claim_ids = {c["id"] for c in report["claims"]}
+        # A claim reserved by a claim pass whose Discord call is still running has
+        # an effect this report cannot see: the role may be added AFTER this reset
+        # finishes. It is inspected as `processing`, but the deletion below has no
+        # status filter, so without this it would be erased and the finish would
+        # leave the member wearing a role with no record - while the reset reported
+        # a clean New Game. The lease rules out a NEW reservation, not a delivery
+        # already in flight, so keep these rows exactly like any other effect that
+        # cannot be proven gone and let the verdict say the reset is not complete.
+        in_flight = [c for c in report["claims"]
+                     if str(c.get("status") or "") == "processing"]
+        report["in_flight_claims"] = [
+            {"id": c["id"], "reward_level": c["reward_level"],
+             "track": c["track"], "role_id": c.get("role_id")}
+            for c in in_flight]
+        in_flight_ids = {c["id"] for c in in_flight}
 
         # ── 1. Discord roles, while the claim rows that name them still exist ──
         # Best effort and reported per role: a failure keeps that claim row (and
@@ -1015,10 +1030,17 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
 
         # ── 4. the records, in one transaction ──
         failed_roles = {int(f["role_id"]) for f in report["role_failures"]}
+        # A temp-role unit of an in-flight delivery is the same kind of live
+        # effect: the add may just have succeeded and recorded its unit while the
+        # claim is still `processing`. Keeping the claim row but deleting its unit
+        # would leave a role that never expires.
+        in_flight_roles = {int(c["role_id"]) for c in in_flight
+                           if c.get("role_id") is not None}
         role_preserved = [c for c in report["claims"]
                           if c.get("role_id") in failed_roles]
         kept_ids = {c["id"] for c in role_preserved}
         kept_ids |= {e["claim_id"] for e in report["unreversed"]}
+        kept_ids |= in_flight_ids
 
         # Defence behind the lease: never delete a fulfilled row this run did not
         # inspect. A reward delivered by a writer that ignored the lease would
@@ -1038,7 +1060,11 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
         report["claims_preserved"] = [
             {"id": c["id"], "reward_level": c["reward_level"], "track": c["track"],
              "role_id": c.get("role_id"),
-             "reason": ("a Discord role could not be removed"
+             "reason": ("its delivery is still in progress, so its effect "
+                        "cannot be known yet - the claim row is kept and the "
+                        "reset is NOT complete"
+                        if c["id"] in in_flight_ids
+                        else "a Discord role could not be removed"
                         if c.get("role_id") in failed_roles
                         else "its delivered effect could not be reversed")}
             for c in preserved]
@@ -1065,10 +1091,11 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
                 sql = ("DELETE FROM temp_roles "
                        "WHERE guild_id=? AND user_id=? AND source=?")
                 args = [guild_id, user_id, CLAIM_SOURCE]
-                if failed_roles:
+                keep_roles = failed_roles | in_flight_roles
+                if keep_roles:
                     sql += (f" AND role_id NOT IN "
-                            f"({','.join('?' * len(failed_roles))})")
-                    args += sorted(failed_roles)
+                            f"({','.join('?' * len(keep_roles))})")
+                    args += sorted(keep_roles)
                 cursor = await db.execute(sql, args)
                 counts["temp_roles"] = cursor.rowcount
                 # The entitlement ledger - what makes the next crossing earnable
