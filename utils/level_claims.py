@@ -37,6 +37,30 @@ SOURCE_SETXP = "setxp"
 SOURCE_SETLEVEL = "setlevel"
 SOURCE_DASHBOARD = "dashboard"
 SOURCE_BACKFILL = "legacy_backfill"
+# Administrative writers that existed BEFORE `operation_id` was added to this
+# table. Their rows carry no operation id, so `source` is the only surviving
+# record that the crossing was an administrator's change rather than play.
+# Verified against the base commit: `/setxp` wrote SOURCE_SETXP and the
+# dashboard edit wrote SOURCE_DASHBOARD; message/voice XP is awarded through
+# utils.reward_engine with source 'leveling', and other XP sources (missions,
+# minigames, shop) use their own names. Only these two are administrative.
+LEGACY_ADMIN_SOURCES = (SOURCE_SETXP, SOURCE_DASHBOARD)
+
+
+def is_administrative_claim(claim: dict) -> bool:
+    """True when a claim row came from an administrative XP change.
+
+    New rows record the change's `operation_id`. Rows created before that
+    column existed are recognised by their recorded `source`, and only for the
+    two administrative writers that predate it. Ordinary play and the legacy
+    backfill have no operation id either, and must never be treated as
+    administratively created: a correction is not proof the member did not earn
+    those rewards.
+    """
+    if str(claim.get("operation_id") or ""):
+        return True
+    return str(claim.get("source") or "") in LEGACY_ADMIN_SOURCES
+
 
 _CREATE_CLAIMS = """
     CREATE TABLE IF NOT EXISTS level_reward_claims (
@@ -363,7 +387,8 @@ async def backfill_legacy_claims() -> int:
 
 
 def _reserve_sql(claim_ids: list[int] | None) -> str:
-    sql = """
+    legacy_marks = ", ".join("?" for _ in LEGACY_ADMIN_SOURCES)
+    sql = f"""
         UPDATE level_reward_claims
         SET status='processing',
             owner_token=?,
@@ -382,18 +407,22 @@ def _reserve_sql(claim_ids: list[int] | None) -> str:
           AND (substr(reward_ref, 1, 8) != 'booster:' OR ?)
           AND (
                 reward_level <= ?
-                OR operation_id IS NULL
-                OR operation_id = ''
+                OR (
+                    (operation_id IS NULL OR operation_id = '')
+                    AND source NOT IN ({legacy_marks})
+                  )
               )
     """
-    # The last two predicates are the correction invariant, enforced at the one
-    # place that actually pays: a reward an administrative XP change created is
-    # collectable only while the member's CURRENT level reaches it. `operation_id`
-    # is set by the three administrative writers and is NULL for every crossing
-    # earned by ordinary play, so a correction cannot invalidate a reward the
-    # member earned at the level it names. Nothing is rewritten here - the row is
-    # left intact and becomes collectable again if the member legitimately
-    # reaches that level later.
+    # The last predicate is the correction invariant, enforced at the one place
+    # that actually pays: a reward an administrative XP change created is
+    # collectable only while the member's CURRENT level reaches it. New rows
+    # carry `operation_id`; rows written by the two administrative writers that
+    # predate that column carry only their `source`, so `source` is honoured for
+    # exactly those two names. Ordinary play and the legacy backfill have no
+    # operation id and are never disabled by a correction: those rewards were
+    # earned at the level they name. Nothing is rewritten here - the row is left
+    # intact and becomes collectable again if the member legitimately reaches
+    # that level later.
     if claim_ids:
         marks = ",".join("?" for _ in claim_ids)
         sql += f" AND id IN ({marks})"
@@ -1025,7 +1054,8 @@ async def claim_available(guild_id: int, user_id: int, *,
             current_level = progress_level(xp_row[0] if xp_row else 0)
             result["current_level"] = current_level
             params = [token, started, guild_id, user_id, expired_before,
-                      1 if booster_ok else 0, current_level]
+                      1 if booster_ok else 0, current_level,
+                      *LEGACY_ADMIN_SOURCES]
             if claim_ids:
                 params.extend(claim_ids)
             # A correction (New Game reset, XP rollback) may be holding this
@@ -1250,6 +1280,8 @@ def _claim_brief(claim: dict) -> dict:
             "track": claim["track"], "reward_ref": claim["reward_ref"],
             "status": claim["status"],
             "origin_operation": claim.get("operation_id"),
+            "source": claim.get("source"),
+            "legacy_admin": bool(claim.get("legacy_admin")),
             "effect": {k: v for k, v in effect.items() if v is not None}}
 
 
@@ -1364,7 +1396,7 @@ async def reconcile_level_drop(guild_id: int, user_id: int, level: int, *,
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         cursor = await db.execute(
             "SELECT id, reward_level, track, reward_ref, payload_json, status, "
-            "operation_id FROM level_reward_claims "
+            "operation_id, source FROM level_reward_claims "
             "WHERE guild_id=? AND user_id=? ORDER BY reward_level, id",
             (guild_id, user_id))
         found = await cursor.fetchall()
@@ -1380,22 +1412,40 @@ async def reconcile_level_drop(guild_id: int, user_id: int, level: int, *,
 
     claims = []
     for (claim_id, reward_level, track, ref, payload, status,
-         claim_operation) in found:
+         claim_operation, claim_source) in found:
         try:
             parsed = json.loads(payload) if payload else {}
         except (TypeError, ValueError):
             parsed = {}
+        legacy_admin = bool(
+            not str(claim_operation or "")
+            and str(claim_source or "") in LEGACY_ADMIN_SOURCES)
         claims.append({"id": claim_id, "reward_level": int(reward_level),
                        "track": track, "reward_ref": ref, "payload": parsed,
-                       "status": status, "operation_id": claim_operation})
+                       "status": status, "operation_id": claim_operation,
+                       "source": claim_source, "legacy_admin": legacy_admin,
+                       "admin_created": is_administrative_claim({
+                           "operation_id": claim_operation,
+                           "source": claim_source})})
 
     above = [c for c in claims if c["reward_level"] > level]
     for claim in above:
         if claim["status"] in ("pending", "failed"):
-            if claim["operation_id"]:
+            if claim["admin_created"]:
                 # Not claimable now (see _reserve_sql) and not deleted: the row
-                # is the history and the future entitlement in one.
-                report["dormant"].append(_claim_brief(claim))
+                # is the history and the future entitlement in one. Legacy
+                # administrative rows are included here exactly like rows that
+                # carry an operation id - their recorded source is what proves
+                # an administrator created them.
+                brief = _claim_brief(claim)
+                if claim["legacy_admin"]:
+                    brief["legacy_admin"] = True
+                    brief["note"] = (
+                        "created before operation ids existed; the recorded "
+                        "source is an administrative writer, so the row is "
+                        "dormant rather than claimable above the corrected "
+                        "level")
+                report["dormant"].append(brief)
         elif claim["status"] == "processing":
             # A delivery that started before the lease may still be finishing
             # outside SQLite. It is not safe to judge its effect yet; it is
@@ -1404,7 +1454,14 @@ async def reconcile_level_drop(guild_id: int, user_id: int, level: int, *,
             report["in_flight"].append(_claim_brief(claim))
         elif claim["status"] == "fulfilled":
             if not claim["operation_id"]:
-                report["kept_not_attributable"].append(_claim_brief(claim))
+                brief = _claim_brief(claim)
+                if claim["legacy_admin"]:
+                    brief["legacy_admin"] = True
+                    brief["note"] = (
+                        "delivered by a pre-operation-id administrative change; "
+                        "no exact reversal record exists, so it is kept and "
+                        "reported rather than guessed at")
+                report["kept_not_attributable"].append(brief)
             else:
                 await _reverse_correction_claim(
                     claim, report, guild_id=guild_id, user_id=user_id,
@@ -1742,13 +1799,20 @@ def claim_is_dormant(claim) -> bool:
 
     Rows an administrative change did NOT create (ordinary play) are deliberately
     excluded: they were earned at the level they name, and a later correction is
-    not proof that the member did not earn them. Only `record_crossing()` sets
-    `operation_id`, and it is set by the three administrative writers
-    (/setxp, /setlevel, the dashboard edit). Rows created before that column
-    existed cannot be attributed, so they keep the old (claimable) behaviour and
-    are reported as unattributable by the correction rather than guessed at.
+    not proof that the member did not earn them. `record_crossing()` writes the
+    operation id for the current administrative writers; rows written by the two
+    administrative writers that predate that column are recognised by their
+    recorded `source` (`is_administrative_claim`). Everything else - ordinary
+    play, the legacy backfill, and rows with an unknown/empty source - keeps the
+    old (claimable) behaviour and is reported as unattributable by the
+    correction rather than guessed at.
     """
-    return bool(claim.get("above_level")) and bool(claim.get("admin_created"))
+    if not claim.get("above_level"):
+        return False
+    # `admin_created` is kept as an explicit override for callers/reports that
+    # already classified the row; otherwise classify from the row itself.
+    return bool(claim.get("admin_created")
+                or is_administrative_claim(claim))
 
 
 async def list_claims(guild_id: int, user_id: int) -> list[dict]:
@@ -1797,8 +1861,14 @@ async def list_claims(guild_id: int, user_id: int) -> list[dict]:
             # change (if any) created this entitlement, and whether it now sits
             # above the member's level. `claim_is_dormant()` is the single
             # predicate the card, the button and the correction all read.
+            # `legacy_admin` marks the pre-operation-id rows that are still
+            # administrative because of their recorded source.
             "operation_id": claim_operation,
-            "admin_created": bool(claim_operation),
+            "admin_created": is_administrative_claim({
+                "operation_id": claim_operation, "source": source}),
+            "legacy_admin": bool(
+                not str(claim_operation or "")
+                and str(source or "") in LEGACY_ADMIN_SOURCES),
             "current_level": current_level,
             "above_level": int(level) > int(current_level),
         })

@@ -1225,7 +1225,12 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
     if mutation["rolled_back"]:
         raise LevelResetError(
             f"operation `{operation_id}` is already rolled back. Nothing is "
-            f"undone twice: the first rollback's own row records what happened.")
+            f"undone twice: the first rollback's own row records what happened. "
+            f"If that rollback reported a reward role it could not remove, the "
+            f"claim row and its open case are listed by `/level_reconcile` for "
+            f"this member - remove the role in Discord, then resolve the case "
+            f"with `resolution: effect_gone drop_claim: True`. Re-running this "
+            f"rollback is refused so the XP delta is never subtracted twice.")
     delta = int(mutation["delta"])
     if delta <= 0:
         raise LevelResetError(
@@ -1423,8 +1428,35 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
                     removed_role_claim_ids.add(int(claim["id"]))
             except Exception as exc:
                 failed_roles.add(int(role_id))
-                report["role_failures"].append({"role_id": role_id,
-                                                "error": str(exc)})
+                # A failed Discord removal is a REAL open case, not a note in a
+                # transient reply. The role is still on the member and its claim
+                # is kept, so `reward_reversals` must remember that the effect
+                # was not reversed: `/level_reconcile` lists exactly those rows,
+                # and the operation below is recorded `partial` instead of
+                # `completed`. A re-run of this rollback cannot retry the
+                # removal (the XP delta must never be subtracted twice); the
+                # supported path is: take the role off in Discord, then resolve
+                # the open case with `effect_gone` + `drop_claim: True`.
+                for claim in group:
+                    await ops.note_reversal(
+                        guild_id=guild_id, user_id=user_id,
+                        claim_id=claim["id"], kind=ops.KIND_ROLE, quantity=1,
+                        operation_id=rollback_operation_id,
+                        status=ops.STATUS_OUTSTANDING, role_id=role_id,
+                        reason=(f"Discord refused the rollback's role removal: "
+                                f"{exc}. The role is still on the member and the "
+                                f"claim row is kept; resolve this case with "
+                                f"/level_reconcile after removing the role."))
+                    report["unreversed"].append({
+                        "claim_id": claim["id"],
+                        "reward_level": claim["reward_level"],
+                        "kind": ops.KIND_ROLE, "role_id": role_id,
+                        "status": ops.STATUS_OUTSTANDING,
+                        "reason": f"Discord refused the role removal: {exc}"})
+                report["role_failures"].append({
+                    "role_id": role_id, "error": str(exc),
+                    "claim_ids": [c["id"] for c in group],
+                    "open_case": True})
 
         # ── 2. delivered value, through the same journal-backed primitives ──
         for entry in plan["reverse_currency"]:
@@ -1616,7 +1648,10 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
              "reversed_claims": counts.get("reversed_claims", 0),
              "reversed_currency": len(report["reversed_currency"]),
              "reversed_inventory": len(report["reversed_inventory"]),
-             "unreversed": len(report["unreversed"])})
+             "unreversed": len(report["unreversed"]),
+             "role_failures": len(report.get("role_failures") or []),
+             "open_role_cases": sum(
+                 1 for f in report.get("role_failures") or [] if f.get("open_case"))})
         return report
     except Exception as exc:
         await ops.finish_operation(

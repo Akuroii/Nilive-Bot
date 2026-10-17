@@ -1224,10 +1224,13 @@ def _xp_rollback_embed(member, report: dict, *, applied: bool) -> discord.Embed:
     """The /xp_rollback preview (or result). Nothing here writes."""
     mutation = report.get("mutation") or {}
     plan = report.get("plan") or {}
+    partial = bool(applied and ((report.get("role_failures") or [])
+                                or (report.get("unreversed") or [])))
     embed = discord.Embed(
-        title=("XP rollback — APPLIED" if applied
+        title=("XP rollback — APPLIED (PARTIAL)" if partial else
+               "XP rollback — APPLIED" if applied
                else "XP rollback — PREVIEW (nothing changed)"),
-        color=0x3ba55d if applied else 0x7c5cbf)
+        color=0xd29922 if partial else 0x3ba55d if applied else 0x7c5cbf)
     embed.add_field(
         name="Operation being undone",
         value=(f"`{mutation.get('operation_id')}` · {mutation.get('source')} "
@@ -1380,9 +1383,16 @@ def _xp_rollback_embed(member, report: dict, *, applied: bool) -> discord.Embed:
                 name="Roles that could NOT be removed",
                 value="\n".join(
                     f"- <@&{f['role_id']}> — {str(f['error'])[:120]}"
+                    + (f" (claim(s) {', '.join(map(str, f['claim_ids']))})"
+                       if f.get("claim_ids") else "")
                     for f in report["role_failures"][:20])[:1024]
-                + "\nTheir claim rows were KEPT, so the member is not left "
-                  "wearing an undocumented reward role.",
+                + "\nTheir claim rows were KEPT and each claim behind them now "
+                  "has an OPEN case in `/level_reconcile` (the operation is "
+                  "recorded as `partial`, not `completed`). Remove the role in "
+                  "Discord, then "
+                  "resolve the case with `resolution: effect_gone "
+                  "drop_claim: True`; re-running the rollback is refused so the "
+                  "XP delta is never subtracted twice.",
                 inline=False)
         if report.get("claims_preserved"):
             embed.add_field(
@@ -1451,10 +1461,13 @@ def _level_reconcile_embed(member, cases: list, *, report: dict | None = None,
         "back automatically. Nothing was deleted to make a reset look complete, "
         "and none of these rewards is claimable again while its case is open.")
     for case in cases[:20]:
-        what = (f"{case['quantity']:,} {case['currency']}"
-                if case.get("currency") else
-                f"{case['quantity']}x {case['item_name']}"
-                if case.get("item_name") else f"{case['quantity']} unit(s)")
+        if case.get("kind") == "role" and str(case.get("item_name") or "").isdigit():
+            what = f"role <@&{case['item_name']}>"
+        else:
+            what = (f"{case['quantity']:,} {case['currency']}"
+                    if case.get("currency") else
+                    f"{case['quantity']}x {case['item_name']}"
+                    if case.get("item_name") else f"{case['quantity']} unit(s)")
         embed.add_field(
             name=f"`{case['reversal_id']}` · {case['kind']} · {case['status']}",
             value=(f"claim `{case['claim_id']}` · {what}\n"
