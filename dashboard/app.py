@@ -2683,6 +2683,28 @@ def api_edit_member():
                     (guild_id, user_id))
                 row = await cursor.fetchone()
                 old_xp = row[0] if row else 0
+                # A DECREASE is refused here, before anything is written. This
+                # page has no correction sweep: it cannot take back a reward the
+                # higher level already delivered, nor take the member's
+                # correction lease, so accepting the edit would leave delivered
+                # rewards in place while the level says they were not earned.
+                # `/setlevel` and `/setxp` run the same lease + reconciliation
+                # (`utils.level_claims.reconcile_level_drop`) that this route
+                # would have to duplicate. Refusing is the whole fix: a decrease
+                # that silently skips reconciliation is worse than a redirect.
+                if xp < old_xp:
+                    await db.execute("ROLLBACK")
+                    return {
+                        "success": False,
+                        "error": (
+                            "This form cannot lower a member's XP or level. "
+                            "Lowering XP can leave rewards that the higher "
+                            "level already unlocked, and this page does not run "
+                            "the reward correction. Use /setlevel or /setxp in "
+                            "Discord instead - both reconcile unclaimed and "
+                            "already-delivered rewards and take the member's "
+                            "correction lease. Nothing was changed."),
+                    }
                 # Tolerant on purpose: a database that predates the claim tables
                 # has no claims to attribute, and a missing column must not turn a
                 # routine member edit into a 500.
@@ -2736,11 +2758,16 @@ def api_edit_member():
                     DO UPDATE SET balance=?, diamonds=?
                 """, (guild_id, user_id, coins, diamonds, coins, diamonds))
                 await db.commit()
+                return {"success": True}
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
 
-    run_async(update())
+    outcome = run_async(update())
+    if not outcome.get("success"):
+        # 409: the request conflicts with the member's recorded state and
+        # nothing was written. The body is still JSON for the page's fetch().
+        return jsonify(outcome), 409
     log_action(guild_id, f"Edited member {user_id}: xp={xp} coins={coins} diamonds={diamonds}",
                "members", target_id=int(user_id) if user_id else None)
     return jsonify({"success": True})

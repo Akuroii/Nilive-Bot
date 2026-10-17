@@ -1201,7 +1201,7 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
     Prestige, the economy outside level rewards, other members and reward
     definitions are never touched, exactly as in `reset_member()`.
     """
-    from utils.level_claims import progress_level
+    from utils.level_claims import _role_granted_elsewhere, progress_level
     guild_id, user_id = _check_scope(guild_id, user_id)
     await ops.ensure_tables()
 
@@ -1287,6 +1287,32 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
                                 "cancelled automatically")
             for c in independent if int(c["reward_level"]) > target_level]
 
+    # Roles this rollback may take off, and roles it must leave on because another
+    # recorded entitlement still grants them. This reuses the SAME predicate the
+    # correction engine uses (`utils.level_claims._role_granted_elsewhere`) rather
+    # than a second, weaker check: it names another fulfilled claim, a
+    # `temp_roles` row from a different source, or an inventory role marker. A
+    # role kept for that reason is deliberately retained, not failed.
+    role_claims: dict[int, dict] = {}
+    for claim in delivered:
+        if claim.get("role_id") and not claim.get("legacy_backfill"):
+            role_claims.setdefault(int(claim["role_id"]), claim)
+    remove_discord_roles: list[int] = []
+    retained_roles: list[dict] = []
+    if role_claims:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as grant_db:
+            for role_id, claim in sorted(role_claims.items()):
+                shared = await _role_granted_elsewhere(
+                    grant_db, guild_id, user_id, role_id,
+                    exclude_claim_id=int(claim["id"]),
+                    exclude_item=(claim["payload"].get("name")
+                                  if claim["track"] == "shop" else None))
+                if shared:
+                    retained_roles.append({"role_id": role_id,
+                                           "also_granted_by": [shared]})
+                else:
+                    remove_discord_roles.append(role_id)
+
     plan = {
         "target_xp": target_xp, "target_level": target_level,
         "removed_xp": current_xp - target_xp, "delta": delta,
@@ -1301,15 +1327,15 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
         "kept_still_earned": [brief(c) for c in still_earned],
         "kept_independent": [brief(c) for c in independent],
         "unattributable": unattributable,
-        "remove_discord_roles": sorted(
-            {int(c["role_id"]) for c in delivered
-             if c.get("role_id") and not c.get("legacy_backfill")}),
+        "remove_discord_roles": remove_discord_roles,
+        "roles_left_on_member": retained_roles,
     }
     report.update({
         "mode": "preview" if not apply else "apply",
         "kind": "rollback", "mutation": mutation, "plan": plan,
         "applied": False, "operation_id": None,
         "roles_removed": [], "role_failures": [], "claims_preserved": [],
+        "roles_left_on_member": list(retained_roles),
         "reversed_currency": [], "reversed_inventory": [], "unreversed": [],
         "cancelled_claims": [], "deleted": {},
     })
@@ -1350,13 +1376,23 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
                       unreversed=[], cancelled_claims=[], deleted={})
         plan = report["plan"]
         current_xp = int(report["xp"])
+        caused_ids = {c["id"] for c in report["claims"]
+                      if str(c.get("operation_id") or "") == str(operation_id)}
 
         # ── 1. Discord roles first, while the claim rows naming them exist ──
+        # `plan["remove_discord_roles"]` was built by the preview immediately
+        # above, after `_role_granted_elsewhere` found no other entitlement for
+        # each role. Roles that predicate retained are not in it and stay on the
+        # member, reported under `roles_left_on_member`.
         failed_roles: set[int] = set()
+        removed_role_claim_ids: set[int] = set()
         for role_id in plan["remove_discord_roles"]:
-            source_claim = next(
-                (c for c in report["claims"] if c.get("role_id") == role_id), None)
-            claim_id = (source_claim or {}).get("id")
+            group = [c for c in report["claims"]
+                     if c.get("role_id") is not None
+                     and int(c["role_id"]) == int(role_id)
+                     and c.get("status") == "fulfilled"
+                     and c["id"] in caused_ids
+                     and not c.get("legacy_backfill")]
             try:
                 if member is None:
                     raise LevelResetError(
@@ -1372,14 +1408,19 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
                     await member.remove_roles(
                         role, reason=f"xp rollback {operation_id}")
                     report["roles_removed"].append(role_id)
-                if claim_id:
+                # One journal row per claim whose role effect is now gone. These
+                # claims join `delete_ids` below: leaving a fulfilled role claim
+                # behind would let a rejoin's `reconcile_role_progression()`
+                # restore the role the rollback just removed.
+                for claim in group:
                     await ops.note_reversal(
-                        guild_id=guild_id, user_id=user_id, claim_id=claim_id,
-                        kind=ops.KIND_ROLE, quantity=1,
+                        guild_id=guild_id, user_id=user_id,
+                        claim_id=claim["id"], kind=ops.KIND_ROLE, quantity=1,
                         operation_id=rollback_operation_id,
                         status=ops.STATUS_APPLIED, role_id=role_id,
                         reason=f"reward role removed by the rollback of "
                                f"{operation_id}")
+                    removed_role_claim_ids.add(int(claim["id"]))
             except Exception as exc:
                 failed_roles.add(int(role_id))
                 report["role_failures"].append({"role_id": role_id,
@@ -1436,11 +1477,10 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
         # Splitting the XP write from the claim deletes would leave a member who
         # lost the rewards but kept the level (or the reverse) if the process died
         # in between.
-        caused_ids = {c["id"] for c in report["claims"]
-                      if str(c.get("operation_id") or "") == str(operation_id)}
         reversed_ok = ({e["claim_id"] for e in report["reversed_currency"]}
                        | {e["claim_id"] for e in report["reversed_inventory"]}
-                       | {e["claim_id"] for e in plan["legacy_cancel_claims"]})
+                       | {e["claim_id"] for e in plan["legacy_cancel_claims"]}
+                       | removed_role_claim_ids)
         delete_ids = {c["claim_id"] for c in plan["cancel_claims"]}
         delete_ids |= {c["id"] for c in report["claims"]
                        if c["id"] in caused_ids and c["id"] in reversed_ok}
@@ -1449,9 +1489,19 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
         failed_claim_ids = {c["id"] for c in report["claims"]
                             if c.get("role_id") in failed_roles}
         delete_ids -= failed_claim_ids
+        retained_role_ids = {int(r["role_id"])
+                             for r in plan.get("roles_left_on_member") or []}
+        retained_claim_ids = {c["id"] for c in report["claims"]
+                              if c.get("role_id") is not None
+                              and int(c["role_id"]) in retained_role_ids
+                              and c["id"] in caused_ids}
         report["claims_preserved"] = [
             dict(brief(c), reason=("a Discord role could not be removed"
                                    if c["id"] in failed_claim_ids
+                                   else "the role is also granted by another "
+                                        "entitlement, so it was deliberately "
+                                        "kept"
+                                   if c["id"] in retained_claim_ids
                                    else "its delivered effect could not be "
                                         "reversed, so it stays terminal"))
             for c in report["claims"]

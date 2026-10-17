@@ -1299,6 +1299,15 @@ def _xp_rollback_embed(member, report: dict, *, applied: bool) -> discord.Embed:
         if roles:
             lines.append("- remove reward role(s): "
                          + ", ".join(f"<@&{r}>" for r in roles))
+        retained = plan.get("roles_left_on_member") or []
+        if retained:
+            # Deliberately kept, not a failure: another recorded entitlement
+            # still grants the role (`_role_granted_elsewhere`).
+            lines.append(
+                "- keep reward role(s) still granted elsewhere: "
+                + ", ".join(f"<@&{r['role_id']}> "
+                            f"({', '.join(str(x) for x in r['also_granted_by'])})"
+                            for r in retained))
         embed.add_field(
             name=("Delivered value taken back" if applied
                   else "Delivered value this would take back"),

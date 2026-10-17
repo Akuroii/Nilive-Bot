@@ -643,13 +643,29 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
     "blocked": bool}``. Failures are role IDs with an explanatory string.
     """
     await ensure_tables()
+    from utils import level_ops as ops
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         cursor = await db.execute("""
-            SELECT reward_level, reward_ref, payload_json, status
+            SELECT id, reward_level, reward_ref, payload_json, status
             FROM level_reward_claims
             WHERE guild_id=? AND user_id=? AND track=?
         """, (guild_id, user_id, TRACK_ROLE))
         claim_rows = await cursor.fetchall()
+        # A role whose reversal the journal already records as applied is gone by
+        # proof. If a crash left the claim row behind, restoring the role here
+        # would undo a completed reversal; the retry that finishes the operation
+        # deletes the row. Read-only and tolerant: a database without the
+        # journal table simply has nothing to exclude.
+        try:
+            cursor = await db.execute(
+                "SELECT claim_id FROM reward_reversals WHERE guild_id=? "
+                "AND user_id=? AND kind=? AND status IN (?,?)",
+                (guild_id, user_id, TRACK_ROLE, ops.STATUS_APPLIED,
+                 ops.STATUS_ALREADY))
+            reversed_role_claims = {int(row[0]) for row in await cursor.fetchall()
+                                    if row[0] is not None}
+        except aiosqlite.Error:
+            reversed_role_claims = set()
 
     result: dict = {"restored": [], "removed": [], "failed": [],
                     "blocked": False}
@@ -660,7 +676,9 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
     # not restored, not targeted, and not removed here.
     booster_ok = member_is_booster(member)
     partitions: dict[bool, dict[int, dict]] = {False: {}, True: {}}
-    for claimed_level, ref, payload, status in claim_rows:
+    for claim_id, claimed_level, ref, payload, status in claim_rows:
+        if claim_id in reversed_role_claims:
+            continue
         audience = is_booster_ref(ref)
         if boosters_only and not audience:
             continue

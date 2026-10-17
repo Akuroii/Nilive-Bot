@@ -50,7 +50,7 @@ and is not part of the suite.
 
 ## Full suite, 63 scripts (`scripts/test_*.py`, this branch)
 
-57 exit 0, 6 exit 1. Every failure is pre-existing or a recorded divergence:
+56 exit 0, 7 exit 1. Every failure is pre-existing or a recorded divergence:
 
 | Suite | This branch | Baseline (`02fbfee`, separate worktree) |
 |---|---|---|
@@ -59,20 +59,58 @@ and is not part of the suite.
 | test_phase2_backend | exit 1 | exit 1 |
 | test_shop_publications | pytest collection `INTERNALERROR` | same |
 | test_xp_safety_audit | 115 passed, 3 failed | 108 passed, **same 3** |
-| test_setlevel_admin | 8 checks fail (§6) | passes (asserts the old policy) |
+| test_setlevel_admin | 8 checks fail (§6) | suite added by this PR — no baseline |
+| test_slice2_level_claims | 1 check fails | check added by this PR — see below |
 
 `test_setlevel_admin` §6 asserts that a downward `/setlevel` must delete nothing and
 leave above-level rewards claimable. That is the behaviour this PR is required to
 replace, so the divergence is deliberate; its eight check names are listed in the PR
-report. The three `test_xp_safety_audit` failures are static checks about the older
-reset/reconciler helpers and fail identically on the base commit.
+report. `test_slice2_level_claims`'s "negative Dashboard member edit clamps existing
+XP" check asserts that the dashboard may lower XP to 0 through
+`/api/edit-member`. That route now refuses every decrease, because it cannot run
+the reward correction; the check encodes the old unsafe behaviour and is a
+deliberate divergence, not a regression in the correction engine. The three
+`test_xp_safety_audit` failures are static checks about the older reset/reconciler
+helpers and fail identically on the base commit.
 
 All other leveling suites pass, including `test_xp_rollback`,
 `test_level_ops_provenance`, `test_level_test_reset`, `test_level_card_fixes`,
 `test_level_card_visuals`, `test_leveling_reward_e2e`,
-`test_leveling_claim_all_d2`, `test_slice1..4`, `test_booster_rewards`,
-`test_level_reward_role_progression`, `test_rejoin_reconciliation` and the wallet
-suites.
+`test_leveling_claim_all_d2`, `test_slice1`, `test_slice3`, `test_slice4`,
+`test_booster_rewards`, `test_level_reward_role_progression`,
+`test_rejoin_reconciliation` and the wallet suites.
+
+## Fix round: `/xp_rollback` role safety and the dashboard decrease gate
+
+No test file was edited. `utils/level_test_reset.py::rollback_xp_operation` now:
+
+* classifies every delivered role through the same
+  `utils.level_claims._role_granted_elsewhere` predicate the correction engine uses,
+  before the plan is built, and moves roles another recorded entitlement still
+  grants into `plan["roles_left_on_member"]` instead of `remove_discord_roles`;
+* journals one applied role reversal per claim behind each removed role and adds
+  those claim ids to the same `delete_ids` transaction as the XP write, so a
+  removed role's fulfilled claim cannot be restored by a rejoin's
+  `reconcile_role_progression()`;
+* reports retained roles in `/xp_rollback`'s preview and result, and names the
+  competing grant in `claims_preserved`.
+
+`utils/level_claims.py::reconcile_role_progression` additionally skips a role claim
+whose journal already says `applied`/`already_reversed`, so a crash between the
+Discord removal and the claim delete cannot be undone by a rejoin.
+
+`dashboard/app.py::api_edit_member` reads the member's XP inside its
+`BEGIN IMMEDIATE` transaction and, when the request would lower it, rolls back and
+returns HTTP 409 with a message directing the administrator to `/setlevel` or
+`/setxp`. Nothing is written: no XP, wallet, claim or mutation row. XP increases
+are unchanged. The member-profile page shows the server's explanation.
+
+Scratch harness `/tmp/verify_fixes.py` (not a repo test), all checks pass:
+role removed **and** its claim deleted, rejoin restores nothing; a role also granted
+by a `temp_roles` row is kept and reported; the crash state (role gone, journal
+applied, claim row left) is not restored by a rejoin and a re-run finishes it; a
+temp-role reward is removed with its own inventory marker excluded; the dashboard
+decrease returns 409 and changes nothing, while an increase still succeeds.
 
 ## 100→10 scenario (`/tmp/verify_correction.py`, all checks pass)
 
@@ -101,7 +139,8 @@ No automated suite covers the production 100→10 path end to end:
 `test_setlevel_admin` still encodes the old policy, and the harness above is not a
 repo test. Scenarios without a committed test: dormant-row repayment after legitimate
 re-progression, crash/retry idempotency at the command layer, concurrent claim pass
-vs. correction, and role-kept-because-otherwise-granted.
+vs. correction, role-kept-because-otherwise-granted, `/xp_rollback` deleting a
+reversed role's claim, and the dashboard's refusal of an XP decrease.
 
 ## Not verified
 
