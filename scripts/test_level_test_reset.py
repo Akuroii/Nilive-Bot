@@ -135,6 +135,7 @@ async def main():
     await reset_database()
     import utils.level_test_reset as reset_mod
     from utils.level_test_reset import (LevelResetError, NEVER_TOUCHED_TABLES,
+                                        SCOPED_REVERSAL_TABLES,
                                         inspect_member, reset_member)
     from utils.level_claims import ensure_tables
     await ensure_tables()
@@ -176,24 +177,53 @@ async def main():
     check("the preview reports delivered currency it will NOT reverse",
           report["currency_credited"] == {"balance": COIN_L3} and report["ledger_rows"] == 1,
           str(report["currency_credited"]))
-    check("the preview flags the block on already-delivered value",
-          plan["blocked_on_delivered_value"] is True and len(plan["blocked_claims"]) == 2
-          and {b["track"] for b in plan["blocked_claims"]} == {"currency", "shop"},
-          str(plan["blocked_claims"]))
+    check("the preview proves both delivered rewards, so nothing is blocked",
+          plan["blocked_on_delivered_value"] is False and plan["cannot_reverse"] == []
+          and plan["claims_kept"] == [] and plan["delete_claims"] == 3,
+          str(plan["cannot_reverse"]))
     check("inspect_member alone is read-only too",
           changed_tables(before, dump()) == [] and (await inspect_member(GUILD, USER))["xp"] == 5000)
 
-    # ── 2. the delivered-value gate ──
-    print("== 2. delivered-value gate ==")
-    blocked = await reset_member(GUILD, USER, apply=True, allow_production=True)
-    check("apply is blocked while delivered value cannot be reversed",
-          blocked["blocked"] is True and blocked["mode"] == "blocked"
-          and blocked["applied"] is False, str(blocked["mode"]))
-    check("a blocked apply wrote nothing", changed_tables(before, dump()) == [],
+    # ── 2. delivered value is attributed to proof, not blocked wholesale ──
+    # This is the heart of the tool: a level reward the test member already
+    # collected has to be identifiable before it can be taken back, and anything
+    # that cannot be identified has to be reported instead of guessed.
+    print("== 2. attributing delivered value ==")
+    preview = await reset_member(GUILD, USER)
+    attributed = preview["plan"]
+    check("the delivered currency is matched to its own append-only ledger row",
+          len(attributed["reverse_currency"]) == 1
+          and attributed["reverse_currency"][0]["reward_level"] == 3
+          and attributed["reverse_currency"][0]["currency"] == "balance"
+          and attributed["reverse_currency"][0]["amount"] == COIN_L3
+          and attributed["reverse_currency"][0]["ledger_id"] is not None,
+          str(attributed["reverse_currency"]))
+    check("matched one-to-one, so two rewards cannot claim the same credit",
+          preview["reconciliation"]["proven"]["currency"][0]["matched_on"]
+              in ("currency+amount+level", "currency+amount"),
+          str(preview["reconciliation"]["proven"]["currency"]))
+    check("the delivered item is matched to the quantity its own claim froze",
+          len(attributed["reverse_inventory"]) == 1
+          and attributed["reverse_inventory"][0]["reward_level"] == 5
+          and attributed["reverse_inventory"][0]["item_name"] == "Potion"
+          and attributed["reverse_inventory"][0]["quantity"] == 2,
+          str(attributed["reverse_inventory"]))
+    check("the preview shows the wallet and the stock it would move",
+          preview["wallet"] == {"balance": 777, "diamonds": 33}
+          and [r["quantity"] for r in preview["inventory_candidates"]] == [4],
+          f"{preview['wallet']} {preview['inventory_candidates']}")
+    check("so nothing is blocked and no claim row needs keeping",
+          attributed["cannot_reverse"] == [] and attributed["claims_kept"] == []
+          and attributed["delete_claims"] == 3, str(attributed))
+    check("and the preview still wrote nothing at all",
+          changed_tables(before, dump()) == [],
           str(changed_tables(before, dump())))
-    check("the block explains which claim rows it will not drop",
-          blocked["plan"]["blocked_claims"][0]["track"] == "currency",
-          str(blocked["plan"]["blocked_claims"]))
+    check("an inventory row from another source is a note, not a level-reward trace",
+          any("another source" in n for n in preview["notes"])
+          and preview["traces"] == [], str(preview["notes"]))
+    check("prestige is a note too: it is not a level reward",
+          any("Prestige left as it is" in n for n in preview["notes"]),
+          str(preview["notes"]))
 
     # ── 3. the production gate ──
     print("== 3. production gate ==")
@@ -207,7 +237,21 @@ async def main():
             refused = str(exc)
         check("production refuses to apply without the explicit second key",
               refused is not None and "production" in refused, str(refused))
-        check("the production refusal wrote nothing", changed_tables(before, dump()) == [],
+        check("the production refusal wrote nothing",
+              changed_tables(before, dump()) == [],
+              str(changed_tables(before, dump())))
+        refused_waiver = None
+        try:
+            await reset_member(GUILD, USER, apply=True, include_delivered=True,
+                               allow_production=True)
+        except LevelResetError as exc:
+            refused_waiver = str(exc)
+        check("production refuses include_delivered even WITH the second key",
+              refused_waiver is not None
+              and "already-paid reward claimable again" in refused_waiver,
+              str(refused_waiver))
+        check("and that refusal wrote nothing either",
+              changed_tables(before, dump()) == [],
               str(changed_tables(before, dump())))
     finally:
         reset_mod.NERO_ENVIRONMENT = saved_env
@@ -229,22 +273,31 @@ async def main():
     print("== 5. apply ==")
     reset_mod.NERO_ENVIRONMENT = "staging"
     try:
-        report = await reset_member(GUILD, USER, apply=True, include_delivered=True,
-                                    member=member)
+        # The DEFAULT path: no include_delivered waiver, so every claim row that
+        # survives does so because its effect survived.
+        report = await reset_member(GUILD, USER, apply=True, member=member,
+                                    reversed_by=999)
     finally:
         reset_mod.NERO_ENVIRONMENT = saved_env
     check("apply reports what it did", report["applied"] is True and report["mode"] == "apply")
     check("the member's XP/level is zeroed and the claim ledger is empty",
-          report["after"] == {"xp": 0, "level": 0, "prestige": 2,
-                              "vi_activation": None, "claims": 0, "boosts": 0,
-                              "temp_roles": 0}, str(report["after"]))
-    check("prestige survived because it was not asked for, and the report says so",
-          report["new_game_complete"] is False
-          and any("Prestige was NOT reset" in t for t in report["traces"]),
-          str(report["traces"]))
+          {k: report["after"][k] for k in
+           ("xp", "level", "prestige", "vi_activation", "claims", "boosts",
+            "temp_roles")} == {"xp": 0, "level": 0, "prestige": 2,
+                               "vi_activation": None, "claims": 0, "boosts": 0,
+                               "temp_roles": 0}, str(report["after"]))
+    check("every delivered level reward was reversed, so this IS a clean New Game",
+          report["traces"] == [] and report["new_game_complete"] is True
+          and report["unreversed"] == [] and report["claims_preserved"] == [],
+          f"traces={report['traces']} unreversed={report['unreversed']}")
+    check("prestige surviving is a note, not a trace - it is not a level reward",
+          any("Prestige left as it is" in n for n in report["notes"]),
+          str(report["notes"]))
     check("the report separates what ran from what could not",
           any("zeroed levels.xp/level" in r for r in report["ran"])
-          and any("inventory_items" in c for c in report["could_not"]),
+          and any(f"reversed {COIN_L3} balance" in r for r in report["ran"])
+          and any("removed 2x Potion" in r for r in report["ran"])
+          and report["could_not"] == [],
           f"ran={report['ran']} could_not={report['could_not']}")
     check("the reward role was removed from the member",
           report["roles_removed"] == [ROLE_ID] and not report["role_failures"]
@@ -254,17 +307,59 @@ async def main():
                (GUILD, USER)) == [(0, 0, 2)])
 
     changed = changed_tables(before, dump())
-    check("only the four scoped stores changed",
+    check("only the scoped leveling stores and the three reversal stores changed",
           set(changed) == {"levels", "level_reward_claims", "leveling_active_boosts",
-                           "temp_roles"}, str(changed))
-    check("no reward definition, config, economy, ledger or inventory table was touched",
+                           "temp_roles"} | set(SCOPED_REVERSAL_TABLES), str(changed))
+    check("no reward definition, config, shop or history table was touched",
           not (set(changed) & set(NEVER_TOUCHED_TABLES)),
           str(set(changed) & set(NEVER_TOUCHED_TABLES)))
     after = dump()
-    check("the economy, ledger and inventory rows are byte-identical",
+    check("the wallet moved by EXACTLY the proven amount, and no further",
+          rows("SELECT balance, diamonds FROM economy WHERE guild_id=? AND user_id=?",
+               (GUILD, USER)) == [(777 - COIN_L3, 33)],
+          str(rows("SELECT balance, diamonds FROM economy WHERE guild_id=? "
+                   "AND user_id=?", (GUILD, USER))))
+    check("the item moved by EXACTLY the proven quantity",
+          rows("SELECT quantity, source FROM inventory_items WHERE guild_id=? "
+               "AND user_id=? AND item_name='Potion'", (GUILD, USER)) == [(2, "mission")],
+          str(rows("SELECT quantity FROM inventory_items WHERE guild_id=? "
+                   "AND user_id=?", (GUILD, USER))))
+    check("the reversal is recorded through the ledger, not a silent edit",
+          rows("SELECT reversed, reversed_by FROM transaction_ledger WHERE guild_id=? "
+               "AND user_id=? AND source='level_claim' AND type='credit'",
+               (GUILD, USER)) == [(1, 999)]
+          and rows("SELECT type, amount, source FROM transaction_ledger "
+                   "WHERE guild_id=? AND user_id=? AND type='reversal'",
+                   (GUILD, USER)) == [("reversal", -COIN_L3, "ledger")],
+          str(rows("SELECT type, amount, reversed, reversed_by FROM transaction_ledger "
+                   "WHERE guild_id=? AND user_id=?", (GUILD, USER))))
+    # reverse_transaction() writes two rows per reversal by design: the
+    # compensating debit from safe_deduct, plus its own 'reversal' marker. It also
+    # flips `reversed`/`reversed_at`/`reversed_by` on the row it undoes - that is
+    # the audit marker, not a rewrite of the financial fact, so every other column
+    # of every pre-existing row must still be byte-identical.
+    fact = (1, 2, 3, 4, 5, 6, 7, 8, 9, 13)
+    ledger_before = {r[0]: r for r in before["transaction_ledger"]}
+    ledger_after = {r[0]: r for r in after["transaction_ledger"]}
+    check("no ledger row was deleted, and no financial column was rewritten",
+          len(ledger_after) == len(ledger_before) + 2
+          and set(ledger_before) <= set(ledger_after)
+          and all(tuple(ledger_after[i][c] for c in fact)
+                  == tuple(row[c] for c in fact)
+                  for i, row in ledger_before.items()),
+          f"{len(ledger_before)} -> {len(ledger_after)}")
+    check("the other member's wallet and inventory are byte-identical",
+          after["economy"] == sorted(
+              [r for r in before["economy"] if r[1] != USER or r[0] != GUILD]
+              + [(GUILD, USER, 777 - COIN_L3, 33)], key=repr)
+          and rows("SELECT balance, diamonds FROM economy WHERE guild_id=? AND user_id=?",
+                   (GUILD, OTHER)) == [(777, 33)],
+          str(rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                   (GUILD, OTHER))))
+    check("reward definitions, config, shop and history are byte-identical",
           all(after[t] == before[t] for t in
-              ("economy", "transaction_ledger", "inventory_items", "shop_items",
-               "leveling_currency_rewards", "leveling_rewards", "activity_stats")))
+              ("shop_items", "leveling_currency_rewards", "leveling_rewards",
+               "leveling_boost_rewards", "activity_stats", "purchase_history")))
     check("every reward definition still exists",
           rows("SELECT COUNT(*) FROM leveling_currency_rewards")[0][0] == 2
           and rows("SELECT COUNT(*) FROM leveling_rewards")[0][0] == 2)
@@ -283,11 +378,12 @@ async def main():
                (GUILD, USER)) == [("shop",)]
           and rows("SELECT source FROM temp_roles WHERE guild_id=? AND user_id=?",
                    (GUILD, USER)) == [("shop",)])
-    check("the value it could not reverse is repeated in the report",
-          report["left_behind"]["currency"] == {"balance": COIN_L3}
-          and report["left_behind"]["ledger_rows"] == 1
-          and len(report["left_behind"]["inventory_candidates"]) == 1,
-          str(report["left_behind"]))
+    check("the report lists what it reversed, with the amounts and the new totals",
+          len(report["reversed_currency"]) == 1
+          and report["reversed_currency"][0]["amount"] == COIN_L3
+          and report["reversed_currency"][0]["new_balance"] == 777 - COIN_L3
+          and report["reversed_inventory"][0]["remaining"] == 2,
+          f"{report['reversed_currency']} {report['reversed_inventory']}")
 
     # ── 6. the reset really lets the test be repeated ──
     print("== 6. re-testing from zero ==")
@@ -352,8 +448,15 @@ async def main():
     check("the preview names the scope and the single member",
           f"`{GUILD}`" in embed.fields[0].value and f"`{USER}`" in embed.fields[0].value
           and "Never any other member" in embed.fields[0].value, embed.fields[0].value)
-    check("the preview warns about the delivered value it will not reverse",
-          any("NOT reversed" in f.value for f in embed.fields),
+    check("the preview names each delivered reward it WILL reverse, and how",
+          any(f.name == "Delivered level rewards this reset reverses"
+              and f"L3 · {COIN_L3:,} balance" in f.value
+              and "ledger row" in f.value for f in embed.fields),
+          str([(f.name, f.value) for f in embed.fields]))
+    check("and it states plainly what cannot be attributed to a level reward",
+          any(f.name.startswith("Left alone: cannot be attributed")
+              and "inventory_items" in f.value and "economy" in f.value
+              for f in embed.fields),
           str([f.name for f in embed.fields]))
     check("the preview states prestige is not being reset unless asked",
           any("**not reset** (pass include_prestige)" in f.value for f in embed.fields)
@@ -386,21 +489,37 @@ async def main():
         user=itx.user, guild=guild,
         response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
         followup=SimpleNamespace(send=AsyncMock()))
+    # include_delivered on production is refused even with the env key: it would
+    # delete a claim row whose value is still in the member's hands.
+    itx_waiver = SimpleNamespace(
+        user=itx.user, guild=guild,
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()))
+    waiver_before = dump()
     os.environ["ALLOW_LEVEL_TEST_RESET"] = "1"
     try:
-        await command.callback(cog, itx3, member, True, True)
+        await command.callback(cog, itx_waiver, member, True, True)
+        check("the command refuses include_delivered on production too",
+              "already-paid reward claimable again" in
+              itx_waiver.followup.send.await_args.args[0]
+              and changed_tables(waiver_before, dump()) == [],
+              str(itx_waiver.followup.send.await_args.args))
+        # The default path needs no waiver, because everything is reversible.
+        await command.callback(cog, itx3, member, True)
     finally:
         os.environ.pop("ALLOW_LEVEL_TEST_RESET", None)
     applied = itx3.followup.send.await_args.kwargs["embed"]
-    check("the applied report separates what ran from what could not",
-          any(f.name == "What ran" for f in applied.fields)
-          and any(f.name == "What could NOT be done" for f in applied.fields),
-          str([f.name for f in applied.fields]))
-    check("and it never claims a clean New Game while traces survive",
-          any("Not a clean New Game" in f.name for f in applied.fields)
-          and not any("Clean New Game" == f.name.lstrip("\u2705 ")
-                      for f in applied.fields),
-          str([f.name for f in applied.fields]))
+    check("the applied report separates what ran from what it reversed",
+          any(f.name == "What ran" and "zeroed levels.xp/level" in f.value
+              for f in applied.fields)
+          and any(f.name == "Delivered level rewards reversed"
+                  and "ledger" in f.value for f in applied.fields)
+          and not any(f.name == "What could NOT be done" for f in applied.fields),
+          str([(f.name, f.value) for f in applied.fields]))
+    check("and it only claims a clean New Game when nothing survived",
+          any(f.name == "\u2705 Clean New Game" for f in applied.fields)
+          and "nothing was preserved" in (applied.footer.text or ""),
+          str([(f.name, applied.footer.text) for f in applied.fields]))
     check("with both keys it applies and reports the result",
           "APPLIED" in applied.title
           and rows("SELECT xp, level FROM levels WHERE guild_id=? AND user_id=?",
@@ -414,7 +533,7 @@ async def main():
           and rows("SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
                    (GUILD, OTHER)) == [(5000,)]
           and set(changed_tables(other_before_command, after_command))
-              <= {"levels", "level_reward_claims"},
+              <= {"levels", "level_reward_claims"} | set(SCOPED_REVERSAL_TABLES),
           f"other={rows('SELECT COUNT(*) FROM level_reward_claims WHERE guild_id=? AND user_id=?', (GUILD, OTHER))} "
           f"changed={changed_tables(other_before_command, after_command)}")
 
@@ -461,6 +580,15 @@ async def main():
                     "'2026-01-01T00:00:00+00:00','2026-01-02T00:00:00+00:00','test')",
                     (GUILD, uid, json.dumps({"currency": "balance",
                                              "amount": COIN_L3})))
+            # What the claim engine really leaves behind: one append-only ledger
+            # row naming the reward level, and the money in the wallet. Without
+            # both there is nothing to attribute and nothing to reverse.
+            execute("INSERT INTO transaction_ledger (guild_id,user_id,currency,"
+                    "amount,balance_after,type,reason,source) VALUES (?,?,'balance',"
+                    "?,NULL,'credit','Level 3 reward','level_claim')",
+                    (GUILD, uid, COIN_L3))
+            execute("UPDATE economy SET balance = balance + ? "
+                    "WHERE guild_id=? AND user_id=?", (COIN_L3, GUILD, uid))
         if shop:
             execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
                     "track,reward_ref,payload_json,status,created_at,fulfilled_at,"
@@ -558,10 +686,10 @@ async def main():
                (GUILD, USER)) == [(3,)]
           and rows("SELECT COUNT(*) FROM prestige_vi_activations "
                    "WHERE guild_id=? AND user_id=?", (GUILD, USER)) == [(1,)])
-    check("and the report refuses to call that a New Game while they survive",
-          kept["new_game_complete"] is False
-          and any("Prestige was NOT reset" in t and "permanent tier 3" in t
-                  for t in kept["traces"]), str(kept["traces"]))
+    check("and prestige is a NOTE, not a trace that blocks the New Game verdict",
+          kept["new_game_complete"] is True and kept["traces"] == []
+          and any("Prestige left as it is" in n and "permanent tier 3" in n
+                  for n in kept["notes"]), str(kept["notes"]))
     stage(vi=True, prestige=3)
     cleared = await apply(member=member, include_prestige=True)
     check("include_prestige zeroes the tier and drops the VI activation",
@@ -607,22 +735,78 @@ async def main():
           {u["table"] for u in recon["unattributable"]}
               == {"inventory_items", "economy", "transaction_ledger"}
           and all(u["reason"] for u in recon["unattributable"])
-          and [c["item_name"] for c in recon["unattributable"][0]["candidates"]]
-              == ["Potion"], str(recon["unattributable"]))
-    check("delivered value still blocks apply until it is explicitly waived",
-          preview["plan"]["blocked_on_delivered_value"] is True
-          and preview["blocked"] is False)
-    blocked = await apply(member=member)
-    check("and a blocked apply changes nothing at all",
-          blocked["blocked"] is True and blocked["mode"] == "blocked"
-          and blocked["applied"] is False and claim_count() == 3
-          and blocked["new_game_complete"] is False, str(blocked["mode"]))
+          and "does NOT overwrite `source`" in recon["unattributable"][0]["reason"],
+          str(recon["unattributable"]))
+    check("with the money still in the wallet both rewards are reversible",
+          preview["plan"]["cannot_reverse"] == []
+          and len(preview["plan"]["reverse_currency"]) == 1
+          and len(preview["plan"]["reverse_inventory"]) == 1
+          and preview["traces"] == [], str(preview["plan"]["cannot_reverse"]))
+
+    # The case that matters: the member already SPENT the reward. The ledger still
+    # proves what was paid, but the wallet no longer holds it, so taking it back
+    # would steal money that came from somewhere else.
+    execute("UPDATE economy SET balance=0 WHERE guild_id=? AND user_id=?",
+            (GUILD, USER))
+    drained = await reset_member(GUILD, USER)
+    stuck = drained["plan"]["cannot_reverse"]
+    check("a spent reward is reported as irreversible instead of being forced",
+          len(stuck) == 1 and stuck[0]["kind"] == "currency"
+          and stuck[0]["amount"] == COIN_L3 and "has been spent" in stuck[0]["note"],
+          str(stuck))
+    check("and the preview says which claim row that will keep",
+          len(drained["plan"]["claims_kept"]) == 1
+          and drained["plan"]["delete_claims"] == 2
+          and any("would NOT be reversible" in t for t in drained["traces"]),
+          str(drained["plan"]["claims_kept"]))
+    spent = await apply(member=member)
+    check("apply reverses what it can and leaves the wallet at zero, not negative",
+          rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+               (GUILD, USER)) == [(0,)]
+          and spent["reversed_inventory"] and not spent["reversed_currency"]
+          and len(spent["unreversed"]) == 1, str(spent["unreversed"]))
+    check("so only the un-reversed claim row survives",
+          claim_count() == 1
+          and rows("SELECT reward_level, track, status FROM level_reward_claims "
+                   "WHERE guild_id=? AND user_id=?", (GUILD, USER))
+              == [(3, "currency", "fulfilled")],
+          str(rows("SELECT reward_level, track, status FROM level_reward_claims "
+                   "WHERE guild_id=? AND user_id=?", (GUILD, USER))))
+    check("and the report refuses to call that a clean New Game",
+          spent["new_game_complete"] is False and spent["traces"]
+          and any("could NOT be reversed" in c or "was NOT reversed" in c
+                  for c in spent["could_not"]),
+          str(spent["traces"]))
+    check("the kept row is terminal, so it can never be claimed again",
+          rows("SELECT status FROM level_reward_claims WHERE guild_id=? "
+               "AND user_id=?", (GUILD, USER)) == [("fulfilled",)])
+    bal_before_relevel = rows("SELECT balance FROM economy WHERE guild_id=? "
+                              "AND user_id=?", (GUILD, USER))[0][0]
+    execute("UPDATE levels SET xp=0, level=0 WHERE guild_id=? AND user_id=?",
+            (GUILD, USER))
+    await give_reward(bot, GUILD, USER, "xp", amount=total, reason="retest",
+                      source="leveling")
+    again = await claim_available(GUILD, USER, member=member, bot=bot)
+    check("re-levelling cannot pay the kept reward a second time",
+          rows("SELECT COUNT(*), MIN(status) FROM level_reward_claims "
+               "WHERE guild_id=? AND user_id=? AND reward_level=3 "
+               "AND track='currency'", (GUILD, USER)) == [(1, "fulfilled")]
+          and rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                   (GUILD, USER))[0][0] == bal_before_relevel,
+          f"balance={rows('SELECT balance FROM economy WHERE guild_id=? AND user_id=?', (GUILD, USER))}")
+
+    # Staging only: the explicit waiver drops the row anyway, and still says the
+    # value is outstanding. On production the same call is refused (section 3).
+    stage(currency=True, shop=True)
+    execute("UPDATE economy SET balance=0 WHERE guild_id=? AND user_id=?",
+            (GUILD, USER))
     waived = await apply(member=member, include_delivered=True)
-    check("waiving it drops the records but still lists the value as a trace",
+    check("staging's include_delivered drops the row but still reports the trace",
           waived["applied"] is True and claim_count() == 0
           and waived["new_game_complete"] is False
-          and any("still in the wallet" in t for t in waived["traces"])
-          and any("delivered" in t for t in waived["traces"]),
+          and any("not reversed" in t for t in waived["traces"])
+          and rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                   (GUILD, USER)) == [(0,)],
           str(waived["traces"]))
 
     print()

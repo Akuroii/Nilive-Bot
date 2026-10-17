@@ -455,16 +455,14 @@ async def claim_confirmation(guild, result: dict, claims,
 def _level_reset_embed(member, report: dict, *, applied: bool) -> discord.Embed:
     """The /level_test_reset preview (or result). Nothing here writes anything.
 
-    The preview has to name every record and side effect the reset touches, and
-    - just as importantly - every delivered reward it CANNOT reverse, so an
-    admin never confirms a destructive step on a guess.
+    The preview has to name every record and side effect the reset touches, every
+    delivered level reward it CAN take back and how, and - just as importantly -
+    every one it CANNOT, so an admin never confirms a destructive step on a
+    guess. Things that are not level rewards (prestige, value from other systems)
+    are reported as notes and never counted against the result.
     """
     plan = report.get("plan") or {}
-    mode = report.get("mode", "preview")
-    if mode == "blocked":
-        title = "Level test reset — BLOCKED"
-        color = 0xd1543a
-    elif applied:
+    if applied:
         title = "Level test reset — APPLIED"
         color = 0x3ba55d
     else:
@@ -518,38 +516,48 @@ def _level_reset_embed(member, report: dict, *, applied: bool) -> discord.Embed:
         "so it can never be paid twice and never becomes undocumented")
     embed.add_field(name=would, value="\n".join(lines)[:1024], inline=False)
 
-    left = plan.get("reported_not_reversed") or {}
-    money = left.get("currency") or {}
-    not_reversed = []
-    if money:
-        not_reversed.append(
-            "- currency already credited: "
-            + ", ".join(f"{v:,} {k}" for k, v in sorted(money.items()))
-            + f" ({left.get('ledger_rows', 0)} `level_claim` ledger row(s))")
-    if left.get("inventory_candidates"):
-        not_reversed.append(
-            "- inventory row(s) that may hold delivered shop rewards: "
-            + ", ".join(f"{i['item_name']} (qty {i['quantity']})"
-                        for i in left["inventory_candidates"]))
-    if not_reversed:
-        not_reversed.append(
-            "**These are NOT reversed** — coins are fungible and inventory "
-            "quantities are merged with unrelated sources, so reversing them "
-            "here could corrupt economy/inventory data. Reverse them by hand "
-            "(or use a staging database) before re-testing a delivered reward.")
-        embed.add_field(name="Delivered value this tool will not touch",
-                        value="\n".join(not_reversed)[:1024], inline=False)
-
-    if mode == "blocked":
-        blocked = plan.get("blocked_claims") or []
+    # Every level reward this member actually received, split by whether the
+    # reset can prove it and take it back. Amounts come from the append-only
+    # ledger and the frozen claim payloads - what was really paid, not what a
+    # reward definition says today.
+    will = []
+    for entry in plan.get("reverse_currency") or []:
+        will.append(f"- L{entry['reward_level']} · {entry['amount']:,} "
+                    f"{entry['currency']} → reversed via ledger row "
+                    f"`{entry['ledger_id']}`"
+                    + (" (already reversed earlier)"
+                       if entry.get("already_reversed") else ""))
+    for entry in plan.get("reverse_inventory") or []:
+        will.append(f"- L{entry['reward_level']} · {entry['quantity']}x "
+                    f"{entry['item_name']} → removed from the inventory")
+    if will:
         embed.add_field(
-            name="Why it was refused",
-            value=(f"{len(blocked)} fulfilled reward(s) delivered value this tool "
-                   f"cannot reverse, and dropping them would make an already-paid "
-                   f"reward claimable again. Reverse that value first, then re-run "
-                   f"with `include_delivered: True`.\n"
-                   + "\n".join(f"- claim `{b['id']}` L{b['reward_level']} "
-                               f"{b['track']}" for b in blocked[:20]))[:1024],
+            name=("Delivered level rewards this reset reverses" if not applied
+                  else "Delivered level rewards reversed"),
+            value="\n".join(will)[:1024], inline=False)
+
+    cannot = plan.get("cannot_reverse") or []
+    if cannot:
+        embed.add_field(
+            name="⚠️ Delivered value that CANNOT be reversed",
+            value="\n".join(
+                f"- L{e['reward_level']} {e['kind']}: {e.get('note') or e.get('error')}"
+                for e in cannot[:20])[:1024]
+            + "\n**These claim rows are KEPT**, so the reward cannot be claimed "
+              "a second time while its value is still in the member's hands. "
+              "Reversing them needs a manual decision.",
+            inline=False)
+
+    # The manual-review half of the report: what looks related to a level reward
+    # but cannot be pinned to one, so it is left alone and explained rather than
+    # guessed at. Shown on the preview too, because an admin deciding whether to
+    # confirm needs to know what will NOT be undone.
+    unattributable = (report.get("reconciliation") or {}).get("unattributable") or []
+    if unattributable:
+        embed.add_field(
+            name="Left alone: cannot be attributed to a level reward",
+            value="\n".join(
+                f"- `{u['table']}` — {u['reason']}" for u in unattributable)[:1024],
             inline=False)
     if applied:
         removed = report.get("roles_removed") or []
@@ -589,9 +597,16 @@ def _level_reset_embed(member, report: dict, *, applied: bool) -> discord.Embed:
                 name="What could NOT be done",
                 value="\n".join(f"- {c}" for c in report["could_not"])[:1024],
                 inline=False)
-        if report.get("left_behind"):
-            embed.set_footer(text="Delivered currency/inventory was left in place "
-                                  "on purpose — see above.")
+        if report.get("unreversed"):
+            embed.set_footer(
+                text=f"{len(report['unreversed'])} delivered reward(s) could not "
+                     f"be reversed and their claim rows were kept — see above.")
+        else:
+            # The applied embed always ends on the same question the admin has:
+            # did anything have to be left behind?
+            embed.set_footer(
+                text="Every delivered level reward this reset could attribute was "
+                     "reversed; nothing was preserved.")
 
     # The honesty rule the whole tool is written against: if anything from the
     # previous run survived, this is not a New Game and the admin is told so,
@@ -604,10 +619,17 @@ def _level_reset_embed(member, report: dict, *, applied: bool) -> discord.Embed:
     elif applied:
         embed.add_field(
             name="✅ Clean New Game",
-            value="Nothing from the previous run survived: XP, level, prestige, "
-                  "claim records, boosts, temp roles and Discord roles are all "
-                  "reset for this member only.", inline=False)
-    if not applied and mode != "blocked":
+            value="No level-reward trace of the previous run survived: XP, level, "
+                  "claim records, boosts, temp roles, Discord roles and the "
+                  "delivered currency/items this reset could prove are all "
+                  "reversed for this member only.", inline=False)
+    # Not level rewards, so not traces - but the admin should still see them.
+    notes = report.get("notes") or []
+    if notes:
+        embed.add_field(name="Left alone on purpose (not level rewards)",
+                        value="\n".join(f"- {n}" for n in notes)[:1024],
+                        inline=False)
+    if not applied:
         embed.set_footer(text="Preview only. Re-run with confirm: True to apply.")
     return embed
 
@@ -1748,8 +1770,9 @@ class Leveling(commands.Cog):
     @app_commands.describe(
         member="The single member whose leveling test state is reset",
         confirm="Required to actually apply; without it this only previews",
-        include_delivered="Also drop fulfilled currency/shop rewards (their "
-                          "delivered value stays in the wallet/inventory)",
+        include_delivered="Force-drop claim rows whose delivered value could "
+                          "NOT be reversed (staging only; makes them claimable "
+                          "again)",
         include_prestige="Also zero permanent Prestige and the booster VI "
                          "activation. Permanent tiers are Shop purchases and "
                          "are NOT refunded.")
@@ -1777,7 +1800,8 @@ class Leveling(commands.Cog):
                 # whether prestige is about to be destroyed.
                 report = await inspect_member(
                     interaction.guild.id, member.id,
-                    include_prestige=include_prestige)
+                    include_prestige=include_prestige,
+                    include_delivered=include_delivered)
                 embed = _level_reset_embed(member, report, applied=False)
                 await interaction.followup.send(embed=embed, ephemeral=True)
                 return
@@ -1785,7 +1809,10 @@ class Leveling(commands.Cog):
                 interaction.guild.id, member.id, apply=True,
                 include_delivered=include_delivered,
                 include_prestige=include_prestige,
-                allow_production=production_ok, member=member)
+                allow_production=production_ok, member=member,
+                # Stamped on the ledger reversal rows, so the wallet history says
+                # which admin's test reset took the value back.
+                reversed_by=interaction.user.id)
         except LevelResetError as exc:
             await interaction.followup.send(
                 f"Reset refused — nothing was changed.\n`{exc}`", ephemeral=True)
