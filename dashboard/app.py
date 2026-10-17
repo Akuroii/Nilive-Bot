@@ -1818,7 +1818,7 @@ COMMAND_CATEGORIES = {
         "addcoins", "removecoins", "adddiamonds", "removediamonds",
     ],
     "Leveling": [
-        "rank", "leaderboard", "level", "setxp", "resetxp",
+        "rank", "leaderboard", "level", "setxp", "setlevel", "resetxp",
         "resetleaderboard", "level_test_reset", "prestige",
     ],
     "Shop & Inventory": [
@@ -1902,9 +1902,10 @@ COMMAND_METADATA = {
     "leaderboard": {"desc": "View the XP leaderboard", "params": []},
     "level": {"desc": "View and claim level rewards", "params": []},
     "setxp": {"desc": "Set XP for a member (admin)", "params": ["member", "xp"]},
+    "setlevel": {"desc": "Place a member at the start of a level (admin)", "params": ["member", "level"]},
     "resetxp": {"desc": "Reset a member's XP and level back to 0 (admin)", "params": ["member"]},
     "resetleaderboard": {"desc": "Force an immediate leaderboard reset for this server (admin)", "params": []},
-    "level_test_reset": {"desc": "Preview/reset ONE member's /level reward test state (admin, preview unless confirmed)", "params": ["member", "confirm", "include_delivered"]},
+    "level_test_reset": {"desc": "Preview/reset ONE member's /level reward test state (admin, preview unless confirmed)", "params": ["member", "confirm", "include_delivered", "include_prestige"]},
     "prestige": {"desc": "View your Prestige state (permanent tier + effective tier)", "params": []},
     "minigames_setup": {"desc": "Configure the minigames spawn system (channel + weekly range)", "params": ["channel", "min_events", "max_events", "enabled"]},
     "minigames_spawn": {"desc": "Spawn a minigame right now (manual, admin). Omit the template to let the rotation pick.", "params": ["template_id"]},

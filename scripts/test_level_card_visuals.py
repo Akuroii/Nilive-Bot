@@ -190,6 +190,106 @@ async def main():
           and _progress_path(5, 12) == f"{REACHED}{LINK * 2}{REACHED}{LINK * 2}{PLANE}{AHEAD}{LINK * 2}{AHEAD}{LINK * 2}{AHEAD}",
           _progress_path(5, 12))
 
+    # ── 1b. the station boundary, proven rather than asserted ──
+    # The approved shape is 5 stations, 4 two-dash links, one plane inside the
+    # active link: 12 slots, slot s lights s//3 + 1 stations and puts the plane
+    # in link s//3 at offset s%3. Written out as literal glyphs below so this is
+    # an oracle a reviewer can eyeball, not a second implementation of the
+    # function under test. The glyph identities are asserted first so the table
+    # cannot silently drift from the production constants.
+    print("== 1b. station boundary: 46/49/50%, all 12 slots, zero denominator ==")
+    P = PLANE
+    check("the test's glyphs are the production glyphs",
+          REACHED == "\u25c6" and AHEAD == "\u25c7" and LINK == "\u2501"
+          and PLANE == leveling._PATH_PLANE and LINK * 2 == leveling._PATH_LINK,
+          f"{REACHED!r} {AHEAD!r} {LINK!r} {PLANE!r}")
+    APPROVED = [
+        f"\u25c6{P}\u2501\u2501\u25c7\u2501\u2501\u25c7\u2501\u2501\u25c7\u2501\u2501\u25c7",   # 0  0%
+        f"\u25c6\u2501{P}\u2501\u25c7\u2501\u2501\u25c7\u2501\u2501\u25c7\u2501\u2501\u25c7",   # 1
+        f"\u25c6\u2501\u2501{P}\u25c7\u2501\u2501\u25c7\u2501\u2501\u25c7\u2501\u2501\u25c7",   # 2  end of link 0
+        f"\u25c6\u2501\u2501\u25c6{P}\u2501\u2501\u25c7\u2501\u2501\u25c7\u2501\u2501\u25c7",   # 3
+        f"\u25c6\u2501\u2501\u25c6\u2501{P}\u2501\u25c7\u2501\u2501\u25c7\u2501\u2501\u25c7",   # 4
+        f"\u25c6\u2501\u2501\u25c6\u2501\u2501{P}\u25c7\u2501\u2501\u25c7\u2501\u2501\u25c7",   # 5  ~46% / 49%
+        f"\u25c6\u2501\u2501\u25c6\u2501\u2501\u25c6{P}\u2501\u2501\u25c7\u2501\u2501\u25c7",   # 6  exactly 50%
+        f"\u25c6\u2501\u2501\u25c6\u2501\u2501\u25c6\u2501{P}\u2501\u25c7\u2501\u2501\u25c7",   # 7
+        f"\u25c6\u2501\u2501\u25c6\u2501\u2501\u25c6\u2501\u2501{P}\u25c7\u2501\u2501\u25c7",   # 8
+        f"\u25c6\u2501\u2501\u25c6\u2501\u2501\u25c6\u2501\u2501\u25c6{P}\u2501\u2501\u25c7",   # 9
+        f"\u25c6\u2501\u2501\u25c6\u2501\u2501\u25c6\u2501\u2501\u25c6\u2501{P}\u2501\u25c7",   # 10
+        f"\u25c6\u2501\u2501\u25c6\u2501\u2501\u25c6\u2501\u2501\u25c6\u2501\u2501{P}\u25c7",   # 11
+    ]
+    COMPLETED = f"\u25c6\u2501\u2501\u25c6\u2501\u2501\u25c6\u2501\u2501\u25c6\u2501\u2501{P}\u25c6"
+    LIT = [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
+
+    # All twelve positions, each drawn from a (current, needed) pair that really
+    # lands on it: needed=1200 and current=slot*100 gives slot = current*12//1200.
+    wrong_slots = [(slot, _progress_path(slot * 100, 1200), want)
+                   for slot, want in enumerate(APPROVED)
+                   if _progress_path(slot * 100, 1200) != want]
+    check("all 12 positions draw the approved path exactly",
+          not wrong_slots, str(wrong_slots))
+    check("each slot lights exactly the approved number of stations",
+          [_progress_path(slot * 100, 1200).count(REACHED) for slot in range(12)] == LIT,
+          str([_progress_path(slot * 100, 1200).count(REACHED) for slot in range(12)]))
+    check("the path starts at the first station and ends only when the level is done",
+          _progress_path(0, 1200) == APPROVED[0]
+          and _progress_path(1199, 1200) == APPROVED[11]
+          and _progress_path(1200, 1200) == COMPLETED
+          and _progress_path(99999, 1200) == COMPLETED,
+          _progress_path(1199, 1200))
+
+    # The boundary the review asked to see proven, not assumed. Station index 2
+    # (the third station) sits at 2/4 = 50% of the path, so it must still be ◇ at
+    # 49% and must be ◆ at exactly 50%.
+    def station_glyphs(drawn):
+        return [c for c in drawn if c in (REACHED, AHEAD)]
+
+    at46 = _progress_path(46, 100)
+    at49 = _progress_path(4900, 10000)
+    one_under = _progress_path(4999, 10000)
+    at50 = _progress_path(5000, 10000)
+    check("46% and 49% both draw the approved ~46% path, third station unreached",
+          at46 == at49 == APPROVED[5] == one_under
+          and station_glyphs(at49)[2] == AHEAD
+          and station_glyphs(at49).count(REACHED) == 2, f"{at46} / {at49}")
+    check("exactly 50% lights the third station and moves the plane onto link 2",
+          at50 == APPROVED[6] and station_glyphs(at50)[2] == REACHED
+          and station_glyphs(at50).count(REACHED) == 3, at50)
+    check("the flip happens at the boundary XP, one either side",
+          _progress_path(4999, 10000) != _progress_path(5000, 10000)
+          and all(_progress_path(c, 10000) == APPROVED[5] for c in (4167, 4600, 4900, 4999))
+          and all(_progress_path(c, 10000) == APPROVED[6] for c in (5000, 5100, 5833)),
+          f"{[(_progress_path(c, 10000)) for c in (4999, 5000)]}")
+
+    # The general rule behind those two numbers, checked exhaustively rather than
+    # at one convenient level: a station may only be ◆ once real progress has
+    # reached the fraction of the path that station sits at, and all five are
+    # reached only by a completed level.
+    violations = []
+    for needed in (1, 2, 3, 4, 7, 12, 100, 999, 1200, 14264):
+        for current in range(0, needed + 1):
+            drawn = _progress_path(current, needed)
+            glyphs = station_glyphs(drawn)
+            lit = glyphs.count(REACHED)
+            if (lit == 5) != (current >= needed):
+                violations.append((current, needed, drawn, "all-five vs completed"))
+            for k in range(lit):
+                # station k sits at k/(stations-1); lighting it needs
+                # current/needed >= k/(stations-1), in integers.
+                if current * (len(glyphs) - 1) < k * needed:
+                    violations.append((current, needed, drawn, f"station {k} early"))
+            if len(glyphs) != 5 or drawn.count(PLANE) != 1:
+                violations.append((current, needed, drawn, "geometry"))
+    check("no station fills before real progress reaches it, and only a completed "
+          "level fills all five (every XP of 10 sample levels)",
+          not violations, str(violations[:4]))
+
+    # Zero denominator: needed=0 must not divide, and must not invent progress.
+    zero = _progress_path(0, 0)
+    check("a zero denominator draws the path start, whatever current says",
+          zero == APPROVED[0] == _progress_path(999, 0) == _progress_path(-5, 0)
+          == _progress_path(5, -10) and station_glyphs(zero).count(REACHED) == 1,
+          zero)
+
     # ── 2. the real /level embed: header, path, XP numbers ──
     print("== 2. the level page renders the reference layout ==")
     member = SimpleNamespace(id=USER, premium_since=None)

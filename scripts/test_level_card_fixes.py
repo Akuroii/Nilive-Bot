@@ -44,6 +44,19 @@ LINK = "\u2501"
 COIN_L3, COIN_L5, GEM_L7 = 100, 250, 40
 ROLE_L5 = 601
 
+
+class FakeRole(SimpleNamespace):
+    """A stand-in for discord.Role that hashes the way the real one does.
+
+    SimpleNamespace defines __eq__, which clears __hash__, so it cannot go into a
+    set. `reconcile_role_progression()` does `set(member.roles)` and discord.Role
+    is hashed by id, so the exclusive-role reconcile path (reached through the
+    Restore Level Role button) needs a hashable stand-in.
+    """
+
+    def __hash__(self):
+        return hash(("role", self.id))
+
 FAILS = []
 
 
@@ -133,8 +146,8 @@ async def main():
     execute("INSERT INTO leveling_rewards (guild_id,level,role_id,audience) "
             "VALUES (?,?,?,'everyone')", (GUILD, 5, ROLE_L5))
 
-    real_role = SimpleNamespace(id=ROLE_L5, mention=f"<@&{ROLE_L5}>",
-                                position=10, name="Moon")
+    real_role = FakeRole(id=ROLE_L5, mention=f"<@&{ROLE_L5}>",
+                         position=10, name="Moon")
     guild = SimpleNamespace(
         id=GUILD, get_role=lambda rid: real_role if rid == ROLE_L5 else None,
         me=SimpleNamespace(top_role=SimpleNamespace(position=100)))
@@ -280,15 +293,19 @@ async def main():
     res = await claim_available(GUILD, USER, member=member, bot=bot)
     claims_after = await list_claims(GUILD, USER)
     name, value = await claim_confirmation(guild, res, claims_after, False)
-    check("the confirmation names what was delivered and totals it",
-          name == "Claim result" and "Delivered" in value and "Total:" in value, value)
+    paid = len({int(i) for i in res["fulfilled"]})
+    check("the confirmation is Arabic and names what was actually delivered",
+          name == "نتيجة الاستلام" and "مبروك" in value and "تم تسليم" in value
+          and str(paid) in value, value)
+    check("a clear total appears when, and only when, there is more than one reward",
+          ("الإجمالي:" in value) == (paid > 1), value)
     totals = leveling._claim_totals(
         [c for c in claims_after if c["id"] in {int(i) for i in res["fulfilled"]}],
         {"coins": {"name": "Coins"}, "diamonds": {"name": "Diamonds"}})
     check("the total aggregates fungible quantities instead of listing arithmetic",
           totals == "77x Coins", totals)
     check("nothing left to claim is stated, not implied",
-          "Nothing left to claim." in value, value)
+          "لا يتبقّى شيء للاستلام" in value, value)
     noop = await claim_confirmation(guild, {"fulfilled": [], "failed": []}, claims_after, False)
     check("a no-op repeat click produces no confirmation field at all", noop is None, str(noop))
 
@@ -310,18 +327,99 @@ async def main():
     after = await list_claims(GUILD, USER)
     name, value = await claim_confirmation(guild, part, after, False)
     check("a partial failure is reported honestly, with the reason and what remains",
-          part["failed"] and "Could not deliver" in value
-          and "simulated Discord role failure" in value
-          and "Still waiting:" in value, value)
+          part["failed"] and "ولم يتم تسليم" in value
+          and "السبب: simulated Discord role failure" in value
+          and "ما زال متاحًا للاستلام" in value, value)
+    check("a partial pass never reads as a general success",
+          "مبروك" not in value and "⚠️" in value, value)
+    check("a reward is called delivered only because the engine paid it",
+          value.count("✅ **تم تسليم") == 1
+          and str(len(part["fulfilled"])) in value, value)
     check("the delivered part of a partial pass is still itemised",
           "55x Coins" in value, value)
     footer = leveling.claim_result_footer(part)
     check("the existing footer contract is unchanged",
           footer.startswith("Claimed ") and "Retryable failures: 1." in footer, footer)
 
+    # ── 4b. full failure, then a successful retry ──
+    # The requirement is that a reward is never presented as delivered merely
+    # because a claim row exists, and that a retry after a failure is real. Here
+    # every reward in the pass fails, then the same pass is retried with Discord
+    # working again.
+    print("== 4b. full failure and retry ==")
+    execute("INSERT INTO leveling_rewards (guild_id,level,role_id,audience) "
+            "VALUES (?,?,?,'everyone')", (GUILD, 10, ROLE_L5))
+    await to_level(10)
+    bal_before_retry = balance()
+    delivered_before = {r["id"] for r in await list_claims(GUILD, USER)
+                        if r["status"] == "fulfilled"}
+    none_ok = await claim_available(GUILD, USER, member=member, bot=bot)
+    rows_after = await list_claims(GUILD, USER)
+    name, value = await claim_confirmation(guild, none_ok, rows_after, False)
+    check("a pass where nothing could be delivered says so, in Arabic",
+          name == "نتيجة الاستلام" and "تعذّر تسليم المكافآت" in value
+          and "مبروك" not in value and "✅" not in value
+          and none_ok["fulfilled"] == [] and len(none_ok["failed"]) == 2, value)
+    check("each undelivered reward is named with its reason and stays retryable",
+          value.count("السبب: simulated Discord role failure") == 2
+          and "يمكن إعادة المحاولة" in value
+          and "ما زال متاحًا للاستلام" in value, value)
+    check("nothing was paid and no row was marked delivered",
+          balance() == bal_before_retry
+          and {r["id"] for r in rows_after if r["status"] == "fulfilled"}
+              == delivered_before,
+          str([(r["reward_level"], r["track"], r["status"]) for r in rows_after]))
+
+    # the retry: Discord works again, the failed rows are picked up and paid once
+    member.add_roles = AsyncMock(side_effect=lambda *r, **k: member.roles.extend(r))
+    retried = await claim_available(GUILD, USER, member=member, bot=bot)
+    rows_retry = await list_claims(GUILD, USER)
+    name, value = await claim_confirmation(guild, retried, rows_retry, False)
+    check("a retry delivers what failed and reports it as a success",
+          len(retried["fulfilled"]) == 2 and retried["failed"] == []
+          and "مبروك" in value and "تعذّر" not in value
+          and "لا يتبقّى شيء للاستلام" in value, value)
+    check("the retry names both role rewards and totals them",
+          value.count("<@&601>") == 2 and "الإجمالي:" in value
+          and "2 role reward(s)" in value, value)
+    check("the retry paid nothing twice",
+          balance() == bal_before_retry
+          and all(r["status"] == "fulfilled" for r in rows_retry
+                  if r["reward_level"] in (9, 10)),
+          str([(r["reward_level"], r["status"]) for r in rows_retry]))
+    again = await claim_confirmation(
+        guild, await claim_available(GUILD, USER, member=member, bot=bot),
+        await list_claims(GUILD, USER), False)
+    check("and a third pass has nothing to confirm at all", again is None, str(again))
+
+    # The confirmation is a Discord embed field, so it is capped at 1024 chars.
+    # A truncated reward list must not read as a complete one, and no line may be
+    # cut in half - a half-rendered reward name is worse than an omitted one.
+    long_list = ["\u0627\u0644\u0633\u0637\u0631 \u0627\u0644\u0623\u0648\u0644"] + [
+        f"- L{i} \u00b7 {i}x Coins \u00b7 reward number {i} with a long name"
+        for i in range(80)] + ["\u2714 \u0644\u0627 \u064a\u062a\u0628\u0642\u0649 \u0634\u064a\u0621"]
+    bounded = leveling._bounded_lines(long_list)
+    check("a long confirmation is cut to whole lines and says how many it dropped",
+          len(bounded) <= 1024 and bounded.startswith(long_list[0])
+          and bounded.endswith(long_list[-1])
+          and "\u0633\u0637\u0631\u064b\u0627 \u0623\u062e\u0631\u0649" in bounded
+          and all(line in long_list or "\u0623\u062e\u0631\u0649" in line
+                  for line in bounded.split("\n")),
+          f"{len(bounded)} chars, {len(bounded.splitlines())} lines")
+    check("a short confirmation is returned untouched",
+          leveling._bounded_lines(["a", "b"]) == "a\nb"
+          and leveling._bounded_lines(["only"]) == "only")
+
     # ── 5. Claim All button state and repeat clicks ──
     print("== 5. button state ==")
     member.add_roles = AsyncMock(side_effect=lambda *r, **k: member.roles.extend(r))
+    # 4b's retry left nothing outstanding, so cross one more reward level: this
+    # section is about the button's state while something IS waiting, and then
+    # after it is not.
+    execute("INSERT INTO leveling_currency_rewards "
+            "(guild_id,level,currency,amount,audience) VALUES (?,?, 'balance', 33, 'everyone')",
+            (GUILD, 11))
+    await to_level(11)
     view2 = LevelRewardView(bot, GUILD, USER)
     claims_now = await list_claims(GUILD, USER)
     await view2._apply_claim_state(claims_now, False)
@@ -340,11 +438,22 @@ async def main():
     claimable, reconcile_only = await _claim_button_state(
         GUILD, await list_claims(GUILD, USER), False)
     view2.set_claimable(claimable, reconcile_only)
-    check("the exclusive-role reconcile action stays reachable but is grey, not green",
+    check("the exclusive-role reconcile gets its own button; Claim All is disabled",
           claimable is False and reconcile_only is True
           and view2.claim_all.style.name == "secondary"
-          and view2.claim_all.disabled is False,
+          and view2.claim_all.disabled is True
+          and view2.sync_roles in view2.children
+          and view2.sync_roles.disabled is False,
           f"claimable={claimable} reconcile={reconcile_only}")
+    check("the reconcile button is labelled for what it does, not 'Claim All'",
+          view2.sync_roles.label == "Restore Level Role"
+          and view2.sync_roles.row == view2.claim_all.row == 1,
+          view2.sync_roles.label)
+    sync_log = []
+    itx_sync = component_itx(member, guild, sync_log)
+    await view2.sync_roles.callback(itx_sync)
+    check("the reconcile button runs the same deferred, single-response pass",
+          sync_log == ["defer", "edit_original_response"], str(sync_log))
     check("_claim_button_available still reports the same reachability (D2 contract)",
           await leveling._claim_button_available(
               GUILD, await list_claims(GUILD, USER), False) is True)
@@ -353,6 +462,12 @@ async def main():
         GUILD, await list_claims(GUILD, USER), False)
     check("nothing claimable and nothing to reconcile -> grey and disabled",
           (claimable, reconcile_only) == (False, False))
+    view2.set_claimable(claimable, reconcile_only)
+    check("the reconcile button leaves the card again once it has no work",
+          view2.sync_roles not in view2.children
+          and view2.claim_all.disabled is True
+          and [c.label for c in view2.children] == ["Level", "Stats", "Claim All"],
+          str([c.label for c in view2.children]))
 
     # repeat clicks must not deliver twice
     execute("UPDATE level_reward_claims SET status='pending', last_error=NULL, "

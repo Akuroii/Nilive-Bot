@@ -34,6 +34,7 @@ _INVENTORY_TYPE = {
 }
 # Metadata only. Not part of identity, eligibility, reserve, or payout.
 SOURCE_SETXP = "setxp"
+SOURCE_SETLEVEL = "setlevel"
 SOURCE_DASHBOARD = "dashboard"
 SOURCE_BACKFILL = "legacy_backfill"
 

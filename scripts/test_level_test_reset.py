@@ -15,7 +15,13 @@ is the safety contract, not the happy path:
 * a production database refuses to apply without an explicit second key;
 * a non-positive or non-integer scope is refused outright;
 * after a reset the member really can earn and claim the same rewards again,
-  exactly once.
+  exactly once;
+* a role another grant also gives is left on the member, and a role that could
+  NOT be removed keeps its claim and temp-role rows - so it can never be paid a
+  second time and never becomes an undocumented role;
+* prestige is per-member state but is Shop-purchased, so it is only cleared on an
+  explicit `include_prestige`, and the report refuses to call the result a New
+  Game while any trace (prestige, delivered value, a preserved claim) survives.
 
 Run with:
     python scripts/test_level_test_reset.py
@@ -32,6 +38,11 @@ from phase1_support import GUILD, USER, execute, rows, reset_database
 OTHER = USER + 500           # a second member whose data must never move
 OTHER_GUILD = GUILD + 500    # a second guild whose data must never move
 ROLE_ID = 601
+# An unrelated grant's role. Deliberately NOT ROLE_ID: the scoping check
+# below proves the reset deletes only level_claim rows, while section 8
+# proves a role shared with another grant is left on the member.
+OTHER_ROLE_ID = 602
+CLEAN_USER = USER + 900    # no reward history at all
 COIN_L3 = 100
 
 FAILS = []
@@ -117,7 +128,7 @@ def seed():
                 "VALUES (?,?,?, '2030-01-01T00:00:00+00:00','level_claim', ?, 0)",
                 (gid, uid, ROLE_ID, 900000 + sequence))
         execute("INSERT INTO temp_roles (guild_id,user_id,role_id,expires_at,source) "
-                "VALUES (?,?,?, '2030-01-01T00:00:00+00:00','shop')", (gid, uid, ROLE_ID))
+                "VALUES (?,?,?, '2030-01-01T00:00:00+00:00','shop')", (gid, uid, OTHER_ROLE_ID))
 
 
 async def main():
@@ -224,8 +235,17 @@ async def main():
         reset_mod.NERO_ENVIRONMENT = saved_env
     check("apply reports what it did", report["applied"] is True and report["mode"] == "apply")
     check("the member's XP/level is zeroed and the claim ledger is empty",
-          report["after"] == {"xp": 0, "level": 0, "claims": 0, "boosts": 0,
+          report["after"] == {"xp": 0, "level": 0, "prestige": 2,
+                              "vi_activation": None, "claims": 0, "boosts": 0,
                               "temp_roles": 0}, str(report["after"]))
+    check("prestige survived because it was not asked for, and the report says so",
+          report["new_game_complete"] is False
+          and any("Prestige was NOT reset" in t for t in report["traces"]),
+          str(report["traces"]))
+    check("the report separates what ran from what could not",
+          any("zeroed levels.xp/level" in r for r in report["ran"])
+          and any("inventory_items" in c for c in report["could_not"]),
+          f"ran={report['ran']} could_not={report['could_not']}")
     check("the reward role was removed from the member",
           report["roles_removed"] == [ROLE_ID] and not report["role_failures"]
           and real_role not in held, str(report["role_failures"]))
@@ -335,6 +355,13 @@ async def main():
     check("the preview warns about the delivered value it will not reverse",
           any("NOT reversed" in f.value for f in embed.fields),
           str([f.name for f in embed.fields]))
+    check("the preview states prestige is not being reset unless asked",
+          any("**not reset** (pass include_prestige)" in f.value for f in embed.fields)
+          and not any("zero permanent Prestige" in f.value for f in embed.fields),
+          str([f.name for f in embed.fields]))
+    check("the preview warns that a failed role removal keeps its records",
+          any("can never be paid twice" in f.value for f in embed.fields),
+          str([f.name for f in embed.fields]))
 
     claims_before_command = rows(
         "SELECT COUNT(*) FROM level_reward_claims WHERE guild_id=? AND user_id=?",
@@ -365,6 +392,15 @@ async def main():
     finally:
         os.environ.pop("ALLOW_LEVEL_TEST_RESET", None)
     applied = itx3.followup.send.await_args.kwargs["embed"]
+    check("the applied report separates what ran from what could not",
+          any(f.name == "What ran" for f in applied.fields)
+          and any(f.name == "What could NOT be done" for f in applied.fields),
+          str([f.name for f in applied.fields]))
+    check("and it never claims a clean New Game while traces survive",
+          any("Not a clean New Game" in f.name for f in applied.fields)
+          and not any("Clean New Game" == f.name.lstrip("\u2705 ")
+                      for f in applied.fields),
+          str([f.name for f in applied.fields]))
     check("with both keys it applies and reports the result",
           "APPLIED" in applied.title
           and rows("SELECT xp, level FROM levels WHERE guild_id=? AND user_id=?",
@@ -381,6 +417,213 @@ async def main():
               <= {"levels", "level_reward_claims"},
           f"other={rows('SELECT COUNT(*) FROM level_reward_claims WHERE guild_id=? AND user_id=?', (GUILD, OTHER))} "
           f"changed={changed_tables(other_before_command, after_command)}")
+
+    # ── 8. role safety, prestige, and the New Game honesty rule ──
+    # Sections 1-7 cover the scoping contract. This one covers the three things a
+    # reset can get WRONG in a way that silently damages a member: taking off a
+    # role somebody else granted, deleting a claim record whose role is still on
+    # the member (which makes the reward payable a second time), and reporting a
+    # clean New Game while traces of the old one survive.
+    print("== 8. role safety, prestige and New Game honesty ==")
+
+    def claim_count(uid=USER):
+        return rows("SELECT COUNT(*) FROM level_reward_claims "
+                    "WHERE guild_id=? AND user_id=?", (GUILD, uid))[0][0]
+
+    def stage(uid=USER, *, shared_role=False, vi=False, currency=False,
+              shop=False, prestige=2, fresh_levels=False):
+        """A known single-member state: L5, one fulfilled role reward."""
+        for table in ("level_reward_claims", "temp_roles",
+                      "leveling_active_boosts", "prestige_vi_activations"):
+            execute(f"DELETE FROM {table} WHERE guild_id=? AND user_id=?",
+                    (GUILD, uid))
+        if fresh_levels:
+            execute("INSERT INTO levels (guild_id,user_id,xp,level,prestige) "
+                    "VALUES (?,?,5000,5,?)", (GUILD, uid, prestige))
+        else:
+            execute("UPDATE levels SET xp=5000, level=5, prestige=? "
+                    "WHERE guild_id=? AND user_id=?", (prestige, GUILD, uid))
+        execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+                "track,reward_ref,payload_json,status,created_at,fulfilled_at,source) "
+                "VALUES (?,?,5,'role',?,?,'fulfilled',"
+                "'2026-01-01T00:00:00+00:00','2026-01-02T00:00:00+00:00','test')",
+                (GUILD, uid, str(ROLE_ID), json.dumps({"role_id": ROLE_ID})))
+        claim_id = rows("SELECT id FROM level_reward_claims WHERE guild_id=? "
+                        "AND user_id=? AND track='role'", (GUILD, uid))[0][0]
+        execute("INSERT INTO temp_roles (guild_id,user_id,role_id,expires_at,"
+                "source,claim_id,unit_index) VALUES (?,?,?,"
+                "'2030-01-01T00:00:00+00:00','level_claim',?,0)",
+                (GUILD, uid, ROLE_ID, claim_id))
+        if currency:
+            execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+                    "track,reward_ref,payload_json,status,created_at,fulfilled_at,"
+                    "source) VALUES (?,?,3,'currency','balance',?,'fulfilled',"
+                    "'2026-01-01T00:00:00+00:00','2026-01-02T00:00:00+00:00','test')",
+                    (GUILD, uid, json.dumps({"currency": "balance",
+                                             "amount": COIN_L3})))
+        if shop:
+            execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+                    "track,reward_ref,payload_json,status,created_at,fulfilled_at,"
+                    "source) VALUES (?,?,5,'shop','potion',?,'fulfilled',"
+                    "'2026-01-01T00:00:00+00:00','2026-01-02T00:00:00+00:00','test')",
+                    (GUILD, uid, json.dumps({"type": "potion", "name": "Potion",
+                                             "quantity": 2})))
+        if shared_role:
+            execute("INSERT INTO temp_roles (guild_id,user_id,role_id,expires_at,"
+                    "source) VALUES (?,?,?,'2030-01-01T00:00:00+00:00','shop')",
+                    (GUILD, uid, ROLE_ID))
+        if vi:
+            execute("INSERT INTO prestige_vi_activations "
+                    "(guild_id,user_id,activated_at) VALUES (?,?,?)",
+                    (GUILD, uid, "2026-05-01T00:00:00+00:00"))
+        if real_role not in held:
+            held.append(real_role)
+
+    async def apply(uid=USER, **kw):
+        reset_mod.NERO_ENVIRONMENT = "staging"
+        try:
+            return await reset_member(GUILD, uid, apply=True, **kw)
+        finally:
+            reset_mod.NERO_ENVIRONMENT = saved_env
+
+    # 8a. a role another grant also gives must not be taken off
+    stage(shared_role=True)
+    shared_plan = (await inspect_member(GUILD, USER))["plan"]
+    check("a role another grant also gives is kept out of the removal plan",
+          shared_plan["remove_discord_roles"] == []
+          and shared_plan["roles_left_on_member"] == [
+              {"role_id": ROLE_ID, "also_granted_by": ["shop"]}],
+          str(shared_plan))
+    shared = await apply(member=member)
+    check("so it stays on the member and no removal is attempted or failed",
+          real_role in held and shared["roles_removed"] == []
+          and shared["role_failures"] == []
+          and any("still on the member" in t for t in shared["traces"]),
+          f"removed={shared['roles_removed']} failures={shared['role_failures']}")
+    check("only this reward's own records were cleared, the other grant's survived",
+          shared["deleted"]["claims"] == 1 and claim_count() == 0
+          and rows("SELECT source FROM temp_roles WHERE guild_id=? AND user_id=? "
+                   "AND role_id=?", (GUILD, USER, ROLE_ID)) == [("shop",)],
+          str(rows("SELECT source, role_id FROM temp_roles WHERE guild_id=? "
+                   "AND user_id=?", (GUILD, USER))))
+
+    # 8b. a FAILED removal must keep the record, and must not make it payable twice
+    stage()
+    member.remove_roles = AsyncMock(side_effect=RuntimeError("Missing Permissions"))
+    failed = await apply(member=member)
+    check("a failed role removal is reported with its reason, not swallowed",
+          failed["role_failures"]
+          and "Missing Permissions" in failed["role_failures"][0]["error"]
+          and any("NOT removed" in c for c in failed["could_not"]),
+          str(failed["role_failures"]))
+    check("so its claim record survives instead of being deleted anyway",
+          failed["claims_preserved"] and claim_count() == 1
+          and rows("SELECT status FROM level_reward_claims WHERE guild_id=? "
+                   "AND user_id=?", (GUILD, USER)) == [("fulfilled",)])
+    check("and its temp-role row survives, so the expiry task can retry removal",
+          rows("SELECT source FROM temp_roles WHERE guild_id=? AND user_id=? "
+               "AND role_id=?", (GUILD, USER, ROLE_ID)) == [("level_claim",)])
+    check("the member is still wearing it and the reset is not reported complete",
+          real_role in held and failed["new_game_complete"] is False
+          and failed["traces"] and failed["roles_removed"] == [],
+          str(failed["traces"]))
+    total = sum(xp_for_level(n) for n in range(1, 6))
+    execute("UPDATE levels SET xp=0, level=0 WHERE guild_id=? AND user_id=?",
+            (GUILD, USER))
+    await give_reward(bot, GUILD, USER, "xp", amount=total, reason="retest",
+                      source="leveling")
+    check("a preserved claim can never be paid a second time after re-levelling",
+          rows("SELECT COUNT(*), MIN(status) FROM level_reward_claims "
+               "WHERE guild_id=? AND user_id=? AND reward_level=5 AND track='role'",
+               (GUILD, USER)) == [(1, "fulfilled")],
+          str(rows("SELECT id, status FROM level_reward_claims WHERE guild_id=? "
+                   "AND user_id=?", (GUILD, USER))))
+
+    # 8c. no member object at all: the role cannot be verified as removed
+    stage()
+    member.remove_roles = AsyncMock(
+        side_effect=lambda *r, **k: [held.remove(x) for x in r if x in held])
+    no_member = await apply(member=None)
+    check("without a member object the role claims are preserved, not deleted",
+          no_member["role_failures"]
+          and "no member object" in no_member["role_failures"][0]["error"]
+          and no_member["claims_preserved"] and claim_count() == 1
+          and real_role in held, str(no_member["role_failures"]))
+
+    # 8d. prestige is per-member state, but it is paid for, so it is opt-in
+    stage(vi=True, prestige=3)
+    kept = await apply(member=member)
+    check("prestige and the VI activation survive a default reset",
+          rows("SELECT prestige FROM levels WHERE guild_id=? AND user_id=?",
+               (GUILD, USER)) == [(3,)]
+          and rows("SELECT COUNT(*) FROM prestige_vi_activations "
+                   "WHERE guild_id=? AND user_id=?", (GUILD, USER)) == [(1,)])
+    check("and the report refuses to call that a New Game while they survive",
+          kept["new_game_complete"] is False
+          and any("Prestige was NOT reset" in t and "permanent tier 3" in t
+                  for t in kept["traces"]), str(kept["traces"]))
+    stage(vi=True, prestige=3)
+    cleared = await apply(member=member, include_prestige=True)
+    check("include_prestige zeroes the tier and drops the VI activation",
+          rows("SELECT xp, level, prestige FROM levels WHERE guild_id=? AND user_id=?",
+               (GUILD, USER)) == [(0, 0, 0)]
+          and rows("SELECT COUNT(*) FROM prestige_vi_activations "
+                   "WHERE guild_id=? AND user_id=?", (GUILD, USER)) == [(0,)])
+    check("the levels ROW survives a prestige reset - it is never deleted",
+          rows("SELECT COUNT(*) FROM levels WHERE guild_id=? AND user_id=?",
+               (GUILD, USER)) == [(1,)])
+    check("a preview shows the prestige values it would destroy",
+          (await inspect_member(GUILD, USER, include_prestige=True))["plan"][
+              "reset_prestige"] is True
+          and (await inspect_member(GUILD, USER))["plan"]["reset_prestige"] is False)
+
+    # 8e. a member with no delivered value and no prestige really does start clean
+    stage(CLEAN_USER, fresh_levels=True, prestige=0)
+    clean = await apply(uid=CLEAN_USER, member=member, include_prestige=True)
+    check("a member with nothing left behind is reported as a complete New Game",
+          clean["new_game_complete"] is True and clean["traces"] == []
+          and clean["claims_preserved"] == [] and clean["role_failures"] == [],
+          str(clean["traces"]))
+
+    # 8f. delivered value is listed for manual review, proven apart from guesswork
+    stage(currency=True, shop=True)
+    preview = await reset_member(GUILD, USER)
+    recon = preview["reconciliation"]
+    # Independently aggregated from the append-only ledger, so this is an oracle
+    # rather than a restatement. The total is deliberately MORE than one reward
+    # definition's amount: sections 5 and 6 paid this member twice, and a number
+    # read from a definition could not know that.
+    ledger = rows("SELECT COALESCE(SUM(amount), 0), COUNT(*) FROM transaction_ledger "
+                  "WHERE guild_id=? AND user_id=? AND source='level_claim' "
+                  "AND type='credit'", (GUILD, USER))[0]
+    check("the manual-review listing proves currency from the ledger, not from a "
+          "definition",
+          recon["proven"]["currency_by_code"] == {"balance": ledger[0]}
+          and recon["proven"]["ledger_rows"] == ledger[1]
+          and ledger[0] > COIN_L3 and ledger[1] > 1
+          and [c["reward_level"] for c in recon["proven"]["delivered_claims"]]
+              == [3, 5], f"{recon['proven']} ledger={ledger}")
+    check("and names what cannot be attributed, with the reason",
+          {u["table"] for u in recon["unattributable"]}
+              == {"inventory_items", "economy", "transaction_ledger"}
+          and all(u["reason"] for u in recon["unattributable"])
+          and [c["item_name"] for c in recon["unattributable"][0]["candidates"]]
+              == ["Potion"], str(recon["unattributable"]))
+    check("delivered value still blocks apply until it is explicitly waived",
+          preview["plan"]["blocked_on_delivered_value"] is True
+          and preview["blocked"] is False)
+    blocked = await apply(member=member)
+    check("and a blocked apply changes nothing at all",
+          blocked["blocked"] is True and blocked["mode"] == "blocked"
+          and blocked["applied"] is False and claim_count() == 3
+          and blocked["new_game_complete"] is False, str(blocked["mode"]))
+    waived = await apply(member=member, include_delivered=True)
+    check("waiving it drops the records but still lists the value as a trace",
+          waived["applied"] is True and claim_count() == 0
+          and waived["new_game_complete"] is False
+          and any("still in the wallet" in t for t in waived["traces"])
+          and any("delivered" in t for t in waived["traces"]),
+          str(waived["traces"]))
 
     print()
     if FAILS:

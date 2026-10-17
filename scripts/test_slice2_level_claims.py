@@ -285,9 +285,12 @@ async def main():
             (GUILD, USER))
     cog = Leveling.__new__(Leveling)
     cog.bot = SimpleNamespace(get_guild=lambda gid: who.guild)
+    # /setxp acknowledges before its transaction (same 3-second interaction
+    # window as every other leveling interaction) and replies on the followup.
     ix = SimpleNamespace(
         guild=SimpleNamespace(id=GUILD),
-        response=SimpleNamespace(send_message=AsyncMock()))
+        response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()))
     await Leveling.setxp.callback(cog, ix, who, 400)
     after_set = claims()
     await Leveling.setxp.callback(cog, ix, who, 400)
