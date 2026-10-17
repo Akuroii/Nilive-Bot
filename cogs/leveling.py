@@ -287,7 +287,13 @@ def _claim_reward_text(guild, claim, currency) -> str:
 
 
 def claim_result_footer(result: dict) -> str:
-    """The Claim All footer, including any Level role that was reconciled.
+    """تذييل Claim All - the Claim All footer, including any reconciled role.
+
+    This line is attached to the member-facing Claim All embed, so it is Arabic
+    end to end like `claim_confirmation()` above it: one message, one language.
+    It carries counts and status only - never an item or role name, which is why
+    nothing here needs the original English wording. "Boosters" stays as the
+    product's own name for the paid tier.
 
     A restored role is not a newly fulfilled claim (nothing was paid, the claim
     was already fulfilled), so it would otherwise be invisible in the footer.
@@ -295,19 +301,20 @@ def claim_result_footer(result: dict) -> str:
     """
     got = len(result.get("fulfilled") or [])
     missed = len(result.get("failed") or [])
-    text = f"Claimed {got}. Retryable failures: {missed}."
+    text = (f"تم الاستلام: {got}. "
+            f"إخفاقات قابلة لإعادة المحاولة: {missed}.")
     locked = int(result.get("locked") or 0)
     if locked:
-        text += f" Locked (Boosters only): {locked}."
+        text += f" مقفلة (Boosters فقط): {locked}."
         if result.get("booster_unverified"):
-            text += " Boost status could not be verified."
+            text += " تعذّر التحقق من حالة Boosters."
     reconciled = result.get("reconciled") or {}
     restored = len(reconciled.get("restored") or [])
     reconciliation_failures = len(reconciled.get("failed") or [])
     if restored:
-        text += f" Level role restored: {restored}."
+        text += f" تمت إعادة رتبة المستوى: {restored}."
     if reconciliation_failures:
-        text += (f" Level role reconciliation failure(s): "
+        text += (f" فشل في مطابقة رتبة المستوى: "
                  f"{reconciliation_failures}.")
     return text
 
@@ -1042,10 +1049,23 @@ SPAM_REPEAT_SECONDS = 10
 # entitlement side of a correction impossible to get inconsistent between the
 # two: same transaction, same record_crossing call, same advisory.
 #
-# The cap is a guard against a typo, not a product limit: level_start_xp() sums
-# the curve one level at a time, and nothing else in the bot caps levels, so an
-# unbounded admin input would be an O(level) loop on an interaction thread.
-# /setxp still accepts any XP total for anything genuinely beyond this.
+# MAX_SETTABLE_LEVEL is an INPUT GUARD on one parameter, not a level cap in the
+# game - nothing else in the bot has a maximum level, and this constant is not
+# consulted by the engine, the curve, a reward or an entitlement. It exists for
+# two technical reasons, both specific to /setlevel:
+#
+#   1. level_start_xp() sums the curve one level at a time, so the level number
+#      is a loop bound driven by user input. A typo like 10**12 would spin an
+#      O(level) loop on the interaction thread before doing anything.
+#   2. That sum is then written to levels.xp, which SQLite stores as a signed
+#      64-bit integer. level_start_xp(1000) is ~1.27e9 - comfortably inside it -
+#      while an unbounded input can overflow the column and corrupt the row.
+#
+# The bound is declared to Discord with app_commands.Range so the client refuses
+# the value before it is ever sent, and re-checked in the callback because the
+# callback is also called directly (tests, dashboard, other cogs). Both read this
+# one constant, so they cannot drift. Anything genuinely beyond it is what /setxp
+# is for: it takes an XP total and has no level bound at all.
 MAX_SETTABLE_LEVEL = 1000
 
 
@@ -1693,19 +1713,25 @@ class Leveling(commands.Cog):
     @app_commands.describe(
         member="The member whose level is set",
         level=f"Target level, 0-{MAX_SETTABLE_LEVEL}. The member is placed at "
-              f"the first XP of that level.")
+              "the first XP of that level. Use /setxp for anything beyond.")
     @app_commands.checks.has_permissions(administrator=True)
     async def setlevel(self, interaction: discord.Interaction,
-                       member: discord.Member, level: int):
+                       member: discord.Member,
+                       level: app_commands.Range[int, 0, MAX_SETTABLE_LEVEL]):
         from utils.level_claims import SOURCE_SETLEVEL
         if interaction.guild is None:
             await interaction.response.send_message(
                 "Use this command in a server.", ephemeral=True)
             return
+        # Defence in depth behind the Range above: the callback is also called
+        # directly, and the reason has to be stated so the bound is not mistaken
+        # for a level cap the bot enforces on its members.
         if int(level) < 0 or int(level) > MAX_SETTABLE_LEVEL:
             await interaction.response.send_message(
-                f"Level must be between 0 and {MAX_SETTABLE_LEVEL}. "
-                f"Nothing was changed.", ephemeral=True)
+                f"`level` must be a whole number between 0 and "
+                f"{MAX_SETTABLE_LEVEL}. That bound is an input guard on the XP "
+                f"curve sum, not a maximum level in the game - use `/setxp` for "
+                f"anything beyond it. Nothing was changed.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         target_xp = level_start_xp(level)

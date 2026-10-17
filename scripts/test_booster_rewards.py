@@ -14,6 +14,12 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+# The Claim All footer is user-visible, so it is Arabic like the rest of the
+# claim message. The exact strings are spelled out here rather than imported,
+# so a wording change in cogs/leveling.py fails this test.
+AR_RETRY = "إخفاقات قابلة لإعادة المحاولة: "
+AR_LOCKED = "مقفلة (Boosters فقط)"
+
 from phase1_support import DB_PATH, GUILD, USER, execute, reset_database, rows
 
 PLAIN = USER + 1
@@ -296,8 +302,8 @@ async def main():
     footer = leveling_cog.claim_result_footer(mixed)
     check("locked and failed are reported separately",
           len(mixed["failed"]) == 1 and mixed["locked"] >= 2
-          and "Retryable failures: 1." in footer
-          and f"Locked (Boosters only): {mixed['locked']}." in footer, footer)
+          and AR_RETRY + "1." in footer
+          and f"{AR_LOCKED}: {mixed['locked']}." in footer, footer)
     booster.fail_add = None
     check("no locked text when nothing is locked",
           "Locked" not in leveling_cog.claim_result_footer(
@@ -354,8 +360,8 @@ async def main():
     await view.claim_all.callback(interaction)
     sent = interaction.edit_original_response.await_args.kwargs
     check("Claim All callback reports locked, not failed, for a non-booster",
-          "Locked (Boosters only)" in sent["embed"].footer.text
-          and "Retryable failures: 0." in sent["embed"].footer.text
+          AR_LOCKED in sent["embed"].footer.text
+          and AR_RETRY + "0." in sent["embed"].footer.text
           and view.claim_all.disabled, sent["embed"].footer.text)
 
     # ── 8. Migration: idempotent, legacy rows default to Everyone ──

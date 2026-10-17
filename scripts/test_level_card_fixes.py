@@ -34,6 +34,12 @@ import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+# The Claim All footer is user-visible, so it is Arabic like the rest of the
+# claim message. The exact strings are spelled out here rather than imported,
+# so a wording change in cogs/leveling.py fails this test.
+AR_CLAIMED = "تم الاستلام: "
+AR_RETRY = "إخفاقات قابلة لإعادة المحاولة: "
+
 from phase1_support import GUILD, USER, execute, rows, reset_database
 
 PLANE = "\u2708\ufe0e"
@@ -338,8 +344,8 @@ async def main():
     check("the delivered part of a partial pass is still itemised",
           "55x Coins" in value, value)
     footer = leveling.claim_result_footer(part)
-    check("the existing footer contract is unchanged",
-          footer.startswith("Claimed ") and "Retryable failures: 1." in footer, footer)
+    check("the footer is Arabic like the rest of the claim message",
+          footer.startswith(AR_CLAIMED) and AR_RETRY + "1." in footer, footer)
 
     # ── 4b. full failure, then a successful retry ──
     # The requirement is that a reward is never presented as delivered merely

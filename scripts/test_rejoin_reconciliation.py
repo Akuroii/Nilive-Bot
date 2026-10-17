@@ -16,6 +16,14 @@ from types import SimpleNamespace
 
 import aiosqlite
 
+# The Claim All footer is user-visible, so it is Arabic like the rest of the
+# claim message. The exact strings are spelled out here rather than imported,
+# so a wording change in cogs/leveling.py fails this test.
+AR_CLAIMED = "تم الاستلام: "
+AR_RETRY = "إخفاقات قابلة لإعادة المحاولة: "
+AR_RESTORED = "تمت إعادة رتبة المستوى: "
+AR_RECON = "فشل في مطابقة رتبة المستوى: "
+
 from phase1_support import DB_PATH, GUILD, USER, execute, reset_database, rows
 from test_level_reward_role_progression import (
     MANUAL_ROLE, ROLE_IDS, SECOND_LEVEL10_ROLE, UNRELATED_ROLE,
@@ -325,14 +333,12 @@ async def main():
         "reconciled": {"restored": [], "removed": [],
                         "failed": [(ROLE_IDS[10], "Role no longer exists")]},
     })
-    check("ordinary Claim All footer retains its base count wording",
-          plain == "Claimed 0. Retryable failures: 0.", plain)
+    check("the Claim All footer is Arabic, like the message it belongs to",
+          plain == AR_CLAIMED + "0. " + AR_RETRY + "0.", plain)
     check("Claim All footer reports a restored role separately from paid claims",
-          restored == "Claimed 1. Retryable failures: 0. Level role restored: 1.",
-          restored)
+          restored == AR_CLAIMED + "1. " + AR_RETRY + "0. " + AR_RESTORED + "1.", restored)
     check("Claim All footer reports reconciliation failures separately from claim failures",
-          failed == ("Claimed 0. Retryable failures: 1. "
-                    "Level role reconciliation failure(s): 1."), failed)
+          failed == AR_CLAIMED + "0. " + AR_RETRY + "1. " + AR_RECON + "1.", failed)
 
     print("ALL AUTOMATIC REJOIN RECONCILIATION CHECKS PASSED")
 

@@ -32,6 +32,12 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+# The Claim All footer is user-visible, so it is Arabic like the rest of the
+# claim message. The exact strings are spelled out here rather than imported,
+# so a wording change in cogs/leveling.py fails this test.
+AR_CLAIMED = "تم الاستلام: "
+AR_RETRY = "إخفاقات قابلة لإعادة المحاولة: "
+
 from phase1_support import (GUILD, USER, execute, interaction, reset_database,
                             rows)
 
@@ -410,8 +416,8 @@ async def main():
           "Claimed" in field_names(stats)
           and f"{COIN_L5}x Coins" in field_text(stats), field_text(stats))
     footer = itx.edit_original_response.await_args.kwargs["embed"].footer.text
-    check("the Claim All footer still reports the real result",
-          footer.startswith("Claimed 2.") and "Retryable failures: 0." in footer,
+    check("the Claim All footer still reports the real result, in Arabic",
+          footer.startswith(AR_CLAIMED + "2.") and AR_RETRY + "0." in footer,
           footer)
     check("Claim All re-rendered the card page, not the stats page",
           itx.edit_original_response.await_args.kwargs["embed"].title.startswith("LEVEL ")
