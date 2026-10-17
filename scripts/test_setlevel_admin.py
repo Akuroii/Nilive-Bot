@@ -331,8 +331,15 @@ async def main():
           len(pending["fulfilled"]) == 3 and balance() == COIN_L3 + COIN_L5
           and real_role in held,
           f"{pending['fulfilled']} balance={balance()}")
-    check("the advisory points at the scoped review tool, not at a bulk delete",
-          "/level_test_reset" in reply and "include_delivered" in reply, reply)
+    # Round 4: the advisory must point at the tool that undoes THIS change, not at
+    # the one that wipes the member's whole reward history - and the
+    # `include_delivered` escape hatch it used to advertise is gone, so it must
+    # not appear in anything an administrator reads. The delta-not-snapshot rule
+    # is asserted here too, because that is the promise /xp_rollback makes.
+    check("the advisory points at the exact rollback, not at a bulk delete",
+          "/xp_rollback" in reply and "/level_test_reset" in reply
+          and "include_delivered" not in reply
+          and "CURRENT XP" in reply and "snapshot" in reply, reply)
 
     # ── 7. scope ──
     print("== 7. scope ==")

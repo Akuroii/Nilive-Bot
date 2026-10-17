@@ -101,10 +101,24 @@ async def ensure_tables(db: aiosqlite.Connection | None = None) -> None:
             await connection.execute(
                 "ALTER TABLE level_reward_claims "
                 "ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+        # Which administrative XP operation caused this entitlement, if any.
+        # A rollback can then cancel exactly the entitlements an erroneous grant
+        # created and leave the ones the member earned independently. NULL for
+        # ordinary play and for every row created before this column existed -
+        # those cannot be attributed, and nothing pretends otherwise.
+        if "operation_id" not in columns:
+            await connection.execute(
+                "ALTER TABLE level_reward_claims "
+                "ADD COLUMN operation_id TEXT")
         await connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_lrc_owner
             ON level_reward_claims(guild_id, user_id, status)
         """)
+        # The claim path reads `level_op_locks` and writes `reward_grants`, so a
+        # database created before utils/level_ops.py existed is migrated here
+        # rather than failing mid-claim with "no such table".
+        from utils.level_ops import ensure_tables as ensure_ops_tables
+        await ensure_ops_tables(connection)
 
     if db is not None:
         await apply(db)
@@ -261,21 +275,23 @@ def _payload(track: str, raw: dict, multipliers: dict | None) -> str:
 
 async def _insert_identity(db, guild_id, user_id, level, track, ref,
                            payload: str, status: str, now: str,
-                           source: str) -> None:
+                           source: str, operation_id: str = None) -> None:
     fulfilled_at = now if status == "fulfilled" else None
     await db.execute("""
         INSERT OR IGNORE INTO level_reward_claims
             (guild_id, user_id, reward_level, track, reward_ref,
-             payload_json, status, created_at, fulfilled_at, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             payload_json, status, created_at, fulfilled_at, source,
+             operation_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (guild_id, user_id, level, track, ref, payload, status, now,
-          fulfilled_at, source or ""))
+          fulfilled_at, source or "", operation_id))
 
 
 async def record_crossing(db: aiosqlite.Connection, guild_id: int,
                           user_id: int, old_xp: int, new_xp: int,
                           multipliers: dict | None = None, *,
-                          source: str, is_booster: bool = False) -> int:
+                          source: str, is_booster: bool = False,
+                          operation_id: str = None) -> int:
     """Insert pending rows for levels crossed by an XP increase.
 
     Caller owns the transaction. Eligibility is xp_progress(xp).level,
@@ -301,7 +317,7 @@ async def record_crossing(db: aiosqlite.Connection, guild_id: int,
         await _insert_identity(
             db, guild_id, user_id, level, track, ref,
             _payload(track, raw, multipliers or {}),
-            "pending", now, source)
+            "pending", now, source, operation_id)
         created += 1
     return created
 
@@ -877,6 +893,58 @@ async def _ensure_temp_role_units(claim_id: int, guild_id: int, user_id: int,
             raise
 
 
+async def _record_delivery_provenance(db, guild_id: int, user_id: int,
+                                      row: dict) -> None:
+    """Write the grant record for a reward this transaction just delivered.
+
+    Runs inside the claim transaction, so a grant row exists if and only if the
+    delivery committed - never one without the other. This is what makes a later
+    correction exact instead of inferential:
+
+    * currency -> the `transaction_ledger` row id the credit just produced, so a
+      reversal targets that specific row rather than matching on amount;
+    * inventory -> the item and the exact quantity granted, with a
+      `remaining_quantity` that consumption decrements FIFO, so "are this
+      reward's units still here" is a recorded fact rather than a guess from a
+      stack total that also holds quest, shop and trade units. This includes the
+      inventory marker row a `temp_role` reward writes.
+
+    Roles and XP boosts are not recorded: a role's effect lives on the Discord
+    member and in `temp_roles`, and a boost row is deleted outright by a reset.
+    Neither leaves a fungible balance behind.
+
+    Bookkeeping must never fail a delivery the member earned, so an error is
+    logged and the claim still commits. The consequence is limited and safe: that
+    reward has no provenance, and a later reset refuses to reverse it
+    automatically instead of guessing which units are whose.
+    """
+    try:
+        from utils.level_ops import KIND_CURRENCY, KIND_INVENTORY, record_grant
+        track, payload = row["track"], row["payload"]
+        if track == TRACK_CURRENCY:
+            cursor = await db.execute(
+                "SELECT id FROM transaction_ledger WHERE guild_id=? AND user_id=? "
+                "AND currency=? AND amount=? AND type='credit' "
+                "AND source='level_claim' AND reason=? ORDER BY id DESC LIMIT 1",
+                (guild_id, user_id, payload["currency"], int(payload["amount"]),
+                 f"Level {row['reward_level']} reward"))
+            ledger_row = await cursor.fetchone()
+            await record_grant(
+                db, guild_id=guild_id, user_id=user_id, claim_id=row["id"],
+                reward_level=row["reward_level"], track=track,
+                kind=KIND_CURRENCY, quantity=int(payload["amount"]),
+                currency=payload["currency"],
+                ledger_id=ledger_row[0] if ledger_row else None)
+        elif track == TRACK_SHOP:
+            await record_grant(
+                db, guild_id=guild_id, user_id=user_id, claim_id=row["id"],
+                reward_level=row["reward_level"], track=track,
+                kind=KIND_INVENTORY, quantity=int(payload["quantity"]),
+                item_name=str(payload["name"]))
+    except Exception as exc:                     # pragma: no cover - safety net
+        print(f"[PROVENANCE] claim {row.get('id')} grant record failed: {exc}")
+
+
 async def claim_available(guild_id: int, user_id: int, *,
                           member=None, bot=None,
                           claim_ids: list[int] | None = None) -> dict:
@@ -917,6 +985,37 @@ async def claim_available(guild_id: int, user_id: int, *,
                       1 if booster_ok else 0]
             if claim_ids:
                 params.extend(claim_ids)
+            # A correction (New Game reset, XP rollback) may be holding this
+            # member's lock while it waits on the Discord API. Delivering a reward
+            # inside that window is how a claim row gets deleted by the correction
+            # after its value was already paid, which makes that reward claimable
+            # a second time. Checked here, inside this write transaction, so the
+            # answer cannot go stale before the reservation is written - and it is
+            # a database row rather than a Python lock because the dashboard is a
+            # separate process over the same file.
+            from utils.level_ops import _now as _ops_now
+            blocker = None
+            try:
+                cursor = await db.execute(
+                    "SELECT operation_id, holder FROM level_op_locks "
+                    "WHERE guild_id=? AND user_id=? AND expires_at > ?",
+                    (guild_id, user_id, _ops_now()))
+                blocker = await cursor.fetchone()
+            except aiosqlite.OperationalError as exc:
+                # Only reachable on a database whose migration never ran. Claiming
+                # an earned reward must still work; say loudly that coordination
+                # is unavailable rather than failing silently.
+                print(f"[LEVEL CLAIM] lock table unavailable, claiming without "
+                      f"reset coordination: {exc}")
+            if blocker:
+                await db.execute("ROLLBACK")
+                result["blocked_by_operation"] = blocker[0]
+                result["blocked_by_holder"] = blocker[1]
+                result["blocked"] = (
+                    f"A {blocker[1]} operation ({blocker[0]}) is running for this "
+                    f"member. Rewards are frozen until it finishes - try again "
+                    f"in a moment.")
+                return result
             await db.execute(_reserve_sql(claim_ids), params)
             owned = await _owned_rows(db, token)
             result["owned"] = len(owned)
@@ -963,6 +1062,7 @@ async def claim_available(guild_id: int, user_id: int, *,
                         raise RuntimeError(f"unknown claim track {row['track']}")
                     if not await _mark(db, row["id"], token, "fulfilled"):
                         raise RuntimeError("lost claim ownership before fulfillment")
+                    await _record_delivery_provenance(db, guild_id, user_id, row)
                     await db.execute(f"RELEASE SAVEPOINT claim_{row['id']}")
                     result["fulfilled"].append(row["id"])
                     if row["track"] == TRACK_CURRENCY:
@@ -1061,6 +1161,7 @@ async def claim_available(guild_id: int, user_id: int, *,
                         })
                     if not await _mark(db, row["id"], token, "fulfilled"):
                         raise RuntimeError("lost claim ownership before fulfillment")
+                    await _record_delivery_provenance(db, guild_id, user_id, row)
                     await db.execute(f"RELEASE SAVEPOINT claim_{row['id']}")
                     result["fulfilled"].append(row["id"])
                     result["delivered_shop"] += 1

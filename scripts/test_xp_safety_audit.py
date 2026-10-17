@@ -44,6 +44,13 @@ LEVEL_WRITERS = {
     # pair and gated behind a preview, an explicit confirm and, on production,
     # ALLOW_LEVEL_TEST_RESET=1. See utils/level_test_reset.py.
     ("utils/level_test_reset.py", "reset_member"): "admin /level_test_reset (writes 0, one member)",
+    # /xp_rollback's engine. NOT a snapshot restore: it subtracts the recorded
+    # change's own delta from the member's CURRENT xp, so progress earned after
+    # the mistake survives, and it recomputes the stored level from the same
+    # curve the engine uses. Scoped to one (guild_id, user_id) pair, gated behind
+    # a preview, an explicit confirm and a reason, and it only cancels the
+    # entitlements that carry the operation id it is undoing.
+    ("utils/level_test_reset.py", "rollback_xp_operation"): "admin /xp_rollback (current xp minus the recorded delta, one member)",
     ("dashboard/app.py", "api_edit_member"): "dashboard member edit (clamped)",
     ("utils/prestige.py", "purchase_prestige"): "prestige tier (never touches xp/level)",
 }
@@ -125,6 +132,7 @@ LEVEL_CONSISTENCY = {
     ("utils/xp_calculator.py", "_apply_spam_penalty_in_transaction"): "xp_progress(new_xp)[0]",
     ("cogs/leveling.py", "_apply_admin_xp"): "xp_progress(xp)",
     ("dashboard/app.py", "api_edit_member"): "calculate_level_from_xp(xp)",
+    ("utils/level_test_reset.py", "rollback_xp_operation"): "progress_level(target_xp)",
 }
 
 

@@ -2658,10 +2658,21 @@ def api_edit_member():
     coins     = max(0, int(data.get("coins", 0)))
     diamonds  = max(0, int(data.get("diamonds", 0)))
     new_level = calculate_level_from_xp(xp)
+    from utils import level_ops as ops
     from utils.level_claims import (
         SOURCE_DASHBOARD, record_crossing, snapshot_multipliers,
     )
     multipliers = run_async(snapshot_multipliers(guild_id, int(user_id)))
+    # The dashboard is a second, independent XP mutation path (the bot and the
+    # dashboard share one SQLite file), so it gets the same durable operation
+    # record as /setxp and /setlevel. Without it an XP change made here would
+    # create reward entitlements that no operation id accounts for, and
+    # /xp_rollback would have nothing exact to cancel - it would be left guessing
+    # from level numbers, which is how rewards earned independently get taken
+    # away. The authenticated session user is the actor, so the row names a real
+    # person rather than "the dashboard".
+    actor_id = int(session.get("user", {}).get("id", 0) or 0) or None
+    operation_id = ops.new_operation_id(SOURCE_DASHBOARD)
 
     async def update():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -2672,6 +2683,21 @@ def api_edit_member():
                     (guild_id, user_id))
                 row = await cursor.fetchone()
                 old_xp = row[0] if row else 0
+                # Tolerant on purpose: a database that predates the claim tables
+                # has no claims to attribute, and a missing column must not turn a
+                # routine member edit into a 500.
+                before_ids: set[int] = set()
+                try:
+                    cursor = await db.execute(
+                        "SELECT id FROM level_reward_claims "
+                        "WHERE guild_id=? AND user_id=?", (guild_id, user_id))
+                    before_ids = {r[0] for r in await cursor.fetchall()}
+                except aiosqlite.Error:
+                    before_ids = set()
+                cursor = await db.execute(
+                    "SELECT balance, diamonds FROM economy "
+                    "WHERE guild_id=? AND user_id=?", (guild_id, user_id))
+                wallet_before = await cursor.fetchone() or (0, 0)
                 await db.execute("""
                     INSERT INTO levels (guild_id, user_id, xp, level)
                     VALUES (?,?,?,?)
@@ -2680,7 +2706,29 @@ def api_edit_member():
                 """, (guild_id, user_id, xp, new_level, xp, new_level))
                 await record_crossing(
                     db, guild_id, int(user_id), old_xp, xp, multipliers,
-                    source=SOURCE_DASHBOARD)
+                    source=SOURCE_DASHBOARD, operation_id=operation_id)
+                crossings: list[int] = []
+                try:
+                    cursor = await db.execute(
+                        "SELECT id, reward_level FROM level_reward_claims "
+                        "WHERE guild_id=? AND user_id=?", (guild_id, user_id))
+                    crossings = sorted({r[1] for r in await cursor.fetchall()
+                                        if r[0] not in before_ids})
+                except aiosqlite.Error:
+                    crossings = []
+                # This form overwrites the wallet absolutely, with no ledger row,
+                # so the row below is the ONLY record of what the balance was
+                # before. It is captured rather than left to inference.
+                await ops.record_xp_mutation(
+                    guild_id=guild_id, user_id=int(user_id),
+                    source=SOURCE_DASHBOARD, actor_id=actor_id,
+                    reason=("dashboard member edit; wallet overwritten "
+                            f"{wallet_before[0]}->{coins} coins, "
+                            f"{wallet_before[1]}->{diamonds} diamonds"),
+                    xp_before=old_xp, xp_after=xp,
+                    level_before=calculate_level_from_xp(old_xp),
+                    level_after=new_level, crossings=crossings,
+                    operation_id=operation_id, db=db)
                 await db.execute("""
                     INSERT INTO economy (guild_id, user_id, balance, diamonds)
                     VALUES (?,?,?,?)
