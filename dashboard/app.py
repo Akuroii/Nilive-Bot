@@ -1818,8 +1818,8 @@ COMMAND_CATEGORIES = {
         "addcoins", "removecoins", "adddiamonds", "removediamonds",
     ],
     "Leveling": [
-        "rank", "leaderboard", "level", "setxp", "resetxp",
-        "resetleaderboard", "prestige",
+        "rank", "leaderboard", "level", "setxp", "setlevel", "resetxp",
+        "resetleaderboard", "level_test_reset", "prestige",
     ],
     "Shop & Inventory": [
         "shop", "inventory",
@@ -1902,8 +1902,10 @@ COMMAND_METADATA = {
     "leaderboard": {"desc": "View the XP leaderboard", "params": []},
     "level": {"desc": "View and claim level rewards", "params": []},
     "setxp": {"desc": "Set XP for a member (admin)", "params": ["member", "xp"]},
+    "setlevel": {"desc": "Place a member at the start of a level (admin)", "params": ["member", "level"]},
     "resetxp": {"desc": "Reset a member's XP and level back to 0 (admin)", "params": ["member"]},
     "resetleaderboard": {"desc": "Force an immediate leaderboard reset for this server (admin)", "params": []},
+    "level_test_reset": {"desc": "Preview/reset ONE member's /level reward test state (admin, preview unless confirmed)", "params": ["member", "confirm", "include_delivered", "include_prestige"]},
     "prestige": {"desc": "View your Prestige state (permanent tier + effective tier)", "params": []},
     "minigames_setup": {"desc": "Configure the minigames spawn system (channel + weekly range)", "params": ["channel", "min_events", "max_events", "enabled"]},
     "minigames_spawn": {"desc": "Spawn a minigame right now (manual, admin). Omit the template to let the rotation pick.", "params": ["template_id"]},
@@ -2654,12 +2656,29 @@ def api_edit_member():
     user_id   = data.get("user_id")
     xp        = max(0, int(data.get("xp", 0)))
     coins     = max(0, int(data.get("coins", 0)))
-    diamonds  = max(0, int(data.get("diamonds", 0)))
+    # The Members-page edit modal predates diamonds and sends only
+    # {user_id, xp, coins}. Treat an ABSENT field as "leave diamonds alone"
+    # rather than "set them to 0": this route overwrites the wallet absolutely,
+    # so defaulting to 0 silently destroyed every diamond the member owned.
+    # An explicit value (including an explicit 0) still overwrites, as before.
+    diamonds_raw = data.get("diamonds")
+    diamonds = None if diamonds_raw is None else max(0, int(diamonds_raw))
     new_level = calculate_level_from_xp(xp)
+    from utils import level_ops as ops
     from utils.level_claims import (
         SOURCE_DASHBOARD, record_crossing, snapshot_multipliers,
     )
     multipliers = run_async(snapshot_multipliers(guild_id, int(user_id)))
+    # The dashboard is a second, independent XP mutation path (the bot and the
+    # dashboard share one SQLite file), so it gets the same durable operation
+    # record as /setxp and /setlevel. Without it an XP change made here would
+    # create reward entitlements that no operation id accounts for, and
+    # /xp_rollback would have nothing exact to cancel - it would be left guessing
+    # from level numbers, which is how rewards earned independently get taken
+    # away. The authenticated session user is the actor, so the row names a real
+    # person rather than "the dashboard".
+    actor_id = int(session.get("user", {}).get("id", 0) or 0) or None
+    operation_id = ops.new_operation_id(SOURCE_DASHBOARD)
 
     async def update():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -2670,6 +2689,49 @@ def api_edit_member():
                     (guild_id, user_id))
                 row = await cursor.fetchone()
                 old_xp = row[0] if row else 0
+                # A DECREASE is refused here, before anything is written. This
+                # page has no correction sweep: it cannot take back a reward the
+                # higher level already delivered, nor take the member's
+                # correction lease, so accepting the edit would leave delivered
+                # rewards in place while the level says they were not earned.
+                # `/setlevel` and `/setxp` run the same lease + reconciliation
+                # (`utils.level_claims.reconcile_level_drop`) that this route
+                # would have to duplicate. Refusing is the whole fix: a decrease
+                # that silently skips reconciliation is worse than a redirect.
+                if xp < old_xp:
+                    await db.execute("ROLLBACK")
+                    return {
+                        "success": False,
+                        "error": (
+                            "This form cannot lower a member's XP or level. "
+                            "Lowering XP can leave rewards that the higher "
+                            "level already unlocked, and this page does not run "
+                            "the reward correction. Use /setlevel or /setxp in "
+                            "Discord instead - both reconcile unclaimed and "
+                            "already-delivered rewards and take the member's "
+                            "correction lease. Nothing was changed."),
+                    }
+                # Tolerant on purpose: a database that predates the claim tables
+                # has no claims to attribute, and a missing column must not turn a
+                # routine member edit into a 500.
+                before_ids: set[int] = set()
+                try:
+                    cursor = await db.execute(
+                        "SELECT id FROM level_reward_claims "
+                        "WHERE guild_id=? AND user_id=?", (guild_id, user_id))
+                    before_ids = {r[0] for r in await cursor.fetchall()}
+                except aiosqlite.Error:
+                    before_ids = set()
+                cursor = await db.execute(
+                    "SELECT balance, diamonds FROM economy "
+                    "WHERE guild_id=? AND user_id=?", (guild_id, user_id))
+                wallet_before = await cursor.fetchone() or (0, 0)
+                # Preserve the stored diamonds when the caller did not send the
+                # field. Resolved inside BEGIN IMMEDIATE, from the same row this
+                # transaction overwrites, so a concurrent dashboard save cannot
+                # make the preserved value stale.
+                effective_diamonds = (int(wallet_before[1] or 0)
+                                      if diamonds is None else diamonds)
                 await db.execute("""
                     INSERT INTO levels (guild_id, user_id, xp, level)
                     VALUES (?,?,?,?)
@@ -2678,21 +2740,52 @@ def api_edit_member():
                 """, (guild_id, user_id, xp, new_level, xp, new_level))
                 await record_crossing(
                     db, guild_id, int(user_id), old_xp, xp, multipliers,
-                    source=SOURCE_DASHBOARD)
+                    source=SOURCE_DASHBOARD, operation_id=operation_id)
+                crossings: list[int] = []
+                try:
+                    cursor = await db.execute(
+                        "SELECT id, reward_level FROM level_reward_claims "
+                        "WHERE guild_id=? AND user_id=?", (guild_id, user_id))
+                    crossings = sorted({r[1] for r in await cursor.fetchall()
+                                        if r[0] not in before_ids})
+                except aiosqlite.Error:
+                    crossings = []
+                # This form overwrites the wallet absolutely, with no ledger row,
+                # so the row below is the ONLY record of what the balance was
+                # before. It is captured rather than left to inference.
+                await ops.record_xp_mutation(
+                    guild_id=guild_id, user_id=int(user_id),
+                    source=SOURCE_DASHBOARD, actor_id=actor_id,
+                    reason=("dashboard member edit; wallet overwritten "
+                            f"{wallet_before[0]}->{coins} coins, "
+                            f"{wallet_before[1]}->{effective_diamonds} diamonds"),
+                    xp_before=old_xp, xp_after=xp,
+                    level_before=calculate_level_from_xp(old_xp),
+                    level_after=new_level, crossings=crossings,
+                    operation_id=operation_id, db=db)
                 await db.execute("""
                     INSERT INTO economy (guild_id, user_id, balance, diamonds)
                     VALUES (?,?,?,?)
                     ON CONFLICT(guild_id, user_id)
                     DO UPDATE SET balance=?, diamonds=?
-                """, (guild_id, user_id, coins, diamonds, coins, diamonds))
+                """, (guild_id, user_id, coins, effective_diamonds,
+                       coins, effective_diamonds))
                 await db.commit()
+                return {"success": True, "diamonds": effective_diamonds}
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
 
-    run_async(update())
-    log_action(guild_id, f"Edited member {user_id}: xp={xp} coins={coins} diamonds={diamonds}",
-               "members", target_id=int(user_id) if user_id else None)
+    outcome = run_async(update())
+    if not outcome.get("success"):
+        # 409: the request conflicts with the member's recorded state and
+        # nothing was written. The body is still JSON for the page's fetch().
+        return jsonify(outcome), 409
+    log_action(
+        guild_id,
+        f"Edited member {user_id}: xp={xp} coins={coins} "
+        f"diamonds={outcome.get('diamonds')}",
+        "members", target_id=int(user_id) if user_id else None)
     return jsonify({"success": True})
 
 

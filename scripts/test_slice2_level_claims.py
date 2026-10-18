@@ -285,9 +285,12 @@ async def main():
             (GUILD, USER))
     cog = Leveling.__new__(Leveling)
     cog.bot = SimpleNamespace(get_guild=lambda gid: who.guild)
+    # /setxp acknowledges before its transaction (same 3-second interaction
+    # window as every other leveling interaction) and replies on the followup.
     ix = SimpleNamespace(
         guild=SimpleNamespace(id=GUILD),
-        response=SimpleNamespace(send_message=AsyncMock()))
+        response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()))
     await Leveling.setxp.callback(cog, ix, who, 400)
     after_set = claims()
     await Leveling.setxp.callback(cog, ix, who, 400)
@@ -350,14 +353,25 @@ async def main():
         json={"user_id": USER, "xp": -987, "coins": 0, "diamonds": 0},
         headers={"X-CSRF-Token": "phase1-csrf"})
     after_negative_dashboard = level_of()
-    check("negative Dashboard member edit clamps existing XP without reward or claim side effects",
-          response.status_code == 200
-          and response.get_json() == {"success": True}
+    # A NEGATIVE/absent XP field reaches this route clamped to 0, which is still a
+    # decrease whenever the member is above 0. The route must refuse: lowering XP
+    # can strand rewards the higher level unlocked, and this page does not run
+    # the reward correction that /setxp and /setlevel do. The invariant this
+    # check protects is unchanged - a dashboard edit may never lower XP without
+    # reconciliation and may never produce a reward/claim side effect.
+    body = response.get_json() or {}
+    check("negative Dashboard member edit is REFUSED because a decrease needs "
+          "reward reconciliation",
+          response.status_code == 409
+          and body.get("success") is False
+          and "/setlevel" in (body.get("error") or "")
+          and "/setxp" in (body.get("error") or "")
+          and "Nothing was changed" in (body.get("error") or "")
           and before_negative_dashboard is not None and before_negative_dashboard[0] > 0
-          and after_negative_dashboard == (0, xp_progress(0)[0])
+          and after_negative_dashboard == before_negative_dashboard
           and reward_side_effect_snapshot() == dashboard_side_effects_before,
-          f"status={response.status_code} before={before_negative_dashboard} "
-          f"after={after_negative_dashboard}")
+          f"status={response.status_code} body={body} "
+          f"before={before_negative_dashboard} after={after_negative_dashboard}")
     dashboard_sources = claim_sources()
 
     # 11. Reset keeps the rows. Re-leveling does not create a second identity.
