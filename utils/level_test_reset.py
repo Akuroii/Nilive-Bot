@@ -886,6 +886,7 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
     report["applied"] = False
     report["roles_removed"] = []
     report["role_failures"] = []
+    report["roles_deferred"] = []
     report["claims_preserved"] = []
     report["reversed_currency"] = []
     report["reversed_inventory"] = []
@@ -916,8 +917,9 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
                                       include_prestige=include_prestige)
         report.update({"operation_id": operation_id, "applied": False,
                        "roles_removed": [], "role_failures": [],
-                       "claims_preserved": [], "reversed_currency": [],
-                       "reversed_inventory": [], "unreversed": []})
+                       "roles_deferred": [], "claims_preserved": [],
+                       "reversed_currency": [], "reversed_inventory": [],
+                       "unreversed": []})
         plan = report["plan"]
         report["roles_left_on_member"] = plan["roles_left_on_member"]
         report["mode"] = "apply"
@@ -955,6 +957,21 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
                 if role is None:
                     raise LevelResetError(f"role {role_id} not found in the guild")
                 if role not in (getattr(member, "roles", None) or []):
+                    if claim is not None and claim["id"] in in_flight_ids:
+                        # The delivery that owns this claim may still add the
+                        # role after this reset finishes. Nothing was removed,
+                        # so nothing may be recorded as removed: writing
+                        # `applied` here would be a journal row the Discord
+                        # state can contradict moments later, and the next
+                        # correction would trust it. The claim is already kept
+                        # and reported, so the verdict stays incomplete and the
+                        # decision is left to the delivery.
+                        report["roles_deferred"].append(
+                            {"role_id": role_id, "claim_id": claim["id"],
+                             "reason": "its claim is still being delivered, so "
+                                       "the role may be added after this reset; "
+                                       "nothing was removed"})
+                        continue
                     report["roles_removed"].append(role_id)   # already absent
                 else:
                     await member.remove_roles(role, reason="level test reset")
@@ -1762,6 +1779,12 @@ def _could_not(report: dict) -> list[str]:
             f"Its claim record was KEPT and the case was written to "
             f"reward_reversals, so it cannot be claimed again and "
             f"/level_reconcile can resolve it.")
+    for entry in report.get("roles_deferred") or []:
+        could_not.append(
+            f"role {entry['role_id']} was NOT removed: claim {entry['claim_id']} "
+            f"is still being delivered, so the role may be added after this "
+            f"reset. Its claim row was kept and this reset is not complete; run "
+            f"the reset again once the delivery has finished.")
     for claim in report.get("concurrent_claims") or []:
         could_not.append(
             f"claim {claim['id']} (L{claim['reward_level']} {claim['track']}) was "

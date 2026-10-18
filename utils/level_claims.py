@@ -1782,6 +1782,16 @@ async def _reverse_correction_role(claim: dict, report: dict, *,
     failure is not a reversal: the claim stays terminal, the case is recorded,
     and a later run retries the removal. `True` means the caller may delete the
     claim row - never before this point.
+
+    A journal row that says `applied`/`already_reversed` is NOT proof on its own.
+    A reset that ran while this claim was still `processing` could record the
+    role as removed when it was not on the member yet, and the delivery could
+    add it afterwards; the row then stays terminal while the role is live. The
+    recorded outcome is therefore re-checked against the member. If the role IS
+    worn the row is treated as stale and the removal is attempted again - unless
+    another recorded grant still justifies the role, in which case the claim may
+    be deleted and that other grant keeps the role documented. With no member to
+    check, a settled row is left exactly as it was.
     """
     from utils import level_ops as ops
 
@@ -1803,14 +1813,41 @@ async def _reverse_correction_role(claim: dict, report: dict, *,
 
     prior = await ops.existing_reversal(guild_id, user_id, claim_id,
                                         ops.KIND_ROLE)
-    if prior and prior["status"] in (ops.STATUS_APPLIED, ops.STATUS_ALREADY):
+    settled = bool(prior and prior["status"] in (ops.STATUS_APPLIED,
+                                                 ops.STATUS_ALREADY))
+
+    # Is the role actually on the member right now? The journal is a record of
+    # what an earlier run BELIEVED it did; only the member says what is true.
+    role = None
+    held: list = []
+    if member is not None:
+        guild = getattr(member, "guild", None)
+        role = guild.get_role(role_id) if guild is not None else None
+        # A list, not a set: discord.py Role objects are hashable, but test
+        # doubles and other embedders may pass plain objects whose equality is
+        # identity.
+        held = list(getattr(member, "roles", None) or [])
+    worn = role is not None and role in held
+
+    if settled and (member is None or not worn):
+        # The journal and the member agree: there is no live effect to undo.
         return True
 
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         shared = await _role_granted_elsewhere(
             db, guild_id, user_id, role_id, exclude_claim_id=claim_id,
+            # A claim this same pass has already decided to delete is not a
+            # separate entitlement. Counting it as one would let two stale rows
+            # justify each other and leave the role undocumented.
+            exclude_claim_ids={int(c["claim_id"])
+                               for c in report.get("deleted_claims") or []},
             exclude_item=exclude_item)
     if shared:
+        if settled:
+            # The journal says this claim's reversal was applied AND another
+            # recorded grant still owns the role, so deleting the claim row
+            # leaves the role documented rather than orphaned.
+            return True
         await ops.note_reversal(
             guild_id=guild_id, user_id=user_id, claim_id=claim_id,
             kind=ops.KIND_ROLE, quantity=1, operation_id=operation_id,
@@ -1835,12 +1872,7 @@ async def _reverse_correction_role(claim: dict, report: dict, *,
             reason="no member object available for the Discord role removal"))
         return False
 
-    guild = getattr(member, "guild", None)
-    role = guild.get_role(role_id) if guild is not None else None
-    # A list, not a set: discord.py Role objects are hashable, but test doubles
-    # and other embedders may pass plain objects whose equality is identity.
-    held = list(getattr(member, "roles", None) or [])
-    if role is not None and role in held:
+    if worn:
         try:
             await member.remove_roles(
                 role, reason=f"Level correction: Level {claim['reward_level']} "
