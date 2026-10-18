@@ -1370,6 +1370,11 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
     deliberately conservative: an unrecorded manual role grant cannot be
     distinguished from the reward, and is reported as a residual risk rather
     than guessed at.
+
+    A grant that a claim being reversed by this same operation wrote is not
+    "another" source: its inventory marker is the effect being undone. Those
+    units are recognised through `reward_grants` (which claim still owns them)
+    and the marker is not offered as a reason to keep the role.
     """
     # One claim is excluded by the original caller; a caller that is deciding
     # whether a role is still justified must exclude ALL claims whose reversal
@@ -1402,17 +1407,53 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
     except aiosqlite.Error:
         pass
     cursor = await db.execute(
-        "SELECT item_name, source, metadata FROM inventory_items "
+        "SELECT item_name, source, metadata, quantity FROM inventory_items "
         "WHERE guild_id=? AND user_id=? AND item_type IN ('role','temp_role')",
         (guild_id, user_id))
-    for item_name, source, metadata in await cursor.fetchall():
-        if exclude_item and str(item_name) == str(exclude_item):
-            continue                # the marker belonging to this very claim
+    for item_name, source, metadata, quantity in await cursor.fetchall():
         try:
-            if int((json.loads(metadata) or {}).get("role_id")) == int(role_id):
-                return f"inventory '{item_name}' ({source})"
+            if int((json.loads(metadata) or {}).get("role_id")) != int(role_id):
+                continue
         except (TypeError, ValueError):
             continue
+        held = int(quantity or 0)
+        if held <= 0:
+            # An empty stack grants nothing, whatever wrote the row.
+            continue
+        # Attribution, never the item name and never the stack count alone. A
+        # marker can be the effect of a claim this operation is itself
+        # reversing; then it is not an independent grant and may not protect
+        # the role from the very correction undoing it. `reward_grants` says
+        # which claim each unit still belongs to: units of an excluded claim
+        # are attributable to this operation, units of another claim or with no
+        # claim are independent, and stack units no grant accounts for are
+        # independent too (they came from somewhere this correction cannot
+        # name). `exclude_item` stays as the last resort for a claim's own
+        # marker whose provenance record is missing.
+        own_item = bool(exclude_item and str(item_name) == str(exclude_item))
+        try:
+            cursor = await db.execute(
+                "SELECT claim_id, remaining_quantity, unattributed "
+                "FROM reward_grants WHERE guild_id=? AND user_id=? AND "
+                "item_name=? AND kind='inventory'",
+                (guild_id, user_id, str(item_name)))
+            grants = await cursor.fetchall()
+        except aiosqlite.Error:
+            grants = []
+        attributable = independent = 0
+        for grant_claim, remaining, unattributed in grants:
+            if unattributed:
+                continue        # invalidated provenance cannot attribute units
+            units = max(0, int(remaining or 0))
+            if grant_claim is not None and int(grant_claim) in excluded:
+                attributable += units
+            else:
+                independent += units
+        if grants and independent == 0 and held <= attributable:
+            continue            # every unit is value this operation is undoing
+        if own_item and independent == 0 and not grants:
+            continue            # the claim's own marker, provenance unavailable
+        return f"inventory '{item_name}' ({source})"
     return None
 
 

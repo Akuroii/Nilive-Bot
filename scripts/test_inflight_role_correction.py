@@ -38,11 +38,19 @@ Cases:
   M  the same fresh pair with the role already absent: both rows close, no
      removal is attempted, and nothing is left outstanding.
   N  a genuinely independent claim still protects the role from the correction.
+  O  /setxp correction: two shop temp-role claims for one role, different item
+     names, role worn. Each claim's inventory marker must not justify the other.
+  P  the same fresh pair with the role already absent: both rows close.
+  Q  an inventory marker that is genuinely independent still protects the role.
+  R  the shop-role path with a partial removal failure, then a clean retry.
+  S  /xp_rollback: two shop temp-role claims for one role from ONE operation.
+  T  restore: an open case's own inventory marker does not justify the role.
 
 Run with:
     python scripts/test_inflight_role_correction.py
 """
 import asyncio
+import json
 import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -764,6 +772,265 @@ async def case_n_correction_independent_grant_protects_role():
           not (world.role in world.held and claim_count() == 0))
 
 
+
+def seed_shop_role_claim(level, name, operation, *, quantity=1, grant=True,
+                         unit=True, source="level_claim"):
+    """A delivered shop temp_role reward: claim, marker, provenance and unit.
+
+    Mirrors what delivery writes (`_grant_inventory`, `record_grant`,
+    `_ensure_temp_role_units`) so the correction sees the rows production has.
+    """
+    execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+            "track,reward_ref,payload_json,status,source,operation_id,"
+            "created_at) VALUES (?,?,?,'shop',?,?,'fulfilled','setlevel',?,"
+            "CURRENT_TIMESTAMP)",
+            (GUILD, USER, level, f"shop:{name}", json.dumps({
+                "name": name, "type": "temp_role", "quantity": quantity,
+                "role_id": ROLE_ID, "duration_hours": 24}), operation))
+    claim = rows("SELECT id FROM level_reward_claims ORDER BY id DESC")[0][0]
+    execute("INSERT INTO inventory_items (guild_id,user_id,item_name,item_type,"
+            "quantity,metadata,source) VALUES (?,?,?,?,?,?,?)",
+            (GUILD, USER, name, "temp_role", quantity,
+             json.dumps({"role_id": ROLE_ID}), source))
+    if grant:
+        execute("INSERT INTO reward_grants (grant_id,guild_id,user_id,claim_id,"
+                "reward_level,track,kind,item_name,quantity,remaining_quantity,"
+                "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+                (f"grant-{claim}", GUILD, USER, claim, level, "shop",
+                 "inventory", name, quantity, quantity))
+    if unit:
+        execute("INSERT INTO temp_roles (guild_id,user_id,role_id,expires_at,"
+                "source,claim_id,unit_index) VALUES (?,?,?,?,?,?,?)",
+                (GUILD, USER, ROLE_ID, "2099-01-01T00:00:00+00:00",
+                 "level_claim", claim, 0))
+    return claim
+
+
+def marker_quantities():
+    return dict((name, int(qty)) for name, qty in rows(
+        "SELECT item_name, quantity FROM inventory_items ORDER BY item_name"))
+
+
+async def case_o_shop_pair_same_role_worn():
+    """Each claim's marker is the other's effect, not an independent grant."""
+    print("\n== O. shop pair, different item names, role worn ==")
+    await reset_db()
+    first = seed_shop_role_claim(12, "Pass A", "admin-a")
+    second = seed_shop_role_claim(15, "Pass B", "admin-b")
+    world = World(held=True)
+
+    report = await reconcile(5, world)
+    check("O: the role is removed, not kept by the other claim's marker",
+          world.role not in world.held and report["reversed"]["role"] != [],
+          (world.held, report["reversed"]["role"]))
+    check("O: both claims are deleted, so neither marker blocks the other",
+          claim_count() == 0
+          and {c["claim_id"] for c in report["deleted_claims"]} == {first, second},
+          (claim_count(), report["deleted_claims"]))
+    check("O: no case cites a marker or a sibling",
+          report["kept_unresolved"] == [], report["kept_unresolved"])
+    check("O: both journals are applied, not outstanding",
+          sorted(status for status, _ in journal(first)) == ["applied"]
+          and sorted(status for status, _ in journal(second)) == ["applied"],
+          (journal(first), journal(second)))
+    check("O: both markers were reversed, not left behind",
+          marker_quantities() == {"Pass A": 0, "Pass B": 0},
+          marker_quantities())
+
+    retry = await reconcile(5, world)
+    check("O: a retry has nothing left to do",
+          retry["deleted_claims"] == [] and retry["kept_unresolved"] == []
+          and claim_count() == 0, (retry["deleted_claims"],
+                                   retry["kept_unresolved"], claim_count()))
+
+
+async def case_p_shop_pair_same_role_absent():
+    """No live role effect: both shop rows must still close, nothing to remove."""
+    print("\n== P. shop pair, role already absent ==")
+    await reset_db()
+    first = seed_shop_role_claim(12, "Pass A", "admin-a")
+    second = seed_shop_role_claim(15, "Pass B", "admin-b")
+    world = World(held=False)
+
+    report = await reconcile(5, world)
+    check("P: both rows are deleted and recorded as gone",
+          claim_count() == 0
+          and {c["claim_id"] for c in report["deleted_claims"]} == {first, second}
+          and sorted(status for status, _ in journal(first)) == ["applied"]
+          and sorted(status for status, _ in journal(second)) == ["applied"],
+          (claim_count(), report["deleted_claims"], journal(first), journal(second)))
+    check("P: no Discord removal is attempted",
+          world.member.remove_roles.await_count == 0,
+          world.member.remove_roles.await_count)
+    check("P: nothing is left outstanding and no failure is claimed",
+          report["kept_unresolved"] == [] and report["role_failures"] == []
+          and all(e["status"] == "applied" for e in report["reversed"]["role"]),
+          (report["kept_unresolved"], report["role_failures"],
+           report["reversed"]["role"]))
+    check("P: both markers are cleared", marker_quantities() ==
+          {"Pass A": 0, "Pass B": 0}, marker_quantities())
+
+
+async def case_q_shop_independent_inventory_grant():
+    """Attribution, not item name: a marker this correction did not write stays."""
+    print("\n== Q. an independent inventory marker still protects the role ==")
+    await reset_db()
+    first = seed_shop_role_claim(12, "Pass A", "admin-a")
+    second = seed_shop_role_claim(15, "Pass B", "admin-b")
+    execute("INSERT INTO inventory_items (guild_id,user_id,item_name,item_type,"
+            "quantity,metadata,source) VALUES (?,?,?,?,?,?,?)",
+            (GUILD, USER, "Bought Pass", "temp_role", 1,
+             json.dumps({"role_id": ROLE_ID}), "purchase"))
+    world = World(held=True)
+    report = await reconcile(5, world)
+    check("Q: the role stays, because a purchase marker grants it",
+          world.role in world.held and report["reversed"]["role"] == [],
+          (world.held, report["reversed"]["role"]))
+    check("Q: both correction claims are kept, not deleted",
+          claim_status(first) == "fulfilled" and claim_status(second) == "fulfilled"
+          and claim_count() == 2,
+          (claim_status(first), claim_status(second), claim_count()))
+    check("Q: the reason names the purchase marker",
+          any("Bought Pass" in c["reason"] for c in report["kept_unresolved"]),
+          report["kept_unresolved"])
+    check("Q: no removal is attempted", world.member.remove_roles.await_count == 0,
+          world.member.remove_roles.await_count)
+
+    print("\n== Q2. a grant that belongs to no claim is independent too ==")
+    await reset_db()
+    first = seed_shop_role_claim(12, "Pass A", "admin-a")
+    second = seed_shop_role_claim(15, "Pass B", "admin-b")
+    execute("INSERT INTO inventory_items (guild_id,user_id,item_name,item_type,"
+            "quantity,metadata,source) VALUES (?,?,?,?,?,?,?)",
+            (GUILD, USER, "Manual Pass", "temp_role", 1,
+             json.dumps({"role_id": ROLE_ID}), "manual"))
+    execute("INSERT INTO reward_grants (grant_id,guild_id,user_id,claim_id,"
+            "track,kind,item_name,quantity,remaining_quantity,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+            ("grant-manual", GUILD, USER, None, "manual", "inventory",
+             "Manual Pass", 1, 1))
+    world = World(held=True)
+    report = await reconcile(5, world)
+    check("Q2: an unclaimed grant also protects the role",
+          world.role in world.held and claim_count() == 2
+          and any("Manual Pass" in c["reason"]
+                  for c in report["kept_unresolved"]),
+          (world.held, claim_count(), report["kept_unresolved"]))
+    check("Q2: and nothing is removed",
+          world.member.remove_roles.await_count == 0,
+          world.member.remove_roles.await_count)
+
+
+async def case_r_shop_partial_failure_retry():
+    """The shop path still converges when the first role removal is refused."""
+    print("\n== R. shop pair, first removal fails, retry closes the rest ==")
+    await reset_db()
+    first = seed_shop_role_claim(12, "Pass A", "admin-a")
+    second = seed_shop_role_claim(15, "Pass B", "admin-b")
+    world = World(held=True)
+    calls = {"n": 0}
+
+    async def flaky(*roles, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated refusal")
+        for role in roles:
+            if role in world.held:
+                world.held.remove(role)
+                world.removed.append(role.id)
+
+    world.member.remove_roles = AsyncMock(side_effect=flaky)
+    report = await reconcile(5, world)
+    check("R: the failing claim stays open, its marker untouched",
+          claim_status(first) == "fulfilled"
+          and sorted(status for status, _ in journal(first)) == ["outstanding"]
+          and marker_quantities()["Pass A"] == 1,
+          (claim_status(first), journal(first), marker_quantities()))
+    check("R: the failure is reported", [f["claim_id"] for f in
+                                        report["role_failures"]] == [first],
+          report["role_failures"])
+    check("R: the sibling removes the role and closes",
+          world.role not in world.held and claim_status(second) is None
+          and marker_quantities()["Pass B"] == 0,
+          (world.held, claim_status(second), marker_quantities()))
+
+    retry = await reconcile(5, world)
+    check("R: the retry reverses the remaining marker and closes the claim",
+          claim_count() == 0
+          and sorted(status for status, _ in journal(first)) == ["applied"]
+          and marker_quantities() == {"Pass A": 0, "Pass B": 0}
+          and retry["kept_unresolved"] == [] and retry["role_failures"] == [],
+          (claim_count(), journal(first), marker_quantities(),
+           retry["kept_unresolved"], retry["role_failures"]))
+
+
+async def case_s_rollback_shop_markers():
+    """/xp_rollback gets the same attribution: its caller passes the same set."""
+    print("\n== S. /xp_rollback with two shop temp-role claims ==")
+    await rollback_db()
+    for name in ("Pass A", "Pass B"):
+        execute("INSERT INTO shop_items (guild_id,name,price,type,role_id,"
+                "duration_hours,enabled) VALUES (?,?,?,?,?,?,1)",
+                (GUILD, name, 100, "temp_role", ROLE_ID, 24))
+    items = rows("SELECT id FROM shop_items ORDER BY id")
+    for level, (item_id,) in zip((12, 15), items):
+        execute("INSERT INTO leveling_shop_rewards (guild_id,level,item_id,"
+                "quantity) VALUES (?,?,?,1)", (GUILD, level, item_id))
+    world = World()
+    world.before_add.set()          # deliver immediately, not paused
+    world.after_add.set()
+    granted, delivered = await grant_and_deliver(world, 16)
+    check("S: the change delivered both shop rewards and the role",
+          world.role in world.held and claim_count() == 2,
+          (world.held, claim_count()))
+    report = await rollback(granted["operation_id"], world)
+    check("S: the role is removed, not kept by the other marker",
+          world.role not in world.held and report["roles_removed"] == [ROLE_ID],
+          (world.held, report["roles_removed"]))
+    check("S: both markers are reversed",
+          marker_quantities() == {"Pass A": 0, "Pass B": 0},
+          marker_quantities())
+    check("S: no claim survives and none is preserved",
+          claim_count() == 0 and report["claims_preserved"] == [],
+          (claim_count(), report["claims_preserved"]))
+    check("S: the role is not reported as granted elsewhere",
+          report.get("roles_left_on_member") == [],
+          report.get("roles_left_on_member"))
+    check("S: the operation completes", op_status() == ["completed"], op_status())
+
+
+async def case_t_restore_open_case_marker():
+    """An open reversal case must not restore its role from its own marker."""
+    print("\n== T. restore: an open case's marker is not an independent grant ==")
+    await reset_db()
+    claim = seed_claim("fulfilled", level=10, operation="op-10")
+    from utils import level_ops as ops
+    await ops.note_reversal(guild_id=GUILD, user_id=USER, claim_id=claim,
+                            kind="role", quantity=1, operation_id="corr",
+                            status=ops.STATUS_OUTSTANDING, role_id=ROLE_ID,
+                            reason="open case")
+    execute("INSERT INTO inventory_items (guild_id,user_id,item_name,item_type,"
+            "quantity,metadata,source) VALUES (?,?,?,?,?,?,?)",
+            (GUILD, USER, "Pass A", "temp_role", 1,
+             json.dumps({"role_id": ROLE_ID}), "level_claim"))
+    execute("INSERT INTO reward_grants (grant_id,guild_id,user_id,claim_id,"
+            "track,kind,item_name,quantity,remaining_quantity,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+            ("grant-open", GUILD, USER, claim, "shop", "inventory",
+             "Pass A", 1, 1))
+    world = World(held=False)
+    world.before_add.set()          # a restore attempt would otherwise block
+    world.after_add.set()
+    from utils.level_claims import reconcile_role_progression
+    out = await reconcile_role_progression(world.member, GUILD, USER)
+    check("T: the role is withheld, not restored from the open case's marker",
+          out["restored"] == [] and world.role not in world.held
+          and [w["role_id"] for w in out["withheld"]] == [ROLE_ID], out)
+    check("T: the open case is still open and the claim still terminal",
+          claim_status(claim) == "fulfilled"
+          and sorted(s for s, _ in journal(claim)) == ["outstanding"],
+          (claim_status(claim), journal(claim)))
+
 async def main():
     for case in (case_a_role_absent_during_reset,
                  case_b_role_present_during_reset,
@@ -778,7 +1045,13 @@ async def main():
                  case_k_open_case_blocks_clean_verdict,
                  case_l_correction_two_claims_same_role_worn,
                  case_m_correction_two_claims_same_role_absent,
-                 case_n_correction_independent_grant_protects_role):
+                 case_n_correction_independent_grant_protects_role,
+                 case_o_shop_pair_same_role_worn,
+                 case_p_shop_pair_same_role_absent,
+                 case_q_shop_independent_inventory_grant,
+                 case_r_shop_partial_failure_retry,
+                 case_s_rollback_shop_markers,
+                 case_t_restore_open_case_marker):
         await case()
         # A worn role must never coexist with zero claim rows anywhere.
         if claim_count() == 0:
