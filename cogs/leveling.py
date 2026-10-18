@@ -709,6 +709,15 @@ def _level_reset_embed(member, report: dict, *, applied: bool) -> discord.Embed:
                 text=f"{len(report['unreversed'])} delivered reward(s) could not "
                      f"be reversed; {kept} claim row(s) kept and queued for "
                      f"/level_reconcile — see above.")
+        elif report.get("claims_preserved") or report.get("traces"):
+            # Claim rows are kept for effects this run cannot prove gone (an
+            # in-flight delivery, a failed role removal, an open case from an
+            # earlier operation). The footer must not call that "nothing was
+            # preserved" just because `unreversed` happens to be empty.
+            embed.set_footer(
+                text=f"{len(report.get('claims_preserved') or [])} claim row(s) "
+                     f"were kept because their effect is not proven gone; this "
+                     f"is NOT a clean New Game — see the traces above.")
         else:
             # The applied embed always ends on the same question the admin has:
             # did anything have to be left behind?
@@ -1258,7 +1267,8 @@ def _xp_rollback_embed(member, report: dict, *, applied: bool) -> discord.Embed:
     mutation = report.get("mutation") or {}
     plan = report.get("plan") or {}
     partial = bool(applied and ((report.get("role_failures") or [])
-                                or (report.get("unreversed") or [])))
+                                or (report.get("unreversed") or [])
+                                or (plan.get("in_flight_claims") or [])))
     embed = discord.Embed(
         title=("XP rollback — APPLIED (PARTIAL)" if partial else
                "XP rollback — APPLIED" if applied
@@ -1319,6 +1329,23 @@ def _xp_rollback_embed(member, report: dict, *, applied: bool) -> discord.Embed:
                 f"({c['status']})" for c in cancel[:20])[:1024]
             + "\nAbove the target level and created by this operation, so the "
               "member no longer reaches them.",
+            inline=False)
+    in_flight = plan.get("in_flight_claims") or []
+    if in_flight:
+        embed.add_field(
+            name=("⚠️ Deliveries still in flight (not judged)" if applied
+                  else "⚠️ Deliveries that would still be in flight"),
+            value="\n".join(
+                f"- L{c['reward_level']} · {c['track']} · `{c['reward_ref']}` "
+                f"(processing)" for c in in_flight[:20])[:1024]
+            + ("\nTheir effect cannot be known yet, so their claim rows are KEPT "
+               "and this rollback is **not complete**: a delivery that finishes "
+               "afterwards can still pay this reward. Run the correction or the "
+               "rollback preview again once the delivery has finished."
+               if applied else
+               "\nThe delivery may finish after the rollback, so it cannot be "
+               "cancelled or reversed. Applying now keeps the claim row and "
+               "records the operation as partial, never as complete."),
             inline=False)
     reverse = (plan.get("reverse_currency") or []) + (plan.get("reverse_inventory") or [])
     if reverse:
@@ -1439,6 +1466,12 @@ def _xp_rollback_embed(member, report: dict, *, applied: bool) -> discord.Embed:
                 text=f"{len(report['unreversed'])} delivered reward(s) could not "
                      f"be reversed; their claim rows are kept and queued for "
                      f"/level_reconcile.")
+        elif in_flight:
+            embed.set_footer(
+                text="The rollback is PARTIAL: a delivery this operation created "
+                     "was still in progress, so its claim row was kept and its "
+                     "effect is not claimed as reversed. Run the rollback preview "
+                     "again once it has finished.")
         else:
             embed.set_footer(
                 text="Every entitlement this operation created above the target "

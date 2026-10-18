@@ -25,6 +25,13 @@ Cases:
   F  a stale `applied` row and the role already gone.
   G  a stale `applied` row with no member object (old behaviour, no guessing).
   H  the reset's own role removal fails while the role is worn.
+  I  /xp_rollback: two delivered claims for one role created by the SAME
+     operation must not justify each other; an INDEPENDENT claim still must.
+  J  /xp_rollback: a caused claim still being delivered is reported and the
+     operation is `partial`, never `completed`.
+  K  an earlier OPEN reversal case keeps the reset from calling itself clean,
+     and the applied embed never says "nothing was preserved" while it kept
+     rows.
 
 Run with:
     python scripts/test_inflight_role_correction.py
@@ -34,7 +41,8 @@ import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from phase1_support import GUILD, USER, execute, rows, reset_database
+from phase1_support import (GUILD, USER, all_embed_text, execute, rows,
+                            reset_database)
 
 ROLE_ID = 7001
 FAILS = []
@@ -187,6 +195,48 @@ async def reconcile(level, world, operation="correction-regression"):
                                       member=world.member)
 
 
+async def rollback_db(*levels):
+    """A clean member at L0 with one role reward per configured level."""
+    await reset_db()
+    execute("DELETE FROM leveling_rewards")
+    execute("DELETE FROM level_reward_claims")
+    execute("UPDATE levels SET xp=0, level=0 WHERE guild_id=? AND user_id=?",
+            (GUILD, USER))
+    for level in levels:
+        execute("INSERT INTO leveling_rewards (guild_id,level,role_id,audience) "
+                "VALUES (?,?,?,'everyone')", (GUILD, level, ROLE_ID))
+
+
+def rollback_bot(world):
+    return SimpleNamespace(
+        get_guild=lambda gid: world.guild if gid == GUILD else None)
+
+
+async def grant_and_deliver(world, top_level):
+    """One administrative change up to ``top_level``, then Claim All."""
+    from cogs.leveling import _apply_admin_xp
+    from utils.level_claims import SOURCE_SETLEVEL, claim_available
+    from utils.xp_calculator import xp_for_level
+    target = sum(xp_for_level(n) for n in range(1, top_level + 1))
+    granted = await _apply_admin_xp(
+        GUILD, world.member, target, rollback_bot(world),
+        source=SOURCE_SETLEVEL, actor_id=999, reason="regression")
+    delivered = await claim_available(GUILD, USER, member=world.member)
+    return granted, delivered
+
+
+async def rollback(operation_id, world):
+    from utils.level_test_reset import rollback_xp_operation
+    return await rollback_xp_operation(
+        GUILD, USER, operation_id=operation_id, apply=True,
+        reversed_by=999, reason="regression rollback", member=world.member)
+
+
+def op_status(kind="xp_rollback"):
+    return [r[0] for r in rows(
+        "SELECT status FROM level_ops WHERE user_id=? AND kind=?", (USER, kind))]
+
+
 async def case_a_role_absent_during_reset():
     """Akuroi's exact sequence: the reset runs before the add reaches Discord."""
     print("\n== A. the role is absent while the reset runs, then it is delivered ==")
@@ -198,6 +248,13 @@ async def case_a_role_absent_during_reset():
           await wait_processing(claim_id), claim_status(claim_id))
     check("A: the role is not on the member yet", world.role not in world.held,
           world.held)
+
+    from utils.level_test_reset import inspect_member
+    preview = await inspect_member(GUILD, USER)
+    check("A: the preview counts the in-flight claim as KEPT, not deleted",
+          preview["plan"]["claims_kept"] == [claim_id]
+          and preview["plan"]["delete_claims"] == 0,
+          (preview["plan"]["claims_kept"], preview["plan"]["delete_claims"]))
 
     report = await reset_member_apply(world)
     check("A: the reset does NOT report the role as removed",
@@ -220,6 +277,17 @@ async def case_a_role_absent_during_reset():
     check("A: the claim is kept and this is not a clean New Game",
           claim_status(claim_id) == "processing"
           and report["new_game_complete"] is False, report["traces"])
+
+    # What the administrator actually reads: the applied embed must not end on
+    # "nothing was preserved" while a claim row was kept.
+    from cogs.leveling import _level_reset_embed
+    embed = _level_reset_embed(world.member, report, applied=True)
+    footer = ((getattr(embed, "_footer", None) or {}).get("text") or "")
+    body = all_embed_text(embed)
+    check("A: the applied embed says this is NOT a clean New Game",
+          "NOT a clean New Game" in footer
+          and "nothing was preserved" not in footer
+          and "Clean New Game" not in body, (footer, body[-400:]))
 
     world.before_add.set()
     world.after_add.set()
@@ -462,6 +530,147 @@ async def case_h_reset_removal_fails():
           retry["traces"])
 
 
+async def case_i_rollback_shared_role():
+    """Two delivered claims for one role from ONE operation are not independent."""
+    print("\n== I. /xp_rollback and a role configured at two levels ==")
+    await rollback_db(4, 5)
+    world = World()
+    world.before_add.set()          # deliver immediately, not paused
+    world.after_add.set()
+    granted, delivered = await grant_and_deliver(world, 5)
+    created = [r[0] for r in rows("SELECT id FROM level_reward_claims ORDER BY id")]
+    check("I: the change delivered the same role at both levels",
+          sorted(delivered["fulfilled"]) == created and len(created) == 2
+          and world.role in world.held, (delivered, world.held, created))
+    check("I: both rows carry the operation id being rolled back",
+          {r[0] for r in rows("SELECT operation_id FROM level_reward_claims")}
+          == {granted["operation_id"]})
+
+    report = await rollback(granted["operation_id"], world)
+    check("I: the role is removed, not kept by the row being reversed",
+          report["roles_removed"] == [ROLE_ID] and world.role not in world.held,
+          (report["roles_removed"], report.get("roles_left_on_member"),
+           world.held))
+    check("I: no claim from the operation survives above the target level",
+          claim_count() == 0, rows("SELECT id,reward_level,status FROM "
+                                   "level_reward_claims"))
+    check("I: the report does not cite a claim this run deletes as the "
+          "reason to keep the role",
+          report.get("roles_left_on_member") == []
+          and report["claims_preserved"] == [],
+          (report.get("roles_left_on_member"), report.get("claims_preserved")))
+    check("I: the operation is complete because every effect is gone",
+          op_status() == ["completed"], op_status())
+
+    print("\n== I2. an INDEPENDENT claim for the same role still justifies it ==")
+    await rollback_db(4, 5)
+    world = World()
+    world.before_add.set()
+    world.after_add.set()
+    # The member earned the L5 role by playing, before the administrative
+    # change. It is not part of the operation and must survive the rollback.
+    execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+            "track,reward_ref,payload_json,status,source,created_at) "
+            "VALUES (?,?,5,'role',?,?,'fulfilled','level_up',"
+            "CURRENT_TIMESTAMP)",
+            (GUILD, USER, str(ROLE_ID), f'{{"role_id": {ROLE_ID}}}'))
+    independent = rows("SELECT id FROM level_reward_claims")[0][0]
+    granted, delivered = await grant_and_deliver(world, 5)
+    caused = delivered["fulfilled"][0]
+    check("I2: the administrative change created only its own claim",
+          len(delivered["fulfilled"]) == 1 and caused != independent
+          and claim_count() == 2, (delivered, independent, claim_count()))
+    check("I2: the role is worn and documented by both rows",
+          world.role in world.held and claim_count() == 2)
+
+    report = await rollback(granted["operation_id"], world)
+    check("I2: the role stays, because a claim that is NOT being reversed "
+          "grants it",
+          world.role in world.held
+          and [r["role_id"] for r in report.get("roles_left_on_member") or []]
+          == [ROLE_ID],
+          (world.held, report.get("roles_left_on_member")))
+    check("I2: the independent claim survives untouched",
+          claim_status(independent) == "fulfilled", claim_status(independent))
+    check("I2: the caused claim is preserved with that reason, not deleted",
+          [c["claim_id"] for c in report["claims_preserved"]] == [caused]
+          and "also granted" in report["claims_preserved"][0]["reason"],
+          report.get("claims_preserved"))
+    check("I2: the role is never left undocumented",
+          not (world.role in world.held and claim_count() == 0))
+
+
+async def case_j_rollback_in_flight_claim():
+    """A delivery in flight is an open case: the operation is partial."""
+    print("\n== J. /xp_rollback while a caused claim is still being delivered ==")
+    await rollback_db(4)
+    world = World()
+    from cogs.leveling import _apply_admin_xp
+    from utils.level_claims import SOURCE_SETLEVEL
+    from utils.xp_calculator import xp_for_level
+    target = sum(xp_for_level(n) for n in range(1, 5))
+    granted = await _apply_admin_xp(
+        GUILD, world.member, target, rollback_bot(world),
+        source=SOURCE_SETLEVEL, actor_id=999, reason="regression")
+    claim_id = rows("SELECT id FROM level_reward_claims")[0][0]
+    task = start_delivery(world, claim_id)
+    check("J: the claim reached the in-flight state",
+          await wait_processing(claim_id), claim_status(claim_id))
+    check("J: the role is not on the member yet", world.role not in world.held)
+
+    report = await rollback(granted["operation_id"], world)
+    check("J: the in-flight claim is reported, not dropped",
+          [c["claim_id"] for c in report.get("in_flight_claims") or []]
+          == [claim_id], report.get("in_flight_claims"))
+    check("J: the claim is kept and the reason says the rollback is not "
+          "complete",
+          claim_status(claim_id) == "processing"
+          and "NOT complete" in report["claims_preserved"][0]["reason"],
+          (claim_status(claim_id), report.get("claims_preserved")))
+    check("J: the operation is PARTIAL, never completed",
+          op_status() == ["partial"], op_status())
+    check("J: the XP was still rolled back", rows(
+        "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+        (GUILD, USER))[0][0] == 0)
+
+    # Documented residual: the delivery finishes afterwards and pays a reward
+    # above the target level. The claim row stays as its record, and the
+    # operation already says `partial`, so this is visible, not silent.
+    world.before_add.set()
+    world.after_add.set()
+    await task
+    check("J: the late delivery is still documented by its claim row",
+          claim_status(claim_id) == "fulfilled" and world.role in world.held,
+          (claim_status(claim_id), world.held))
+
+
+async def case_k_open_case_blocks_clean_verdict():
+    """An earlier open reversal case is a trace, even with no claim row left."""
+    print("\n== K. an earlier open reversal case blocks a clean New Game ==")
+    await reset_db()
+    claim_id = seed_claim("fulfilled", level=10, operation="old-admin")
+    from utils import level_ops as ops
+    await ops.note_reversal(
+        guild_id=GUILD, user_id=USER, claim_id=claim_id, kind=ops.KIND_ROLE,
+        quantity=1, operation_id="old-correction", status=ops.STATUS_OUTSTANDING,
+        role_id=ROLE_ID,
+        reason="Discord refused the role removal; the case is still open")
+    execute("DELETE FROM level_reward_claims WHERE id=?", (claim_id,))
+    world = World()             # the role is NOT held: the case is the only trace
+    report = await reset_member_apply(world)
+    check("K: the reset still reports the open case",
+          [c["claim_id"] for c in report.get("outstanding") or []] == [claim_id],
+          report.get("outstanding"))
+    check("K: and refuses to call the result a clean New Game",
+          report["new_game_complete"] is False
+          and any("unresolved" in t for t in report["traces"]),
+          report.get("traces"))
+    from cogs.leveling import _level_reset_embed
+    embed = _level_reset_embed(world.member, report, applied=True)
+    footer = ((getattr(embed, "_footer", None) or {}).get("text") or "")
+    check("K: the embed footer agrees", "NOT a clean New Game" in footer, footer)
+
+
 async def main():
     for case in (case_a_role_absent_during_reset,
                  case_b_role_present_during_reset,
@@ -470,7 +679,10 @@ async def main():
                  case_e_two_stale_rows_same_role,
                  case_f_stale_applied_role_gone,
                  case_g_stale_applied_no_member,
-                 case_h_reset_removal_fails):
+                 case_h_reset_removal_fails,
+                 case_i_rollback_shared_role,
+                 case_j_rollback_in_flight_claim,
+                 case_k_open_case_blocks_clean_verdict):
         await case()
         # A worn role must never coexist with zero claim rows anywhere.
         if claim_count() == 0:

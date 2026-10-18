@@ -66,6 +66,20 @@ def production_files():
             yield path
 
 
+def reconciler_call_sites() -> list[str]:
+    """Files that really CALL reconcile_role_progression (AST, not comments)."""
+    sites = set()
+    for path in production_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name == "reconcile_role_progression":
+                sites.add(str(path.relative_to(ROOT)))
+    return sorted(sites)
+
+
 def background_task_calls_reconciler() -> bool:
     """Inspect task-loop function bodies, not unrelated file-level tokens."""
     for path in production_files():
@@ -328,9 +342,13 @@ def main():
 
     print("== 9. D2 reconciliation cannot restore the wrong thing ==")
     rec = claims[claims.index("async def reconcile_role_progression"):]
-    rec = rec[:rec.index("async def _grant_inventory")]
+    # The next function after the reconciler is strip_booster_roles, which does
+    # read role definitions for its own (different) job. Scoping the invariants
+    # to the reconciler itself keeps them honest instead of matching that code.
+    rec = rec[:rec.index("async def strip_booster_roles")]
     check("the reconciler inspects all role claim statuses",
-          "SELECT reward_level, payload_json, status" in rec and "TRACK_ROLE" in rec)
+          "SELECT id, reward_level, reward_ref, payload_json, status" in rec
+          and "TRACK_ROLE" in rec and "AND status=" not in rec)
     check("the reconciler targets the highest FULFILLED role claim group",
           "highest = max(delivered_levels)" in rec
           and 'keep = sorted(group["role_ids"])' in rec)
@@ -354,9 +372,11 @@ def main():
           and 'get("remove_old_reward_role")' in rec
           and "exclusive_roles" in rec)
     check("reconciliation has one claim/retry implementation plus the join callback",
-          [str(p.relative_to(ROOT)) for p in production_files()
-           if "reconcile_role_progression" in p.read_text(encoding="utf-8")]
-          == ["cogs/leveling.py", "utils/level_claims.py"])
+          sum(source(rel).count("async def reconcile_role_progression")
+              for rel in ("cogs/leveling.py", "utils/level_claims.py",
+                          "utils/level_test_reset.py")) == 1
+          and reconciler_call_sites() == ["cogs/leveling.py",
+                                          "utils/level_claims.py"])
     check("Claim All path requires a member, full pass and replacement enabled",
           "if exclusive_roles and member is not None and claim_ids is None:" in claims)
     check("join callback reconciles automatically without requiring Claim All",
@@ -368,8 +388,7 @@ def main():
           "for member in guild.members" not in source("cogs/leveling.py"))
 
     print("== 10. no retroactive sweep, no rejoin reset ==")
-    call_sites = [str(p.relative_to(ROOT)) for p in production_files()
-                  if "reconcile_role_progression(" in p.read_text(encoding="utf-8")]
+    call_sites = reconciler_call_sites()
     check("the reconciler has only the Claim All and join callback callers",
           call_sites == ["cogs/leveling.py", "utils/level_claims.py"],
           str(call_sites))
@@ -393,7 +412,8 @@ def main():
     enforce = claims[claims.index("async def enforce_role_progression"):]
     enforce = enforce[:enforce.index("async def reconcile_role_progression")]
     check("removals come only from the superseded-claim helper",
-          "await superseded_role_ids(db, guild_id, user_id, level, role_id)" in enforce)
+          "await superseded_role_ids(" in enforce
+          and "db, guild_id, user_id, level, role_id, booster=booster)" in enforce)
     check("roles the member does not hold are skipped, never guessed",
           "if role is None or role not in held:" in enforce)
 

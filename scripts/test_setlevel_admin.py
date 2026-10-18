@@ -12,10 +12,15 @@ What it locks down:
    and `/setxp` with that same total produces a byte-identical row.
 3. Both commands report the level and the XP before AND after.
 4. `/setxp`'s reply is unchanged, so nothing that parsed it breaks.
-5. The XP-reduction policy: raising XP by mistake, letting the member claim, and
-   then correcting the XP down does NOT delete earned entitlements, does NOT undo
-   what was already delivered, does NOT debit the wallet, and cannot pay any of
-   it a second time when the member levels back up. The admin is told all of it.
+5. The XP-reduction policy (approved for this PR): eligibility follows the
+   CORRECTED level. Raising XP by mistake, letting the member claim, and then
+   correcting the XP down reverses the delivered rewards through provenance,
+   deletes their rows only once the effect is gone, and takes the value back -
+   the member can then earn the reward again legitimately, but never hold more
+   than the configured total. Unclaimed rows the administrative change created
+   are kept as history and become dormant above the corrected level: not
+   claimable until the member really reaches it, then payable once. The admin is
+   told what was reversed and which unclaimed rows stopped being claimable.
 
 Run with:
     python scripts/test_setlevel_admin.py
@@ -255,6 +260,12 @@ async def main():
 
     # ── 6. the XP-reduction policy ──
     # XP raised by mistake -> the member claims -> the admin corrects it down.
+    # Policy (approved for this PR): eligibility follows the CORRECTED level.
+    # Delivered rewards that only the higher level unlocked are reversed through
+    # provenance, and their claim rows are deleted only after the effect is gone,
+    # so the reward can be earned again legitimately. Unclaimed rows created by
+    # the administrative change stay in place as history but are dormant above
+    # the corrected level - not claimable until the member really reaches it.
     print("== 6. XP raised by mistake, claimed, then corrected down ==")
     execute("DELETE FROM level_reward_claims WHERE guild_id=? AND user_id=?",
             (GUILD, USER))
@@ -277,69 +288,116 @@ async def main():
 
     itx = await setxp(level_start_xp(2))
     reply = itx.followup.send.await_args.args[0]
-    claims_after = sorted(
-        (r[0], r[1], r[2], r[3]) for r in rows(
-            "SELECT reward_level, track, reward_ref, status "
-            "FROM level_reward_claims WHERE guild_id=? AND user_id=?",
-            (GUILD, USER)))
-    check("correcting the XP down does not delete earned entitlements",
-          claims_after == claims_before and len(claims_after) == 3,
-          f"{claims_before} -> {claims_after}")
-    check("and does not treat delivered effects as if they never happened",
-          balance() == paid and real_role in held
-          and rows("SELECT COUNT(*) FROM transaction_ledger WHERE guild_id=? "
-                   "AND user_id=? AND source='level_claim'", (GUILD, USER))[0][0] >= 2,
-          f"balance={balance()} paid={paid}")
-    check("the admin is told the level went down and nothing was deleted",
+    claims_after = rows(
+        "SELECT reward_level, track, reward_ref, status "
+        "FROM level_reward_claims WHERE guild_id=? AND user_id=?", (GUILD, USER))
+    journal = rows(
+        "SELECT kind, status FROM reward_reversals WHERE guild_id=? AND user_id=?",
+        (GUILD, USER))
+    check("correcting the XP down reverses the delivered rewards through "
+          "provenance and deletes their rows only now",
+          claims_after == []
+          and sorted(journal) == [("currency", "applied"),
+                                  ("currency", "applied"),
+                                  ("role", "applied")],
+          f"{claims_before} -> {claims_after} journal={journal}")
+    check("and the value is taken back, not left in place",
+          balance() == 0 and real_role not in held,
+          f"balance={balance()} held={[r.id for r in held]}")
+    check("the admin is told the level went down and exactly what was reversed",
           "Level went **down** (L10 → L2)" in reply
-          and "was **not** deleted" in reply
-          and "already **delivered**" in reply, reply)
-    check("and told how many delivered rewards now sit above the new level",
-          "3 reward(s) above L2 were already **delivered**" in reply, reply)
+          and "Reversed 3 delivered reward(s)" in reply
+          and f"{COIN_L3 + COIN_L5} balance" in reply
+          and "1 role(s)" in reply, reply)
+    check("the advisory no longer advertises the bulk history wipe",
+          "/level_test_reset" not in reply
+          and "include_delivered" not in reply, reply)
     check("the stored level and XP stay consistent with the curve",
           state() == (level_start_xp(2), 2)
           and xp_progress(state()[0])[0] == state()[1], str(state()))
 
+    # The deleted rows are what makes the reward legitimately earnable again.
+    # Receiving the configured total once - not twice - is the invariant.
     re_levelled = await setlevel(10)
     second = await claim_available(GUILD, USER, member=member, bot=bot)
-    check("levelling back up creates no duplicate rewards and pays nothing twice",
-          balance() == paid and second["fulfilled"] == [] and second["owned"] == 0
+    check("levelling back up re-earns the reward exactly once: the member holds "
+          "the configured total, never double the mistaken payout",
+          balance() == paid and len(second["fulfilled"]) == 3
+          and len(claims_after) == 0
           and sorted((r[0], r[1], r[2], r[3]) for r in rows(
               "SELECT reward_level, track, reward_ref, status "
               "FROM level_reward_claims WHERE guild_id=? AND user_id=?",
-              (GUILD, USER))) == claims_before,
-          f"balance={balance()} second={second['fulfilled']}")
+              (GUILD, USER))) == claims_before
+          and real_role in held,
+          f"balance={balance()} paid={paid} second={second['fulfilled']}")
     check("the correction back up raises no false alarm",
           "not deleted" not in re_levelled.followup.send.await_args.args[0],
           re_levelled.followup.send.await_args.args[0])
 
-    # An EARNED-BUT-UNDELIVERED reward is not the same as a delivered one: it
-    # stays claimable, because the member legitimately crossed that level.
+    # An unclaimed administrative entitlement is a different case: it was never
+    # delivered, so there is nothing to reverse, but it must not stay claimable
+    # above the corrected level either. The row is kept as history and becomes
+    # claimable again only if the member legitimately reaches that level.
     execute("DELETE FROM level_reward_claims WHERE guild_id=? AND user_id=?",
             (GUILD, USER))
     execute("UPDATE levels SET xp=0, level=0 WHERE guild_id=? AND user_id=?",
             (GUILD, USER))
-    await setlevel(10)                       # crosses L3/L5, nothing claimed yet
-    itx = await setxp(level_start_xp(2))     # corrected down before claiming
-    reply = itx.followup.send.await_args.args[0]
-    check("an unclaimed reward above the new level is reported as still claimable",
-          "3 reward(s) above L2 are still **claimable**" in reply, reply)
     execute("UPDATE economy SET balance=0 WHERE guild_id=? AND user_id=?",
             (GUILD, USER))
+    execute("DELETE FROM reward_reversals WHERE guild_id=? AND user_id=?",
+            (GUILD, USER))
+    held.clear()                # model a fresh member; the row is at L0 again
+    await setlevel(10)                       # crosses L3/L5, nothing claimed yet
+    dormant_ids = [r[0] for r in rows(
+        "SELECT id FROM level_reward_claims WHERE guild_id=? AND user_id=? "
+        "ORDER BY id", (GUILD, USER))]
+    itx = await setxp(level_start_xp(2))     # corrected down before claiming
+    reply = itx.followup.send.await_args.args[0]
+    check("an unclaimed reward above the new level is reported as no longer "
+          "claimable, with its rows kept",
+          "3 unclaimed reward(s) above L2" in reply
+          and "no longer claimable" in reply
+          and "rows are kept" in reply
+          and "legitimately reaches those levels" in reply
+          and "pay only once" in reply, reply)
     pending = await claim_available(GUILD, USER, member=member, bot=bot)
-    check("and is still payable, because it was legitimately earned",
-          len(pending["fulfilled"]) == 3 and balance() == COIN_L3 + COIN_L5
-          and real_role in held,
+    check("and it is NOT payable while the member is below that level",
+          pending["fulfilled"] == [] and pending["owned"] == 0
+          and balance() == 0 and real_role not in held,
           f"{pending['fulfilled']} balance={balance()}")
-    # Round 4: the advisory must point at the tool that undoes THIS change, not at
-    # the one that wipes the member's whole reward history - and the
-    # `include_delivered` escape hatch it used to advertise is gone, so it must
-    # not appear in anything an administrator reads. The delta-not-snapshot rule
-    # is asserted here too, because that is the promise /xp_rollback makes.
-    check("the advisory points at the exact rollback, not at a bulk delete",
-          "/xp_rollback" in reply and "/level_test_reset" in reply
-          and "include_delivered" not in reply
-          and "CURRENT XP" in reply and "snapshot" in reply, reply)
+    kept = rows("SELECT id, status FROM level_reward_claims WHERE guild_id=? "
+                "AND user_id=? ORDER BY id", (GUILD, USER))
+    check("the rows survive as history instead of being deleted or paid",
+          [r[0] for r in kept] == dormant_ids
+          and all(r[1] == "pending" for r in kept), kept)
+    # The card reads the same predicate the reservation SQL enforces, so an old
+    # message's Claim All cannot look pressable while the rows are dormant.
+    from cogs.leveling import _claim_button_state
+    view_rows = await list_claims(GUILD, USER)
+    check("the Claim All button is disabled for the dormant rows",
+          sorted(c["id"] for c in view_rows) == sorted(dormant_ids)
+          and all(c["above_level"] and c["admin_created"] for c in view_rows)
+          and await _claim_button_state(GUILD, view_rows, False) == (False, False),
+          [(c["id"], c["status"], c["above_level"], c["admin_created"])
+           for c in view_rows])
+
+    # Reaching the level legitimately makes the SAME rows claimable again -
+    # at most once - because the row is both the history and the entitlement.
+    again = await setlevel(10)
+    pending = await claim_available(GUILD, USER, member=member, bot=bot)
+    check("reaching the level legitimately re-enables the same rows, once",
+          len(pending["fulfilled"]) == 3 and balance() == COIN_L3 + COIN_L5
+          and real_role in held
+          and [r[0] for r in rows(
+              "SELECT id FROM level_reward_claims WHERE guild_id=? AND user_id=? "
+              "ORDER BY id", (GUILD, USER))] == dormant_ids
+          and all(r[0] == "fulfilled" for r in rows(
+              "SELECT status FROM level_reward_claims WHERE guild_id=? "
+              "AND user_id=?", (GUILD, USER))),
+          f"{pending['fulfilled']} balance={balance()}")
+    check("that upward correction still raises no false alarm",
+          "no longer claimable" not in again.followup.send.await_args.args[0],
+          again.followup.send.await_args.args[0])
 
     # ── 7. scope ──
     print("== 7. scope ==")

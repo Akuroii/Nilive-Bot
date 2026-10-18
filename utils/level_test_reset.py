@@ -737,8 +737,12 @@ def _plan(report: dict, *, include_prestige: bool = False) -> dict:
 
     # Rows kept because their effect survives. There is no override: deleting one
     # of these would make an already-paid reward earnable again while its value is
-    # still in the member's hands.
-    kept = {e["claim_id"] for e in stuck_money} | {e["claim_id"] for e in stuck_goods}
+    # still in the member's hands. A `processing` row is kept for the same
+    # reason - its delivery is still running - so the preview counts it as kept
+    # instead of promising a deletion `apply` will not perform.
+    kept = ({e["claim_id"] for e in stuck_money}
+            | {e["claim_id"] for e in stuck_goods}
+            | {c["id"] for c in claims if c["status"] == "processing"})
     return {
         "zero_levels_row": report["has_level_row"],
         # The flag alone decides this: clearing prestige is an explicit choice,
@@ -1304,6 +1308,14 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
     above = [c for c in caused if int(c["reward_level"]) > target_level]
     cancel = [c for c in above if c["status"] in _CLAIMABLE]
     delivered = [c for c in above if c["status"] == "fulfilled"]
+    # A claim this operation created whose delivery was still in progress when the
+    # rollback inspected it. Its effect (a Discord role add, an inventory grant)
+    # cannot be known yet, so it is neither cancelled nor reversed: the row is
+    # kept and the operation is not called complete. Reporting it here - rather
+    # than leaving it out of every list because it is neither `pending` nor
+    # `fulfilled` - is what stops a later delivery from appearing as a clean
+    # rollback after it already paid a reward above the target level.
+    in_flight = [c for c in above if c["status"] == "processing"]
     still_earned = [c for c in caused if int(c["reward_level"]) <= target_level]
     independent = [c for c in report["claims"] if c["id"] not in caused_ids]
 
@@ -1349,11 +1361,26 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
     remove_discord_roles: list[int] = []
     retained_roles: list[dict] = []
     if role_claims:
+        # Every delivered claim for this role that THIS rollback is about to
+        # reverse, not just the one representative picked above. Another claim
+        # for the same role created by the same operation is not an independent
+        # entitlement: counting it as one made two rows justify each other, so
+        # the role stayed on the member and both rows survived while the XP was
+        # rolled back - a reward above the target level with no independent
+        # source. `_role_granted_elsewhere` may only name a grant that this run
+        # leaves in place.
+        being_reversed: dict[int, set[int]] = {}
+        for claim in delivered:
+            if claim.get("role_id") is None:
+                continue
+            being_reversed.setdefault(int(claim["role_id"]), set()).add(
+                int(claim["id"]))
         async with aiosqlite.connect(DB_PATH, timeout=10) as grant_db:
             for role_id, claim in sorted(role_claims.items()):
                 shared = await _role_granted_elsewhere(
                     grant_db, guild_id, user_id, role_id,
                     exclude_claim_id=int(claim["id"]),
+                    exclude_claim_ids=being_reversed.get(role_id, set()),
                     exclude_item=(claim["payload"].get("name")
                                   if claim["track"] == "shop" else None))
                 if shared:
@@ -1367,6 +1394,7 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
         "removed_xp": current_xp - target_xp, "delta": delta,
         "earned_since": earned_since, "clamped": clamped,
         "cancel_claims": [brief(c) for c in cancel],
+        "in_flight_claims": [brief(c) for c in in_flight],
         "legacy_cancel_claims": legacy_cancel,
         "reverse_currency": [e for e in attribution["currency"]
                              if e.get("reversible")],
@@ -1571,13 +1599,25 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
                               if c.get("role_id") is not None
                               and int(c["role_id"]) in retained_role_ids
                               and c["id"] in caused_ids}
+        in_flight_ids = {c["claim_id"]
+                         for c in plan.get("in_flight_claims") or []}
+        still_earned_ids = {int(c["id"]) for c in still_earned}
+        report["in_flight_claims"] = list(plan.get("in_flight_claims") or [])
         report["claims_preserved"] = [
-            dict(brief(c), reason=("a Discord role could not be removed"
+            dict(brief(c), reason=("its delivery was still in progress when the "
+                                   "rollback ran, so its effect cannot be known "
+                                   "yet - the claim row is kept and this "
+                                   "rollback is NOT complete"
+                                   if c["id"] in in_flight_ids
+                                   else "a Discord role could not be removed"
                                    if c["id"] in failed_claim_ids
                                    else "the role is also granted by another "
                                         "entitlement, so it was deliberately "
                                         "kept"
                                    if c["id"] in retained_claim_ids
+                                   else "the member still reaches this level, "
+                                        "so the reward is legitimately theirs"
+                                   if c["id"] in still_earned_ids
                                    else "its delivered effect could not be "
                                         "reversed, so it stays terminal"))
             for c in report["claims"]
@@ -1689,15 +1729,19 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
             # A role the rollback could not take off is an outstanding reversal
             # even if the role's claims could not be journalled (no member object,
             # or a role that disappeared from the guild). Never record
-            # `completed` while `role_failures` says otherwise.
+            # `completed` while `role_failures` says otherwise - and a delivery
+            # that was still in flight when the rollback ran is the same kind of
+            # open case: its effect may land above the target level afterwards.
             "completed" if not report["unreversed"]
-            and not report.get("role_failures") else "partial",
+            and not report.get("role_failures")
+            and not report.get("in_flight_claims") else "partial",
             {"rolled_back": operation_id, "target_xp": target_xp,
              "cancelled": counts.get("cancelled_claims", 0),
              "reversed_claims": counts.get("reversed_claims", 0),
              "reversed_currency": len(report["reversed_currency"]),
              "reversed_inventory": len(report["reversed_inventory"]),
              "unreversed": len(report["unreversed"]),
+             "in_flight": len(report.get("in_flight_claims") or []),
              "role_failures": len(report.get("role_failures") or []),
              "open_role_cases": sum(
                  1 for f in report.get("role_failures") or [] if f.get("open_case"))})
@@ -1825,12 +1869,18 @@ def _traces(report: dict, *, applied: bool) -> list[str]:
             traces.append(
                 f"L{entry['reward_level']} {entry['kind']} reward would NOT be "
                 f"reversible: {entry.get('note')}.")
-    if not applied:
-        for entry in report.get("outstanding") or []:
-            traces.append(
-                f"an earlier operation left claim {entry['claim_id']} "
-                f"{entry['kind']} unresolved ({entry['status']}): "
-                f"{entry['reason']}.")
+    # An open reversal case is a trace whether this run wrote it or an earlier
+    # one did: the effect is not proven gone, so the reset is not a clean New
+    # Game. Cases already listed above are not repeated.
+    seen = {c.get("claim_id") for c in report.get("claims_preserved") or []}
+    seen |= {e.get("claim_id") for e in report.get("unreversed") or []}
+    for entry in report.get("outstanding") or []:
+        if entry.get("claim_id") in seen:
+            continue
+        traces.append(
+            f"an operation left claim {entry['claim_id']} "
+            f"{entry['kind']} unresolved ({entry['status']}): "
+            f"{entry['reason']}.")
     return traces
 
 
