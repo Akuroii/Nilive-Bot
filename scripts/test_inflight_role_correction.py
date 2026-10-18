@@ -32,6 +32,12 @@ Cases:
   K  an earlier OPEN reversal case keeps the reset from calling itself clean,
      and the applied embed never says "nothing was preserved" while it kept
      rows.
+  L  /setxp correction: two delivered claims for one role, both above the
+     corrected level, role worn. Neither may cite the other as an independent
+     grant (no journal row is pre-seeded, as in production).
+  M  the same fresh pair with the role already absent: both rows close, no
+     removal is attempted, and nothing is left outstanding.
+  N  a genuinely independent claim still protects the role from the correction.
 
 Run with:
     python scripts/test_inflight_role_correction.py
@@ -671,6 +677,93 @@ async def case_k_open_case_blocks_clean_verdict():
     check("K: the embed footer agrees", "NOT a clean New Game" in footer, footer)
 
 
+async def case_l_correction_two_claims_same_role_worn():
+    """Fresh correction: two delivered rows for one role must not block each other."""
+    print("\n== L. correction, two delivered claims for one role, role worn ==")
+    await reset_db()
+    first = seed_claim("fulfilled", level=10, operation="admin-a")
+    second = seed_claim("fulfilled", level=12, operation="admin-b",
+                        payload=f'{{"role_id": {ROLE_ID}}}')
+    world = World(held=True)
+
+    report = await reconcile(5, world)
+    check("L: the role is removed, not kept because the rows cite each other",
+          world.role not in world.held
+          and report["reversed"]["role"] != [],
+          (world.held, report["reversed"]["role"]))
+    check("L: both claims are deleted, so neither blocks the other",
+          claim_count() == 0
+          and {c["claim_id"] for c in report["deleted_claims"]} == {first, second},
+          (claim_count(), report["deleted_claims"]))
+    check("L: no claim is left outstanding and no case cites a sibling",
+          report["kept_unresolved"] == [], report["kept_unresolved"])
+    check("L: both role outcomes are recorded as applied, not outstanding",
+          sorted(status for status, _ in journal(first)) == ["applied"]
+          and sorted(status for status, _ in journal(second)) == ["applied"],
+          (journal(first), journal(second)))
+
+    retry = await reconcile(5, world)
+    check("L: a retry has nothing left to do",
+          retry["deleted_claims"] == [] and retry["kept_unresolved"] == []
+          and claim_count() == 0,
+          (retry["deleted_claims"], retry["kept_unresolved"], claim_count()))
+
+
+async def case_m_correction_two_claims_same_role_absent():
+    """No live role effect: both fresh rows must still close, nothing to remove."""
+    print("\n== M. correction, two delivered claims, role already absent ==")
+    await reset_db()
+    first = seed_claim("fulfilled", level=10, operation="admin-a")
+    second = seed_claim("fulfilled", level=12, operation="admin-b",
+                        payload=f'{{"role_id": {ROLE_ID}}}')
+    world = World(held=False)
+
+    report = await reconcile(5, world)
+    check("M: neither claim is left permanently outstanding",
+          report["kept_unresolved"] == [] and claim_count() == 0,
+          (report["kept_unresolved"], claim_count()))
+    check("M: both rows are deleted and recorded as gone",
+          {c["claim_id"] for c in report["deleted_claims"]} == {first, second}
+          and sorted(status for status, _ in journal(first)) == ["applied"]
+          and sorted(status for status, _ in journal(second)) == ["applied"],
+          (report["deleted_claims"], journal(first), journal(second)))
+    check("M: no Discord removal is attempted for an absent role",
+          world.member.remove_roles.await_count == 0,
+          world.member.remove_roles.await_count)
+    check("M: it is reported as already gone, not as a removal failure",
+          report["role_failures"] == []
+          and len(report["reversed"]["role"]) == 2
+          and all(e["status"] == "applied"
+                  for e in report["reversed"]["role"]),
+          (report["role_failures"], report["reversed"]["role"]))
+
+
+async def case_n_correction_independent_grant_protects_role():
+    """A claim at/below the corrected level is a real entitlement, not a sibling."""
+    print("\n== N. correction: an independent claim still protects the role ==")
+    await reset_db()
+    stale = seed_claim("fulfilled", level=10, operation="admin-10")
+    keeper = seed_claim("fulfilled", level=5, operation="admin-5")
+    world = World(held=True)
+
+    report = await reconcile(5, world)
+    check("N: the role stays, because another claim still grants it",
+          world.role in world.held and report["reversed"]["role"] == [],
+          (world.held, report["reversed"]["role"]))
+    check("N: the shared-role claim is kept, not deleted",
+          claim_status(stale) == "fulfilled"
+          and stale not in {c["claim_id"] for c in report["deleted_claims"]},
+          (claim_status(stale), report["deleted_claims"]))
+    check("N: the genuinely independent claim survives untouched",
+          claim_status(keeper) == "fulfilled" and claim_count() == 2,
+          (claim_status(keeper), claim_count()))
+    check("N: the report names the independent grant as the reason",
+          any("also granted" in c["reason"] for c in report["kept_unresolved"]),
+          report["kept_unresolved"])
+    check("N: no removal is claimed and no orphan is created",
+          not (world.role in world.held and claim_count() == 0))
+
+
 async def main():
     for case in (case_a_role_absent_during_reset,
                  case_b_role_present_during_reset,
@@ -682,7 +775,10 @@ async def main():
                  case_h_reset_removal_fails,
                  case_i_rollback_shared_role,
                  case_j_rollback_in_flight_claim,
-                 case_k_open_case_blocks_clean_verdict):
+                 case_k_open_case_blocks_clean_verdict,
+                 case_l_correction_two_claims_same_role_worn,
+                 case_m_correction_two_claims_same_role_absent,
+                 case_n_correction_independent_grant_protects_role):
         await case()
         # A worn role must never coexist with zero claim rows anywhere.
         if claim_count() == 0:

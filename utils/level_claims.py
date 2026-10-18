@@ -1512,6 +1512,16 @@ async def reconcile_level_drop(guild_id: int, user_id: int, level: int, *,
                            "source": claim_source})})
 
     above = [c for c in claims if c["reward_level"] > level]
+    # Every claim this pass is itself going to reverse. Such a row is not an
+    # independent entitlement to the other claims in the same correction: passing
+    # only the rows already in `deleted_claims` let two claims for one role cite
+    # each other, so neither removal was attempted, neither row was deleted, and
+    # every retry reached the same state. The set is known before the loop runs,
+    # which is what makes it usable while the loop is still deciding.
+    being_reversed = {
+        int(c["id"]) for c in above
+        if c["status"] == "fulfilled" and str(c.get("operation_id") or "")
+    }
     for claim in above:
         if claim["status"] in ("pending", "failed"):
             if claim["admin_created"]:
@@ -1550,7 +1560,8 @@ async def reconcile_level_drop(guild_id: int, user_id: int, level: int, *,
                     claim, report, guild_id=guild_id, user_id=user_id,
                     level=level, operation_id=operation_id, member=member,
                     free_credits=free_credits, reason=reason,
-                    reversed_by=actor_id)
+                    reversed_by=actor_id,
+                    exclude_claim_ids=being_reversed)
 
     delete_ids = [int(c["claim_id"]) for c in report["deleted_claims"]]
     if delete_ids:
@@ -1609,8 +1620,13 @@ async def _reverse_correction_claim(claim: dict, report: dict, *,
                                     operation_id: str, member,
                                     free_credits: list,
                                     reason: str | None = None,
-                                    reversed_by: int | None = None) -> None:
-    """Reverse ONE delivered reward, or record precisely why it was kept."""
+                                    reversed_by: int | None = None,
+                                    exclude_claim_ids=frozenset()) -> None:
+    """Reverse ONE delivered reward, or record precisely why it was kept.
+
+    `exclude_claim_ids` is every claim this correction pass is itself reversing;
+    a role justification may not name one of them (see `_reverse_correction_role`).
+    """
     from utils import level_ops as ops
 
     claim_id = int(claim["id"])
@@ -1699,7 +1715,8 @@ async def _reverse_correction_claim(claim: dict, report: dict, *,
             role_outcome = await _reverse_correction_role(
                 claim, report, guild_id=guild_id, user_id=user_id,
                 role_id=role_id, level=level, operation_id=operation_id,
-                member=member, exclude_item=item_name)
+                member=member, exclude_item=item_name,
+                exclude_claim_ids=exclude_claim_ids)
             if not role_outcome:
                 return              # already reported: the role keeps it
         outcome = await ops.reverse_inventory(
@@ -1761,7 +1778,8 @@ async def _reverse_correction_claim(claim: dict, report: dict, *,
         removed = await _reverse_correction_role(
             claim, report, guild_id=guild_id, user_id=user_id,
             role_id=payload.get("role_id"), level=level,
-            operation_id=operation_id, member=member)
+            operation_id=operation_id, member=member,
+            exclude_claim_ids=exclude_claim_ids)
         if removed:
             report["deleted_claims"].append(dict(
                 _claim_brief(claim), role_id=payload.get("role_id")))
@@ -1774,8 +1792,14 @@ async def _reverse_correction_claim(claim: dict, report: dict, *,
 async def _reverse_correction_role(claim: dict, report: dict, *,
                                    guild_id: int, user_id: int, role_id,
                                    level: int, operation_id: str, member,
-                                   exclude_item: str | None = None) -> bool:
+                                   exclude_item: str | None = None,
+                                   exclude_claim_ids=frozenset()) -> bool:
     """Take a reward role off the member, or record why it stays.
+
+    `exclude_claim_ids` names the claims this same correction pass is reversing.
+    None of them is an independent entitlement to the role, so none may justify
+    keeping it: otherwise two claims for one role cite each other, no removal is
+    attempted, and neither row is ever deleted.
 
     Returns True only when the role's effect is gone (removed now, already
     absent, or never held) AND that outcome is on the journal. A Discord API
@@ -1836,11 +1860,16 @@ async def _reverse_correction_role(claim: dict, report: dict, *,
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         shared = await _role_granted_elsewhere(
             db, guild_id, user_id, role_id, exclude_claim_id=claim_id,
-            # A claim this same pass has already decided to delete is not a
-            # separate entitlement. Counting it as one would let two stale rows
-            # justify each other and leave the role undocumented.
-            exclude_claim_ids={int(c["claim_id"])
-                               for c in report.get("deleted_claims") or []},
+            # No claim this correction pass is reversing is a separate
+            # entitlement - neither one it has already decided to delete nor one
+            # it has not reached yet. Counting either as one lets two claims for
+            # one role cite each other, so no removal is attempted and neither
+            # row is ever deleted. Genuinely independent grants (a claim at or
+            # below the corrected level, a temp-role unit, an inventory marker)
+            # are not in this set and still keep the role.
+            exclude_claim_ids=({int(c["claim_id"])
+                                for c in report.get("deleted_claims") or []}
+                               | {int(c) for c in exclude_claim_ids or ()}),
             exclude_item=exclude_item)
     if shared:
         if settled:
