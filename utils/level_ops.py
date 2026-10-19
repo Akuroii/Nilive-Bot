@@ -110,6 +110,16 @@ def _expiry(seconds: int) -> str:
         timespec="seconds")
 
 
+def _new_fence_epoch() -> str:
+    """A clock value that can only move forward, written inside a transaction.
+
+    Milliseconds, unlike the second-resolution lease timestamps: two fences in
+    the same second must still be totally ordered against a deferral sampled
+    between them, or `xp_write_barrier` would accept a stale attempt.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
 SCHEMA = (
     # One row per administrative operation (reset, rollback, reconcile, XP set).
     """
@@ -210,9 +220,28 @@ SCHEMA = (
         holder       TEXT NOT NULL,
         acquired_at  TEXT NOT NULL,
         expires_at   TEXT NOT NULL,
+        fence_epoch  TEXT,
         PRIMARY KEY (guild_id, user_id)
     )
     """,
+    # One row per ordinary-XP award attempted while a correction lease was live.
+    # It is written inside the award's own write transaction, and its
+    # `deferral_epoch` is the wall clock at that moment. Because the fence and
+    # the award need the same SQLite write lock, the comparison with the lease's
+    # `fence_epoch` is total: a row older than the fence raced it (counted, and
+    # the correction re-runs), a row not older than the fence is refused. Rows
+    # exist only while a lease does - `acquire_lock` clears them.
+    """
+    CREATE TABLE IF NOT EXISTS level_xp_deferrals (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id       INTEGER NOT NULL,
+        user_id        INTEGER NOT NULL,
+        deferral_epoch TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
+        created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_xp_deferrals_member "
+    "ON level_xp_deferrals(guild_id, user_id, id)",
 )
 
 
@@ -228,6 +257,19 @@ async def ensure_tables(db: aiosqlite.Connection | None = None) -> None:
     async def create(connection):
         for statement in SCHEMA:
             await connection.execute(statement)
+        # `fence_epoch` was added after the lease table shipped. The CREATE above
+        # is a no-op on an existing table, so the column is added explicitly; a
+        # database that already has it fails with "duplicate column" and that is
+        # the only error tolerated here.
+        cursor = await connection.execute("PRAGMA table_info(level_op_locks)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "fence_epoch" not in columns:
+            try:
+                await connection.execute(
+                    "ALTER TABLE level_op_locks ADD COLUMN fence_epoch TEXT")
+            except aiosqlite.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
     if db is not None:
         await create(db)
@@ -462,6 +504,14 @@ async def acquire_lock(guild_id: int, user_id: int, *, holder: str,
                     "reason": (f"{existing[1]} operation {existing[0]} is "
                                f"already running for this member "
                                f"(lease until {existing[2]})")}
+        # A fresh lease starts a fresh accounting window: deferral rows only
+        # exist while some lease is live, and `fence_live_writers()` reports
+        # "how many ordinary awards collided with THIS operation" by counting
+        # them. Without this, every earlier correction for the member would be
+        # counted again and force pointless re-runs.
+        await connection.execute(
+            "DELETE FROM level_xp_deferrals WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id))
         await connection.execute(
             "INSERT INTO level_op_locks (guild_id, user_id, operation_id, "
             "holder, acquired_at, expires_at) VALUES (?,?,?,?,?,?)",
@@ -526,6 +576,128 @@ async def lock_held(guild_id: int, user_id: int) -> dict | None:
     if not row:
         return None
     return {"operation_id": row[0], "holder": row[1], "expires_at": row[2]}
+
+
+async def fence_live_writers(guild_id: int, user_id: int,
+                             operation_id: str) -> dict:
+    """Revoke every XP writer's permission to proceed on this member.
+
+    A correction holds the member's lease while it talks to Discord and then
+    writes SQLite. The lease alone does not stop a *non-administrative* XP
+    writer: message XP, voice XP, a mission/event/minigame award and the
+    dashboard's member edit all used to write `levels` without ever looking at
+    it. Such an award can legitimately put the member back above a level the
+    correction is busy reversing, after the correction read the level it is
+    correcting TO (B1). The correction then deletes a reward the member is once
+    again entitled to, and no claim row survives to restore it.
+
+    The fence is the lease's clock, not a second mechanism: an XP writer samples
+    the lease inside its own write transaction, and this call moves the lease's
+    start ("fence epoch") and expiry forward in ONE commit. A writer that took
+    its sample before this commit can no longer be mid-write afterwards - its
+    transaction is serialized against this one - and a writer that starts after
+    it sees the new epoch and defers. So after this returns, every XP writer has
+    either finished its award before the correction's reads or is refusing.
+
+    `deferred` is the count of ordinary awards that collided with this
+    operation's lease - awards that either were refused (written after an earlier
+    fence) or got in just before this one. Any of them may have re-earned a
+    reward level, so a non-zero count means the caller must re-run its sweep
+    against the state that includes them. The caller must hold `operation_id`'s
+    lease, and must call this BEFORE the reads its correction decisions rest on.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            now = _now()
+            cursor = await db.execute(
+                "UPDATE level_op_locks SET fence_epoch=?, expires_at=? "
+                "WHERE guild_id=? AND user_id=? AND operation_id=? "
+                "AND expires_at > ?",
+                (_new_fence_epoch(), _expiry(LOCK_TTL_SECONDS), guild_id,
+                 user_id, operation_id, now))
+            if cursor.rowcount != 1:
+                await db.execute("ROLLBACK")
+                return {"ok": False, "deferred": None,
+                        "reason": ("this operation's lease is no longer held "
+                                   "for this member, so it must not continue")}
+            # Deferral rows are deleted when the lease is taken (see
+            # acquire_lock), so "rows present" is exactly "ordinary awards that
+            # collided with THIS operation". Any of them may have re-earned a
+            # reward level, which is why the caller re-runs its sweep.
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM level_xp_deferrals "
+                "WHERE guild_id=? AND user_id=?", (guild_id, user_id))
+            deferred = int((await cursor.fetchone())[0] or 0)
+            await db.commit()
+            return {"ok": True, "deferred": deferred}
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+
+
+async def xp_write_barrier(guild_id: int, user_id: int,
+                           db: aiosqlite.Connection) -> str | None:
+    """Record one ordinary-XP attempt, or say why it must not write.
+
+    Called INSIDE the writer's own ``BEGIN IMMEDIATE`` transaction, BEFORE it
+    reads `levels`. That placement is the whole correctness argument: the
+    transaction already holds SQLite's single write lock, and
+    ``fence_live_writers()`` needs that same lock before it can move the epoch.
+    So the lease this function reads cannot change until the award commits:
+    either the fence committed first (this read sees the new epoch and refuses),
+    or this award commits first (the fence moves the epoch afterwards, counts
+    the deferral, and the correction re-runs against state that includes the
+    award). There is no interleaving in which an award is authorised by a lease
+    the correction has already superseded.
+
+    Returns None when the award may proceed, otherwise the human-readable
+    reason to defer it. A deferral is not a lost award: the XP was never
+    written, so the next message/voice tick earns it normally.
+    """
+    if not db.in_transaction:
+        raise LevelOpsError(
+            "xp_write_barrier must run inside the writer's own BEGIN IMMEDIATE "
+            "transaction, otherwise its view of the lease can go stale between "
+            "the read and the write it authorises")
+    cursor = await db.execute(
+        "SELECT operation_id, holder, fence_epoch, expires_at "
+        "FROM level_op_locks WHERE guild_id=? AND user_id=? AND expires_at > ?",
+        (guild_id, user_id, _now()))
+    live = await cursor.fetchone()
+    if not live:
+        # The overwhelmingly common case: nobody is correcting this member, so
+        # an ordinary award costs one indexed SELECT and writes no bookkeeping.
+        return None
+    operation_id, holder, epoch, expires_at = live
+    # `lastrowid` rather than RETURNING: RETURNING needs SQLite 3.35+, and this
+    # table is written on every ordinary award, so it must work on the oldest
+    # sqlite the bot may boot against.
+    cursor = await db.execute(
+        "INSERT INTO level_xp_deferrals (guild_id, user_id) VALUES (?,?)",
+        (guild_id, user_id))
+    deferral_id = cursor.lastrowid
+    cursor = await db.execute(
+        "SELECT deferral_epoch FROM level_xp_deferrals WHERE id=?",
+        (deferral_id,))
+    own = await cursor.fetchone()
+    sampled_before_fence = (epoch is not None and own is not None
+                            and own[0] is not None and own[0] < epoch)
+    if epoch is None or sampled_before_fence:
+        # Either the correction has not fenced yet (so its reads are still ahead
+        # of this write and will include it), or this attempt sampled STRICTLY
+        # before the fence - in which case it is one of the awards that raced the
+        # fence, it is counted in `fence_live_writers()["deferred"]`, and the
+        # correction re-runs against the state that includes it.
+        #
+        # Anything sampled AT or AFTER the fence is after the correction's
+        # snapshot and must not land: the sweep may already have deleted the
+        # claim this award would re-earn.
+        return None
+    return (f"A {holder} correction ({operation_id}) is in progress for this "
+            f"member until {expires_at}; the XP award was deferred and can be "
+            f"earned again on the next message/voice tick")
 
 
 # ─────────────────────────── XP mutation provenance ───────────────────────────
@@ -782,9 +954,14 @@ async def outstanding_reversals(guild_id: int,
     # audit history is retained.
     sql = ("SELECT reversal_id, operation_id, claim_id, kind, currency, "
            "item_name, quantity, ledger_id, status, reason, created_at "
-           "FROM reward_reversals WHERE guild_id=? AND status != ? "
+           "FROM reward_reversals WHERE guild_id=? "
+           "AND status NOT IN (?, ?) "
            "AND status NOT LIKE 'resolved:%'")
-    params: list = [guild_id, STATUS_APPLIED]
+    # `already_reversed` is terminal exactly like `applied`: the effect was
+    # proven gone. Leaving it in this queue offered an administrator a case that
+    # needed no decision, and `_resolve_case_in` would then overwrite the
+    # terminal marker with `resolved:...` (audit finding N1).
+    params: list = [guild_id, STATUS_APPLIED, STATUS_ALREADY]
     if user_id is not None:
         sql += " AND user_id=?"
         params.append(user_id)
@@ -1146,9 +1323,10 @@ async def _resolve_case_in(db, reversal_id: str, *, actor_id: int,
     """
     cursor = await db.execute(
         "UPDATE reward_reversals SET status=?, reason=reason || ? "
-        "WHERE reversal_id=? AND status != ? AND status NOT LIKE 'resolved:%'",
+        "WHERE reversal_id=? AND status NOT IN (?, ?) "
+        "AND status NOT LIKE 'resolved:%'",
         (f"resolved:{resolution}", f" | resolved by {actor_id} at {_now()}: "
-         f"{note}", reversal_id, STATUS_APPLIED))
+         f"{note}", reversal_id, STATUS_APPLIED, STATUS_ALREADY))
     return cursor.rowcount == 1
 
 

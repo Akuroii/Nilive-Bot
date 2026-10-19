@@ -517,6 +517,15 @@ async def main():
     print("== 5. XP mutation provenance ==")
     from cogs.leveling import Leveling, _apply_admin_xp, level_start_xp
     from utils.level_claims import SOURCE_SETLEVEL, SOURCE_SETXP
+    # §1 left a live lease on OTHER on purpose (it proves leases are per-member).
+    # Section 5 now writes XP for OTHER through /setlevel, and an administrative
+    # XP write under a live lease is refused by design - so the fixture lease has
+    # to go first. Nothing is asserted differently: this is setup, not a check.
+    leftover = leases(OTHER)
+    if leftover:
+        await ops.release_lock(GUILD, OTHER, leftover[0][0])
+    check("OTHER has no lease before the XP-write section",
+          leases(OTHER) == [], str(leases(OTHER)))
     execute("INSERT OR IGNORE INTO levels (guild_id,user_id,xp,level) VALUES (?,?,0,0)",
             (GUILD, OTHER))
     execute("INSERT INTO leveling_currency_rewards (guild_id,level,currency,amount,"

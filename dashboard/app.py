@@ -2684,6 +2684,24 @@ def api_edit_member():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
+                # B1: this route is the second XP writer in the whole system (its
+                # own process, own event loop) and it used to write `levels`
+                # without ever looking at the correction lease. A correction
+                # sweeping the same member could therefore reverse a reward and
+                # then find the member back at that level - or, worse, delete the
+                # claim after this route legitimately re-earned it (audit probe
+                # Q). The barrier is written FIRST, inside this transaction, so
+                # the decision cannot go stale: either the correction's fence
+                # commits first and this call refuses with a retryable 409, or
+                # this deferral commits first and the correction re-runs.
+                from utils import level_ops as ops
+                deferred = await ops.xp_write_barrier(guild_id, int(user_id), db)
+                if deferred:
+                    await db.commit()      # keep the deferral on the record
+                    return {"success": False, "deferred": True,
+                            "error": (f"{deferred}. Nothing was changed - "
+                                      f"retry this edit when the correction "
+                                      f"finishes.")}
                 cursor = await db.execute(
                     "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
                     (guild_id, user_id))

@@ -1640,10 +1640,26 @@ def _correction_advice(member, old_level: int, new_level: int,
             + ". The compensation is on the ledger and reversal journal.")
     kept = correction.get("kept_not_attributable") or []
     if kept:
-        lines.append(
-            f"• {len(kept)} delivered reward(s) above L{new_level} were **kept**: "
-            f"they were crossed by ordinary play, not by an administrative XP "
-            f"change, so they are not evidence of the correction.")
+        # The list mixes two different reasons and used to describe both as
+        # ordinary play. A row delivered by a PRE-operation-id administrative
+        # change is not ordinary play at all - it is kept because there is no
+        # exact reversal record, and saying otherwise sent the administrator
+        # looking for a play history that does not exist (audit finding N2).
+        legacy = [c for c in kept if c.get("legacy_admin")]
+        ordinary = [c for c in kept if not c.get("legacy_admin")]
+        if ordinary:
+            lines.append(
+                f"• {len(ordinary)} delivered reward(s) above L{new_level} were "
+                f"**kept**: they were crossed by ordinary play, not by an "
+                f"administrative XP change, so they are not evidence of the "
+                f"correction.")
+        if legacy:
+            lines.append(
+                f"• {len(legacy)} delivered reward(s) above L{new_level} were "
+                f"**kept**: an administrative change created them before "
+                f"operation ids existed, so there is no exact reversal record. "
+                f"They are not evidence that the member played to that level; "
+                f"they are simply not reversible without guessing.")
     unresolved = correction.get("kept_unresolved") or []
     for entry in unresolved[:4]:
         lines.append(
@@ -1755,6 +1771,26 @@ async def _apply_admin_xp(guild_id: int, member, xp: int, bot, *,
                         f"to finish or for its lease to expire, then run the "
                         f"command again.")
                 lease_held = True
+            else:
+                # An UPWARD change is not a correction, but it is still an XP
+                # write to the same member and must not land inside somebody
+                # else's sweep: the sweep's whole decision is "what is above the
+                # level I am correcting to", and an administrative grant that
+                # re-crosses a reward level mid-sweep is exactly the B1 race with
+                # an admin's badge on it. Refuse instead of racing - the operator
+                # retries in a moment, and nothing is half-applied.
+                cursor = await db.execute(
+                    "SELECT operation_id, holder, expires_at "
+                    "FROM level_op_locks WHERE guild_id=? AND user_id=? "
+                    "AND expires_at > ?",
+                    (guild_id, member.id, ops._now()))
+                running = await cursor.fetchone()
+                if running:
+                    raise ops.LevelOpsError(
+                        f"another operation is running for this member: "
+                        f"{running[1]} operation {running[0]} holds the lease "
+                        f"until {running[2]}. Nothing was changed - wait for it "
+                        f"to finish, then run the command again.")
             cursor = await db.execute(
                 "SELECT id FROM level_reward_claims WHERE guild_id=? AND user_id=?",
                 (guild_id, member.id))
@@ -1792,9 +1828,48 @@ async def _apply_admin_xp(guild_id: int, member, xp: int, bot, *,
         try:
             from utils.level_claims import reconcile_level_drop
             try:
-                correction = await reconcile_level_drop(
-                    guild_id, member.id, new_level, operation_id=operation_id,
-                    actor_id=actor_id, reason=reason, member=member)
+                # ── close the B1 window BEFORE the sweep reads anything ──────
+                # The lease in the transaction above stops CLAIM passes. It does
+                # not stop ordinary XP: a message/voice/mission award or a
+                # dashboard edit could put the member back above this level after
+                # the sweep decided what to reverse, and the sweep would then
+                # delete a reward the member had legitimately re-earned (audit
+                # probe U). `fence_live_writers` moves the lease's epoch and
+                # expires it forward in one commit, so every award either
+                # committed before it (and is therefore visible to the reads
+                # below) or is deferred by its own `xp_write_barrier`.
+                fence = await ops.fence_live_writers(
+                    guild_id, member.id, operation_id)
+                if not fence.get("ok"):
+                    correction = {
+                        "level": new_level, "error": fence.get("reason"),
+                        "lease_lost": True}
+                else:
+                    correction = await reconcile_level_drop(
+                        guild_id, member.id, new_level,
+                        operation_id=operation_id, actor_id=actor_id,
+                        reason=reason, member=member, require_lease=True)
+                    correction["fenced_deferrals"] = fence.get("deferred")
+                    if fence.get("deferred") and not correction.get("lease_lost"):
+                        # An award raced the fence. It is counted, visible and
+                        # already committed - re-run against the state that
+                        # includes it instead of against the pre-award reads.
+                        again = await reconcile_level_drop(
+                            guild_id, member.id, new_level,
+                            operation_id=operation_id, actor_id=actor_id,
+                            reason=reason, member=member, require_lease=True)
+                        again["fenced_deferrals"] = fence.get("deferred")
+                        again["reconciled_after_deferrals"] = True
+                        if (not again.get("deleted_claims")
+                                and not again.get("kept_unresolved")
+                                and not again.get("role_failures")):
+                            # The re-run has nothing left to do: report it, but
+                            # keep the first pass's own record of what it moved.
+                            first = dict(correction)
+                            first["reconciled_after_deferrals"] = True
+                            correction = first
+                        else:
+                            correction = again
             except Exception as exc:
                 # The XP correction itself is already committed. Say so and keep
                 # the lease's guarantee: eligibility still follows the new
@@ -2055,7 +2130,10 @@ class Leveling(commands.Cog):
         from utils.reward_engine import give_reward
         result = await give_reward(
             self.bot, guild_id, user_id, "xp", amount=xp_to_add,
-            reason="Message XP", source="leveling")
+            reason="Message XP", source="leveling",
+            # Message XP is re-earned by the next message, so it must never wait
+            # on a correction: deferring immediately keeps the listener free.
+            defer_retry_seconds=0)
 
         if result.get("leveled_up"):
             await self._announce_levelup(
@@ -2140,7 +2218,9 @@ class Leveling(commands.Cog):
             from utils.reward_engine import give_reward
             await give_reward(
                 self.bot, guild.id, member.id, "xp", amount=xp_gain,
-                reason="Voice XP", source="leveling")
+                reason="Voice XP", source="leveling",
+                # Same reasoning as message XP: the next voice tick re-earns it.
+                defer_retry_seconds=0)
         except Exception as e:
             print(f"[VOICE XP] Error for member {member.id} in "
                   f"guild {guild.id}: {e}")
@@ -2432,6 +2512,15 @@ class Leveling(commands.Cog):
     # reset below) and does NOT archive the member's XP anywhere —
     # a single-member reset is a moderation correction, not a
     # leaderboard cycle event.
+    #
+    # SCOPE, stated so it is not mistaken for the correction path: this is a
+    # blunt reset. It does NOT take the member's correction lease, does NOT
+    # write an `xp_mutations` row, and does NOT run `reconcile_level_drop`.
+    # Rewards already delivered above the new level therefore stay with the
+    # member and their claim rows stay terminal (so they can never be paid
+    # twice). That is intentional - a reset is not an undo - and the reply says
+    # so, pointing at `/setlevel` for the reconciling version. `/level_reconcile`
+    # cannot see anything this command did, because it records nothing.
     @app_commands.command(name="resetxp",
                           description="Reset a member's XP and level back to 0 (admin)")
     @app_commands.checks.has_permissions(administrator=True)
@@ -2446,7 +2535,11 @@ class Leveling(commands.Cog):
             """, (interaction.guild.id, member.id))
             await db.commit()
         await interaction.response.send_message(
-            f"Reset {member.mention}'s XP and level to 0.",
+            f"Reset {member.mention}'s XP and level to 0.\n"
+            f"This command only moves the XP row: it does **not** run the "
+            f"reward correction, so rewards already delivered above Level 0 "
+            f"stay with the member and their claim rows stay terminal. Use "
+            f"`/setlevel 0` when the grants themselves have to be reconciled.",
             ephemeral=True)
 
     # ─── LEVEL TEST RESET (admin, scoped, preview-first) ──

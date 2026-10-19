@@ -1,3 +1,5 @@
+import asyncio
+
 import discord
 import aiosqlite
 from datetime import datetime, timedelta, timezone
@@ -35,7 +37,8 @@ async def give_reward(bot: discord.Client,
                        source: str = "system",
                        item_name: str = None,
                        item_type: str = "custom",
-                       item_metadata: dict = None) -> dict:
+                       item_metadata: dict = None,
+                       defer_retry_seconds: float | None = None) -> dict:
     if reward_type in ("coins", "diamonds"):
         if amount is None:
             raise RewardError(f"{reward_type} reward requires 'amount'")
@@ -119,34 +122,68 @@ async def give_reward(bot: discord.Client,
         # utils/economy_safe.py already uses for coins/diamonds, so a
         # second concurrent grant is forced to wait and read the
         # already-updated row instead of overwriting it.
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = await db.execute("""
-                    SELECT xp, level FROM levels
-                    WHERE guild_id = ? AND user_id = ?
-                """, (guild_id, user_id))
-                row = await cursor.fetchone()
-                old_xp    = row[0] if row else 0
-                old_level = row[1] if row else 0
-                new_xp    = max(0, old_xp + amount)
-                new_level, _, _ = xp_progress(new_xp)
-                await db.execute("""
-                    INSERT INTO levels (guild_id, user_id, xp, level)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(guild_id, user_id)
-                    DO UPDATE SET xp = ?, level = ?
-                """, (guild_id, user_id, new_xp, new_level,
-                      new_xp, new_level))
-                # Entitlements use xp_progress, not the stored level column.
-                # Auto-grant stays off; the member claims the snapshot later.
-                await record_crossing(
-                    db, guild_id, user_id, old_xp, new_xp, multipliers,
-                    source=source, is_booster=member_is_booster(member))
-                await db.commit()
-            except Exception:
-                await db.execute("ROLLBACK")
-                raise
+        # How long an award may wait for a correction to finish before it gives
+        # up. Message and voice XP pass 0: the very next message/minute earns the
+        # XP again, so blocking the listener is strictly worse than deferring.
+        # Every OTHER source (missions, events, minigames, tags) is one-shot - it
+        # is paid once and never retried by its caller - so it waits a few
+        # seconds rather than losing the reward.
+        wait_for = (3.0 if defer_retry_seconds is None else defer_retry_seconds)
+        deadline = None
+        while True:
+            from utils import level_ops as ops
+            deferred_reason = None
+            # One BEGIN IMMEDIATE transaction per attempt, spanning the fence
+            # check and the write. The barrier runs FIRST, inside the
+            # transaction that already holds SQLite's write lock, so the lease
+            # it reads cannot change before this award commits:
+            # `ops.fence_live_writers()` needs the same lock, so either the
+            # fence committed first (this attempt defers, and nothing was
+            # written) or this award commits first (the fence counts it and the
+            # correction re-runs against state that includes it).
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    deferred_reason = await ops.xp_write_barrier(
+                        guild_id, user_id, db)
+                    if deferred_reason is None:
+                        cursor = await db.execute("""
+                            SELECT xp, level FROM levels
+                            WHERE guild_id = ? AND user_id = ?
+                        """, (guild_id, user_id))
+                        row = await cursor.fetchone()
+                        old_xp    = row[0] if row else 0
+                        old_level = row[1] if row else 0
+                        new_xp    = max(0, old_xp + amount)
+                        new_level, _, _ = xp_progress(new_xp)
+                        await db.execute("""
+                            INSERT INTO levels (guild_id, user_id, xp, level)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(guild_id, user_id)
+                            DO UPDATE SET xp = ?, level = ?
+                        """, (guild_id, user_id, new_xp, new_level,
+                              new_xp, new_level))
+                        # Entitlements use xp_progress, not the stored level
+                        # column. Auto-grant stays off; the member claims the
+                        # snapshot later.
+                        await record_crossing(
+                            db, guild_id, user_id, old_xp, new_xp, multipliers,
+                            source=source, is_booster=member_is_booster(member))
+                    await db.commit()
+                except Exception:
+                    await db.execute("ROLLBACK")
+                    raise
+            if deferred_reason is None:
+                break
+            loop = asyncio.get_running_loop()
+            if deadline is None:
+                deadline = loop.time() + max(0.0, float(wait_for))
+            if loop.time() >= deadline:
+                return {"success": False, "reward_type": "xp", "amount": 0,
+                        "deferred": True, "error": deferred_reason,
+                        "old_level": None, "new_level": None,
+                        "leveled_up": False}
+            await asyncio.sleep(0.5)
 
         await _log_xp_ledger(guild_id, user_id, amount, new_xp, reason, source)
 
