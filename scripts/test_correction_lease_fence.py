@@ -40,6 +40,12 @@ What this file locks down:
      from a reward crossed by ordinary play.
   J  no silent loss: a deferred award is applied once when it is retried, and
      the member's XP never moves backwards.
+  M  cancellation: a sweep cancelled mid-flight releases the lease (CancelledError
+     is a BaseException, so it bypasses the `except Exception` and reaches the
+     `finally`), the reward survives, ordinary XP writes resume, and a retry
+     still completes the correction.
+  N  lease expiry: a lease past its TTL defers nobody, and a sweep whose lease
+     expired deletes no claim - the irreversible half needs live authority.
 
 Run with:
     python scripts/test_correction_lease_fence.py
@@ -323,6 +329,19 @@ async def case_a_role_removal_race():
           + (xp_at(12) - xp_at(11)), retried)
     check("A: and the retry crossed back to Level 12 exactly once",
           level_of() == 12 and xp_of() == xp_at(12), (level_of(), xp_of()))
+    # The deterministic half of the B1 invariant, and the reason a deferral is
+    # safe rather than merely slow: the sweep already deleted the Level-12 row
+    # it was entitled to delete, so the re-cross must OPEN A NEW ONE. Without
+    # it the member stands at Level 12 holding neither the role nor any claim
+    # that could restore it - the loss case E/C/K exist to prevent. Deterministic
+    # because `allow` gates the sweep; no timing can reorder these steps.
+    reopened = rows("SELECT id, status FROM level_reward_claims "
+                    "WHERE guild_id=? AND user_id=? AND reward_level=? "
+                    "AND track='role'", (GUILD, USER, 12))
+    check("A: the re-cross reopens a claimable Level 12 row, so the reward is "
+          "recoverable rather than lost",
+          any(status in ("pending", "failed", "processing")
+              for _, status in reopened), reopened)
 
 
 async def case_b_dashboard_race():
@@ -444,12 +463,35 @@ async def case_e_serialization():
     check("E: the final XP is one of the two legal states, never a blend",
           final in (xp_at(11), xp_at(12)), (final, xp_at(11), xp_at(12)))
     if final == xp_at(12):
-        # The award committed first; the member is legitimately at L12, so the
-        # reward must survive with its role.
-        check("E: a Level 12 the member legitimately holds keeps its role and "
-              "claim", claim_status(claim) == "fulfilled"
-              and world.role in world.held,
-              (claim_status(claim), world.held))
+        # The member is legitimately back at Level 12. An unsynchronised
+        # `gather` reaches this XP by one of two LEGAL interleavings, and the
+        # harness does not get to choose which:
+        #
+        #   (a) the correction ran to completion at Level 11 and the DEFERRED
+        #       award was retried afterwards. Its first `xp_write_barrier`
+        #       sampled a live lease and refused; the sweep finished and
+        #       released; the retry sampled no lease and applied. The original
+        #       row is correctly gone and `record_crossing` has opened a FRESH,
+        #       claimable one;
+        #   (b) the award landed inside the sweep, so the sweep must have seen
+        #       the re-cross and kept the original row and the role.
+        #
+        # What must hold in BOTH is the invariant this file exists to prove:
+        # the member is never left at an eligible level holding neither the
+        # reward nor a claim that can restore it. That - not the identity of
+        # the surviving row - is what this asserts. The vulnerable
+        # implementation breaks it by deleting the row the re-cross opened:
+        # the audit probe records Level 12 with an empty `level_reward_claims`
+        # table and no role, i.e. permanently lost.
+        survivors = rows("SELECT id, status FROM level_reward_claims "
+                         "WHERE guild_id=? AND user_id=? AND reward_level=? "
+                         "AND track='role'", (GUILD, USER, 12))
+        claimable = any(status in ("pending", "failed", "processing",
+                                   "fulfilled") for _, status in survivors)
+        check("E: a Level 12 the member legitimately holds keeps its role or "
+              "reopens a claim that can restore it",
+              world.role in world.held or claimable,
+              (claim_status(claim), world.held, survivors))
     else:
         check("E: the correction's Level 11 removed the reward it no longer "
               "holds", claim_status(claim) is None and world.role not in world.held,
@@ -722,6 +764,123 @@ async def case_l_one_shot_award_waits():
           or xp_of() == xp_at(2) + 25, (xp_of(), start))
 
 
+async def case_m_sweep_cancelled():
+    """A cancelled sweep must not fence the member forever.
+
+    `CancelledError` is a `BaseException`, so it passes straight through the
+    `except Exception` that turns a reconciliation failure into a report - but
+    the lease is released in a `finally`. If it were not, one cancelled
+    correction would refuse every ordinary XP award for this member until the
+    lease's TTL ran out, which is a quieter way to lose the same rewards.
+    """
+    print("\n== M. the sweep is cancelled inside remove_roles ==")
+    await fresh()
+    gate, allow = asyncio.Event(), asyncio.Event()
+
+    async def pause(world):
+        gate.set()
+        await allow.wait()
+
+    world = World(held=False, on_remove=pause)
+    claim = await deliver_role_claim(world)
+    check("M: setup - the role is worn and the claim is fulfilled",
+          world.role in world.held and claim_status(claim) == "fulfilled",
+          (world.held, claim_status(claim)))
+
+    from cogs.leveling import _apply_admin_xp
+    from utils import level_ops as ops
+    task = asyncio.create_task(_apply_admin_xp(
+        GUILD, world.member, xp_at(11), bot_for(world), source="setlevel",
+        actor_id=1, reason="cancellation audit"))
+    await asyncio.wait_for(gate.wait(), 10)
+    check("M: the sweep is paused holding the lease", not task.done())
+    check("M: the lease is really held while it is paused",
+          await ops.lock_held(GUILD, USER) is not None, leases())
+
+    task.cancel()
+    try:
+        await task
+        check("M: the task honoured the cancellation", False, "it returned")
+    except asyncio.CancelledError:
+        check("M: the task honoured the cancellation", True)
+
+    allow.set()
+    await asyncio.sleep(0.2)
+    check("M: the LEASE IS RELEASED, so XP writers are not fenced forever",
+          await ops.lock_held(GUILD, USER) is None, leases())
+
+    survivors = rows("SELECT id, status FROM level_reward_claims "
+                     "WHERE guild_id=? AND user_id=? AND reward_level=? "
+                     "AND track='role'", (GUILD, USER, 12))
+    check("M: the reward survived - the role is worn or a claim names it",
+          world.role in world.held or bool(survivors), (world.held, survivors))
+
+    before = xp_of()
+    res = await award_xp(10)
+    check("M: ordinary XP writes work again after the cancellation",
+          res.get("success") is True and xp_of() == before + 10,
+          (res, before, xp_of()))
+
+    await fresh()
+    retry_world = World(held=False)
+    retry_claim = await deliver_role_claim(retry_world)
+    await correction(retry_world, 11)
+    check("M: a retry afterwards still completes the correction",
+          level_of() == 11 and claim_status(retry_claim) is None
+          and retry_world.role not in retry_world.held,
+          (level_of(), claim_status(retry_claim), retry_world.held))
+
+
+async def case_n_lease_expiry():
+    """An expired lease fences nobody, and authorises no deletion.
+
+    Two halves of the same guarantee: the lease is the ONLY thing that defers an
+    ordinary award, so a stale row must stop deferring them once its TTL passes;
+    and a sweep that has lost its authority must not carry out the irreversible
+    half of the correction (the claim deletion) on the strength of reads it made
+    while it still had it.
+    """
+    print("\n== N. a lease whose TTL has passed fences nobody ==")
+    await fresh()
+    world = World(held=False)
+    await deliver_role_claim(world)
+    from utils import level_ops as ops
+    lease = await ops.acquire_lock(GUILD, USER, holder="setlevel",
+                                   operation_id="op-expiry-audit")
+    check("N: the lease was taken", lease.get("ok") is True, lease)
+    execute("UPDATE level_op_locks SET expires_at='2000-01-01T00:00:00+00:00' "
+            "WHERE guild_id=? AND user_id=?", (GUILD, USER))
+    check("N: an expired lease is NOT reported as held",
+          await ops.lock_held(GUILD, USER) is None, leases())
+
+    before = xp_of()
+    res = await award_xp(10)
+    check("N: an ordinary award is not blocked by an expired lease",
+          res.get("success") is True and xp_of() == before + 10,
+          (res, before, xp_of()))
+
+    await fresh()
+    stale_world = World(held=False)
+    claim = await deliver_role_claim(stale_world)
+    await ops.acquire_lock(GUILD, USER, holder="setlevel",
+                           operation_id="op-expiry-sweep")
+    execute("UPDATE level_op_locks SET expires_at='2000-01-01T00:00:00+00:00' "
+            "WHERE guild_id=? AND user_id=?", (GUILD, USER))
+    from utils.level_claims import reconcile_level_drop
+    report = await reconcile_level_drop(
+        GUILD, USER, 11, operation_id="op-expiry-sweep", actor_id=1,
+        reason="expiry audit", member=stale_world.member, require_lease=True)
+    check("N: a sweep whose lease expired DELETES NOTHING",
+          not report.get("deleted_claims"), report.get("deleted_claims"))
+    check("N: and it says its authority is gone",
+          bool(report.get("lease_lost")) or bool(report.get("error")),
+          {k: report.get(k) for k in ("lease_lost", "error")})
+    check("N: the claim and the role are left untouched",
+          claim_status(claim) == "fulfilled"
+          and stale_world.role in stale_world.held,
+          (claim_status(claim), stale_world.held))
+
+
 async def main():
     for case in (case_a_role_removal_race,
                  case_b_dashboard_race,
@@ -734,7 +893,9 @@ async def main():
                  case_i_advice_wording,
                  case_j_no_silent_loss,
                  case_k_award_raced_the_fence,
-                 case_l_one_shot_award_waits):
+                 case_l_one_shot_award_waits,
+                 case_m_sweep_cancelled,
+                 case_n_lease_expiry):
         await case()
 
     print()
