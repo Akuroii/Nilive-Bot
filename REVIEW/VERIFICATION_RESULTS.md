@@ -338,3 +338,161 @@ stays open and the reward cannot be re-earned while its claim survives.
   corrected by reviewing the member's rewards, exactly as the new reply says.
 * Existing unverified areas are unchanged: real Discord role/permission/429
   handling, Railway, browser CSRF, million-scale timing.
+
+---
+
+# Round 4 — the B1 fence regression, its rc=1, and the fix
+
+Head: `5ea9791` (`arena/077d2ec7-nilive-bot`), on top of `bc4e28c`. Base `main`
+is `02fbfee`. PR #98 stays open; nothing merged, nothing deployed.
+
+## Why `test_correction_lease_fence.py` returned rc=1
+
+Two independent causes. **Neither is a product defect** — no production file was
+changed in this round (`git diff bc4e28c --stat` is one test file).
+
+**1. The environment had no dependencies.** The sandbox had no packages
+installed, so the script died at import:
+
+```
+ModuleNotFoundError: No module named 'aiosqlite'   (database.py line 1)
+```
+
+Zero assertions ran; `main()` was never reached. After
+`pip install -r requirements.txt` the script passes. This is the most likely
+cause of the reported exit code, since rc=1 with no `[FAIL]` line can only come
+from an exception before the first `check()`.
+
+**2. Case E had a genuinely nondeterministic assumption.** It `asyncio.gather`s
+a correction and an award with no synchronisation and branches on the outcome,
+but `final_xp == xp_at(12)` is reachable by **two legal interleavings**:
+
+* **(a)** the award lands inside the sweep, so the sweep must keep the original
+  row and the role;
+* **(b)** the award is **DEFERRED**, the correction finishes legitimately at
+  Level 11, and the deferred award is **retried afterwards** (`give_reward`
+  defaults `defer_retry_seconds` to 3.0 s). The original row is correctly gone
+  and `record_crossing` has opened a **fresh, claimable** row.
+
+The assertion only described (a). An instrumented timeline of a failing
+iteration (patching `utils.level_ops.{xp_write_barrier,fence_live_writers,
+acquire_lock,release_lock}`, every production call site uses `ops.<name>`):
+
+```
+ 209.395ms CORRECTION-START
+ 234.776ms LEASE-ACQUIRE   setlevel-8a0ef761e11545da
+ 241.283ms CORRECTION-FENCE  deferred_count=0
+ 246.901ms AWARD-BARRIER   live_lease=setlevel-8a0ef761e11545da -> DEFERRED
+ 273.699ms LEASE-RELEASE
+ 273.736ms CORRECTION-END  new_level=11
+ 754.248ms AWARD-BARRIER   live_lease=None -> ALLOWED
+ 763.047ms AWARD-END       success, new_level=12
+```
+
+The fence worked: the first attempt was refused while the lease was live, and
+the retry landed only after the sweep had released. That is branch (b), and it
+is correct behaviour — the member ends at Level 12 with a fresh `pending` row
+they can claim. Measured frequency: **5 of 30 iterations unloaded, 1 of 3 under
+CPU contention**.
+
+## The fix
+
+Assert the invariant the file exists to prove, which holds in **both**
+branches: *the member is never left at an eligible level holding neither the
+reward nor a claim that can restore it*. Not a weakening — the vulnerable
+baseline fails it:
+
+| | `a8ef28f` (vulnerable) | `bc4e28c`+ (fixed) |
+|---|---|---|
+| final level | 12 | 12 |
+| role worn | no | no |
+| `level_reward_claims` rows | **`[]` — empty** | `[(2, 12, role, pending)]` |
+
+The baseline deletes the row the re-cross opened, leaving Level 12 with no role
+and no claim: permanent loss. The fixed head keeps a recoverable row.
+
+Sensitivity after the change went **up**, not down: the corrected file reports
+**41 failed checks on `a8ef28f`** versus 39 before, and **0 on the fixed head**.
+
+Added for coverage the audit found missing:
+
+* **case M — cancellation.** `CancelledError` is a `BaseException`, so it passes
+  through the `except Exception` that turns a reconciliation failure into a
+  report, and reaches the `finally` that releases the lease. Locks: the lease is
+  released, the reward stays recoverable, ordinary XP writes resume, and a retry
+  still completes the correction.
+* **case N — lease expiry.** A lease past its TTL defers no writer, and a sweep
+  that has lost its authority deletes no claim.
+* **case A** gained one deterministic assertion (gated by `allow`, so no timing
+  can reorder it) that the re-cross reopens a claimable Level 12 row.
+
+67 -> 82 checks.
+
+## Verification
+
+| suite | `a8ef28f` | fixed head |
+|---|---|---|
+| `test_correction_lease_fence.py` | n/a (file added at `bc4e28c`); copied in: **rc=1, 27 pass / 41 fail** | **rc=0, 82 pass / 0 fail** |
+| `test_inflight_role_correction.py` | rc=0, 134/134 | rc=0, 134/134 |
+| `test_level_ops_provenance.py` | rc=0, 70 | rc=0, 70 |
+| `test_xp_rollback.py` | rc=0, 59 | rc=0, 59 |
+| `test_level_test_reset.py` | rc=0, 87 | rc=0, 87 |
+| `test_rejoin_reconciliation.py` | rc=0, 24 | rc=0, 24 |
+| `test_setlevel_admin.py` | rc=0, 38 | rc=0, 38 |
+| `test_level_card_fixes.py` (dashboard) | rc=0, 60 | rc=0, 60 |
+| `test_leveling_runtime.py` / `_contract` | rc=0, 26 / 31 | rc=0, 26 / 31 |
+| `test_slice2/3/4_*_claims.py` | rc=0, 26 / 21 / 15 | rc=0, 26 / 21 / 15 |
+| `test_shop_publications.py` (pytest) | **23 passed** | **23 passed** |
+| `npm test` | 17/17 harnesses | 17/17 harnesses |
+
+**Full Python suite, same runner** (`/tmp/run_suite.sh`: every
+`scripts/test_*.py` in its own process, 240 s timeout, same venv):
+
+* `a8ef28f` — 64 scripts, **60 exit 0, 4 exit 1**
+* fixed head — 65 scripts, **61 exit 0, 4 exit 1**
+
+The 4 failures are **identical on both** and identical on `main` (`02fbfee`),
+so none is introduced by this work:
+
+1. `test_afk.py` — 169/170 (one pre-existing check).
+2. `test_leveling_voice_hard_blocks.py` — the same 9 "guard OFF" checks.
+3. `test_phase2_backend.py` — `TimeoutError` in
+   `test_single_canonical_reset_loop_runs_once_after_ready_and_cancels`
+   (a 5 s `wait_for`; this sandbox has 2 CPUs).
+4. `test_shop_publications.py` — a **pytest module**, not a standalone script;
+   executed directly it fails on `import pytest`. Under pytest it is 23/23.
+
+**Flakiness proof.** Case E re-sampled 120 times under 8 busy-loops on 2 CPUs
+with the corrected assertion: **120/120 pass**, with the AWARD-WON branch
+exercised 52 times. The whole fence file: rc=0 on 5 consecutive unloaded runs.
+
+**Note on running these scripts.** They need `pip install -r requirements.txt`
+(`aiosqlite` is imported by `database.py` at module scope) and, for the pytest
+modules, `OWNER_ID` set — `database.py` calls `sys.exit(1)` without it.
+
+## The B1 invariant
+
+An XP award arriving during a level correction cannot leave the member at an
+eligible level with both the reward and its recoverable claim missing. Verified
+across: the correction lease (A, G), ordinary XP writers including message,
+voice and mission awards (A, J), the dashboard member edit (B), one-shot awards
+that wait rather than lose the reward (L), an award committing between the XP
+write and the fence (K), the final claim-deletion transaction under lease
+supersession (G), lease expiry (N), exceptions and interrupted removal (F),
+cancellation (M), and retry/idempotency (F, J).
+
+All of this is single-process SQLite with fake Discord objects. It says nothing
+about live Discord role/permission/429 behaviour or Railway.
+
+## Remaining risks
+
+* Case E is still an **unsynchronised race**; the assertion now holds in both
+  outcomes, but which outcome occurs remains timing-dependent. The
+  deterministic guards for the same invariant are cases A, C, K, M and N.
+* `test_phase2_backend.py`'s reset-loop test is timing-sensitive and fails in a
+  2-CPU sandbox; it fails identically on `main`, so it is not a regression here,
+  but it is also not proven by this run.
+* Multi-process SQLite contention is still unverified (see the round-3 note).
+* PR #98's head branch is `arena/adb559e5-nilive-bot`; this round was committed
+  to the session branch `arena/077d2ec7-nilive-bot` from the exact PR head
+  `bc4e28c`. PR #98 has not been retargeted or merged.
