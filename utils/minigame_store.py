@@ -1207,7 +1207,18 @@ async def mark_run_resolved(log_id: int, guild_id: int, status: str,
     than a second set of grants; `INSERT OR IGNORE` on the idempotency key is
     the backstop if that guard is ever raced.
 
-    Returns True if this call resolved the run, False if it was already closed.
+    Returns True if this call resolved the run, False if nothing needed doing.
+
+    False is a NO-OP, not a failure, and covers two cases that must stay
+    indistinguishable to the caller because both mean "there is no record for
+    this call to write": the run row was already closed by whoever now owns the
+    round (its grants were enqueued then, so enqueuing again here would be a
+    second record for one award), and there being no database at all.
+
+    A genuine database problem RAISES rather than returning False. The caller
+    has to be able to tell the two apart: treating a failed write as a no-op
+    would let it hand the XP out with no durable record behind it, which is the
+    exact crash window this function exists to close.
     """
     # Synchronous short-circuit, deliberately before the first await: if the
     # database file does not exist then no run row does either, so there is no
@@ -1221,34 +1232,37 @@ async def mark_run_resolved(log_id: int, guild_id: int, status: str,
     # are what rank_card_data.py and legacy UIs read, and finish_run() will be
     # a no-op after this commits, so they have to be written here.
     first_winner = next((w for w in granted if w.get("status") == "won"), None)
-    try:
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = await db.execute(
-                    "UPDATE minigames_log SET status = ?, winners_json = ?, "
-                    "ended_at = ?, winner_id = ?, winner_display_name = ? "
-                    "WHERE id = ? AND status = 'running'",
-                    (status, _dump(granted), _now_iso(),
-                     first_winner.get("id") if first_winner else None,
-                     first_winner.get("name") if first_winner else None,
-                     log_id))
-                resolved = cursor.rowcount == 1
-                for user_id, amount in xp_grants:
-                    await enqueue_xp_grant(
-                        guild_id, user_id, amount,
-                        idem_key=f"minigame:{guild_id}:{log_id}:{user_id}",
-                        source="minigame", reason=reason, db=db)
-                await db.commit()
-                return resolved
-            except Exception:
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "UPDATE minigames_log SET status = ?, winners_json = ?, "
+                "ended_at = ?, winner_id = ?, winner_display_name = ? "
+                "WHERE id = ? AND status = 'running'",
+                (status, _dump(granted), _now_iso(),
+                 first_winner.get("id") if first_winner else None,
+                 first_winner.get("name") if first_winner else None,
+                 log_id))
+            if cursor.rowcount != 1:
+                # Already closed, so this call owns nothing: no status change to
+                # commit and no grants to queue. Roll back the empty
+                # transaction rather than leaving a write lock held.
                 await db.execute("ROLLBACK")
-                raise
-    except (aiosqlite.Error, sqlite3.Error):
-        # No run-log schema (or no such run row) means there is no round here
-        # to make durable, so there is no award to protect either. The engine
-        # still delivers through give_reward, which enqueues the grant itself.
-        return False
+                return False
+            for user_id, amount in xp_grants:
+                await enqueue_xp_grant(
+                    guild_id, user_id, amount,
+                    idem_key=f"minigame:{guild_id}:{log_id}:{user_id}",
+                    source="minigame", reason=reason, db=db)
+            await db.commit()
+            return True
+        except Exception:
+            # in_transaction guard: if BEGIN IMMEDIATE itself failed there is
+            # no transaction to roll back, and ROLLBACK would raise a second,
+            # misleading error that masked the real one.
+            if db.in_transaction:
+                await db.execute("ROLLBACK")
+            raise
 
 
 async def get_history(guild_id: int, limit: int = 50,
