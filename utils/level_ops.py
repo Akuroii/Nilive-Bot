@@ -740,9 +740,39 @@ async def xp_write_barrier(guild_id: int, user_id: int,
 
 # ──────────────────── durable one-shot XP awards (never lose a reward) ────────
 
+def xp_amount_or_none(value) -> int | None:
+    """The XP a reward is worth, or None when the value is not a usable amount.
+
+    Used by callers deciding whether a reward can be queued atomically with the
+    work that earned it. An unusable value is simply not queued: `give_reward`
+    still reports it afterwards exactly as it always has, and there is no valid
+    award for a crash to lose.
+    """
+    try:
+        amount = int(value)
+    except (TypeError, ValueError):
+        return None
+    return amount if amount > 0 else None
+
+
+async def _enqueue_xp_grant_in(db: aiosqlite.Connection, guild_id: int,
+                                user_id: int, amount: int, *, idem_key: str,
+                                source: str | None,
+                                reason: str | None) -> bool:
+    """The INSERT alone, inside a transaction the caller already owns."""
+    cursor = await db.execute(
+        "INSERT OR IGNORE INTO level_xp_pending_grants "
+        "(guild_id, user_id, idem_key, amount, source, reason, status, "
+        " attempts, created_at) VALUES (?,?,?,?,?,?,'pending',0,?)",
+        (int(guild_id), int(user_id), str(idem_key), int(amount),
+         source, reason, _now()))
+    return cursor.rowcount == 1
+
+
 async def enqueue_xp_grant(guild_id: int, user_id: int, amount: int, *,
                            idem_key: str, source: str | None = None,
-                           reason: str | None = None) -> bool:
+                           reason: str | None = None,
+                           db: aiosqlite.Connection | None = None) -> bool:
     """Record a one-shot XP award that must not be lost. Returns True if new.
 
     Call this BEFORE trying to write the XP, so the award is durable from the
@@ -751,25 +781,43 @@ async def enqueue_xp_grant(guild_id: int, user_id: int, amount: int, *,
     the same completed mission / minigame round / event is a retry, not a second
     reward, so it must not enqueue (and therefore not pay) twice.
 
+    An optional caller-owned transaction is NOT committed, so a caller that
+    commits the work which earned this award can enqueue the grant in the SAME
+    transaction. That pairing is the point, not a convenience: a crash between
+    the two commits would leave completed work with no recoverable award - a
+    mission already marked `completed`, an event winner already recorded, or a
+    minigame round already resolved - none of which can ever be re-earned, so
+    the XP would simply be gone. Same contract as
+    `utils.economy_safe.safe_credit(..., db=)` and
+    `utils.inventory.give_item(..., db=)`.
+
+    ``db`` must already be in a transaction (``BEGIN IMMEDIATE``) for the two
+    writes to be atomic; the caller commits both or neither.
+
     Returns False when the key was already known - already granted, or already
     queued and waiting for the fence to lift.
     """
-    await ensure_tables()
-    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute(
-                "INSERT OR IGNORE INTO level_xp_pending_grants "
-                "(guild_id, user_id, idem_key, amount, source, reason, status, "
-                " attempts, created_at) VALUES (?,?,?,?,?,?,'pending',0,?)",
-                (int(guild_id), int(user_id), str(idem_key), int(amount),
-                 source, reason, _now()))
-            created = cursor.rowcount == 1
-            await db.commit()
-            return created
-        except Exception:
-            await db.execute("ROLLBACK")
-            raise
+    if db is None:
+        await ensure_tables()
+        async with aiosqlite.connect(DB_PATH, timeout=10) as own:
+            await own.execute("BEGIN IMMEDIATE")
+            try:
+                created = await _enqueue_xp_grant_in(
+                    own, guild_id, user_id, amount, idem_key=idem_key,
+                    source=source, reason=reason)
+                await own.commit()
+                return created
+            except Exception:
+                await own.execute("ROLLBACK")
+                raise
+    # Caller-owned transaction. DDL is transactional in SQLite, and this runs
+    # only until the tables are known to exist, so the steady-state cost is a
+    # flag read rather than a schema sweep on every hot-path write.
+    if not _TABLES_READY:
+        await ensure_tables(db)
+    return await _enqueue_xp_grant_in(
+        db, guild_id, user_id, amount, idem_key=idem_key,
+        source=source, reason=reason)
 
 
 async def grant_row(idem_key: str) -> dict | None:

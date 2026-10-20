@@ -1,6 +1,7 @@
 import aiosqlite
 from datetime import datetime, timezone, timedelta
 from database import DB_PATH
+from utils.level_ops import enqueue_xp_grant, xp_amount_or_none
 from utils.timezone import (
     get_cairo_daily_key, get_cairo_weekly_key,
     seconds_until_cairo_midnight, seconds_until_cairo_saturday,
@@ -473,6 +474,26 @@ async def record_activities(bot, guild_id: int, user_id: int,
                     new_progress, int(just_completed),
                     now.isoformat() if just_completed else None,
                 ))
+                if just_completed and d["reward_type"] == "xp":
+                    # Queue the award in the SAME transaction that commits the
+                    # completion - this is the crash window. Once `completed=1`
+                    # is committed, re-recording the activity can never complete
+                    # this mission again, so a grant enqueued afterwards would
+                    # be the mission's only chance: a crash in between would
+                    # leave a completed mission whose XP was never recorded and
+                    # can never be re-earned. One transaction means either both
+                    # land or neither does, and the completion is then retried
+                    # by the next activity. `INSERT OR IGNORE` keeps a later
+                    # retry of this same period paying exactly once.
+                    xp_amount = xp_amount_or_none(d["reward_value"])
+                    if xp_amount is not None:
+                        await enqueue_xp_grant(
+                            guild_id, user_id, xp_amount,
+                            idem_key=(f"mission:{guild_id}:{user_id}:"
+                                      f"{d['id']}:{period_key}"),
+                            source="mission",
+                            reason=f"Mission complete: {d['name']}",
+                            db=db)
                 await db.commit()
             except Exception:
                 # in_transaction guard: if BEGIN IMMEDIATE itself failed

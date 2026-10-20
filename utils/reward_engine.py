@@ -145,9 +145,10 @@ async def give_reward(bot: discord.Client,
         # fenced. One indexed SELECT when there is nothing queued. This is what
         # lets a deferred one-shot award land without waiting for a timer: the
         # member's very next XP event settles it.
+        drained = None
         try:
             from utils import level_ops as ops
-            await ops.drain_xp_grants(guild_id, user_id)
+            drained = await ops.drain_xp_grants(guild_id, user_id)
         except Exception as exc:
             # A drain failure must never cost the award being granted now.
             print(f"[XP] pending-grant drain failed (guild={guild_id} "
@@ -169,14 +170,49 @@ async def give_reward(bot: discord.Client,
                 guild_id, user_id, amount, idem_key=idempotency_key,
                 source=source, reason=reason)
             if not fresh:
-                prior = await ops.grant_row(idempotency_key)
-                return {"success": False, "reward_type": "xp", "amount": 0,
-                        "duplicate": True, "deferred": False,
-                        "queued": (prior or {}).get("status") == "pending",
-                        "error": ("this reward was already recorded under "
-                                  f"'{idempotency_key}' and is not paid twice"),
-                        "old_level": None, "new_level": None,
-                        "leveled_up": False}
+                prior = await ops.grant_row(idempotency_key) or {}
+                if prior.get("status") == "applied":
+                    # `INSERT OR IGNORE` on the UNIQUE key guarantees there has
+                    # only ever been one row for this completed mission / round
+                    # / event, so an already-applied row is that same award,
+                    # not a second one.
+                    #
+                    # Unless THIS call is what applied it: the opening drain
+                    # above settles every queued row for this member, including
+                    # a grant the caller pre-enqueued in the same transaction
+                    # that committed the work which earned it. That is the
+                    # normal path now, and it is this award being delivered -
+                    # reporting it back as a duplicate would tell the caller
+                    # the reward failed when the XP has just landed.
+                    own = next(
+                        (a for a in ((drained or {}).get("applied") or [])
+                         if str(a.get("idem_key")) == str(idempotency_key)),
+                        None)
+                    if own is not None:
+                        paid = int(own["amount"])
+                        new_xp = int(own["new_xp"])
+                        old_level = xp_progress(max(0, new_xp - paid))[0]
+                        new_level, _, _ = xp_progress(new_xp)
+                        return {"success": True, "reward_type": "xp",
+                                "amount": paid, "new_xp": new_xp,
+                                "old_level": old_level,
+                                "new_level": new_level,
+                                "leveled_up": new_level > old_level,
+                                "queued": False}
+                    return {"success": False, "reward_type": "xp", "amount": 0,
+                            "duplicate": True, "deferred": False,
+                            "queued": False,
+                            "error": ("this reward was already recorded under "
+                                      f"'{idempotency_key}' and is not paid "
+                                      "twice"),
+                            "old_level": None, "new_level": None,
+                            "leveled_up": False}
+                # Still `pending`. Either this is a retry after an interrupted
+                # run, or the caller pre-enqueued the grant in the same
+                # transaction that committed the work which earned it - in both
+                # cases there is exactly one row and it is still owed, so fall
+                # through and deliver it. Treating this as a duplicate would
+                # return "already recorded" while the XP sits unapplied.
             deadline = loop.time() + max(0.0, float(wait_for))
             blocked = None
             while True:

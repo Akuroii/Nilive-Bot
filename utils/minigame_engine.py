@@ -8,6 +8,7 @@ import discord
 from utils import minigame_store as store
 from utils.formatters import snapshot_user
 from utils.reward_engine import give_reward
+from utils.level_ops import xp_amount_or_none
 from utils.emoji import CHECK_EMOJI
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -393,8 +394,12 @@ class MinigameEngine:
         await self._cancel_timers()
         await self._disable_ephemeral_views()
 
-        # 1) independent rolls + grants — BEFORE any embed work
+        # 1) Roll every winner's reward up front, in memory. The roll is what
+        #    the durable record written in step 2 has to name, so it cannot
+        #    happen after it.
+        reason = "Minigame reward (%s)" % (self.snapshot.get("name") or "?")
         granted = []
+        pending: list[tuple[dict, dict]] = []
         for w in winners:
             entry = {"id": w["id"], "name": w.get("name") or w.get("display_name") or "?"}
             if not self.rewards:
@@ -406,12 +411,46 @@ class MinigameEngine:
             rolled = store.roll_reward(self.rewards)
             entry.update(reward_type=rolled["reward_type"],
                          reward_value=rolled["reward_value"], status="won")
+            granted.append(entry)
+            pending.append((entry, rolled))
+
+        # 2) Make the round's resolution durable together with every XP grant it
+        #    owes, in ONE transaction. This is the crash window: `self.finished`
+        #    is in-memory only, so until this commits a restart leaves the run
+        #    row 'running' (the startup sweep then finalizes it as
+        #    aborted_restart) with the winners recorded nowhere durable and no
+        #    grant row — and the round can never be re-resolved, because the
+        #    engine object that owned it is gone with the process. After this
+        #    commits the grants are durable rows and the periodic drain applies
+        #    them, so a crash anywhere before `finish_run` still pays once.
+        xp_grants = []
+        for entry, rolled in pending:
+            if rolled["reward_type"] != "xp":
+                continue
+            amount = xp_amount_or_none(rolled["reward_value"])
+            if amount is not None:
+                xp_grants.append((entry["id"], amount))
+        try:
+            await store.mark_run_resolved(self.log_id, self.guild_id, status,
+                                          granted, xp_grants, reason)
+        except Exception as e:
+            # Never strand the round on a failed durable record: fall through to
+            # delivery, where give_reward enqueues the grant itself. That
+            # re-opens the crash window for this one round, which is no worse
+            # than the previous behaviour and still reports the failure.
+            print(f"[MINIGAMES] run {self.log_id}: durable resolution failed "
+                  f"(falling back to grant-time enqueue): {e}")
+
+        # 3) Deliver. XP grants are already queued by step 2, and give_reward
+        #    called with the same idempotency key drains the row it finds
+        #    instead of enqueuing a second one — so this pays exactly once
+        #    whether or not step 2 got there first.
+        for entry, rolled in pending:
             try:
                 res = await give_reward(
-                    self.bot, self.guild_id, w["id"], rolled["reward_type"],
+                    self.bot, self.guild_id, entry["id"], rolled["reward_type"],
                     **_grant_kwargs(rolled),
-                    reason="Minigame reward (%s)"
-                           % (self.snapshot.get("name") or "?"),
+                    reason=reason,
                     source="minigame",
                     # One run, one chance: the round is consumed and the winner
                     # is announced regardless of delivery, so an XP award that
@@ -419,7 +458,7 @@ class MinigameEngine:
                     # run row opened before start(), so the key is stable across
                     # a retry and a repeat pays nothing.
                     idempotency_key=(f"minigame:{self.guild_id}:{self.log_id}:"
-                                     f"{w['id']}"
+                                     f"{entry['id']}"
                                      if rolled["reward_type"] == "xp" else None))
                 if not res or not res.get("success"):
                     entry["status"] = "failed"
@@ -428,9 +467,8 @@ class MinigameEngine:
             except Exception as e:
                 entry["status"] = "failed"
                 entry["error"] = str(e)[:300]
-            granted.append(entry)
 
-        # 2) best-effort final embed + disabled components
+        # 4) best-effort final embed + disabled components
         if self._message:
             embed = self.build_embed()
             if result_text:
@@ -444,7 +482,7 @@ class MinigameEngine:
                 print(f"[MINIGAMES] run {self.log_id}: final embed edit "
                       f"failed (rewards already delivered): {e}")
 
-        # 3) close the run row
+        # 5) close the run row
         try:
             await store.finish_run(
                 self.log_id, status,

@@ -8,6 +8,7 @@ import random
 from datetime import datetime, timezone, timedelta
 from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
+from utils.level_ops import enqueue_xp_grant, xp_amount_or_none
 from utils.currency import get_currency_config, currency_amount
 from utils.emoji import CHECK_EMOJI
 
@@ -112,16 +113,42 @@ class ButtonRaceView(discord.ui.View):
         self.winners.append(interaction.user.id)
         snap = snapshot_user(interaction.user)
 
+        # An unusable value is not queued; give_reward still reports it below.
+        xp_amount = (xp_amount_or_none(self.reward_value)
+                     if self.reward_type == "xp" else None)
+
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO event_winners
-                    (event_id, guild_id, user_id,
-                     user_display_name)
-                VALUES (?, ?, ?, ?)
-            """, (self.event_id, interaction.guild.id,
-                  interaction.user.id,
-                  snap["display_name"]))
-            await db.commit()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute("""
+                    INSERT INTO event_winners
+                        (event_id, guild_id, user_id,
+                         user_display_name)
+                    VALUES (?, ?, ?, ?)
+                """, (self.event_id, interaction.guild.id,
+                      interaction.user.id,
+                      snap["display_name"]))
+                if xp_amount is not None:
+                    # Queue the award in the SAME transaction that records the
+                    # winner - this is the crash window. The winner row is what
+                    # makes a second claim impossible ("You already claimed
+                    # this reward"), so once it is committed the member can
+                    # never win this event again. A grant enqueued afterwards
+                    # would therefore be the only chance: a crash in between
+                    # would leave a recorded winner whose XP was never recorded
+                    # and can never be re-earned. One transaction means either
+                    # both land or neither does, and the claim can be retried.
+                    # `INSERT OR IGNORE` keeps a retry paying exactly once.
+                    await enqueue_xp_grant(
+                        interaction.guild.id, interaction.user.id, xp_amount,
+                        idem_key=(f"event:{interaction.guild.id}:"
+                                  f"{self.event_id}:{interaction.user.id}"),
+                        source="event", reason="Event reward", db=db)
+                await db.commit()
+            except Exception:
+                if db.in_transaction:
+                    await db.execute("ROLLBACK")
+                raise
 
         result = await give_reward(
             interaction.client,
