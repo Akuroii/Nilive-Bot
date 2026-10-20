@@ -8,7 +8,16 @@ import discord
 from utils import minigame_store as store
 from utils.formatters import snapshot_user
 from utils.reward_engine import give_reward
+from utils.level_ops import xp_amount_or_none
 from utils.emoji import CHECK_EMOJI
+
+# How resolve() re-attempts the atomic durable write that closes a round and
+# queues its XP grants. The write is idempotent, so retrying cannot pay twice;
+# it only rides out a transient SQLITE_BUSY or I/O error. A round whose write
+# fails every attempt is left open with no XP delivered rather than being paid
+# out with no durable record behind it.
+_DURABLE_ATTEMPTS = 3
+_DURABLE_RETRY_DELAY = 0.25
 
 # ═══════════════════════════════════════════════════════════════════════
 # MINIGAMES v2 — GAME ENGINES (Phase 2 of the approved v2 plan)
@@ -385,6 +394,17 @@ class MinigameEngine:
         if the game was already resolved — concurrent clicks, a timer
         racing a click, or a double invocation can never resolve twice.
 
+        Also returns False, having delivered nothing and closed nothing, if the
+        round could not be recorded durably: a round paid out with no grant row
+        behind it is the one thing this must never do. The run row is left
+        'running', so the round is not consumed — but this engine is already
+        claimed and will not try again, so the reward is FORFEITED, not merely
+        deferred. Failing closed is deliberate; it is not a recovery path.
+
+        Returns False as well when the run was already closed by an earlier
+        attempt: that attempt owns the round and any grant it committed stays
+        recoverable on its own, so this call must not create a replacement.
+
         Order (plan §18): rolls+grants → best-effort embed edit → log.
         """
         winners = winners or []
@@ -393,8 +413,12 @@ class MinigameEngine:
         await self._cancel_timers()
         await self._disable_ephemeral_views()
 
-        # 1) independent rolls + grants — BEFORE any embed work
+        # 1) Roll every winner's reward up front, in memory. The roll is what
+        #    the durable record written in step 2 has to name, so it cannot
+        #    happen after it.
+        reason = "Minigame reward (%s)" % (self.snapshot.get("name") or "?")
         granted = []
+        pending: list[tuple[dict, dict]] = []
         for w in winners:
             entry = {"id": w["id"], "name": w.get("name") or w.get("display_name") or "?"}
             if not self.rewards:
@@ -406,13 +430,100 @@ class MinigameEngine:
             rolled = store.roll_reward(self.rewards)
             entry.update(reward_type=rolled["reward_type"],
                          reward_value=rolled["reward_value"], status="won")
+            granted.append(entry)
+            pending.append((entry, rolled))
+
+        # 2) Make the round's resolution durable together with every XP grant it
+        #    owes, in ONE transaction. This is the crash window: `self.finished`
+        #    is in-memory only, so until this commits a restart leaves the run
+        #    row 'running' (the startup sweep then finalizes it as
+        #    aborted_restart) with the winners recorded nowhere durable and no
+        #    grant row — and the round can never be re-resolved, because the
+        #    engine object that owned it is gone with the process. After this
+        #    commits the grants are durable rows and the periodic drain applies
+        #    them, so a crash anywhere before `finish_run` still pays once.
+        #
+        #    The write is idempotent — the UPDATE is guarded on
+        #    status='running' and the grants are INSERT OR IGNORE on a UNIQUE
+        #    key — so a transient lock or I/O error can simply be retried and
+        #    retrying can never pay twice. It returns RESOLVED, ALREADY_CLOSED
+        #    or NO_RECORD, and raises only on a genuine failure; only a raise
+        #    retries, and only a raise that never clears fails the round.
+        xp_grants = []
+        for entry, rolled in pending:
+            if rolled["reward_type"] != "xp":
+                continue
+            amount = xp_amount_or_none(rolled["reward_value"])
+            if amount is not None:
+                xp_grants.append((entry["id"], amount))
+        durable = None
+        last_error = None
+        for attempt in range(_DURABLE_ATTEMPTS):
+            try:
+                durable = await store.mark_run_resolved(
+                    self.log_id, self.guild_id, status, granted, xp_grants,
+                    reason)
+                break
+            except Exception as e:
+                last_error = e
+                if attempt + 1 < _DURABLE_ATTEMPTS:
+                    await asyncio.sleep(_DURABLE_RETRY_DELAY * (attempt + 1))
+        if durable is None:
+            # Nothing was written, so nothing may be handed out. Delivering
+            # here would re-open the crash window this step closes: the XP
+            # would be paid with no durable grant row behind it, and the run
+            # row would be closed straight after, so a crash in between would
+            # lose the award permanently.
+            #
+            # Deliberately NOT calling finish_run() either. The row is still
+            # 'running', so the round is not consumed and no winner is
+            # announced; the startup sweep finalizes it as aborted_restart.
+            #
+            # Fail-closed, and the round's XP is FORFEITED: this engine is
+            # already claimed, so it will never resolve the round again, and
+            # nothing durable survives a restart to re-resolve it either. Not
+            # paying is chosen over paying on a record that does not exist.
+            print(f"[MINIGAMES] run {self.log_id}: durable resolution failed "
+                  f"after {_DURABLE_ATTEMPTS} attempt(s): {last_error}. No XP "
+                  f"delivered and the run is left open (aborted_restart on "
+                  f"restart); the reward is forfeited, not deferred.")
+            return False
+        if durable == store.ALREADY_CLOSED:
+            # An earlier attempt owns this round. Its grants, if it committed
+            # any, are already durable rows the periodic drain will apply, so
+            # they stay recoverable without anything here. Paying now would
+            # add a second grant for one round and would pay the amounts THIS
+            # call just rolled, which need not match the winners that attempt
+            # recorded — so step 5 is skipped too, rather than overwriting a
+            # closed row with a different roll.
+            print(f"[MINIGAMES] run {self.log_id}: already closed by an "
+                  f"earlier resolution attempt; no grant is created here and "
+                  f"any grant that attempt committed stays recoverable.")
+            return False
+
+        # 3) Deliver. Only two outcomes reach here: RESOLVED, where step 2
+        #    committed this round's grants, and NO_RECORD, where there is no
+        #    durable round to own (no database, or no row). Under both, every
+        #    XP award is queued and applied under its idempotency key:
+        #    `give_reward` drains the row step 2 wrote instead of enqueuing a
+        #    second one, or enqueues it itself when step 2 was a no-op. So this
+        #    pays exactly once, and ALREADY_CLOSED — where a second payment
+        #    for one round is possible — is already returned above.
+        for entry, rolled in pending:
             try:
                 res = await give_reward(
-                    self.bot, self.guild_id, w["id"], rolled["reward_type"],
+                    self.bot, self.guild_id, entry["id"], rolled["reward_type"],
                     **_grant_kwargs(rolled),
-                    reason="Minigame reward (%s)"
-                           % (self.snapshot.get("name") or "?"),
-                    source="minigame")
+                    reason=reason,
+                    source="minigame",
+                    # One run, one chance: the round is consumed and the winner
+                    # is announced regardless of delivery, so an XP award that
+                    # the fence refuses would never be retried. `log_id` is the
+                    # run row opened before start(), so the key is stable across
+                    # a retry and a repeat pays nothing.
+                    idempotency_key=(f"minigame:{self.guild_id}:{self.log_id}:"
+                                     f"{entry['id']}"
+                                     if rolled["reward_type"] == "xp" else None))
                 if not res or not res.get("success"):
                     entry["status"] = "failed"
                     entry["error"] = str((res or {}).get("error")
@@ -420,9 +531,8 @@ class MinigameEngine:
             except Exception as e:
                 entry["status"] = "failed"
                 entry["error"] = str(e)[:300]
-            granted.append(entry)
 
-        # 2) best-effort final embed + disabled components
+        # 4) best-effort final embed + disabled components
         if self._message:
             embed = self.build_embed()
             if result_text:
@@ -436,7 +546,7 @@ class MinigameEngine:
                 print(f"[MINIGAMES] run {self.log_id}: final embed edit "
                       f"failed (rewards already delivered): {e}")
 
-        # 3) close the run row
+        # 5) close the run row
         try:
             await store.finish_run(
                 self.log_id, status,

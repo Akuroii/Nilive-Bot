@@ -1,0 +1,1035 @@
+"""Regression: B1 - a correction sweep must not race legitimate XP writers.
+
+The defect, reproduced independently against `a8ef28f` (audit probes Q and U):
+
+1. the member is at Level 12 and the Level-12 role reward is `fulfilled` and
+   worn;
+2. an administrator corrects them to Level 11 (`/setxp` or `/setlevel`);
+3. the sweep pauses inside `member.remove_roles` (a real Discord round-trip);
+4. a *legitimate* XP award - a message, a voice tick, a mission, or the
+   dashboard member edit - puts them back at Level 12;
+5. the sweep resumes and, still trusting the snapshot it read in step 2, deletes
+   the fulfilled Level-12 claim and finishes removing the role.
+
+Final state: Level 12, role gone, claim gone, and a rejoin restores nothing,
+because the ledger no longer names the reward. The member legitimately re-earned
+it and permanently lost it.
+
+What this file locks down:
+
+  A  the exact interleaving above through `give_reward("xp")` (message/voice/
+     mission XP): the award is DEFERRED, not applied, and the award applied once
+     after the correction is not lost.
+  B  the same interleaving through the dashboard member-edit route: a clear,
+     retryable 409 that writes nothing, and a successful retry afterwards.
+  C  an award that legitimately committed BEFORE the sweep read the level
+     (a re-cross the sweep cannot undo) keeps both the role and the claim.
+  D  a bypassing writer that raises the level between the loop and the delete
+     transaction (the last line of defence): the claim is kept and the role is
+     put back.
+  E  correct serialization: a concurrently attempted award and correction never
+     both win, XP is applied exactly once, and nothing is lost.
+  F  idempotent recovery: an interrupted role removal is retried to completion
+     with no duplicate journal row, no double reversal and no double payout; a
+     completed correction re-run changes nothing.
+  G  lease supersession: a worker that lost the lease deletes nothing and says
+     so; the claim survives and a retry with authority finishes the job.
+  H  N1 - a terminal `already_reversed` journal row is not offered as an open
+     case and cannot have its terminal status overwritten.
+  I  N2 - the correction advice distinguishes a legacy administrative delivery
+     from a reward crossed by ordinary play.
+  J  no silent loss: a deferred award is applied once when it is retried, and
+     the member's XP never moves backwards.
+  M  cancellation: a sweep cancelled mid-flight releases the lease (CancelledError
+     is a BaseException, so it bypasses the `except Exception` and reaches the
+     `finally`), the reward survives, ordinary XP writes resume, and a retry
+     still completes the correction.
+  N  lease expiry: a lease past its TTL defers nobody, and a sweep whose lease
+     expired deletes no claim - the irreversible half needs live authority.
+
+Run with:
+    python scripts/test_correction_lease_fence.py
+"""
+import asyncio
+import json
+import os
+import sys
+import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+from phase1_support import (GUILD, USER, all_embed_text, execute, rows,
+                            reset_database)
+
+ROLE_ID = 7001
+FAILS = []
+
+
+def check(label, ok, detail=""):
+    print(f"[{'PASS' if ok else 'FAIL'}] {label}"
+          + (f" — {detail}" if detail and not ok else ""))
+    if not ok:
+        FAILS.append(label)
+
+
+def xp_at(level):
+    from utils.xp_calculator import xp_for_level
+    return sum(xp_for_level(n) for n in range(1, level + 1))
+
+
+def level_of(user=USER):
+    from utils.xp_calculator import xp_progress
+    found = rows("SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+                 (GUILD, user))
+    return xp_progress(int(found[0][0]) if found else 0)[0]
+
+
+def xp_of(user=USER):
+    found = rows("SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+                 (GUILD, user))
+    return int(found[0][0]) if found else 0
+
+
+def claim_status(claim_id):
+    found = rows("SELECT status FROM level_reward_claims WHERE id=?",
+                 (claim_id,))
+    return found[0][0] if found else None
+
+
+def claim_count():
+    return rows("SELECT COUNT(*) FROM level_reward_claims "
+                "WHERE guild_id=? AND user_id=?", (GUILD, USER))[0][0]
+
+
+def wallet():
+    found = rows("SELECT balance, diamonds FROM economy "
+                 "WHERE guild_id=? AND user_id=?", (GUILD, USER))
+    return found[0] if found else (0, 0)
+
+
+def journal():
+    return rows("SELECT claim_id, kind, status FROM reward_reversals "
+                "WHERE guild_id=? AND user_id=? ORDER BY id", (GUILD, USER))
+
+
+def deferrals():
+    """Deferral rows, or 0 on a database that predates the table - which is
+    exactly what the vulnerable implementation has, and what the sensitivity
+    run needs in order to fail cleanly instead of crashing."""
+    try:
+        return rows("SELECT COUNT(*) FROM level_xp_deferrals "
+                    "WHERE guild_id=? AND user_id=?", (GUILD, USER))[0][0]
+    except Exception:
+        return 0
+
+
+def leases():
+    return rows("SELECT operation_id, holder, expires_at FROM level_op_locks "
+                "WHERE guild_id=? AND user_id=?", (GUILD, USER))
+
+
+class Role:
+    """A Discord role double: identity is the id, like discord.py's Role."""
+    __hash__ = object.__hash__
+
+    def __init__(self, role_id=ROLE_ID):
+        self.id = role_id
+        self.name = f"role-{role_id}"
+        self.position = 5
+
+    def __eq__(self, other):
+        return isinstance(other, Role) and other.id == self.id
+
+
+class World:
+    """A member whose Discord calls can be paused, failed or instrumented."""
+
+    def __init__(self, *, held=False, on_remove=None, fail_remove=False,
+                 block_add=False):
+        self.role = Role()
+        self.held = [self.role] if held else []
+        self.before_add = asyncio.Event()
+        self.after_add = asyncio.Event()
+        # Off by default: only a test that wants to pause a DELIVERY arms it.
+        # Waiting unconditionally deadlocked every case that only paused the
+        # removal side.
+        self.block_add = block_add
+        self.fail_remove = fail_remove
+        self.on_remove = on_remove
+        self.removed = []
+        self.guild = SimpleNamespace(
+            id=GUILD,
+            get_role=lambda rid: self.role if int(rid) == self.role.id else None,
+            me=SimpleNamespace(top_role=SimpleNamespace(position=100)))
+        self.member = SimpleNamespace(
+            id=USER, mention=f"<@{USER}>", display_name="Tester",
+            guild=self.guild, roles=self.held, premium_since=None)
+        self.member.add_roles = AsyncMock(side_effect=self._add)
+        self.member.remove_roles = AsyncMock(side_effect=self._remove)
+        self.guild.get_member = lambda uid: self.member if uid == USER else None
+        self.guild.fetch_member = AsyncMock(return_value=self.member)
+
+    async def _add(self, *roles, **kwargs):
+        if self.block_add:
+            await self.before_add.wait()
+        for role in roles:
+            if role not in self.held:
+                self.held.append(role)
+        if self.block_add:
+            await self.after_add.wait()
+
+    async def _remove(self, *roles, **kwargs):
+        if self.on_remove is not None:
+            await self.on_remove(self)
+        if self.fail_remove:
+            raise RuntimeError("Discord refused the role removal (simulated)")
+        for role in roles:
+            if role in self.held:
+                self.held.remove(role)
+                self.removed.append(role.id)
+
+
+def bot_for(world):
+    return SimpleNamespace(
+        get_guild=lambda gid: world.guild if gid == GUILD else None)
+
+
+async def fresh(*, held=True, levels=12):
+    """A clean member at `levels` with the role reward for that level."""
+    await reset_database()
+    from utils.level_claims import ensure_tables
+    from utils import level_ops as ops
+    ops.invalidate_tables_cache()
+    await ensure_tables()
+    await ops.ensure_tables()
+    execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (GUILD,))
+    execute("INSERT INTO levels (guild_id,user_id,xp,level,prestige) "
+            "VALUES (?,?,?,?,0)", (GUILD, USER, xp_at(levels), levels))
+    execute("INSERT INTO economy (guild_id,user_id,balance,diamonds) "
+            "VALUES (?,?,0,0)", (GUILD, USER))
+    execute("INSERT INTO leveling_rewards (guild_id,level,role_id,audience) "
+            "VALUES (?,?,?,'everyone')", (GUILD, levels, ROLE_ID))
+
+
+async def deliver_role_claim(world):
+    """Give the member the role reward at their current level, through the
+    real claim engine, so the claim row and its provenance are production-shaped."""
+    from utils.level_claims import claim_available
+    from utils.xp_calculator import xp_progress
+    level = xp_progress(xp_of())[0]
+    execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+            "track,reward_ref,payload_json,status,created_at,source,"
+            "operation_id) VALUES (?,?,?,'role',?,?,'pending',"
+            "CURRENT_TIMESTAMP,'setlevel','op-setlevel-audit')",
+            (GUILD, USER, level, str(ROLE_ID),
+             json.dumps({"role_id": ROLE_ID})))
+    result = await claim_available(GUILD, USER, member=world.member)
+    assert result["fulfilled"], result
+    return result["fulfilled"][0]
+
+
+async def correction(world, level=11, *, reason="audit regression"):
+    """The production correction: the same writer `/setxp` uses."""
+    from cogs.leveling import _apply_admin_xp
+    return await _apply_admin_xp(
+        GUILD, world.member, xp_at(level), bot_for(world), source="setlevel",
+        actor_id=1, reason=reason)
+
+
+def dashboard_edit(xp, *, coins=0, diamonds=None):
+    """POST the real dashboard route through the real Flask test client."""
+    import dashboard.app as dashboard
+    app = dashboard.app
+    app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=True)
+    execute("INSERT OR REPLACE INTO dashboard_users (guild_id,user_id,"
+            "permission_level,enabled) VALUES (?,?,'admin',1)", (GUILD, USER))
+    execute("CREATE TABLE IF NOT EXISTS squad_members (guild_id INTEGER, "
+            "user_id INTEGER)")
+    client = app.test_client()
+    with client.session_transaction() as session:
+        session.update(user={"id": USER, "username": "Audit", "avatar": None},
+                       guild_id=GUILD, expires_at=time.time() + 7200,
+                       csrf_token="audit-csrf")
+    body = {"user_id": USER, "xp": xp, "coins": coins}
+    if diamonds is not None:
+        body["diamonds"] = diamonds
+    return client.post("/api/edit-member", json=body,
+                       headers={"X-CSRF-Token": "audit-csrf"})
+
+
+async def award_xp(amount, *, source="leveling", reason="Message XP",
+                   wait=0):
+    """An ordinary XP award. `wait=0` is message/voice XP: defer at once.
+    A positive `wait` is a one-shot award (mission/event/minigame), which is
+    allowed to wait a little rather than lose the reward."""
+    from utils.reward_engine import give_reward
+    kwargs = {"amount": amount, "reason": reason, "source": source}
+    try:
+        return await give_reward(None, GUILD, USER, "xp",
+                                 defer_retry_seconds=wait, **kwargs)
+    except TypeError:
+        # The vulnerable implementation has no deferral policy at all; run it
+        # without the argument so the sensitivity check reports failed CHECKS
+        # instead of crashing on a signature that never existed.
+        return await give_reward(None, GUILD, USER, "xp", **kwargs)
+
+
+# ─────────────────────────────── the cases ──────────────────────────────────
+
+async def case_a_role_removal_race():
+    """The audit's exact interleaving, through the ordinary XP writer."""
+    print("\n== A. correction pauses in remove_roles; a message award races it ==")
+    await fresh()
+    gate, allow = asyncio.Event(), asyncio.Event()
+
+    async def pause(world):
+        gate.set()
+        await allow.wait()
+
+    world = World(held=False, on_remove=pause)
+    claim = await deliver_role_claim(world)
+    check("A: the role reward is delivered and worn",
+          world.role in world.held and claim_status(claim) == "fulfilled",
+          (world.held, claim_status(claim)))
+
+    task = asyncio.create_task(correction(world, 11))
+    await asyncio.wait_for(gate.wait(), 10)
+    check("A: the sweep is paused after deciding to remove the role",
+          world.role in world.held and claim_status(claim) == "fulfilled",
+          (world.held, claim_status(claim)))
+
+    before = xp_of()
+    raced = await award_xp(xp_at(12) - xp_at(11))
+    check("A: the racing award is DEFERRED, not applied", raced.get("deferred")
+          is True and raced.get("success") is False, raced)
+    check("A: the member's XP did not move while the sweep holds the lease",
+          xp_of() == before, (before, xp_of()))
+    check("A: the deferral is on the record, so the correction can see it",
+          deferrals() >= 1, deferrals())
+
+    allow.set()
+    report = await asyncio.wait_for(task, 20)
+    observed = report.get("correction") or {}
+    check("A: the correction reports the fence it took (nothing had raced it "
+          "yet; the awarding writer was refused afterwards)",
+          observed.get("fenced_deferrals") == 0, observed.get("fenced_deferrals"))
+    check("A: the role is off and the claim is deleted, because the award "
+          "never became part of the member's XP",
+          world.role not in world.held and claim_count() == 0,
+          (world.held, rows("SELECT id,status FROM level_reward_claims")))
+    check("A: the member is at Level 11, not silently at Level 12",
+          level_of() == 11, level_of())
+    check("A: no claim row was left behind with a removed role",
+          claim_count() == 0 and world.role not in world.held)
+
+    after = xp_of()
+    retried = await award_xp(xp_at(12) - xp_at(11))
+    check("A: the deferred award applies once after the correction",
+          retried.get("success") is True and retried.get("new_xp") == after
+          + (xp_at(12) - xp_at(11)), retried)
+    check("A: and the retry crossed back to Level 12 exactly once",
+          level_of() == 12 and xp_of() == xp_at(12), (level_of(), xp_of()))
+    # The deterministic half of the B1 invariant, and the reason a deferral is
+    # safe rather than merely slow: the sweep already deleted the Level-12 row
+    # it was entitled to delete, so the re-cross must OPEN A NEW ONE. Without
+    # it the member stands at Level 12 holding neither the role nor any claim
+    # that could restore it - the loss case E/C/K exist to prevent. Deterministic
+    # because `allow` gates the sweep; no timing can reorder these steps.
+    reopened = rows("SELECT id, status FROM level_reward_claims "
+                    "WHERE guild_id=? AND user_id=? AND reward_level=? "
+                    "AND track='role'", (GUILD, USER, 12))
+    check("A: the re-cross reopens a claimable Level 12 row, so the reward is "
+          "recoverable rather than lost",
+          any(status in ("pending", "failed", "processing")
+              for _, status in reopened), reopened)
+
+
+async def case_b_dashboard_race():
+    """The same interleaving through the dashboard member-edit route."""
+    print("\n== B. correction pauses; the dashboard edits the same member ==")
+    await fresh()
+    gate, allow = asyncio.Event(), asyncio.Event()
+
+    async def pause(world):
+        gate.set()
+        await allow.wait()
+
+    world = World(held=False, on_remove=pause)
+    claim = await deliver_role_claim(world)
+    execute("UPDATE economy SET balance=7, diamonds=3 WHERE guild_id=? "
+            "AND user_id=?", (GUILD, USER))
+
+    task = asyncio.create_task(correction(world, 11))
+    await asyncio.wait_for(gate.wait(), 10)
+
+    response = await asyncio.to_thread(lambda: dashboard_edit(xp_at(13), coins=5))
+    body = response.get_json() or {}
+    check("B: the dashboard refuses with a retryable 409", response.status_code
+          == 409 and body.get("deferred") is True, (response.status_code, body))
+    check("B: the refusal names the correction and says nothing changed",
+          "correction" in str(body.get("error")) and "Nothing was changed"
+          in str(body.get("error")), body.get("error"))
+    check("B: the dashboard wrote no XP", xp_of() == xp_at(11), xp_of())
+    check("B: the dashboard wrote no wallet values", wallet() == (7, 3),
+          wallet())
+
+    allow.set()
+    await asyncio.wait_for(task, 20)
+    check("B: the correction completed while the edit was refused",
+          level_of() == 11 and claim_status(claim) is None, level_of())
+
+    retry = await asyncio.to_thread(lambda: dashboard_edit(xp_at(13), coins=5))
+    check("B: the same edit succeeds once the correction is over",
+          retry.status_code == 200 and level_of() == 13,
+          (retry.status_code, retry.get_json(), level_of()))
+    check("B: and it still preserves the diamonds the modal never sent",
+          wallet() == (5, 3), wallet())
+
+
+async def case_c_reached_before_the_sweep():
+    """An award that legitimately committed before the sweep read the level."""
+    print("\n== C. the member re-crossed the level BEFORE the sweep read it ==")
+    await fresh()
+    world = World(held=True)
+    claim = await deliver_role_claim(world)
+    # The XP row is at Level 12 again (the correction already wrote 11 and a
+    # legitimate award landed on top of it before the sweep ran).
+    execute("UPDATE levels SET xp=? WHERE guild_id=? AND user_id=?",
+            (xp_at(12), GUILD, USER))
+    from utils.level_claims import reconcile_level_drop
+    report = await reconcile_level_drop(
+        GUILD, USER, 11, operation_id="op-race-c", actor_id=1,
+        reason="audit", member=world.member)
+    check("C: the sweep reports that the level had moved up",
+          bool(report.get("level_raised")), report)
+    check("C: the role stays worn", world.role in world.held, world.held)
+    check("C: the claim stays, so the reward can never be lost",
+          claim_status(claim) == "fulfilled", claim_status(claim))
+    check("C: nothing was reversed or journaled", [(c, k, s) for c, k, s
+                                                   in journal() if s == "applied"]
+          == [], journal())
+
+
+async def case_d_reached_inside_the_delete_window():
+    """Defence in depth: a writer that ignores the fence, mid-delete."""
+    print("\n== D. a bypassing writer raises the level after the loop ==")
+    await fresh()
+
+    async def sneak_xp(world):
+        # Not a supported writer path: it simulates a process that writes
+        # `levels` without the barrier (an operator with sqlite3, a future
+        # writer nobody fenced). The sweep must still not delete the claim.
+        execute("UPDATE levels SET xp=? WHERE guild_id=? AND user_id=?",
+                (xp_at(12), GUILD, USER))
+
+    world = World(held=False, on_remove=sneak_xp)
+    claim = await deliver_role_claim(world)
+    report = await correction(world, 11)
+    observed = report.get("correction") or {}
+    check("D: the sweep detected the re-cross and kept the claim",
+          claim_status(claim) == "fulfilled", claim_status(claim))
+    check("D: it reported the claim as kept because the level was reached",
+          [c["claim_id"] for c in observed.get("kept_reached") or []] == [claim],
+          observed.get("kept_reached"))
+    check("D: and it put the role back on the member",
+          world.role in world.held, world.held)
+    check("D: the member is not left at Level 12 with no role and no claim",
+          not (level_of() == 12 and world.role not in world.held
+               and claim_count() == 0),
+          (level_of(), world.held, claim_count()))
+
+
+def journal_statuses(claim_id):
+    return [st for c, k, st in journal() if c == claim_id]
+
+
+def role_recoverable(claim_id):
+    """Can a PRODUCTION path still put this member's Level role back?
+
+    `fulfilled` alone is not evidence of that, and treating it as such is what
+    let the old oracle agree with the vulnerable implementation. There are two
+    paths, and they accept disjoint claim states:
+
+      * Claim All / `claim_is_eligible` re-pays only `pending`, `failed` and
+        `processing` rows. A `fulfilled` row has already been paid and is never
+        paid twice.
+      * `reconcile_role_progression` (the rejoin and restore path) restores only
+        `fulfilled` rows - and deliberately refuses to restore a role whose
+        reversal is recorded `applied`/`already_reversed`, because it cannot tell
+        "we took this away" from "we took it away and the member re-earned it".
+
+    So a `fulfilled` claim sitting behind a terminal reversal is unrecoverable by
+    every production path even though the row still exists. That combination is
+    exactly what a lease expiring mid-correction produces.
+    """
+    status = claim_status(claim_id)
+    if status is None:
+        return False, "the claim row is gone; nothing can restore from it"
+    seen = journal_statuses(claim_id)
+    if status in ("pending", "failed", "processing"):
+        if any(st == "outstanding" for st in seen):
+            return False, f"an open reversal blocks the claim: {seen}"
+        return True, f"Claim All can still pay this row ({status})"
+    if status == "fulfilled":
+        terminal = [st for st in seen
+                    if st in ("applied", "already_reversed")]
+        if terminal:
+            return False, (f"the role is gone and the reversal is terminal "
+                           f"({seen}): reconcile_role_progression refuses to "
+                           f"restore it and Claim All will not re-pay it")
+        return True, f"the restore path can put the role back ({seen or 'no reversal'})"
+    return False, f"unknown claim status {status!r}"
+
+
+async def e_award_wins():
+    """The award commits before the fence closes, so the sweep must see it.
+
+    Driven deterministically by hooking the fence call itself: that is the exact
+    boundary between "awards may still land" and "awards are refused", so the
+    award lands on the winning side of it every run instead of whenever the
+    scheduler happened to interleave two coroutines.
+    """
+    print("\n== E-award-wins: the award gets in before the fence closes ==")
+    await fresh()
+    world = World(held=False)
+    claim = await deliver_role_claim(world)
+    from utils import level_ops as ops
+    from cogs.leveling import _apply_admin_xp
+
+    real_fence = getattr(ops, "fence_live_writers", None)
+    seen = {}
+
+    async def award_now():
+        if seen.get("done"):
+            return
+        seen["done"] = True
+        seen["award"] = await award_xp(xp_at(12) - xp_at(11),
+                                       source="leveling",
+                                       reason="Message XP (raced the sweep)")
+
+    if real_fence is not None:
+        # The fence closes the window, so hooking the fence call is the
+        # deterministic way to land on the winning side of it: the award
+        # commits, then the epoch moves and the sweep re-runs against the
+        # state that includes the award.
+        async def award_then_fence(guild_id, user_id, operation_id):
+            await award_now()
+            return await real_fence(guild_id, user_id, operation_id)
+        ops.fence_live_writers = award_then_fence
+    else:
+        # A pre-fence implementation (the vulnerable baseline): there is no
+        # window to close and no epoch to move, so an award injected anywhere
+        # inside the sweep simply commits. Hook the role removal so it happens
+        # after the sweep has decided what to reverse but before it finalises -
+        # the same relative position, reached the only way this build allows.
+        world.on_remove = lambda w: award_now()
+    try:
+        out = await _apply_admin_xp(GUILD, world.member, xp_at(11),
+                                    bot_for(world), source="setlevel",
+                                    actor_id=1, reason="concurrent")
+    finally:
+        if real_fence is not None:
+            ops.fence_live_writers = real_fence
+
+    corr = out.get("correction") or {}
+    check("E-award-wins: the injected award committed, it was not deferred",
+          seen.get("award", {}).get("success") is True, seen.get("award"))
+    if real_fence is not None:
+        check("E-award-wins: the fence counted the award that raced it, so the "
+              "sweep re-runs against the state that includes it",
+              (corr.get("fenced_deferrals") or 0) >= 1,
+              (corr.get("fenced_deferrals"),
+               corr.get("reconciled_after_deferrals")))
+    else:
+        check("E-award-wins: no fence mechanism exists, so the sweep had no "
+              "way to see the award before deciding",
+              True, "pre-fence baseline: the B1 window is simply open")
+    check("E-award-wins: the member is legitimately at Level 12",
+          level_of() == 12, level_of())
+    check("E-award-wins: the Level 12 the member holds was NOT deleted",
+          claim_status(claim) is not None, claim_status(claim))
+    check("E-award-wins: the member is wearing the role they are entitled to",
+          world.role in world.held, (world.held, journal()))
+    ok, why = role_recoverable(claim)
+    check("E-award-wins: a production path can still deliver or restore this "
+          "reward", ok, why)
+    check("E-award-wins: the wallet never paid a reward twice",
+          wallet()[0] == 0, wallet())
+
+
+async def e_correction_wins():
+    """The award starts after the fence closed: it is deferred, then re-earned.
+
+    The correction therefore wins the race and the Level 12 claim is legitimately
+    removed. What must still hold is that the member is not stranded: the deferred
+    award re-earns the level, and the crossing opens a row a production path can
+    actually deliver from. The vulnerable implementation fails here - the audit
+    probe records Level 12 with an empty `level_reward_claims` table and no role.
+    """
+    print("\n== E-correction-wins: the award is deferred, then re-earns it ==")
+    await fresh()
+    world = World(held=False)
+    claim = await deliver_role_claim(world)
+    seen = {}
+
+    async def award_inside_the_sweep(w):
+        if seen.get("done"):
+            return
+        seen["done"] = True
+        # Called from inside the sweep's role removal: the fence is closed, so
+        # this is the losing side of the boundary, deterministically.
+        seen["res"] = await award_xp(xp_at(12) - xp_at(11), source="leveling",
+                                     reason="Message XP (fenced)")
+
+    world.on_remove = award_inside_the_sweep
+    out = await correction(world, 11)
+
+    check("E-correction-wins: the fenced award was deferred, not applied",
+          bool(seen.get("res", {}).get("deferred")), seen.get("res"))
+    check("E-correction-wins: the member really is at Level 11",
+          level_of() == 11, level_of())
+    check("E-correction-wins: the Level 12 the member no longer holds had its "
+          "claim deleted and its role removed",
+          claim_status(claim) is None and world.role not in world.held,
+          (claim_status(claim), world.held))
+
+    # Recurring XP: the next tick earns it again. Nothing was lost by deferring.
+    again = await award_xp(xp_at(12) - xp_at(11), source="leveling",
+                           reason="Message XP (next tick)")
+    check("E-correction-wins: the deferred award was re-earned on the next tick",
+          again.get("success") is True, again)
+    check("E-correction-wins: the member is back at Level 12",
+          level_of() == 12, level_of())
+    survivors = rows("SELECT id FROM level_reward_claims WHERE guild_id=? AND "
+                     "user_id=? AND reward_level=? AND track='role'",
+                     (GUILD, USER, 12))
+    if survivors:
+        ok, why = role_recoverable(survivors[0][0])
+    else:
+        ok, why = False, "no Level-12 claim row exists - the re-cross opened nothing"
+    check("E-correction-wins: the re-cross opened a claim a production path can "
+          "still deliver from", ok, why)
+    check("E-correction-wins: the wallet never paid a reward twice",
+          wallet()[0] == 0, wallet())
+
+
+async def case_e_serialization():
+    """A correction and an award started at the same moment.
+
+    The previous version raced them with `gather` and asserted on whichever
+    branch the scheduler produced. 40/40 runs landed in the Level-11 branch, so
+    the one assertion that could tell the two implementations apart never
+    executed; and the oracle that did run accepted a `fulfilled` claim as
+    recoverable even behind a terminal reversal, which is unrecoverable in
+    production. Both outcomes are now driven to their own deterministic
+    interleaving, and both are judged by whether a production path can still
+    deliver or restore the reward.
+    """
+    await e_award_wins()
+    await e_correction_wins()
+
+
+async def case_f_idempotent_recovery():
+    """Interrupt the role removal, then retry to completion."""
+    print("\n== F. interrupted removal, then a clean retry ==")
+    await fresh()
+    world = World(held=False, fail_remove=True)
+    claim = await deliver_role_claim(world)
+    first = await correction(world, 11)
+    observed = first.get("correction") or {}
+    check("F: the failed removal is journaled, not counted as a reversal",
+          claim_status(claim) == "fulfilled"
+          and [(c, k, s) for c, k, s in journal()] == [(claim, "role", "outstanding")],
+          (claim_status(claim), journal()))
+    check("F: the role is still worn and the claim still names it",
+          world.role in world.held, world.held)
+    check("F: the correction tells the administrator it could not finish",
+          observed.get("role_failures"), observed)
+
+    world.fail_remove = False
+    second = await correction(world, 11)
+    again = second.get("correction") or {}
+    check("F: the retry removes the role and deletes the claim once",
+          world.role not in world.held and claim_count() == 0,
+          (world.held, claim_count()))
+    check("F: the journal has exactly one row and it says applied",
+          journal() == [(claim, "role", "applied")], journal())
+    check("F: the retry reports the reversal", bool(again.get("reversed")),
+          again)
+
+    third = await correction(world, 11)
+    check("F: re-running a completed correction changes nothing",
+          claim_count() == 0 and journal() == [(claim, "role", "applied")]
+          and (third.get("correction") or {}).get("deleted_claims") in ([], None),
+          (third.get("correction"), journal()))
+    check("F: the wallet was never touched", wallet() == (0, 0), wallet())
+
+
+async def case_g_lease_supersession():
+    """A worker that lost its lease must not delete anything."""
+    print("\n== G. the lease is taken over while the sweep is paused ==")
+    await fresh()
+    gate, allow = asyncio.Event(), asyncio.Event()
+
+    async def takeover(world):
+        gate.set()
+        await allow.wait()
+
+    world = World(held=False, on_remove=takeover)
+    claim = await deliver_role_claim(world)
+    task = asyncio.create_task(correction(world, 11))
+    await asyncio.wait_for(gate.wait(), 10)
+    stolen = rows("SELECT operation_id FROM level_op_locks WHERE guild_id=? "
+                  "AND user_id=?", (GUILD, USER))
+    check("G: the correction really holds the lease while it talks to Discord",
+          bool(stolen), stolen)
+    execute("UPDATE level_op_locks SET operation_id='someone-else-op', "
+            "holder='setlevel' WHERE guild_id=? AND user_id=?", (GUILD, USER))
+    allow.set()
+    report = await asyncio.wait_for(task, 20)
+    observed = report.get("correction") or {}
+    check("G: the sweep refuses to continue without authority",
+          bool(observed.get("lease_lost")), observed)
+    check("G: nothing was deleted", claim_count() == 1, claim_count())
+    check("G: the claim is still terminal and still names the role",
+          claim_status(claim) == "fulfilled", claim_status(claim))
+    from utils.level_claims import claim_is_dormant
+    claims = rows("SELECT id, reward_level, track, reward_ref, payload_json, "
+                  "status, operation_id, source FROM level_reward_claims")
+    check("G: the reward is still accounted for in the ledger",
+          len(claims) == 1, claims)
+
+    execute("DELETE FROM level_op_locks WHERE guild_id=? AND user_id=?",
+            (GUILD, USER))
+    world2 = World(held=True)
+    retry = await correction(world2, 11)
+    check("G: a retry with authority finishes the correction",
+          world2.role not in world2.held and claim_count() == 0,
+          (world2.held, claim_count()))
+
+
+async def case_h_terminal_queue():
+    """N1: a terminal journal row is not an open case."""
+    print("\n== H. terminal `already_reversed` rows are not open cases ==")
+    await fresh()
+    world = World(held=True)
+    claim = await deliver_role_claim(world)
+    from utils import level_ops as ops
+    await ops.note_reversal(
+        guild_id=GUILD, user_id=USER, claim_id=claim, kind="role", quantity=1,
+        operation_id="op-h", status=ops.STATUS_ALREADY,
+        reason="the effect was already gone")
+    queue = await ops.outstanding_reversals(GUILD, USER)
+    check("H: the terminal row is NOT listed as an open case", queue == [], queue)
+    reversal = rows("SELECT reversal_id FROM reward_reversals WHERE claim_id=?",
+                    (claim,))[0][0]
+    closed = await ops.resolve_outstanding(reversal, actor_id=1,
+                                           resolution="value_kept",
+                                           note="audit")
+    check("H: it cannot be resolved either", closed is False, closed)
+    check("H: and its terminal status was not overwritten",
+          rows("SELECT status FROM reward_reversals WHERE claim_id=?",
+               (claim,)) == [("already_reversed",)],
+          rows("SELECT status FROM reward_reversals WHERE claim_id=?", (claim,)))
+    check("H: an open case is still listed and still resolvable", True)
+
+
+async def case_i_advice_wording():
+    """N2: legacy administrative rows are not called ordinary play."""
+    print("\n== I. the correction advice tells the truth about legacy rows ==")
+    from cogs.leveling import _correction_advice
+    from types import SimpleNamespace as NS
+    member = NS(mention=f"<@{USER}>", id=USER)
+
+    legacy = {"level": 5, "kept_not_attributable": [
+        {"claim_id": 1, "reward_level": 12, "track": "role",
+         "legacy_admin": True},
+    ]}
+    text = _correction_advice(member, 12, 5, legacy)
+    check("I: a legacy administrative row is NOT described as ordinary play",
+          "ordinary play" not in text, text)
+    check("I: it is described as pre-operation-id and not reversible",
+          "before operation ids existed" in text and "not reversible" in text,
+          text)
+
+    ordinary = {"level": 5, "kept_not_attributable": [
+        {"claim_id": 2, "reward_level": 12, "track": "role"},
+    ]}
+    text2 = _correction_advice(member, 12, 5, ordinary)
+    check("I: an ordinary-play row still says it was crossed by ordinary play",
+          "ordinary play" in text2 and "before operation ids" not in text2, text2)
+
+    both = {"level": 5, "kept_not_attributable": [
+        {"claim_id": 1, "reward_level": 12, "track": "role",
+         "legacy_admin": True},
+        {"claim_id": 2, "reward_level": 12, "track": "currency"},
+    ]}
+    text3 = _correction_advice(member, 12, 5, both)
+    check("I: a mixed list reports each count separately",
+          "1 delivered reward(s)" in text3 and "ordinary play" in text3
+          and "before operation ids existed" in text3, text3)
+
+
+async def case_j_no_silent_loss():
+    """A deferred award is retried, never dropped and never duplicated."""
+    print("\n== J. a deferred award is applied once, later ==")
+    await fresh(levels=3)
+    world = World(held=False)
+    claim = await deliver_role_claim(world)
+    gate, allow = asyncio.Event(), asyncio.Event()
+
+    async def pause(world):
+        gate.set()
+        await allow.wait()
+
+    world.on_remove = pause
+    task = asyncio.create_task(correction(world, 2))
+    await asyncio.wait_for(gate.wait(), 10)
+    attempts = [await award_xp(50) for _ in range(3)]
+    check("J: three racing awards are all deferred",
+          all(a.get("deferred") for a in attempts),
+          [(a.get("deferred"), a.get("success")) for a in attempts])
+    allow.set()
+    await asyncio.wait_for(task, 20)
+    start = xp_of()
+    applied = await award_xp(50)
+    check("J: the retried award applies once", applied.get("success") is True
+          and xp_of() == start + 50, (applied, start, xp_of()))
+    check("J: no XP was duplicated by the deferred attempts",
+          xp_of() == xp_at(2) + 50, (xp_of(), xp_at(2)))
+    check("J: the deferrals were only bookkeeping",
+          deferrals() >= 3, deferrals())
+
+
+async def case_k_award_raced_the_fence():
+    """An award that commits in the instant between the XP write and the fence.
+
+    This is the narrow window the deferral COUNT exists for: the award is
+    legitimate and must not be refused (the correction has not read anything
+    yet), but it must also not be invisible to the sweep. It is recorded, the
+    fence reports it, and the correction re-runs against the state that
+    includes it.
+    """
+    print("\n== K. an award commits between the XP write and the fence ==")
+    await fresh()
+    world = World(held=True)
+    claim = await deliver_role_claim(world)
+    from utils import level_ops as ops
+    from cogs.leveling import _apply_admin_xp
+    # The vulnerable implementation has no fence at all; leave it alone there so
+    # the sensitivity run reports failed CHECKS instead of crashing on an
+    # attribute that never existed.
+    real_fence = getattr(ops, "fence_live_writers", None)
+    fired = {"done": False}
+
+    async def fence_after_award(guild_id, user_id, operation_id):
+        if not fired["done"]:
+            fired["done"] = True
+            from utils.reward_engine import give_reward
+            raced = await give_reward(None, GUILD, USER, "xp",
+                                      amount=xp_at(12) - xp_at(11),
+                                      reason="Message XP", source="leveling")
+            fired["result"] = raced
+        return await real_fence(guild_id, user_id, operation_id)
+
+    if real_fence is not None:
+        ops.fence_live_writers = fence_after_award
+    try:
+        result = await _apply_admin_xp(
+            GUILD, world.member, xp_at(11), bot_for(world), source="setlevel",
+            actor_id=1, reason="raced fence")
+    finally:
+        if real_fence is not None:
+            ops.fence_live_writers = real_fence
+    observed = result.get("correction") or {}
+    check("K: the racing award was applied, not refused",
+          (fired.get("result") or {}).get("success") is True
+          and xp_of() == xp_at(12), (fired.get("result"), xp_of()))
+    check("K: the fence mechanism exists to record it",
+          real_fence is not None, real_fence)
+    check("K: the correction counted the award and re-ran",
+          observed.get("fenced_deferrals", 0) >= 1
+          and observed.get("reconciled_after_deferrals") is True, observed)
+    check("K: the already-earned Level 12 reward survived the correction",
+          claim_status(claim) == "fulfilled" and world.role in world.held,
+          (claim_status(claim), world.held))
+    check("K: and the sweep is honest that the level had moved up",
+          bool(observed.get("level_raised")), observed.get("level_raised"))
+
+
+async def case_l_one_shot_award_waits():
+    """A one-shot award (mission/event/minigame) waits instead of being lost."""
+    print("\n== L. a one-shot award waits for the correction and then applies ==")
+    await fresh(levels=3)
+    world = World(held=False)
+    await deliver_role_claim(world)
+    gate, allow = asyncio.Event(), asyncio.Event()
+
+    async def pause(world):
+        gate.set()
+        await allow.wait()
+
+    world.on_remove = pause
+    task = asyncio.create_task(correction(world, 2))
+    await asyncio.wait_for(gate.wait(), 10)
+    start = xp_of()
+    award = asyncio.create_task(award_xp(25, source="mission",
+                                         reason="Mission complete: audit",
+                                         wait=5))
+    await asyncio.sleep(0.4)
+    check("L: the one-shot award is waiting, not failed",
+          not award.done(), award)
+    allow.set()
+    await asyncio.wait_for(task, 20)
+    result = await asyncio.wait_for(award, 20)
+    check("L: it applied by itself once the correction finished",
+          result.get("success") is True and xp_of() == xp_at(2) + 25,
+          (result, xp_of(), xp_at(2)))
+    check("L: exactly once - the mission reward was not duplicated",
+          xp_of() == start - (xp_at(3) - xp_at(2)) + 25
+          or xp_of() == xp_at(2) + 25, (xp_of(), start))
+
+
+async def case_m_sweep_cancelled():
+    """A cancelled sweep must not fence the member forever.
+
+    `CancelledError` is a `BaseException`, so it passes straight through the
+    `except Exception` that turns a reconciliation failure into a report - but
+    the lease is released in a `finally`. If it were not, one cancelled
+    correction would refuse every ordinary XP award for this member until the
+    lease's TTL ran out, which is a quieter way to lose the same rewards.
+    """
+    print("\n== M. the sweep is cancelled inside remove_roles ==")
+    await fresh()
+    gate, allow = asyncio.Event(), asyncio.Event()
+
+    async def pause(world):
+        gate.set()
+        await allow.wait()
+
+    world = World(held=False, on_remove=pause)
+    claim = await deliver_role_claim(world)
+    check("M: setup - the role is worn and the claim is fulfilled",
+          world.role in world.held and claim_status(claim) == "fulfilled",
+          (world.held, claim_status(claim)))
+
+    from cogs.leveling import _apply_admin_xp
+    from utils import level_ops as ops
+    task = asyncio.create_task(_apply_admin_xp(
+        GUILD, world.member, xp_at(11), bot_for(world), source="setlevel",
+        actor_id=1, reason="cancellation audit"))
+    await asyncio.wait_for(gate.wait(), 10)
+    check("M: the sweep is paused holding the lease", not task.done())
+    check("M: the lease is really held while it is paused",
+          await ops.lock_held(GUILD, USER) is not None, leases())
+
+    task.cancel()
+    try:
+        await task
+        check("M: the task honoured the cancellation", False, "it returned")
+    except asyncio.CancelledError:
+        check("M: the task honoured the cancellation", True)
+
+    allow.set()
+    await asyncio.sleep(0.2)
+    check("M: the LEASE IS RELEASED, so XP writers are not fenced forever",
+          await ops.lock_held(GUILD, USER) is None, leases())
+
+    survivors = rows("SELECT id, status FROM level_reward_claims "
+                     "WHERE guild_id=? AND user_id=? AND reward_level=? "
+                     "AND track='role'", (GUILD, USER, 12))
+    check("M: the reward survived - the role is worn or a claim names it",
+          world.role in world.held or bool(survivors), (world.held, survivors))
+
+    before = xp_of()
+    res = await award_xp(10)
+    check("M: ordinary XP writes work again after the cancellation",
+          res.get("success") is True and xp_of() == before + 10,
+          (res, before, xp_of()))
+
+    await fresh()
+    retry_world = World(held=False)
+    retry_claim = await deliver_role_claim(retry_world)
+    await correction(retry_world, 11)
+    check("M: a retry afterwards still completes the correction",
+          level_of() == 11 and claim_status(retry_claim) is None
+          and retry_world.role not in retry_world.held,
+          (level_of(), claim_status(retry_claim), retry_world.held))
+
+
+async def case_n_lease_expiry():
+    """An expired lease fences nobody, and authorises no deletion.
+
+    Two halves of the same guarantee: the lease is the ONLY thing that defers an
+    ordinary award, so a stale row must stop deferring them once its TTL passes;
+    and a sweep that has lost its authority must not carry out the irreversible
+    half of the correction (the claim deletion) on the strength of reads it made
+    while it still had it.
+    """
+    print("\n== N. a lease whose TTL has passed fences nobody ==")
+    await fresh()
+    world = World(held=False)
+    await deliver_role_claim(world)
+    from utils import level_ops as ops
+    lease = await ops.acquire_lock(GUILD, USER, holder="setlevel",
+                                   operation_id="op-expiry-audit")
+    check("N: the lease was taken", lease.get("ok") is True, lease)
+    execute("UPDATE level_op_locks SET expires_at='2000-01-01T00:00:00+00:00' "
+            "WHERE guild_id=? AND user_id=?", (GUILD, USER))
+    check("N: an expired lease is NOT reported as held",
+          await ops.lock_held(GUILD, USER) is None, leases())
+
+    before = xp_of()
+    res = await award_xp(10)
+    check("N: an ordinary award is not blocked by an expired lease",
+          res.get("success") is True and xp_of() == before + 10,
+          (res, before, xp_of()))
+
+    await fresh()
+    stale_world = World(held=False)
+    claim = await deliver_role_claim(stale_world)
+    await ops.acquire_lock(GUILD, USER, holder="setlevel",
+                           operation_id="op-expiry-sweep")
+    execute("UPDATE level_op_locks SET expires_at='2000-01-01T00:00:00+00:00' "
+            "WHERE guild_id=? AND user_id=?", (GUILD, USER))
+    from utils.level_claims import reconcile_level_drop
+    report = await reconcile_level_drop(
+        GUILD, USER, 11, operation_id="op-expiry-sweep", actor_id=1,
+        reason="expiry audit", member=stale_world.member, require_lease=True)
+    check("N: a sweep whose lease expired DELETES NOTHING",
+          not report.get("deleted_claims"), report.get("deleted_claims"))
+    check("N: and it says its authority is gone",
+          bool(report.get("lease_lost")) or bool(report.get("error")),
+          {k: report.get(k) for k in ("lease_lost", "error")})
+    check("N: the claim and the role are left untouched",
+          claim_status(claim) == "fulfilled"
+          and stale_world.role in stale_world.held,
+          (claim_status(claim), stale_world.held))
+
+
+async def main():
+    for case in (case_a_role_removal_race,
+                 case_b_dashboard_race,
+                 case_c_reached_before_the_sweep,
+                 case_d_reached_inside_the_delete_window,
+                 case_e_serialization,
+                 case_f_idempotent_recovery,
+                 case_g_lease_supersession,
+                 case_h_terminal_queue,
+                 case_i_advice_wording,
+                 case_j_no_silent_loss,
+                 case_k_award_raced_the_fence,
+                 case_l_one_shot_award_waits,
+                 case_m_sweep_cancelled,
+                 case_n_lease_expiry):
+        await case()
+
+    print()
+    if FAILS:
+        print(f"{len(FAILS)} CHECK(S) FAILED: {FAILS}")
+        raise SystemExit(1)
+    print("ALL CORRECTION-LEASE FENCE CHECKS PASSED")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

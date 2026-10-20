@@ -7,6 +7,42 @@ class InsufficientItems(Exception):
     pass
 
 
+async def _consume_provenance(db, guild_id: int, user_id: int, item_name: str,
+                              quantity: int) -> None:
+    """Take units off attributable level-reward grants, FIFO. Fails closed.
+
+    Bookkeeping for `utils/level_ops.reward_grants`: after this runs, every later
+    reversal judges `remaining_quantity` as the number of that reward's units
+    still in the member's hands. If it silently failed while the inventory
+    decrement committed, `remaining_quantity` would keep counting units the member
+    no longer has, and a later correction would "reverse" a reward by removing
+    units that came from a quest, a trade or a purchase - the exact class of
+    unrelated-asset loss this provenance exists to prevent.
+
+    Every caller runs this inside the same `BEGIN IMMEDIATE` transaction as the
+    quantity change, so raising rolls BOTH back: the purchase/potion/drop/trade
+    does not happen, and no stale attribution survives. That is deliberately the
+    opposite of "never break a purchase": a refused action the member can retry is
+    recoverable; a silently wrong attribution is not.
+    """
+    from utils.level_ops import consume_grants
+    await consume_grants(db, guild_id, user_id, item_name, int(quantity))
+
+
+async def _invalidate_provenance(db, guild_id: int, user_id: int,
+                                 item_name: str, reason: str) -> None:
+    """Mark an item stack's reward provenance unusable. Fails closed.
+
+    `set_quantity()` writes an absolute quantity, so no grant for that stack can
+    be trusted afterwards. If this write failed while the absolute quantity
+    committed, the old `remaining_quantity` values would survive and a later
+    correction could treat the new stack as containing the old reward's units.
+    The caller's transaction is rolled back instead.
+    """
+    from utils.level_ops import invalidate_grants
+    await invalidate_grants(db, guild_id, user_id, item_name, reason)
+
+
 async def give_item(guild_id: int, user_id: int, item_name: str,
                      quantity: int = 1, item_type: str = "custom",
                      metadata: dict = None, source: str = "system",
@@ -79,6 +115,13 @@ async def remove_item(guild_id: int, user_id: int, item_name: str,
                 SET quantity = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE guild_id=? AND user_id=? AND item_name=?
             """, (new_qty, guild_id, user_id, item_name))
+            # Level-reward provenance: the units leaving the stack are taken off
+            # the oldest attributable reward grants first, inside this same
+            # transaction, so `reward_grants.remaining_quantity` keeps meaning
+            # "units of that reward that are still here". Without this the only
+            # way to judge a reversal would be the merged stack total, which
+            # cannot tell a reward's units from a quest's.
+            await _consume_provenance(db, guild_id, user_id, item_name, quantity)
             await db.commit()
             return new_qty
         except InsufficientItems:
@@ -115,7 +158,15 @@ async def set_quantity(guild_id: int, user_id: int, item_name: str,
                 item_type  = excluded.item_type,
                 metadata   = COALESCE(excluded.metadata, inventory_items.metadata),
                 updated_at = CURRENT_TIMESTAMP
-        """, (guild_id, user_id, item_name, item_type, quantity, meta_json, source))
+                """, (guild_id, user_id, item_name, item_type, quantity, meta_json, source))
+        # An absolute quantity write does not say which units it replaced, so
+        # after one runs no reward grant for this stack can be trusted. Giving up
+        # on that provenance explicitly is what stops a later reset from
+        # deducting another source's items on a guess.
+        await _invalidate_provenance(
+            db, guild_id, user_id, item_name,
+            "set_quantity() wrote an absolute quantity, which cannot be "
+            "attributed to individual grants")
         await db.commit()
     return quantity
 
@@ -147,6 +198,8 @@ async def drop_item(guild_id: int, user_id: int, item_name: str) -> dict:
                 DELETE FROM inventory_items
                 WHERE guild_id=? AND user_id=? AND item_name=?
             """, (guild_id, user_id, item_name))
+            await _consume_provenance(db, guild_id, user_id, item_name,
+                                      dropped_qty)
             await db.commit()
             return {"success": True, "item_name": item_name,
                     "quantity": dropped_qty, "item_type": dropped_type}

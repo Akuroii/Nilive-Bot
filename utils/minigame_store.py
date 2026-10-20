@@ -1,4 +1,5 @@
 import json
+import os
 import random
 import sqlite3
 from datetime import datetime, timezone
@@ -1182,6 +1183,117 @@ async def finish_run(log_id: int, status: str,
               first_winner.get("name") if first_winner else None,
               log_id))
         await db.commit()
+
+
+# Outcomes of a mark_run_resolved() attempt. Three, not two: whether the run
+# was already closed decides whether the round may still be paid, so it must
+# not be folded in with "there is nothing here to record".
+RESOLVED = "resolved"              # this call closed the run; grants committed
+ALREADY_CLOSED = "already_closed"  # row exists but is closed — do NOT pay here
+NO_RECORD = "no_record"            # no database, or no such run row
+
+
+async def mark_run_resolved(log_id: int, guild_id: int, status: str,
+                            granted: list[dict],
+                            xp_grants: list[tuple[int, int]],
+                            reason: str = "Minigame reward") -> str:
+    """
+    Close a round's crash window, in ONE transaction: the run row stops being
+    'running' AND every XP grant the round owes is queued.
+
+    `resolve()` guards against double-resolution with an in-memory flag, which
+    a restart erases. Until this commits, a crash leaves the run row 'running',
+    so the startup sweep finalizes it as aborted_restart, the winners exist
+    nowhere durable, and the XP is gone for good — the round can never be
+    re-resolved, because the engine object that owned it is gone too. After
+    this commits the grants are durable rows and the periodic drain applies
+    them, so a restart anywhere between here and `finish_run` still pays the
+    round exactly once.
+
+    `xp_grants` is a list of (user_id, amount). The UPDATE is guarded on
+    status='running', so a second resolve of the same run is a no-op rather
+    than a second set of grants; `INSERT OR IGNORE` on the idempotency key is
+    the backstop if that guard is ever raced.
+
+    Returns one of three outcomes, and the caller must not collapse them:
+
+      RESOLVED       This call closed the run and committed every grant. Pay
+                     the round.
+
+      ALREADY_CLOSED The run row exists but is no longer 'running', so some
+                     earlier attempt already owns this round. Do NOT pay here.
+                     That attempt's grants, if it committed any, are already
+                     durable rows and the periodic drain will apply them; anything
+                     paid now would be a SECOND grant for one round, and this
+                     call's freshly rolled amounts would not even match the
+                     winners that attempt recorded. If it committed no grant,
+                     the reward goes unpaid rather than being paid on a record
+                     this call did not write.
+
+      NO_RECORD      There is no database, or no row for this run, so there is
+                     no durable round for this call to own. Nothing was written.
+                     Pay the round: give_reward enqueues its own grant, so the
+                     award is still recoverable, and there is nothing here that
+                     a second payment could duplicate.
+
+    A genuine database problem RAISES rather than returning an outcome. The
+    caller has to be able to tell a failed write from a no-op: paying out on a
+    failed write is the exact crash window this function exists to close.
+
+    ALREADY_CLOSED is also how an ambiguous commit surfaces. If an attempt
+    committed and then raised, a retry sees the row closed and returns this —
+    which is correct, because that attempt's grants are already recoverable.
+    """
+    # Synchronous short-circuit, deliberately before the first await: if the
+    # database file does not exist then no run row does either, so there is no
+    # round here to make durable and nothing to protect. Returning without
+    # suspending also keeps resolve()'s timing free of a needless yield.
+    if not os.path.exists(DB_PATH):
+        return NO_RECORD
+
+    from utils.level_ops import enqueue_xp_grant
+    # mirror finish_run(): the legacy winner_id / winner_display_name columns
+    # are what rank_card_data.py and legacy UIs read, and finish_run() will be
+    # a no-op after this commits, so they have to be written here.
+    first_winner = next((w for w in granted if w.get("status") == "won"), None)
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "UPDATE minigames_log SET status = ?, winners_json = ?, "
+                "ended_at = ?, winner_id = ?, winner_display_name = ? "
+                "WHERE id = ? AND status = 'running'",
+                (status, _dump(granted), _now_iso(),
+                 first_winner.get("id") if first_winner else None,
+                 first_winner.get("name") if first_winner else None,
+                 log_id))
+            if cursor.rowcount != 1:
+                # Nothing was updated. Either the row is closed already (an
+                # earlier attempt owns this round, possibly one that committed
+                # and then raised) or there is no row at all. Those two demand
+                # opposite behaviour from the caller, so tell them apart on the
+                # same connection, inside the transaction, before rolling back.
+                probe = await db.execute(
+                    "SELECT status FROM minigames_log WHERE id = ?", (log_id,))
+                exists = await probe.fetchone() is not None
+                # Roll back the empty transaction rather than leaving a write
+                # lock held.
+                await db.execute("ROLLBACK")
+                return ALREADY_CLOSED if exists else NO_RECORD
+            for user_id, amount in xp_grants:
+                await enqueue_xp_grant(
+                    guild_id, user_id, amount,
+                    idem_key=f"minigame:{guild_id}:{log_id}:{user_id}",
+                    source="minigame", reason=reason, db=db)
+            await db.commit()
+            return RESOLVED
+        except Exception:
+            # in_transaction guard: if BEGIN IMMEDIATE itself failed there is
+            # no transaction to roll back, and ROLLBACK would raise a second,
+            # misleading error that masked the real one.
+            if db.in_transaction:
+                await db.execute("ROLLBACK")
+            raise
 
 
 async def get_history(guild_id: int, limit: int = 50,

@@ -84,6 +84,20 @@ class Scheduler(commands.Cog):
 
     @tasks.loop(seconds=60)
     async def check_scheduled(self):
+        # One-shot XP awards (missions, minigames, events, tag rewards) that a
+        # correction's fence refused stay queued until it is safe to write them.
+        # The caller-side drains settle most of them on the member's next
+        # activity; this sweep settles the rest, including everything left over
+        # when the process last stopped. Never allowed to break scheduling.
+        try:
+            from utils.level_ops import drain_xp_grants_sweep
+            swept = await drain_xp_grants_sweep()
+            if swept.get("applied"):
+                print(f"[SCHEDULER] settled {swept['applied']} queued XP "
+                      f"award(s) across {swept['members']} member(s)")
+        except Exception as e:
+            print(f"[SCHEDULER] queued-XP sweep failed: {e}")
+
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""

@@ -1,6 +1,7 @@
 import aiosqlite
 from datetime import datetime, timezone, timedelta
 from database import DB_PATH
+from utils.level_ops import enqueue_xp_grant, xp_amount_or_none
 from utils.timezone import (
     get_cairo_daily_key, get_cairo_weekly_key,
     seconds_until_cairo_midnight, seconds_until_cairo_saturday,
@@ -405,6 +406,19 @@ async def record_activities(bot, guild_id: int, user_id: int,
     Returns the list of mission dicts newly completed by this call
     (including any chained daily_completions completions).
     """
+    # Settle any one-shot award this member earned while a correction had them
+    # fenced, BEFORE deciding whether a mission completes. This has to run even
+    # when nothing matches below: the mission that earned a queued award is
+    # already `completed`, so its own grant path will never execute again - only
+    # a fresh activity can settle it. Cheap when nothing is queued.
+    try:
+        from utils.level_ops import drain_xp_grants
+        await drain_xp_grants(guild_id, user_id)
+    except Exception as e:
+        # A drain failure must never stop progress being recorded.
+        print(f"[MISSIONS] pending XP drain failed (guild={guild_id} "
+              f"user={user_id}): {e}")
+
     amounts = {t: a for t, a in (amounts or {}).items()
                if a and a > 0 and t in VALID_TYPES}
     if not amounts:
@@ -418,6 +432,11 @@ async def record_activities(bot, guild_id: int, user_id: int,
 
     now = datetime.now(timezone.utc)
     newly_completed = []
+    # period_key per completed mission, so the reward below can be queued under
+    # an idempotency key that names exactly this completion of exactly this
+    # period. Kept beside the list rather than written into the definition dicts
+    # because those are returned to (and rendered by) callers.
+    period_keys: dict[int, str] = {}
 
     async with aiosqlite.connect(DB_PATH) as db:
         for d in matching:
@@ -455,6 +474,26 @@ async def record_activities(bot, guild_id: int, user_id: int,
                     new_progress, int(just_completed),
                     now.isoformat() if just_completed else None,
                 ))
+                if just_completed and d["reward_type"] == "xp":
+                    # Queue the award in the SAME transaction that commits the
+                    # completion - this is the crash window. Once `completed=1`
+                    # is committed, re-recording the activity can never complete
+                    # this mission again, so a grant enqueued afterwards would
+                    # be the mission's only chance: a crash in between would
+                    # leave a completed mission whose XP was never recorded and
+                    # can never be re-earned. One transaction means either both
+                    # land or neither does, and the completion is then retried
+                    # by the next activity. `INSERT OR IGNORE` keeps a later
+                    # retry of this same period paying exactly once.
+                    xp_amount = xp_amount_or_none(d["reward_value"])
+                    if xp_amount is not None:
+                        await enqueue_xp_grant(
+                            guild_id, user_id, xp_amount,
+                            idem_key=(f"mission:{guild_id}:{user_id}:"
+                                      f"{d['id']}:{period_key}"),
+                            source="mission",
+                            reason=f"Mission complete: {d['name']}",
+                            db=db)
                 await db.commit()
             except Exception:
                 # in_transaction guard: if BEGIN IMMEDIATE itself failed
@@ -469,6 +508,7 @@ async def record_activities(bot, guild_id: int, user_id: int,
 
             if just_completed:
                 newly_completed.append(d)
+                period_keys[d["id"]] = period_key
 
     # Rewards AFTER the write loop (and outside the connection): a
     # broken reward config must not strand the remaining missions'
@@ -479,6 +519,16 @@ async def record_activities(bot, guild_id: int, user_id: int,
     for d in newly_completed:
         try:
             from utils.reward_engine import give_reward
+            # The completion row above is already COMMITTED, so re-recording the
+            # same activity will never complete this mission again. The reward
+            # therefore has exactly one chance unless it is made durable: an XP
+            # award refused by a correction's fence would be gone for good.
+            # `idempotency_key` queues it and retries until it lands, and makes
+            # a repeat of this same completion pay nothing.
+            idem = None
+            if d["reward_type"] == "xp":
+                idem = (f"mission:{guild_id}:{user_id}:{d['id']}:"
+                        f"{period_keys.get(d['id'])}")
             result = await give_reward(
                 bot, guild_id, user_id, d["reward_type"],
                 amount=d["reward_value"] if d["reward_type"] in ("coins", "diamonds", "xp") else None,
@@ -487,6 +537,7 @@ async def record_activities(bot, guild_id: int, user_id: int,
                 duration_hours=d.get("reward_duration_hours"),
                 reason=f"Mission complete: {d['name']}",
                 source="mission",
+                idempotency_key=idem,
             )
             if not result.get("success"):
                 print(f"[MISSIONS] Reward grant failed for mission "

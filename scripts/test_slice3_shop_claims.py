@@ -312,11 +312,21 @@ async def main():
     check("14 /rank was not given shop-claim behavior",
           "claim_available" not in rank_source and "leveling_shop_rewards" not in rank_source)
     level_source = inspect.getsource(Leveling.level.callback)
-    view_source = inspect.getsource(
-        __import__("cogs.leveling", fromlist=["LevelRewardView"]).LevelRewardView.claim_all)
+    view_cls = __import__("cogs.leveling", fromlist=["LevelRewardView"]).LevelRewardView
+    view_source = inspect.getsource(view_cls.claim_all)
+    # Claim All's body now lives in the shared _run_claim_pass(), so the
+    # separately labelled role-reconcile button runs the identical
+    # lease-protected pass instead of a second delivery path. The contract being
+    # checked is what a Claim All click DOES, so follow the delegation - and
+    # assert the delegation is real, so a stub could not satisfy this.
+    delegates = "_run_claim_pass" in view_source
+    if delegates:
+        view_source += inspect.getsource(view_cls._run_claim_pass)
     check("Claim All still defers and uses claim_available",
           "claim_available" in view_source and "defer" in view_source
-          and "ephemeral=True" in level_source and "process_purchase" not in level_source)
+          and "ephemeral=True" in level_source and "process_purchase" not in level_source
+          and (not delegates or "await self._run_claim_pass(interaction)"
+               in inspect.getsource(view_cls.claim_all)))
 
     print("ALL SLICE 3 CHECKS PASSED")
 

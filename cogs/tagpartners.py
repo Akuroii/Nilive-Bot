@@ -66,6 +66,13 @@ class TagPartners(commands.Cog):
                 role_id=reward_role_id,
                 reason="Cross-server tag partner reward",
                 source="tag_partner",
+                # The join-reward log is only written on success, so a refused
+                # award would normally be retried on the next join - which for a
+                # partner tag may never happen. Keying it makes the XP award
+                # durable instead of dependent on a repeat event.
+                idempotency_key=(
+                    f"tag_partner:{member.guild.id}:{partner_guild_id}:"
+                    f"{member.id}" if reward_type == "xp" else None),
             )
         except RewardError as e:
             print(f"[TAGPARTNERS] reward config error guild={member.guild.id} "
