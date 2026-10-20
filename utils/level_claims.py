@@ -1730,141 +1730,121 @@ async def reconcile_level_drop(guild_id: int, user_id: int, level: int, *,
 
     delete_ids = [int(c["claim_id"]) for c in report["deleted_claims"]]
     if delete_ids:
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                # ── last line of defence, inside the write transaction ──────
-                # 1. Re-read the persisted level. A legitimately re-crossed
-                #    reward level must keep BOTH its effect and its claim, or the
-                #    member loses a reward they are entitled to with no row left
-                #    to restore it from. Claims at or below `keep_level` are
-                #    dropped from the delete set here, not deleted and forgiven
-                #    later.
-                # 2. Re-assert ownership. A worker whose lease was superseded
-                #    while it waited for the write lock must not delete anything.
-                cursor = await db.execute(
-                    "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
-                    (guild_id, user_id))
-                row = await cursor.fetchone()
-                keep_level = max(effective, progress_level(row[0] if row else 0))
-                if keep_level > effective:
-                    report["level_raised"] = {
-                        "requested": int(level), "persisted": int(keep_level),
-                        "detected": "inside the delete transaction"}
-                level_of = {int(c["claim_id"]): int(c.get("reward_level") or 0)
-                            for c in report["deleted_claims"]}
-                reached = [cid for cid in delete_ids
-                           if level_of.get(cid, 0) <= keep_level]
-                if reached:
-                    for cid in reached:
-                        entry = next((c for c in report["deleted_claims"]
-                                      if int(c["claim_id"]) == cid), None)
-                        if entry is not None:
-                            report["kept_reached"].append(dict(
-                                entry,
-                                reason=("the member legitimately re-reached "
-                                        f"Level {level_of.get(cid)} while the "
-                                        "correction was running, so the reward "
-                                        "is still earned and both its effect "
-                                        "and its claim row are kept")))
-                    # The claim is kept, so any terminal journal row written
-                    # moments ago is no longer the last word: it records that
-                    # the effect was removed, and `reconcile_role_progression`
-                    # deliberately refuses to restore a role whose reversal is
-                    # `applied`. Close it as an administrative fact instead of a
-                    # reversal that still stands, in the SAME transaction, so a
-                    # rejoin can put the role back even if this process dies
-                    # before the in-line restore below.
-                    await db.execute(
-                        "UPDATE reward_reversals SET status=?, reason=reason || ? "
-                        "WHERE guild_id=? AND user_id=? AND kind=? "
-                        f"AND claim_id IN ({','.join('?' for _ in reached)}) "
-                        "AND status IN (?, ?)",
-                        ("resolved:level_reached",
-                         " | the member re-reached this reward level during the "
-                         "correction, so the claim and its effect are kept",
-                         guild_id, user_id, TRACK_ROLE, *reached,
-                         ops.STATUS_APPLIED, ops.STATUS_ALREADY))
-                    delete_ids = [cid for cid in delete_ids if cid not in reached]
-                    report["deleted_claims"] = [
-                        c for c in report["deleted_claims"]
-                        if int(c["claim_id"]) not in reached]
-                cursor = await db.execute(
-                    "SELECT operation_id, fence_epoch FROM level_op_locks "
-                    "WHERE guild_id=? AND user_id=? AND expires_at > ?",
-                    (guild_id, user_id, _ops_now()))
-                live = await cursor.fetchone()
-                ours = bool(live) and str(live[0]) == str(operation_id)
-                if (live and not ours) or (require_lease and not ours):
-                    await db.execute("ROLLBACK")
-                    if live and not ours:
-                        report["lease_lost"] = (
-                            f"operation {live[0]} took this member's lease while "
-                            f"the correction was running; no claim was deleted")
-                    else:
-                        report["lease_lost"] = (
-                            "this operation lost the member's lease before its "
-                            "claims could be deleted; no claim was deleted")
-                    delete_ids = []
-                if delete_ids:
-                    # Only now, with the delete set settled and authority
-                    # re-proved, does the fence move. Everything that raced the
-                    # sweep has committed (the write lock is ours) and is counted
-                    # in `deferred`; anything after this defers.
-                    await db.execute(
-                        "UPDATE level_op_locks SET fence_epoch=?, expires_at=? "
-                        "WHERE guild_id=? AND user_id=? AND operation_id=?",
-                        (_new_fence_epoch(), _fence_expiry(), guild_id,
-                         user_id, operation_id))
-                if delete_ids:
-                    # A boost's remaining duration is the effect itself; the row
-                    # is deleted here, in the same commit that removes the claim.
-                    await db.execute(
-                        f"DELETE FROM leveling_active_boosts WHERE guild_id=? "
-                        f"AND user_id=? AND source IN "
-                        f"({','.join('?' for _ in delete_ids)})",
-                        [guild_id, user_id]
-                        + [f"level_claim:{cid}" for cid in delete_ids])
-                    try:
+        level_of = {int(c["claim_id"]): int(c.get("reward_level") or 0)
+                    for c in report["deleted_claims"]}
+
+        # ── STEP 1: settle every claim the member legitimately re-reached ──────
+        # Last line of defence: a re-crossed reward level must keep BOTH its
+        # effect and its claim, or the member loses a reward they are entitled
+        # to with no row left to restore it from. So: keep the claim, undo any
+        # reversal this pass already applied to it, and close its journal row as
+        # an administrative fact rather than a standing reversal.
+        #
+        # This commits in its OWN transaction and is deliberately NOT gated on
+        # lease ownership. It only gives value back, so a worker that has lost
+        # its lease can still safely repair it. Keeping the repair out of the
+        # deletion transaction is the point: that transaction is rolled back
+        # whenever authority was lost, which is exactly when the repair is
+        # needed. Rolling the repair back with it is what previously left a
+        # `fulfilled` claim behind a terminal `applied` reversal with the wallet
+        # already debited - unrecoverable, because nothing restores the value
+        # and nothing re-pays the claim.
+        reached, keep_level = await _claims_reached_again(
+            guild_id, user_id, delete_ids, level_of, effective, report)
+        if reached:
+            report["restored_for_reached"] = await _settle_reached_reversals(
+                guild_id, user_id, reached, operation_id=operation_id)
+            delete_ids = [cid for cid in delete_ids if cid not in reached]
+            report["deleted_claims"] = [
+                c for c in report["deleted_claims"]
+                if int(c["claim_id"]) not in reached]
+
+        # ── STEP 2: delete the rest, gated on live authority ─────────────
+        # Only claims still genuinely above the corrected level are deleted, and
+        # only by a worker that can prove it still owns the lease.
+        if delete_ids:
+            async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    # Re-assert ownership: a worker whose lease was superseded
+                    # while it waited for the write lock must not delete
+                    # anything.
+                    cursor = await db.execute(
+                        "SELECT operation_id, fence_epoch FROM level_op_locks "
+                        "WHERE guild_id=? AND user_id=? AND expires_at > ?",
+                        (guild_id, user_id, _ops_now()))
+                    live = await cursor.fetchone()
+                    ours = bool(live) and str(live[0]) == str(operation_id)
+                    if (live and not ours) or (require_lease and not ours):
+                        await db.execute("ROLLBACK")
+                        if live and not ours:
+                            report["lease_lost"] = (
+                                f"operation {live[0]} took this member's lease while "
+                                f"the correction was running; no claim was deleted")
+                        else:
+                            report["lease_lost"] = (
+                                "this operation lost the member's lease before its "
+                                "claims could be deleted; no claim was deleted")
+                        delete_ids = []
+                    if delete_ids:
+                        # Only now, with the delete set settled and authority
+                        # re-proved, does the fence move. Everything that raced the
+                        # sweep has committed (the write lock is ours) and is counted
+                        # in `deferred`; anything after this defers.
                         await db.execute(
-                            "DELETE FROM temp_roles WHERE guild_id=? "
-                            "AND user_id=? AND source='level_claim' "
-                            "AND claim_id IN "
+                            "UPDATE level_op_locks SET fence_epoch=?, expires_at=? "
+                            "WHERE guild_id=? AND user_id=? AND operation_id=?",
+                            (_new_fence_epoch(), _fence_expiry(), guild_id,
+                             user_id, operation_id))
+                    if delete_ids:
+                        # A boost's remaining duration is the effect itself; the row
+                        # is deleted here, in the same commit that removes the claim.
+                        await db.execute(
+                            f"DELETE FROM leveling_active_boosts WHERE guild_id=? "
+                            f"AND user_id=? AND source IN "
                             f"({','.join('?' for _ in delete_ids)})",
-                            [guild_id, user_id] + delete_ids)
-                    except aiosqlite.Error:
-                        # `claim_id` is an added column. Fall back to the role
-                        # ids this correction is removing - never to `source`
-                        # alone, which would take units belonging to other
-                        # claims.
-                        role_ids = sorted({
-                            int(c["role_id"])
-                            for c in report["deleted_claims"]
-                            if c.get("role_id") is not None})
-                        if role_ids:
+                            [guild_id, user_id]
+                            + [f"level_claim:{cid}" for cid in delete_ids])
+                        try:
                             await db.execute(
                                 "DELETE FROM temp_roles WHERE guild_id=? "
                                 "AND user_id=? AND source='level_claim' "
-                                "AND role_id IN "
-                                f"({','.join('?' for _ in role_ids)})",
-                                [guild_id, user_id] + role_ids)
-                    cursor = await db.execute(
-                        "DELETE FROM level_reward_claims WHERE guild_id=? "
-                        "AND user_id=? AND status='fulfilled' AND id IN "
-                        f"({','.join('?' for _ in delete_ids)})",
-                        [guild_id, user_id] + delete_ids)
-                    if cursor.rowcount != len(delete_ids):
-                        # The lease should make this impossible; if it happens,
-                        # say so instead of reporting a clean result. The
-                        # reversal journal still names every claim, so the case
-                        # is traceable.
-                        report["delete_mismatch"] = {
-                            "expected": len(delete_ids),
-                            "deleted": int(cursor.rowcount or 0)}
-                await db.commit()
-            except Exception:
-                await db.execute("ROLLBACK")
-                raise
+                                "AND claim_id IN "
+                                f"({','.join('?' for _ in delete_ids)})",
+                                [guild_id, user_id] + delete_ids)
+                        except aiosqlite.Error:
+                            # `claim_id` is an added column. Fall back to the role
+                            # ids this correction is removing - never to `source`
+                            # alone, which would take units belonging to other
+                            # claims.
+                            role_ids = sorted({
+                                int(c["role_id"])
+                                for c in report["deleted_claims"]
+                                if c.get("role_id") is not None})
+                            if role_ids:
+                                await db.execute(
+                                    "DELETE FROM temp_roles WHERE guild_id=? "
+                                    "AND user_id=? AND source='level_claim' "
+                                    "AND role_id IN "
+                                    f"({','.join('?' for _ in role_ids)})",
+                                    [guild_id, user_id] + role_ids)
+                        cursor = await db.execute(
+                            "DELETE FROM level_reward_claims WHERE guild_id=? "
+                            "AND user_id=? AND status='fulfilled' AND id IN "
+                            f"({','.join('?' for _ in delete_ids)})",
+                            [guild_id, user_id] + delete_ids)
+                        if cursor.rowcount != len(delete_ids):
+                            # The lease should make this impossible; if it happens,
+                            # say so instead of reporting a clean result. The
+                            # reversal journal still names every claim, so the case
+                            # is traceable.
+                            report["delete_mismatch"] = {
+                                "expected": len(delete_ids),
+                                "deleted": int(cursor.rowcount or 0)}
+                    await db.commit()
+                except Exception:
+                    await db.execute("ROLLBACK")
+                    raise
 
     # A claim kept because the member re-reached its level ORDERS that the role
     # be worn. The sweep may already have taken it off before that became
@@ -1881,12 +1861,129 @@ async def reconcile_level_drop(guild_id: int, user_id: int, level: int, *,
     return report
 
 
+async def _claims_reached_again(guild_id: int, user_id: int,
+                                delete_ids: list, level_of: dict,
+                                effective: int, report: dict):
+    """Which of these claims the member is legitimately at or above again.
+
+    Read in one transaction: the persisted level is the floor, so a level that
+    moved up while the sweep was reversing is honoured rather than corrected
+    away. Reports the difference instead of being silent about it.
+    """
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id))
+            row = await cursor.fetchone()
+            keep_level = max(int(effective), progress_level(row[0] if row else 0))
+            await db.commit()
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+    if keep_level > int(effective):
+        report["level_raised"] = {
+            "requested": int(effective), "persisted": int(keep_level),
+            "detected": "inside the settle transaction"}
+    reached = [cid for cid in delete_ids if level_of.get(cid, 0) <= keep_level]
+    for cid in reached:
+        entry = next((c for c in report["deleted_claims"]
+                      if int(c["claim_id"]) == cid), None)
+        if entry is not None:
+            report["kept_reached"].append(dict(
+                entry,
+                reason=("the member legitimately re-reached "
+                        f"Level {level_of.get(cid)} while the correction was "
+                        "running, so the reward is still earned and both its "
+                        "effect and its claim row are kept")))
+    return reached, keep_level
+
+
+async def _settle_reached_reversals(guild_id: int, user_id: int,
+                                    reached: list, *,
+                                    operation_id: str) -> list[dict]:
+    """Give back what this pass already took from claims it is now keeping.
+
+    A claim the member has legitimately re-reached is KEPT, so any reversal this
+    sweep already applied to it was a mistake it must undo - otherwise the member
+    keeps the claim row (and can never be paid again, because `fulfilled` is
+    terminal) while the wallet was debited and the reversal journal says
+    `applied`. That combination is an unrecoverable reward: nothing restores the
+    value and nothing re-pays it.
+
+    Runs in its own transaction and commits on its own, deliberately NOT gated on
+    lease ownership. It only gives value back, so a worker that has lost its
+    lease can still safely repair; and keeping it out of the deletion
+    transaction is the point, because that transaction is rolled back whenever
+    authority was lost - which previously discarded the repair exactly when it
+    was needed (a lease expiring during a Discord round-trip).
+
+    Idempotent by journal status: only an `applied`/`already_reversed` row still
+    has value to give back, and the row is closed to `resolved:level_reached` as
+    it is settled, so a retry finds nothing to do. Never debits or credits twice.
+    """
+    if not reached:
+        return []
+    from utils import level_ops as ops
+    settled: list[dict] = []
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            placeholders = ",".join("?" for _ in reached)
+            cursor = await db.execute(
+                "SELECT reversal_id, claim_id, kind, currency, item_name, "
+                "quantity, status FROM reward_reversals WHERE guild_id=? "
+                f"AND user_id=? AND claim_id IN ({placeholders}) "
+                "AND status IN (?, ?) ORDER BY id",
+                (guild_id, user_id, *reached, ops.STATUS_APPLIED,
+                 ops.STATUS_ALREADY))
+            rows_found = await cursor.fetchall()
+            for (rev_id, claim_id, kind, currency, item_name, quantity,
+                 status) in rows_found:
+                quantity = int(quantity or 0)
+                note = {"claim_id": int(claim_id), "kind": kind,
+                        "status": status}
+                if kind == ops.KIND_CURRENCY and currency and quantity > 0:
+                    from utils.economy_safe import safe_credit
+                    await safe_credit(
+                        guild_id, user_id, quantity, currency,
+                        reason=(f"level correction: Level reward re-earned by "
+                                f"the member, reversal {rev_id} undone"),
+                        source="level_correction_restore", db=db)
+                    note["credited"] = {currency: quantity}
+                elif kind == ops.KIND_INVENTORY and item_name and quantity > 0:
+                    from utils.inventory import give_item
+                    await give_item(
+                        guild_id, user_id, item_name, quantity,
+                        source="level_correction_restore", db=db)
+                    note["returned"] = {item_name: quantity}
+                # A role has no fungible value to hand back: it is restored from
+                # the surviving claim by `restore_reached_level_roles` below, and
+                # closing the row here is what lets that restore see the claim.
+                await db.execute(
+                    "UPDATE reward_reversals SET status=?, reason=reason || ? "
+                    "WHERE reversal_id=? AND status IN (?, ?)",
+                    ("resolved:level_reached",
+                     " | the member re-reached this reward level during the "
+                     "correction, so the reversal was undone and the claim and "
+                     "its effect are kept", rev_id, ops.STATUS_APPLIED,
+                     ops.STATUS_ALREADY))
+                settled.append(note)
+            await db.commit()
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+    return settled
+
+
 async def _reverse_correction_claim(claim: dict, report: dict, *,
                                     guild_id: int, user_id: int, level: int,
                                     operation_id: str, member,
                                     free_credits: list,
                                     reason: str | None = None,
                                     reversed_by: int | None = None,
+                                    require_lease: bool = False,
                                     exclude_claim_ids=frozenset()) -> None:
     """Reverse ONE delivered reward, or record precisely why it was kept.
 
@@ -1982,6 +2079,7 @@ async def _reverse_correction_claim(claim: dict, report: dict, *,
                 claim, report, guild_id=guild_id, user_id=user_id,
                 role_id=role_id, level=level, operation_id=operation_id,
                 member=member, exclude_item=item_name,
+                require_lease=require_lease,
                 exclude_claim_ids=exclude_claim_ids)
             if not role_outcome:
                 return              # already reported: the role keeps it
@@ -2045,6 +2143,7 @@ async def _reverse_correction_claim(claim: dict, report: dict, *,
             claim, report, guild_id=guild_id, user_id=user_id,
             role_id=payload.get("role_id"), level=level,
             operation_id=operation_id, member=member,
+            require_lease=require_lease,
             exclude_claim_ids=exclude_claim_ids)
         if removed:
             report["deleted_claims"].append(dict(
@@ -2059,6 +2158,7 @@ async def _reverse_correction_role(claim: dict, report: dict, *,
                                    guild_id: int, user_id: int, role_id,
                                    level: int, operation_id: str, member,
                                    exclude_item: str | None = None,
+                                   require_lease: bool = False,
                                    exclude_claim_ids=frozenset()) -> bool:
     """Take a reward role off the member, or record why it stays.
 
@@ -2168,6 +2268,16 @@ async def _reverse_correction_role(claim: dict, report: dict, *,
         return False
 
     if worn:
+        # ── lease maintenance across the Discord round-trip ────────────────
+        # The lease's 90 s clock is wall-clock time and this await is the one
+        # place in the sweep that can spend it. Renewing only at the top of the
+        # claim loop is not enough: the expiry can land between iterations, and
+        # specifically while Discord is answering this call. Renew first so an
+        # ordinary round-trip does not cost the sweep its authority.
+        try:
+            await ops.renew_lock(guild_id, user_id, operation_id)
+        except Exception:
+            pass        # a failed renewal is caught by the re-check below
         try:
             await member.remove_roles(
                 role, reason=f"Level correction: Level {claim['reward_level']} "
@@ -2184,6 +2294,30 @@ async def _reverse_correction_role(claim: dict, report: dict, *,
             report["kept_unresolved"].append(dict(
                 _claim_brief(claim), kind=ops.KIND_ROLE,
                 reason=f"Discord refused the role removal: {exc}"))
+            return False
+        # The role is off the member. Re-assert authority BEFORE recording that
+        # as terminal, because a terminal row is forever: if the lease expired
+        # while Discord was working, this worker can no longer delete the claim
+        # - and a surviving `fulfilled` claim behind a terminal `applied` row is
+        # unrecoverable (`reconcile_role_progression` refuses to restore it, and
+        # Claim All never re-pays a fulfilled row). An OPEN case is retried and
+        # resolved; a terminal one just closes the door. Record what is true.
+        lost = await _lease_problem(guild_id, user_id, operation_id,
+                                    require_lease)
+        if lost:
+            report["lease_lost"] = lost
+            await ops.note_reversal(
+                guild_id=guild_id, user_id=user_id, claim_id=claim_id,
+                kind=ops.KIND_ROLE, quantity=1, operation_id=operation_id,
+                status=ops.STATUS_OUTSTANDING, role_id=role_id,
+                reason="the role was removed but the lease expired before the "
+                       "claim could be finalised, so the removal is recorded as "
+                       "open rather than terminal: a retry completes it, and an "
+                       "open case can be resolved by hand")
+            report["kept_unresolved"].append(dict(
+                _claim_brief(claim), kind=ops.KIND_ROLE,
+                reason="the role was removed but authority was lost before the "
+                       "claim could be finalised, so the reversal is open"))
             return False
     # role is None (deleted in the guild) or not held: there is no live effect.
     await ops.note_reversal(

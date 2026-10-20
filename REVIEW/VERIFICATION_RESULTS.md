@@ -505,12 +505,17 @@ Base for this round: PR head `29af13c` (round 4). Committed to the session
 branch `arena/077d2ec7-nilive-bot`. `main` (`02fbfee`) untouched; PR #98 open,
 not marked ready, nothing merged or deployed.
 
-Akuroi's round-4 review held `29af13c` with four open items. This round
-addresses **#1 (one-shot XP reward permanently lost)** and **#4 (case E oracle
-is wrong)**. Items **#2 (P1, lease expiry leaves a role permanently missing)**
-and **#3 (P2, currency reversal leaves claim and balance inconsistent) are NOT
-implemented** — see "Not done" below. This is stated rather than glossed: the
-PR is not ready and is not claimed to be.
+Akuroi's round-4 review held `29af13c` with four open items. All four are
+addressed in this round:
+
+* **#1** one-shot XP reward permanently lost — fixed.
+* **#2 (P1)** lease expiry leaves a role permanently missing — fixed.
+* **#3 (P2)** currency reversal leaves claim and balance inconsistent — fixed.
+* **#4** case E oracle is wrong and does not discriminate — fixed.
+
+Each has a deterministic regression that fails before the change and passes
+after it. See "Remaining risks" for what this round does *not* cover; the PR
+stays open and is not claimed to be ready.
 
 ## #1 — One-shot XP reward permanently lost (FIXED)
 
@@ -611,34 +616,76 @@ The old oracle reported PASS for the first of these.
 
 Cases A, B, C, D, F, G, H, I, J, K, L, M, N are preserved unchanged.
 
-## Not done — #2 (P1) and #3 (P2)
+## #2 (P1) and #3 (P2) — lease expiry leaves a role / a balance unrecoverable
 
-Both remain open and both are real. Root causes from the round-4 reproductions:
+**Root cause (both).** The correction's repair and its deletion were one
+`BEGIN IMMEDIATE` transaction. When the re-cross check found that the member had
+legitimately re-earned a level, it closed the reversal journal and dropped the
+claim from the delete set — but the very next step in that *same* transaction
+re-asserted lease ownership and rolled everything back when the lease had
+expired. So the repair was discarded exactly when it was needed, which is what
+produced the two symptoms:
 
-* **P1** — lease expiry inside the Discord `remove_roles` await of
-  `_reverse_correction_claim` (`utils/level_claims.py:1885`). The role comes off,
-  authority is lost before DB cleanup, and the result is `claim=fulfilled` +
-  journal `applied`: `reconcile_role_progression` skips that pair and
-  `outstanding_reversals` is empty, so nothing restores it. The claim loop
-  re-checks the lease only at the top of each iteration, which does not cover
-  time spent awaiting Discord.
-* **P2** — the currency branch of `_reverse_correction_claim`
-  (`utils/level_claims.py:1921–1969`) debits first and appends to
-  `deleted_claims` on `applied`/`already_reversed`; at expiry the final guard
-  reports the reward kept while the wallet is already debited. It does not
-  reproduce with a live fenced lease and all writers normal — it is a specific
-  expiry/finalization interleaving.
+* **P1 (role)** — the sweep removes the role, the lease expires during the
+  Discord round-trip, authority is lost before the DB cleanup. Result: claim
+  `fulfilled` + journal `applied`. `reconcile_role_progression` deliberately
+  refuses to restore a role whose reversal is terminal, and `fulfilled` is
+  terminal for Claim All, so the role is gone with no open case and no way back.
+* **P2 (currency)** — the currency branch debits first and only then decides. At
+  expiry the final guard reports the reward KEPT while the wallet is already
+  debited: Level 12, wallet debited, claim `fulfilled`, and Claim All cannot
+  compensate.
 
-Neither is addressed by this commit. Fixing P1 needs lease renewal across the
-Discord await plus a post-side-effect recovery path that leaves an *open* case
-rather than a terminal one; that is a change to the correction's authority
-handling, not a local patch, and it was not going to be done carefully in the
-budget left in this round. It is listed here so the gap is explicit rather than
-implied.
+**Fix — split repair from deletion, and make the repair unconditional.**
 
-`probe2_lease_expiry_role.py` and `probe3_currency_expiry.py` remain ad-hoc
-probes for this reason: promoted as rc=0 regressions they would fail, and a
-regression that fails by design is worse than an honest gap.
+* `reconcile_level_drop` is now two steps. **STEP 1** (`_claims_reached_again` +
+  `_settle_reached_reversals`) settles every claim the member legitimately
+  re-reached: it re-reads the persisted level, and for each kept claim it
+  **gives back** what the pass already took — `safe_credit` for currency,
+  `give_item` for inventory — and closes the journal row as
+  `resolved:level_reached` instead of a standing reversal. **STEP 2** deletes the
+  rest, still gated on live authority.
+* STEP 1 commits in its own transaction and is deliberately **not** gated on
+  lease ownership. It only gives value back, so a worker that has lost its lease
+  can still safely repair. Keeping it out of the deletion transaction is the
+  point: that transaction is rolled back whenever authority was lost. Rolling the
+  repair back with it is precisely what produced both defects.
+* Idempotent by journal status: only an `applied`/`already_reversed` row still
+  has value to give back, and it is closed as it is settled, so a retry finds
+  nothing to do. No double debit, no double credit.
+* `_reverse_correction_role` now renews the lease around the Discord
+  `remove_roles` await, and — if authority was lost while Discord was working —
+  records the removal as an **open** (`outstanding`) case rather than a terminal
+  one. A terminal row is forever; an open one is retried and resolvable.
+  `require_lease` is threaded from `reconcile_level_drop` through
+  `_reverse_correction_claim` to `_reverse_correction_role`.
+
+**Regressions** (both promoted from the round-4 probes, both deterministic):
+
+* `scripts/test_lease_expiry_role_recovery.py` — expiry is simulated by pausing
+  inside `member.remove_roles`, which is where a real Discord round-trip spends
+  the time that outlives the TTL. Asserts eligibility, the surviving claim and
+  the reversal journal **together** permit recovery, and that no terminal row is
+  left behind a surviving claim. `fulfilled` alone is explicitly not accepted as
+  evidence.
+* `scripts/test_currency_reversal_consistency.py` — `ops.reverse_currency` is
+  wrapped so the re-cross award lands immediately after the debit commits and
+  before the sweep finalises, which is the expiry/finalisation boundary the
+  defect needs (it does not reproduce with a live fenced lease and every writer
+  normal). Asserts the final wallet balance **and** the claim/journal state, and
+  that the restore is not a double credit.
+
+**Discrimination** — both fail on `29af13c` and pass on this head:
+
+| regression | `29af13c` | fixed head |
+|---|---|---|
+| `test_lease_expiry_role_recovery` | exit 1 — `recoverable = False`, journal `applied` | exit 0 |
+| `test_currency_reversal_consistency` | exit 1 — wallet `0` while claim kept | exit 0 |
+
+They do **not** discriminate against `a8ef28f`, and that is expected rather than
+a weakness: `a8ef28f` predates the fence entirely, so the lease never blocks the
+re-cross award there and neither expiry interleaving can arise. The correct
+baseline for these two is the round-4 head where they were demonstrated.
 
 ## Commands and results
 
@@ -651,12 +698,16 @@ OWNER_ID=1 SECRET_KEY=test DISCORD_TOKEN=test NERO_ENVIRONMENT=test \
 
 | suite | result |
 |---|---|
-| `scripts/test_correction_lease_fence.py` | 14 cases, all PASS (exit 0) |
-| `scripts/test_one_shot_xp_durability.py` | 19 checks, all PASS (exit 0) |
-| `scripts/test_inflight_role_correction.py` | all PASS (exit 0) |
+| `scripts/test_correction_lease_fence.py` | 14 cases, 89 checks, all PASS (exit 0) |
+| `scripts/test_one_shot_xp_durability.py` | 21 checks, all PASS (exit 0) |
+| `scripts/test_lease_expiry_role_recovery.py` | all PASS (exit 0); exit 1 on `29af13c` |
+| `scripts/test_currency_reversal_consistency.py` | all PASS (exit 0); exit 1 on `29af13c` |
+| `scripts/test_inflight_role_correction.py` | 134 checks, all PASS (exit 0) |
+| `scripts/test_level_ops_provenance.py` | all PASS (exit 0) |
+| `scripts/test_slice2_level_claims.py` | 26 checks, all PASS (exit 0) |
 | `scripts/test_xp_safety_audit.py` | 121 passed, 0 failed |
 | `scripts/test_leveling_caller_integrations.py` | all PASS |
-| full Python suite, fixed head | 65 scripts: **62 OK, 3 BAD** |
+| full Python suite, fixed head | 68 scripts: **65 OK, 3 BAD** |
 | full Python suite, `a8ef28f` | 65 scripts: 61 OK, 4 BAD |
 | `pytest scripts/test_shop_publications.py` | 23 passed |
 | `npm test` | 17 harnesses, 148/148 checks |
@@ -685,10 +736,24 @@ Two failures were introduced and fixed during this round:
 
 ## Remaining risks
 
-* P1 and P2 are open, as above.
+* **Lease renewal is still not continuous.** `_reverse_correction_role` renews
+  around the role-removal await and re-asserts afterwards, and the claim loop
+  re-checks at the top of each iteration. But a correction spanning many claims
+  with slow Discord round-trips can still exhaust the 90 s TTL between those
+  points. What changed is the consequence, not the possibility: losing authority
+  now leaves an open, recoverable case instead of a terminal one. Extending
+  renewal to the currency and inventory awaits is a follow-up, not done here.
+* **The repair is unconditional by design, so it must stay read-only in spirit.**
+  STEP 1 commits without re-proving the lease because it only gives value back.
+  If a future change makes it take anything, that reasoning no longer holds and
+  the split must be revisited.
+* **`restore_reached_level_roles` is the only role-restoration path exercised.**
+  It runs in-process at the end of the sweep. A member who rejoins later relies
+  on `reconcile_role_progression` seeing the now-closed journal row, which the
+  new regression checks by state but not by driving a real rejoin.
 * Multi-process SQLite contention is still unverified; everything here is
   single-process with fake Discord objects. Nothing in this round speaks to live
   Discord role/permission/429 behaviour or to Railway.
-* The sweep's lease is checked at the top of each claim iteration only. On a
-  slow worker with many claims, a correction spanning more than the 90 s TTL can
-  still lose authority mid-pass; that is P1's mechanism and is unfixed.
+* `test_afk.py`, `test_leveling_voice_hard_blocks.py` and
+  `test_phase2_backend.py` fail identically before and after; the third is
+  timing-sensitive on a 2-CPU box and is not proven by this run.
