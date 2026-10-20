@@ -1185,10 +1185,18 @@ async def finish_run(log_id: int, status: str,
         await db.commit()
 
 
+# Outcomes of a mark_run_resolved() attempt. Three, not two: whether the run
+# was already closed decides whether the round may still be paid, so it must
+# not be folded in with "there is nothing here to record".
+RESOLVED = "resolved"              # this call closed the run; grants committed
+ALREADY_CLOSED = "already_closed"  # row exists but is closed — do NOT pay here
+NO_RECORD = "no_record"            # no database, or no such run row
+
+
 async def mark_run_resolved(log_id: int, guild_id: int, status: str,
                             granted: list[dict],
                             xp_grants: list[tuple[int, int]],
-                            reason: str = "Minigame reward") -> bool:
+                            reason: str = "Minigame reward") -> str:
     """
     Close a round's crash window, in ONE transaction: the run row stops being
     'running' AND every XP grant the round owes is queued.
@@ -1207,25 +1215,41 @@ async def mark_run_resolved(log_id: int, guild_id: int, status: str,
     than a second set of grants; `INSERT OR IGNORE` on the idempotency key is
     the backstop if that guard is ever raced.
 
-    Returns True if this call resolved the run, False if nothing needed doing.
+    Returns one of three outcomes, and the caller must not collapse them:
 
-    False is a NO-OP, not a failure, and covers two cases that must stay
-    indistinguishable to the caller because both mean "there is no record for
-    this call to write": the run row was already closed by whoever now owns the
-    round (its grants were enqueued then, so enqueuing again here would be a
-    second record for one award), and there being no database at all.
+      RESOLVED       This call closed the run and committed every grant. Pay
+                     the round.
 
-    A genuine database problem RAISES rather than returning False. The caller
-    has to be able to tell the two apart: treating a failed write as a no-op
-    would let it hand the XP out with no durable record behind it, which is the
-    exact crash window this function exists to close.
+      ALREADY_CLOSED The run row exists but is no longer 'running', so some
+                     earlier attempt already owns this round. Do NOT pay here.
+                     That attempt's grants, if it committed any, are already
+                     durable rows and the periodic drain will apply them; anything
+                     paid now would be a SECOND grant for one round, and this
+                     call's freshly rolled amounts would not even match the
+                     winners that attempt recorded. If it committed no grant,
+                     the reward goes unpaid rather than being paid on a record
+                     this call did not write.
+
+      NO_RECORD      There is no database, or no row for this run, so there is
+                     no durable round for this call to own. Nothing was written.
+                     Pay the round: give_reward enqueues its own grant, so the
+                     award is still recoverable, and there is nothing here that
+                     a second payment could duplicate.
+
+    A genuine database problem RAISES rather than returning an outcome. The
+    caller has to be able to tell a failed write from a no-op: paying out on a
+    failed write is the exact crash window this function exists to close.
+
+    ALREADY_CLOSED is also how an ambiguous commit surfaces. If an attempt
+    committed and then raised, a retry sees the row closed and returns this —
+    which is correct, because that attempt's grants are already recoverable.
     """
     # Synchronous short-circuit, deliberately before the first await: if the
     # database file does not exist then no run row does either, so there is no
     # round here to make durable and nothing to protect. Returning without
     # suspending also keeps resolve()'s timing free of a needless yield.
     if not os.path.exists(DB_PATH):
-        return False
+        return NO_RECORD
 
     from utils.level_ops import enqueue_xp_grant
     # mirror finish_run(): the legacy winner_id / winner_display_name columns
@@ -1244,18 +1268,25 @@ async def mark_run_resolved(log_id: int, guild_id: int, status: str,
                  first_winner.get("name") if first_winner else None,
                  log_id))
             if cursor.rowcount != 1:
-                # Already closed, so this call owns nothing: no status change to
-                # commit and no grants to queue. Roll back the empty
-                # transaction rather than leaving a write lock held.
+                # Nothing was updated. Either the row is closed already (an
+                # earlier attempt owns this round, possibly one that committed
+                # and then raised) or there is no row at all. Those two demand
+                # opposite behaviour from the caller, so tell them apart on the
+                # same connection, inside the transaction, before rolling back.
+                probe = await db.execute(
+                    "SELECT status FROM minigames_log WHERE id = ?", (log_id,))
+                exists = await probe.fetchone() is not None
+                # Roll back the empty transaction rather than leaving a write
+                # lock held.
                 await db.execute("ROLLBACK")
-                return False
+                return ALREADY_CLOSED if exists else NO_RECORD
             for user_id, amount in xp_grants:
                 await enqueue_xp_grant(
                     guild_id, user_id, amount,
                     idem_key=f"minigame:{guild_id}:{log_id}:{user_id}",
                     source="minigame", reason=reason, db=db)
             await db.commit()
-            return True
+            return RESOLVED
         except Exception:
             # in_transaction guard: if BEGIN IMMEDIATE itself failed there is
             # no transaction to roll back, and ROLLBACK would raise a second,

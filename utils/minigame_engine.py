@@ -397,7 +397,13 @@ class MinigameEngine:
         Also returns False, having delivered nothing and closed nothing, if the
         round could not be recorded durably: a round paid out with no grant row
         behind it is the one thing this must never do. The run row is left
-        'running', so the reward is neither paid nor consumed.
+        'running', so the round is not consumed — but this engine is already
+        claimed and will not try again, so the reward is FORFEITED, not merely
+        deferred. Failing closed is deliberate; it is not a recovery path.
+
+        Returns False as well when the run was already closed by an earlier
+        attempt: that attempt owns the round and any grant it committed stays
+        recoverable on its own, so this call must not create a replacement.
 
         Order (plan §18): rolls+grants → best-effort embed edit → log.
         """
@@ -440,9 +446,9 @@ class MinigameEngine:
         #    The write is idempotent — the UPDATE is guarded on
         #    status='running' and the grants are INSERT OR IGNORE on a UNIQUE
         #    key — so a transient lock or I/O error can simply be retried and
-        #    retrying can never pay twice. It returns True (this call resolved
-        #    the run), False (a no-op: already closed, or no database at all)
-        #    or raises, and only a raise stops the round from being paid out.
+        #    retrying can never pay twice. It returns RESOLVED, ALREADY_CLOSED
+        #    or NO_RECORD, and raises only on a genuine failure; only a raise
+        #    retries, and only a raise that never clears fails the round.
         xp_grants = []
         for entry, rolled in pending:
             if rolled["reward_type"] != "xp":
@@ -470,23 +476,39 @@ class MinigameEngine:
             # lose the award permanently.
             #
             # Deliberately NOT calling finish_run() either. The row is still
-            # 'running', so the round is not consumed: it stays open, no
-            # winner is announced, and the startup sweep finalizes it as
-            # aborted_restart. That is the honest outcome — the reward is
-            # neither paid nor lost — instead of a completed round whose XP
-            # exists only in memory.
+            # 'running', so the round is not consumed and no winner is
+            # announced; the startup sweep finalizes it as aborted_restart.
+            #
+            # Fail-closed, and the round's XP is FORFEITED: this engine is
+            # already claimed, so it will never resolve the round again, and
+            # nothing durable survives a restart to re-resolve it either. Not
+            # paying is chosen over paying on a record that does not exist.
             print(f"[MINIGAMES] run {self.log_id}: durable resolution failed "
                   f"after {_DURABLE_ATTEMPTS} attempt(s): {last_error}. No XP "
                   f"delivered and the run is left open (aborted_restart on "
-                  f"restart) so the reward is not consumed.")
+                  f"restart); the reward is forfeited, not deferred.")
+            return False
+        if durable == store.ALREADY_CLOSED:
+            # An earlier attempt owns this round. Its grants, if it committed
+            # any, are already durable rows the periodic drain will apply, so
+            # they stay recoverable without anything here. Paying now would
+            # add a second grant for one round and would pay the amounts THIS
+            # call just rolled, which need not match the winners that attempt
+            # recorded — so step 5 is skipped too, rather than overwriting a
+            # closed row with a different roll.
+            print(f"[MINIGAMES] run {self.log_id}: already closed by an "
+                  f"earlier resolution attempt; no grant is created here and "
+                  f"any grant that attempt committed stays recoverable.")
             return False
 
-        # 3) Deliver. Getting here means the round is durably recorded, or
-        #    there is no database for it to be recorded in. Either way every
+        # 3) Deliver. Only two outcomes reach here: RESOLVED, where step 2
+        #    committed this round's grants, and NO_RECORD, where there is no
+        #    durable round to own (no database, or no row). Under both, every
         #    XP award is queued and applied under its idempotency key:
         #    `give_reward` drains the row step 2 wrote instead of enqueuing a
         #    second one, or enqueues it itself when step 2 was a no-op. So this
-        #    pays exactly once and never pays without a durable record.
+        #    pays exactly once, and ALREADY_CLOSED — where a second payment
+        #    for one round is possible — is already returned above.
         for entry, rolled in pending:
             try:
                 res = await give_reward(
