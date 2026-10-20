@@ -412,7 +412,15 @@ class MinigameEngine:
                     **_grant_kwargs(rolled),
                     reason="Minigame reward (%s)"
                            % (self.snapshot.get("name") or "?"),
-                    source="minigame")
+                    source="minigame",
+                    # One run, one chance: the round is consumed and the winner
+                    # is announced regardless of delivery, so an XP award that
+                    # the fence refuses would never be retried. `log_id` is the
+                    # run row opened before start(), so the key is stable across
+                    # a retry and a repeat pays nothing.
+                    idempotency_key=(f"minigame:{self.guild_id}:{self.log_id}:"
+                                     f"{w['id']}"
+                                     if rolled["reward_type"] == "xp" else None))
                 if not res or not res.get("success"):
                     entry["status"] = "failed"
                     entry["error"] = str((res or {}).get("error")

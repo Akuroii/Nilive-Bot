@@ -496,3 +496,199 @@ about live Discord role/permission/429 behaviour or Railway.
 * PR #98's head branch is `arena/adb559e5-nilive-bot`; this round was committed
   to the session branch `arena/077d2ec7-nilive-bot` from the exact PR head
   `bc4e28c`. PR #98 has not been retargeted or merged.
+
+---
+
+# Round 5 — 2026-10-20
+
+Base for this round: PR head `29af13c` (round 4). Committed to the session
+branch `arena/077d2ec7-nilive-bot`. `main` (`02fbfee`) untouched; PR #98 open,
+not marked ready, nothing merged or deployed.
+
+Akuroi's round-4 review held `29af13c` with four open items. This round
+addresses **#1 (one-shot XP reward permanently lost)** and **#4 (case E oracle
+is wrong)**. Items **#2 (P1, lease expiry leaves a role permanently missing)**
+and **#3 (P2, currency reversal leaves claim and balance inconsistent) are NOT
+implemented** — see "Not done" below. This is stated rather than glossed: the
+PR is not ready and is not claimed to be.
+
+## #1 — One-shot XP reward permanently lost (FIXED)
+
+**Root cause.** `give_reward()`'s wait is a fixed `wait_for = 3.0` s. A
+correction lease has a 90 s TTL. When the lease outlived the wait, `give_reward`
+returned a *deferred failure* and wrote nothing. Every one-shot caller had
+already committed the work that earned the reward, so nothing ever retried it:
+
+* `mission_engine.record_activities` sets `completed=1` and commits **before**
+  the grant, so re-recording the activity produces no second completion.
+* `cogs/events.py` inserts the `event_winners` row and commits **before** the
+  grant, and a second claim is refused with "You already claimed this reward".
+
+A fixed timeout cannot fix this: leases expire, renew and can outlive any
+assumed number.
+
+**Fix — make the award durable and idempotent rather than patient.**
+
+* `utils/level_ops.py` — new table `level_xp_pending_grants` (UNIQUE
+  `idem_key`) plus `enqueue_xp_grant()` / `grant_row()` / `drain_xp_grants()` /
+  `drain_xp_grants_sweep()`. Each grant applies in its own `BEGIN IMMEDIATE`
+  that opens with `xp_write_barrier`, so a grant can never land inside a fence;
+  the XP write, `record_crossing` and `status='applied'` commit together, which
+  is what makes it exactly-once.
+* `utils/reward_engine.py` — `give_reward(..., idempotency_key=None)`. With a
+  key the award is recorded *before* it is attempted and retried; without one,
+  behaviour is unchanged. Recurring message/voice XP must NOT pass a key — the
+  next tick earns it again, so queueing it would only build a backlog.
+* `utils/mission_engine.py` — passes `mission:{guild}:{user}:{def_id}:{period}`
+  and drains at the very top of `record_activities`, **before** the
+  `if not amounts: return []` early exit. That placement is required: the
+  earning mission is already `completed`, so its own grant path never runs
+  again and only a fresh activity can settle it.
+* `cogs/events.py`, `cogs/tagmissions.py`, `cogs/tagpartners.py`,
+  `utils/minigame_engine.py` — each now passes an idempotency key
+  (`event:`, `tag_mission:`, `tag_partner:`, `minigame:` + `log_id`).
+  `cogs/events.py` has a thin local `give_reward` wrapper; the key is forwarded
+  through it rather than added to the wrapper's callers.
+* `scheduler.py` — the 60 s loop calls `drain_xp_grants_sweep()`, so a quiet
+  member and anything left pending by a restart is also settled.
+
+**Wording.** `xp_write_barrier` no longer promises a retry ("the XP award was
+deferred and nothing was written"). `give_reward`'s non-keyed deferral tail
+distinguishes recurring XP ("the next message or voice tick earns this XP
+again") from one-shot ("should be retried with idempotency_key to be safe").
+Only a genuinely queued award says it will be applied automatically.
+
+**Regression** — `scripts/test_one_shot_xp_durability.py` (new, 19 checks,
+exit 0). Holds a *fenced* lease (a bare `acquire_lock` does not stop an ordinary
+writer) and asserts: the mission completes while fenced; XP is not written; the
+award is queued `pending`; re-recording does not re-complete or double-pay;
+after release the next activity applies it exactly once; the row is `applied`;
+further activity never duplicates it. Also covers the quiet-member/sweep path and
+an event winner's keyed award.
+
+## #4 — Case E oracle was wrong (FIXED)
+
+Two independent defects, both confirmed:
+
+1. **It accepted `fulfilled` as recoverable.** Claim All re-pays only
+   `pending`/`failed`/`processing`; `reconcile_role_progression` restores only
+   `fulfilled` rows and deliberately refuses one whose reversal is
+   `applied`/`already_reversed`. So a `fulfilled` claim behind a terminal
+   reversal is unrecoverable by *every* production path — which is exactly what
+   P1 produces. The new `role_recoverable()` helper encodes both paths.
+2. **It never discriminated.** The old case raced a correction and an award with
+   `asyncio.gather` and asserted on whichever branch the scheduler produced;
+   40/40 runs landed in the Level-11 branch, so the discriminating assertion
+   never executed and the vulnerable implementation passed.
+
+**Fix.** Case E is split into two deterministic interleavings, each driven by
+hooking a boundary instead of hoping for one:
+
+* `e_award_wins` — hooks `ops.fence_live_writers`, the exact boundary between
+  "awards may still land" and "awards are refused", so the award commits on the
+  winning side every run.
+* `e_correction_wins` — injects the award from inside the sweep's role removal,
+  i.e. after the fence closed, so it is deferred; the correction wins, and the
+  retried award must reopen a claimable row.
+
+On a pre-fence baseline (which has no `fence_live_writers`) the first hook
+degrades to injecting at the role removal, so the sensitivity run reports failed
+checks instead of crashing.
+
+**Discrimination verified.**
+
+| | fixed head | `a8ef28f` |
+|---|---|---|
+| `E-award-wins` | 7/7 PASS | 4 FAIL |
+| `E-correction-wins` | 7/7 PASS | 2 FAIL |
+
+The failing checks on `a8ef28f` are the ones that matter:
+`E-award-wins: a production path can still deliver or restore this reward — the
+claim row is gone; nothing can restore from it`, and
+`E-correction-wins: ... no Level-12 claim row exists - the re-cross opened
+nothing` (the audit probe's Level 12 with an empty `level_reward_claims` table).
+The old oracle reported PASS for the first of these.
+
+Cases A, B, C, D, F, G, H, I, J, K, L, M, N are preserved unchanged.
+
+## Not done — #2 (P1) and #3 (P2)
+
+Both remain open and both are real. Root causes from the round-4 reproductions:
+
+* **P1** — lease expiry inside the Discord `remove_roles` await of
+  `_reverse_correction_claim` (`utils/level_claims.py:1885`). The role comes off,
+  authority is lost before DB cleanup, and the result is `claim=fulfilled` +
+  journal `applied`: `reconcile_role_progression` skips that pair and
+  `outstanding_reversals` is empty, so nothing restores it. The claim loop
+  re-checks the lease only at the top of each iteration, which does not cover
+  time spent awaiting Discord.
+* **P2** — the currency branch of `_reverse_correction_claim`
+  (`utils/level_claims.py:1921–1969`) debits first and appends to
+  `deleted_claims` on `applied`/`already_reversed`; at expiry the final guard
+  reports the reward kept while the wallet is already debited. It does not
+  reproduce with a live fenced lease and all writers normal — it is a specific
+  expiry/finalization interleaving.
+
+Neither is addressed by this commit. Fixing P1 needs lease renewal across the
+Discord await plus a post-side-effect recovery path that leaves an *open* case
+rather than a terminal one; that is a change to the correction's authority
+handling, not a local patch, and it was not going to be done carefully in the
+budget left in this round. It is listed here so the gap is explicit rather than
+implied.
+
+`probe2_lease_expiry_role.py` and `probe3_currency_expiry.py` remain ad-hoc
+probes for this reason: promoted as rc=0 regressions they would fail, and a
+regression that fails by design is worse than an honest gap.
+
+## Commands and results
+
+Runner for the suite comparison (one runner, one environment, both trees):
+
+```
+OWNER_ID=1 SECRET_KEY=test DISCORD_TOKEN=test NERO_ENVIRONMENT=test \
+  python /home/user/scratch/run_suite.py <repo-root>
+```
+
+| suite | result |
+|---|---|
+| `scripts/test_correction_lease_fence.py` | 14 cases, all PASS (exit 0) |
+| `scripts/test_one_shot_xp_durability.py` | 19 checks, all PASS (exit 0) |
+| `scripts/test_inflight_role_correction.py` | all PASS (exit 0) |
+| `scripts/test_xp_safety_audit.py` | 121 passed, 0 failed |
+| `scripts/test_leveling_caller_integrations.py` | all PASS |
+| full Python suite, fixed head | 65 scripts: **62 OK, 3 BAD** |
+| full Python suite, `a8ef28f` | 65 scripts: 61 OK, 4 BAD |
+| `pytest scripts/test_shop_publications.py` | 23 passed |
+| `npm test` | 17 harnesses, 148/148 checks |
+
+The 3 BAD on the fixed head are pre-existing and fail identically on `a8ef28f`:
+
+* `test_afk.py` — 169/170, one legacy-snapshot check.
+* `test_leveling_voice_hard_blocks.py` — 9 voice-guard checks.
+* `test_phase2_backend.py` — `CancelledError`/`TimeoutError` in the reset-loop
+  test; timing-sensitive on a 2-CPU box.
+
+The 4th baseline failure (`test_shop_publications.py`) passes once `OWNER_ID`,
+`SECRET_KEY`, `DISCORD_TOKEN` and `NERO_ENVIRONMENT` are exported; it was an
+environment gap, not a defect.
+
+Two failures were introduced and fixed during this round:
+
+* `test_leveling_caller_integrations.py` — `TypeError: give_reward() got an
+  unexpected keyword argument 'source'`, because `cogs/events.py` has its own
+  thin `give_reward` wrapper. Fixed by forwarding `idempotency_key` through the
+  wrapper.
+* `test_xp_safety_audit.py` — `drain_xp_grants() is classified INSERT INTO
+  levels is not in the audit inventory`. Correctly caught: the new function
+  writes `levels`. Added to both `LEVEL_WRITERS` and `LEVEL_CONSISTENCY`
+  (it uses `xp_progress(new_xp)` in the same transaction as the write).
+
+## Remaining risks
+
+* P1 and P2 are open, as above.
+* Multi-process SQLite contention is still unverified; everything here is
+  single-process with fake Discord objects. Nothing in this round speaks to live
+  Discord role/permission/429 behaviour or to Railway.
+* The sweep's lease is checked at the top of each claim iteration only. On a
+  slow worker with many claims, a correction spanning more than the 90 s TTL can
+  still lose authority mid-pass; that is P1's mechanism and is unfixed.

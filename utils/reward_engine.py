@@ -38,7 +38,18 @@ async def give_reward(bot: discord.Client,
                        item_name: str = None,
                        item_type: str = "custom",
                        item_metadata: dict = None,
-                       defer_retry_seconds: float | None = None) -> dict:
+                       defer_retry_seconds: float | None = None,
+                       idempotency_key: str | None = None) -> dict:
+    """...
+
+    ``idempotency_key`` marks a ONE-SHOT xp award - a mission, tag mission,
+    minigame, event or tag-partner grant whose triggering work the caller has
+    already committed. The award is queued under that key before it is
+    attempted and retried until it lands, so a correction lease that outlives
+    the caller's wait can defer it but can never delete it. Repeating the same
+    key never pays twice. Recurring awards (message/voice XP) must NOT pass it:
+    they are dropped on a fence and simply re-earned, which is correct for them.
+    """
     if reward_type in ("coins", "diamonds"):
         if amount is None:
             raise RewardError(f"{reward_type} reward requires 'amount'")
@@ -129,6 +140,75 @@ async def give_reward(bot: discord.Client,
         # is paid once and never retried by its caller - so it waits a few
         # seconds rather than losing the reward.
         wait_for = (3.0 if defer_retry_seconds is None else defer_retry_seconds)
+
+        # Pay anything this member earned earlier while a correction had them
+        # fenced. One indexed SELECT when there is nothing queued. This is what
+        # lets a deferred one-shot award land without waiting for a timer: the
+        # member's very next XP event settles it.
+        try:
+            from utils import level_ops as ops
+            await ops.drain_xp_grants(guild_id, user_id)
+        except Exception as exc:
+            # A drain failure must never cost the award being granted now.
+            print(f"[XP] pending-grant drain failed (guild={guild_id} "
+                  f"user={user_id}): {exc}")
+
+        # One-shot awards: record the award FIRST, then try to apply it.
+        #
+        # A recurring award (message/voice XP) that the fence refuses simply
+        # earns the XP again on the next tick, so dropping it costs nothing. A
+        # one-shot award - a mission, tag mission, minigame, event or tag-partner
+        # grant - has already committed the work that earned it, so refusing it
+        # would delete a benefit the member earned. It is queued under
+        # `idempotency_key` and retried until it lands, which is the only design
+        # that survives a correction lasting longer than any fixed wait.
+        if idempotency_key:
+            from utils import level_ops as ops
+            loop = asyncio.get_running_loop()
+            fresh = await ops.enqueue_xp_grant(
+                guild_id, user_id, amount, idem_key=idempotency_key,
+                source=source, reason=reason)
+            if not fresh:
+                prior = await ops.grant_row(idempotency_key)
+                return {"success": False, "reward_type": "xp", "amount": 0,
+                        "duplicate": True, "deferred": False,
+                        "queued": (prior or {}).get("status") == "pending",
+                        "error": ("this reward was already recorded under "
+                                  f"'{idempotency_key}' and is not paid twice"),
+                        "old_level": None, "new_level": None,
+                        "leveled_up": False}
+            deadline = loop.time() + max(0.0, float(wait_for))
+            blocked = None
+            while True:
+                out = await ops.drain_xp_grants(guild_id, user_id,
+                                                idem_key=idempotency_key)
+                if out["applied"]:
+                    granted = out["applied"][0]
+                    new_xp = int(granted["new_xp"])
+                    new_level, _, _ = xp_progress(new_xp)
+                    return {"success": True, "reward_type": "xp",
+                            "amount": amount, "new_xp": new_xp,
+                            "old_level": xp_progress(max(0, new_xp - amount))[0],
+                            "new_level": new_level, "leveled_up": True,
+                            "queued": False}
+                blocked = (out["deferred"][0]["reason"] if out["deferred"]
+                           else (out["failed"][0]["error"]
+                                 if out["failed"] else blocked))
+                if loop.time() >= deadline:
+                    break
+                await asyncio.sleep(0.5)
+            # Still fenced. NOT lost: the row is durable and every later drain
+            # (the next award for this member, the next activity, or the
+            # periodic sweep) applies it once the correction finishes.
+            return {"success": False, "reward_type": "xp", "amount": 0,
+                    "deferred": True, "queued": True,
+                    "error": (f"{blocked or 'a level correction is in progress'} "
+                              "- this reward has been recorded and will be "
+                              "applied automatically once the correction "
+                              "finishes; it is not earned again by ordinary "
+                              "play, so it is not dropped"),
+                    "old_level": None, "new_level": None, "leveled_up": False}
+
         deadline = None
         while True:
             from utils import level_ops as ops
@@ -179,8 +259,22 @@ async def give_reward(bot: discord.Client,
             if deadline is None:
                 deadline = loop.time() + max(0.0, float(wait_for))
             if loop.time() >= deadline:
+                # Be honest about what a deferral costs. Recurring XP
+                # (message/voice, which pass defer_retry_seconds=0) is simply
+                # earned again by the next tick, so dropping it costs nothing.
+                # Anything else is one-shot: without `idempotency_key` this
+                # award really may never be retried, and the message must not
+                # claim otherwise.
+                recurring = (defer_retry_seconds is not None
+                             and float(defer_retry_seconds) == 0)
+                tail = ("nothing was written, so the next message or voice "
+                        "tick earns this XP again"
+                        if recurring else
+                        "nothing was written and this award is one-shot, so "
+                        "it should be retried with idempotency_key to be safe")
                 return {"success": False, "reward_type": "xp", "amount": 0,
-                        "deferred": True, "error": deferred_reason,
+                        "deferred": True, "queued": False,
+                        "error": f"{deferred_reason} - {tail}",
                         "old_level": None, "new_level": None,
                         "leveled_up": False}
             await asyncio.sleep(0.5)

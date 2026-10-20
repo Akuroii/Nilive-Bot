@@ -224,6 +224,13 @@ class TagMissions(commands.Cog):
                             duration_hours=reward_duration_hours,
                             reason="Tag-loyalty mission reward",
                             source="tag_mission",
+                            # The participant's outcome and the mission's
+                            # 'completed' status are written below regardless of
+                            # delivery, so a refused award is never retried.
+                            # Keying it makes the XP award durable.
+                            idempotency_key=(
+                                f"tag_mission:{guild_id}:{mission_id}:{user_id}"
+                                if reward_type == "xp" else None),
                         )
                         if result.get("success"):
                             outcome = "rewarded"

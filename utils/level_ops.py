@@ -242,6 +242,39 @@ SCHEMA = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_xp_deferrals_member "
     "ON level_xp_deferrals(guild_id, user_id, id)",
+    # A ONE-SHOT XP award that could not be written yet.
+    #
+    # Message and voice XP are recurring: when the fence refuses them the XP was
+    # never written, so the next message or voice minute simply earns it again
+    # and nothing is lost. A mission, tag mission, minigame, event or tag-partner
+    # award is different - the caller has already committed the work that earned
+    # it (a mission row marked `completed`, a minigame round consumed), so a
+    # refused award is a reward that can never be re-earned. Dropping it on a
+    # timeout silently deletes a benefit the member earned.
+    #
+    # Such an award is therefore RECORDED before it is attempted and retried
+    # until it lands. `idem_key` is the identity of the completed unit of work,
+    # so re-delivering the same completion (a listener firing twice, a restart
+    # replaying an event) can never pay twice. Rows survive process restarts -
+    # that is the point - and are cleared by `drain_xp_grants`.
+    """
+    CREATE TABLE IF NOT EXISTS level_xp_pending_grants (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id   INTEGER NOT NULL,
+        user_id    INTEGER NOT NULL,
+        idem_key   TEXT NOT NULL UNIQUE,
+        amount     INTEGER NOT NULL,
+        source     TEXT,
+        reason     TEXT,
+        status     TEXT NOT NULL DEFAULT 'pending',
+        attempts   INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        applied_at TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_xp_pending_member "
+    "ON level_xp_pending_grants(guild_id, user_id, status)",
 )
 
 
@@ -695,9 +728,191 @@ async def xp_write_barrier(guild_id: int, user_id: int,
         # snapshot and must not land: the sweep may already have deleted the
         # claim this award would re-earn.
         return None
+    # Deliberately says nothing about what happens next: whether a deferred
+    # award is re-earned depends on the caller, not on the fence. A recurring
+    # award (message/voice XP) IS re-earned on the next tick; a one-shot award
+    # would not be, and promising otherwise is how a lost reward looks like a
+    # handled one. `give_reward` attaches the source-accurate sentence.
     return (f"A {holder} correction ({operation_id}) is in progress for this "
-            f"member until {expires_at}; the XP award was deferred and can be "
-            f"earned again on the next message/voice tick")
+            f"member until {expires_at}; the XP award was deferred and nothing "
+            f"was written")
+
+
+# ──────────────────── durable one-shot XP awards (never lose a reward) ────────
+
+async def enqueue_xp_grant(guild_id: int, user_id: int, amount: int, *,
+                           idem_key: str, source: str | None = None,
+                           reason: str | None = None) -> bool:
+    """Record a one-shot XP award that must not be lost. Returns True if new.
+
+    Call this BEFORE trying to write the XP, so the award is durable from the
+    moment the work that earned it is committed. `INSERT OR IGNORE` on the
+    UNIQUE `idem_key` is what makes the pair idempotent: a second caller naming
+    the same completed mission / minigame round / event is a retry, not a second
+    reward, so it must not enqueue (and therefore not pay) twice.
+
+    Returns False when the key was already known - already granted, or already
+    queued and waiting for the fence to lift.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "INSERT OR IGNORE INTO level_xp_pending_grants "
+                "(guild_id, user_id, idem_key, amount, source, reason, status, "
+                " attempts, created_at) VALUES (?,?,?,?,?,?,'pending',0,?)",
+                (int(guild_id), int(user_id), str(idem_key), int(amount),
+                 source, reason, _now()))
+            created = cursor.rowcount == 1
+            await db.commit()
+            return created
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+
+
+async def grant_row(idem_key: str) -> dict | None:
+    """One queued award by idempotency key, whatever its state."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "SELECT id, amount, source, reason, status, attempts, applied_at "
+            "FROM level_xp_pending_grants WHERE idem_key=?", (str(idem_key),))
+        row = await cursor.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "amount": int(row[1]), "source": row[2],
+            "reason": row[3], "status": row[4], "attempts": int(row[5]),
+            "applied_at": row[6]}
+
+
+async def drain_xp_grants(guild_id: int, user_id: int, *,
+                          idem_key: str | None = None,
+                          limit: int = 100) -> dict:
+    """Apply queued one-shot XP awards, each exactly once.
+
+    Every grant gets its own `BEGIN IMMEDIATE` transaction that opens with
+    `xp_write_barrier`, so a grant can never land inside a correction's fence:
+    it stays queued and is retried later. That is the whole reason this exists -
+    a correction can last longer than any caller-side wait, so "try for N
+    seconds" is not a guarantee; "stay queued until it is safe" is.
+
+    The XP write, the crossing rows and the `applied` mark commit together, so a
+    crash mid-award leaves the row pending rather than half-paid.
+    """
+    await ensure_tables()
+    applied: list[dict] = []
+    deferred: list[dict] = []
+    failed: list[dict] = []
+
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "SELECT id, idem_key, amount, source, reason "
+            "FROM level_xp_pending_grants WHERE guild_id=? AND user_id=? "
+            "AND status='pending' ORDER BY id LIMIT ?",
+            (int(guild_id), int(user_id), max(1, int(limit))))
+        pending = await cursor.fetchall()
+
+    for (row_id, key, amount, source, reason) in pending:
+        if idem_key is not None and str(key) != str(idem_key):
+            continue
+        new_xp = None
+        try:
+            async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    blocked = await xp_write_barrier(guild_id, user_id, db)
+                    if blocked is not None:
+                        # Not now. The row stays pending and is retried - this
+                        # is the designed behaviour, not an error.
+                        await db.execute("ROLLBACK")
+                        deferred.append({"idem_key": key, "reason": blocked})
+                        continue
+                    from utils.xp_calculator import xp_progress
+                    from utils.level_claims import (record_crossing,
+                                                    snapshot_multipliers)
+                    cursor = await db.execute(
+                        "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
+                        (guild_id, user_id))
+                    row = await cursor.fetchone()
+                    old_xp = int(row[0]) if row else 0
+                    new_xp = max(0, old_xp + int(amount))
+                    new_level, _, _ = xp_progress(new_xp)
+                    await db.execute(
+                        "INSERT INTO levels (guild_id, user_id, xp, level) "
+                        "VALUES (?,?,?,?) ON CONFLICT(guild_id, user_id) "
+                        "DO UPDATE SET xp=?, level=?",
+                        (guild_id, user_id, new_xp, new_level, new_xp,
+                         new_level))
+                    multipliers = await snapshot_multipliers(
+                        guild_id, user_id)
+                    await record_crossing(
+                        db, guild_id, user_id, old_xp, new_xp, multipliers,
+                        source=source or "", is_booster=False)
+                    cursor = await db.execute(
+                        "UPDATE level_xp_pending_grants SET status='applied', "
+                        "applied_at=?, attempts=attempts+1, last_error=NULL "
+                        "WHERE id=? AND status='pending'", (_now(), row_id))
+                    if cursor.rowcount != 1:
+                        # Someone applied it between the SELECT and here.
+                        await db.execute("ROLLBACK")
+                        continue
+                    await db.commit()
+                except Exception:
+                    await db.execute("ROLLBACK")
+                    raise
+        except Exception as exc:
+            async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                await db.execute(
+                    "UPDATE level_xp_pending_grants SET attempts=attempts+1, "
+                    "last_error=? WHERE id=?",
+                    (f"{type(exc).__name__}: {exc}", row_id))
+                await db.commit()
+            failed.append({"idem_key": key,
+                           "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        try:
+            from utils.reward_engine import _log_xp_ledger
+            await _log_xp_ledger(guild_id, user_id, int(amount), int(new_xp),
+                                 reason or "", source or "")
+        except Exception:
+            pass
+        applied.append({"idem_key": key, "amount": int(amount),
+                        "new_xp": new_xp})
+
+    return {"applied": applied, "deferred": deferred, "failed": failed}
+
+
+async def drain_xp_grants_sweep(member_limit: int = 200,
+                                 per_member: int = 50) -> dict:
+    """Periodic sweep over every member with a queued award.
+
+    The in-line drains in `give_reward` and `record_activities` settle a queued
+    award as soon as the member does anything. This covers the rest: a member who
+    goes quiet, or a process that restarted while awards were pending. Bounded on
+    both axes so a backlog after an outage is drained gradually, not in one
+    blocking pass.
+    """
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute(
+            "SELECT DISTINCT guild_id, user_id FROM level_xp_pending_grants "
+            "WHERE status='pending' ORDER BY id LIMIT ?",
+            (max(1, int(member_limit)),))
+        members = await cursor.fetchall()
+    applied = deferred = failed = 0
+    for guild_id, user_id in members:
+        try:
+            out = await drain_xp_grants(guild_id, user_id, limit=per_member)
+        except Exception:
+            failed += 1
+            continue
+        applied += len(out["applied"])
+        deferred += len(out["deferred"])
+        failed += len(out["failed"])
+    return {"members": len(members), "applied": applied,
+            "deferred": deferred, "failed": failed}
 
 
 # ─────────────────────────── XP mutation provenance ───────────────────────────

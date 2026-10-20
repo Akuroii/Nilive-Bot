@@ -53,6 +53,12 @@ LEVEL_WRITERS = {
     ("utils/level_test_reset.py", "rollback_xp_operation"): "admin /xp_rollback (current xp minus the recorded delta, one member)",
     ("dashboard/app.py", "api_edit_member"): "dashboard member edit (clamped)",
     ("utils/prestige.py", "purchase_prestige"): "prestige tier (never touches xp/level)",
+    # Applying a one-shot award that a correction's fence had deferred. It is the
+    # ONLY writer that replays an award rather than producing a new one, and it
+    # is the reason a mission/event/minigame reward cannot be lost: each row is
+    # applied at most once (status='pending' -> 'applied' in the same transaction
+    # as the XP write), behind the same fence and the same recompute.
+    ("utils/level_ops.py", "drain_xp_grants"): "applying a queued one-shot XP award (clamped)",
 }
 
 
@@ -143,6 +149,10 @@ def enclosing_function(spans, lineno: int) -> str:
 # writer is called inside apply_spam_penalty's BEGIN IMMEDIATE transaction.
 LEVEL_CONSISTENCY = {
     ("utils/reward_engine.py", "give_reward"): "xp_progress(new_xp)",
+    # The queued-award drain recomputes the level from the same curve, in the
+    # same transaction that marks the row applied, so a replayed award can never
+    # leave `levels.level` disagreeing with `levels.xp`.
+    ("utils/level_ops.py", "drain_xp_grants"): "xp_progress(new_xp)",
     ("utils/xp_calculator.py", "_apply_spam_penalty_in_transaction"): "xp_progress(new_xp)[0]",
     ("cogs/leveling.py", "_apply_admin_xp"): "xp_progress(xp)",
     ("dashboard/app.py", "api_edit_member"): "calculate_level_from_xp(xp)",

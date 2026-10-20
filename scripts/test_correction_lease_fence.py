@@ -439,68 +439,194 @@ async def case_d_reached_inside_the_delete_window():
           (level_of(), world.held, claim_count()))
 
 
-async def case_e_serialization():
-    """A correction and an award started at the same moment."""
-    print("\n== E. correction and award started together ==")
+def journal_statuses(claim_id):
+    return [st for c, k, st in journal() if c == claim_id]
+
+
+def role_recoverable(claim_id):
+    """Can a PRODUCTION path still put this member's Level role back?
+
+    `fulfilled` alone is not evidence of that, and treating it as such is what
+    let the old oracle agree with the vulnerable implementation. There are two
+    paths, and they accept disjoint claim states:
+
+      * Claim All / `claim_is_eligible` re-pays only `pending`, `failed` and
+        `processing` rows. A `fulfilled` row has already been paid and is never
+        paid twice.
+      * `reconcile_role_progression` (the rejoin and restore path) restores only
+        `fulfilled` rows - and deliberately refuses to restore a role whose
+        reversal is recorded `applied`/`already_reversed`, because it cannot tell
+        "we took this away" from "we took it away and the member re-earned it".
+
+    So a `fulfilled` claim sitting behind a terminal reversal is unrecoverable by
+    every production path even though the row still exists. That combination is
+    exactly what a lease expiring mid-correction produces.
+    """
+    status = claim_status(claim_id)
+    if status is None:
+        return False, "the claim row is gone; nothing can restore from it"
+    seen = journal_statuses(claim_id)
+    if status in ("pending", "failed", "processing"):
+        if any(st == "outstanding" for st in seen):
+            return False, f"an open reversal blocks the claim: {seen}"
+        return True, f"Claim All can still pay this row ({status})"
+    if status == "fulfilled":
+        terminal = [st for st in seen
+                    if st in ("applied", "already_reversed")]
+        if terminal:
+            return False, (f"the role is gone and the reversal is terminal "
+                           f"({seen}): reconcile_role_progression refuses to "
+                           f"restore it and Claim All will not re-pay it")
+        return True, f"the restore path can put the role back ({seen or 'no reversal'})"
+    return False, f"unknown claim status {status!r}"
+
+
+async def e_award_wins():
+    """The award commits before the fence closes, so the sweep must see it.
+
+    Driven deterministically by hooking the fence call itself: that is the exact
+    boundary between "awards may still land" and "awards are refused", so the
+    award lands on the winning side of it every run instead of whenever the
+    scheduler happened to interleave two coroutines.
+    """
+    print("\n== E-award-wins: the award gets in before the fence closes ==")
     await fresh()
     world = World(held=False)
     claim = await deliver_role_claim(world)
+    from utils import level_ops as ops
     from cogs.leveling import _apply_admin_xp
-    from utils.reward_engine import give_reward
 
-    corr, award = await asyncio.gather(
-        _apply_admin_xp(GUILD, world.member, xp_at(11), bot_for(world),
-                        source="setlevel", actor_id=1, reason="concurrent"),
-        give_reward(None, GUILD, USER, "xp", amount=xp_at(12) - xp_at(11),
-                    reason="Message XP", source="leveling"),
-        return_exceptions=True)
-    check("E: neither side raised", not isinstance(corr, Exception)
-          and not isinstance(award, Exception), (corr, award))
-    deferred = bool(award.get("deferred"))
-    check("E: the award either applied or was deferred - never half-applied",
-          deferred or award.get("success") is True, award)
-    final = xp_of()
-    check("E: the final XP is one of the two legal states, never a blend",
-          final in (xp_at(11), xp_at(12)), (final, xp_at(11), xp_at(12)))
-    if final == xp_at(12):
-        # The member is legitimately back at Level 12. An unsynchronised
-        # `gather` reaches this XP by one of two LEGAL interleavings, and the
-        # harness does not get to choose which:
-        #
-        #   (a) the correction ran to completion at Level 11 and the DEFERRED
-        #       award was retried afterwards. Its first `xp_write_barrier`
-        #       sampled a live lease and refused; the sweep finished and
-        #       released; the retry sampled no lease and applied. The original
-        #       row is correctly gone and `record_crossing` has opened a FRESH,
-        #       claimable one;
-        #   (b) the award landed inside the sweep, so the sweep must have seen
-        #       the re-cross and kept the original row and the role.
-        #
-        # What must hold in BOTH is the invariant this file exists to prove:
-        # the member is never left at an eligible level holding neither the
-        # reward nor a claim that can restore it. That - not the identity of
-        # the surviving row - is what this asserts. The vulnerable
-        # implementation breaks it by deleting the row the re-cross opened:
-        # the audit probe records Level 12 with an empty `level_reward_claims`
-        # table and no role, i.e. permanently lost.
-        survivors = rows("SELECT id, status FROM level_reward_claims "
-                         "WHERE guild_id=? AND user_id=? AND reward_level=? "
-                         "AND track='role'", (GUILD, USER, 12))
-        claimable = any(status in ("pending", "failed", "processing",
-                                   "fulfilled") for _, status in survivors)
-        check("E: a Level 12 the member legitimately holds keeps its role or "
-              "reopens a claim that can restore it",
-              world.role in world.held or claimable,
-              (claim_status(claim), world.held, survivors))
+    real_fence = getattr(ops, "fence_live_writers", None)
+    seen = {}
+
+    async def award_now():
+        if seen.get("done"):
+            return
+        seen["done"] = True
+        seen["award"] = await award_xp(xp_at(12) - xp_at(11),
+                                       source="leveling",
+                                       reason="Message XP (raced the sweep)")
+
+    if real_fence is not None:
+        # The fence closes the window, so hooking the fence call is the
+        # deterministic way to land on the winning side of it: the award
+        # commits, then the epoch moves and the sweep re-runs against the
+        # state that includes the award.
+        async def award_then_fence(guild_id, user_id, operation_id):
+            await award_now()
+            return await real_fence(guild_id, user_id, operation_id)
+        ops.fence_live_writers = award_then_fence
     else:
-        check("E: the correction's Level 11 removed the reward it no longer "
-              "holds", claim_status(claim) is None and world.role not in world.held,
-              (claim_status(claim), world.held))
-    check("E: the member's XP was never silently dropped below what was left "
-          "for them", final >= xp_at(11), final)
-    check("E: the wallet never paid a reward twice", wallet()[0] == 0, wallet())
-    check("E: the journal holds at most one row per claim and kind",
-          len({(c, k) for c, k, s in journal()}) == len(journal()), journal())
+        # A pre-fence implementation (the vulnerable baseline): there is no
+        # window to close and no epoch to move, so an award injected anywhere
+        # inside the sweep simply commits. Hook the role removal so it happens
+        # after the sweep has decided what to reverse but before it finalises -
+        # the same relative position, reached the only way this build allows.
+        world.on_remove = lambda w: award_now()
+    try:
+        out = await _apply_admin_xp(GUILD, world.member, xp_at(11),
+                                    bot_for(world), source="setlevel",
+                                    actor_id=1, reason="concurrent")
+    finally:
+        if real_fence is not None:
+            ops.fence_live_writers = real_fence
+
+    corr = out.get("correction") or {}
+    check("E-award-wins: the injected award committed, it was not deferred",
+          seen.get("award", {}).get("success") is True, seen.get("award"))
+    if real_fence is not None:
+        check("E-award-wins: the fence counted the award that raced it, so the "
+              "sweep re-runs against the state that includes it",
+              (corr.get("fenced_deferrals") or 0) >= 1,
+              (corr.get("fenced_deferrals"),
+               corr.get("reconciled_after_deferrals")))
+    else:
+        check("E-award-wins: no fence mechanism exists, so the sweep had no "
+              "way to see the award before deciding",
+              True, "pre-fence baseline: the B1 window is simply open")
+    check("E-award-wins: the member is legitimately at Level 12",
+          level_of() == 12, level_of())
+    check("E-award-wins: the Level 12 the member holds was NOT deleted",
+          claim_status(claim) is not None, claim_status(claim))
+    check("E-award-wins: the member is wearing the role they are entitled to",
+          world.role in world.held, (world.held, journal()))
+    ok, why = role_recoverable(claim)
+    check("E-award-wins: a production path can still deliver or restore this "
+          "reward", ok, why)
+    check("E-award-wins: the wallet never paid a reward twice",
+          wallet()[0] == 0, wallet())
+
+
+async def e_correction_wins():
+    """The award starts after the fence closed: it is deferred, then re-earned.
+
+    The correction therefore wins the race and the Level 12 claim is legitimately
+    removed. What must still hold is that the member is not stranded: the deferred
+    award re-earns the level, and the crossing opens a row a production path can
+    actually deliver from. The vulnerable implementation fails here - the audit
+    probe records Level 12 with an empty `level_reward_claims` table and no role.
+    """
+    print("\n== E-correction-wins: the award is deferred, then re-earns it ==")
+    await fresh()
+    world = World(held=False)
+    claim = await deliver_role_claim(world)
+    seen = {}
+
+    async def award_inside_the_sweep(w):
+        if seen.get("done"):
+            return
+        seen["done"] = True
+        # Called from inside the sweep's role removal: the fence is closed, so
+        # this is the losing side of the boundary, deterministically.
+        seen["res"] = await award_xp(xp_at(12) - xp_at(11), source="leveling",
+                                     reason="Message XP (fenced)")
+
+    world.on_remove = award_inside_the_sweep
+    out = await correction(world, 11)
+
+    check("E-correction-wins: the fenced award was deferred, not applied",
+          bool(seen.get("res", {}).get("deferred")), seen.get("res"))
+    check("E-correction-wins: the member really is at Level 11",
+          level_of() == 11, level_of())
+    check("E-correction-wins: the Level 12 the member no longer holds had its "
+          "claim deleted and its role removed",
+          claim_status(claim) is None and world.role not in world.held,
+          (claim_status(claim), world.held))
+
+    # Recurring XP: the next tick earns it again. Nothing was lost by deferring.
+    again = await award_xp(xp_at(12) - xp_at(11), source="leveling",
+                           reason="Message XP (next tick)")
+    check("E-correction-wins: the deferred award was re-earned on the next tick",
+          again.get("success") is True, again)
+    check("E-correction-wins: the member is back at Level 12",
+          level_of() == 12, level_of())
+    survivors = rows("SELECT id FROM level_reward_claims WHERE guild_id=? AND "
+                     "user_id=? AND reward_level=? AND track='role'",
+                     (GUILD, USER, 12))
+    if survivors:
+        ok, why = role_recoverable(survivors[0][0])
+    else:
+        ok, why = False, "no Level-12 claim row exists - the re-cross opened nothing"
+    check("E-correction-wins: the re-cross opened a claim a production path can "
+          "still deliver from", ok, why)
+    check("E-correction-wins: the wallet never paid a reward twice",
+          wallet()[0] == 0, wallet())
+
+
+async def case_e_serialization():
+    """A correction and an award started at the same moment.
+
+    The previous version raced them with `gather` and asserted on whichever
+    branch the scheduler produced. 40/40 runs landed in the Level-11 branch, so
+    the one assertion that could tell the two implementations apart never
+    executed; and the oracle that did run accepted a `fulfilled` claim as
+    recoverable even behind a terminal reversal, which is unrecoverable in
+    production. Both outcomes are now driven to their own deterministic
+    interleaving, and both are judged by whether a production path can still
+    deliver or restore the reward.
+    """
+    await e_award_wins()
+    await e_correction_wins()
 
 
 async def case_f_idempotent_recovery():

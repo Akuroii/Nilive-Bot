@@ -17,10 +17,16 @@ async def give_reward(bot: discord.Client,
                        member: discord.Member,
                        reward_type: str,
                        reward_value: str,
-                       duration_hours: int = None):
+                       duration_hours: int = None,
+                       idempotency_key: str | None = None):
     """
     Awards an event reward to a member.
     reward_type: 'coins', 'diamonds', 'xp', 'role', 'temp_role', 'item'
+
+    `idempotency_key` makes a refused award durable instead of lost. The winner
+    row in `event_winners` is committed BEFORE this runs, so the member cannot
+    claim twice and a grant the correction fence refused would never be retried
+    - the reward would simply vanish. See utils/reward_engine.give_reward().
 
     Phase 3 / E2: this used to duplicate the exact same coin/xp/role/
     temp_role granting logic that also lived in cogs/shop.py and
@@ -55,6 +61,7 @@ async def give_reward(bot: discord.Client,
             duration_hours=duration_hours,
             reason="Event reward",
             source="event",
+            idempotency_key=idempotency_key,
         )
     if not result.get("success"):
         print(f"[EVENTS] Reward grant failed: {result.get('error')}")
@@ -122,7 +129,14 @@ class ButtonRaceView(discord.ui.View):
             interaction.user,
             self.reward_type,
             self.reward_value,
-            self.reward_duration)
+            self.reward_duration,
+            # The winner row above is already COMMITTED, so a second claim is
+            # refused with "You already claimed this reward" and a grant the
+            # correction fence refused would never be retried. Keying it makes
+            # the award durable instead of lost.
+            idempotency_key=(f"event:{interaction.guild.id}:{self.event_id}:"
+                             f"{interaction.user.id}"
+                             if self.reward_type == "xp" else None))
 
         if not result.get("success"):
             await interaction.response.send_message(
