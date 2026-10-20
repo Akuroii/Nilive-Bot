@@ -1683,6 +1683,17 @@ async def reconcile_level_drop(guild_id: int, user_id: int, level: int, *,
         # lease must not keep removing roles or moving value on the member's
         # behalf - the remaining claims stay untouched and are reported, so a
         # retry can finish them.
+        # Renew before the check. The correction spans Discord round-trips and
+        # the lease's 90 s clock runs across all of them; without this a sweep
+        # that is making steady progress still loses authority part-way through,
+        # and the checks below would then stop it with work left to do purely
+        # because time passed. Renewal is conditional on still being the owner,
+        # so a superseded worker can never extend a lease that is no longer its.
+        if require_lease:
+            try:
+                await ops.renew_lock(guild_id, user_id, operation_id)
+            except Exception:
+                pass        # a failed renewal surfaces as the check below
         problem = await _lease_problem(guild_id, user_id, operation_id,
                                        require_lease)
         if problem:
