@@ -314,19 +314,25 @@ async def main():
     level_source = inspect.getsource(Leveling.level.callback)
     view_cls = __import__("cogs.leveling", fromlist=["LevelRewardView"]).LevelRewardView
     view_source = inspect.getsource(view_cls.claim_all)
-    # Claim All's body now lives in the shared _run_claim_pass(), so the
-    # separately labelled role-reconcile button runs the identical
-    # lease-protected pass instead of a second delivery path. The contract being
-    # checked is what a Claim All click DOES, so follow the delegation - and
-    # assert the delegation is real, so a stub could not satisfy this.
-    delegates = "_run_claim_pass" in view_source
-    if delegates:
-        view_source += inspect.getsource(view_cls._run_claim_pass)
+    # Claim All now lives in _run_claim_all_pass() (separate followup, original
+    # card unchanged); Restore Level Role preserves the original-card path via
+    # _run_claim_pass(). Follow the delegation for each button and assert it is
+    # real, so a stub could not satisfy this.
+    delegates_all = "_run_claim_all_pass" in view_source
+    if delegates_all:
+        view_source += inspect.getsource(view_cls._run_claim_all_pass)
     check("Claim All still defers and uses claim_available",
           "claim_available" in view_source and "defer" in view_source
           and "ephemeral=True" in level_source and "process_purchase" not in level_source
-          and (not delegates or "await self._run_claim_pass(interaction)"
+          and (not delegates_all or "await self._run_claim_all_pass(interaction)"
                in inspect.getsource(view_cls.claim_all)))
+    # Restore Level Role must still delegate to _run_claim_pass and preserve
+    # the original-card update path (not weakened).
+    restore_source = inspect.getsource(view_cls.sync_roles)
+    delegates_restore = "_run_claim_pass" in restore_source
+    check("Restore Level Role still delegates to _run_claim_pass",
+          delegates_restore
+          and "await self._run_claim_pass(interaction)" in restore_source)
 
     print("ALL SLICE 3 CHECKS PASSED")
 

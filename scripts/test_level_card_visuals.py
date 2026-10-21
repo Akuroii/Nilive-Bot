@@ -396,7 +396,8 @@ async def main():
         user=member, guild=guild,
         response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock(),
                                  edit_message=AsyncMock()),
-        edit_original_response=AsyncMock())
+        edit_original_response=AsyncMock(),
+        followup=SimpleNamespace(send=AsyncMock()))
     before = balance()
     await view.claim_all.callback(itx)
     paid = balance() - before
@@ -415,13 +416,18 @@ async def main():
     check("the Stats page still reports the delivered rewards",
           "Claimed" in field_names(stats)
           and f"{COIN_L5}x Coins" in field_text(stats), field_text(stats))
-    footer = itx.edit_original_response.await_args.kwargs["embed"].footer.text
-    check("the Claim All footer still reports the real result, in Arabic",
+    footer = itx.followup.send.await_args.kwargs["embed"].footer.text
+    check("the Claim All footer still reports the real result, in Arabic (followup)",
           footer.startswith(AR_CLAIMED + "2.") and AR_RETRY + "0." in footer,
           footer)
-    check("Claim All re-rendered the card page, not the stats page",
-          itx.edit_original_response.await_args.kwargs["embed"].title.startswith("LEVEL ")
-          and itx.edit_original_response.await_args.kwargs["view"] is view)
+    # Original card must stay unchanged — no edit_original_response
+    check("Claim All leaves original card unchanged (followup only)",
+          itx.edit_original_response.await_count == 0
+          and itx.followup.send.await_count == 1, str(itx.followup.send.await_count))
+    # defer was thinking+ephemeral
+    dk = itx.response.defer.await_args.kwargs if itx.response.defer.await_args else {}
+    check("Claim All defer is thinking=True ephemeral=True",
+          dk.get("thinking") is True and dk.get("ephemeral") is True, str(dk))
 
     # ── 4. the real slash command and all three buttons ──
     print("== 4. /level command and button interactions ==")
