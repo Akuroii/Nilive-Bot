@@ -431,15 +431,33 @@ async def main():
     await view2._apply_claim_state(claims_now, False)
     check("green while a reward is actually waiting",
           view2.claim_all.style.name == "success" and view2.claim_all.disabled is False)
+    # Claim All's result is now a separate ephemeral followup — the original
+    # /level card must stay completely unchanged (style/disabled untouched,
+    # no edit_original_response). A fresh card built after the claim would be
+    # grey/disabled, but this view is the old message and must not mutate.
     await claim_available(GUILD, USER, member=member, bot=bot)
     log = []
     itx_claim = component_itx(member, guild, log)
     await view2.claim_all.callback(itx_claim)
-    check("after everything is delivered Claim All goes grey and disabled",
-          view2.claim_all.style.name == "secondary" and view2.claim_all.disabled is True,
+    # Original card preserved: still green/enabled (pre-claim state)
+    check("after everything is delivered Claim All leaves original card unchanged",
+          view2.claim_all.style.name == "success" and view2.claim_all.disabled is False,
           f"style={view2.claim_all.style.name} disabled={view2.claim_all.disabled}")
-    check("Claim All defers, then edits the deferred response once",
-          log == ["defer", "edit_original_response"], str(log))
+    # Fresh state after delivery would be grey+disabled (verified via builder)
+    claimable_fresh, reconcile_fresh = await _claim_button_state(
+        GUILD, await list_claims(GUILD, USER), False)
+    check("a fresh card after delivery would be grey and disabled",
+          claimable_fresh is False and reconcile_fresh is False,
+          f"claimable={claimable_fresh} reconcile={reconcile_fresh}")
+    # New defer mode: thinking=True ephemeral, then followup
+    check("Claim All defers thinking+ephemeral, then sends followup (no edit)",
+          log == ["defer", "followup.send"] and itx_claim.edit_original_response.await_count == 0,
+          str(log))
+    # Verify defer kwargs are thinking=True, ephemeral=True (approved fix)
+    dk = itx_claim.response.defer.await_args.kwargs if itx_claim.response.defer.await_args else {}
+    check("Claim All defer is thinking=True ephemeral=True",
+          dk.get("thinking") is True and dk.get("ephemeral") is True,
+          str(dk))
     set_exclusive(True)
     claimable, reconcile_only = await _claim_button_state(
         GUILD, await list_claims(GUILD, USER), False)
@@ -458,8 +476,12 @@ async def main():
     sync_log = []
     itx_sync = component_itx(member, guild, sync_log)
     await view2.sync_roles.callback(itx_sync)
-    check("the reconcile button runs the same deferred, single-response pass",
-          sync_log == ["defer", "edit_original_response"], str(sync_log))
+    check("the reconcile button runs the same deferred followup pass",
+          sync_log == ["defer", "followup.send"] and itx_sync.edit_original_response.await_count == 0,
+          str(sync_log))
+    dk2 = itx_sync.response.defer.await_args.kwargs if itx_sync.response.defer.await_args else {}
+    check("Restore defer is thinking=True ephemeral=True",
+          dk2.get("thinking") is True and dk2.get("ephemeral") is True, str(dk2))
     check("_claim_button_available still reports the same reachability (D2 contract)",
           await leveling._claim_button_available(
               GUILD, await list_claims(GUILD, USER), False) is True)
@@ -491,15 +513,17 @@ async def main():
           and balance() == before_swarm)
     view3._claim_running = False
     await asyncio.gather(*[view3.claim_all.callback(i) for i in itxs[1:]])
-    delivered = sum(1 for i in itxs[1:] if i.edit_original_response.await_count)
+    delivered = sum(1 for i in itxs[1:] if i.followup.send.await_count)
     told_to_wait = sum(1 for i in itxs[1:] if i.response.send_message.await_count)
     check("concurrent Claim All clicks pay the reward exactly once",
           balance() - before_swarm == COIN_L3 and delivered == 1 and told_to_wait == 3,
           f"delta={balance() - before_swarm} delivered={delivered} waiting={told_to_wait}")
     check("the view clears its in-flight guard after the pass",
           view3._claim_running is False)
-    check("the guard never blocks the next legitimate pass",
-          view3.claim_all.disabled is True)
+    # Original card must remain unchanged — guard cleared but no view mutation
+    check("the guard never blocks the next legitimate pass (original unchanged, guard cleared)",
+          view3._claim_running is False and view3.claim_all.style.name == "success" and view3.claim_all.disabled is False,
+          f"style={view3.claim_all.style.name} disabled={view3.claim_all.disabled} guard={view3._claim_running}")
 
     # ── 6. Stats labels vs the actual records ──
     print("== 6. Stats labels ==")
@@ -516,7 +540,7 @@ async def main():
           and "nothing left to claim" in highest
           and str(total_rows) in highest, highest)
     check("Waiting only says 'delivered' when every row really is fulfilled",
-          "every crossed reward is delivered" in waiting, waiting)
+          "every crossed reward is delivered" in waiting.lower(), waiting)
 
     # a row with a LIVE lease is in flight, not delivered
     from datetime import datetime, timezone
@@ -530,7 +554,7 @@ async def main():
     waiting = field(stats, "Waiting")
     highest = field(stats, "Highest unclaimed")
     check("an in-flight row stops the 'every crossed reward is delivered' claim",
-          "every crossed reward is delivered" not in waiting
+          "every crossed reward is delivered" not in waiting.lower()
           and "being delivered now" in waiting, waiting)
     check("an in-flight row is not reported as 'nothing crossed yet' either",
           "nothing crossed yet" not in highest and "being delivered now" in highest,
