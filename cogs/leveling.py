@@ -1081,7 +1081,7 @@ class LevelRewardView(discord.ui.View):
 
     @discord.ui.button(label="Claim All", style=discord.ButtonStyle.primary, row=1)
     async def claim_all(self, interaction, button):
-        await self._run_claim_pass(interaction)
+        await self._run_claim_all_pass(interaction)
 
     @discord.ui.button(label="Restore Level Role",
                        style=discord.ButtonStyle.secondary, row=1)
@@ -1105,29 +1105,21 @@ class LevelRewardView(discord.ui.View):
         """
         await self._run_claim_pass(interaction)
 
-    async def _run_claim_pass(self, interaction):
-        """Shared body: one lease-protected pass, one deferred interaction."""
+    async def _run_claim_all_pass(self, interaction):
+        """Claim All: separate ephemeral followup, original card unchanged."""
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "This level card belongs to someone else.", ephemeral=True)
             return
         if self._claim_running:
-            # A second click while a pass is in flight. Delivery is already
-            # lease-protected (the loser reserves nothing), so this only keeps
-            # the member from stacking up "Claimed 0" replies.
             await interaction.response.send_message(
                 "Your rewards are already being delivered. One moment.",
                 ephemeral=True)
             return
-        # Set before the first await, so two clicks landing in the same
-        # event-loop step cannot both start a pass.
         self._claim_running = True
         try:
-            # Role delivery is outside SQLite and can exceed the 3s ack window.
-            # For a component interaction the default defer is
-            # deferred_message_update (edit the original message). Claim All
-            # must NOT edit the original /level card — the result is a
-            # separate follow-up — so we use thinking=True which selects
+            # Claim All must NOT edit the original /level card — the result
+            # is a separate follow-up — so we use thinking=True which selects
             # deferred_channel_message and keeps the original intact.
             await interaction.response.defer(thinking=True, ephemeral=True)
             from utils.level_claims import (
@@ -1136,8 +1128,6 @@ class LevelRewardView(discord.ui.View):
             result = await claim_available(
                 self.guild_id, self.user_id, member=interaction.user,
                 bot=self.bot)
-            # Data for the result message only — the original /level card
-            # stays completely unchanged (no view mutation, no embed rebuild).
             claims = await list_claims(self.guild_id, self.user_id)
             booster_ok = member_is_booster(interaction.user)
             footer = claim_result_footer(result)
@@ -1150,9 +1140,9 @@ class LevelRewardView(discord.ui.View):
                 result_embed.set_footer(text=footer)
             else:
                 # Nothing delivered and nothing failed — still show the footer
-                # (counts / blocked / reconciliation) so the member sees why.
+                # but only once (was previously assigned to both description
+                # and footer, duplicating the same text).
                 result_embed.description = footer
-                result_embed.set_footer(text=footer)
             await interaction.followup.send(embed=result_embed, ephemeral=True)
         except Exception:
             print(f"[LEVEL CARD] Claim All failed (guild={self.guild_id} "
@@ -1162,6 +1152,61 @@ class LevelRewardView(discord.ui.View):
                     content="Claiming failed before it could finish. "
                             "Nothing was lost. Try Claim All again.",
                     ephemeral=True)
+            except Exception:
+                pass
+            raise
+        finally:
+            self._claim_running = False
+
+    async def _run_claim_pass(self, interaction):
+        """Restore Level Role: preserves original-card update path.
+
+        This is the pre-existing Restore behavior — it defers normally and
+        edits the original /level card with the updated embed/view. Claim All
+        now uses a separate method (_run_claim_all_pass) that sends a followup.
+        """
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This level card belongs to someone else.", ephemeral=True)
+            return
+        if self._claim_running:
+            await interaction.response.send_message(
+                "Your rewards are already being delivered. One moment.",
+                ephemeral=True)
+            return
+        self._claim_running = True
+        try:
+            await interaction.response.defer()
+            from utils.level_claims import (
+                claim_available, list_claims, member_is_booster,
+            )
+            result = await claim_available(
+                self.guild_id, self.user_id, member=interaction.user,
+                bot=self.bot)
+            claims = await list_claims(self.guild_id, self.user_id)
+            booster_ok = member_is_booster(interaction.user)
+            await self._apply_claim_state(claims, booster_ok)
+            if result.get("blocked"):
+                self.claim_all.disabled = True
+                if self.sync_roles in self.children:
+                    self.sync_roles.disabled = True
+            self.set_page_state("level")
+            embed = await _level_embed(interaction.guild, interaction.user,
+                                       "level", claims=claims)
+            embed.set_footer(text=claim_result_footer(result))
+            confirmation = await claim_confirmation(
+                interaction.guild, result, claims, booster_ok)
+            if confirmation:
+                embed.add_field(name=confirmation[0], value=confirmation[1],
+                                inline=False)
+            await interaction.edit_original_response(embed=embed, view=self)
+        except Exception:
+            print(f"[LEVEL CARD] Restore Level Role failed (guild={self.guild_id} "
+                  f"user={self.user_id})")
+            try:
+                await interaction.edit_original_response(
+                    content="Claiming failed before it could finish. "
+                            "Nothing was lost. Try Claim All again.")
             except Exception:
                 pass
             raise

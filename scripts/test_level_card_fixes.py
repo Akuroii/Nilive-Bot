@@ -476,12 +476,15 @@ async def main():
     sync_log = []
     itx_sync = component_itx(member, guild, sync_log)
     await view2.sync_roles.callback(itx_sync)
-    check("the reconcile button runs the same deferred followup pass",
-          sync_log == ["defer", "followup.send"] and itx_sync.edit_original_response.await_count == 0,
+    check("the reconcile button still defers then edits the original card (preserved)",
+          sync_log == ["defer", "edit_original_response"]
+          and itx_sync.edit_original_response.await_count == 1
+          and itx_sync.followup.send.await_count == 0,
           str(sync_log))
     dk2 = itx_sync.response.defer.await_args.kwargs if itx_sync.response.defer.await_args else {}
-    check("Restore defer is thinking=True ephemeral=True",
-          dk2.get("thinking") is True and dk2.get("ephemeral") is True, str(dk2))
+    check("Restore defer is plain (no thinking) — original-card update path preserved",
+          not dk2.get("thinking") and not dk2.get("ephemeral"),
+          str(dk2))
     check("_claim_button_available still reports the same reachability (D2 contract)",
           await leveling._claim_button_available(
               GUILD, await list_claims(GUILD, USER), False) is True)

@@ -171,26 +171,32 @@ async def main():
     member5 = make_member(guild)
     import aiosqlite
     from database import DB_PATH
-    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)", (GUILD, USER, 1000, 5))
+    from utils.xp_calculator import xp_for_level as _xp_for_level
+    _xp5 = sum(_xp_for_level(n) for n in range(1, 6))
+    execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (?,?,?,?)", (GUILD, USER, _xp5, 5))
     execute("INSERT INTO leveling_rewards (guild_id, level, role_id, audience) VALUES (?,?,?,?)", (GUILD,5, ROLE_L5, "everyone"))
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,track,reward_ref,payload_json,status,created_at,last_error) VALUES (?,?,?,?,?,?,?,?,?)",
                          (GUILD, USER, 5, "role", str(ROLE_L5), '{"role_id": %d}'%ROLE_L5, "failed", "2024-01-01T00:00:00+00:00", "discord unavailable"))
         await db.commit()
     claims_failed = await list_claims(GUILD, USER)
-    # Check that a retryable failed claim's level page does not contain em dash
-    # (Claim_all's confirmation is the authoritative place where failed label appears)
-    # Verify claim_confirmation text uses parentheses not em dash
-    # Use the already-verified partial failure embed2 which contains failed label
-    assert "(failed, can retry)" not in (rewards_field if 'rewards_field' in locals() else "")
-    # Instead verify the partial confirmation contains correct punctuation
-    assert embed2 and "(failed, can retry)" not in embed2.fields[0].value  # not expected here either
-    # The authoritative check: failed rewards in level embed's remaining line uses status tag
-    # Check the level embed's waiting/highest don't contain em dash
-    all_fields_text = " ".join(f.value for f in level_embed.fields) if 'level_embed' in locals() else ""
-    assert "—" not in all_fields_text, f"Level embed should not contain em dash: {all_fields_text[:200]}"
+    # Render the actual Level embed for the failed claim and verify the
+    # intended wording appears in its real field text.
+    level_embed_failed = await _level_embed(guild, member5, "level", claims=claims_failed)
+    rewards_field = next((f.value for f in level_embed_failed.fields if f.name == "Rewards Available"), "")
+    print(f"Level embed Rewards Available: {rewards_field}")
+    assert "(failed, can retry)" in rewards_field, f"Expected '(failed, can retry)' in Level embed, got: {rewards_field}"
+    assert "—" not in rewards_field, f"Level embed must not contain em dash: {rewards_field}"
+    # Verify the whole Level embed contains no em dash
+    all_fields_text = " ".join(f.value for f in level_embed_failed.fields)
+    if level_embed_failed.footer and level_embed_failed.footer.text:
+        all_fields_text += " " + level_embed_failed.footer.text
+    assert "—" not in all_fields_text, f"Level embed should not contain em dash: {all_fields_text[:300]}"
     print(f"Level embed fields ok, no em dash: {all_fields_text[:200]}")
-    # and check currency waiting text
+    # Stats page for the failed claim should also have no em dash
+    stats_failed = await _level_embed(guild, member5, "stats", claims=claims_failed)
+    stats_text = " ".join(f.value for f in stats_failed.fields)
+    assert "—" not in stats_text, f"Stats embed should not contain em dash: {stats_text[:300]}"
     # Re-run stats for fulfilled case
     execute("DELETE FROM level_reward_claims WHERE guild_id=? AND user_id=?", (GUILD, USER))
     await setup_rewards()
