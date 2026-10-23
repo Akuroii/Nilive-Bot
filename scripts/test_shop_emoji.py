@@ -859,6 +859,24 @@ def test_changed_source_ready_duplicate_conflict_is_not_clean_success(shop):
     assert shop.fake.delete_calls == []
 
 
+def test_changed_source_ready_refreshed_duplicate_conflict_is_not_clean_success(shop):
+    old_hash, old_before, new_hash = _begin_changed_source_ready_race(shop)
+    _insert_changed_source_ready_asset(shop, new_hash, "5001")
+    shop.fake.list_snapshots = [
+        [], [], [remote_emoji(new_hash, 5001), remote_emoji(new_hash, 5002)],
+    ]
+
+    result = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+
+    _assert_changed_source_ready_result(shop, old_hash, old_before, new_hash, result)
+    assert result["code"] == "deterministic_name_conflict"
+    assert result["message"] == "Multiple Discord emojis share the deterministic name: 5001,5002"
+    assert result["duplicates"] == ["5001", "5002"]
+    assert shop.fake.create_calls == []
+    assert shop.fake.delete_calls == []
+
+
 def test_changed_source_ready_mismatched_bound_id_is_not_clean_success(shop):
     old_hash, old_before, new_hash = _begin_changed_source_ready_race(shop)
     _insert_changed_source_ready_asset(shop, new_hash, "5001")

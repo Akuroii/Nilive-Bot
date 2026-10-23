@@ -1070,6 +1070,7 @@ async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
     if new_asset["status"] == "ready":
         if not any(str(e.get("id")) == str(new_asset.get("emoji_id")) for e in remote):
             remote = await discord.list_emojis()
+            new_duplicates = _duplicates(new_asset, _matching_name(new_asset, remote))
         new_asset = await _refresh_ready_asset(db, new_asset, remote, bot_user_id)
     await _upsert_alias(db, discord.application_id, guild_id, source_url, changed_hash)
     if new_claimed is not None and new_asset["status"] == "preparing":
