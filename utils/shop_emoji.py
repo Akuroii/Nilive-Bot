@@ -656,7 +656,15 @@ async def _reconcile_asset(db, asset, remote, bot_user_id, *, stale_after=PREPAR
         if (_valid_emoji_id(candidate.get("id"))
                 and _ownership_supported(candidate, asset["application_id"], bot_user_id)):
             return await _adopt_asset(db, asset, candidate), []
-        return await _set_last_error(db, asset, "The deterministic-name match lacks supported ownership metadata."), []
+        # A name match without positive bot-uploader provenance is a collision,
+        # not absence. Keep ambiguous creation uncertain and return its ID so
+        # every pre-create/retry path blocks instead of falling through to POST.
+        message = "The deterministic-name match lacks supported ownership metadata."
+        if asset["status"] == "preparing":
+            asset = await _mark_uncertain(db, asset, message)
+        else:
+            asset = await _set_last_error(db, asset, message)
+        return asset, duplicates
     if asset["status"] == "preparing":
         started = _parse_time(asset.get("attempt_started_at"))
         if started is None or (_utcnow() - started).total_seconds() >= stale_after:
@@ -885,6 +893,7 @@ async def preflight_prepared_emoji_ids(guild_id, references):
                              code="product_emoji_reference_limit", status=409)
     async with DiscordAPI() as discord:
         await discord.verify_application()
+        bot_user_id = await discord.bot_user_id()
         async with aiosqlite.connect(DB_PATH) as db:
             marks = ",".join("?" for _ in wanted)
             cur = await db.execute(
@@ -912,7 +921,9 @@ async def preflight_prepared_emoji_ids(guild_id, references):
         conflicts = []
         for emoji_id, (name, animated) in bound.items():
             emoji = remote_by_id[emoji_id]
-            if emoji.get("name") != name or bool(emoji.get("animated", False)) != animated:
+            if (emoji.get("name") != name
+                    or bool(emoji.get("animated", False)) != animated
+                    or not _ownership_supported(emoji, discord.application_id, bot_user_id)):
                 conflicts.append(emoji_id)
         if conflicts:
             raise ShopEmojiError(
@@ -927,9 +938,12 @@ def _result(asset, *, code=None, message=None, duplicates=None):
     emoji = ""
     if asset and status == "ready" and _valid_emoji_id(asset.get("emoji_id")):
         emoji = build_custom_emoji(asset["emoji_id"], asset["emoji_name"], bool(asset["animated"]))
+    if code is None:
+        code = ("deterministic_name_conflict" if duplicates
+                else "create_uncertain" if status in {"uncertain", "preparing"} else status)
     return {
         "status": status,
-        "code": code or ("create_uncertain" if status in {"uncertain", "preparing"} else status),
+        "code": code,
         "message": message or (asset or {}).get("last_error") or "",
         "content_hash": (asset or {}).get("content_hash"),
         "emoji_name": (asset or {}).get("emoji_name"),
@@ -957,6 +971,8 @@ async def _retry_allowed(asset, retry_uncertain, acknowledgement):
 async def _create_claimed(db, discord, asset, final_png, bot_user_id):
     remote = await discord.list_emojis()
     reconciled, duplicates = await _reconcile_asset(db, asset, remote, bot_user_id, stale_after=10**9)
+    if duplicates:
+        return _result(reconciled, code="deterministic_name_conflict", duplicates=duplicates)
     if reconciled["status"] != "preparing" or reconciled.get("attempt_id") != asset.get("attempt_id"):
         return _result(reconciled, duplicates=duplicates)
     if len(remote) >= APPLICATION_EMOJI_LIMIT:
@@ -997,26 +1013,37 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
                        retry_uncertain, acknowledgement):
     alias_asset = await _get_alias_asset(db, discord.application_id, guild_id, source_url)
     if alias_asset and alias_asset["status"] in {"preparing", "uncertain"}:
+        original_asset = alias_asset
+        recovery_allowed = False
         alias_asset, duplicates = await _reconcile_asset(db, alias_asset, remote, bot_user_id)
-        if alias_asset["status"] == "ready":
-            return _result(alias_asset, code="reconciled"), remote
-        if not await _retry_allowed(alias_asset, retry_uncertain, acknowledgement):
-            return _result(alias_asset, duplicates=duplicates), remote
-        remote = await discord.list_emojis()
-        alias_asset, duplicates = await _reconcile_asset(db, alias_asset, remote, bot_user_id)
-        if alias_asset["status"] == "ready":
-            return _result(alias_asset, code="reconciled"), remote
-        if alias_asset["status"] != "uncertain" or duplicates:
-            return _result(alias_asset, duplicates=duplicates), remote
-        # Fetch/compare before claiming a new attempt. A source error or changed
-        # image must leave the original uncertain evidence and quarantine intact.
+        if alias_asset["status"] != "ready":
+            if not await _retry_allowed(alias_asset, retry_uncertain, acknowledgement):
+                return _result(alias_asset, duplicates=duplicates), remote
+            recovery_allowed = True
+            remote = await discord.list_emojis()
+            alias_asset, duplicates = await _reconcile_asset(db, alias_asset, remote, bot_user_id)
+            if alias_asset["status"] != "ready" and (alias_asset["status"] != "uncertain" or duplicates):
+                return _result(alias_asset, duplicates=duplicates), remote
+        # Reconciliation may confirm the old emoji, but that alone does not make
+        # it the prepared result for different current source bytes. Compare
+        # before every ready return and before claiming any uncertain retry.
         final_png = await _download_and_normalize(source_url)
         changed_hash = content_identity(final_png)
         if changed_hash != alias_asset["content_hash"]:
+            if not recovery_allowed:
+                # The initial reconciliation confirmed the old asset. It stays
+                # valid, but only the acknowledged recovery flow may move the
+                # URL away from it; never return that old hash as new content.
+                if not await _retry_allowed(original_asset, retry_uncertain, acknowledgement):
+                    raise ShopEmojiError(
+                        "The current source differs from the confirmed old asset; "
+                        "use acknowledged recovery after quarantine to remap it.",
+                        code="source_changed_recovery_required", status=409)
+                remote = await discord.list_emojis()
             # Explicit owner recovery for a changed source: prepare/remap the
-            # new identity without touching the old uncertain attempt. In
-            # particular, never turn the old POST into a definite failure and
-            # never issue a second POST for that old content hash.
+            # new identity without touching the old attempt. In particular,
+            # never turn an old POST into a definite failure and never issue a
+            # second POST for that old content hash.
             old_asset = alias_asset
             new_asset, new_claimed, new_duplicates = await _insert_asset_or_claim(
                 db, discord.application_id, guild_id, changed_hash, remote, bot_user_id)
@@ -1037,8 +1064,10 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
                 outcome["code"] = "remapped_changed_source"
                 outcome["message"] = (
                     "The source changed; the alias now uses the newly prepared hash. "
-                    "The old uncertain asset remains available for reconciliation.")
+                    "The previous asset was left unchanged.")
             return outcome, remote
+        if alias_asset["status"] == "ready":
+            return _result(alias_asset, code="reconciled"), remote
         claimed = await _claim_existing(db, alias_asset, guild_id, allow_uncertain=True)
         if claimed is None:
             current = await _get_asset(db, discord.application_id, alias_asset["content_hash"])

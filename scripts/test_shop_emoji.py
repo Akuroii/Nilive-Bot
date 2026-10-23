@@ -40,6 +40,7 @@ class FakeDiscord:
         self.create_error = None
         self.delete_error = None
         self.list_error = None
+        self.list_snapshots = None
         self.create_hook = None
         self.auto_remote = True
         self.next_id = 1000
@@ -60,6 +61,8 @@ class FakeDiscord:
         self.list_calls += 1
         if self.list_error:
             raise self.list_error
+        if self.list_snapshots:
+            self.remote = [dict(item) for item in self.list_snapshots.pop(0)]
         return [dict(item) for item in self.remote]
 
     async def create_emoji(self, name, final_png, bot_user_id):
@@ -403,6 +406,40 @@ def test_uncertain_retry_requires_elapsed_quarantine_then_is_explicit(shop):
     assert len(shop.fake.create_calls) == 2
 
 
+def test_untrusted_collision_between_lists_blocks_initial_post(shop):
+    content_hash = SE.content_identity(PNG1)
+    collision = remote_emoji(content_hash, 2001)
+    del collision["user"]
+    shop.fake.list_snapshots = [[], [collision]]
+    result = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert result["code"] == "deterministic_name_conflict"
+    assert result["status"] == "uncertain"
+    assert result["duplicates"] == ["2001"]
+    assert shop.fake.list_calls == 2
+    assert shop.fake.create_calls == []
+    current = asset_row(shop, content_hash)
+    assert current["status"] == "uncertain" and current["emoji_id"] is None
+
+
+def test_untrusted_collision_blocks_acknowledged_uncertain_retry(shop):
+    content_hash = put_asset(shop)
+    with sqlite3.connect(shop.path) as db:
+        db.execute("UPDATE shop_emoji_assets SET quarantine_until=? WHERE content_hash=?",
+                   (SE._iso(SE._utcnow() - timedelta(seconds=1)), content_hash))
+    collision = remote_emoji(content_hash, 2001)
+    collision["user"] = {"id": "12345"}
+    shop.fake.list_snapshots = [[], [collision]]
+    result = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+    assert result["code"] == "deterministic_name_conflict"
+    assert result["status"] == "uncertain"
+    assert result["duplicates"] == ["2001"]
+    assert shop.fake.list_calls == 2
+    assert shop.fake.create_calls == []
+    current = asset_row(shop, content_hash)
+    assert current["status"] == "uncertain" and current["attempt_id"] == "attempt-1"
+
+
 def test_uncertain_retry_remaps_changed_source_without_touching_old_attempt(shop):
     old_hash = put_asset(shop)
     with sqlite3.connect(shop.path) as db:
@@ -431,6 +468,48 @@ def test_uncertain_retry_remaps_changed_source_without_touching_old_attempt(shop
     reused = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
     assert reused["status"] == "ready" and reused["content_hash"] == new_hash
     assert len(shop.fake.create_calls) == 1
+
+
+def test_changed_source_remaps_even_when_old_emoji_is_visible_on_retry(shop):
+    old_hash = put_asset(shop)
+    with sqlite3.connect(shop.path) as db:
+        db.execute("UPDATE shop_emoji_assets SET quarantine_until=? WHERE content_hash=?",
+                   (SE._iso(SE._utcnow() - timedelta(seconds=1)), old_hash))
+    shop.images[URL1] = PNG2
+    shop.fake.list_snapshots = [[], [remote_emoji(old_hash, 2001)]]
+    result = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+    new_hash = SE.content_identity(PNG2)
+    assert result["code"] == "remapped_changed_source"
+    assert result["status"] == "ready" and result["content_hash"] == new_hash
+    assert result["remapped_from_content_hash"] == old_hash
+    old = asset_row(shop, old_hash)
+    assert old["status"] == "ready" and old["emoji_id"] == "2001"
+    assert asset_row(shop, new_hash)["status"] == "ready"
+    assert len(shop.fake.create_calls) == 1
+    assert shop.fake.create_calls[0][0] == SE.deterministic_emoji_name(new_hash)
+    with sqlite3.connect(shop.path) as db:
+        aliased = db.execute(
+            "SELECT content_hash FROM shop_emoji_url_aliases WHERE application_id=? AND guild_id=? AND source_url=?",
+            (APP, GUILD, URL1)).fetchone()[0]
+        assert aliased == new_hash
+
+
+def test_visible_old_asset_is_not_returned_for_changed_source_without_recovery(shop):
+    old_hash = put_asset(shop)
+    shop.images[URL1] = PNG2
+    shop.fake.remote = [remote_emoji(old_hash, 2001)]
+    result = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert result["status"] == "failed"
+    assert result["code"] == "source_changed_recovery_required"
+    old = asset_row(shop, old_hash)
+    assert old["status"] == "ready" and old["emoji_id"] == "2001"
+    assert shop.fake.create_calls == []
+    with sqlite3.connect(shop.path) as db:
+        aliased = db.execute(
+            "SELECT content_hash FROM shop_emoji_url_aliases WHERE application_id=? AND guild_id=? AND source_url=?",
+            (APP, GUILD, URL1)).fetchone()[0]
+        assert aliased == old_hash
 
 
 def test_late_completion_cannot_overwrite_a_newer_attempt(shop):
@@ -550,6 +629,25 @@ def test_preflight_missing_and_api_failure_never_mark_asset_missing(shop):
     with pytest.raises(SE.DiscordAPIError):
         run(SE.preflight_prepared_emoji_ids(GUILD, reference))
     assert asset_row(shop, content_hash)["status"] == "ready"
+
+
+@pytest.mark.parametrize("uploader", [None, {"id": "12345"}])
+def test_publication_preflight_rejects_untrusted_uploader_without_asset_writes(shop, uploader):
+    content_hash = put_asset(shop, status="ready", emoji_id="5001", attempt=None)
+    reference = [{"id": "5001", "name": SE.deterministic_emoji_name(content_hash), "animated": False}]
+    remote = remote_emoji(content_hash, 5001)
+    if uploader is None:
+        del remote["user"]
+    else:
+        remote["user"] = uploader
+    shop.fake.remote = [remote]
+    before = asset_row(shop, content_hash)
+    with pytest.raises(SE.ShopEmojiError) as error:
+        run(SE.preflight_prepared_emoji_ids(GUILD, reference))
+    assert error.value.code == "product_emoji_conflict"
+    assert error.value.details == {"emoji_ids": ["5001"]}
+    assert asset_row(shop, content_hash) == before
+    assert shop.fake.create_calls == [] and shop.fake.delete_calls == []
 
 
 def test_publication_preflight_blocks_before_pending_or_update_claim(monkeypatch):
