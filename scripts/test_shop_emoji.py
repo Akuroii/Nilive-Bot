@@ -41,6 +41,7 @@ class FakeDiscord:
         self.delete_error = None
         self.list_error = None
         self.list_snapshots = None
+        self.list_hook = None
         self.create_hook = None
         self.auto_remote = True
         self.next_id = 1000
@@ -63,6 +64,8 @@ class FakeDiscord:
             raise self.list_error
         if self.list_snapshots:
             self.remote = [dict(item) for item in self.list_snapshots.pop(0)]
+        if self.list_hook:
+            await self.list_hook()
         return [dict(item) for item in self.remote]
 
     async def create_emoji(self, name, final_png, bot_user_id):
@@ -626,6 +629,100 @@ def test_late_completion_cannot_overwrite_a_newer_attempt(shop):
     assert result["code"] == "late_completion"
     current = asset_row(shop, content_hash)
     assert current["attempt_id"] == "new-attempt" and current["status"] == "preparing"
+
+
+async def _set_ready_from_other_connection(shop, content_hash, emoji_id="5001"):
+    async with SE.aiosqlite.connect(shop.path) as other:
+        cur = await other.execute(
+            "UPDATE shop_emoji_assets SET status='ready',emoji_id=?,attempt_id=NULL,"
+            "attempt_started_at=NULL,quarantine_until=NULL,last_error=NULL,updated_at=? "
+            "WHERE application_id=? AND content_hash=?",
+            (str(emoji_id), SE._iso(), APP, content_hash))
+        assert cur.rowcount == 1
+        await other.commit()
+
+
+def _create_claimed_result(shop, content_hash):
+    async def scenario():
+        async with SE.aiosqlite.connect(shop.path) as db:
+            asset = await SE._get_asset(db, APP, content_hash)
+            return await SE._create_claimed(db, shop.fake, asset, PNG1, BOT)
+
+    return run(scenario())
+
+
+def _assert_current_ready(shop, content_hash, result, emoji_id="5001"):
+    current = asset_row(shop, content_hash)
+    assert current["status"] == "ready" and current["emoji_id"] == str(emoji_id)
+    assert current["attempt_id"] is None and current["last_error"] is None
+    assert result["status"] == "ready" and result["emoji_id"] == str(emoji_id)
+    assert result["emoji"] == SE.build_custom_emoji(
+        current["emoji_id"], current["emoji_name"], bool(current["animated"]))
+    assert result["retry_after"] is None
+
+
+@pytest.mark.parametrize("uncertain", [True, False], ids=["uncertain", "definitive"])
+def test_current_ready_wins_over_create_error(shop, uncertain):
+    content_hash = put_asset(shop, status="preparing", attempt="original-attempt")
+
+    async def ready_hook(*_args):
+        await _set_ready_from_other_connection(shop, content_hash)
+
+    shop.fake.create_hook = ready_hook
+    shop.fake.create_error = SE.DiscordAPIError(
+        "obsolete create error", uncertain=uncertain)
+
+    result = _create_claimed_result(shop, content_hash)
+
+    _assert_current_ready(shop, content_hash, result)
+    if uncertain:
+        assert result["code"] == "create_uncertain"
+        assert result["message"] == (
+            "The create request had an uncertain outcome while this asset was bound by another operation. "
+            "Reconcile application emojis to check for a possible duplicate.")
+        assert "obsolete create error" not in result["message"]
+    else:
+        assert result["code"] == "reconciled"
+        assert result["message"] == ""
+    assert result["duplicates"] == []
+    assert len(shop.fake.create_calls) == 1
+    assert shop.fake.delete_calls == []
+
+
+def test_current_ready_wins_over_capacity_failure(shop):
+    content_hash = put_asset(shop, status="preparing", attempt="original-attempt")
+    shop.fake.remote = _capacity_remote(SE.APPLICATION_EMOJI_LIMIT)
+
+    async def ready_hook():
+        await _set_ready_from_other_connection(shop, content_hash)
+
+    shop.fake.list_hook = ready_hook
+    result = _create_claimed_result(shop, content_hash)
+
+    _assert_current_ready(shop, content_hash, result)
+    assert result["code"] == "reconciled"
+    assert result["message"] == ""
+    assert result["duplicates"] == []
+    assert shop.fake.create_calls == []
+    assert shop.fake.delete_calls == []
+
+
+def test_current_ready_preserves_duplicate_conflict(shop):
+    content_hash = put_asset(shop, status="preparing", attempt="original-attempt")
+    shop.fake.remote = [remote_emoji(content_hash, 5001), remote_emoji(content_hash, 5002)]
+
+    async def ready_hook():
+        await _set_ready_from_other_connection(shop, content_hash)
+
+    shop.fake.list_hook = ready_hook
+    result = _create_claimed_result(shop, content_hash)
+
+    _assert_current_ready(shop, content_hash, result)
+    assert result["code"] == "deterministic_name_conflict"
+    assert result["message"] == ""
+    assert result["duplicates"] == ["5001", "5002"]
+    assert shop.fake.create_calls == []
+    assert shop.fake.delete_calls == []
 
 
 def test_duplicates_are_reported_without_selection_or_deletion(shop):

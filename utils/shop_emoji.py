@@ -1018,14 +1018,23 @@ async def _create_claimed(db, discord, asset, final_png, bot_user_id):
         return _result(reconciled, duplicates=duplicates)
     if len(remote) >= APPLICATION_EMOJI_LIMIT:
         failed = await _mark_failed(db, asset, "The application's total emoji capacity is full.")
+        if failed["status"] == "ready":
+            return _result(failed, code="reconciled")
         return _result(failed, code="emoji_capacity", message=failed["last_error"])
     try:
         created = await discord.create_emoji(asset["emoji_name"], final_png, bot_user_id)
     except DiscordAPIError as exc:
         if exc.uncertain:
             uncertain = await _mark_uncertain(db, asset, str(exc))
+            if uncertain["status"] == "ready":
+                return _result(
+                    uncertain, code="create_uncertain",
+                    message=("The create request had an uncertain outcome while this asset was bound by another operation. "
+                             "Reconcile application emojis to check for a possible duplicate."))
             return _result(uncertain, code="create_uncertain", message=str(exc))
         failed = await _mark_failed(db, asset, str(exc))
+        if failed["status"] == "ready":
+            return _result(failed, code="reconciled")
         return _result(failed, code="discord_rejected", message=str(exc))
     adopted = await _adopt_asset(db, asset, created)
     if adopted["status"] == "ready" and str(adopted.get("emoji_id")) != str(created["id"]):
