@@ -68,7 +68,7 @@ _NAT64_NETWORKS = (
     ipaddress.IPv6Network("64:ff9b:1::/48"),
 )
 
-# database.py executes these statements and the additive creator migration via
+# database.py executes these statements and additive migrations via
 # ensure_shop_emoji_schema() during normal init_db(). Preview/loaders never DDL.
 SHOP_EMOJI_SCHEMA = (
     """
@@ -98,6 +98,8 @@ SHOP_EMOJI_SCHEMA = (
         guild_id         INTEGER NOT NULL,
         source_url       TEXT NOT NULL,
         content_hash     TEXT NOT NULL,
+        recovery_ack_required INTEGER NOT NULL DEFAULT 0,
+        recovery_not_before TEXT,
         created_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (application_id, guild_id, source_url),
@@ -135,6 +137,14 @@ async def ensure_shop_emoji_schema(db):
     columns = {row[1] for row in await cur.fetchall()}
     if "creator_guild_id" not in columns:
         await db.execute("ALTER TABLE shop_emoji_assets ADD COLUMN creator_guild_id INTEGER")
+    cur = await db.execute("PRAGMA table_info(shop_emoji_url_aliases)")
+    alias_columns = {row[1] for row in await cur.fetchall()}
+    if "recovery_ack_required" not in alias_columns:
+        await db.execute(
+            "ALTER TABLE shop_emoji_url_aliases "
+            "ADD COLUMN recovery_ack_required INTEGER NOT NULL DEFAULT 0")
+    if "recovery_not_before" not in alias_columns:
+        await db.execute("ALTER TABLE shop_emoji_url_aliases ADD COLUMN recovery_not_before TEXT")
     # Existing aliased rows retain their original guild where possible. A
     # legacy unaliased NULL remains unattributed and cannot claim a new POST.
     await db.execute(
@@ -462,12 +472,18 @@ async def _get_asset(db, application_id, content_hash):
 
 async def _get_alias_asset(db, application_id, guild_id, source_url):
     cur = await db.execute(
-        f"SELECT {_ASSET_SELECT_E} FROM shop_emoji_url_aliases a "
+        f"SELECT {_ASSET_SELECT_E},a.recovery_ack_required,a.recovery_not_before "
+        "FROM shop_emoji_url_aliases a "
         "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
         "AND e.content_hash=a.content_hash "
         "WHERE a.application_id=? AND a.guild_id=? AND a.source_url=?",
         (application_id, guild_id, source_url))
-    return _asset(await cur.fetchone())
+    row = await cur.fetchone()
+    asset = _asset(row)
+    if asset:
+        asset["recovery_ack_required"] = bool(row[len(_ASSET_FIELDS)])
+        asset["recovery_not_before"] = row[len(_ASSET_FIELDS) + 1]
+    return asset
 
 
 async def _upsert_alias(db, application_id, guild_id, source_url, content_hash):
@@ -476,8 +492,25 @@ async def _upsert_alias(db, application_id, guild_id, source_url, content_hash):
         "INSERT INTO shop_emoji_url_aliases "
         "(application_id,guild_id,source_url,content_hash,created_at,updated_at) "
         "VALUES (?,?,?,?,?,?) ON CONFLICT(application_id,guild_id,source_url) DO UPDATE SET "
-        "content_hash=excluded.content_hash,updated_at=excluded.updated_at",
+        "content_hash=excluded.content_hash,recovery_ack_required=0,recovery_not_before=NULL,"
+        "updated_at=excluded.updated_at",
         (application_id, guild_id, source_url, content_hash, now, now))
+    await db.commit()
+
+
+async def _set_alias_recovery_required(db, application_id, guild_id, source_url, content_hash, not_before):
+    await db.execute(
+        "UPDATE shop_emoji_url_aliases SET recovery_ack_required=1,recovery_not_before=?,updated_at=? "
+        "WHERE application_id=? AND guild_id=? AND source_url=? AND content_hash=?",
+        (not_before, _iso(), application_id, guild_id, source_url, content_hash))
+    await db.commit()
+
+
+async def _clear_alias_recovery_required(db, application_id, guild_id, source_url, content_hash):
+    await db.execute(
+        "UPDATE shop_emoji_url_aliases SET recovery_ack_required=0,recovery_not_before=NULL,updated_at=? "
+        "WHERE application_id=? AND guild_id=? AND source_url=? AND content_hash=?",
+        (_iso(), application_id, guild_id, source_url, content_hash))
     await db.commit()
 
 
@@ -955,14 +988,14 @@ def _result(asset, *, code=None, message=None, duplicates=None):
     }
 
 
-async def _retry_allowed(asset, retry_uncertain, acknowledgement):
+async def _retry_allowed(asset, retry_uncertain, acknowledgement, *, quarantine_until=None):
     if not retry_uncertain:
         return False
     if acknowledgement is not True:
         raise ShopEmojiError(
             "Retrying an uncertain creation requires explicit acknowledgement that a duplicate is still possible.",
             code="duplicate_risk_ack_required", status=409)
-    until = _parse_time(asset.get("quarantine_until"))
+    until = _parse_time(asset.get("quarantine_until") if quarantine_until is None else quarantine_until)
     if until is None or _utcnow() < until:
         return False
     return True
@@ -1009,12 +1042,47 @@ async def _create_claimed(db, discord, asset, final_png, bot_user_id):
     return _result(adopted, code="created")
 
 
+async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
+                                final_png, remote, bot_user_id):
+    """Prepare a new identity and clear recovery state only through this flow."""
+    changed_hash = content_identity(final_png)
+    new_asset, new_claimed, new_duplicates = await _insert_asset_or_claim(
+        db, discord.application_id, guild_id, changed_hash, remote, bot_user_id)
+    if new_claimed is None and new_asset["status"] in {"preparing", "uncertain"}:
+        new_asset, new_duplicates = await _reconcile_asset(db, new_asset, remote, bot_user_id)
+    if new_asset["status"] == "ready":
+        if not any(str(e.get("id")) == str(new_asset.get("emoji_id")) for e in remote):
+            remote = await discord.list_emojis()
+        new_asset = await _refresh_ready_asset(db, new_asset, remote, bot_user_id)
+    await _upsert_alias(db, discord.application_id, guild_id, source_url, changed_hash)
+    if new_claimed is not None and new_asset["status"] == "preparing":
+        outcome = await _create_claimed(db, discord, new_claimed, final_png, bot_user_id)
+    else:
+        outcome = _result(new_asset, code="remapped_changed_source", duplicates=new_duplicates)
+    outcome["remapped_from_content_hash"] = old_asset["content_hash"]
+    if outcome.get("status") == "ready":
+        outcome["code"] = "remapped_changed_source"
+        outcome["message"] = (
+            "The source changed; the alias now uses the newly prepared hash. "
+            "The previous asset was left unchanged.")
+    return outcome, remote
+
+
 async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
                        retry_uncertain, acknowledgement):
     alias_asset = await _get_alias_asset(db, discord.application_id, guild_id, source_url)
     if alias_asset and alias_asset["status"] in {"preparing", "uncertain"}:
         original_asset = alias_asset
         recovery_allowed = False
+        # Persist changed-source recovery before reconciliation can turn the
+        # old asset ready. A later request must not inherit an unmarked ready
+        # alias after an error, crash, or unacknowledged preparation attempt.
+        final_png = await _download_and_normalize(source_url)
+        changed_hash = content_identity(final_png)
+        if changed_hash != original_asset["content_hash"]:
+            await _set_alias_recovery_required(
+                db, discord.application_id, guild_id, source_url, original_asset["content_hash"],
+                original_asset.get("quarantine_until") or original_asset.get("recovery_not_before"))
         alias_asset, duplicates = await _reconcile_asset(db, alias_asset, remote, bot_user_id)
         if alias_asset["status"] != "ready":
             if not await _retry_allowed(alias_asset, retry_uncertain, acknowledgement):
@@ -1025,10 +1093,7 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
             if alias_asset["status"] != "ready" and (alias_asset["status"] != "uncertain" or duplicates):
                 return _result(alias_asset, duplicates=duplicates), remote
         # Reconciliation may confirm the old emoji, but that alone does not make
-        # it the prepared result for different current source bytes. Compare
-        # before every ready return and before claiming any uncertain retry.
-        final_png = await _download_and_normalize(source_url)
-        changed_hash = content_identity(final_png)
+        # it the prepared result for different current source bytes.
         if changed_hash != alias_asset["content_hash"]:
             if not recovery_allowed:
                 # The initial reconciliation confirmed the old asset. It stays
@@ -1040,32 +1105,10 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
                         "use acknowledged recovery after quarantine to remap it.",
                         code="source_changed_recovery_required", status=409)
                 remote = await discord.list_emojis()
-            # Explicit owner recovery for a changed source: prepare/remap the
-            # new identity without touching the old attempt. In particular,
-            # never turn an old POST into a definite failure and never issue a
-            # second POST for that old content hash.
-            old_asset = alias_asset
-            new_asset, new_claimed, new_duplicates = await _insert_asset_or_claim(
-                db, discord.application_id, guild_id, changed_hash, remote, bot_user_id)
-            if new_claimed is None and new_asset["status"] in {"preparing", "uncertain"}:
-                new_asset, new_duplicates = await _reconcile_asset(
-                    db, new_asset, remote, bot_user_id)
-            if new_asset["status"] == "ready":
-                if not any(str(e.get("id")) == str(new_asset.get("emoji_id")) for e in remote):
-                    remote = await discord.list_emojis()
-                new_asset = await _refresh_ready_asset(db, new_asset, remote, bot_user_id)
-            await _upsert_alias(db, discord.application_id, guild_id, source_url, changed_hash)
-            if new_claimed is not None and new_asset["status"] == "preparing":
-                outcome = await _create_claimed(db, discord, new_claimed, final_png, bot_user_id)
-            else:
-                outcome = _result(new_asset, code="remapped_changed_source", duplicates=new_duplicates)
-            outcome["remapped_from_content_hash"] = old_asset["content_hash"]
-            if outcome.get("status") == "ready":
-                outcome["code"] = "remapped_changed_source"
-                outcome["message"] = (
-                    "The source changed; the alias now uses the newly prepared hash. "
-                    "The previous asset was left unchanged.")
-            return outcome, remote
+            # Only this acknowledged flow may move the alias and clear its
+            # durable recovery requirement. The old hash is never re-POSTed.
+            return await _remap_changed_source(
+                db, discord, guild_id, source_url, alias_asset, final_png, remote, bot_user_id)
         if alias_asset["status"] == "ready":
             return _result(alias_asset, code="reconciled"), remote
         claimed = await _claim_existing(db, alias_asset, guild_id, allow_uncertain=True)
@@ -1074,7 +1117,11 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
             return _result(current), remote
         return await _create_claimed(db, discord, claimed, final_png, bot_user_id), remote
 
+    old_alias_asset = None
+    recovery_not_before = None
     if alias_asset and alias_asset["status"] == "ready":
+        old_alias_asset = alias_asset
+        recovery_not_before = alias_asset.get("recovery_not_before")
         # Reuse a bound ID already confirmed in this snapshot (including a
         # creation earlier in this batch). Absence requires a fresh list after
         # the ready DB read before it can be treated as confirmed deletion.
@@ -1084,6 +1131,23 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
 
     final_png = await _download_and_normalize(source_url)
     content_hash = content_identity(final_png)
+    if old_alias_asset and old_alias_asset.get("recovery_ack_required"):
+        if content_hash == old_alias_asset["content_hash"]:
+            # The source reverted to the confirmed old identity; no remap is
+            # needed, so ordinary reuse may clear the recovered-alias marker.
+            await _clear_alias_recovery_required(
+                db, discord.application_id, guild_id, source_url, old_alias_asset["content_hash"])
+        else:
+            if not await _retry_allowed(
+                    old_alias_asset, retry_uncertain, acknowledgement,
+                    quarantine_until=recovery_not_before):
+                raise ShopEmojiError(
+                    "The current source differs from the confirmed old asset; "
+                    "use acknowledged recovery after quarantine to remap it.",
+                    code="source_changed_recovery_required", status=409)
+            remote = await discord.list_emojis()
+            return await _remap_changed_source(
+                db, discord, guild_id, source_url, old_alias_asset, final_png, remote, bot_user_id)
     asset = await _get_asset(db, discord.application_id, content_hash)
     duplicates = []
     claimed = None
