@@ -741,18 +741,18 @@ class Shop(commands.Cog):
 
     # ─── INVENTORY ──────────────────────────────────────
     @app_commands.command(name="inventory",
-                          description="Open your inventory (inside your wallet)")
+                          description="Open your inventory")
     async def inventory(self, interaction: discord.Interaction):
-        # /inventory now opens the wallet hub with the inventory
-        # ready. The old verbose purchase-history dump is gone —
-        # receipts live under Wallet → Receipts, and inventory is the
-        # clean tabs view from cogs/wallet.py. This keeps one source
-        # of truth for inventory rendering and removes the
-        # "Paid/Bought/Expires" debug-style output entirely.
-        from cogs.wallet import render_hub
-        await render_hub(
+        # /inventory opens the Inventory panel DIRECTLY (Items tab),
+        # not the Wallet hub. It shares one renderer/view with Wallet's
+        # Inventory button — the only difference is `first=True`, which
+        # sends a fresh ephemeral message instead of editing the one
+        # the button was clicked on. One template, one interaction
+        # logic, one ownership guard (WalletBaseView).
+        from cogs.wallet import TAB_ITEMS, open_inventory_panel
+        await open_inventory_panel(
             interaction, interaction.guild.id, interaction.user.id,
-            first=True)
+            TAB_ITEMS, first=True)
 
 
 async def setup(bot):
