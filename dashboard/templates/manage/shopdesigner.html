@@ -48,7 +48,7 @@
             </section>
             <details id="sd-token-catalog-panel" class="sd-token-catalog">
                 <summary>📖 Token catalog</summary>
-                <p class="sd-muted">Type a token such as <code>&#123;&#123;product.name&#125;&#125;</code> in the message content or any embed text. It is filled in from the product when the design is previewed or published. A short spelling (alias) resolves to the same value as its full token.</p>
+                <p class="sd-muted">Type a token such as <code>&#123;&#123;product.name&#125;&#125;</code> in supported message or embed text. It is filled in from the product when the design is previewed or published. A short spelling (alias) resolves to the same value as its full token. <code>&#123;&#123;product.emoji&#125;&#125;</code> is narrower: use it only in message content, embed descriptions, or embed field values after explicit preparation; unprepared supported uses resolve empty with a warning.</p>
                 <label class="sd-field-label" for="sd-token-search">Find a token</label>
                 <input id="sd-token-search" class="form-input" type="search" placeholder="name, price, stock…" autocomplete="off">
                 <div id="sd-token-status" class="sd-muted" role="status" aria-live="polite"></div>
@@ -78,6 +78,21 @@
                     <p class="sd-muted">Products appear in this order in the draft. Reordering changes only the in-memory roster.</p>
                     <ol id="sd-roster" class="sd-roster-list" aria-label="Ordered root product IDs"></ol>
                     <div id="sd-roster-empty" class="sd-empty">Add products from the live catalog to begin.</div>
+                    <div class="sd-preview-detail" aria-labelledby="sd-emoji-title">
+                        <h3 id="sd-emoji-title">Product image emoji</h3>
+                        <p class="sd-muted">Preparation is explicit and owner-only. Preview and publication never create or delete emojis. Each server can account for up to 100 active or recovering assets; those old assets still count even after their aliases move. If an acknowledged retry finds changed source bytes, the alias moves to the newly prepared asset and the old uncertain attempt remains for reconciliation.</p>
+                        <div class="sd-roster-actions">
+                            <button id="sd-emoji-prepare-selected" class="btn btn-secondary" type="button" disabled>Prepare selected</button>
+                            <button id="sd-emoji-prepare-all" class="btn btn-secondary" type="button" disabled>Prepare roster</button>
+                            <button id="sd-emoji-reconcile" class="btn btn-secondary" type="button" disabled>Reconcile roster</button>
+                        </div>
+                        <label class="sd-muted" for="sd-emoji-retry-uncertain">
+                            <input id="sd-emoji-retry-uncertain" type="checkbox">
+                            After the server quarantine, retry uncertain creation; I acknowledge that a duplicate is still possible.
+                        </label>
+                        <div id="sd-emoji-status" class="sd-muted" role="status" aria-live="polite">Select a roster product to prepare its stored icon.</div>
+                        <div id="sd-emoji-results" class="sd-muted"></div>
+                    </div>
                 </section>
             </div>
 

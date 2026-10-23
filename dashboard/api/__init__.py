@@ -90,6 +90,7 @@ from dashboard.api import moderation     # noqa: E402,F401
 from dashboard.api import mvp            # noqa: E402,F401
 from dashboard.api import shop_categories  # noqa: E402,F401
 from dashboard.api import shop_designs  # noqa: E402,F401
+from dashboard.api import shop_emoji  # noqa: E402,F401
 from dashboard.api import shop_publisher  # noqa: E402,F401
 from dashboard.api import shop_publications  # noqa: E402,F401
 from dashboard.api import tagmissions    # noqa: E402,F401

@@ -1336,6 +1336,12 @@ async def init_db():
             ON shop_designs(guild_id)
         """)
 
+        # Explicit Shop product-emoji preparation. Assets are application-wide
+        # and keyed by final uploaded bytes; aliases remain guild/URL scoped.
+        # Schema is centralized here, never created lazily by preview readers.
+        from utils.shop_emoji import ensure_shop_emoji_schema
+        await ensure_shop_emoji_schema(db)
+
         # Publication identity/state only. The live message is always rebuilt
         # from shop_designs + current shop_items; never persist commerce or
         # rendered payload snapshots here. No Design/channel uniqueness:
@@ -2245,6 +2251,12 @@ async def init_db():
     from utils.level_claims import backfill_legacy_claims, ensure_tables
     await ensure_tables()
     await backfill_legacy_claims()
+
+    # Read-only Discord recovery for interrupted/uncertain emoji creates. This
+    # is scheduled, never awaited: startup does not block on the network and no
+    # startup path may create or delete Discord resources.
+    from utils.shop_emoji import schedule_startup_reconciliation
+    schedule_startup_reconciliation()
 
     print("✅ Database initialized — all tables ready")
     print(f"✅ Developer bypass active for user ID: {OWNER_DISCORD_ID} "

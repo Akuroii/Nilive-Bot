@@ -12,13 +12,20 @@ import requests
 from dashboard.utils.async_utils import run_async
 from database import DB_PATH
 from utils.currency import get_currency_config
+from utils.shop_emoji import (
+    ShopEmojiError, attach_prepared_emojis, preflight_prepared_emoji_ids,
+    product_emoji_references,
+)
 import utils.shop_publisher as SP
 
 DISCORD_API = "https://discord.com/api/v10"
 VIEW_CHANNEL, SEND_MESSAGES, EMBED_LINKS, READ_MESSAGE_HISTORY, ADMINISTRATOR = (
     1 << 10, 1 << 11, 1 << 14, 1 << 16, 1 << 3)
 SUPPORTED_CHANNEL_TYPES = {0, 5}
-BLOCKING_PREVIEW_CODES = {"validation", "action_limit", "presentation_limit"}
+BLOCKING_PREVIEW_CODES = {
+    "validation", "action_limit", "presentation_limit",
+    "unsupported_product_emoji_surface",
+}
 _PRODUCT_COLUMNS = ("id, name, type, price, price_diamonds, enabled, current_stock, max_stock, "
                     "prestige_tier, featured, description, duration_hours, required_level, "
                     "rarity, icon_url, option_of_id, role_id, required_role_id, "
@@ -272,18 +279,20 @@ def _load_design_and_rows(guild_id, design_id):
             if not isinstance(design, dict): return {"_invalid": True}, [], name
             design = dict(design); design["id"] = int(design_id)
             wanted = _design_ids(design)
-            if not wanted: return design, [], name
+            if not wanted: return design, {}, name
             marks = ",".join("?" for _ in wanted)
             cur = await db.execute(f"SELECT {_PRODUCT_COLUMNS} FROM shop_items WHERE guild_id=? AND id IN ({marks})",
                                    (guild_id, *wanted))
-            return design, await cur.fetchall(), name
+            products = {int(r[0]): dict(zip(_PRODUCT_KEYS, r)) for r in await cur.fetchall()}
+            await attach_prepared_emojis(db, guild_id, list(products.values()))
+            return design, products, name
     fetched = run_async(fetch())
     if fetched[0] is None:
         raise PublicationError("Saved Design was not found in this server.", code="unknown_design", status=404)
     design, rows, name = fetched
     if design.get("_invalid"):
         raise PublicationError("The saved Design data is invalid.", code="invalid_saved_design", status=409)
-    return design, {int(r[0]): dict(zip(_PRODUCT_KEYS, r)) for r in rows}, str(name or "")
+    return design, rows, str(name or "")
 
 
 def prepare_design(guild_id, design_id):
@@ -325,7 +334,8 @@ def prepare_design(guild_id, design_id):
     fingerprint = _prepared_fingerprint(design, rows, resolved, payload)
     return {"design_id": design_id, "design_name": name, "blocking_errors": blocking,
             "warnings": nonblocking, "warning_token": _warning_token(nonblocking, fingerprint),
-            "payload": None if blocking else payload, "action": resolved.get("action")}
+            "payload": None if blocking else payload, "action": resolved.get("action"),
+            "product_emoji_references": product_emoji_references(resolved)}
 
 
 def _prepared_fingerprint(design, rows, resolved, payload):
@@ -497,6 +507,18 @@ def remove_publication(guild_id, publication_id, *, expected_statuses=None,
     return bool(run_async(delete()))
 
 
+def _product_emoji_preflight_error(guild_id, prepared):
+    references = prepared.get("product_emoji_references") or []
+    if not references:
+        return None
+    try:
+        run_async(preflight_prepared_emoji_ids(guild_id, references))
+    except ShopEmojiError as exc:
+        return {"code": exc.code, "path": "product.emoji", "message": str(exc),
+                "retryable": exc.status >= 500 or exc.status == 429}
+    return None
+
+
 def post_publish(guild_id, design_id, channel_id, warning_token=None, *, rest=None):
     rest = rest or DiscordREST()
     prepared = prepare_design(guild_id, design_id)
@@ -507,6 +529,10 @@ def post_publish(guild_id, design_id, channel_id, warning_token=None, *, rest=No
     if fresh["blocking_errors"]: return {"outcome": "blocked", "prepared": fresh}
     rest.validate_channel_and_permissions(guild_id, channel_id, "publish")
     if not require_warning_ack(fresh, warning_token): return {"outcome": "ack_required", "prepared": fresh}
+    preflight_error = _product_emoji_preflight_error(guild_id, fresh)
+    if preflight_error:
+        fresh["blocking_errors"] = [*fresh["blocking_errors"], preflight_error]
+        return {"outcome": "blocked", "prepared": fresh}
     record = create_pending(guild_id, design_id, channel_id)
     try: message_id = rest.create_message(channel_id, fresh["payload"])
     except DiscordFailure as exc:
@@ -540,6 +566,10 @@ def update_publication(guild_id, publication, warning_token=None, *, rest=None):
     if not message_id:
         error = "This Publication has no confirmed message ID; it was not retried."
         return {"outcome": "attention", "publication": get_publication(guild_id, pid), "error": error}
+    preflight_error = _product_emoji_preflight_error(guild_id, fresh)
+    if preflight_error:
+        fresh["blocking_errors"] = [*fresh["blocking_errors"], preflight_error]
+        return {"outcome": "blocked", "prepared": fresh}
 
     if not claim_update(guild_id, pid, int(message_id)):
         return {"outcome": "attention", "publication": get_publication(guild_id, pid),
@@ -549,6 +579,14 @@ def update_publication(guild_id, publication, warning_token=None, *, rest=None):
         if not claim_replacement(guild_id, pid, int(message_id)):
             return {"outcome": "replacement_uncertain", "publication": get_publication(guild_id, pid),
                     "error": "Replacement state changed; no send was attempted."}
+        preflight_error = _product_emoji_preflight_error(guild_id, fresh)
+        if preflight_error:
+            _conditional_transition(
+                guild_id, pid, ("replacement_sending",), "attention",
+                expected_message_id=int(message_id), match_message=True,
+                last_error=preflight_error["message"])
+            return {"outcome": "blocked", "prepared": {
+                **fresh, "blocking_errors": [*fresh["blocking_errors"], preflight_error]}}
         try:
             new_id = rest.create_message(channel_id, fresh["payload"])
         except DiscordFailure as exc:

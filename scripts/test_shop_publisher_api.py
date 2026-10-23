@@ -136,8 +136,8 @@ class ShopPublisherApiTests(unittest.TestCase):
             set(by_id[first]),
             {"id", "name", "type", "price", "price_diamonds", "enabled",
              "current_stock", "max_stock", "prestige_tier", "featured",
-             "category_id", "option_of_id"},
-            "category_id and root/option relationship are additive catalog metadata")
+             "category_id", "option_of_id", "app_emoji"},
+            "category, option, and prepared-emoji fields are additive catalog metadata")
         self.assertIsNone(by_id[first]["option_of_id"])
         execute("UPDATE shop_items SET category_id = NULL WHERE id = ?", (first,))
         data = self.client.get("/api/shop-publisher/catalog").get_json()
@@ -207,6 +207,46 @@ class ShopPublisherApiTests(unittest.TestCase):
         self.assertEqual(json.dumps(data["preview"], sort_keys=True),
                          json.dumps(direct, sort_keys=True),
                          "the route must not resolve anything on its own")
+
+    def test_prepared_emoji_preview_and_publication_share_enrichment(self):
+        import json
+        import os
+        from unittest.mock import patch
+        from utils import shop_emoji as SE
+        from utils import shop_publication as publication
+
+        item_id = seed_product()
+        content_hash = "a" * 64
+        name = SE.deterministic_emoji_name(content_hash)
+        markup = f"<:{name}:5001>"
+        design = draft_for(item_id, {
+            "content": "{{product.emoji}}",
+            "embeds": [{"description": "{{product.emoji}}",
+                        "fields": [{"name": "Icon", "value": "{{product.emoji}}"}]}],
+        })
+        with patch.dict(os.environ, {"DISCORD_CLIENT_ID": "123456789012345678"}):
+            execute("INSERT INTO shop_emoji_assets "
+                    "(application_id,content_hash,emoji_name,emoji_id,animated,pipeline_version,status) "
+                    "VALUES(?,?,?,?,0,?,'ready')",
+                    ("123456789012345678", content_hash, name, "5001", SE.PIPELINE_VERSION))
+            execute("INSERT INTO shop_emoji_url_aliases "
+                    "(application_id,guild_id,source_url,content_hash) VALUES(?,?,?,?)",
+                    ("123456789012345678", GUILD, "https://x/i.png", content_hash))
+            catalog = self.client.get("/api/shop-publisher/catalog").get_json()
+            self.assertEqual(next(p for p in catalog["products"] if p["id"] == item_id)["app_emoji"], markup)
+            design_id = execute("INSERT INTO shop_designs (guild_id,name,design_json) VALUES(?,?,?)",
+                                (GUILD, "Emoji parity", json.dumps(design)))
+            design["id"] = design_id
+            execute("UPDATE shop_designs SET design_json=? WHERE id=?", (json.dumps(design), design_id))
+            preview_response = self.preview(design)
+            self.assertEqual(preview_response.status_code, 200)
+            preview = preview_response.get_json()["preview"]
+            prepared = publication.prepare_design(GUILD, design_id)
+            self.assertEqual(prepared["blocking_errors"], [])
+            self.assertEqual(prepared["payload"], publication.message_payload(preview))
+            self.assertEqual(prepared["product_emoji_references"], [
+                {"id": "5001", "name": name, "animated": False}])
+            self.assertEqual(preview["content"], markup)
 
     def test_preview_warnings_survive_the_api(self):
         item_id = seed_product(description=None, enabled=0, current_stock=0)
