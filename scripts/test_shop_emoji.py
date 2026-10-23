@@ -735,8 +735,7 @@ def _begin_changed_source_ready_race(shop):
     return old_hash, old_before, SE.content_identity(PNG2)
 
 
-def _assert_changed_source_ready_result(shop, old_hash, old_before, new_hash, result):
-    _assert_current_ready(shop, new_hash, result)
+def _assert_changed_source_alias_result(shop, old_hash, old_before, new_hash, result):
     assert result["remapped_from_content_hash"] == old_hash
     assert asset_row(shop, old_hash) == old_before
     with sqlite3.connect(shop.path) as db:
@@ -745,6 +744,22 @@ def _assert_changed_source_ready_result(shop, old_hash, old_before, new_hash, re
             "FROM shop_emoji_url_aliases WHERE application_id=? AND guild_id=? AND source_url=?",
             (APP, GUILD, URL1)).fetchone()
     assert (aliased, required, not_before) == (new_hash, 0, None)
+
+
+def _assert_changed_source_ready_result(shop, old_hash, old_before, new_hash, result):
+    _assert_current_ready(shop, new_hash, result)
+    _assert_changed_source_alias_result(shop, old_hash, old_before, new_hash, result)
+
+
+def _insert_changed_source_ready_asset(shop, content_hash, emoji_id):
+    with sqlite3.connect(shop.path) as db:
+        db.execute(
+            "INSERT INTO shop_emoji_assets "
+            "(application_id,content_hash,emoji_name,emoji_id,animated,creator_guild_id,pipeline_version,status,"
+            "attempt_id,attempt_started_at,quarantine_until,last_error) "
+            "VALUES(?,?,?,?,0,?,?,'ready',NULL,NULL,NULL,NULL)",
+            (APP, content_hash, SE.deterministic_emoji_name(content_hash), emoji_id,
+             GUILD, SE.PIPELINE_VERSION))
 
 
 def test_changed_source_ready_race_preserves_create_uncertain(shop):
@@ -810,15 +825,27 @@ def test_changed_source_ready_race_preserves_deterministic_conflict(shop):
     assert shop.fake.delete_calls == []
 
 
+def test_changed_source_ready_single_bound_id_is_clean_reuse(shop):
+    old_hash, old_before, new_hash = _begin_changed_source_ready_race(shop)
+    _insert_changed_source_ready_asset(shop, new_hash, "5001")
+    shop.fake.remote = [remote_emoji(new_hash, 5001)]
+
+    result = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+
+    _assert_changed_source_ready_result(shop, old_hash, old_before, new_hash, result)
+    assert result["code"] == "remapped_changed_source"
+    assert result["message"] == (
+        "The source changed; the alias now uses the newly prepared hash. "
+        "The previous asset was left unchanged.")
+    assert result["duplicates"] == ["5001"]
+    assert shop.fake.create_calls == []
+    assert shop.fake.delete_calls == []
+
+
 def test_changed_source_ready_duplicate_conflict_is_not_clean_success(shop):
     old_hash, old_before, new_hash = _begin_changed_source_ready_race(shop)
-    with sqlite3.connect(shop.path) as db:
-        db.execute(
-            "INSERT INTO shop_emoji_assets "
-            "(application_id,content_hash,emoji_name,emoji_id,animated,creator_guild_id,pipeline_version,status,"
-            "attempt_id,attempt_started_at,quarantine_until,last_error) "
-            "VALUES(?,?,?,?,0,?,?,'ready',NULL,NULL,NULL,NULL)",
-            (APP, new_hash, SE.deterministic_emoji_name(new_hash), "5001", GUILD, SE.PIPELINE_VERSION))
+    _insert_changed_source_ready_asset(shop, new_hash, "5001")
     shop.fake.remote = [remote_emoji(new_hash, 5001), remote_emoji(new_hash, 5002)]
 
     result = run(SE.prepare_product_emojis(
@@ -828,6 +855,50 @@ def test_changed_source_ready_duplicate_conflict_is_not_clean_success(shop):
     assert result["code"] == "deterministic_name_conflict"
     assert result["message"] == "Multiple Discord emojis share the deterministic name: 5001,5002"
     assert result["duplicates"] == ["5001", "5002"]
+    assert shop.fake.create_calls == []
+    assert shop.fake.delete_calls == []
+
+
+def test_changed_source_ready_mismatched_bound_id_is_not_clean_success(shop):
+    old_hash, old_before, new_hash = _begin_changed_source_ready_race(shop)
+    _insert_changed_source_ready_asset(shop, new_hash, "5001")
+    shop.fake.remote = [remote_emoji(new_hash, 5002)]
+
+    result = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+
+    _assert_changed_source_alias_result(shop, old_hash, old_before, new_hash, result)
+    assert result["status"] == "missing"
+    assert result["code"] == "deterministic_name_conflict"
+    assert result["message"] == "Discord confirmed the previously bound emoji ID is absent."
+    assert result["emoji_id"] is None and result["emoji"] == ""
+    assert result["duplicates"] == ["5002"]
+    assert result["retry_after"] is None
+    current = asset_row(shop, new_hash)
+    assert current["status"] == "missing" and current["emoji_id"] == "5001"
+    assert current["last_error"] == result["message"]
+    assert shop.fake.create_calls == []
+    assert shop.fake.delete_calls == []
+
+
+def test_changed_source_ready_without_bound_id_is_not_clean_success(shop):
+    old_hash, old_before, new_hash = _begin_changed_source_ready_race(shop)
+    _insert_changed_source_ready_asset(shop, new_hash, None)
+    shop.fake.remote = []
+
+    result = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+
+    _assert_changed_source_alias_result(shop, old_hash, old_before, new_hash, result)
+    assert result["status"] == "failed"
+    assert result["code"] == "failed"
+    assert result["message"] == "The ready asset has no usable bound emoji ID."
+    assert result["emoji_id"] is None and result["emoji"] == ""
+    assert result["duplicates"] == []
+    assert result["retry_after"] is None
+    current = asset_row(shop, new_hash)
+    assert current["status"] == "failed" and current["emoji_id"] is None
+    assert current["last_error"] == result["message"]
     assert shop.fake.create_calls == []
     assert shop.fake.delete_calls == []
 

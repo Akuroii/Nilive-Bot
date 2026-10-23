@@ -1075,12 +1075,16 @@ async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
     if new_claimed is not None and new_asset["status"] == "preparing":
         outcome = await _create_claimed(db, discord, new_claimed, final_png, bot_user_id)
     else:
-        outcome = _result(new_asset, code="remapped_changed_source", duplicates=new_duplicates)
-        if outcome["status"] == "ready" and new_duplicates:
-            outcome["code"] = "deterministic_name_conflict"
-            outcome["message"] = (
-                "Multiple Discord emojis share the deterministic name: "
-                + ",".join(new_duplicates))
+        outcome = _result(new_asset, duplicates=new_duplicates)
+        if outcome["status"] == "ready":
+            bound_id = str(outcome.get("emoji_id") or "")
+            if any(emoji_id != bound_id for emoji_id in new_duplicates):
+                outcome["code"] = "deterministic_name_conflict"
+                outcome["message"] = (
+                    "Multiple Discord emojis share the deterministic name: "
+                    + ",".join(new_duplicates))
+            else:
+                outcome["code"] = "remapped_changed_source"
     outcome["remapped_from_content_hash"] = old_asset["content_hash"]
     if (outcome.get("status") == "ready"
             and outcome.get("code") in {"created", "ready", "reconciled", "remapped_changed_source"}):
