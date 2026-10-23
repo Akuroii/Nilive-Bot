@@ -558,6 +558,53 @@ def test_acknowledged_recovery_succeeds_after_ready_transition(shop):
         assert required == 0 and not_before is None
 
 
+def test_preparing_changed_source_gets_durable_quarantine_deadline(shop):
+    old_hash = put_asset(shop, status="preparing", attempt="attempt-1")
+    assert asset_row(shop, old_hash)["quarantine_until"] is None
+    shop.images[URL1] = PNG2
+    shop.fake.remote = [remote_emoji(old_hash, 2001)]
+    first = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert first["code"] == "source_changed_recovery_required"
+    old = asset_row(shop, old_hash)
+    assert old["status"] == "ready" and old["emoji_id"] == "2001"
+    assert old["quarantine_until"] is None
+    with sqlite3.connect(shop.path) as db:
+        required, not_before = db.execute(
+            "SELECT recovery_ack_required,recovery_not_before FROM shop_emoji_url_aliases "
+            "WHERE application_id=? AND guild_id=? AND source_url=?",
+            (APP, GUILD, URL1)).fetchone()
+        assert required == 1 and not_before is not None
+        deadline = SE._parse_time(not_before)
+        assert deadline is not None and deadline > SE._utcnow()
+    second = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert second["code"] == "source_changed_recovery_required"
+    early = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+    assert early["code"] == "source_changed_recovery_required"
+    assert shop.fake.create_calls == []
+    assert asset_row(shop, SE.content_identity(PNG2)) is None
+    with sqlite3.connect(shop.path) as db:
+        db.execute(
+            "UPDATE shop_emoji_url_aliases SET recovery_not_before=? "
+            "WHERE application_id=? AND guild_id=? AND source_url=?",
+            (SE._iso(SE._utcnow() - timedelta(seconds=1)), APP, GUILD, URL1))
+    result = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+    new_hash = SE.content_identity(PNG2)
+    assert result["code"] == "remapped_changed_source"
+    assert result["status"] == "ready" and result["content_hash"] == new_hash
+    assert len(shop.fake.create_calls) == 1
+    assert shop.fake.create_calls[0][0] == SE.deterministic_emoji_name(new_hash)
+    old = asset_row(shop, old_hash)
+    assert old["status"] == "ready" and old["emoji_id"] == "2001"
+    with sqlite3.connect(shop.path) as db:
+        aliased, required, not_before = db.execute(
+            "SELECT content_hash,recovery_ack_required,recovery_not_before "
+            "FROM shop_emoji_url_aliases WHERE application_id=? AND guild_id=? AND source_url=?",
+            (APP, GUILD, URL1)).fetchone()
+        assert aliased == new_hash and required == 0 and not_before is None
+
+
 def test_late_completion_cannot_overwrite_a_newer_attempt(shop):
     content_hash = put_asset(shop, status="preparing", attempt="old-attempt")
 
