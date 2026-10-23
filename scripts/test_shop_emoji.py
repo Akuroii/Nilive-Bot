@@ -38,6 +38,7 @@ class FakeDiscord:
         self.delete_calls = []
         self.list_calls = 0
         self.create_error = None
+        self.delete_error = None
         self.list_error = None
         self.create_hook = None
         self.auto_remote = True
@@ -76,6 +77,8 @@ class FakeDiscord:
 
     async def delete_emoji(self, emoji_id):
         self.delete_calls.append(str(emoji_id))
+        if self.delete_error:
+            raise self.delete_error
         self.remote = [item for item in self.remote if str(item["id"]) != str(emoji_id)]
 
 
@@ -118,9 +121,9 @@ def put_asset(shop, final_png=PNG1, status="uncertain", emoji_id=None, attempt="
     with sqlite3.connect(shop.path) as db:
         db.execute(
             "INSERT OR REPLACE INTO shop_emoji_assets "
-            "(application_id,content_hash,emoji_name,emoji_id,animated,pipeline_version,status,"
-            "attempt_id,attempt_started_at,quarantine_until,last_error) VALUES(?,?,?,?,0,?,?,?,?,?,?)",
-            (APP, content_hash, SE.deterministic_emoji_name(content_hash), emoji_id,
+            "(application_id,content_hash,emoji_name,emoji_id,animated,creator_guild_id,pipeline_version,status,"
+            "attempt_id,attempt_started_at,quarantine_until,last_error) VALUES(?,?,?,?,0,?,?,?,?,?,?,?)",
+            (APP, content_hash, SE.deterministic_emoji_name(content_hash), emoji_id, GUILD,
              SE.PIPELINE_VERSION, status, attempt, SE._iso(),
              SE._iso(SE._utcnow() + timedelta(minutes=15)) if status == "uncertain" else None,
              "test state"))
@@ -164,6 +167,97 @@ def test_application_asset_reuse_across_guild_aliases(shop):
         assert db.execute("SELECT COUNT(*) FROM shop_emoji_url_aliases").fetchone()[0] == 2
 
 
+def test_schema_migration_backfills_aliased_creator_attribution(tmp_path):
+    path = tmp_path / "shop-emoji-migration.db"
+    old_asset_schema = SE.SHOP_EMOJI_SCHEMA[0].replace(
+        "        creator_guild_id     INTEGER,\n", "")
+    assert old_asset_schema != SE.SHOP_EMOJI_SCHEMA[0]
+    with sqlite3.connect(path) as db:
+        db.execute(old_asset_schema)
+        for statement in SE.SHOP_EMOJI_SCHEMA[1:]:
+            db.execute(statement)
+        for final_png in (PNG1, PNG2):
+            content_hash = SE.content_identity(final_png)
+            db.execute(
+                "INSERT INTO shop_emoji_assets (application_id,content_hash,emoji_name,emoji_id,animated,"
+                "pipeline_version,status,attempt_id,attempt_started_at,quarantine_until,last_error) "
+                "VALUES (?,?,?,NULL,0,?,'ready',NULL,NULL,NULL,NULL)",
+                (APP, content_hash, SE.deterministic_emoji_name(content_hash), SE.PIPELINE_VERSION))
+        db.execute(
+            "INSERT INTO shop_emoji_url_aliases (application_id,guild_id,source_url,content_hash) "
+            "VALUES (?,?,?,?)", (APP, GUILD, URL1, SE.content_identity(PNG1)))
+
+    async def migrate():
+        async with SE.aiosqlite.connect(path) as db:
+            await SE.ensure_shop_emoji_schema(db)
+
+    run(migrate())
+    with sqlite3.connect(path) as db:
+        attributed = db.execute(
+            "SELECT creator_guild_id FROM shop_emoji_assets WHERE application_id=? AND content_hash=?",
+            (APP, SE.content_identity(PNG1))).fetchone()[0]
+        unattributed = db.execute(
+            "SELECT creator_guild_id FROM shop_emoji_assets WHERE application_id=? AND content_hash=?",
+            (APP, SE.content_identity(PNG2))).fetchone()[0]
+        assert attributed == GUILD
+        assert unattributed is None
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE type='index' "
+                          "AND name='idx_shop_emoji_assets_creator'").fetchone()
+
+
+def test_durable_guild_cap_counts_old_unaliased_assets(shop, monkeypatch):
+    monkeypatch.setattr(SE, "GUILD_ASSET_LIMIT", 1)
+    first = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert first["status"] == "ready"
+    old_hash = first["content_hash"]
+    assert asset_row(shop, old_hash)["creator_guild_id"] == GUILD
+    with sqlite3.connect(shop.path) as db:
+        db.execute("DELETE FROM shop_emoji_url_aliases WHERE application_id=? AND guild_id=?",
+                   (APP, GUILD))
+    blocked = run(SE.prepare_product_emojis(GUILD, [3]))["results"][0]
+    assert blocked["status"] == "failed" and blocked["code"] == "guild_emoji_quota"
+    assert "durable per-server limit is 1" in blocked["message"]
+    assert asset_row(shop, SE.content_identity(PNG2)) is None
+    assert len(shop.fake.create_calls) == 1
+    assert asset_row(shop, old_hash)["status"] == "ready"
+    # Ready reuse by another guild does not consume another creation slot.
+    other = run(SE.prepare_product_emojis(GUILD + 1, [4]))["results"][0]
+    assert other["status"] == "ready" and other["content_hash"] == old_hash
+    assert len(shop.fake.create_calls) == 1
+
+
+def test_guild_cap_accounting_includes_only_active_or_recovering_states(shop):
+    for status in ("ready", "preparing", "uncertain", "failed", "missing"):
+        put_asset(shop, final_png=("asset-" + status).encode(), status=status,
+                  attempt=None if status in {"ready", "failed", "missing"} else "attempt-" + status)
+
+    async def usage():
+        async with SE.aiosqlite.connect(shop.path) as db:
+            return await SE._guild_asset_usage(db, APP, GUILD)
+
+    assert run(usage()) == 3
+
+
+def test_guild_cap_claim_is_atomic_across_database_workers(shop, monkeypatch):
+    monkeypatch.setattr(SE, "GUILD_ASSET_LIMIT", 1)
+
+    async def worker(final_png):
+        async with SE.aiosqlite.connect(shop.path) as db:
+            return await SE._insert_asset_or_claim(
+                db, APP, GUILD, SE.content_identity(final_png), [], BOT)
+
+    async def concurrent():
+        return await asyncio.gather(worker(PNG1), worker(PNG2), return_exceptions=True)
+
+    outcomes = run(concurrent())
+    errors = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+    claims = [outcome for outcome in outcomes if not isinstance(outcome, Exception)]
+    assert len(claims) == 1 and claims[0][1] is not None
+    assert len(errors) == 1 and errors[0].code == "guild_emoji_quota"
+    with sqlite3.connect(shop.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM shop_emoji_assets").fetchone()[0] == 1
+
+
 def test_concurrent_preparation_has_one_claim_and_one_post(shop):
     async def concurrent():
         return await asyncio.gather(
@@ -180,7 +274,7 @@ def test_atomic_insert_claim_excludes_a_second_db_worker(shop):
 
     async def worker():
         async with SE.aiosqlite.connect(shop.path) as db:
-            return await SE._insert_asset_or_claim(db, APP, content_hash, [], BOT)
+            return await SE._insert_asset_or_claim(db, APP, GUILD, content_hash, [], BOT)
 
     async def concurrent():
         return await asyncio.gather(worker(), worker())
@@ -188,6 +282,41 @@ def test_atomic_insert_claim_excludes_a_second_db_worker(shop):
     rows = run(concurrent())
     assert sum(claimed is not None for _asset, claimed, _duplicates in rows) == 1
     assert {row[0]["attempt_id"] for row in rows} == {rows[0][0]["attempt_id"]}
+
+
+def _capacity_remote(count):
+    return [{"id": str(20000 + index), "name": f"other_{index}",
+             "animated": index % 2 == 0, "user": {"id": BOT}}
+            for index in range(count)]
+
+
+def test_application_capacity_counts_animated_and_static_entries(shop):
+    content_hash = put_asset(shop, status="preparing")
+    shop.fake.remote = _capacity_remote(SE.APPLICATION_EMOJI_LIMIT)
+    assert any(emoji["animated"] for emoji in shop.fake.remote)
+
+    async def create():
+        async with SE.aiosqlite.connect(shop.path) as db:
+            asset = await SE._get_asset(db, APP, content_hash)
+            return await SE._create_claimed(db, shop.fake, asset, PNG1, BOT)
+
+    result = run(create())
+    assert result["status"] == "failed" and result["code"] == "emoji_capacity"
+    assert shop.fake.create_calls == []
+
+
+def test_application_near_capacity_allows_one_final_creation(shop):
+    content_hash = put_asset(shop, status="preparing")
+    shop.fake.remote = _capacity_remote(SE.APPLICATION_EMOJI_LIMIT - 1)
+
+    async def create():
+        async with SE.aiosqlite.connect(shop.path) as db:
+            asset = await SE._get_asset(db, APP, content_hash)
+            return await SE._create_claimed(db, shop.fake, asset, PNG1, BOT)
+
+    result = run(create())
+    assert result["status"] == "ready" and result["code"] == "created"
+    assert len(shop.fake.create_calls) == 1
 
 
 def test_uncertain_post_never_retries_without_ack_and_quarantine(shop):
@@ -215,6 +344,52 @@ def test_reconciliation_adopts_one_late_completion_without_second_post(shop):
     assert reused["code"] == "reused" and len(shop.fake.create_calls) == 1
 
 
+def test_initial_name_match_requires_provenance_before_adoption(shop):
+    content_hash = SE.content_identity(PNG1)
+    candidate = remote_emoji(content_hash, 2001)
+    del candidate["user"]
+    shop.fake.remote = [candidate]
+    rejected = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert rejected["status"] == "failed" and rejected["emoji_id"] is None
+    assert asset_row(shop, content_hash)["emoji_id"] is None
+    assert shop.fake.create_calls == []
+    shop.fake.remote = [remote_emoji(content_hash, 2001)]
+    adopted = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert adopted["status"] == "ready" and adopted["emoji_id"] == "2001"
+    assert shop.fake.create_calls == []
+
+
+@pytest.mark.parametrize("metadata", [
+    {},
+    {"user": None},
+    {"user": {}},
+    {"user": {"id": "12345"}},
+    {"user": {"id": BOT}, "application_id": "12345"},
+])
+def test_name_matching_never_adopts_without_exact_bot_uploader_provenance(shop, metadata):
+    content_hash = put_asset(shop)
+    candidate = {"id": "2001", "name": SE.deterministic_emoji_name(content_hash),
+                 "animated": False, **metadata}
+    shop.fake.remote = [candidate]
+    result = run(SE.reconcile_product_emojis(GUILD, [1]))["results"][0]
+    assert result["status"] == "uncertain"
+    assert result["emoji_id"] is None
+    assert asset_row(shop, content_hash)["emoji_id"] is None
+    assert asset_row(shop, content_hash)["status"] == "uncertain"
+    assert shop.fake.create_calls == [] and shop.fake.delete_calls == []
+
+
+def test_ready_bound_validation_fails_closed_on_missing_uploader(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="2001", attempt=None)
+    bound = remote_emoji(content_hash, 2001)
+    del bound["user"]
+    shop.fake.remote = [bound]
+    result = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert result["status"] == "failed" and result["code"] == "bound_emoji_conflict"
+    assert asset_row(shop, content_hash)["status"] == "failed"
+    assert shop.fake.create_calls == []
+
+
 def test_uncertain_retry_requires_elapsed_quarantine_then_is_explicit(shop):
     shop.fake.create_error = SE.DiscordAPIError("5xx", uncertain=True)
     uncertain = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
@@ -228,18 +403,34 @@ def test_uncertain_retry_requires_elapsed_quarantine_then_is_explicit(shop):
     assert len(shop.fake.create_calls) == 2
 
 
-def test_uncertain_retry_rejects_changed_source_before_new_claim(shop):
-    content_hash = put_asset(shop)
+def test_uncertain_retry_remaps_changed_source_without_touching_old_attempt(shop):
+    old_hash = put_asset(shop)
     with sqlite3.connect(shop.path) as db:
         db.execute("UPDATE shop_emoji_assets SET quarantine_until=? WHERE content_hash=?",
-                   (SE._iso(SE._utcnow() - timedelta(seconds=1)), content_hash))
+                   (SE._iso(SE._utcnow() - timedelta(seconds=1)), old_hash))
+    old_before = asset_row(shop, old_hash)
     shop.images[URL1] = PNG2
     result = run(SE.prepare_product_emojis(
         GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
-    assert result["code"] == "source_changed_during_retry"
-    assert result["status"] == "uncertain"
-    assert asset_row(shop, content_hash)["attempt_id"] == "attempt-1"
-    assert shop.fake.create_calls == []
+    new_hash = SE.content_identity(PNG2)
+    assert result["code"] == "remapped_changed_source"
+    assert result["status"] == "ready" and result["content_hash"] == new_hash
+    assert result["remapped_from_content_hash"] == old_hash
+    old_after = asset_row(shop, old_hash)
+    for field in ("status", "attempt_id", "attempt_started_at", "quarantine_until", "last_error"):
+        assert old_after[field] == old_before[field]
+    assert old_after["status"] == "uncertain" and old_after["attempt_id"] == "attempt-1"
+    assert len(shop.fake.create_calls) == 1
+    assert shop.fake.create_calls[0][0] == SE.deterministic_emoji_name(new_hash)
+    with sqlite3.connect(shop.path) as db:
+        aliased = db.execute(
+            "SELECT content_hash FROM shop_emoji_url_aliases WHERE application_id=? AND guild_id=? AND source_url=?",
+            (APP, GUILD, URL1)).fetchone()[0]
+        assert aliased == new_hash
+    # The URL is not stuck on the old uncertain identity and needs no further POST.
+    reused = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert reused["status"] == "ready" and reused["content_hash"] == new_hash
+    assert len(shop.fake.create_calls) == 1
 
 
 def test_late_completion_cannot_overwrite_a_newer_attempt(shop):
@@ -288,6 +479,38 @@ def test_duplicate_delete_requires_confirmation_and_fresh_id(shop):
     assert shop.fake.delete_calls == ["3002"]
     adopted = run(SE.reconcile_product_emojis(GUILD, [1]))["results"][0]
     assert adopted["status"] == "ready" and adopted["emoji_id"] == "3001"
+
+
+def test_confirmed_duplicate_delete_404_is_absence_without_retry(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="3001", attempt=None)
+    shop.fake.remote = [remote_emoji(content_hash, 3001), remote_emoji(content_hash, 3002)]
+    shop.fake.delete_error = SE.DiscordAPIError(
+        "not found", status=404, http_status=404, uncertain=False)
+    result = run(SE.delete_confirmed_duplicate(GUILD, content_hash, "3002", confirm=True))
+    assert result["success"] is True and result["deleted_emoji_id"] == "3002"
+    assert shop.fake.delete_calls == ["3002"]
+
+
+def test_uncertain_duplicate_delete_is_never_automatically_retried(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="3001", attempt=None)
+    shop.fake.remote = [remote_emoji(content_hash, 3001), remote_emoji(content_hash, 3002)]
+    shop.fake.delete_error = SE.DiscordAPIError(
+        "timeout", status=504, http_status=None, uncertain=True)
+    with pytest.raises(SE.ShopEmojiError) as error:
+        run(SE.delete_confirmed_duplicate(GUILD, content_hash, "3002", confirm=True))
+    assert error.value.code == "delete_uncertain" and error.value.status == 202
+    assert shop.fake.delete_calls == ["3002"]
+
+
+def test_duplicate_delete_rejects_name_match_without_uploader_provenance(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="3001", attempt=None)
+    target = remote_emoji(content_hash, 3002)
+    del target["user"]
+    shop.fake.remote = [remote_emoji(content_hash, 3001), target]
+    with pytest.raises(SE.ShopEmojiError) as error:
+        run(SE.delete_confirmed_duplicate(GUILD, content_hash, "3002", confirm=True))
+    assert error.value.code == "duplicate_ownership_conflict"
+    assert shop.fake.delete_calls == []
 
 
 def test_failed_duplicate_conflict_reconciles_after_explicit_cleanup(shop):
@@ -420,10 +643,17 @@ def test_normalize_static_images_to_deterministic_rgba_png():
         assert image.format == "PNG" and getattr(image, "n_frames", 1) == 1
 
 
-def test_normalization_rejects_animation_pixels_size_and_format():
+def test_normalization_rejects_gif_animation_pixels_size_and_format():
+    assert SE.SUPPORTED_IMAGE_FORMATS == ("PNG", "JPEG", "WEBP")
+    single_gif = io.BytesIO()
+    Image.new("RGBA", (4, 4), "red").save(single_gif, format="GIF")
+    with pytest.raises(SE.SourceImageError) as error:
+        SE.normalize_image(single_gif.getvalue())
+    assert error.value.code == "unsupported_source_type"
+    # A supported container still may not discard frames: reject animated APNG.
     animated = io.BytesIO()
     Image.new("RGBA", (4, 4), "red").save(
-        animated, format="GIF", save_all=True, append_images=[Image.new("RGBA", (4, 4), "blue")],
+        animated, format="PNG", save_all=True, append_images=[Image.new("RGBA", (4, 4), "blue")],
         duration=100, loop=0)
     with pytest.raises(SE.SourceImageError) as error:
         SE.normalize_image(animated.getvalue())
@@ -450,6 +680,20 @@ def test_normalization_rejects_animation_pixels_size_and_format():
 def test_unsafe_source_urls_are_rejected(url):
     with pytest.raises(SE.SourceImageError):
         SE.canonicalize_url(url)
+
+
+@pytest.mark.parametrize("port", [80, 8443, 444, 65535])
+def test_https_source_urls_reject_every_explicit_non_443_port(port):
+    with pytest.raises(SE.SourceImageError) as error:
+        SE.canonicalize_url(f"https://cdn.example.com:{port}/image.png?signature=keep")
+    assert error.value.code == "invalid_source_port"
+
+
+def test_https_source_urls_allow_omitted_or_explicit_443_port_only():
+    omitted = SE.canonicalize_url("https://cdn.example.com/image.png?signature=keep")
+    explicit = SE.canonicalize_url("https://cdn.example.com:443/image.png?signature=keep")
+    assert omitted == explicit == "https://cdn.example.com/image.png?signature=keep"
+    assert SE.canonicalize_url("https://8.8.8.8:443/image.png") == "https://8.8.8.8/image.png"
 
 
 def test_resolver_rejects_mixed_dns_answers_and_pins_original_hostname(monkeypatch):
@@ -519,6 +763,17 @@ def test_redirect_to_private_target_is_never_requested_and_no_credentials_escape
     assert "headers" not in session.calls[0][1] or "Authorization" not in session.calls[0][1]["headers"]
 
 
+def test_redirect_to_non_443_port_is_never_requested(monkeypatch):
+    session = FakeSession([FakeResponse(
+        302, b"", {"Location": "https://cdn.example.com:8443/private.png"})])
+    monkeypatch.setattr(SE.aiohttp, "ClientSession", lambda **kwargs: session)
+    monkeypatch.setattr(SE.aiohttp, "TCPConnector", lambda **kwargs: object())
+    with pytest.raises(SE.SourceImageError) as error:
+        run(SE.fetch_source_image(URL1))
+    assert error.value.code == "invalid_source_port"
+    assert len(session.calls) == 1
+
+
 def test_download_body_limit_is_enforced_without_content_length(monkeypatch):
     session = FakeSession([FakeResponse(200, b"x" * (SE.MAX_SOURCE_BYTES + 1), {"Content-Type": "image/png"})])
     monkeypatch.setattr(SE.aiohttp, "ClientSession", lambda **kwargs: session)
@@ -526,6 +781,26 @@ def test_download_body_limit_is_enforced_without_content_length(monkeypatch):
     with pytest.raises(SE.SourceImageError) as error:
         run(SE.fetch_source_image(URL1))
     assert error.value.code == "source_too_large"
+
+
+@pytest.mark.parametrize("http_status,expected_status,uncertain", [
+    (400, 400, False),
+    (401, 401, False),
+    (403, 403, False),
+    (404, 404, False),
+    (429, 429, True),
+    (500, 502, True),
+    (503, 502, True),
+])
+def test_discord_definitive_and_retryable_status_semantics(http_status, expected_status, uncertain):
+    client = SE.DiscordAPI(application_id=APP, token="secret")
+    client._session = FakeSession([FakeResponse(http_status, b'{"message":"response"}')])
+    with pytest.raises(SE.DiscordAPIError) as error:
+        run(client._request("DELETE", "/applications/test/emojis/1", mutating=True))
+    assert error.value.status == expected_status
+    assert error.value.http_status == http_status
+    assert error.value.uncertain is uncertain
+    assert len(client._session.calls) == 1
 
 
 @pytest.mark.parametrize("response", [
@@ -543,6 +818,19 @@ def test_discord_bad_create_responses_are_uncertain(response):
 def test_discord_missing_usable_create_id_is_uncertain():
     client = SE.DiscordAPI(application_id=APP, token="secret")
     client._session = FakeSession([FakeResponse(200, b"{}")])
+    with pytest.raises(SE.DiscordAPIError) as error:
+        run(client.create_emoji("shop_test", PNG1, BOT))
+    assert error.value.uncertain is True
+
+
+@pytest.mark.parametrize("user", [None, {}, {"id": "12345"}])
+def test_discord_create_response_requires_exact_bot_uploader(user):
+    body = {"id": "7001", "name": "shop_test", "animated": False,
+            "application_id": APP}
+    if user is not None:
+        body["user"] = user
+    client = SE.DiscordAPI(application_id=APP, token="secret")
+    client._session = FakeSession([FakeResponse(200, json.dumps(body).encode())])
     with pytest.raises(SE.DiscordAPIError) as error:
         run(client.create_emoji("shop_test", PNG1, BOT))
     assert error.value.uncertain is True
@@ -601,7 +889,7 @@ def test_unsupported_surface_is_a_real_publication_blocker(monkeypatch):
 
 
 @pytest.mark.parametrize("failure", [asyncio.TimeoutError, aiohttp.ClientError, OSError])
-def test_discord_transport_create_failures_are_uncertain(failure):
+def test_discord_transport_create_and_delete_failures_are_uncertain(failure):
     class FailingRequest:
         async def __aenter__(self):
             raise failure("transport failed")
@@ -618,3 +906,8 @@ def test_discord_transport_create_failures_are_uncertain(failure):
     with pytest.raises(SE.DiscordAPIError) as error:
         run(client.create_emoji("shop_test", PNG1, BOT))
     assert error.value.uncertain is True
+    client._session = FailingSession()
+    with pytest.raises(SE.DiscordAPIError) as error:
+        run(client._request("DELETE", "/applications/test/emojis/1", mutating=True))
+    assert error.value.uncertain is True
+    assert error.value.code == "discord_transport_error"

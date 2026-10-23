@@ -5,6 +5,7 @@ import ipaddress
 import ssl
 import subprocess
 import threading
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 
@@ -56,9 +57,28 @@ def test_pinned_connection_keeps_host_and_verifies_tls_hostname(tmp_path, monkey
             return ip
         return real_validate(ip)
 
-    # Only the address policy is relaxed for this local fixture. The production
-    # resolver/pinning and TLS verification code remains unchanged.
+    # Only the address and exact ephemeral-port policies are relaxed for this
+    # local fixture. Production pinning, Host, TLS and all other URL checks stay
+    # in use; the separate URL tests reject non-443 ports without this wrapper.
     monkeypatch.setattr(SE, "_validate_public_ip", allow_test_loopback)
+    real_canonicalize = SE.canonicalize_url
+
+    def allow_test_port(raw):
+        try:
+            return real_canonicalize(raw)
+        except SE.SourceImageError as exc:
+            parts = urlsplit(raw)
+            if (exc.code != "invalid_source_port" or parts.port != port
+                    or parts.hostname not in {"localhost", "127.0.0.1"}):
+                raise
+            without_port = urlunsplit((parts.scheme, parts.hostname, parts.path, parts.query, ""))
+            canonical = urlsplit(real_canonicalize(without_port))
+            host = canonical.hostname
+            if ":" in host:
+                host = f"[{host}]"
+            return urlunsplit((canonical.scheme, f"{host}:{port}", canonical.path, canonical.query, ""))
+
+    monkeypatch.setattr(SE, "canonicalize_url", allow_test_port)
     client_tls = ssl.create_default_context(cafile=str(cert))
     real_connector = SE.aiohttp.TCPConnector
 

@@ -1339,10 +1339,8 @@ async def init_db():
         # Explicit Shop product-emoji preparation. Assets are application-wide
         # and keyed by final uploaded bytes; aliases remain guild/URL scoped.
         # Schema is centralized here, never created lazily by preview readers.
-        from utils.shop_emoji import SHOP_EMOJI_SCHEMA
-        for _statement in SHOP_EMOJI_SCHEMA:
-            await db.execute(_statement)
-        await db.commit()
+        from utils.shop_emoji import ensure_shop_emoji_schema
+        await ensure_shop_emoji_schema(db)
 
         # Publication identity/state only. The live message is always rebuilt
         # from shop_designs + current shop_items; never persist commerce or

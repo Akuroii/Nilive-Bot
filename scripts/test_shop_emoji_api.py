@@ -9,6 +9,7 @@ from unittest.mock import patch
 from phase1_support import GUILD, USER, execute, reset_database
 import dashboard.app as dashboard
 from dashboard.api import shop_emoji as routes
+from utils.shop_emoji import DiscordAPIError
 
 
 class ShopEmojiApiTests(unittest.TestCase):
@@ -110,6 +111,18 @@ class ShopEmojiApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured, {"guild_id": GUILD, "content_hash": "a" * 64,
                                     "emoji_id": "5002", "confirm": True})
+
+    def test_definitive_discord_error_status_is_not_collapsed_to_502(self):
+        async def fake(*args, **kwargs):
+            raise DiscordAPIError("forbidden", status=403, http_status=403, uncertain=False)
+
+        with patch.object(routes, "delete_confirmed_duplicate", fake):
+            response = self.post("/api/shop-publisher/emojis/delete-duplicate", {
+                "content_hash": "a" * 64, "emoji_id": "5002",
+                "confirmation": "DELETE 5002",
+            })
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()["code"], "discord_api_error")
 
     def test_owner_permission_and_csrf_apply_to_every_mutation(self):
         execute("UPDATE dashboard_users SET permission_level='admin'")

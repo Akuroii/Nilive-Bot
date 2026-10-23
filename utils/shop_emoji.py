@@ -7,7 +7,13 @@ only in the explicit preparation/reconciliation paths below.
 Discord creation is not exactly-once. The asset key and attempt fence stop
 concurrent workers from claiming the same content independently; an ambiguous
 create remains quarantined until read-only reconciliation or an informed,
-explicit owner retry.
+explicit owner retry. Changed source bytes can instead be explicitly remapped
+to a new content identity while the old uncertain attempt remains untouched.
+
+Shared-pool accounting is durable: each asset permanently records its creator
+guild. Ready, preparing, and uncertain assets count toward that guild's
+100-asset allowance even when no alias remains; failed and confirmed-missing
+assets do not. Reusing an existing ready asset does not consume a new slot.
 """
 from __future__ import annotations
 
@@ -49,8 +55,12 @@ PREPARING_STALE_SECONDS = 60
 QUARANTINE_SECONDS = 15 * 60
 STARTUP_RECONCILE_LIMIT = 25
 MAX_PRODUCTS_PER_REQUEST = 25
-STATIC_APPLICATION_EMOJI_LIMIT = 2000
-SUPPORTED_IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF")
+APPLICATION_EMOJI_LIMIT = 2000
+# Durable shared-pool safeguard: ready/preparing/uncertain assets count against
+# their creator guild even after every alias has moved away. Failed and
+# confirmed-missing assets do not consume this per-guild allowance.
+GUILD_ASSET_LIMIT = 100
+SUPPORTED_IMAGE_FORMATS = ("PNG", "JPEG", "WEBP")
 DISCORD_API = "https://discord.com/api/v10"
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _NAT64_NETWORKS = (
@@ -58,8 +68,8 @@ _NAT64_NETWORKS = (
     ipaddress.IPv6Network("64:ff9b:1::/48"),
 )
 
-# database.py executes these statements during normal init_db(). Nothing in a
-# preview/loader calls CREATE TABLE.
+# database.py executes these statements and the additive creator migration via
+# ensure_shop_emoji_schema() during normal init_db(). Preview/loaders never DDL.
 SHOP_EMOJI_SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS shop_emoji_assets (
@@ -68,6 +78,7 @@ SHOP_EMOJI_SCHEMA = (
         emoji_name           TEXT NOT NULL,
         emoji_id             TEXT,
         animated             INTEGER NOT NULL DEFAULT 0,
+        creator_guild_id     INTEGER,
         pipeline_version     TEXT NOT NULL,
         status               TEXT NOT NULL CHECK (
             status IN ('preparing', 'ready', 'uncertain', 'missing', 'failed')
@@ -107,13 +118,36 @@ SHOP_EMOJI_SCHEMA = (
 
 _ASSET_FIELDS = (
     "application_id", "content_hash", "emoji_name", "emoji_id", "animated",
-    "pipeline_version", "status", "attempt_id", "attempt_started_at",
+    "creator_guild_id", "pipeline_version", "status", "attempt_id", "attempt_started_at",
     "quarantine_until", "last_error", "created_at", "updated_at",
 )
 _ASSET_SELECT = ",".join(_ASSET_FIELDS)
 _ASSET_SELECT_E = ",".join("e." + field for field in _ASSET_FIELDS)
 _startup_tasks: set[asyncio.Task] = set()
 _preparation_locks: dict[str, asyncio.Lock] = {}
+
+
+async def ensure_shop_emoji_schema(db):
+    """Initialize and additively migrate emoji accounting during normal init_db."""
+    for statement in SHOP_EMOJI_SCHEMA:
+        await db.execute(statement)
+    cur = await db.execute("PRAGMA table_info(shop_emoji_assets)")
+    columns = {row[1] for row in await cur.fetchall()}
+    if "creator_guild_id" not in columns:
+        await db.execute("ALTER TABLE shop_emoji_assets ADD COLUMN creator_guild_id INTEGER")
+    # Existing aliased rows retain their original guild where possible. A
+    # legacy unaliased NULL remains unattributed and cannot claim a new POST.
+    await db.execute(
+        "UPDATE shop_emoji_assets SET creator_guild_id=( "
+        "SELECT a.guild_id FROM shop_emoji_url_aliases a "
+        "WHERE a.application_id=shop_emoji_assets.application_id "
+        "AND a.content_hash=shop_emoji_assets.content_hash "
+        "ORDER BY a.created_at ASC,a.guild_id ASC LIMIT 1) "
+        "WHERE creator_guild_id IS NULL")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shop_emoji_assets_creator "
+        "ON shop_emoji_assets(application_id,creator_guild_id,status)")
+    await db.commit()
 
 
 class ShopEmojiError(Exception):
@@ -190,8 +224,8 @@ def canonicalize_url(raw: str) -> str:
         raise SourceImageError("Only HTTPS image URLs are supported.", code="invalid_source_url")
     if parts.username is not None or parts.password is not None or parts.fragment:
         raise SourceImageError("Image URL credentials and fragments are not allowed.", code="invalid_source_url")
-    if port is not None and not 1 <= port <= 65535:
-        raise SourceImageError("The image URL port is invalid.", code="invalid_source_url")
+    if port is not None and port != 443:
+        raise SourceImageError("Image URLs may use only HTTPS port 443.", code="invalid_source_port")
     host = parts.hostname
     try:
         literal = ipaddress.ip_address(host)
@@ -334,7 +368,7 @@ def normalize_image(data: bytes) -> bytes:
     if not data or len(data) > MAX_SOURCE_BYTES:
         raise SourceImageError("The source image exceeds the download limit.", code="source_too_large")
     try:
-        from PIL import Image, __version__ as pillow_version
+        from PIL import Image, UnidentifiedImageError, __version__ as pillow_version
     except ImportError as exc:
         raise SourceImageError("Pillow is unavailable.", code="image_decoder_unavailable", status=503) from exc
     try:
@@ -372,6 +406,9 @@ def normalize_image(data: bytes) -> bytes:
             final = output.getvalue()
     except SourceImageError:
         raise
+    except UnidentifiedImageError as exc:
+        raise SourceImageError("Only PNG, JPEG, and WebP source images are supported.",
+                               code="unsupported_source_type") from exc
     except Exception as exc:
         raise SourceImageError("The source image could not be decoded safely.",
                                code="invalid_source_image") from exc
@@ -391,19 +428,15 @@ async def _download_and_normalize(url):
 
 
 def _ownership_supported(emoji, application_id, bot_user_id=None):
-    """Reject contradictory ownership metadata on an application-scoped list.
-
-    The application-scoped list itself establishes ownership. When Discord also
-    returns application/user metadata, it must agree with that ownership.
-    """
-    if not isinstance(emoji, dict):
+    """Require positive proof that the bot API identity uploaded the emoji."""
+    if not isinstance(emoji, dict) or not bot_user_id:
         return False
     if emoji.get("application_id") is not None and str(emoji["application_id"]) != str(application_id):
         return False
     user = emoji.get("user")
-    if isinstance(user, dict) and user.get("id") is not None and bot_user_id:
-        return str(user["id"]) == str(bot_user_id)
-    return True
+    if not isinstance(user, dict) or user.get("id") is None:
+        return False
+    return str(user["id"]) == str(bot_user_id)
 
 
 def _valid_emoji_id(value):
@@ -506,49 +539,101 @@ async def _mark_missing(db, asset):
     return await _get_asset(db, asset["application_id"], asset["content_hash"])
 
 
-async def _claim_existing(db, asset, *, allow_uncertain=False):
+async def _guild_asset_usage(db, application_id, guild_id):
+    cur = await db.execute(
+        "SELECT COUNT(*) FROM shop_emoji_assets WHERE application_id=? AND creator_guild_id=? "
+        "AND status IN ('ready','preparing','uncertain')",
+        (application_id, guild_id))
+    return int((await cur.fetchone())[0])
+
+
+async def _enforce_guild_quota(db, application_id, guild_id):
+    if guild_id is None:
+        raise ShopEmojiError("This legacy asset has no creator-guild attribution; recovery is blocked.",
+                             code="asset_attribution_required", status=409)
+    used = await _guild_asset_usage(db, application_id, guild_id)
+    if used >= GUILD_ASSET_LIMIT:
+        raise ShopEmojiError(
+            f"This server already accounts for {used} active or recovering emoji assets; "
+            f"the durable per-server limit is {GUILD_ASSET_LIMIT}. Old unaliased assets still count.",
+            code="guild_emoji_quota", status=409,
+            details={"used": used, "limit": GUILD_ASSET_LIMIT})
+
+
+async def _claim_existing(db, asset, guild_id, *, allow_uncertain=False):
     allowed = ("uncertain",) if allow_uncertain else ("failed", "missing")
     if asset["status"] not in allowed:
         return None
-    attempt = uuid.uuid4().hex
-    cur = await db.execute(
-        "UPDATE shop_emoji_assets SET status='preparing',attempt_id=?,attempt_started_at=?,"
-        "quarantine_until=NULL,last_error=NULL,updated_at=? WHERE application_id=? AND content_hash=? "
-        "AND status=? AND COALESCE(attempt_id,'')=COALESCE(?, '')",
-        (attempt, _iso(), _iso(), asset["application_id"], asset["content_hash"],
-         asset["status"], asset.get("attempt_id")))
-    await db.commit()
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        current = await _get_asset(db, asset["application_id"], asset["content_hash"])
+        if (current is None or current["status"] != asset["status"]
+                or current.get("attempt_id") != asset.get("attempt_id")):
+            await db.commit()
+            return None
+        creator = current.get("creator_guild_id")
+        if creator is None:
+            raise ShopEmojiError("This legacy asset has no creator-guild attribution; recovery is blocked.",
+                                 code="asset_attribution_required", status=409)
+        if int(creator) != int(guild_id):
+            raise ShopEmojiError("Only the asset's creator server can recover this non-ready asset.",
+                                 code="asset_creator_mismatch", status=409)
+        if current["status"] in {"failed", "missing"}:
+            await _enforce_guild_quota(db, current["application_id"], int(creator))
+        attempt = uuid.uuid4().hex
+        now = _iso()
+        cur = await db.execute(
+            "UPDATE shop_emoji_assets SET status='preparing',attempt_id=?,attempt_started_at=?,"
+            "quarantine_until=NULL,last_error=NULL,updated_at=? WHERE application_id=? AND content_hash=? "
+            "AND status=? AND COALESCE(attempt_id,'')=COALESCE(?, '')",
+            (attempt, now, now, current["application_id"], current["content_hash"],
+             current["status"], current.get("attempt_id")))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     if not cur.rowcount:
         return None
     return await _get_asset(db, asset["application_id"], asset["content_hash"])
 
 
-async def _insert_asset_or_claim(db, application_id, content_hash, remote, bot_user_id):
+async def _insert_asset_or_claim(db, application_id, guild_id, content_hash, remote, bot_user_id):
     name = deterministic_emoji_name(content_hash)
     synthetic = {"application_id": application_id, "content_hash": content_hash,
                  "emoji_name": name, "animated": 0}
     matches = _matching_name(synthetic, remote)
     duplicates = _duplicates(synthetic, matches)
-    now, attempt = _iso(), uuid.uuid4().hex
-    status, emoji_id, error = "preparing", None, None
-    if len(matches) > 1:
-        # No POST has been claimed for a newly discovered asset: this is a
-        # definite conflict, not evidence of an uncertain creation attempt.
-        status, error = "failed", "Multiple Discord emojis share the deterministic name: " + ",".join(duplicates)
-        attempt = None
-    elif len(matches) == 1:
-        candidate = matches[0]
-        if _valid_emoji_id(candidate.get("id")) and _ownership_supported(candidate, application_id, bot_user_id):
-            status, emoji_id, attempt = "ready", str(candidate["id"]), None
-        else:
-            status, error, attempt = "failed", "The deterministic-name match lacks supported ownership metadata.", None
-    await db.execute(
-        "INSERT INTO shop_emoji_assets (application_id,content_hash,emoji_name,emoji_id,animated,"
-        "pipeline_version,status,attempt_id,attempt_started_at,quarantine_until,last_error,created_at,updated_at) "
-        "VALUES (?,?,?,?,0,?,?,?,?,NULL,?,?,?) ON CONFLICT(application_id,content_hash) DO NOTHING",
-        (application_id, content_hash, name, emoji_id, PIPELINE_VERSION, status,
-         attempt, now if attempt else None, error, now, now))
-    await db.commit()
+    await db.execute("BEGIN IMMEDIATE")
+    try:
+        existing = await _get_asset(db, application_id, content_hash)
+        if existing is not None:
+            await db.commit()
+            return existing, None, duplicates
+        now, attempt = _iso(), uuid.uuid4().hex
+        status, emoji_id, error = "preparing", None, None
+        if len(matches) > 1:
+            # No POST has been claimed for a newly discovered asset: this is a
+            # definite conflict, not evidence of an uncertain creation attempt.
+            status, error = "failed", "Multiple Discord emojis share the deterministic name: " + ",".join(duplicates)
+            attempt = None
+        elif len(matches) == 1:
+            candidate = matches[0]
+            if _valid_emoji_id(candidate.get("id")) and _ownership_supported(candidate, application_id, bot_user_id):
+                status, emoji_id, attempt = "ready", str(candidate["id"]), None
+            else:
+                status, error, attempt = "failed", "The deterministic-name match lacks supported ownership metadata.", None
+        if status == "preparing":
+            await _enforce_guild_quota(db, application_id, guild_id)
+        await db.execute(
+            "INSERT INTO shop_emoji_assets (application_id,content_hash,emoji_name,emoji_id,animated,"
+            "creator_guild_id,pipeline_version,status,attempt_id,attempt_started_at,quarantine_until,last_error,created_at,updated_at) "
+            "VALUES (?,?,?,?,0,?,?,?,?,?,NULL,?,?,?) ON CONFLICT(application_id,content_hash) DO NOTHING",
+            (application_id, content_hash, name, emoji_id, guild_id, PIPELINE_VERSION, status,
+             attempt, now if attempt else None, error, now, now))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
     current = await _get_asset(db, application_id, content_hash)
     claimed = current if (current and status == "preparing"
                           and current.get("attempt_id") == attempt) else None
@@ -716,10 +801,14 @@ class DiscordAPI:
                 except (UnicodeDecodeError, ValueError, AttributeError):
                     pass
                 uncertain = mutating and (response.status >= 500 or response.status == 429)
+                # Definitive 4xx responses (including 401/403/404) keep their
+                # status and are not retryable. Only 429/5xx/transport failures
+                # use retryable/uncertain semantics.
+                error_status = (response.status if 400 <= response.status < 500 else 502)
                 raise DiscordAPIError(
                     f"Discord API {response.status}: {detail}",
                     code="create_uncertain" if uncertain and method == "POST" else "discord_api_error",
-                    status=429 if response.status == 429 else 502,
+                    status=error_status,
                     http_status=response.status, uncertain=uncertain, retry_after=retry_after,
                 )
         except DiscordAPIError:
@@ -870,9 +959,8 @@ async def _create_claimed(db, discord, asset, final_png, bot_user_id):
     reconciled, duplicates = await _reconcile_asset(db, asset, remote, bot_user_id, stale_after=10**9)
     if reconciled["status"] != "preparing" or reconciled.get("attempt_id") != asset.get("attempt_id"):
         return _result(reconciled, duplicates=duplicates)
-    static_count = sum(not bool(emoji.get("animated", False)) for emoji in remote)
-    if static_count >= STATIC_APPLICATION_EMOJI_LIMIT:
-        failed = await _mark_failed(db, asset, "The application's static emoji capacity is full.")
+    if len(remote) >= APPLICATION_EMOJI_LIMIT:
+        failed = await _mark_failed(db, asset, "The application's total emoji capacity is full.")
         return _result(failed, code="emoji_capacity", message=failed["last_error"])
     try:
         created = await discord.create_emoji(asset["emoji_name"], final_png, bot_user_id)
@@ -923,10 +1011,35 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
         # Fetch/compare before claiming a new attempt. A source error or changed
         # image must leave the original uncertain evidence and quarantine intact.
         final_png = await _download_and_normalize(source_url)
-        if content_identity(final_png) != alias_asset["content_hash"]:
-            return _result(alias_asset, code="source_changed_during_retry",
-                           message="The source bytes changed; the uncertain asset was left for reconciliation."), remote
-        claimed = await _claim_existing(db, alias_asset, allow_uncertain=True)
+        changed_hash = content_identity(final_png)
+        if changed_hash != alias_asset["content_hash"]:
+            # Explicit owner recovery for a changed source: prepare/remap the
+            # new identity without touching the old uncertain attempt. In
+            # particular, never turn the old POST into a definite failure and
+            # never issue a second POST for that old content hash.
+            old_asset = alias_asset
+            new_asset, new_claimed, new_duplicates = await _insert_asset_or_claim(
+                db, discord.application_id, guild_id, changed_hash, remote, bot_user_id)
+            if new_claimed is None and new_asset["status"] in {"preparing", "uncertain"}:
+                new_asset, new_duplicates = await _reconcile_asset(
+                    db, new_asset, remote, bot_user_id)
+            if new_asset["status"] == "ready":
+                if not any(str(e.get("id")) == str(new_asset.get("emoji_id")) for e in remote):
+                    remote = await discord.list_emojis()
+                new_asset = await _refresh_ready_asset(db, new_asset, remote, bot_user_id)
+            await _upsert_alias(db, discord.application_id, guild_id, source_url, changed_hash)
+            if new_claimed is not None and new_asset["status"] == "preparing":
+                outcome = await _create_claimed(db, discord, new_claimed, final_png, bot_user_id)
+            else:
+                outcome = _result(new_asset, code="remapped_changed_source", duplicates=new_duplicates)
+            outcome["remapped_from_content_hash"] = old_asset["content_hash"]
+            if outcome.get("status") == "ready":
+                outcome["code"] = "remapped_changed_source"
+                outcome["message"] = (
+                    "The source changed; the alias now uses the newly prepared hash. "
+                    "The old uncertain asset remains available for reconciliation.")
+            return outcome, remote
+        claimed = await _claim_existing(db, alias_asset, guild_id, allow_uncertain=True)
         if claimed is None:
             current = await _get_asset(db, discord.application_id, alias_asset["content_hash"])
             return _result(current), remote
@@ -947,7 +1060,7 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
     claimed = None
     if asset is None:
         asset, claimed, duplicates = await _insert_asset_or_claim(
-            db, discord.application_id, content_hash, remote, bot_user_id)
+            db, discord.application_id, guild_id, content_hash, remote, bot_user_id)
     elif asset["status"] in {"preparing", "uncertain"}:
         asset, duplicates = await _reconcile_asset(db, asset, remote, bot_user_id)
     elif asset["status"] == "ready":
@@ -971,7 +1084,7 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
         if asset["status"] == "ready":
             return _result(asset, code="reconciled"), remote
         if asset["status"] == "uncertain" and not duplicates:
-            claimed = await _claim_existing(db, asset, allow_uncertain=True)
+            claimed = await _claim_existing(db, asset, guild_id, allow_uncertain=True)
     elif claimed is None and asset["status"] in {"failed", "missing"}:
         # A present bound ID with conflicting metadata needs owner recovery;
         # only a confirmed missing bound ID may be recreated normally.
@@ -991,7 +1104,7 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
             else:
                 asset = await _set_last_error(db, asset, "The deterministic-name match lacks supported ownership metadata.")
         else:
-            claimed = await _claim_existing(db, asset)
+            claimed = await _claim_existing(db, asset, guild_id)
     if asset["status"] == "ready":
         return _result(asset, code="reconciled"), remote
     if claimed is None:
@@ -1076,6 +1189,7 @@ async def prepare_product_emojis(guild_id, product_ids, *, retry_uncertain=False
                                     "name": result["emoji_name"],
                                     "animated": bool(result.get("animated")),
                                     "application_id": discord.application_id,
+                                    "user": {"id": bot_user_id},
                                 })
                         except (SourceImageError, ShopEmojiError) as exc:
                             result = {"status": "failed", "code": exc.code,
@@ -1246,6 +1360,15 @@ async def delete_confirmed_duplicate(guild_id, content_hash, emoji_id, *, confir
                     if exc.uncertain:
                         raise ShopEmojiError("Duplicate deletion is uncertain; do not retry until Discord is rechecked.",
                                              code="delete_uncertain", status=202) from exc
+                    if exc.http_status == 404:
+                        # The fresh list and provenance check established this
+                        # exact unbound target immediately before DELETE. A
+                        # definitive 404 therefore confirms absence; do not
+                        # issue another DELETE or turn this into a retry loop.
+                        return {"success": True, "deleted_emoji_id": str(emoji_id),
+                                "bound_emoji_id": (str(asset["emoji_id"])
+                                                   if _valid_emoji_id(asset.get("emoji_id")) else None),
+                                "content_hash": content_hash}
                     raise
                 return {"success": True, "deleted_emoji_id": str(emoji_id),
                         "bound_emoji_id": (str(asset["emoji_id"])
