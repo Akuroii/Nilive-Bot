@@ -810,6 +810,28 @@ def test_changed_source_ready_race_preserves_deterministic_conflict(shop):
     assert shop.fake.delete_calls == []
 
 
+def test_changed_source_ready_duplicate_conflict_is_not_clean_success(shop):
+    old_hash, old_before, new_hash = _begin_changed_source_ready_race(shop)
+    with sqlite3.connect(shop.path) as db:
+        db.execute(
+            "INSERT INTO shop_emoji_assets "
+            "(application_id,content_hash,emoji_name,emoji_id,animated,creator_guild_id,pipeline_version,status,"
+            "attempt_id,attempt_started_at,quarantine_until,last_error) "
+            "VALUES(?,?,?,?,0,?,?,'ready',NULL,NULL,NULL,NULL)",
+            (APP, new_hash, SE.deterministic_emoji_name(new_hash), "5001", GUILD, SE.PIPELINE_VERSION))
+    shop.fake.remote = [remote_emoji(new_hash, 5001), remote_emoji(new_hash, 5002)]
+
+    result = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+
+    _assert_changed_source_ready_result(shop, old_hash, old_before, new_hash, result)
+    assert result["code"] == "deterministic_name_conflict"
+    assert result["message"] == "Multiple Discord emojis share the deterministic name: 5001,5002"
+    assert result["duplicates"] == ["5001", "5002"]
+    assert shop.fake.create_calls == []
+    assert shop.fake.delete_calls == []
+
+
 def test_duplicates_are_reported_without_selection_or_deletion(shop):
     content_hash = put_asset(shop)
     shop.fake.remote = [remote_emoji(content_hash, 3001), remote_emoji(content_hash, 3002)]
