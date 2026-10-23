@@ -1077,7 +1077,8 @@ async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
     else:
         outcome = _result(new_asset, code="remapped_changed_source", duplicates=new_duplicates)
     outcome["remapped_from_content_hash"] = old_asset["content_hash"]
-    if outcome.get("status") == "ready":
+    if (outcome.get("status") == "ready"
+            and outcome.get("code") in {"created", "ready", "reconciled", "remapped_changed_source"}):
         outcome["code"] = "remapped_changed_source"
         outcome["message"] = (
             "The source changed; the alias now uses the newly prepared hash. "

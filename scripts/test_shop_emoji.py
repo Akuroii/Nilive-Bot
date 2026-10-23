@@ -725,6 +725,91 @@ def test_current_ready_preserves_duplicate_conflict(shop):
     assert shop.fake.delete_calls == []
 
 
+def _begin_changed_source_ready_race(shop):
+    old_hash = put_asset(shop)
+    with sqlite3.connect(shop.path) as db:
+        db.execute("UPDATE shop_emoji_assets SET quarantine_until=? WHERE content_hash=?",
+                   (SE._iso(SE._utcnow() - timedelta(seconds=1)), old_hash))
+    old_before = asset_row(shop, old_hash)
+    shop.images[URL1] = PNG2
+    return old_hash, old_before, SE.content_identity(PNG2)
+
+
+def _assert_changed_source_ready_result(shop, old_hash, old_before, new_hash, result):
+    _assert_current_ready(shop, new_hash, result)
+    assert result["remapped_from_content_hash"] == old_hash
+    assert asset_row(shop, old_hash) == old_before
+    with sqlite3.connect(shop.path) as db:
+        aliased, required, not_before = db.execute(
+            "SELECT content_hash,recovery_ack_required,recovery_not_before "
+            "FROM shop_emoji_url_aliases WHERE application_id=? AND guild_id=? AND source_url=?",
+            (APP, GUILD, URL1)).fetchone()
+    assert (aliased, required, not_before) == (new_hash, 0, None)
+
+
+def test_changed_source_ready_race_preserves_create_uncertain(shop):
+    old_hash, old_before, new_hash = _begin_changed_source_ready_race(shop)
+
+    async def ready_hook(*_args):
+        await _set_ready_from_other_connection(shop, new_hash)
+
+    shop.fake.create_hook = ready_hook
+    shop.fake.create_error = SE.DiscordAPIError("lost create response", uncertain=True)
+    result = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+
+    _assert_changed_source_ready_result(shop, old_hash, old_before, new_hash, result)
+    assert result["code"] == "create_uncertain"
+    assert result["message"] == (
+        "The create request had an uncertain outcome while this asset was bound by another operation. "
+        "Reconcile application emojis to check for a possible duplicate.")
+    assert "lost create response" not in result["message"]
+    assert result["duplicates"] == []
+    assert len(shop.fake.create_calls) == 1
+    assert shop.fake.delete_calls == []
+
+
+def test_changed_source_ready_race_preserves_duplicate_detected(shop):
+    old_hash, old_before, new_hash = _begin_changed_source_ready_race(shop)
+
+    async def ready_hook(*_args):
+        await _set_ready_from_other_connection(shop, new_hash)
+
+    shop.fake.create_hook = ready_hook
+    result = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+
+    _assert_changed_source_ready_result(shop, old_hash, old_before, new_hash, result)
+    assert result["code"] == "duplicate_detected"
+    assert result["message"] == (
+        "Another completion was bound first; this create returned a duplicate ID requiring review.")
+    assert result["duplicates"] == ["1001", "5001"]
+    assert len(shop.fake.create_calls) == 1
+    assert shop.fake.delete_calls == []
+
+
+def test_changed_source_ready_race_preserves_deterministic_conflict(shop):
+    old_hash, old_before, new_hash = _begin_changed_source_ready_race(shop)
+    shop.fake.list_snapshots = [
+        [], [], [remote_emoji(new_hash, 5001), remote_emoji(new_hash, 5002)],
+    ]
+
+    async def ready_on_conflict():
+        if {str(emoji["id"]) for emoji in shop.fake.remote} == {"5001", "5002"}:
+            await _set_ready_from_other_connection(shop, new_hash)
+
+    shop.fake.list_hook = ready_on_conflict
+    result = run(SE.prepare_product_emojis(
+        GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+
+    _assert_changed_source_ready_result(shop, old_hash, old_before, new_hash, result)
+    assert result["code"] == "deterministic_name_conflict"
+    assert result["message"] == ""
+    assert result["duplicates"] == ["5001", "5002"]
+    assert shop.fake.create_calls == []
+    assert shop.fake.delete_calls == []
+
+
 def test_duplicates_are_reported_without_selection_or_deletion(shop):
     content_hash = put_asset(shop)
     shop.fake.remote = [remote_emoji(content_hash, 3001), remote_emoji(content_hash, 3002)]
