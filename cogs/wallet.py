@@ -164,6 +164,50 @@ def _item_thumbnail_url(catalog: dict) -> str | None:
     return None
 
 
+async def _shop_icon_urls(guild_id: int,
+                          item_names: list[str]) -> dict[str, str]:
+    """Read-only icon_url lookup for owned items with no catalog URL.
+
+    `item_catalog` is written when a Shop item is SAVED, so a listing
+    that predates that write path has no catalog row at all — even
+    though its emoji may already be prepared against its icon_url. The
+    listing itself is the only other place that URL lives.
+
+    Only an unambiguous, exact, guild-scoped match is accepted: one
+    single `shop_items` row for that exact name in this guild, carrying
+    an http(s) icon_url. Two listings sharing a name (or a nameless
+    match) return nothing, so another product's emoji can never be
+    attached to this item. No writes, no preparation, no backfill.
+    """
+    names = sorted({n for n in item_names if isinstance(n, str) and n})
+    if not names:
+        return {}
+    marks = ",".join("?" for _ in names)
+    try:
+        import aiosqlite
+
+        from database import DB_PATH
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT name, MIN(icon_url), COUNT(*) FROM shop_items "
+                f"WHERE guild_id=? AND name IN ({marks}) GROUP BY name",
+                (guild_id, *names))
+            rows = await cursor.fetchall()
+    except Exception:
+        # No shop_items table / unreadable DB: behave exactly as before.
+        return {}
+    found = {}
+    for name, icon_url, count in rows:
+        url = (icon_url or "").strip()
+        if count != 1 or not url:
+            continue
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        found[name] = url
+    return found
+
+
 async def _attach_prepared_app_emojis(guild_id: int,
                                       entries: list[dict]) -> None:
     """Resolve already-prepared Shop emoji for owned entries. READ-ONLY.
@@ -171,10 +215,12 @@ async def _attach_prepared_app_emojis(guild_id: int,
     Inventory rows are keyed by item_name and carry no Shop product id,
     so the source of truth for an entry's icon is the catalog row
     (get_catalog_entry), whose `icon_url` is exactly the URL Shop
-    preparation aliased. Passing that URL through
-    attach_prepared_emojis() means the lookup goes through the same
-    canonicalisation, guild alias and `ready` asset the shop preview
-    uses — no second emoji mechanism, no guessed emoji name/ID.
+    preparation aliased. When the catalog has no URL (a listing saved
+    before the catalog write path existed), the exact guild-scoped Shop
+    listing is used instead — see _shop_icon_urls(). Passing that URL
+    through attach_prepared_emojis() means the lookup goes through the
+    same canonicalisation, guild alias and `ready` asset the shop
+    preview uses — no second emoji mechanism, no guessed emoji name/ID.
 
     Only batched SELECTs run here. No image download, no upload, no
     delete, no recovery/preparation, no DDL: if the tables are missing
@@ -185,7 +231,9 @@ async def _attach_prepared_app_emojis(guild_id: int,
     """
     if not entries:
         return
-    products = [{"icon_url": entry.get("icon_url")} for entry in entries]
+    products = [{"icon_url": (entry.get("icon_url")
+                              or entry.get("_shop_icon_url"))}
+                for entry in entries]
     try:
         import aiosqlite
 
@@ -216,6 +264,14 @@ async def _decorate(guild_id: int, items: list[dict]) -> list[dict]:
                 catalog["rarity"], catalog["value_currency"],
                 catalog["value_amount"]),
         })
+    # Catalog first; only the entries it cannot answer for fall back to
+    # the (exact, unambiguous) Shop listing URL.
+    missing = [it for it in out if not (it.get("icon_url") or "").strip()]
+    if missing:
+        fallback = await _shop_icon_urls(
+            guild_id, [it["item_name"] for it in missing])
+        for it in missing:
+            it["_shop_icon_url"] = fallback.get(it["item_name"], "")
     await _attach_prepared_app_emojis(guild_id, out)
     out.sort(key=lambda x: (x["_sort"], x["item_name"]), reverse=True)
     return out

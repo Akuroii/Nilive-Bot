@@ -407,6 +407,128 @@ async def main():
             ("a" * 64,))
         await db.commit()
 
+    # ── 4b. Listings that predate the item_catalog write ───────────────
+    section("4b. Prepared emoji with NO item_catalog row")
+    legacy_url = "https://cdn.example.com/items/legacy_cape.png"
+    await give_item(GUILD, USER, "Legacy Cape", 2, item_type="shop_custom")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM item_catalog WHERE guild_id=? AND item_name=?",
+                         (GUILD, "Legacy Cape"))
+        await db.execute(
+            "INSERT INTO shop_items (guild_id, name, price, type, icon_url,"
+            " enabled) VALUES (?,?,?,?,?,1)",
+            (GUILD, "Legacy Cape", 50, "custom", legacy_url))
+        await db.execute(
+            "INSERT INTO shop_emoji_assets "
+            "(application_id, content_hash, emoji_name, emoji_id, animated,"
+            " creator_guild_id, pipeline_version, status) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("123456789012345678", "b" * 64, "legacy_cape_emj",
+             "150000000000000010", 0, GUILD, "rgba-128-png-v1", "ready"))
+        await db.execute(
+            "INSERT INTO shop_emoji_url_aliases "
+            "(application_id, guild_id, source_url, content_hash) "
+            "VALUES (?,?,?,?)",
+            ("123456789012345678", GUILD, legacy_url, "b" * 64))
+        await db.commit()
+
+    items = await get_inventory(GUILD, USER, include_empty=False)
+    entries = await _decorate(GUILD, split_by_tab(items)[TAB_ITEMS])
+    legacy = next(it for it in entries if it["item_name"] == "Legacy Cape")
+    check("catalog has no row for this item", legacy["icon_url"] is None,
+          str(legacy["icon_url"]))
+    check("Shop listing icon resolves the prepared emoji",
+          legacy["app_emoji"] == "<:legacy_cape_emj:150000000000000010>",
+          str(legacy["app_emoji"]))
+    emb = build_inventory_embed(TAB_ITEMS, entries,
+                                currency_rows=currency_rows,
+                                bot_name=BOT_NAME, username=USERNAME)
+    legacy_line = next(ln for ln in lines_of(emb) if "Legacy Cape" in ln)
+    check("the resolved emoji is used inline",
+          legacy_line.startswith("> - <:legacy_cape_emj:150000000000000010> •"),
+          legacy_line)
+    check("the Shop URL is not written back as a catalog icon",
+          legacy["icon_url"] is None, str(legacy["icon_url"]))
+
+    # Ambiguous name: two listings, only one carrying the prepared URL.
+    await give_item(GUILD, USER, "Ambiguous Item", 1, item_type="shop_custom")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO shop_items (guild_id, name, price, type, icon_url,"
+            " enabled) VALUES (?,?,?,?,?,1)",
+            (GUILD, "Ambiguous Item", 10, "custom", legacy_url))
+        await db.execute(
+            "INSERT INTO shop_items (guild_id, name, price, type, icon_url,"
+            " enabled) VALUES (?,?,?,?,?,1)",
+            (GUILD, "Ambiguous Item", 20, "custom", None))
+        await db.commit()
+    items = await get_inventory(GUILD, USER, include_empty=False)
+    entries = await _decorate(GUILD, split_by_tab(items)[TAB_ITEMS])
+    ambiguous = next(it for it in entries if it["item_name"] == "Ambiguous Item")
+    check("an ambiguous Shop name never borrows another listing's emoji",
+          ambiguous["app_emoji"] == "", str(ambiguous["app_emoji"]))
+    emb = build_inventory_embed(TAB_ITEMS, entries,
+                                currency_rows=currency_rows,
+                                bot_name=BOT_NAME, username=USERNAME)
+    amb_line = next(ln for ln in lines_of(emb) if "Ambiguous Item" in ln)
+    check("ambiguous item keeps the rarity fallback",
+          amb_line.startswith("> - ⚪ •")
+          and "legacy_cape_emj" not in amb_line, amb_line)
+
+    # No Shop listing at all.
+    await give_item(GUILD, USER, "Unlisted Item", 1, item_type="shop_custom")
+    items = await get_inventory(GUILD, USER, include_empty=False)
+    entries = await _decorate(GUILD, split_by_tab(items)[TAB_ITEMS])
+    unlisted = next(it for it in entries if it["item_name"] == "Unlisted Item")
+    check("no Shop listing means no emoji (safe fallback)",
+          unlisted["app_emoji"] == "", str(unlisted["app_emoji"]))
+
+    # Listing in ANOTHER guild must never be matched.
+    await give_item(GUILD, USER, "Foreign Item", 1, item_type="shop_custom")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO shop_items (guild_id, name, price, type, icon_url,"
+            " enabled) VALUES (?,?,?,?,?,1)",
+            (GUILD + 1, "Foreign Item", 10, "custom", legacy_url))
+        await db.commit()
+    items = await get_inventory(GUILD, USER, include_empty=False)
+    entries = await _decorate(GUILD, split_by_tab(items)[TAB_ITEMS])
+    foreign = next(it for it in entries if it["item_name"] == "Foreign Item")
+    check("another guild's listing is never used",
+          foreign["app_emoji"] == "", str(foreign["app_emoji"]))
+
+    # Listing with an icon but nothing prepared.
+    await give_item(GUILD, USER, "Unprepared Item", 1, item_type="shop_custom")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO shop_items (guild_id, name, price, type, icon_url,"
+            " enabled) VALUES (?,?,?,?,?,1)",
+            (GUILD, "Unprepared Item", 10, "custom",
+             "https://cdn.example.com/items/unprepared.png"))
+        await db.commit()
+    items = await get_inventory(GUILD, USER, include_empty=False)
+    entries = await _decorate(GUILD, split_by_tab(items)[TAB_ITEMS])
+    unprepared = next(it for it in entries if it["item_name"] == "Unprepared Item")
+    check("a Shop URL with no prepared asset stays empty",
+          unprepared["app_emoji"] == "", str(unprepared["app_emoji"]))
+
+    # The new lookup is still read-only.
+    async with aiosqlite.connect(DB_PATH) as db:
+        shops_before = (await (await db.execute(
+            "SELECT COUNT(*) FROM shop_items")).fetchone())[0]
+    def _no_io(*args, **kwargs):
+        raise AssertionError("Shop fallback triggered emoji preparation/IO")
+
+    with patch("utils.shop_emoji.prepare_product_emojis", _no_io), \
+         patch("utils.shop_emoji.fetch_source_image", _no_io):
+        await _decorate(GUILD, split_by_tab(
+            await get_inventory(GUILD, USER, include_empty=False))[TAB_ITEMS])
+    async with aiosqlite.connect(DB_PATH) as db:
+        shops_after = (await (await db.execute(
+            "SELECT COUNT(*) FROM shop_items")).fetchone())[0]
+    check("Shop fallback writes nothing", shops_before == shops_after,
+          f"{shops_before}/{shops_after}")
+
     # ── 5. Strict no side effects ──────────────────────────────────────
     section("5. Navigation never mutates emoji state")
     async with aiosqlite.connect(DB_PATH) as db:
