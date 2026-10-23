@@ -10,6 +10,9 @@ window.NERO = window.NERO || {};
     var TEMPLATE_URL = '/api/embedbuilder/template/';
     var PREVIEW_URL = '/api/shop-publisher/preview';
     var DESIGNS_URL = '/api/shop-publisher/designs';
+    var EMOJI_PREPARE_URL = '/api/shop-publisher/emojis/prepare';
+    var EMOJI_RECONCILE_URL = '/api/shop-publisher/emojis/reconcile';
+    var EMOJI_DELETE_URL = '/api/shop-publisher/emojis/delete-duplicate';
 
     function make(doc, tag, className, text) {
         var node = doc.createElement(tag);
@@ -50,6 +53,12 @@ window.NERO = window.NERO || {};
             var rosterList = root.querySelector('#sd-roster');
             var rosterEmpty = root.querySelector('#sd-roster-empty');
             var rosterCount = root.querySelector('#sd-roster-count');
+            var emojiPrepareSelected = root.querySelector('#sd-emoji-prepare-selected');
+            var emojiPrepareAll = root.querySelector('#sd-emoji-prepare-all');
+            var emojiReconcile = root.querySelector('#sd-emoji-reconcile');
+            var emojiRetryUncertain = root.querySelector('#sd-emoji-retry-uncertain');
+            var emojiStatus = root.querySelector('#sd-emoji-status');
+            var emojiResults = root.querySelector('#sd-emoji-results');
             var catalogStatus = root.querySelector('#sd-catalog-status');
             var statusLine = root.querySelector('#sd-status');
             var templateSelect = root.querySelector('#sd-template');
@@ -130,6 +139,7 @@ window.NERO = window.NERO || {};
             var applyPresentationDocument = null;
             var selectedInspectorContext = null;
             var selectedProductId = null;
+            var emojiInFlight = false;
 
             try { limits = JSON.parse(root.getAttribute('data-limits') || '{}'); } catch (_e) { limits = {}; }
             if (modeSelect && !modeSelect.value) modeSelect.value = 'per_product';
@@ -279,6 +289,146 @@ window.NERO = window.NERO || {};
                     });
                 });
             }
+
+            function setEmojiStatus(message, isError) {
+                if (!emojiStatus) return;
+                emojiStatus.textContent = message || '';
+                emojiStatus.className = isError ? 'sd-status sd-error' : 'sd-muted';
+            }
+
+            function updateEmojiControls() {
+                var noRoster = !draft.products.length;
+                if (emojiPrepareSelected) emojiPrepareSelected.disabled = emojiInFlight || !isRostered(selectedProductId);
+                if (emojiPrepareAll) emojiPrepareAll.disabled = emojiInFlight || noRoster;
+                if (emojiReconcile) emojiReconcile.disabled = emojiInFlight || noRoster;
+                if (emojiRetryUncertain) emojiRetryUncertain.disabled = emojiInFlight;
+            }
+
+            function finishEmojiOperation() {
+                emojiInFlight = false;
+                updateEmojiControls();
+            }
+
+            function renderEmojiResults(results) {
+                if (!emojiResults) return;
+                clear(emojiResults);
+                (results || []).forEach(function (result) {
+                    var product = productById(Number(result.product_id));
+                    var row = make(doc, 'div', 'sd-preview-detail');
+                    var label = product ? (product.name || ('Product #' + result.product_id)) : ('Product #' + result.product_id);
+                    row.appendChild(make(doc, 'div', 'sd-product-name', label + ': ' + (result.status || result.code || 'unknown')));
+                    if (result.message || result.code) row.appendChild(make(doc, 'div', 'sd-muted', result.message || result.code));
+                    if (result.emoji_id) row.appendChild(make(doc, 'div', 'sd-product-id', 'Bound emoji ID ' + result.emoji_id));
+                    var duplicates = Array.isArray(result.duplicates) ? result.duplicates : [];
+                    if (duplicates.length) {
+                        row.appendChild(make(doc, 'div', 'sd-muted',
+                            'Deterministic-name IDs: ' + duplicates.join(', ') + '. No ID was selected or deleted automatically.'));
+                        duplicates.forEach(function (emojiId) {
+                            if (result.emoji_id && String(result.emoji_id) === String(emojiId)) return;
+                            var remove = make(doc, 'button', 'btn btn-secondary sd-roster-button', 'Delete duplicate ' + emojiId);
+                            remove.type = 'button';
+                            remove.setAttribute('data-duplicate-id', emojiId);
+                            remove.addEventListener('click', function () { deleteEmojiDuplicate(result, String(emojiId)); });
+                            row.appendChild(remove);
+                        });
+                    }
+                    emojiResults.appendChild(row);
+                });
+            }
+
+            function applyEmojiResults(results) {
+                var changed = false;
+                (results || []).forEach(function (result) {
+                    var product = productById(Number(result.product_id));
+                    if (!product) return;
+                    if (result.status === 'ready' && result.emoji) {
+                        product.app_emoji = result.emoji;
+                        changed = true;
+                    } else if (result.content_hash || result.status === 'unprepared') {
+                        product.app_emoji = '';
+                        changed = true;
+                    }
+                });
+                renderEmojiResults(results);
+                if (changed) {
+                    renderCatalog();
+                    invalidatePreview('Prepared emoji data changed. Validate action to refresh the read-only preview.');
+                }
+            }
+
+            function runEmojiOperation(operation, productIds) {
+                if (emojiInFlight || !Array.isArray(productIds) || !productIds.length) return Promise.resolve(null);
+                var preparing = operation === 'prepare';
+                var retry = preparing && !!(emojiRetryUncertain && emojiRetryUncertain.checked);
+                if (retry && !confirmAction('Retry uncertain emoji creation only after its server quarantine? Discord creation is not exactly-once; a duplicate remains possible.')) {
+                    return Promise.resolve(null);
+                }
+                emojiInFlight = true;
+                updateEmojiControls();
+                setEmojiStatus(preparing ? 'Preparing stored product icons…' : 'Reconciling with a read-only Discord list…');
+                var body = { product_ids: productIds.slice() };
+                if (preparing) {
+                    body.retry_uncertain = retry;
+                    body.acknowledge_duplicate_risk = retry;
+                }
+                return requestJSON(preparing ? EMOJI_PREPARE_URL : EMOJI_RECONCILE_URL, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+                }).then(function (data) {
+                    if (!data || data.success !== true) throw new Error(data && data.error ? data.error : 'Emoji operation failed.');
+                    if (destroyed || ctx.isDestroyed()) return null;
+                    var results = data && Array.isArray(data.results) ? data.results : [];
+                    applyEmojiResults(results);
+                    var uncertain = results.some(function (result) { return result.status === 'uncertain' || result.status === 'preparing'; });
+                    setEmojiStatus(uncertain
+                        ? 'Recovery required: reconcile first. No automatic second create was attempted.'
+                        : (preparing ? 'Preparation finished; review each product result.' : 'Read-only reconciliation finished.'));
+                    return data;
+                }).then(function (data) { finishEmojiOperation(); return data; }, function (error) {
+                    finishEmojiOperation();
+                    if (!destroyed && !ctx.isDestroyed()) setEmojiStatus(error && error.message ? error.message : 'Emoji operation failed.', true);
+                    return null;
+                });
+            }
+
+            function deleteEmojiDuplicate(result, emojiId) {
+                if (emojiInFlight || !result.content_hash || !emojiId) return;
+                if (typeof window.prompt !== 'function') return;
+                var confirmation = window.prompt('Delete only freshly confirmed duplicate emoji ' + emojiId + '? Type DELETE ' + emojiId + ' to continue.');
+                if (confirmation !== 'DELETE ' + emojiId) {
+                    setEmojiStatus('Duplicate deletion cancelled; the exact confirmation did not match.');
+                    return;
+                }
+                emojiInFlight = true;
+                updateEmojiControls();
+                setEmojiStatus('Freshly confirming and deleting only duplicate ' + emojiId + '…');
+                requestJSON(EMOJI_DELETE_URL, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content_hash: result.content_hash, emoji_id: emojiId,
+                        confirmation: 'DELETE ' + emojiId }),
+                }).then(function (data) {
+                    finishEmojiOperation();
+                    if (destroyed || ctx.isDestroyed()) return;
+                    if (!data || data.success !== true) {
+                        setEmojiStatus(data && data.error ? data.error : 'Duplicate deletion was not confirmed.', true);
+                        return;
+                    }
+                    setEmojiStatus('Deleted confirmed duplicate ' + emojiId + '. Reconciling the remaining ID…');
+                    runEmojiOperation('reconcile', [Number(result.product_id)]);
+                }, function (error) {
+                    finishEmojiOperation();
+                    if (!destroyed && !ctx.isDestroyed()) setEmojiStatus(error && error.message ? error.message : 'Duplicate deletion failed.', true);
+                });
+            }
+
+            if (emojiPrepareSelected) ctx.on(emojiPrepareSelected, 'click', function () {
+                if (isRostered(selectedProductId)) runEmojiOperation('prepare', [selectedProductId]);
+            });
+            if (emojiPrepareAll) ctx.on(emojiPrepareAll, 'click', function () {
+                runEmojiOperation('prepare', draft.products.slice());
+            });
+            if (emojiReconcile) ctx.on(emojiReconcile, 'click', function () {
+                runEmojiOperation('reconcile', draft.products.slice());
+            });
 
             // Setting select.value in code fires no event, so dependents (the Publications panel)
             // would keep showing the previous Design's records. Announce a real selection change,
@@ -433,6 +583,7 @@ window.NERO = window.NERO || {};
                         else if (row.removeAttribute) row.removeAttribute('aria-current');
                     }
                 });
+                updateEmojiControls();
             }
             function rowIdFromTarget(target, container, attr) {
                 var node = target;
@@ -529,6 +680,8 @@ window.NERO = window.NERO || {};
                     var main = make(doc, 'div', 'sd-roster-main'); main.appendChild(make(doc, 'span', 'sd-roster-index', String(index + 1) + '.'));
                     var identity = make(doc, 'div', 'sd-roster-name'); identity.appendChild(make(doc, 'div', 'sd-product-name', product ? (product.name || ('#' + id)) : ('Product #' + id)));
                     identity.appendChild(make(doc, 'div', 'sd-product-id', 'Root product ID ' + id));
+                    if (product) identity.appendChild(make(doc, 'div', 'sd-muted',
+                        product.app_emoji ? 'Product image emoji prepared' : 'Product image emoji not prepared'));
                     if (product) { var meta = make(doc, 'div', 'sd-product-meta'); formatProductMeta(product).forEach(function (field) { meta.appendChild(make(doc, 'span', 'sd-product-meta-item', field)); }); identity.appendChild(meta); }
                     main.appendChild(identity); var actions = make(doc, 'div', 'sd-roster-actions');
                     [{ action: 'up', label: '↑', title: 'Move up', disabled: index === 0 }, { action: 'down', label: '↓', title: 'Move down', disabled: index === draft.products.length - 1 }, { action: 'remove', label: 'Remove', title: 'Remove from roster', disabled: false }].forEach(function (control) {

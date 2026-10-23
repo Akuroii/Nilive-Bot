@@ -149,6 +149,11 @@ TOKEN_CATALOG = {
         "label": "Image URL", "group": "Product",
         "description": "The item icon URL, empty when unset.",
     },
+    "product.emoji": {
+        "label": "Prepared image emoji", "group": "Product",
+        "description": ("The explicitly prepared application emoji for the item icon, empty until prepared. "
+                        "Supported only in message content, embed descriptions, and embed field values."),
+    },
     "product.price": {
         "label": "Price (amount)", "group": "Price",
         "description": ("The price amount in grouped digits (e.g. \"1,500\"), "
@@ -352,6 +357,7 @@ def product_token_values(product: dict, currency: dict) -> dict:
             str(int(required_level)) if required_level else ""),
         "product.image": str(product.get("icon_url") or ""),
         "product.icon_url": str(product.get("icon_url") or ""),
+        "product.emoji": str(product.get("app_emoji") or ""),
         "product.price": f"{int(amount):,}",
         "product.price_display": display_price(
             amount, currency_name, currency_emoji, free),
@@ -391,14 +397,25 @@ def _embed_text_leaves(embed: dict, prefix: str, visit) -> None:
                     visit(field, key, f"{prefix}.fields.{i}.{key}")
 
 
+def _product_emoji_surface_supported(path: str) -> bool:
+    """Only content, embed descriptions, and embed field values may render it."""
+    parts = path.split(".")
+    return (
+        path == "content"
+        or (len(parts) == 3 and parts[0] == "embeds" and parts[1].isdigit()
+            and parts[2] == "description")
+        or (len(parts) == 5 and parts[0] == "embeds" and parts[1].isdigit()
+            and parts[2] == "fields" and parts[3].isdigit() and parts[4] == "value")
+    )
+
+
 def resolve_string(text: str, path: str, values: dict, used: list) -> str:
     """Substitute catalog tokens through ONE documented text surface.
 
-    Occurrences are appended to `used` in document order as
-    {"token", "key", "canonical", "path", "resolved", "known", "value"}:
-      resolved=False + known=True  -> a catalog token with no product context
-                                      (left verbatim; reported)
-      resolved=False + known=False -> an unknown name (left verbatim)
+    Unknown and ordinary context-less tokens remain verbatim. product.emoji is
+    deliberately narrower: unsupported surfaces remain verbatim and block
+    publication, while supported no-context uses become empty with a warning
+    rather than publishing a broken literal token.
     """
     if not isinstance(text, str) or "{{" not in text:
         return text
@@ -406,8 +423,11 @@ def resolve_string(text: str, path: str, values: dict, used: list) -> str:
     def repl(match):
         key = match.group(1)
         canonical = canonical_token(key)
-        resolved = canonical in values if canonical else False
-        value = values.get(canonical, "") if resolved else ""
+        has_value = canonical in values if canonical else False
+        unsupported = canonical == "product.emoji" and not _product_emoji_surface_supported(path)
+        resolved = has_value and not unsupported
+        value = values.get(canonical, "") if has_value else ""
+        empty_without_context = canonical == "product.emoji" and not has_value and not unsupported
         used.append({
             "token": match.group(0),
             "key": key,
@@ -416,9 +436,14 @@ def resolve_string(text: str, path: str, values: dict, used: list) -> str:
             "resolved": resolved,
             "known": bool(canonical),
             "value": value if resolved else "",
+            "unsupported_surface": unsupported,
+            "empty_without_context": empty_without_context,
         })
-        # Unknown / context-less tokens stay verbatim; known values are
-        # emitted once and never re-scanned (no nesting, no escalation).
+        if unsupported:
+            return match.group(0)
+        if empty_without_context:
+            return ""
+        # Known values are emitted once and never re-scanned.
         return value if resolved else match.group(0)
 
     return TOKEN_RE.sub(repl, text)
@@ -478,6 +503,22 @@ def entry_custom_id(row: dict) -> str:
     return f"shop_buy_{int((row or {}).get('id') or 0)}"
 
 
+def _detect_raw_product_emoji(text: str, path: str, used: list) -> None:
+    """Report product.emoji in a raw pass-through without resolving other tokens."""
+    if not isinstance(text, str) or "{{" not in text:
+        return
+    for match in TOKEN_RE.finditer(text):
+        key = match.group(1)
+        canonical = canonical_token(key)
+        if canonical != "product.emoji":
+            continue
+        used.append({
+            "token": match.group(0), "key": key, "canonical": canonical,
+            "path": path, "resolved": False, "known": True, "value": "",
+            "unsupported_surface": True, "empty_without_context": False,
+        })
+
+
 def build_purchase_action(action_cfg: dict, rows_by_id: dict, currency: dict,
                           context_id: int = 0, used: list = None) -> dict:
     """Action config + rows -> THE purchase action Phase 2+ publishes.
@@ -523,6 +564,9 @@ def build_purchase_action(action_cfg: dict, rows_by_id: dict, currency: dict,
         description = resolve_string(
             desc_tpl, f"action.entries.{i}.description", values,
             used if used is not None else [])
+        if used is not None:
+            _detect_raw_product_emoji(
+                str(entry.get("emoji") or ""), f"action.entries.{i}.emoji", used)
 
         built = {
             "product_id": int(row.get("id") or 0),
@@ -742,15 +786,22 @@ def _state_warnings(rows: list) -> list:
 def _occurrence_warnings(used: list) -> list:
     warnings = []
     for entry in used:
-        if not entry["resolved"]:
+        if entry.get("unsupported_surface"):
+            warnings.append({
+                "code": "unsupported_product_emoji_surface", "path": entry["path"],
+                "message": (f"{entry['token']} at {entry['path']} is unsupported: use it only "
+                            "in message content, embed descriptions, or embed field values. "
+                            "It remains visible here and blocks publication until removed."),
+            })
+        elif not entry["resolved"]:
             if entry.get("known"):
-                warnings.append({
-                    "code": "unresolved_product_token", "path": entry["path"],
-                    "message": (f"Token {entry['token']} at {entry['path']} needs a "
-                                "product context — this surface is not rendered per "
-                                "product (frame mode / shared content). It was left "
-                                "as typed."),
-                })
+                message = (f"Token {entry['token']} at {entry['path']} needs a product context. "
+                           "Use it on a single-product card. It was left as typed.")
+                if entry.get("empty_without_context"):
+                    message = (f"Token {entry['token']} at {entry['path']} needs a single-product "
+                               "context and was left empty rather than sent as a broken literal token.")
+                warnings.append({"code": "unresolved_product_token", "path": entry["path"],
+                                 "message": message})
             else:
                 warnings.append({
                     "code": "unknown_token", "path": entry["path"],
@@ -758,11 +809,13 @@ def _occurrence_warnings(used: list) -> list:
                                 "was left as typed — it is not in the token catalog."),
                 })
         elif entry["value"] == "":
-            warnings.append({
-                "code": "empty_value", "path": entry["path"],
-                "message": (f"Token {entry['token']} at {entry['path']} "
-                            "resolved to an empty value for this product."),
-            })
+            message = (f"Token {entry['token']} at {entry['path']} resolved to an empty "
+                       "value for this product.")
+            if entry["canonical"] == "product.emoji":
+                message = (f"Token {entry['token']} at {entry['path']} is empty because this "
+                           "product icon is not prepared. Prepare it explicitly; preview and "
+                           "publication never create emojis.")
+            warnings.append({"code": "empty_value", "path": entry["path"], "message": message})
     return warnings
 
 

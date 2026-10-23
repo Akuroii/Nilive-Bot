@@ -113,8 +113,8 @@ def catalog_tests():
         "product.price_display", "product.price_amount", "product.currency",
         "product.currency_name", "product.currency_emoji", "product.type",
         "product.duration", "product.stock", "product.required_level",
-        "product.rarity", "product.image", "product.icon_url", "product.tier",
-        "product.prestige_tier",
+        "product.rarity", "product.image", "product.icon_url", "product.emoji",
+        "product.tier", "product.prestige_tier",
     }
     check(set(SP.TOKEN_CATALOG) == expected,
           "catalog holds exactly the canonical token set",

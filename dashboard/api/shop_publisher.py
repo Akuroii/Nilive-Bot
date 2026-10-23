@@ -59,6 +59,7 @@ from dashboard.permissions import (
 from dashboard.api import api_bp
 import utils.shop_publisher as SP
 from utils.currency import get_currency_config
+from utils.shop_emoji import attach_prepared_emojis
 
 # shop_items columns the preview needs: identity, the price line, every
 # token/state field, and the persisted one-level option relationship used by
@@ -131,6 +132,7 @@ def api_shop_publisher_catalog():
                 (guild_id,))
             products = [_row_dict(r, _PRODUCT_LIST_KEYS)
                         for r in await cursor.fetchall()]
+            await attach_prepared_emojis(db, guild_id, products)
         products.sort(key=lambda p: (SP.type_group_key(p["type"] or ""),
                                      (p["name"] or "").lower(), p["id"]))
         return templates, products
@@ -250,11 +252,12 @@ def api_shop_publisher_preview():
                 rows = await cursor.fetchall()
             else:
                 rows = []
-        return rows
+            products = [_row_dict(row, _PRODUCT_DICT_KEYS) for row in rows]
+            await attach_prepared_emojis(db, guild_id, products)
+        return products
 
     rows_by_id = {}
-    for row in run_async(fetch()):
-        product = _row_dict(row, _PRODUCT_DICT_KEYS)
+    for product in run_async(fetch()):
         rows_by_id[product["id"]] = product
 
     problems = SP.validate_design(design, rows_by_id)
