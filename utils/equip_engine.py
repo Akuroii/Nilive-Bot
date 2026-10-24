@@ -89,26 +89,36 @@ async def swap_and_record_equipped(bot: discord.Client | None,
         member = guild.get_member(user_id)
 
     current = await get_equipped(guild_id, user_id)
-    if current and (current.get("entry_key") or current["item_name"]) != \
-            (entry_key or item_name):
-        old_role_id = int(current["role_id"])
-        if old_role_id != int(role_id):
-            from utils.timed_ownership import non_slot_role_entitlement
-            protected = await non_slot_role_entitlement(
-                guild_id, user_id, old_role_id, bot=bot, member=member)
-            if not protected and guild is not None and member is not None:
-                old_role = guild.get_role(old_role_id)
-                if old_role and old_role in member.roles:
-                    try:
-                        await member.remove_roles(
-                            old_role, reason=f"{reason} — swapped out")
-                    except Exception as e:
-                        print(f"[EQUIP] Failed to remove previous role "
-                              f"{old_role_id} from {user_id} in "
-                              f"{guild_id}: {e}")
-
     await record_equipped(guild_id, user_id, item_name, role_id=int(role_id),
                           entry_key=entry_key)
+
+    if current:
+        same_slot = (
+            (current.get("entry_key") is not None
+             and entry_key is not None
+             and current.get("entry_key") == entry_key)
+            or (current.get("entry_key") is None
+                and (entry_key is None or str(entry_key).startswith("i:"))
+                and current["item_name"] == item_name
+                and int(current["role_id"]) == int(role_id))
+        )
+        if not same_slot:
+            old_role_id = int(current["role_id"])
+            if old_role_id != int(role_id):
+                from utils.timed_ownership import non_slot_role_entitlement
+                protected = await non_slot_role_entitlement(
+                    guild_id, user_id, old_role_id, bot=bot, member=member)
+                if not protected and guild is not None and member is not None:
+                    old_role = guild.get_role(old_role_id)
+                    if old_role and old_role in member.roles:
+                        try:
+                            await member.remove_roles(
+                                old_role, reason=f"{reason} — swapped out")
+                        except Exception as e:
+                            print(f"[EQUIP] Failed to remove previous role "
+                                  f"{old_role_id} from {user_id} in "
+                                  f"{guild_id}: {e}")
+
     return {"previous": current, "entry_key": entry_key,
             "role_id": int(role_id)}
 
@@ -176,10 +186,15 @@ async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
             return {"success": False, "error": f"Discord error assigning role: {e}",
                     "role_added": False}
 
-    await swap_and_record_equipped(
-        bot, guild_id, user_id,
-        item_name=item_name, role_id=role_id, entry_key=owned_key,
-        guild=guild, member=member, reason=reason)
+    try:
+        await swap_and_record_equipped(
+            bot, guild_id, user_id,
+            item_name=item_name, role_id=role_id, entry_key=owned_key,
+            guild=guild, member=member, reason=reason)
+    except Exception as e:
+        return {"success": False,
+                "error": f"Database error recording equipped role: {e}",
+                "role_added": not role_was_present}
 
     return {"success": True, "item_name": item_name,
             "role_id": role_id, "role_name": role.name,
@@ -202,13 +217,32 @@ async def unequip_role(bot: discord.Client, guild_id: int, user_id: int,
     current = await get_equipped(guild_id, user_id)
     if not current:
         return {"success": False, "error": "You do not have a role equipped."}
-    if entry_key is not None:
-        if current.get("entry_key") != entry_key:
+    current_key = current.get("entry_key")
+    if current_key is not None:
+        if entry_key is not None:
+            if current_key != entry_key:
+                return {"success": False,
+                        "error": "That is not the currently equipped role."}
+        elif item_name is not None and current["item_name"] != item_name:
             return {"success": False,
                     "error": "That is not the currently equipped role."}
-    elif item_name is not None and current["item_name"] != item_name:
-        return {"success": False,
-                "error": "That is not the currently equipped role."}
+    else:
+        # Legacy equipped_roles row (entry_key IS NULL): represents a
+        # permanent inventory_items row identified by item_name.
+        if entry_key is not None:
+            if not str(entry_key).startswith("i:"):
+                return {"success": False,
+                        "error": "That is not the currently equipped role."}
+            from utils.inventory import get_inventory, find_entry
+            inv = await get_inventory(guild_id, user_id, include_empty=False)
+            target = find_entry(inv, entry_key=entry_key)
+            resolved_name = target["item_name"] if target else item_name
+            if resolved_name != current["item_name"]:
+                return {"success": False,
+                        "error": "That is not the currently equipped role."}
+        elif item_name is not None and current["item_name"] != item_name:
+            return {"success": False,
+                    "error": "That is not the currently equipped role."}
 
     guild = bot.get_guild(guild_id)
     if not guild:

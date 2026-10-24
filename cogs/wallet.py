@@ -1358,6 +1358,7 @@ async def open_item_panel(interaction: discord.Interaction, guild_id: int,
         await open_inventory_panel(interaction, guild_id, user_id, tab, page)
         return
 
+    item_name = item["item_name"]
     if tab == TAB_TITLES:
         current = await get_equipped_title(guild_id, user_id)
         equipped = bool(current and current["item_name"] == item_name)
@@ -1365,11 +1366,16 @@ async def open_item_panel(interaction: discord.Interaction, guild_id: int,
         current = await get_equipped(guild_id, user_id)
         # entry_key decides when both sides have one: an equipped permanent
         # "Flame" does not make a timed "Flame" the equipped entry. The name
-        # comparison stays for legacy equipped_roles rows (entry_key NULL).
+        # comparison stays for legacy equipped_roles rows (entry_key NULL),
+        # which only ever represent permanent inventory_items rows.
         if current and current.get("entry_key") and item.get("entry_key"):
             equipped = current["entry_key"] == item["entry_key"]
         else:
-            equipped = bool(current and current["item_name"] == item_name)
+            equipped = bool(
+                current
+                and not item.get("timed")
+                and current["item_name"] == item_name
+            )
     else:
         equipped = False
 

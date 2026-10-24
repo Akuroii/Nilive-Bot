@@ -26,6 +26,8 @@ async def _log_ledger(guild_id: int, user_id: int, currency: str,
             type=type, reason=reason, source=source,
             related_user_id=related_user_id, db=db)
     except Exception as e:
+        if db is not None and "no such table: transaction_ledger" not in str(e).lower():
+            raise
         print(f"[LEDGER] Failed to log transaction "
               f"(guild={guild_id} user={user_id} currency={currency}): {e}")
 

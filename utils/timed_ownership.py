@@ -464,6 +464,7 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
     boost_level = _booster_level_for(member)
     if boost_level >= 1:
         async with aiosqlite.connect(DB_PATH) as db:
+            boost_enabled = True
             try:
                 cursor = await db.execute(
                     "SELECT enabled, boost1_role_id, boost2_role_id "
@@ -472,7 +473,9 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
                 row = await cursor.fetchone()
                 if row:
                     enabled, b1, b2 = row
-                    if enabled is None or int(enabled) != 0:
+                    if enabled is not None and int(enabled) == 0:
+                        boost_enabled = False
+                    else:
                         if b1 not in (None, "") and boost_level >= 1:
                             try:
                                 managed.add(int(b1))
@@ -486,22 +489,23 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
             except aiosqlite.Error:
                 pass
 
-            try:
-                cursor = await db.execute(
-                    "SELECT role_id, requires_boost_level "
-                    "FROM boost_color_roles WHERE guild_id=?",
-                    (guild_id,))
-                for r_id, req_lvl in await cursor.fetchall():
-                    if r_id in (None, ""):
-                        continue
-                    needed = max(1, int(req_lvl or 1))
-                    if boost_level >= needed:
-                        try:
-                            managed.add(int(r_id))
-                        except (TypeError, ValueError):
+            if boost_enabled:
+                try:
+                    cursor = await db.execute(
+                        "SELECT role_id, requires_boost_level "
+                        "FROM boost_color_roles WHERE guild_id=?",
+                        (guild_id,))
+                    for r_id, req_lvl in await cursor.fetchall():
+                        if r_id in (None, ""):
                             continue
-            except aiosqlite.Error:
-                pass
+                        needed = max(1, int(req_lvl or 1))
+                        if boost_level >= needed:
+                            try:
+                                managed.add(int(r_id))
+                            except (TypeError, ValueError):
+                                continue
+                except aiosqlite.Error:
+                    pass
 
     return managed
 
@@ -1732,6 +1736,15 @@ async def resolve_purchase_operation(op_id: str, *, action: str,
                       "choose 'refund' or 'delivered'."),
         }
 
+    if not op_id or not str(op_id).strip():
+        return {
+            "success": False,
+            "op_id": op_id,
+            "action": normalized,
+            "status": None,
+            "error": "Operation ID must be a non-empty string.",
+        }
+
     if not confirmed:
         return {
             "success": False,
@@ -1904,14 +1917,55 @@ def format_purchase_inspection(evidence: dict) -> str:
     return "\n".join(lines)
 
 
+def _swap_db_path(target_path: str) -> dict:
+    """Point database-backed modules at `target_path`, returning prior state."""
+    import os
+    import sys
+    prior = {"env": os.environ.get("DATABASE_PATH"), "modules": {}}
+    os.environ["DATABASE_PATH"] = target_path
+    for mod_name in (
+        "database",
+        "utils.timed_ownership",
+        "utils.economy_safe",
+        "utils.ledger",
+        "utils.equip_engine",
+        "utils.inventory",
+        "utils.reward_engine",
+    ):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "DB_PATH"):
+            prior["modules"][mod_name] = getattr(mod, "DB_PATH")
+            setattr(mod, "DB_PATH", target_path)
+    return prior
+
+
+def _restore_db_path(prior: dict) -> None:
+    import os
+    import sys
+    if prior["env"] is None:
+        os.environ.pop("DATABASE_PATH", None)
+    else:
+        os.environ["DATABASE_PATH"] = prior["env"]
+    for mod_name, old_val in prior["modules"].items():
+        mod = sys.modules.get(mod_name)
+        if mod is not None:
+            setattr(mod, "DB_PATH", old_val)
+
+
 async def _cli_async(argv: list[str] | None = None) -> int:
     import argparse
+    import os
 
     parser = argparse.ArgumentParser(
         description=(
             "Inspect and safely resolve uncertain/failed shop purchase "
-            "operations (read-only by default)."
+            "operations (read-only by default). Note: this tool inspects "
+            "SQLite tables only; live Discord role membership must be "
+            "verified by the operator before resolving as 'delivered' or 'refund'."
         ))
+    parser.add_argument(
+        "--db", default=None,
+        help="Path to the SQLite database file (or set DATABASE_PATH).")
     parser.add_argument(
         "--op-id", help="Specific purchase operation ID to inspect or resolve.")
     parser.add_argument(
@@ -1934,7 +1988,7 @@ async def _cli_async(argv: list[str] | None = None) -> int:
         help="Confirm and execute the --resolve state transition.")
     parser.add_argument(
         "--note", default=None,
-        help="Optional operator note recorded in the operation detail.")
+        help="Operator note recorded in the operation detail (required with --resolve --yes).")
     parser.add_argument(
         "--json", action="store_true",
         help="Emit machine-readable JSON output.")
@@ -1943,65 +1997,99 @@ async def _cli_async(argv: list[str] | None = None) -> int:
     if args.resolve and not args.op_id:
         parser.error("--resolve requires --op-id.")
 
-    if not args.op_id:
-        ops = await list_purchase_operations(
-            status=args.status, guild_id=args.guild_id,
-            user_id=args.user_id, limit=args.limit)
+    target_db = (args.db or os.environ.get("DATABASE_PATH") or "").strip()
+    if not target_db:
+        msg = ("Refusing to run without an explicit database target: "
+               "pass --db <path> or set DATABASE_PATH.")
         if args.json:
-            print(json.dumps({"operations": ops}, indent=2, default=str))
-        elif not ops:
-            print(f"No purchase operations found with status={args.status!r}.")
+            print(json.dumps({"success": False, "error": msg}, indent=2))
         else:
-            print(f"Found {len(ops)} operation(s) with status={args.status!r}:")
-            for op in ops:
-                print(
-                    f"  {op['op_id']}  guild={op['guild_id']} "
-                    f"user={op['user_id']} item={op['item_name']!r} "
-                    f"amount={op['amount']} {op['currency']} "
-                    f"charged={op['charged']} refunded={op['refunded']} "
-                    f"reserved={op['stock_reserved']} "
-                    f"returned={op['stock_returned']} "
-                    f"detail={op.get('detail')!r}")
-        return 0
-
-    evidence = await inspect_purchase_operation(args.op_id)
-    if evidence is None:
-        if args.json:
-            print(json.dumps(
-                {"error": f"Unknown operation: {args.op_id}"}, indent=2))
-        else:
-            print(f"Error: Unknown purchase operation {args.op_id!r}.")
-        return 1
-
-    if not args.resolve:
-        if args.json:
-            print(json.dumps(evidence, indent=2, default=str))
-        else:
-            print(format_purchase_inspection(evidence))
-        return 0
-
-    if not args.yes:
-        msg = ("Refusing to mutate without --yes. Inspect the evidence above "
-               f"and re-run with --op-id {args.op_id} --resolve {args.resolve} --yes.")
-        if args.json:
-            print(json.dumps(
-                {"success": False, "error": msg, "inspection": evidence},
-                indent=2, default=str))
-        else:
-            print(format_purchase_inspection(evidence))
-            print(f"\n[DRY-RUN] {msg}")
+            print(f"Error: {msg}")
         return 2
 
-    res = await resolve_purchase_operation(
-        args.op_id, action=args.resolve, confirmed=True, note=args.note)
-    if args.json:
-        print(json.dumps(res, indent=2, default=str))
-    else:
-        if res["success"]:
-            print(f"Resolved {args.op_id}: action={res['action']} -> status={res['status']}")
+    if not os.path.isfile(target_db):
+        msg = f"Database file does not exist: {target_db}"
+        if args.json:
+            print(json.dumps({"success": False, "error": msg}, indent=2))
         else:
-            print(f"Resolution failed for {args.op_id}: {res['error']}")
-    return 0 if res["success"] else 1
+            print(f"Error: {msg}")
+        return 2
+
+    prior_db = _swap_db_path(target_db)
+    try:
+        if not args.op_id:
+            ops = await list_purchase_operations(
+                status=args.status, guild_id=args.guild_id,
+                user_id=args.user_id, limit=args.limit)
+            if args.json:
+                print(json.dumps({"operations": ops}, indent=2, default=str))
+            elif not ops:
+                print(f"No purchase operations found with status={args.status!r}.")
+            else:
+                print(f"Found {len(ops)} operation(s) with status={args.status!r}:")
+                for op in ops:
+                    print(
+                        f"  {op['op_id']}  guild={op['guild_id']} "
+                        f"user={op['user_id']} item={op['item_name']!r} "
+                        f"amount={op['amount']} {op['currency']} "
+                        f"charged={op['charged']} refunded={op['refunded']} "
+                        f"reserved={op['stock_reserved']} "
+                        f"returned={op['stock_returned']} "
+                        f"detail={op.get('detail')!r}")
+            return 0
+
+        evidence = await inspect_purchase_operation(args.op_id)
+        if evidence is None:
+            if args.json:
+                print(json.dumps(
+                    {"error": f"Unknown operation: {args.op_id}"}, indent=2))
+            else:
+                print(f"Error: Unknown purchase operation {args.op_id!r}.")
+            return 1
+
+        if not args.resolve:
+            if args.json:
+                print(json.dumps(evidence, indent=2, default=str))
+            else:
+                print(format_purchase_inspection(evidence))
+            return 0
+
+        if not args.yes:
+            msg = ("Refusing to mutate without --yes. Inspect the evidence above "
+                   f"and re-run with --op-id {args.op_id} --resolve {args.resolve} "
+                   "--yes --note '<reason>'.")
+            if args.json:
+                print(json.dumps(
+                    {"success": False, "error": msg, "inspection": evidence},
+                    indent=2, default=str))
+            else:
+                print(format_purchase_inspection(evidence))
+                print(f"\n[DRY-RUN] {msg}")
+            return 2
+
+        if not (args.note and args.note.strip()):
+            msg = ("Refusing to resolve without an operator --note recording "
+                   "what was verified.")
+            if args.json:
+                print(json.dumps(
+                    {"success": False, "error": msg, "inspection": evidence},
+                    indent=2, default=str))
+            else:
+                print(f"Error: {msg}")
+            return 2
+
+        res = await resolve_purchase_operation(
+            args.op_id, action=args.resolve, confirmed=True, note=args.note)
+        if args.json:
+            print(json.dumps(res, indent=2, default=str))
+        else:
+            if res["success"]:
+                print(f"Resolved {args.op_id}: action={res['action']} -> status={res['status']}")
+            else:
+                print(f"Resolution failed for {args.op_id}: {res['error']}")
+        return 0 if res["success"] else 1
+    finally:
+        _restore_db_path(prior_db)
 
 
 def main(argv: list[str] | None = None) -> int:

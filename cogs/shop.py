@@ -370,9 +370,16 @@ async def process_purchase(interaction: discord.Interaction,
                 await db.commit()
             else:
                 await db.execute("ROLLBACK")
-        except Exception:
+        except Exception as exc:
             try:
                 await db.execute("ROLLBACK")
+            except Exception:
+                pass
+            try:
+                await claim_purchase_transition(
+                    op_id, from_statuses=(PURCHASE_PENDING,),
+                    to_status=PURCHASE_FAILED,
+                    detail=f"stock reservation error: {exc}")
             except Exception:
                 pass
             raise
@@ -440,6 +447,18 @@ async def process_purchase(interaction: discord.Interaction,
                 f"You need {pay_amount:,} {cinfo['emoji']} but only have {bal:,}.",
                 ephemeral=True)
             return
+        except Exception as exc:
+            # The charge transaction rolled back (charged=0), so only any
+            # already-reserved stock needs to be released.
+            try:
+                if await claim_purchase_transition(
+                        op_id, from_statuses=(PURCHASE_PENDING,),
+                        to_status=PURCHASE_FAILED,
+                        detail=f"charge error: {exc}"):
+                    await refund_purchase(op_id)
+            except Exception:
+                pass
+            raise
 
     # `color` is a Shop CATEGORY, not a reward type: internally a permanent
     # Colour is the existing `role` grant and a timed Colour is a timed role

@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """Safe operator CLI for inspecting and resolving `uncertain` Shop purchases.
 
+Requires an explicit SQLite database target via `--db <path>` or `DATABASE_PATH`
+so the CLI can never silently target or create a default production database.
+
 Read-only by default:
-  * `python scripts/recover_shop_purchases.py`
+  * `python scripts/recover_shop_purchases.py --db /path/to/nilive.db`
       Lists all `uncertain` purchase operations.
-  * `python scripts/recover_shop_purchases.py --op-id <op_id>`
-      Displays full diagnostic evidence (operation journal, shop listing,
+  * `python scripts/recover_shop_purchases.py --db /path/to/nilive.db --op-id <op_id>`
+      Displays full SQLite diagnostic evidence (operation journal, shop listing,
       wallet balance, ledger rows, inventory items, timed holdings, temp_roles,
       equipped role) without mutating any state.
 
-Explicit operator resolution (requires BOTH `--resolve` and `--yes`):
-  * `python scripts/recover_shop_purchases.py --op-id <op_id> --resolve refund --yes`
+Explicit operator resolution (requires `--op-id`, `--resolve`, `--yes`, and `--note`):
+  * `python scripts/recover_shop_purchases.py --db /path/to/nilive.db --op-id <op_id> --resolve refund --yes --note "verified role not granted"`
       Atomically and idempotently refunds charged currency and restores reserved
-      stock (via `refund_purchase()`), then records the resolution in the
-      purchase journal audit trail.
-  * `python scripts/recover_shop_purchases.py --op-id <op_id> --resolve delivered --yes`
+      stock (via `refund_purchase()`), then records the resolution and operator
+      note in the purchase journal audit trail.
+  * `python scripts/recover_shop_purchases.py --db /path/to/nilive.db --op-id <op_id> --resolve delivered --yes --note "verified role present on Discord"`
       Marks the operation as `delivered` after the operator has verified that
-      the member holds the purchased product, preserving the audit trail.
+      the member holds the purchased product (including any live Discord role
+      state, which this offline SQLite tool does not query directly), preserving
+      the audit trail.
 """
 
 from __future__ import annotations
@@ -28,7 +33,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from utils.timed_ownership import main  # noqa: E402
+
+def main(argv: list[str] | None = None) -> int:
+    from utils.timed_ownership import main as _to_main
+    return _to_main(argv)
 
 
 if __name__ == "__main__":

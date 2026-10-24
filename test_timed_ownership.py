@@ -1241,6 +1241,249 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
             [(1,)])
 
+    async def test_adversarial_audit_transaction_and_ledger_boundaries(self):
+        import aiosqlite
+        from database import DB_PATH
+        from utils.economy_safe import (
+            safe_credit, safe_deduct, safe_decrement_stock,
+        )
+        import utils.ledger as ledger_mod
+
+        listing = shop_item("color", price=400, name="BoundHue",
+                            role_id=993, duration_hours=2, stock=3)
+        start_bal = rows("SELECT balance FROM economy")[0][0]
+        start_ledger = len(rows("SELECT id FROM transaction_ledger"))
+
+        # 1. Caller-owned BEGIN IMMEDIATE rollback undoes safe_credit,
+        # safe_deduct, safe_decrement_stock, restore_stock, log_transaction,
+        # and update_purchase together.
+        op_tx = await TO.open_purchase(
+            GUILD, USER, item_id=listing, item_name="BoundHue",
+            currency="balance", amount=400)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await safe_decrement_stock(listing, db=db)
+            await safe_deduct(GUILD, USER, 400, currency="balance",
+                              reason="tx test", source="shop", db=db)
+            await safe_credit(GUILD, USER, 100, currency="balance",
+                              reason="tx credit", source="shop", db=db)
+            await TO.restore_stock(listing, db=db)
+            await TO.update_purchase(
+                op_tx, stock_reserved=1, charged=1, db=db)
+            await db.execute("ROLLBACK")
+
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], start_bal)
+        self.assertEqual(len(rows("SELECT id FROM transaction_ledger")),
+                         start_ledger)
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
+            [(3,)])
+        op_after = await TO.get_purchase(op_tx)
+        self.assertEqual(op_after["stock_reserved"], 0)
+        self.assertEqual(op_after["charged"], 0)
+
+        # 2. If log_transaction raises inside caller-owned `db=`, safe_deduct
+        # propagates the failure so process_purchase rolls back the debit AND
+        # releases reserved stock via refund_purchase.
+        itx, _, _, _ = purchase_ctx(granted_role=role_stub(993, "BoundHue"))
+        with patch.object(ledger_mod, "log_transaction",
+                          AsyncMock(side_effect=RuntimeError("ledger disk full"))):
+            with self.assertRaises(RuntimeError):
+                await process_purchase(itx, listing)
+
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], start_bal,
+                         "ledger failure in caller-owned tx must roll back debit")
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
+            [(3,)],
+            "reserved stock must be released when charge tx fails after stock_reserved=1")
+        latest_op = rows(
+            "SELECT status, stock_reserved, charged, stock_returned "
+            "FROM shop_purchase_operations WHERE op_id != ? "
+            "ORDER BY rowid DESC LIMIT 1", (op_tx,))[0]
+        self.assertEqual(latest_op, (TO.PURCHASE_FAILED, 1, 0, 1))
+
+        # 3. Interruption after stock_returned=1 before operator finalizes
+        # status=refunded: resolve_purchase_operation(action='refund') finalizes
+        # status=refunded without double-crediting or double-restoring stock.
+        op_half = await TO.open_purchase(
+            GUILD, USER, item_id=listing, item_name="BoundHue",
+            currency="balance", amount=400)
+        await TO.update_purchase(
+            op_half, stock_reserved=1, charged=1,
+            refunded=1, stock_returned=1, status=TO.PURCHASE_FAILED)
+        retry_res = await TO.resolve_purchase_operation(
+            op_half, action="refund", confirmed=True,
+            note="finalize interrupted refund")
+        self.assertTrue(retry_res["success"])
+        self.assertEqual((await TO.get_purchase(op_half))["status"],
+                         TO.PURCHASE_REFUNDED)
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], start_bal)
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
+            [(3,)])
+
+    async def test_adversarial_audit_swap_order_legacy_null_key_and_db_failure(self):
+        from utils.inventory import give_item
+        from utils.equip_engine import unequip_role
+        import utils.equip_engine as eq_mod
+
+        r_old = role_stub(994, "LegacyFlame")
+        r_new = role_stub(995, "AzureWave")
+        _, person, bot, guild = purchase_ctx(granted_role=r_old)
+        roles_map = {994: r_old, 995: r_new}
+        guild.get_role = lambda rid: roles_map.get(int(rid))
+        person.roles.append(r_old)
+
+        # Seed two permanent role items and a legacy equipped_roles row with entry_key=NULL
+        await give_item(GUILD, USER, "LegacyFlame", 1, item_type="role",
+                        source="shop", metadata={"role_id": 994, "category": "color"})
+        await give_item(GUILD, USER, "AzureWave", 1, item_type="role",
+                        source="shop", metadata={"role_id": 995, "category": "color"})
+        execute("""
+            INSERT OR REPLACE INTO equipped_roles
+                (guild_id, user_id, item_name, role_id, entry_key)
+            VALUES (?, ?, 'LegacyFlame', 994, NULL)
+        """, (GUILD, USER))
+
+        inv = await get_inventory(GUILD, USER)
+        flame_entry = next(it for it in inv if it["item_name"] == "LegacyFlame")
+        azure_entry = next(it for it in inv if it["item_name"] == "AzureWave")
+
+        # 1. Re-equipping the same permanent item upgrades legacy NULL entry_key
+        # without removing the Discord role.
+        call_order = []
+
+        async def _track_add(r, reason=None):
+            call_order.append(("add", r.id))
+            if r not in person.roles:
+                person.roles.append(r)
+
+        async def _track_rem(r, reason=None):
+            call_order.append(("remove", r.id))
+            person.roles = [x for x in person.roles if x.id != r.id]
+
+        person.add_roles = AsyncMock(side_effect=_track_add)
+        person.remove_roles = AsyncMock(side_effect=_track_rem)
+
+        res_same = await equip_role(
+            bot, GUILD, USER, "LegacyFlame",
+            entry_key=flame_entry["entry_key"])
+        self.assertTrue(res_same["success"])
+        self.assertEqual(call_order, [], "re-equipping already worn role must not add/remove")
+        self.assertEqual((await get_equipped(GUILD, USER))["entry_key"],
+                         flame_entry["entry_key"])
+
+        # Reset back to legacy NULL entry_key to test DB failure & swap order
+        execute("UPDATE equipped_roles SET entry_key = NULL WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+
+        # 2. If record_equipped fails with a DB error after add_roles(new),
+        # remove_roles(old) must NOT run (member never loses old_role!).
+        with patch.object(eq_mod, "record_equipped",
+                          AsyncMock(side_effect=RuntimeError("sqlite disk I/O error"))):
+            res_dbfail = await equip_role(
+                bot, GUILD, USER, "AzureWave",
+                entry_key=azure_entry["entry_key"])
+        self.assertFalse(res_dbfail["success"])
+        self.assertIn(r_old, person.roles,
+                      "old role must remain on Discord if DB write fails")
+        self.assertEqual((await get_equipped(GUILD, USER))["role_id"], 994)
+
+        # Remove r_new from person.roles to test clean swap call order
+        if r_new in person.roles:
+            person.roles.remove(r_new)
+        call_order.clear()
+
+        # 3. Clean swap from LegacyFlame (994, entry_key=NULL) -> AzureWave (995):
+        # add_roles(995) MUST be called strictly BEFORE remove_roles(994).
+        res_swap = await equip_role(
+            bot, GUILD, USER, "AzureWave",
+            entry_key=azure_entry["entry_key"])
+        self.assertTrue(res_swap["success"])
+        self.assertEqual(call_order, [("add", 995), ("remove", 994)],
+                         "new role must be added before old role is removed")
+        self.assertIn(r_new, person.roles)
+        self.assertNotIn(r_old, person.roles)
+
+        # 4. Legacy NULL entry_key row can be unequipped via permanent entry_key="i:<id>",
+        # but refuses a timed holding entry_key="h:<id>".
+        execute("""
+            UPDATE equipped_roles
+            SET item_name='AzureWave', role_id=995, entry_key=NULL
+            WHERE guild_id=? AND user_id=?
+        """, (GUILD, USER))
+        refuse_timed = await unequip_role(
+            bot, GUILD, USER, "AzureWave", entry_key="h:999")
+        self.assertFalse(refuse_timed["success"])
+        ok_legacy_unequip = await unequip_role(
+            bot, GUILD, USER, "AzureWave", entry_key=azure_entry["entry_key"])
+        self.assertTrue(ok_legacy_unequip["success"])
+        self.assertIsNone(await get_equipped(GUILD, USER))
+
+    async def test_adversarial_audit_cli_db_safety_and_note_requirement(self):
+        import os
+        import subprocess
+        import sys
+        from database import DB_PATH
+
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "scripts", "recover_shop_purchases.py")
+
+        # 1. Importing scripts/recover_shop_purchases.py has no side effects.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("recover_cli_mod", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertTrue(callable(mod.main))
+
+        # 2. Running without --db and without DATABASE_PATH refuses with exit code 2.
+        env_no_db = {k: v for k, v in os.environ.items() if k != "DATABASE_PATH"}
+        no_db = subprocess.run(
+            [sys.executable, script, "--json"],
+            env=env_no_db, capture_output=True, text=True)
+        self.assertEqual(no_db.returncode, 2)
+        self.assertIn("explicit database target", no_db.stdout)
+
+        # 3. Running with --db pointing to a nonexistent file refuses with exit code 2
+        # and does not create the file.
+        missing_path = DB_PATH + ".does_not_exist.sqlite"
+        if os.path.exists(missing_path):
+            os.remove(missing_path)
+        missing_res = subprocess.run(
+            [sys.executable, script, "--db", missing_path, "--json"],
+            env=env_no_db, capture_output=True, text=True)
+        self.assertEqual(missing_res.returncode, 2)
+        self.assertFalse(os.path.exists(missing_path))
+
+        # 4. --resolve --yes without --note refuses with exit code 2 and does not mutate.
+        listing = shop_item("color", price=250, name="CliGuardHue",
+                            role_id=996, duration_hours=2, stock=1)
+        op_id = await TO.open_purchase(
+            GUILD, USER, item_id=listing, item_name="CliGuardHue",
+            currency="balance", amount=250)
+        await TO.update_purchase(
+            op_id, charged=1, stock_reserved=1, status=TO.PURCHASE_UNCERTAIN,
+            detail="awaiting note")
+        no_note = subprocess.run(
+            [sys.executable, script, "--db", DB_PATH, "--op-id", op_id,
+             "--resolve", "delivered", "--yes", "--json"],
+            env=env_no_db, capture_output=True, text=True)
+        self.assertEqual(no_note.returncode, 2)
+        self.assertEqual((await TO.get_purchase(op_id))["status"],
+                         TO.PURCHASE_UNCERTAIN)
+
+        # 5. --resolve delivered --yes --note succeeds with explicit --db (no env var).
+        ok_deliv = subprocess.run(
+            [sys.executable, script, "--db", DB_PATH, "--op-id", op_id,
+             "--resolve", "delivered", "--yes",
+             "--note", "verified Discord role present", "--json"],
+            env=env_no_db, capture_output=True, text=True, check=True)
+        self.assertTrue(json.loads(ok_deliv.stdout)["success"])
+        self.assertEqual((await TO.get_purchase(op_id))["status"],
+                         TO.PURCHASE_DELIVERED)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
