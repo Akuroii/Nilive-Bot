@@ -46,14 +46,16 @@
             <div class="form-group">
                 <label class="form-label">Type</label>
                 <select class="form-input" id="item-type" onchange="toggleItemTypeFields()">
-                    <option value="role">Permanent Role</option>
-                    <option value="temp_role">Temporary Role</option>
-                    <option value="xp_boost">⚡ XP Boost</option>
+                    <option value="custom">Items</option>
+                    <option value="color">Colors</option>
+                    <option value="potion">Potion</option>
+                    <option value="title">Title</option>
                     <option value="prestige">⭐ Prestige</option>
-                    <option value="potion">🧪 Potion (consumable)</option>
-                    <option value="title">🏷️ Title</option>
-                    <option value="custom">Custom</option>
                 </select>
+                <div class="form-hint">
+                    Items and Colors are permanent with duration 0 and temporary with a
+                    positive duration. Legacy products of the older types keep working.
+                </div>
             </div>
             <div class="form-group" id="item-prestige-tier-field" style="display:none;">
                 <label class="form-label">Prestige tier</label>
@@ -357,12 +359,26 @@ function toggleItemTypeFields() {
         prestigeField.style.display = 'none';
         durLabel.textContent = 'Duration hours (0 = permanent)';
         durHint.textContent = 'Titles are cosmetic and permanent — leave as 0.';
-    } else {
+    } else if (type === 'color') {
         roleField.style.display = 'block';
         boostField.style.display = 'none';
         prestigeField.style.display = 'none';
         durLabel.textContent = 'Duration hours (0 = permanent)';
-        durHint.textContent = '';
+        durHint.textContent =
+            'The Discord role this Colour grants. 0 = permanent; a positive ' +
+            'value removes the role when it expires unless the member has ' +
+            'another entitlement to it.';
+    } else {
+        // Items (custom). Duration is what makes a listing temporary, so it
+        // is the only thing that decides permanence here — there is no
+        // separate "temporary item" type or tab.
+        roleField.style.display = 'none';
+        boostField.style.display = 'none';
+        prestigeField.style.display = 'none';
+        durLabel.textContent = 'Duration hours (0 = permanent)';
+        durHint.textContent =
+            '0 = owned forever. A positive value = temporary ownership; the ' +
+            'timer starts when the purchase is delivered.';
     }
     applyFreeVIFields();
 }
@@ -390,15 +406,18 @@ async function addItem() {
         price:         priceValue === null ? 0 : priceValue,
         price_diamonds: priceDiamonds > 0 ? priceDiamonds : null,
         type:          type,
-        role_id:       ['xp_boost', 'prestige', 'potion', 'title'].indexOf(type) === -1
+        // Only a Colors listing binds a Discord role. Everything else sends
+        // null so a stray value in a hidden field can never become ownership.
+        role_id:       type === 'color'
                        ? (document.getElementById('item-role').value || null)
                        : null,
         prestige_tier: type === 'prestige' && prestigeTier
                        ? parseInt(prestigeTier.value) : null,
         xp_boost_multiplier: (type === 'xp_boost' || type === 'potion') && boostMult > 1
                        ? boostMult : null,
-        duration_hours:parseInt(
-            document.getElementById('item-duration').value) || null,
+        // Prestige is a progression purchase: it never carries a duration.
+        duration_hours: type === 'prestige' ? null : (parseInt(
+            document.getElementById('item-duration').value) || null),
         required_level:parseInt(
             document.getElementById('item-level').value) || 0,
         description:   document.getElementById('item-desc').value,
@@ -430,6 +449,14 @@ async function addItem() {
     if (!freeVI && type !== 'prestige' && payload.price_diamonds === null
             && priceValue === null) {
         showToast('Enter name and a coin or diamond price', 'danger');
+        return;
+    }
+    if (type === 'color' && !payload.role_id) {
+        showToast('Choose the Discord role this Colour grants', 'danger');
+        return;
+    }
+    if (type === 'title' && payload.duration_hours) {
+        showToast('Titles are permanent — set duration to 0', 'danger');
         return;
     }
     if (type === 'xp_boost' && (!payload.xp_boost_multiplier || !payload.duration_hours)) {
