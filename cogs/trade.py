@@ -320,7 +320,12 @@ class TradeView(discord.ui.View):
 
     @discord.ui.button(label="Offer Item", emoji="🎁", style=discord.ButtonStyle.secondary)
     async def offer_item(self, interaction: discord.Interaction, button: discord.ui.Button):
-        items = await get_inventory(self.session.guild_id, interaction.user.id, include_empty=False)
+        items = await get_inventory(self.session.guild_id, interaction.user.id,
+                                    include_empty=False)
+        # A timed holding is bound to its expiry and to the role it granted, so
+        # it is never offered for trade. Filtering here (rather than trusting
+        # _move_items to ignore it) keeps the picker and the offer in sync.
+        items = [it for it in items if not it.get("timed")]
         if not items:
             await interaction.response.send_message(
                 "You don't have any items to offer.", ephemeral=True)

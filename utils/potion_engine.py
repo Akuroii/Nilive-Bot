@@ -96,7 +96,13 @@ async def use_potion(guild_id: int, user_id: int, item_name: str) -> dict:
     )
 
     items = await get_inventory(guild_id, user_id, include_empty=False)
-    owned = next((it for it in items if it["item_name"] == item_name), None)
+    # Potions are permanent stacks in `inventory_items`; the duration on a
+    # potion is its EFFECT once activated, not an ownership expiry. A timed
+    # holding that happens to share the name is a different record and
+    # `remove_item()` could not consume it, so it is never a candidate here.
+    owned = next((it for it in items
+                  if not it.get("timed") and it["item_name"] == item_name),
+                 None)
     if not owned:
         return {"success": False, "error": f"You don't own **{item_name}**."}
     if owned["item_type"] != POTION_ITEM_TYPE:

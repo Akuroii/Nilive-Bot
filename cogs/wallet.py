@@ -14,7 +14,11 @@ from utils.currency import (
     DEFAULT_COIN_EMOJI, DEFAULT_DIAMOND_EMOJI,
 )
 from utils.emoji import as_partial_emoji
-from utils.inventory import get_inventory, drop_item
+from utils.inventory import (
+    get_inventory, drop_item, find_entry,
+    ROLE_ITEM_TYPES,
+)
+from utils.timed_ownership import CATEGORY_COLOR
 from utils.equip_engine import get_equipped, equip_role, unequip_role
 from utils.title_engine import (
     TITLE_ITEM_TYPE, get_equipped_title, equip_title, unequip_title,
@@ -77,18 +81,26 @@ VIEW_TIMEOUT = 1800  # 30 minutes — long enough to browse comfortably
 # split that matters is equippable vs consumable vs cosmetic label,
 # not which table the role_id lives in.
 TAB_ITEMS = "items"
+TAB_COLORS = "colors"
 TAB_POTIONS = "potions"
 TAB_TITLES = "titles"
 
-EQUIPPABLE_TYPES = ("role", "temp_role")
+EQUIPPABLE_TYPES = ROLE_ITEM_TYPES
 
 # Tab BUTTON labels use the owner's small-caps words; the author line
 # above the list uses the full display words in TAB_AUTHOR_WORD.
 TAB_META = {
     TAB_ITEMS:   {"label": "ɪᴛᴇᴍꜱ",   "emoji": "🎒"},
+    # Colours are role-backed: permanent or timed by their Duration. There is
+    # deliberately no separate "temporary" tab — temporariness is a Duration,
+    # never a category of its own.
+    TAB_COLORS:  {"label": "ᴄᴏʟᴏʀꜱ",  "emoji": "🎨"},
     TAB_POTIONS: {"label": "ᴘᴏᴛɪᴏɴꜱ", "emoji": "🧪"},
     TAB_TITLES:  {"label": "ᴛɪᴛʟᴇꜱ",  "emoji": "🏷️"},
 }
+
+# The tab strip, in render order (Colors sits right after Items).
+TAB_ORDER = (TAB_ITEMS, TAB_COLORS, TAB_POTIONS, TAB_TITLES)
 
 # Rarity glyphs used when an item has no custom emoji or http image,
 # so the inline list still has a visual anchor per rarity tier.
@@ -303,11 +315,27 @@ async def load_wallet_snapshot(guild_id: int, user_id: int) -> dict:
     }
 
 
+def is_color_entry(entry: dict) -> bool:
+    """Does this ownership record belong to the Colors category?
+
+    Answered ONLY from the record's own provenance (`category`, stamped at
+    grant time from a Colors listing). An ordinary role reward — an event
+    prize, a level claim, a raw `role_id` grant — is *not* a Color and stays in
+    the Items tab, exactly as before. Nothing is reclassified retroactively.
+    """
+    return entry.get("category") == CATEGORY_COLOR
+
+
 def split_by_tab(items: list[dict]) -> dict:
+    colors = [it for it in items if is_color_entry(it)]
     return {
+        TAB_COLORS: colors,
+        # Items keeps every non-potion, non-title entry that is not a Color,
+        # including role-backed ones: a role reward is still an item.
         TAB_ITEMS: [it for it in items
                     if it["item_type"] not in (POTION_ITEM_TYPE,
-                                               TITLE_ITEM_TYPE)],
+                                               TITLE_ITEM_TYPE)
+                    and not is_color_entry(it)],
         TAB_POTIONS: [it for it in items
                       if it["item_type"] == POTION_ITEM_TYPE],
         TAB_TITLES: [it for it in items
@@ -670,18 +698,21 @@ INVENTORY_FOOTER_ICON = (
 # supplied display words verbatim.
 TAB_AUTHOR_WORD = {
     TAB_ITEMS: "𝐈𝐓𝐄𝐌𝐒",
+    TAB_COLORS: "ᴄᴏʟᴏʀꜱ",
     TAB_POTIONS: "𝐩𝐨𝐭𝐢𝐨𝐧𝐬",
     TAB_TITLES: "𝐓𝐈𝐓𝐋𝐄𝐒",
 }
 
 TAB_SELECT_PLACEHOLDER = {
     TAB_ITEMS: "Select an item…",
+    TAB_COLORS: "Select a color…",
     TAB_POTIONS: "Select a potion…",
     TAB_TITLES: "Select a title…",
 }
 
 TAB_EMPTY_TEXT = {
     TAB_ITEMS: "No items yet — get one from `/shop`.",
+    TAB_COLORS: "No colors yet — get one from `/shop`.",
     TAB_POTIONS: "No potions yet — get one from `/shop`.",
     TAB_TITLES: "No titles yet — get one from `/shop`.",
 }
@@ -751,14 +782,21 @@ def _inventory_line(emoji: str, quantity, name, suffix: str | None = None) -> st
     return line
 
 
-def remaining_hours_minutes(metadata: dict | None) -> str | None:
-    """`H:MM` remaining for a temporary role, from persisted expires_at only.
+def remaining_hours_minutes(metadata) -> str | None:
+    """`H:MM` remaining, from a persisted `expires_at` only.
+
+    Accepts either the entry's metadata dict (the historical shape) or the
+    bare ISO `expires_at` the unified inventory view exposes on timed
+    holdings — both end at the same parsed instant.
 
     Never invents a duration, never returns a negative countdown: an
     absent, unparseable or already-expired timestamp yields None and the
     line simply has no time suffix.
     """
-    expires = _parse_timestamp((metadata or {}).get("expires_at"))
+    if isinstance(metadata, str):
+        expires = _parse_timestamp(metadata)
+    else:
+        expires = _parse_timestamp((metadata or {}).get("expires_at"))
     if expires is None:
         return None
     remaining = (expires - _utcnow()).total_seconds()
@@ -766,6 +804,25 @@ def remaining_hours_minutes(metadata: dict | None) -> str | None:
         return None
     hours, minutes = divmod(int(remaining) // 60, 60)
     return f"{hours}:{minutes:02d}"
+
+
+def _color_line(emoji: str, entry: dict) -> str:
+    """One Colors row: the role is rendered as a real mention.
+
+    `<@&id>` only becomes a pill when it is NOT wrapped in backticks, so the
+    name column is the mention itself instead of `_inventory_line`'s
+    backticked text. A permanent Color has no suffix; a timed one shows the
+    remaining `H:MM`, read from the record rather than recomputed.
+    """
+    role_id = entry.get("role_id") or (entry.get("metadata") or {}).get("role_id")
+    mention = f"<@&{int(role_id)}>" if role_id else _display_label(
+        entry.get("item_name"))
+    line = f"> - {emoji} • ` {int(entry.get('quantity') or 0):,} ` • {mention}"
+    remaining = remaining_hours_minutes(entry.get("expires_at")
+                                        or (entry.get("metadata") or {}).get("expires_at"))
+    if remaining:
+        line += f" • ` {remaining} `"
+    return line
 
 
 def paginate_entries(entries: list[dict],
@@ -828,12 +885,17 @@ def build_inventory_embed(tab: str, entries: list[dict], *,
             lines.append(_inventory_line(
                 row["emoji"], row["quantity"], row["name"]))
     for entry in page_entries:
-        suffix = None
-        if tab == TAB_ITEMS and entry.get("item_type") == "temp_role":
-            suffix = remaining_hours_minutes(entry.get("metadata"))
+        emoji = _entry_emoji(entry, _rarity_glyph(entry.get("rarity")))
+        if tab == TAB_COLORS:
+            lines.append(_color_line(emoji, entry))
+            continue
+        # The remaining time comes from the entry's own expiry field, so a
+        # permanent item (no expiry) never shows a countdown and a timed one
+        # shows exactly the deadline the cleanup loop will honour.
+        suffix = remaining_hours_minutes(entry.get("expires_at")
+                                         or (entry.get("metadata") or {}).get("expires_at"))
         lines.append(_inventory_line(
-            _entry_emoji(entry, _rarity_glyph(entry.get("rarity"))),
-            entry.get("quantity"), entry.get("item_name"), suffix))
+            emoji, entry.get("quantity"), entry.get("item_name"), suffix))
 
     embed.description = "\n".join(lines) if lines else TAB_EMPTY_TEXT[tab]
     embed.set_footer(text=INVENTORY_FOOTER_TEXT,
@@ -891,16 +953,20 @@ class InventoryItemSelect(discord.ui.Select):
         self.user_id = user_id
         self.tab = tab
         self.page = page
-        self._by_value = {opt.value: entry["item_name"]
+        # value -> entry_key. A member can own a permanent "Flame" and two
+        # timed "Flame" holdings at once; the label disambiguates them for
+        # reading, and the entry_key — not the name — says which one the
+        # member actually picked.
+        self._by_value = {opt.value: entry.get("entry_key")
                           for opt, entry in zip(options, entries)}
 
     async def callback(self, interaction: discord.Interaction):
         # Selecting is navigation ONLY — it never equips, drops,
         # activates or consumes anything.
-        item_name = self._by_value.get(self.values[0], self.values[0])
         await open_item_panel(
             interaction, self.guild_id, self.user_id,
-            self.tab, item_name, self.page)
+            self.tab, page=self.page,
+            entry_key=self._by_value.get(self.values[0]))
 
 
 class InventoryTabButton(discord.ui.Button):
@@ -957,7 +1023,7 @@ class InventoryView(WalletBaseView):
         self.pages = pages
         # Row 0: tabs. Row 1: select. Row 2: arrows (when usable).
         # Row 3: Back to Wallet.
-        for key in (TAB_ITEMS, TAB_POTIONS, TAB_TITLES):
+        for key in TAB_ORDER:
             self.add_item(InventoryTabButton(key, active=(key == tab)))
         self.add_item(InventoryItemSelect(guild_id, user_id, tab, entries, page))
         if page > 0:
@@ -1034,13 +1100,22 @@ def build_item_embed(guild: discord.Guild, tab: str, item: dict,
     # can see what wearing it grants — but the DB row is the source
     # of truth, not the role itself. No "Expires" / "Paid" / "Bought"
     # per spec — that data is admin-side and clutters the member view.
-    if tab == TAB_ITEMS and item["item_type"] in EQUIPPABLE_TYPES:
+    if tab in (TAB_ITEMS, TAB_COLORS) and item["item_type"] in EQUIPPABLE_TYPES:
         role_id = (item.get("metadata") or {}).get("role_id")
         role = guild.get_role(int(role_id)) if role_id else None
         embed.add_field(
             name="Role",
             value=(role.mention if role else "*missing — ask an admin*"),
             inline=True)
+
+    # Remaining time is a property of the entry, so it is shown for any tab
+    # that can hold a timed entry (Colors and Items). A permanent entry has no
+    # expires_at and therefore no countdown.
+    remaining = remaining_hours_minutes(item.get("expires_at")
+                                        or (item.get("metadata") or {}).get("expires_at"))
+    if remaining:
+        embed.add_field(name="Time remaining", value=f"**{remaining}**",
+                        inline=True)
 
     if thumb:
         embed.set_thumbnail(url=thumb)
@@ -1064,6 +1139,11 @@ class ItemPanelView(WalletBaseView):
         self.tab = tab
         self.item_name = item["item_name"]
         self.item_type = item["item_type"]
+        # Which entry this panel is about. A name is not an identity: with a
+        # permanent and a timed copy owned at once, every action below must
+        # target the entry the member actually opened.
+        self.entry_key = item.get("entry_key")
+        self.timed = bool(item.get("timed"))
         # The page the member came from, so Back returns to where they
         # were instead of dumping them on page one.
         self.page = page
@@ -1074,7 +1154,12 @@ class ItemPanelView(WalletBaseView):
         else:
             self.add_item(EquipToggleButton(equipped))
 
-        self.add_item(DropButton())
+        # Dropping is permanent-row only. A timed holding is retired by its
+        # own expiry (which also has to strip the Discord role and clear the
+        # equipped slot), so offering "Drop" here would either leave a role
+        # behind or silently promise something this button cannot do.
+        if not self.timed:
+            self.add_item(DropButton())
         self.add_item(ItemBackButton())
 
 
@@ -1128,11 +1213,11 @@ class EquipToggleButton(discord.ui.Button):
             if self.equipped:
                 result = await unequip_role(
                     interaction.client, view.guild_id, view.user_id,
-                    view.item_name)
+                    view.item_name, entry_key=view.entry_key)
             else:
                 result = await equip_role(
                     interaction.client, view.guild_id, view.user_id,
-                    view.item_name)
+                    view.item_name, entry_key=view.entry_key)
         else:
             result = {"success": False,
                       "error": "This item cannot be equipped."}
@@ -1145,7 +1230,7 @@ class EquipToggleButton(discord.ui.Button):
 
         await open_item_panel(
             interaction, view.guild_id, view.user_id,
-            view.tab, view.item_name, view.page)
+            view.tab, page=view.page, entry_key=view.entry_key)
 
 
 class DropButton(discord.ui.Button):
@@ -1157,7 +1242,7 @@ class DropButton(discord.ui.Button):
         view: ItemPanelView = self.view
         await open_drop_confirm(
             interaction, view.guild_id, view.user_id,
-            view.tab, view.item_name, view.page)
+            view.tab, view.item_name, view.page, entry_key=view.entry_key)
 
 
 class ItemBackButton(discord.ui.Button):
@@ -1218,7 +1303,7 @@ class DropConfirmView(WalletBaseView):
             if current and current["item_name"] == self.item_name:
                 await unequip_title(self.guild_id, self.user_id,
                                     self.item_name)
-        elif self.tab == TAB_ITEMS:
+        elif self.tab in (TAB_ITEMS, TAB_COLORS):
             current = await get_equipped(self.guild_id, self.user_id)
             if current and current["item_name"] == self.item_name:
                 await unequip_role(interaction.client, self.guild_id,
@@ -1244,10 +1329,11 @@ class DropConfirmView(WalletBaseView):
 
 async def open_drop_confirm(interaction: discord.Interaction,
                             guild_id: int, user_id: int,
-                            tab: str, item_name: str, page: int = 0):
+                            tab: str, item_name: str, page: int = 0,
+                            *, entry_key: str | None = None):
     items = await get_inventory(guild_id, user_id, include_empty=False)
     entries = await _decorate(guild_id, split_by_tab(items)[tab])
-    item = next((it for it in entries if it["item_name"] == item_name), None)
+    item = find_entry(entries, entry_key=entry_key, item_name=item_name)
     if not item:
         await open_inventory_panel(interaction, guild_id, user_id, tab, page)
         return
@@ -1258,11 +1344,15 @@ async def open_drop_confirm(interaction: discord.Interaction,
 
 
 async def open_item_panel(interaction: discord.Interaction, guild_id: int,
-                          user_id: int, tab: str, item_name: str,
-                          page: int = 0):
+                          user_id: int, tab: str, item_name: str | None = None,
+                          page: int = 0, *, entry_key: str | None = None):
     items = await get_inventory(guild_id, user_id, include_empty=False)
     entries = await _decorate(guild_id, split_by_tab(items)[tab])
-    item = next((it for it in entries if it["item_name"] == item_name), None)
+    # `find_entry` refuses to guess: an ambiguous name (or a stale entry_key
+    # from a panel the holding has since expired out of) resolves to nothing
+    # and the member is dropped back to the list instead of onto another
+    # record.
+    item = find_entry(entries, entry_key=entry_key, item_name=item_name)
 
     if not item:
         await open_inventory_panel(interaction, guild_id, user_id, tab, page)
@@ -1273,7 +1363,13 @@ async def open_item_panel(interaction: discord.Interaction, guild_id: int,
         equipped = bool(current and current["item_name"] == item_name)
     elif item["item_type"] in EQUIPPABLE_TYPES:
         current = await get_equipped(guild_id, user_id)
-        equipped = bool(current and current["item_name"] == item_name)
+        # entry_key decides when both sides have one: an equipped permanent
+        # "Flame" does not make a timed "Flame" the equipped entry. The name
+        # comparison stays for legacy equipped_roles rows (entry_key NULL).
+        if current and current.get("entry_key") and item.get("entry_key"):
+            equipped = current["entry_key"] == item["entry_key"]
+        else:
+            equipped = bool(current and current["item_name"] == item_name)
     else:
         equipped = False
 

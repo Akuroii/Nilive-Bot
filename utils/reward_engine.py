@@ -38,6 +38,7 @@ async def give_reward(bot: discord.Client,
                        item_name: str = None,
                        item_type: str = "custom",
                        item_metadata: dict = None,
+                       metadata_extra: dict = None,
                        defer_retry_seconds: float | None = None,
                        idempotency_key: str | None = None) -> dict:
     """...
@@ -368,11 +369,27 @@ async def give_reward(bot: discord.Client,
         # name; other callers currently don't have one to offer).
         display_name = item_name or role.name
 
+        # Color identity travels with the ownership record, so a Colour stays
+        # identifiable after the listing is renamed or deleted, and after it is
+        # granted by an Event/Mission/Minigame instead of a purchase.
+        #
+        # Resolution is deliberately conservative: `role_id` -> exactly one
+        # enabled Colors listing in this guild. A role no listing claims (or one
+        # claimed by several with no product id passed in) must NOT become a
+        # Colour, so an ordinary role reward is unaffected. The expiry meaning
+        # is never taken from the listing here — this branch applies exactly the
+        # duration the caller asked for.
+        from utils.timed_ownership import color_metadata
+        role_metadata = {"role_id": role_id, "expires_at": expires_at}
+        if metadata_extra:
+            role_metadata.update(metadata_extra)
+        role_metadata = await color_metadata(guild_id, role_id, role_metadata)
+
         from utils.inventory import set_quantity
         await set_quantity(
             guild_id, user_id, display_name, 1,
             item_type=reward_type, source=source,
-            metadata={"role_id": role_id, "expires_at": expires_at})
+            metadata=role_metadata)
 
         from utils.equip_engine import equip_role
         equip_result = await equip_role(
