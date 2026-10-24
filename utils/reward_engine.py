@@ -385,21 +385,86 @@ async def give_reward(bot: discord.Client,
             role_metadata.update(metadata_extra)
         role_metadata = await color_metadata(guild_id, role_id, role_metadata)
 
-        from utils.inventory import set_quantity
-        await set_quantity(
-            guild_id, user_id, display_name, 1,
-            item_type=reward_type, source=source,
-            metadata=role_metadata)
+        role_was_present = role in member.roles
+        prior_inv = None
+        inv_id = None
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT id, quantity, item_type, source, metadata, "
+                "created_at, updated_at FROM inventory_items "
+                "WHERE guild_id=? AND user_id=? AND item_name=?",
+                (guild_id, user_id, display_name))
+            prior_inv = await cursor.fetchone()
 
-        from utils.equip_engine import equip_role
-        equip_result = await equip_role(
-            bot, guild_id, user_id, display_name, reason=reason)
-        if not equip_result.get("success"):
+        async def _restore_prior_inventory() -> bool:
+            try:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    if prior_inv is None:
+                        await db.execute(
+                            "DELETE FROM inventory_items "
+                            "WHERE guild_id=? AND user_id=? AND item_name=?",
+                            (guild_id, user_id, display_name))
+                    else:
+                        p_id, p_qty, p_type, p_src, p_meta, p_cat, p_uat = prior_inv
+                        await db.execute(
+                            "UPDATE inventory_items "
+                            "SET quantity=?, item_type=?, source=?, metadata=?, "
+                            "created_at=?, updated_at=? WHERE id=?",
+                            (p_qty, p_type, p_src, p_meta, p_cat, p_uat, p_id))
+                    await db.commit()
+                return True
+            except Exception as restore_exc:
+                print(f"[REWARD] Failed to restore inventory for "
+                      f"{display_name!r}: {restore_exc}")
+                return False
+
+        from utils.inventory import set_quantity
+        try:
+            await set_quantity(
+                guild_id, user_id, display_name, 1,
+                item_type=reward_type, source=source,
+                metadata=role_metadata)
+            async with aiosqlite.connect(DB_PATH) as db:
+                cursor = await db.execute(
+                    "SELECT id FROM inventory_items "
+                    "WHERE guild_id=? AND user_id=? AND item_name=?",
+                    (guild_id, user_id, display_name))
+                inv_row = await cursor.fetchone()
+                if inv_row:
+                    inv_id = int(inv_row[0])
+        except Exception as exc:
             return {"success": False, "reward_type": reward_type,
-                    "error": equip_result.get("error", "Failed to equip role")}
+                    "error": f"Inventory error: {exc}", "uncertain": False}
+
+        entry_key = f"i:{inv_id}" if inv_id is not None else None
+        from utils.equip_engine import equip_role
+        try:
+            equip_result = await equip_role(
+                bot, guild_id, user_id, display_name,
+                reason=reason, entry_key=entry_key)
+        except Exception as exc:
+            role_added = (not role_was_present) and (role in member.roles)
+            inv_restored = False
+            if not role_added:
+                inv_restored = await _restore_prior_inventory()
+            return {"success": False, "reward_type": reward_type,
+                    "error": f"Failed to equip role: {exc}",
+                    "uncertain": bool(role_added or not inv_restored)}
+
+        if not equip_result.get("success"):
+            role_added = (bool(equip_result.get("role_added"))
+                          or ((not role_was_present) and (role in member.roles)))
+            inv_restored = False
+            if not role_added:
+                inv_restored = await _restore_prior_inventory()
+            return {"success": False, "reward_type": reward_type,
+                    "error": equip_result.get("error", "Failed to equip role"),
+                    "uncertain": bool(role_added or not inv_restored)}
 
         result = {"success": True, "reward_type": reward_type,
-                  "role_id": role_id, "item_name": display_name}
+                  "role_id": role_id, "item_name": display_name,
+                  "entry_key": equip_result.get("entry_key") or entry_key,
+                  "uncertain": False}
 
         if reward_type == "temp_role":
             if not duration_hours:
@@ -407,13 +472,18 @@ async def give_reward(bot: discord.Client,
                                       "was granted but NOT scheduled "
                                       "to expire.")
             else:
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute("""
-                        INSERT INTO temp_roles
-                            (guild_id, user_id, role_id, expires_at, source)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (guild_id, user_id, role_id, expires_at, source))
-                    await db.commit()
+                try:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("""
+                            INSERT INTO temp_roles
+                                (guild_id, user_id, role_id, expires_at, source)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (guild_id, user_id, role_id, expires_at, source))
+                        await db.commit()
+                except Exception as exc:
+                    return {"success": False, "reward_type": reward_type,
+                            "error": f"Could not record temporary role expiry: {exc}",
+                            "uncertain": True}
                 result["expires_at"] = expires_at
 
         return result

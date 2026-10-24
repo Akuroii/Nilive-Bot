@@ -15,6 +15,7 @@ Covers the four behaviours the Shop's new product model depends on:
 Run: python test_timed_ownership.py
      python -m pytest test_timed_ownership.py
 """
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -330,8 +331,10 @@ class ExpiryCleanupTests(unittest.IsolatedAsyncioTestCase):
         person.remove_roles.assert_not_awaited()
 
     async def test_guild_managed_role_is_never_stripped(self):
+        # seed_member() defaults to Prestige tier=3; tier 3's role is protected
+        # for this member, while a different tier's role (tier 1) is not.
         execute("INSERT OR REPLACE INTO prestige_roles "
-                "(guild_id, tier, role_id) VALUES (?,?,?)", (GUILD, 1, 953))
+                "(guild_id, tier, role_id) VALUES (?,?,?)", (GUILD, 3, 953))
         _, person, bot, _ = purchase_ctx(granted_role=role_stub(953))
         granted = await TO.grant_timed_product(
             bot, GUILD, USER, item_name="Tier", duration_hours=1,
@@ -340,6 +343,9 @@ class ExpiryCleanupTests(unittest.IsolatedAsyncioTestCase):
         await self._expire(granted["entry_key"])
         await TO.cleanup_expired_holdings(bot)
         person.remove_roles.assert_not_awaited()
+        self.assertIsNone(
+            await get_equipped(GUILD, USER),
+            "expiring the timed holding must not leave a dangling equipped_roles.entry_key")
 
     async def test_discord_failure_keeps_the_record_as_the_retry_marker(self):
         _, person, bot, _ = purchase_ctx(granted_role=role_stub(954))
@@ -615,6 +621,625 @@ class ShopTypeModelTests(unittest.IsolatedAsyncioTestCase):
         data = shop_input({"name": "B", "type": "xp_boost", "price": 10,
                            "duration_hours": 5, "xp_boost_multiplier": 2})
         self.assertEqual(data["type"], "xp_boost")
+
+
+# ── 7. audit fixes A–F and uncertain purchase recovery ──────────────────────
+
+class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=9000)
+        purge_timed()
+        execute("DELETE FROM purchase_history")
+        execute("DELETE FROM shop_purchase_operations")
+        execute("DELETE FROM transaction_ledger")
+        execute("DELETE FROM level_reward_claims")
+        execute("DELETE FROM reward_reversals")
+        execute("DELETE FROM prestige_roles")
+        execute("DELETE FROM boost_config")
+        execute("DELETE FROM boost_color_roles")
+
+    async def _expire(self, entry_key: str):
+        past = (TO.utcnow() - timedelta(hours=2)).isoformat()
+        execute("UPDATE timed_holdings SET expires_at=? WHERE id=?",
+                (past, TO.entry_key_id(entry_key)))
+
+    # ── Fix A: Atomic compensation / reservation / charge crash windows ──
+
+    async def test_fix_a_refund_money_crash_before_journal_flag_rolls_back_credit(self):
+        listing = shop_item("title", price=500, name="CrashMoney", stock=2)
+        op_id = await TO.open_purchase(
+            GUILD, USER, item_id=listing, item_name="CrashMoney",
+            currency="balance", amount=500)
+        await TO.update_purchase(
+            op_id, charged=1, stock_reserved=1, status=TO.PURCHASE_FAILED)
+        execute("UPDATE shop_items SET current_stock=1 WHERE id=?", (listing,))
+        before = rows("SELECT balance FROM economy")[0][0]
+
+        real_update = TO.update_purchase
+        calls = {"refund_update": 0}
+
+        async def flaky_update(oid, **kwargs):
+            if kwargs.get("refunded") == 1 and calls["refund_update"] == 0:
+                calls["refund_update"] += 1
+                raise RuntimeError("injected crash before refunded=1 commits")
+            return await real_update(oid, **kwargs)
+
+        with patch.object(TO, "update_purchase", side_effect=flaky_update):
+            first = await TO.refund_purchase(op_id)
+
+        self.assertFalse(first["complete"])
+        self.assertEqual(
+            rows("SELECT balance FROM economy")[0][0], before,
+            "injected failure before refunded=1 must roll back safe_credit")
+        op_mid = await TO.get_purchase(op_id)
+        self.assertEqual(op_mid["refunded"], 0)
+        self.assertEqual(op_mid["stock_returned"], 1)
+        self.assertEqual(rows("SELECT current_stock FROM shop_items WHERE id=?",
+                              (listing,)), [(2,)])
+
+        # Retry completes the money half once without re-restoring stock.
+        second = await TO.refund_purchase(op_id)
+        self.assertTrue(second["complete"], str(second))
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], before + 500)
+        self.assertEqual(rows("SELECT current_stock FROM shop_items WHERE id=?",
+                              (listing,)), [(2,)])
+
+    async def test_fix_a_restore_stock_crash_before_journal_flag_rolls_back_stock(self):
+        listing = shop_item("title", price=500, name="CrashStock", stock=3)
+        op_id = await TO.open_purchase(
+            GUILD, USER, item_id=listing, item_name="CrashStock",
+            currency="balance", amount=500)
+        await TO.update_purchase(
+            op_id, charged=1, stock_reserved=1, status=TO.PURCHASE_FAILED)
+        execute("UPDATE shop_items SET current_stock=2 WHERE id=?", (listing,))
+        before = rows("SELECT balance FROM economy")[0][0]
+
+        real_update = TO.update_purchase
+        calls = {"stock_update": 0}
+
+        async def flaky_update(oid, **kwargs):
+            if kwargs.get("stock_returned") == 1 and calls["stock_update"] == 0:
+                calls["stock_update"] += 1
+                raise RuntimeError("injected crash before stock_returned=1 commits")
+            return await real_update(oid, **kwargs)
+
+        with patch.object(TO, "update_purchase", side_effect=flaky_update):
+            first = await TO.refund_purchase(op_id)
+
+        self.assertFalse(first["complete"])
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], before + 500,
+                         "money refund committed in its own atomic transaction")
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
+            [(2,)],
+            "stock increment must roll back when stock_returned=1 fails")
+
+        second = await TO.refund_purchase(op_id)
+        self.assertTrue(second["complete"], str(second))
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], before + 500,
+                         "retry must not refund money a second time")
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
+            [(3,)],
+            "retry restores stock exactly once")
+
+    async def test_fix_a_stock_reservation_and_charge_are_atomic_with_journal_flags(self):
+        import cogs.shop as shop_cog
+        listing = shop_item("title", price=400, name="AtomicBuy", stock=2)
+        before_bal = rows("SELECT balance FROM economy")[0][0]
+        itx, _, _, _ = purchase_ctx()
+
+        real_update = shop_cog.update_purchase
+
+        async def fail_on_stock_flag(oid, **kwargs):
+            if kwargs.get("stock_reserved") == 1:
+                raise RuntimeError("crash before stock_reserved=1")
+            return await real_update(oid, **kwargs)
+
+        with patch.object(shop_cog, "update_purchase", side_effect=fail_on_stock_flag):
+            with self.assertRaises(RuntimeError):
+                await process_purchase(itx, listing)
+
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
+            [(2,)],
+            "stock decrement must roll back if stock_reserved=1 fails")
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], before_bal)
+
+        async def fail_on_charge_flag(oid, **kwargs):
+            if kwargs.get("charged") == 1:
+                raise RuntimeError("crash before charged=1")
+            return await real_update(oid, **kwargs)
+
+        with patch.object(shop_cog, "update_purchase", side_effect=fail_on_charge_flag):
+            with self.assertRaises(RuntimeError):
+                await process_purchase(itx, listing)
+
+        self.assertEqual(
+            rows("SELECT balance FROM economy")[0][0], before_bal,
+            "balance debit must roll back if charged=1 fails")
+
+    # ── Fix B: Permanent Level role claims & legacy temp_role rows ──
+
+    async def test_fix_b_fulfilled_level_role_claim_prevents_expiry_strip(self):
+        role_obj = role_stub(960, "LevelHero")
+        _, person, bot, _ = purchase_ctx(granted_role=role_obj)
+        execute("""
+            INSERT INTO level_reward_claims
+                (guild_id, user_id, reward_level, track, reward_ref,
+                 payload_json, status, source, created_at)
+            VALUES (?, ?, 10, 'role', '10', ?, 'fulfilled', 'xp', ?)
+        """, (GUILD, USER, json.dumps({"role_id": 960}), TO.iso()))
+
+        granted = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="HeroGlow", duration_hours=1,
+            item_type="temp_role", role_id=960)
+        person.roles = [role_obj]
+        await self._expire(granted["entry_key"])
+
+        stats = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats["removed"], 1)
+        person.remove_roles.assert_not_awaited()
+        self.assertIsNone(
+            await get_equipped(GUILD, USER),
+            "expired holding slot is cleared while Level role stays on member")
+
+    async def test_fix_b_booster_level_claim_requires_active_boost_and_respects_exclusivity(self):
+        role_low = role_stub(961, "Lvl5Role")
+        role_high = role_stub(962, "Lvl20Role")
+        role_boost = role_stub(963, "BoosterLvlRole")
+        _, person, bot, _ = purchase_ctx(granted_role=role_boost)
+
+        execute("""
+            INSERT INTO level_reward_claims
+                (guild_id, user_id, reward_level, track, reward_ref,
+                 payload_json, status, source, created_at)
+            VALUES (?, ?, 15, 'role', 'booster:15', ?, 'fulfilled', 'xp', ?)
+        """, (GUILD, USER, json.dumps({"role_id": 963}), TO.iso()))
+
+        # Non-booster: booster level claim does NOT entitle the role.
+        person.premium_since = None
+        self.assertIsNone(await TO.role_still_entitled(
+            GUILD, USER, 963, bot=bot, member=person))
+
+        # Active booster: booster level claim DOES entitle the role.
+        person.premium_since = TO.utcnow()
+        self.assertIsNotNone(await TO.role_still_entitled(
+            GUILD, USER, 963, bot=bot, member=person))
+
+        # Exclusive progression (`remove_old_reward_role=1`): lower level (5)
+        # is superseded by fulfilled higher level (20).
+        execute("""
+            INSERT INTO leveling_config (guild_id, remove_old_reward_role)
+            VALUES (?, 1)
+            ON CONFLICT(guild_id) DO UPDATE SET remove_old_reward_role=1
+        """, (GUILD,))
+        execute("""
+            INSERT INTO level_reward_claims
+                (guild_id, user_id, reward_level, track, reward_ref,
+                 payload_json, status, source, created_at)
+            VALUES
+                (?, ?, 5, 'role', '5', ?, 'fulfilled', 'xp', ?),
+                (?, ?, 20, 'role', '20', ?, 'fulfilled', 'xp', ?)
+        """, (GUILD, USER, json.dumps({"role_id": role_low.id}), TO.iso(),
+              GUILD, USER, json.dumps({"role_id": role_high.id}), TO.iso()))
+
+        self.assertIsNone(
+            await TO.role_still_entitled(
+                GUILD, USER, role_low.id, bot=bot, member=person),
+            "superseded lower-level role must not block expiry removal")
+        self.assertIsNotNone(
+            await TO.role_still_entitled(
+                GUILD, USER, role_high.id, bot=bot, member=person),
+            "highest fulfilled level role must remain entitled")
+
+    async def test_fix_b_stale_legacy_temp_role_inventory_does_not_block_expiry(self):
+        from utils.inventory import give_item
+        role_obj = role_stub(964, "LegacyTemp")
+        _, person, bot, _ = purchase_ctx(granted_role=role_obj)
+        past = (TO.utcnow() - timedelta(hours=5)).isoformat()
+        await give_item(
+            GUILD, USER, "LegacyTemp", 1, item_type="temp_role",
+            source="shop", metadata={"role_id": 964, "expires_at": past})
+        execute("""
+            INSERT INTO temp_roles (guild_id, user_id, role_id, expires_at, source)
+            VALUES (?, ?, 964, ?, 'shop')
+        """, (GUILD, USER, past))
+
+        granted = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="FreshTemp", duration_hours=1,
+            item_type="temp_role", role_id=964)
+        person.roles = [role_obj]
+        await self._expire(granted["entry_key"])
+
+        self.assertIsNone(
+            await TO.role_still_entitled(
+                GUILD, USER, 964, exclude_entry_key=granted["entry_key"],
+                bot=bot, member=person),
+            "expired legacy temp_role inventory row must not keep role alive forever")
+
+    # ── Fix C: Timed Color equip swap on Discord ──
+
+    async def test_fix_c_timed_color_grant_swaps_out_previous_equipped_role(self):
+        from utils.inventory import give_item, get_inventory
+        old_role = role_stub(970, "OldCrimson")
+        new_role = role_stub(971, "NewAzure")
+        _, person, bot, guild = purchase_ctx(granted_role=new_role)
+        roles_map = {970: old_role, 971: new_role}
+        guild.get_role = lambda rid: roles_map.get(int(rid))
+
+        await give_item(GUILD, USER, "OldCrimson", 1, item_type="role",
+                        metadata={"role_id": 970, "category": "color"})
+        person.roles = [old_role]
+        eq_res = await equip_role(bot, GUILD, USER, "OldCrimson")
+        self.assertTrue(eq_res["success"], str(eq_res))
+
+        async def _add_roles(r, reason=None):
+            if r not in person.roles:
+                person.roles.append(r)
+
+        async def _remove_roles(r, reason=None):
+            person.roles = [x for x in person.roles if x.id != r.id]
+
+        person.add_roles = AsyncMock(side_effect=_add_roles)
+        person.remove_roles = AsyncMock(side_effect=_remove_roles)
+
+        granted = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="NewAzure", duration_hours=4,
+            item_type="temp_role", category="color", role_id=971)
+        self.assertTrue(granted["success"], str(granted))
+
+        person.add_roles.assert_awaited_once()
+        person.remove_roles.assert_awaited_once()
+        self.assertEqual([r.id for r in person.roles], [971],
+                         "old Color role removed from Discord, new Color worn")
+        eq_now = await get_equipped(GUILD, USER)
+        self.assertEqual(eq_now["entry_key"], granted["entry_key"])
+        self.assertEqual(eq_now["role_id"], 971)
+
+        inv = await get_inventory(GUILD, USER)
+        names = [it["item_name"] for it in inv]
+        self.assertIn("OldCrimson", names,
+                      "swapping out the old Color must keep its ownership")
+        self.assertIn("NewAzure", names)
+
+    async def test_fix_c_timed_color_grant_keeps_same_role_and_protected_role(self):
+        role_same = role_stub(972, "SameEmerald")
+        role_next = role_stub(973, "NextGold")
+        _, person, bot, guild = purchase_ctx(granted_role=role_same)
+        roles_map = {972: role_same, 973: role_next}
+        guild.get_role = lambda rid: roles_map.get(int(rid))
+        person.roles = [role_same]
+
+        first = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="SameEmerald", duration_hours=2,
+            item_type="temp_role", category="color", role_id=972)
+        second = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="SameEmerald", duration_hours=6,
+            item_type="temp_role", category="color", role_id=972)
+        self.assertTrue(first["success"] and second["success"])
+        person.remove_roles.assert_not_awaited()
+        self.assertEqual((await get_equipped(GUILD, USER))["entry_key"],
+                         second["entry_key"])
+
+        # Now make role 972 a fulfilled Level role claim and grant role 973:
+        # role 972 must NOT be removed from Discord during the swap!
+        execute("""
+            INSERT INTO level_reward_claims
+                (guild_id, user_id, reward_level, track, reward_ref,
+                 payload_json, status, source, created_at)
+            VALUES (?, ?, 10, 'role', '10', ?, 'fulfilled', 'xp', ?)
+        """, (GUILD, USER, json.dumps({"role_id": 972}), TO.iso()))
+        third = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="NextGold", duration_hours=4,
+            item_type="temp_role", category="color", role_id=973)
+        self.assertTrue(third["success"])
+        person.remove_roles.assert_not_awaited()
+        self.assertEqual((await get_equipped(GUILD, USER))["entry_key"],
+                         third["entry_key"])
+
+    # ── Fix D: Timezone-safe & malformed expiry cleanup selection ──
+
+    async def test_fix_d_expired_holdings_selects_malformed_and_offset_timestamps(self):
+        role_a = role_stub(974, "MalformedRole")
+        role_b = role_stub(975, "OffsetRole")
+        _, person, bot, guild = purchase_ctx(granted_role=role_a)
+        roles_map = {974: role_a, 975: role_b}
+        guild.get_role = lambda rid: roles_map.get(int(rid))
+        person.roles = [role_a, role_b]
+
+        h1 = await TO.grant_timed_holding(
+            GUILD, USER, "BadDate", expires_at="not-a-timestamp",
+            item_type="temp_role", role_id=974)
+        # 1 hour ago in UTC, expressed in +05:00 (lexicographically > UTC now!)
+        plus5 = timezone(timedelta(hours=5))
+        offset_past = (TO.utcnow() - timedelta(hours=1)).astimezone(plus5).isoformat()
+        h2 = await TO.grant_timed_holding(
+            GUILD, USER, "OffsetPast", expires_at=offset_past,
+            item_type="temp_role", role_id=975)
+
+        exp_keys = {h["entry_key"] for h in await TO.expired_holdings()}
+        self.assertIn(f"h:{h1}", exp_keys)
+        self.assertIn(f"h:{h2}", exp_keys)
+
+        stats = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats["removed"], 2, str(stats))
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
+
+    # ── Fix E: Per-member Prestige/Booster checks & equip repointing ──
+
+    async def test_fix_e_per_member_prestige_and_booster_entitlements(self):
+        # Member is at Prestige tier 3 (from seed_member).
+        execute("INSERT INTO prestige_roles (guild_id, tier, role_id) VALUES "
+                "(?, 1, 981), (?, 3, 983)", (GUILD, GUILD))
+        execute("""
+            INSERT OR REPLACE INTO boost_config
+                (guild_id, enabled, boost1_role_id, boost2_role_id)
+            VALUES (?, 1, 984, 985)
+        """, (GUILD,))
+        execute("""
+            INSERT INTO boost_color_roles (guild_id, role_id, role_name, requires_boost_level)
+            VALUES (?, 986, 'Pink', 1), (?, 987, 'Gold', 2)
+        """, (GUILD, GUILD))
+
+        _, person, bot, _ = purchase_ctx()
+        person.premium_since = None
+        person.premium_subscription_count = 0
+
+        managed_non_booster = await TO.member_managed_role_ids(
+            GUILD, USER, bot=bot, member=person)
+        self.assertEqual(
+            managed_non_booster, {983},
+            "only effective Prestige tier 3 role is protected; tier 1 and booster roles are not")
+
+        # 1x Booster: gains boost1_role_id (984) and level-1 boost color (986),
+        # plus effective Prestige becomes VI (6) if VI is not configured or 3 if not.
+        person.premium_since = TO.utcnow()
+        person.premium_subscription_count = 1
+        managed_b1 = await TO.member_managed_role_ids(
+            GUILD, USER, bot=bot, member=person)
+        self.assertIn(984, managed_b1)
+        self.assertIn(986, managed_b1)
+        self.assertNotIn(985, managed_b1, "1 boost must not protect 2-boost role")
+        self.assertNotIn(987, managed_b1, "1 boost must not protect level-2 boost color")
+
+        # 2x Booster: gains boost2_role_id (985) and level-2 boost color (987).
+        person.premium_subscription_count = 2
+        managed_b2 = await TO.member_managed_role_ids(
+            GUILD, USER, bot=bot, member=person)
+        self.assertIn(985, managed_b2)
+        self.assertIn(987, managed_b2)
+
+    async def test_fix_e_repoint_equipped_entry_key_when_expired_holding_retained_by_permanent(self):
+        from utils.inventory import give_item, get_inventory
+        role_obj = role_stub(988, "SharedColor")
+        _, person, bot, _ = purchase_ctx(granted_role=role_obj)
+        await give_item(GUILD, USER, "SharedColor", 1, item_type="role",
+                        metadata={"role_id": 988, "category": "color"})
+        perm_entry = [it for it in await get_inventory(GUILD, USER)
+                      if not it["timed"]][0]
+
+        granted = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="SharedColor", duration_hours=1,
+            item_type="temp_role", category="color", role_id=988)
+        self.assertEqual((await get_equipped(GUILD, USER))["entry_key"],
+                         granted["entry_key"])
+
+        person.roles = [role_obj]
+        await self._expire(granted["entry_key"])
+        stats = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats["removed"], 1)
+        person.remove_roles.assert_not_awaited()
+
+        eq_after = await get_equipped(GUILD, USER)
+        self.assertIsNotNone(eq_after)
+        self.assertEqual(
+            eq_after["entry_key"], perm_entry["entry_key"],
+            "equipped_roles.entry_key must repoint to the surviving permanent entry")
+
+    # ── Fix F: Permanent role partial delivery & pre-existing item safety ──
+
+    async def test_fix_f_permanent_role_failure_restores_prior_inventory_and_marks_uncertain_when_role_added(self):
+        from utils.inventory import give_item, get_inventory
+        role_obj = role_stub(989, "PermShade")
+        listing = shop_item("color", price=600, name="PermShade",
+                            role_id=989, duration_hours=None, stock=2)
+        itx, person, bot, _ = purchase_ctx(granted_role=role_obj)
+
+        # Case 1: Member already owns a permanent item named "PermShade", and
+        # Discord add_roles fails. Prior inventory row must be preserved intact
+        # and purchase cleanly refunded (not uncertain).
+        await give_item(GUILD, USER, "PermShade", 1, item_type="role",
+                        source="event",
+                        metadata={"role_id": 989, "category": "color",
+                                  "custom_tag": "keep_me"})
+        before_bal = rows("SELECT balance FROM economy")[0][0]
+        person.add_roles = AsyncMock(side_effect=RuntimeError("discord 500"))
+        await process_purchase(itx, listing)
+
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], before_bal,
+                         "clean failure before role_added must refund")
+        inv = [it for it in await get_inventory(GUILD, USER)
+               if it["item_name"] == "PermShade"]
+        self.assertEqual(len(inv), 1)
+        self.assertEqual(inv[0]["source"], "event",
+                         "pre-existing permanent item must be restored, not deleted")
+        self.assertEqual(inv[0]["metadata"].get("custom_tag"), "keep_me")
+
+        # Case 2: Discord role IS added, but swap_and_record_equipped raises
+        # after add_roles succeeded -> purchase must be marked UNCERTAIN and
+        # NOT refunded!
+        execute("DELETE FROM inventory_items WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+        execute("DELETE FROM shop_purchase_operations")
+
+        async def _add_ok(r, reason=None):
+            if r not in person.roles:
+                person.roles.append(r)
+
+        person.add_roles = AsyncMock(side_effect=_add_ok)
+        before_bal2 = rows("SELECT balance FROM economy")[0][0]
+        import utils.equip_engine as eq_mod
+        with patch.object(eq_mod, "swap_and_record_equipped",
+                          AsyncMock(side_effect=RuntimeError("db locked after role add"))):
+            await process_purchase(itx, listing)
+
+        op = (await TO.list_purchase_operations(status=TO.PURCHASE_UNCERTAIN))[0]
+        self.assertEqual(op["status"], TO.PURCHASE_UNCERTAIN)
+        self.assertEqual(
+            rows("SELECT balance FROM economy")[0][0], before_bal2 - 600,
+            "must NOT refund when Discord role was already added")
+
+    # ── Section 4: Uncertain purchase inspection & recovery CLI ──
+
+    async def test_section_4_uncertain_purchase_inspection_and_operator_recovery(self):
+        listing = shop_item("color", price=550, name="MysteryHue",
+                            role_id=990, duration_hours=3, stock=2)
+        itx, person, bot, _ = purchase_ctx(granted_role=role_stub(990, "MysteryHue"))
+        before_bal = rows("SELECT balance FROM economy")[0][0]
+
+        with patch.object(TO, "grant_timed_holding",
+                          AsyncMock(side_effect=RuntimeError("db interrupted"))):
+            await process_purchase(itx, listing)
+
+        ops = await TO.list_purchase_operations(status=TO.PURCHASE_UNCERTAIN)
+        self.assertEqual(len(ops), 1)
+        op_id = ops[0]["op_id"]
+
+        # 1. Read-only inspection mutates nothing.
+        evidence = await TO.inspect_purchase_operation(op_id)
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence["operation"]["status"], TO.PURCHASE_UNCERTAIN)
+        self.assertEqual(evidence["shop_item"]["id"], listing)
+        self.assertEqual(evidence["member_wallet"]["balance"], before_bal - 550)
+        rendered = TO.format_purchase_inspection(evidence)
+        self.assertIn(op_id, rendered)
+        self.assertIn("MysteryHue", rendered)
+
+        # 2. Refuses without confirmed=True (or --yes on CLI).
+        unconfirmed = await TO.resolve_purchase_operation(
+            op_id, action="refund", confirmed=False)
+        self.assertFalse(unconfirmed["success"])
+        self.assertEqual((await TO.get_purchase(op_id))["status"],
+                         TO.PURCHASE_UNCERTAIN)
+        cli_dry = await TO._cli_async(["--op-id", op_id, "--resolve", "refund"])
+        self.assertEqual(cli_dry, 2)
+        self.assertEqual((await TO.get_purchase(op_id))["status"],
+                         TO.PURCHASE_UNCERTAIN)
+
+        # 3. Resolve via refund (--yes): refunds balance + restores stock once,
+        # transitions to refunded, and preserves audit trail.
+        cli_ok = await TO._cli_async([
+            "--op-id", op_id, "--resolve", "refund", "--yes",
+            "--note", "verified role removed manually"
+        ])
+        self.assertEqual(cli_ok, 0)
+        resolved_op = await TO.get_purchase(op_id)
+        self.assertEqual(resolved_op["status"], TO.PURCHASE_REFUNDED)
+        self.assertEqual(resolved_op["refunded"], 1)
+        self.assertEqual(resolved_op["stock_returned"], 1)
+        self.assertIn("verified role removed manually", resolved_op["detail"])
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], before_bal)
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
+            [(2,)])
+
+        # 4. Re-running resolution on an already-refunded operation is refused.
+        again = await TO.resolve_purchase_operation(
+            op_id, action="refund", confirmed=True)
+        self.assertFalse(again["success"])
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], before_bal)
+
+        # 5. Resolve a second uncertain operation as `delivered`.
+        op2 = await TO.open_purchase(
+            GUILD, USER, item_id=listing, item_name="MysteryHue",
+            currency="balance", amount=550)
+        await TO.update_purchase(
+            op2, charged=1, stock_reserved=1, status=TO.PURCHASE_UNCERTAIN,
+            detail="manual check pending")
+        res_deliv = await TO.resolve_purchase_operation(
+            op2, action="delivered", confirmed=True,
+            note="holding granted manually")
+        self.assertTrue(res_deliv["success"], str(res_deliv))
+        self.assertEqual((await TO.get_purchase(op2))["status"],
+                         TO.PURCHASE_DELIVERED)
+        self.assertIn("holding granted manually",
+                      (await TO.get_purchase(op2))["detail"])
+
+    async def test_fix_b_reversed_level_claim_does_not_block_expiry(self):
+        from utils import level_ops as ops
+        role_obj = role_stub(991, "ReversedLvlRole")
+        _, person, bot, _ = purchase_ctx(granted_role=role_obj)
+        claim_id = execute("""
+            INSERT INTO level_reward_claims
+                (guild_id, user_id, reward_level, track, reward_ref,
+                 payload_json, status, source, created_at)
+            VALUES (?, ?, 10, 'role', '10', ?, 'fulfilled', 'xp', ?)
+        """, (GUILD, USER, json.dumps({"role_id": 991}), TO.iso()))
+        execute("""
+            INSERT INTO reward_reversals
+                (reversal_id, operation_id, guild_id, user_id, claim_id,
+                 kind, quantity, status, reason, created_at)
+            VALUES ('rev-991', 'op-991', ?, ?, ?, 'role',
+                    1, ?, 'rolled back', ?)
+        """, (GUILD, USER, claim_id, ops.STATUS_APPLIED, TO.iso()))
+
+        self.assertIsNone(
+            await TO.role_still_entitled(
+                GUILD, USER, 991, bot=bot, member=person),
+            "a reversed Level role claim must not keep the Discord role")
+
+    async def test_section_4_cli_script_subprocess_end_to_end(self):
+        import os
+        import subprocess
+        import sys
+        from database import DB_PATH
+
+        listing = shop_item("color", price=300, name="SubprocHue",
+                            role_id=992, duration_hours=2, stock=1)
+        op_id = await TO.open_purchase(
+            GUILD, USER, item_id=listing, item_name="SubprocHue",
+            currency="balance", amount=300)
+        await TO.update_purchase(
+            op_id, charged=1, stock_reserved=1, status=TO.PURCHASE_UNCERTAIN,
+            detail="subprocess test")
+        execute("UPDATE shop_items SET current_stock=0 WHERE id=?", (listing,))
+        before_bal = rows("SELECT balance FROM economy")[0][0]
+
+        env = dict(os.environ, DATABASE_PATH=DB_PATH)
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "scripts", "recover_shop_purchases.py")
+
+        # 1. List uncertain operations (JSON)
+        listed = subprocess.run(
+            [sys.executable, script, "--json"],
+            env=env, capture_output=True, text=True, check=True)
+        payload = json.loads(listed.stdout)
+        self.assertEqual(len(payload["operations"]), 1)
+        self.assertEqual(payload["operations"][0]["op_id"], op_id)
+
+        # 2. Dry-run without --yes exits with code 2 and does not mutate
+        dry = subprocess.run(
+            [sys.executable, script, "--op-id", op_id, "--resolve", "refund"],
+            env=env, capture_output=True, text=True)
+        self.assertEqual(dry.returncode, 2)
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], before_bal)
+
+        # 3. Resolve with --yes refunds once and exits 0
+        resolved = subprocess.run(
+            [sys.executable, script, "--op-id", op_id, "--resolve", "refund",
+             "--yes", "--note", "cli resolved", "--json"],
+            env=env, capture_output=True, text=True, check=True)
+        res_json = json.loads(resolved.stdout)
+        self.assertTrue(res_json["success"])
+        self.assertEqual(res_json["status"], TO.PURCHASE_REFUNDED)
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0],
+                         before_bal + 300)
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
+            [(1,)])
 
 
 if __name__ == "__main__":

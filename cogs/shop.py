@@ -347,7 +347,36 @@ async def process_purchase(interaction: discord.Interaction,
     # P1 #11 FIX (kept): stock is claimed atomically FIRST; if the balance
     # deduction that follows fails, the stock claim is released. A Free item
     # claims stock exactly like a paid one.
-    stock_ok = await safe_decrement_stock(iid)
+    # Stock decrement + `stock_reserved=1` share a single BEGIN IMMEDIATE
+    # transaction so a crash between them never leaks stock without a
+    # journal flag.
+    stock_ok = False
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            try:
+                stock_ok = await safe_decrement_stock(iid, db=db)
+            except TypeError as type_exc:
+                if "db" not in str(type_exc):
+                    raise
+                stock_ok = await safe_decrement_stock(iid)
+            if stock_ok:
+                try:
+                    await update_purchase(op_id, stock_reserved=1, db=db)
+                except TypeError as type_exc:
+                    if "db" not in str(type_exc):
+                        raise
+                    await update_purchase(op_id, stock_reserved=1)
+                await db.commit()
+            else:
+                await db.execute("ROLLBACK")
+        except Exception:
+            try:
+                await db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
     if not stock_ok:
         await claim_purchase_transition(
             op_id, from_statuses=(PURCHASE_PENDING,),
@@ -355,16 +384,44 @@ async def process_purchase(interaction: discord.Interaction,
         await interaction.response.send_message(
             "This item is out of stock.", ephemeral=True)
         return
-    await update_purchase(op_id, stock_reserved=1)
 
     # Only the deduction is skipped for a Free item — safe_deduct() keeps its
     # own "amount must be positive" contract untouched; it is simply not called
     # when there is nothing to charge.
+    # Balance deduction + `charged=1` share a single BEGIN IMMEDIATE
+    # transaction so a crash after the debit rolls back the debit unless
+    # `charged=1` commits with it.
     if not free:
         try:
-            await safe_deduct(guild_id, user_id, pay_amount,
-                               currency=pay_currency,
-                               reason=f"Shop purchase: {name}", source="shop")
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    try:
+                        await safe_deduct(
+                            guild_id, user_id, pay_amount,
+                            currency=pay_currency,
+                            reason=f"Shop purchase: {name}", source="shop",
+                            db=db)
+                    except TypeError as type_exc:
+                        if "db" not in str(type_exc):
+                            raise
+                        await safe_deduct(
+                            guild_id, user_id, pay_amount,
+                            currency=pay_currency,
+                            reason=f"Shop purchase: {name}", source="shop")
+                    try:
+                        await update_purchase(op_id, charged=1, db=db)
+                    except TypeError as type_exc:
+                        if "db" not in str(type_exc):
+                            raise
+                        await update_purchase(op_id, charged=1)
+                    await db.commit()
+                except Exception:
+                    try:
+                        await db.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    raise
         except InsufficientBalance:
             # Nothing was charged, so only the stock claim has to be undone.
             if await claim_purchase_transition(
@@ -383,7 +440,6 @@ async def process_purchase(interaction: discord.Interaction,
                 f"You need {pay_amount:,} {cinfo['emoji']} but only have {bal:,}.",
                 ephemeral=True)
             return
-        await update_purchase(op_id, charged=1)
 
     # `color` is a Shop CATEGORY, not a reward type: internally a permanent
     # Colour is the existing `role` grant and a timed Colour is a timed role
@@ -541,15 +597,30 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
             return result
 
         from utils.reward_engine import give_reward
-        extra = {"category": category} if category else None
+        extra: dict = {}
+        if category:
+            extra["category"] = category
+        if product_id is not None:
+            extra["product_id"] = int(product_id)
         granted = await give_reward(
             bot, guild_id, user_id, "role", role_id=role_id,
             reason=f"Shop purchase: {name}", source=source,
-            item_name=name, metadata_extra=extra)
+            item_name=name, metadata_extra=extra or None)
         if not granted.get("success"):
-            result["error"] = granted.get("error") or "Role delivery failed."
+            result.update(
+                error=granted.get("error") or "Role delivery failed.",
+                uncertain=bool(granted.get("uncertain", False)),
+            )
+            if granted.get("uncertain"):
+                result["warning"] = (
+                    "The role or ownership state could not be cleanly "
+                    "rolled back; an admin should check this purchase.")
             return result
-        result.update(success=True, detail="permanent role")
+        result.update(
+            success=True,
+            detail=(f"permanent role ({granted['entry_key']})"
+                    if granted.get("entry_key") else "permanent role"),
+        )
         return result
 
     if itype == "xp_boost":

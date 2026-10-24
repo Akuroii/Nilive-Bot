@@ -65,6 +65,54 @@ async def record_equipped(guild_id: int, user_id: int, item_name: str,
         await db.commit()
 
 
+async def swap_and_record_equipped(bot: discord.Client | None,
+                                   guild_id: int, user_id: int, *,
+                                   item_name: str, role_id: int,
+                                   entry_key: str | None = None,
+                                   guild=None, member=None,
+                                   reason: str = "Equipped") -> dict:
+    """Perform the guarded single-slot Discord swap and update `equipped_roles`.
+
+    Removes the previously equipped Discord role only when:
+      1. there is a previously equipped entry that differs from the new one,
+      2. its `role_id` differs from the new `role_id` (stacking or switching
+         between two holdings of the same role must keep the Discord role worn),
+      3. the previous `role_id` is not protected by a non-slot entitlement for
+         this member (fulfilled Level role claim, effective Prestige tier role,
+         or eligible Booster role).
+
+    Inventory / timed ownership of the old item is never modified.
+    """
+    if guild is None and bot is not None:
+        guild = bot.get_guild(guild_id)
+    if member is None and guild is not None:
+        member = guild.get_member(user_id)
+
+    current = await get_equipped(guild_id, user_id)
+    if current and (current.get("entry_key") or current["item_name"]) != \
+            (entry_key or item_name):
+        old_role_id = int(current["role_id"])
+        if old_role_id != int(role_id):
+            from utils.timed_ownership import non_slot_role_entitlement
+            protected = await non_slot_role_entitlement(
+                guild_id, user_id, old_role_id, bot=bot, member=member)
+            if not protected and guild is not None and member is not None:
+                old_role = guild.get_role(old_role_id)
+                if old_role and old_role in member.roles:
+                    try:
+                        await member.remove_roles(
+                            old_role, reason=f"{reason} — swapped out")
+                    except Exception as e:
+                        print(f"[EQUIP] Failed to remove previous role "
+                              f"{old_role_id} from {user_id} in "
+                              f"{guild_id}: {e}")
+
+    await record_equipped(guild_id, user_id, item_name, role_id=int(role_id),
+                          entry_key=entry_key)
+    return {"previous": current, "entry_key": entry_key,
+            "role_id": int(role_id)}
+
+
 async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
                       item_name: str, reason: str = "Equipped",
                       *, entry_key: str | None = None) -> dict:
@@ -120,42 +168,22 @@ async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
     if not can_assign:
         return {"success": False, "error": warning}
 
-    current = await get_equipped(guild_id, user_id)
-    if current and (current.get("entry_key") or current["item_name"]) != \
-            (owned_key or item_name):
-        # One-slot behaviour: wearing another item takes the old one off. That
-        # is the intended swap, NOT an expiry, so it is not entitlement-guarded
-        # — otherwise every previously owned colour would stay worn.
-        #
-        # The one exception is a role another subsystem owns (Prestige tier,
-        # Booster reward, self-picked booster colour). This code must never
-        # strip those: the owning subsystem decides, and swapping a cosmetic
-        # colour is not a reason to lose a tier role.
-        old_role_id = int(current["role_id"])
-        from utils.timed_ownership import guild_managed_role_ids
-        if old_role_id not in await guild_managed_role_ids(guild_id):
-            old_role = guild.get_role(old_role_id)
-            if old_role and old_role in member.roles:
-                try:
-                    await member.remove_roles(
-                        old_role, reason=f"{reason} — swapped out")
-                except Exception as e:
-                    print(f"[EQUIP] Failed to remove previous role "
-                          f"{old_role_id} from {user_id} in "
-                          f"{guild_id}: {e}")
-
-    if role not in member.roles:
+    role_was_present = role in member.roles
+    if not role_was_present:
         try:
             await member.add_roles(role, reason=reason)
         except Exception as e:
-            return {"success": False, "error": f"Discord error assigning role: {e}"}
+            return {"success": False, "error": f"Discord error assigning role: {e}",
+                    "role_added": False}
 
-    await record_equipped(guild_id, user_id, item_name, role_id=role_id,
-                          entry_key=owned_key)
+    await swap_and_record_equipped(
+        bot, guild_id, user_id,
+        item_name=item_name, role_id=role_id, entry_key=owned_key,
+        guild=guild, member=member, reason=reason)
 
     return {"success": True, "item_name": item_name,
             "role_id": role_id, "role_name": role.name,
-            "entry_key": owned_key}
+            "entry_key": owned_key, "role_added": not role_was_present}
 
 
 async def unequip_role(bot: discord.Client, guild_id: int, user_id: int,
@@ -190,13 +218,18 @@ async def unequip_role(bot: discord.Client, guild_id: int, user_id: int,
     removed_name = current["item_name"]
 
     if member is not None:
-        old_role = guild.get_role(role_id)
-        if old_role and old_role in member.roles:
-            try:
-                await member.remove_roles(old_role, reason="Unequipped from wallet")
-            except Exception as e:
-                return {"success": False,
-                        "error": f"Discord error removing role: {e}"}
+        from utils.timed_ownership import non_slot_role_entitlement
+        protected = await non_slot_role_entitlement(
+            guild_id, user_id, role_id, bot=bot, member=member)
+        if not protected:
+            old_role = guild.get_role(role_id)
+            if old_role and old_role in member.roles:
+                try:
+                    await member.remove_roles(
+                        old_role, reason="Unequipped from wallet")
+                except Exception as e:
+                    return {"success": False,
+                            "error": f"Discord error removing role: {e}"}
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
