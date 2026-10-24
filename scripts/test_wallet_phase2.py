@@ -180,7 +180,8 @@ async def main():
     )
     items = await _gi(GUILD, USER, include_empty=False)
     entries = await _decorate(GUILD, split_by_tab(items)[TAB_ITEMS])
-    iembed = build_inventory_embed(TAB_ITEMS, entries, None, None)
+    iembed = build_inventory_embed(
+        TAB_ITEMS, entries, bot_name="Nero", username="tester")
     ir = (iembed.title or "") + " " + (iembed.description or "")
     for banned in ("Paid:", "Bought:", "Expires", "paid", "bought"):
         check(f"inventory list contains no '{banned}'",
@@ -200,7 +201,8 @@ async def main():
     labels = sorted((c.label or "") for c in view.children)
     check("buttons include Equip", "Equip" in labels, str(labels))
     check("buttons include Drop", "Drop" in labels, str(labels))
-    check("buttons include Back", "Back" in labels, str(labels))
+    check("buttons include a Back action",
+          any(lbl.startswith("Back") for lbl in labels), str(labels))
 
     from cogs.wallet import build_item_embed
     dEmbed = build_item_embed(FakeGuild(), TAB_ITEMS, item, equipped=False)

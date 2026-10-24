@@ -219,8 +219,32 @@ async def has_item(guild_id: int, user_id: int, item_name: str,
     return bool(row) and row[0] >= quantity
 
 
+# Ownership rows that represent a Discord role rather than a stack of goods.
+# The Inventory UI groups them into the Colors tab, but the *category* (does
+# this role correspond to a Colors listing?) is a separate question answered by
+# the record's metadata, never inferred from the type alone.
+ROLE_ITEM_TYPES = ("role", "temp_role")
+
+
 async def get_inventory(guild_id: int, user_id: int,
-                         include_empty: bool = False) -> list[dict]:
+                         include_empty: bool = False,
+                         include_timed: bool = True) -> list[dict]:
+    """Unified ownership view: permanent rows + unexpired timed holdings.
+
+    Every entry carries a stable `entry_key`:
+        `i:<inventory_items.id>`  permanent (legacy) ownership
+        `h:<timed_holdings.id>`   a timed holding
+
+    `item_name` is NOT a key. A permanent and a temporary "Golden Key" coexist,
+    and two timed grants with different expiry times are two entries, so any
+    action on one must use `entry_key` to say which. Callers that still match on
+    `item_name` keep working exactly as before when only one entry has that name
+    (see `find_entry`).
+
+    Expired timed holdings are filtered HERE, not only by the cleanup loop, so
+    /inventory and /rank can never show one even if cleanup is behind. Timed
+    entries also carry `expires_at`, `timed=True`, `category` and `product_id`.
+    """
     query = """
         SELECT id, item_name, item_type, quantity, metadata,
                source, created_at, updated_at
@@ -247,8 +271,52 @@ async def get_inventory(guild_id: int, user_id: int,
             "id": r[0], "item_name": r[1], "item_type": r[2],
             "quantity": r[3], "metadata": meta,
             "source": r[5], "created_at": r[6], "updated_at": r[7],
+            "entry_key": f"i:{r[0]}", "timed": False, "expires_at": None,
+            "product_id": (meta or {}).get("product_id"),
+            "category": (meta or {}).get("category"),
+            "role_id": (meta or {}).get("role_id"),
         })
+
+    if include_timed:
+        from utils.timed_ownership import get_timed_holdings
+
+        for holding in await get_timed_holdings(guild_id, user_id):
+            entry = dict(holding)
+            entry.setdefault("updated_at", holding.get("created_at"))
+            result.append(entry)
+
+    result.sort(key=lambda it: (str(it.get("item_name") or "").lower(),
+                                it.get("expires_at") or "", it["entry_key"]))
     return result
+
+
+def find_entry(entries: list[dict], *, entry_key: str | None = None,
+               item_name: str | None = None,
+               item_type: str | None = None) -> dict | None:
+    """Locate one ownership entry unambiguously.
+
+    `entry_key` wins when supplied (the only safe way to name one of several
+    same-name entries). Otherwise this falls back to the historical
+    name lookup and REFUSES to guess between duplicates: an ambiguous name
+    returns None rather than letting Drop/Equip touch the wrong holding.
+    """
+    if entry_key:
+        for entry in entries:
+            if entry.get("entry_key") == entry_key:
+                return entry
+        return None
+    if item_name is None:
+        return None
+    matches = [e for e in entries if e.get("item_name") == item_name]
+    if item_type is not None:
+        typed = [e for e in matches if e.get("item_type") == item_type]
+        if typed:
+            matches = typed
+    if len(matches) > 1:
+        # A timed copy and a permanent copy (or two timers) share the name; the
+        # name alone does not identify one of them.
+        return None
+    return matches[0] if matches else None
 
 
 async def get_guild_inventory_summary(guild_id: int, limit: int = 200) -> list[dict]:

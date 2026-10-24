@@ -1536,6 +1536,23 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
         if own_item and independent == 0 and not grants:
             continue            # the claim's own marker, provenance unavailable
         return f"inventory '{item_name}' ({source})"
+
+    # Timed Shop ownership (a Color or a timed Item) grants its Discord role from
+    # `timed_holdings`, never from `inventory_items`, so none of the scans above
+    # can see it. An unexpired holding is an independent entitlement and must
+    # keep the role: no level correction buys that role back. Read-only, and a
+    # database that predates the table simply has nothing to report.
+    try:
+        cursor = await db.execute(
+            "SELECT id, item_name, expires_at FROM timed_holdings "
+            "WHERE guild_id=? AND user_id=? AND role_id=?",
+            (guild_id, user_id, int(role_id)))
+        for holding_id, item_name, expires_at in await cursor.fetchall():
+            if not _boost_is_live(expires_at):
+                continue
+            return f"timed holding '{item_name}' (#{holding_id})"
+    except (aiosqlite.Error, TypeError, ValueError):
+        pass
     return None
 
 
