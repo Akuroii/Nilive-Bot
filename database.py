@@ -1342,6 +1342,16 @@ async def init_db():
         from utils.shop_emoji import ensure_shop_emoji_schema
         await ensure_shop_emoji_schema(db)
 
+        # Timed ownership + the Shop purchase journal. Additive by design:
+        # `inventory_items` keeps its UNIQUE(guild, user, item_name) contract
+        # (trade, reward provenance and reversal all rely on it), so temporary
+        # holdings live beside it rather than re-keying it.
+        from utils.timed_ownership import (
+            ensure_timed_ownership_schema, ensure_purchase_journal_schema,
+        )
+        await ensure_timed_ownership_schema(db)
+        await ensure_purchase_journal_schema(db)
+
         # Publication identity/state only. The live message is always rebuilt
         # from shop_designs + current shop_items; never persist commerce or
         # rendered payload snapshots here. No Design/channel uniqueness:
@@ -1494,10 +1504,23 @@ async def init_db():
                 user_id     INTEGER NOT NULL,
                 item_name   TEXT NOT NULL,
                 role_id     INTEGER NOT NULL,
+                entry_key   TEXT,
                 equipped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
+        # Timed ownership: the single equip slot must be able to say WHICH
+        # ownership record it is wearing. `item_name` cannot — a permanent and
+        # a timed "Ocean Blue" share it. Additive and idempotent; NULL on
+        # pre-existing rows, which `get_equipped()` reads as "legacy permanent
+        # ownership, match by name".
+        cursor = await db.execute("PRAGMA table_info(equipped_roles)")
+        if "entry_key" not in {c[1] for c in await cursor.fetchall()}:
+            try:
+                await db.execute(
+                    "ALTER TABLE equipped_roles ADD COLUMN entry_key TEXT")
+            except Exception as e:
+                print(f"[MIGRATION] equipped_roles.entry_key: {e}")
 
         # Wallet pass: equipped_titles is the Title equip slot. It is a
         # SEPARATE table from equipped_roles on purpose — the locked
