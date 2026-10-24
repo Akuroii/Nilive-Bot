@@ -543,23 +543,100 @@ async def process_purchase(interaction: discord.Interaction,
             except Exception:
                 pass
         late_key = delivery.get("entry_key")
-        if late_key and str(late_key).startswith("h:"):
-            try:
-                from utils.timed_ownership import (
-                    get_purchase, clear_equip_for_holding, delete_timed_holding,
-                    PURCHASE_REFUNDED,
-                )
-                cur_op = await get_purchase(op_id)
-                if cur_op and (
+        try:
+            from utils.timed_ownership import (
+                get_purchase, clear_equip_for_holding, delete_timed_holding,
+                role_still_entitled, PURCHASE_REFUNDED,
+            )
+            cur_op = await get_purchase(op_id)
+            was_compensated = bool(
+                cur_op and (
                     cur_op.get("status") in (PURCHASE_REFUNDED, PURCHASE_FAILED)
                     or cur_op.get("refunded")
                     or cur_op.get("stock_returned")
-                ):
+                )
+            )
+            if was_compensated:
+                if late_key and str(late_key).startswith("h:"):
                     await clear_equip_for_holding(
                         guild_id, user_id, str(late_key), role_id=role_id)
                     await delete_timed_holding(str(late_key))
-            except Exception:
-                pass
+                    if role_id is not None:
+                        still_entitled = await role_still_entitled(
+                            guild_id, user_id, int(role_id),
+                            bot=interaction.client, member=interaction.user)
+                        if not still_entitled and interaction.guild is not None:
+                            role_obj = interaction.guild.get_role(int(role_id))
+                            if (role_obj is not None
+                                    and role_obj in (getattr(interaction.user, "roles", None) or ())):
+                                await interaction.user.remove_roles(
+                                    role_obj,
+                                    reason="Late delivery after purchase cancellation")
+                elif itype == "role":
+                    role_item_name = delivery.get("item_name") or name
+                    prior_inv = delivery.get("prior_inventory")
+                    async with aiosqlite.connect(DB_PATH) as cleanup_db:
+                        if prior_inv is None:
+                            await cleanup_db.execute(
+                                "DELETE FROM inventory_items "
+                                "WHERE guild_id=? AND user_id=? AND item_name=?",
+                                (guild_id, user_id, role_item_name))
+                        else:
+                            p_id, p_qty, p_type, p_src, p_meta, p_cat, p_uat = prior_inv
+                            await cleanup_db.execute(
+                                "UPDATE inventory_items "
+                                "SET quantity=?, item_type=?, source=?, metadata=?, "
+                                "created_at=?, updated_at=? WHERE id=?",
+                                (p_qty, p_type, p_src, p_meta, p_cat, p_uat, p_id))
+                        if prior_inv is None and role_id is not None:
+                            if late_key:
+                                await cleanup_db.execute(
+                                    "DELETE FROM equipped_roles "
+                                    "WHERE guild_id=? AND user_id=? "
+                                    "AND (entry_key=? OR (entry_key IS NULL AND role_id=?))",
+                                    (guild_id, user_id, str(late_key), int(role_id)))
+                            else:
+                                await cleanup_db.execute(
+                                    "DELETE FROM equipped_roles "
+                                    "WHERE guild_id=? AND user_id=? AND role_id=?",
+                                    (guild_id, user_id, int(role_id)))
+                        await cleanup_db.commit()
+                    if role_id is not None:
+                        still_entitled = await role_still_entitled(
+                            guild_id, user_id, int(role_id),
+                            bot=interaction.client, member=interaction.user)
+                        if not still_entitled and interaction.guild is not None:
+                            role_obj = interaction.guild.get_role(int(role_id))
+                            if (role_obj is not None
+                                    and role_obj in (getattr(interaction.user, "roles", None) or ())):
+                                await interaction.user.remove_roles(
+                                    role_obj,
+                                    reason="Late delivery after purchase cancellation")
+                elif itype in ("potion", "title", "custom", "shop_custom", "item"):
+                    async with aiosqlite.connect(DB_PATH) as cleanup_db:
+                        await cleanup_db.execute("BEGIN IMMEDIATE")
+                        try:
+                            cursor = await cleanup_db.execute(
+                                "SELECT id, quantity FROM inventory_items "
+                                "WHERE guild_id=? AND user_id=? AND item_name=?",
+                                (guild_id, user_id, name))
+                            inv_row = await cursor.fetchone()
+                            if inv_row and int(inv_row[1] or 0) > 1:
+                                await cleanup_db.execute(
+                                    "UPDATE inventory_items "
+                                    "SET quantity = quantity - 1, "
+                                    "updated_at = CURRENT_TIMESTAMP WHERE id=?",
+                                    (int(inv_row[0]),))
+                            elif inv_row and int(inv_row[1] or 0) == 1:
+                                await cleanup_db.execute(
+                                    "DELETE FROM inventory_items WHERE id=?",
+                                    (int(inv_row[0]),))
+                            await cleanup_db.commit()
+                        except Exception:
+                            await cleanup_db.execute("ROLLBACK")
+                            raise
+        except Exception as cleanup_exc:
+            print(f"[SHOP] Late delivery cleanup failed for {op_id}: {cleanup_exc}")
         embed = discord.Embed(
             title="⚠️ Purchase needs a check",
             description=(
@@ -723,6 +800,9 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
             return result
         result.update(
             success=True,
+            entry_key=granted.get("entry_key"),
+            item_name=granted.get("item_name") or name,
+            prior_inventory=granted.get("prior_inventory"),
             detail=(f"permanent role ({granted['entry_key']})"
                     if granted.get("entry_key") else "permanent role"),
         )
@@ -760,7 +840,10 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
                 EFFECT_XP_BOOST, multiplier, duration_hours),
             reason=f"Shop purchase: {name}", source=source)
         if not granted.get("success"):
-            result["error"] = granted.get("error") or "Potion delivery failed."
+            result.update(
+                error=granted.get("error") or "Potion delivery failed.",
+                uncertain=bool(granted.get("uncertain", False)),
+            )
             return result
         result["success"] = True
         return result
@@ -776,7 +859,10 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
             amount=1, item_name=name, item_type=TITLE_ITEM_TYPE,
             reason=f"Shop purchase: {name}", source=source)
         if not granted.get("success"):
-            result["error"] = granted.get("error") or "Title delivery failed."
+            result.update(
+                error=granted.get("error") or "Title delivery failed.",
+                uncertain=bool(granted.get("uncertain", False)),
+            )
             return result
         result["success"] = True
         return result
@@ -804,7 +890,10 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
             amount=1, item_name=name, item_type="shop_custom",
             reason=f"Shop purchase: {name}", source=source)
         if not granted.get("success"):
-            result["error"] = granted.get("error") or "Item delivery failed."
+            result.update(
+                error=granted.get("error") or "Item delivery failed.",
+                uncertain=bool(granted.get("uncertain", False)),
+            )
             return result
         result["success"] = True
         return result
@@ -848,31 +937,52 @@ async def _compensate_failed_purchase(interaction: discord.Interaction, *,
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    # Default: assume nothing is owed, so losing the transition race (a retry
-    # or the reconciliation loop got here first) never renders a false
-    # "refund pending" note.
-    outcome = {"refunded": False, "stock_returned": False, "complete": True,
+    outcome = {"refunded": False, "stock_returned": False, "complete": False,
                "error": None}
     if await claim_purchase_transition(
             op_id, from_statuses=(PURCHASE_PENDING,),
             to_status=PURCHASE_FAILED, detail=reason):
         outcome = await refund_purchase(op_id)
+    else:
+        try:
+            from utils.timed_ownership import get_purchase, PURCHASE_REFUNDED
+            cur_op = await get_purchase(op_id)
+        except Exception as exc:
+            cur_op = None
+            outcome["error"] = str(exc)
+        if cur_op is not None:
+            refunded_ok = bool(cur_op.get("refunded") or not cur_op.get("charged"))
+            stock_ok = bool(cur_op.get("stock_returned") or not cur_op.get("stock_reserved"))
+            outcome = {
+                "refunded": bool(cur_op.get("refunded")),
+                "stock_returned": bool(cur_op.get("stock_returned")),
+                "complete": (
+                    refunded_ok and stock_ok
+                    and cur_op.get("status") in (PURCHASE_FAILED, PURCHASE_REFUNDED)
+                ),
+                "error": None,
+            }
 
     if free:
         # Nothing was charged, so there is nothing to refund: only the stock
         # claim had to be released above.
         description = (f"**{name}** could not be delivered, so the purchase "
                        f"was cancelled. You were not charged.")
-    else:
+    elif outcome.get("refunded"):
         description = (
             f"**{name}** could not be delivered, so the purchase was "
             f"cancelled and your {pay_amount:,} payment was returned.")
+    else:
+        description = (
+            f"**{name}** could not be delivered, so the purchase was "
+            f"cancelled. Your {pay_amount:,} payment has not been returned yet "
+            f"(reference: `{op_id}`).")
     embed = discord.Embed(
         title="❌ Purchase not completed",
         description=description,
         color=0xED4245)
     embed.add_field(name="Reason", value=reason, inline=False)
-    if not free and not outcome.get("complete"):
+    if not free and (not outcome.get("complete") or not outcome.get("refunded")):
         embed.add_field(
             name="Refund pending",
             value=("Part of the refund could not be applied yet. It is retried "
@@ -929,16 +1039,37 @@ class Shop(commands.Cog):
                 removal_ok = True
                 if guild:
                     member = guild.get_member(user_id)
-                    role   = guild.get_role(role_id)
-                    if member and role and role in member.roles:
+                    if member is None and hasattr(guild, "fetch_member"):
                         try:
-                            await member.remove_roles(
-                                role, reason="Temp role expired")
+                            member = await guild.fetch_member(user_id)
+                        except discord.NotFound:
+                            member = None
                         except Exception as e:
-                            print(f"[SHOP] Failed to remove expired "
-                                  f"role {role_id} from {user_id} in "
+                            print(f"[SHOP] Failed to fetch member {user_id} "
+                                  f"for expired role {role_id} in {guild_id}: {e}")
+                            removal_ok = False
+                    role = guild.get_role(role_id)
+                    if removal_ok and member and role and role in member.roles:
+                        try:
+                            from utils.timed_ownership import role_still_entitled
+                            still_entitled = await role_still_entitled(
+                                guild_id, user_id, role_id,
+                                bot=self.bot, member=member)
+                        except Exception as e:
+                            print(f"[SHOP] Failed to verify role entitlement "
+                                  f"for expired role {role_id} on {user_id} in "
                                   f"{guild_id}: {e}")
                             removal_ok = False
+                        else:
+                            if not still_entitled:
+                                try:
+                                    await member.remove_roles(
+                                        role, reason="Temp role expired")
+                                except Exception as e:
+                                    print(f"[SHOP] Failed to remove expired "
+                                          f"role {role_id} from {user_id} in "
+                                          f"{guild_id}: {e}")
+                                    removal_ok = False
                 else:
                     # Bot isn't in this guild right now — keep the
                     # row so it's retried once it rejoins.

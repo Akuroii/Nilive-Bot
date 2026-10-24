@@ -2238,6 +2238,436 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await get_equipped(GUILD, USER))["entry_key"],
                          g2["entry_key"])
 
+    async def test_f1_temp_role_cleanup_respects_entitlement_and_fails_safe(self):
+        """Priority 1 (F1) regression:
+        (a) Expired legacy `temp_roles` row + active entitlement (`timed_holdings`)
+            -> retain Discord role, keep active `timed_holdings` row and its
+               `equipped_roles` slot, delete expired `temp_roles` row.
+        (b) Expired legacy `temp_roles` row + no remaining entitlement
+            -> remove Discord role, clean up expired legacy `temp_role` inventory
+               item and equipped slot, delete expired `temp_roles` row.
+        (c) Entitlement/DB check failure -> retain Discord role and preserve
+            the expired `temp_roles` row for retry.
+        """
+        from cogs.shop import Shop
+
+        r701 = role_stub(701, "Crimson")
+        _, person, bot, server = purchase_ctx(granted_role=r701, roles_held=(r701,))
+        server.get_role = lambda rid: r701 if int(rid) == 701 else None
+
+        async def _remove_role(r, reason=None):
+            person.roles = [x for x in person.roles if x.id != r.id]
+
+        person.remove_roles = AsyncMock(side_effect=_remove_role)
+
+        # (a) Expired legacy temp_roles row + active timed_holdings row for role 701
+        granted = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="Crimson", duration_hours=24,
+            item_type="temp_role", category=TO.CATEGORY_COLOR, role_id=701)
+        self.assertTrue(granted["success"])
+        past_iso = (TO.utcnow() - timedelta(hours=2)).isoformat()
+        execute(
+            "INSERT INTO temp_roles (guild_id, user_id, role_id, expires_at, source) "
+            "VALUES (?, ?, 701, ?, 'legacy')",
+            (GUILD, USER, past_iso))
+
+        shop_cog = Shop.__new__(Shop)
+        shop_cog.bot = bot
+
+        # (c) First inject an entitlement-check failure: role must be retained AND
+        # the expired temp_roles row must remain in place for retry.
+        real_entitled = TO.role_still_entitled
+
+        async def _broken_entitled(*args, **kwargs):
+            raise TO.EntitlementCheckError("simulated DB lock in role_still_entitled")
+
+        TO.role_still_entitled = _broken_entitled
+        try:
+            await Shop.temp_role_cleanup.coro(shop_cog)
+        finally:
+            TO.role_still_entitled = real_entitled
+
+        person.remove_roles.assert_not_awaited()
+        self.assertIn(r701, person.roles)
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM temp_roles WHERE guild_id=? AND user_id=? AND role_id=701",
+                 (GUILD, USER)),
+            [(1,)],
+            "retryable temp_roles row must survive when entitlement check fails")
+
+        # Now run (a) with normal entitlement check: active timed_holdings row
+        # entitles role 701, so Discord role and equipped slot stay intact while
+        # the expired temp_roles row is cleaned up.
+        await Shop.temp_role_cleanup.coro(shop_cog)
+        person.remove_roles.assert_not_awaited()
+        self.assertIn(r701, person.roles)
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE guild_id=? AND user_id=? AND role_id=701",
+                 (GUILD, USER)),
+            [(1,)])
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM temp_roles WHERE guild_id=? AND user_id=? AND role_id=701",
+                 (GUILD, USER)),
+            [(0,)])
+        eq_now = await get_equipped(GUILD, USER)
+        self.assertIsNotNone(eq_now)
+        self.assertEqual(eq_now["entry_key"], granted["entry_key"])
+
+        # (b) Delete the timed holding so NO entitlement remains, insert a fresh
+        # expired legacy temp_roles row + expired legacy temp_role inventory item,
+        # and verify temp_role_cleanup removes the Discord role and cleans up.
+        await TO.delete_timed_holding(granted["entry_key"])
+        execute("DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        execute(
+            "INSERT INTO inventory_items (guild_id, user_id, item_name, item_type, quantity, metadata, source) "
+            "VALUES (?, ?, 'LegacyTempCrimson', 'temp_role', 1, ?, 'legacy')",
+            (GUILD, USER, json.dumps({"role_id": 701, "expires_at": past_iso})))
+        inv_id = rows(
+            "SELECT id FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='LegacyTempCrimson'",
+            (GUILD, USER))[0][0]
+        execute(
+            "INSERT OR REPLACE INTO equipped_roles (guild_id, user_id, item_name, role_id, entry_key) "
+            "VALUES (?, ?, 'LegacyTempCrimson', 701, ?)",
+            (GUILD, USER, f"i:{inv_id}"))
+        execute(
+            "INSERT INTO temp_roles (guild_id, user_id, role_id, expires_at, source) "
+            "VALUES (?, ?, 701, ?, 'legacy')",
+            (GUILD, USER, past_iso))
+
+        await Shop.temp_role_cleanup.coro(shop_cog)
+        person.remove_roles.assert_awaited_once()
+        self.assertNotIn(r701, person.roles)
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM temp_roles WHERE guild_id=? AND user_id=? AND role_id=701",
+                 (GUILD, USER)),
+            [(0,)])
+        self.assertEqual(
+            rows("SELECT quantity FROM inventory_items WHERE id=?", (inv_id,)),
+            [(0,)])
+        self.assertIsNone(await get_equipped(GUILD, USER))
+
+    async def test_priority2a_late_delivery_after_refund_rolls_back_all_product_types(self):
+        """Priority 2A regression:
+        When an operator refunds an operation while `_deliver_purchase()` is in
+        flight (so `claim_purchase_transition(..., to_status=PURCHASE_DELIVERED)`
+        returns `False` in `process_purchase`), late-delivered goods are rolled
+        back for:
+          1. Timed Color / timed holding (removes holding, equip slot, and Discord
+             role when unentitled; retains Discord role when another active
+             entitlement still requires it).
+          2. Permanent role (restores `inventory_items`, clears equip slot, and
+             removes Discord role when unentitled; retains Discord role when
+             an independent entitlement requires it).
+          3. Potion, Title, and permanent custom Item (removes the +1 unit added
+             by the late delivery without touching pre-existing units or
+             consuming level-reward `reward_grants` provenance).
+        """
+        import cogs.shop as shop_mod
+        from utils import level_ops
+
+        await level_ops.ensure_tables()
+        r_timed = role_stub(701, "Crimson")
+        r_perm = role_stub(702, "Knight")
+        roles_map = {701: r_timed, 702: r_perm}
+        start_bal = rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (GUILD, USER))[0][0]
+
+        real_deliver = shop_mod._deliver_purchase
+
+        async def _deliver_then_operator_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            op_row = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0]
+            op_id = op_row[0]
+            await TO.claim_purchase_transition(
+                op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                to_status=TO.PURCHASE_UNCERTAIN, detail="operator timeout")
+            await TO.resolve_purchase_operation(
+                op_id, action="refund", confirmed=True,
+                note="refunded before late delivery returned")
+            return res
+
+        shop_mod._deliver_purchase = _deliver_then_operator_refund
+        try:
+            # 1a. Timed Color with NO other entitlement -> holding deleted AND Discord role removed
+            color_id = shop_item(
+                "color", price=100, name="LateCrimson",
+                role_id=701, duration_hours=24, stock=5)
+            itx, person, bot, server = purchase_ctx(granted_role=r_timed)
+            server.get_role = lambda rid: roles_map.get(int(rid))
+
+            async def _add_r(r, reason=None):
+                if r not in person.roles:
+                    person.roles.append(r)
+
+            async def _rem_r(r, reason=None):
+                person.roles = [x for x in person.roles if x.id != r.id]
+
+            person.add_roles = AsyncMock(side_effect=_add_r)
+            person.remove_roles = AsyncMock(side_effect=_rem_r)
+
+            await process_purchase(itx, color_id)
+            self.assertEqual(
+                rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (GUILD, USER))[0][0],
+                start_bal,
+                "buyer refunded")
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM timed_holdings WHERE guild_id=? AND user_id=? AND role_id=701",
+                     (GUILD, USER)),
+                [(0,)],
+                "late timed holding removed")
+            self.assertNotIn(r_timed, person.roles,
+                             "late Discord role removed when no other entitlement exists")
+            self.assertIsNone(await get_equipped(GUILD, USER))
+
+            # 1b. Timed Color WITH an independent active timed holding for role 701 -> retain Discord role!
+            indep = await TO.grant_timed_product(
+                bot, GUILD, USER, item_name="IndependentCrimson", duration_hours=48,
+                item_type="temp_role", category=TO.CATEGORY_COLOR, role_id=701)
+            self.assertTrue(indep["success"])
+            self.assertIn(r_timed, person.roles)
+            itx2, _, _, _ = purchase_ctx()
+            itx2.user = person
+            itx2.guild = server
+            itx2.client = bot
+            await process_purchase(itx2, color_id)
+            self.assertEqual(
+                rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (GUILD, USER))[0][0],
+                start_bal)
+            self.assertIn(r_timed, person.roles,
+                          "independent entitlement must keep Discord role 701 on member")
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM timed_holdings WHERE guild_id=? AND user_id=? AND role_id=701",
+                     (GUILD, USER)),
+                [(1,)],
+                "independent timed holding preserved")
+            await TO.delete_timed_holding(indep["entry_key"])
+            person.roles = []
+
+            # 2. Permanent role with NO prior entitlement -> inventory row deleted, equip cleared, Discord role removed
+            perm_id = shop_item(
+                "role", price=200, name="LateKnight",
+                role_id=702, duration_hours=None, stock=5)
+            itx3, _, _, _ = purchase_ctx()
+            itx3.user = person
+            itx3.guild = server
+            itx3.client = bot
+            await process_purchase(itx3, perm_id)
+            self.assertEqual(
+                rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (GUILD, USER))[0][0],
+                start_bal,
+                "buyer refunded")
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='LateKnight' AND quantity > 0",
+                     (GUILD, USER)),
+                [(0,)],
+                "late permanent role removed from inventory_items")
+            self.assertNotIn(r_perm, person.roles,
+                             "late permanent role removed from Discord member")
+            self.assertIsNone(await get_equipped(GUILD, USER))
+
+            # 3. Potion, Title, and permanent custom Item -> +1 unit rolled back,
+            #    preserving pre-existing stack and level-reward provenance!
+            execute(
+                "INSERT INTO inventory_items (guild_id, user_id, item_name, item_type, quantity, source) "
+                "VALUES (?, ?, 'LatePotion', 'potion', 2, 'level_claim')",
+                (GUILD, USER))
+            execute(
+                "INSERT INTO reward_grants (grant_id, guild_id, user_id, claim_id, reward_level, track, kind, item_name, quantity, remaining_quantity, operation_id, created_at) "
+                "VALUES ('grant-pot-1', ?, ?, 901, 5, 'shop', 'inventory', 'LatePotion', 2, 2, 'op-lvl-1', '2026-01-01T00:00:00+00:00')",
+                (GUILD, USER))
+
+            potion_id = shop_item(
+                "potion", price=150, name="LatePotion",
+                duration_hours=2, multiplier=2.0, stock=5)
+            title_id = shop_item(
+                "title", price=150, name="LateTitle", stock=5)
+            custom_id = shop_item(
+                "custom", price=150, name="LateRelic", stock=5)
+
+            for pid in (potion_id, title_id, custom_id):
+                itx_item, _, _, _ = purchase_ctx()
+                itx_item.user = person
+                itx_item.guild = server
+                itx_item.client = bot
+                await process_purchase(itx_item, pid)
+
+            self.assertEqual(
+                rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (GUILD, USER))[0][0],
+                start_bal,
+                "buyer refunded after all 3 late item deliveries")
+            self.assertEqual(
+                rows("SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='LatePotion'",
+                     (GUILD, USER)),
+                [(2,)],
+                "pre-existing 2x LatePotion stack preserved without keeping the late +1 unit")
+            self.assertEqual(
+                rows("SELECT remaining_quantity, unattributed FROM reward_grants WHERE grant_id='grant-pot-1'"),
+                [(2, 0)],
+                "level-reward provenance remaining_quantity is untouched by late-shop rollback")
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name IN ('LateTitle', 'LateRelic') AND quantity > 0",
+                     (GUILD, USER)),
+                [(0,)],
+                "late Title and custom Item rows removed when no prior stack existed")
+        finally:
+            shop_mod._deliver_purchase = real_deliver
+
+    async def test_priority2b_compensate_failed_purchase_never_falsely_claims_refund_when_claim_lost(self):
+        """Priority 2B regression:
+        When `_compensate_failed_purchase()` loses its `pending -> failed`
+        transition claim because the operation was already moved to `uncertain`
+        with `refunded=0`, the buyer is NEVER told that their payment was
+        returned, and the 'Refund pending' field is shown. Conversely, if the
+        operation was already refunded (`refunded=1, status='refunded'`), the
+        message accurately reflects the committed refund.
+        """
+        from cogs.shop import _compensate_failed_purchase
+
+        # Case 1: Operation moved to `uncertain` (refunded=0) before `_compensate_failed_purchase`
+        itx1, _, _, _ = purchase_ctx()
+        op_uncertain = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name="Starlight", currency="balance", amount=250)
+        await TO.update_purchase(op_uncertain, charged=1, stock_reserved=1)
+        await TO.claim_purchase_transition(
+            op_uncertain, from_statuses=(TO.PURCHASE_PENDING,),
+            to_status=TO.PURCHASE_UNCERTAIN, detail="reconcile parked as uncertain")
+
+        await _compensate_failed_purchase(
+            itx1, op_id=op_uncertain,
+            delivery={"success": False, "uncertain": False, "error": "Role not found"},
+            name="Starlight", pay_amount=250, pay_currency="balance", free=False)
+
+        embed1 = itx1.response.send_message.await_args.kwargs["embed"]
+        self.assertNotIn("payment was returned", embed1.description)
+        self.assertIn("has not been returned yet", embed1.description)
+        self.assertTrue(
+            any(f.name == "Refund pending" for f in embed1.fields),
+            "must include Refund pending field when refund was not committed")
+
+        # Case 2: Operation already refunded by operator (`status='refunded', refunded=1`)
+        itx2, _, _, _ = purchase_ctx()
+        op_refunded = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name="Starlight", currency="balance", amount=250)
+        await TO.update_purchase(op_refunded, charged=1, stock_reserved=0)
+        await TO.claim_purchase_transition(
+            op_refunded, from_statuses=(TO.PURCHASE_PENDING,),
+            to_status=TO.PURCHASE_FAILED, detail="already failed")
+        await TO.refund_purchase(op_refunded)
+
+        await _compensate_failed_purchase(
+            itx2, op_id=op_refunded,
+            delivery={"success": False, "uncertain": False, "error": "Role not found"},
+            name="Starlight", pay_amount=250, pay_currency="balance", free=False)
+
+        embed2 = itx2.response.send_message.await_args.kwargs["embed"]
+        self.assertIn("payment was returned", embed2.description)
+        self.assertFalse(
+            any(f.name == "Refund pending" for f in embed2.fields),
+            "no Refund pending warning when refund is already committed")
+
+    async def test_priority3_level_test_reset_timed_holding_and_entitlement_failure_lease_cleanup(self):
+        """Priority 3 regression for `utils/level_test_reset.py`:
+        1. `inspect_member()` / `reset_member()` recognizes an unexpired
+           `timed_holdings` row as a competing role grant (`roles_left_on_member`),
+           preserving the Discord role on the member.
+        2. When an entitlement check fails during `rollback_xp_operation(apply=True)`
+           or `reset_member(apply=True)`, the role is NOT removed, the per-member
+           lease in `level_op_locks` is released (`finally: release_lock`),
+           `rolled_back` remains 0, and a subsequent retry succeeds cleanly.
+        """
+        from utils import level_claims, level_ops
+        from utils.level_test_reset import inspect_member, reset_member, rollback_xp_operation
+
+        await level_claims.ensure_tables()
+        await level_ops.ensure_tables()
+
+        r_shared = role_stub(980, "SharedTimedAndLevelRole")
+        _, person, bot, server = purchase_ctx(granted_role=r_shared, roles_held=(r_shared,))
+        person.guild = server
+        server.get_role = lambda rid: r_shared if int(rid) == 980 else None
+
+        async def _rem_role(r, reason=None):
+            person.roles = [x for x in person.roles if x.id != r.id]
+
+        person.remove_roles = AsyncMock(side_effect=_rem_role)
+
+        # Grant an active timed holding for role 980 AND a fulfilled level role claim for role 980
+        th = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="TimedHalo", duration_hours=24,
+            item_type="temp_role", category=TO.CATEGORY_COLOR, role_id=980)
+        self.assertTrue(th["success"])
+        self.assertIn(r_shared, person.roles)
+
+        execute("INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level) VALUES (?, ?, 5000, 10)",
+                (GUILD, USER))
+        op_mut = "xp_set-test-p3"
+        await level_ops.record_xp_mutation(
+            guild_id=GUILD, user_id=USER, source="setxp", actor_id=999,
+            reason="grant level 10", xp_before=0, xp_after=5000,
+            level_before=0, level_after=10, crossings=[10], operation_id=op_mut)
+        execute("""
+            INSERT INTO level_reward_claims
+                (guild_id, user_id, reward_level, track, reward_ref, payload_json,
+                 status, created_at, fulfilled_at, source, operation_id)
+            VALUES (?, ?, 10, 'role', '980', ?, 'fulfilled',
+                    '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',
+                    'setxp', ?)
+        """, (GUILD, USER, json.dumps({"role_id": 980}), op_mut))
+
+        # 1. `inspect_member` sees the unexpired `timed_holdings` row in `role_other_grants`
+        preview = await inspect_member(GUILD, USER)
+        self.assertEqual(preview["plan"]["remove_discord_roles"], [])
+        self.assertEqual(
+            [r["role_id"] for r in preview["plan"]["roles_left_on_member"]],
+            [980])
+
+        # 2. Fault-inject `EntitlementCheckError` in `_role_granted_elsewhere` during
+        # `rollback_xp_operation(..., apply=True)` and verify lease cleanup + retryability!
+        real_elsewhere = level_claims._role_granted_elsewhere
+
+        async def _failing_elsewhere(*args, **kwargs):
+            raise TO.EntitlementCheckError("simulated DB lock checking role entitlements")
+
+        level_claims._role_granted_elsewhere = _failing_elsewhere
+        try:
+            with self.assertRaises(TO.EntitlementCheckError):
+                await rollback_xp_operation(
+                    GUILD, USER, operation_id=op_mut, apply=True,
+                    reversed_by=999, reason="rollback with entitlement error",
+                    member=person)
+        finally:
+            level_claims._role_granted_elsewhere = real_elsewhere
+
+        person.remove_roles.assert_not_awaited()
+        self.assertIn(r_shared, person.roles)
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM level_op_locks WHERE guild_id=? AND user_id=?",
+                 (GUILD, USER)),
+            [(0,)],
+            "per-member lease in level_op_locks must be released on failure")
+        self.assertEqual(
+            rows("SELECT rolled_back FROM xp_mutations WHERE operation_id=?", (op_mut,)),
+            [(0,)],
+            "xp_mutation must remain un-rolled-back so retry is allowed")
+
+        # 3. Delete the timed holding and retry `rollback_xp_operation` -> succeeds cleanly!
+        await TO.delete_timed_holding(th["entry_key"])
+        rb_ok = await rollback_xp_operation(
+            GUILD, USER, operation_id=op_mut, apply=True,
+            reversed_by=999, reason="retry after entitlement error cleared",
+            member=person)
+        self.assertTrue(rb_ok["applied"])
+        person.remove_roles.assert_awaited_once()
+        self.assertNotIn(r_shared, person.roles)
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM level_op_locks WHERE guild_id=? AND user_id=?",
+                 (GUILD, USER)),
+            [(0,)])
+        self.assertEqual(
+            rows("SELECT rolled_back FROM xp_mutations WHERE operation_id=?", (op_mut,)),
+            [(1,)])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

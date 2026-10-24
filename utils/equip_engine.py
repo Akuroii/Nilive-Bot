@@ -304,6 +304,7 @@ async def cleanup_expired_role_item(guild_id: int, user_id: int, role_id: int):
     the member no longer has.
     """
     from utils.inventory import get_inventory, remove_item, InsufficientItems
+    from utils.timed_ownership import is_expired
 
     items = await get_inventory(guild_id, user_id, include_empty=False)
     match = next(
@@ -314,11 +315,16 @@ async def cleanup_expired_role_item(guild_id: int, user_id: int, role_id: int):
          # table did not exist) and must stay impossible.
          if not it.get("timed")
          and it["item_type"] == "temp_role"
-         and (it.get("metadata") or {}).get("role_id") == role_id),
+         and (it.get("metadata") or {}).get("role_id") == role_id
+         and (
+             (it.get("metadata") or {}).get("expires_at") is None
+             or is_expired((it.get("metadata") or {}).get("expires_at"))
+         )),
         None)
     if not match:
         return
 
+    match_key = match.get("entry_key")
     try:
         await remove_item(guild_id, user_id, match["item_name"],
                           quantity=match["quantity"])
@@ -327,8 +333,10 @@ async def cleanup_expired_role_item(guild_id: int, user_id: int, role_id: int):
 
     current = await get_equipped(guild_id, user_id)
     if current and current["role_id"] == role_id:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?",
-                (guild_id, user_id))
-            await db.commit()
+        cur_key = current.get("entry_key")
+        if cur_key is None or cur_key == match_key:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?",
+                    (guild_id, user_id))
+                await db.commit()

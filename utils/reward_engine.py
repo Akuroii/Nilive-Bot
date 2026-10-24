@@ -470,6 +470,7 @@ async def give_reward(bot: discord.Client,
         result = {"success": True, "reward_type": reward_type,
                   "role_id": role_id, "item_name": display_name,
                   "entry_key": equip_result.get("entry_key") or entry_key,
+                  "prior_inventory": prior_inv,
                   "uncertain": False}
 
         if reward_type == "temp_role":
@@ -509,11 +510,11 @@ async def give_reward(bot: discord.Client,
                 metadata=item_metadata, source=source)
         except Exception as e:
             return {"success": False, "reward_type": "item",
-                    "error": f"Inventory error: {e}"}
+                    "error": f"Inventory error: {e}", "uncertain": False}
 
         return {"success": True, "reward_type": "item",
                 "item_name": item_name, "quantity": quantity,
-                "new_quantity": new_qty}
+                "new_quantity": new_qty, "uncertain": False}
 
     else:
         raise RewardError(f"Unknown reward_type: {reward_type!r}")
