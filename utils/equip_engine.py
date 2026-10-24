@@ -106,8 +106,14 @@ async def swap_and_record_equipped(bot: discord.Client | None,
             old_role_id = int(current["role_id"])
             if old_role_id != int(role_id):
                 from utils.timed_ownership import non_slot_role_entitlement
-                protected = await non_slot_role_entitlement(
-                    guild_id, user_id, old_role_id, bot=bot, member=member)
+                try:
+                    protected = await non_slot_role_entitlement(
+                        guild_id, user_id, old_role_id, bot=bot, member=member)
+                except Exception as e:
+                    print(f"[EQUIP] Entitlement check failed for previous role "
+                          f"{old_role_id} on {user_id} in {guild_id}; "
+                          f"retaining role on Discord: {e}")
+                    protected = "entitlement check failed"
                 if not protected and guild is not None and member is not None:
                     old_role = guild.get_role(old_role_id)
                     if old_role and old_role in member.roles:
@@ -253,8 +259,12 @@ async def unequip_role(bot: discord.Client, guild_id: int, user_id: int,
 
     if member is not None:
         from utils.timed_ownership import non_slot_role_entitlement
-        protected = await non_slot_role_entitlement(
-            guild_id, user_id, role_id, bot=bot, member=member)
+        try:
+            protected = await non_slot_role_entitlement(
+                guild_id, user_id, role_id, bot=bot, member=member)
+        except Exception as e:
+            return {"success": False,
+                    "error": f"Could not verify role entitlements: {e}"}
         if not protected:
             old_role = guild.get_role(role_id)
             if old_role and old_role in member.roles:

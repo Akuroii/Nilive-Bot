@@ -402,6 +402,11 @@ def role_id_of(item: dict) -> int | None:
 
 # ── Entitlements: may this role be removed? ─────────────────────────────
 
+
+class EntitlementCheckError(RuntimeError):
+    """Raised when a role entitlement source cannot be verified reliably."""
+
+
 def _resolve_member_from_bot(bot, guild_id: int, user_id: int, member=None):
     if member is not None:
         return member
@@ -431,6 +436,9 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
         Boost system is enabled.
       * Self-picked Booster colour roles (`boost_color_roles`) require an
         active boost with `boost_level >= requires_boost_level`.
+
+    Raises `EntitlementCheckError` if any required backing table/query fails so
+    callers never mistake a failed query for "no entitlement exists".
     """
     managed: set[int] = set()
     member = _resolve_member_from_bot(bot, guild_id, user_id, member)
@@ -458,14 +466,18 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
                                 managed.add(int(r_id))
                             except (TypeError, ValueError):
                                 continue
-    except Exception:
-        pass
+    except EntitlementCheckError:
+        raise
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify Prestige role entitlement: {exc}"
+        ) from exc
 
     boost_level = _booster_level_for(member)
     if boost_level >= 1:
-        async with aiosqlite.connect(DB_PATH) as db:
-            boost_enabled = True
-            try:
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                boost_enabled = True
                 cursor = await db.execute(
                     "SELECT enabled, boost1_role_id, boost2_role_id "
                     "FROM boost_config WHERE guild_id=?",
@@ -486,11 +498,8 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
                                 managed.add(int(b2))
                             except (TypeError, ValueError):
                                 pass
-            except aiosqlite.Error:
-                pass
 
-            if boost_enabled:
-                try:
+                if boost_enabled:
                     cursor = await db.execute(
                         "SELECT role_id, requires_boost_level "
                         "FROM boost_color_roles WHERE guild_id=?",
@@ -504,8 +513,12 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
                                 managed.add(int(r_id))
                             except (TypeError, ValueError):
                                 continue
-                except aiosqlite.Error:
-                    pass
+        except EntitlementCheckError:
+            raise
+        except Exception as exc:
+            raise EntitlementCheckError(
+                f"Failed to verify Booster role entitlement: {exc}"
+            ) from exc
 
     return managed
 
@@ -528,32 +541,33 @@ async def guild_managed_role_ids(guild_id: int,
 async def level_claim_role_entitled(guild_id: int, user_id: int,
                                     role_id: int, *,
                                     bot=None, member=None) -> str | None:
-    """Check if a fulfilled permanent Level role claim entitles this member to `role_id`."""
+    """Check if a fulfilled permanent Level role claim entitles this member to `role_id`.
+
+    Raises `EntitlementCheckError` if a backing table/query cannot be read so
+    callers never treat a failed query as absence of entitlement.
+    """
     try:
         rid = int(role_id)
     except (TypeError, ValueError):
         return None
     member = _resolve_member_from_bot(bot, guild_id, user_id, member)
     from utils.level_claims import TRACK_ROLE, is_booster_ref, member_is_booster
+    from utils import level_ops as ops
     booster_ok = member_is_booster(member)
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        try:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
                 "SELECT id, reward_level, reward_ref, payload_json, status "
                 "FROM level_reward_claims "
                 "WHERE guild_id=? AND user_id=? AND track=?",
                 (guild_id, user_id, TRACK_ROLE))
             claim_rows = await cursor.fetchall()
-        except aiosqlite.Error:
-            return None
-        if not claim_rows:
-            return None
+            if not claim_rows:
+                return None
 
-        reversed_role_claims: set[int] = set()
-        open_role_claims: set[int] = set()
-        try:
-            from utils import level_ops as ops
+            reversed_role_claims: set[int] = set()
+            open_role_claims: set[int] = set()
             cursor = await db.execute(
                 "SELECT claim_id, status FROM reward_reversals "
                 "WHERE guild_id=? AND user_id=? AND kind=?",
@@ -567,19 +581,20 @@ async def level_claim_role_entitled(guild_id: int, user_id: int,
                     reversed_role_claims.add(cid)
                 elif not st.startswith("resolved:"):
                     open_role_claims.add(cid)
-        except Exception:
-            pass
 
-        exclusive_roles = False
-        try:
+            exclusive_roles = False
             cursor = await db.execute(
                 "SELECT remove_old_reward_role FROM leveling_config WHERE guild_id=?",
                 (guild_id,))
             cfg_row = await cursor.fetchone()
             if cfg_row and cfg_row[0]:
                 exclusive_roles = True
-        except aiosqlite.Error:
-            exclusive_roles = False
+    except EntitlementCheckError:
+        raise
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify Level role claim entitlement: {exc}"
+        ) from exc
 
     partitions: dict[bool, dict[int, dict]] = {False: {}, True: {}}
     for claim_id, claimed_level, ref, payload, status in claim_rows:
@@ -669,19 +684,19 @@ async def role_still_entitled(guild_id: int, user_id: int, role_id: int,
     now = utcnow()
     member = _resolve_member_from_bot(bot, guild_id, user_id, member)
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT id, expires_at FROM timed_holdings "
-            "WHERE guild_id=? AND user_id=? AND role_id=?",
-            (guild_id, user_id, rid))
-        for holding_id, expires_at in await cursor.fetchall():
-            if exclude_entry_key and str(entry_key_id(exclude_entry_key)) == str(holding_id):
-                continue
-            if not is_expired(expires_at, now=now):
-                return "another unexpired timed holding"
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT id, expires_at FROM timed_holdings "
+                "WHERE guild_id=? AND user_id=? AND role_id=?",
+                (guild_id, user_id, rid))
+            for holding_id, expires_at in await cursor.fetchall():
+                if exclude_entry_key and str(entry_key_id(exclude_entry_key)) == str(holding_id):
+                    continue
+                if not is_expired(expires_at, now=now):
+                    return "another unexpired timed holding"
 
-        has_expired_temp_roles_row = False
-        try:
+            has_expired_temp_roles_row = False
             cursor = await db.execute(
                 "SELECT id, expires_at FROM temp_roles "
                 "WHERE guild_id=? AND user_id=? AND role_id=?",
@@ -692,10 +707,7 @@ async def role_still_entitled(guild_id: int, user_id: int, role_id: int,
                     return "unexpired temp_roles grant"
             if tr_rows:
                 has_expired_temp_roles_row = True
-        except aiosqlite.Error:
-            pass
 
-        try:
             cursor = await db.execute(
                 "SELECT item_name, item_type, source, metadata, quantity "
                 "FROM inventory_items WHERE guild_id=? AND user_id=? "
@@ -730,8 +742,12 @@ async def role_still_entitled(guild_id: int, user_id: int, role_id: int,
                 if meta_exp not in (None, "") and is_expired(meta_exp, now=now):
                     continue
                 return f"owned role item ({item_name}, {source})"
-        except aiosqlite.Error:
-            pass
+    except EntitlementCheckError:
+        raise
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify role ownership entitlement: {exc}"
+        ) from exc
 
     non_slot = await non_slot_role_entitlement(
         guild_id, user_id, rid, bot=bot, member=member)
@@ -840,20 +856,17 @@ async def reconcile_equip_for_expired_holding(guild_id: int, user_id: int,
         has_live_temp_roles = False
         has_expired_temp_roles = False
         async with aiosqlite.connect(DB_PATH) as db:
-            try:
-                cursor = await db.execute(
-                    "SELECT expires_at FROM temp_roles "
-                    "WHERE guild_id=? AND user_id=? AND role_id=?",
-                    (guild_id, user_id, rid))
-                tr_rows = await cursor.fetchall()
-                for (tr_exp,) in tr_rows:
-                    if not is_expired(tr_exp, now=now):
-                        has_live_temp_roles = True
-                        break
-                if tr_rows and not has_live_temp_roles:
-                    has_expired_temp_roles = True
-            except aiosqlite.Error:
-                pass
+            cursor = await db.execute(
+                "SELECT expires_at FROM temp_roles "
+                "WHERE guild_id=? AND user_id=? AND role_id=?",
+                (guild_id, user_id, rid))
+            tr_rows = await cursor.fetchall()
+            for (tr_exp,) in tr_rows:
+                if not is_expired(tr_exp, now=now):
+                    has_live_temp_roles = True
+                    break
+            if tr_rows and not has_live_temp_roles:
+                has_expired_temp_roles = True
 
         items = await get_inventory(guild_id, user_id, include_empty=False)
         candidates = []
@@ -928,7 +941,8 @@ async def expire_one(bot, holding: dict) -> dict:
             guild_id, user_id, role_id, exclude_entry_key=entry_key,
             bot=bot, member=member)
     except Exception as exc:  # pragma: no cover - defensive
-        return {"status": "kept", "reason": f"entitlement check failed: {exc}"}
+        err = f"entitlement check failed: {exc}"
+        return {"status": "kept", "reason": err, "error": err}
 
     if reason:
         # Another entitlement keeps the role. Reconcile `equipped_roles` first
@@ -937,8 +951,8 @@ async def expire_one(bot, holding: dict) -> dict:
             await reconcile_equip_for_expired_holding(
                 guild_id, user_id, entry_key, role_id=role_id)
         except Exception as exc:  # pragma: no cover - defensive
-            return {"status": "kept",
-                    "reason": f"equip bookkeeping cleanup failed: {exc}"}
+            err = f"equip bookkeeping cleanup failed: {exc}"
+            return {"status": "kept", "reason": err, "error": err}
         await delete_timed_holding(entry_key)
         return {"status": "removed", "reason": f"role retained ({reason})"}
 
@@ -958,8 +972,8 @@ async def expire_one(bot, holding: dict) -> dict:
         await clear_equip_for_holding(guild_id, user_id, entry_key,
                                       role_id=role_id)
     except Exception as exc:  # pragma: no cover - defensive
-        return {"status": "kept",
-                "reason": f"equip bookkeeping cleanup failed: {exc}"}
+        err = f"equip bookkeeping cleanup failed: {exc}"
+        return {"status": "kept", "reason": err, "error": err}
 
     await delete_timed_holding(entry_key)
     return {"status": "removed", "reason": "expired"}
@@ -980,6 +994,8 @@ async def cleanup_expired_holdings(bot, *, limit: int = 200) -> dict:
             removed += 1
         else:
             kept += 1
+            if result.get("error"):
+                errors.append(f"{holding.get('entry_key')}: {result['error']}")
     return {"removed": removed, "kept": kept, "errors": errors}
 
 
@@ -1243,6 +1259,7 @@ async def claim_purchase_transition(op_id: str, *,
                                     from_statuses: tuple[str, ...],
                                     to_status: str,
                                     detail: str | None = None,
+                                    require_uncompensated: bool | None = None,
                                     db: aiosqlite.Connection | None = None) -> bool:
     """Atomically move one purchase operation between states.
 
@@ -1250,12 +1267,23 @@ async def claim_purchase_transition(op_id: str, *,
     exactly-once: two concurrent retries (a double click, a restart mid-recovery)
     cannot both win the transition, so a refund or a stock restore can never be
     applied twice. Returns True only for the caller that won.
+
+    Whenever `to_status == PURCHASE_DELIVERED` (or `require_uncompensated=True`),
+    the SQL `WHERE` clause also enforces `COALESCE(refunded, 0) = 0 AND
+    COALESCE(stock_returned, 0) = 0` so an operation that has already begun or
+    completed compensation can never transition to `delivered`.
     """
+    if require_uncompensated is None:
+        require_uncompensated = (to_status == PURCHASE_DELIVERED)
     marks = ",".join("?" for _ in from_statuses)
+    guard_sql = (
+        " AND COALESCE(refunded, 0) = 0 AND COALESCE(stock_returned, 0) = 0"
+        if require_uncompensated else ""
+    )
     sql = (
         f"UPDATE shop_purchase_operations SET status=?, detail=?, "
         f"updated_at=CURRENT_TIMESTAMP "
-        f"WHERE op_id=? AND status IN ({marks})"
+        f"WHERE op_id=? AND status IN ({marks}){guard_sql}"
     )
     params = (to_status, detail, op_id, *from_statuses)
     if db is not None:
@@ -1323,7 +1351,8 @@ async def refund_purchase(op_id: str) -> dict:
         # Delivered means the member got the goods; anything after that is a
         # support decision, never an automatic refund.
         return {"refunded": False, "stock_returned": False,
-                "complete": True, "error": None}
+                "complete": False,
+                "error": "Cannot refund a delivered purchase operation"}
 
     error = None
     if op["charged"] and not op["refunded"]:
@@ -1345,7 +1374,8 @@ async def refund_purchase(op_id: str) -> dict:
                 if cur_status == PURCHASE_DELIVERED:
                     await db.execute("ROLLBACK")
                     return {"refunded": False, "stock_returned": False,
-                            "complete": True, "error": None}
+                            "complete": False,
+                            "error": "Cannot refund a delivered purchase operation"}
                 if cur_charged and not cur_refunded:
                     try:
                         credit_res = await safe_credit(
@@ -1404,7 +1434,8 @@ async def refund_purchase(op_id: str) -> dict:
                     await db.execute("ROLLBACK")
                     return {"refunded": bool(op["refunded"]),
                             "stock_returned": False,
-                            "complete": True, "error": None}
+                            "complete": False,
+                            "error": "Cannot refund a delivered purchase operation"}
                 if cur_reserved and not cur_returned:
                     try:
                         await restore_stock(op["item_id"], db=db)
@@ -1776,41 +1807,85 @@ async def resolve_purchase_operation(op_id: str, *, action: str,
                       "only 'uncertain' or 'failed' operations may be resolved."),
         }
 
-    prior_detail = op.get("detail") or ""
     operator_note = (note or "").strip()
 
     if normalized == "delivered":
-        if op["refunded"] or op["stock_returned"]:
-            return {
-                "success": False,
-                "op_id": op_id,
-                "action": normalized,
-                "status": current_status,
-                "error": ("Cannot mark operation as delivered because "
-                          "compensation has already been partially or fully "
-                          f"applied (refunded={op['refunded']}, "
-                          f"stock_returned={op['stock_returned']})."),
-            }
         audit_suffix = "Operator resolved as delivered"
         if operator_note:
             audit_suffix += f" ({operator_note})"
-        merged_detail = (f"{prior_detail} | {audit_suffix}"
-                         if prior_detail else audit_suffix)
-        won = await claim_purchase_transition(
-            op_id,
-            from_statuses=(PURCHASE_UNCERTAIN, PURCHASE_FAILED),
-            to_status=PURCHASE_DELIVERED,
-            detail=merged_detail,
-        )
+        async with aiosqlite.connect(DB_PATH) as db:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                cursor = await db.execute(
+                    "SELECT status, refunded, stock_returned, detail "
+                    "FROM shop_purchase_operations WHERE op_id=?",
+                    (op_id,))
+                cur_row = await cursor.fetchone()
+                if not cur_row:
+                    await db.execute("ROLLBACK")
+                    return {
+                        "success": False,
+                        "op_id": op_id,
+                        "action": normalized,
+                        "status": None,
+                        "error": f"Unknown purchase operation: {op_id}",
+                    }
+                cur_status, cur_refunded, cur_stock_returned, cur_detail = cur_row
+                if cur_status not in (PURCHASE_UNCERTAIN, PURCHASE_FAILED):
+                    await db.execute("ROLLBACK")
+                    return {
+                        "success": False,
+                        "op_id": op_id,
+                        "action": normalized,
+                        "status": cur_status,
+                        "error": (
+                            f"Cannot resolve operation in status {cur_status!r}; "
+                            "only 'uncertain' or 'failed' operations may be resolved."
+                        ),
+                    }
+                if int(cur_refunded or 0) != 0 or int(cur_stock_returned or 0) != 0:
+                    await db.execute("ROLLBACK")
+                    return {
+                        "success": False,
+                        "op_id": op_id,
+                        "action": normalized,
+                        "status": cur_status,
+                        "error": (
+                            "Cannot mark operation as delivered because "
+                            "compensation has already been partially or fully "
+                            f"applied (refunded={int(cur_refunded or 0)}, "
+                            f"stock_returned={int(cur_stock_returned or 0)})."
+                        ),
+                    }
+                live_detail = cur_detail or ""
+                merged_detail = (f"{live_detail} | {audit_suffix}"
+                                 if live_detail else audit_suffix)
+                won = await claim_purchase_transition(
+                    op_id,
+                    from_statuses=(PURCHASE_UNCERTAIN, PURCHASE_FAILED),
+                    to_status=PURCHASE_DELIVERED,
+                    detail=merged_detail,
+                    require_uncompensated=True,
+                    db=db,
+                )
+                if not won:
+                    await db.execute("ROLLBACK")
+                    updated = await get_purchase(op_id)
+                    return {
+                        "success": False,
+                        "op_id": op_id,
+                        "action": normalized,
+                        "status": updated["status"] if updated else None,
+                        "error": "Concurrent state change prevented transition to delivered.",
+                    }
+                await db.commit()
+            except Exception:
+                try:
+                    await db.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
         updated = await get_purchase(op_id)
-        if not won:
-            return {
-                "success": False,
-                "op_id": op_id,
-                "action": normalized,
-                "status": updated["status"] if updated else None,
-                "error": "Concurrent state change prevented transition to delivered.",
-            }
         return {
             "success": True,
             "op_id": op_id,
@@ -1840,14 +1915,85 @@ async def resolve_purchase_operation(op_id: str, *, action: str,
     audit_suffix = "Operator resolved via refund"
     if operator_note:
         audit_suffix += f" ({operator_note})"
-    merged_detail = (f"{prior_detail} | {audit_suffix}"
-                     if prior_detail else audit_suffix)
-    await claim_purchase_transition(
-        op_id,
-        from_statuses=(PURCHASE_UNCERTAIN, PURCHASE_FAILED, PURCHASE_REFUNDED),
-        to_status=PURCHASE_REFUNDED,
-        detail=merged_detail,
-    )
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT status, charged, refunded, stock_reserved, "
+                "stock_returned, detail "
+                "FROM shop_purchase_operations WHERE op_id=?",
+                (op_id,))
+            cur_row = await cursor.fetchone()
+            if not cur_row:
+                await db.execute("ROLLBACK")
+                return {
+                    "success": False,
+                    "op_id": op_id,
+                    "action": normalized,
+                    "status": None,
+                    "error": f"Unknown purchase operation: {op_id}",
+                }
+            (cur_status, cur_charged, cur_refunded,
+             cur_reserved, cur_returned, cur_detail) = cur_row
+            if cur_status not in (PURCHASE_UNCERTAIN, PURCHASE_FAILED):
+                await db.execute("ROLLBACK")
+                updated = await get_purchase(op_id)
+                return {
+                    "success": False,
+                    "op_id": op_id,
+                    "action": normalized,
+                    "status": cur_status,
+                    "refunded": bool(cur_refunded),
+                    "stock_returned": bool(cur_returned),
+                    "operation": updated,
+                    "error": (
+                        f"Cannot finalize refund in status {cur_status!r}; "
+                        "only 'uncertain' or 'failed' operations may be resolved."
+                    ),
+                }
+            if (cur_charged and not cur_refunded) or (cur_reserved and not cur_returned):
+                await db.execute("ROLLBACK")
+                updated = await get_purchase(op_id)
+                return {
+                    "success": False,
+                    "op_id": op_id,
+                    "action": normalized,
+                    "status": cur_status,
+                    "refunded": bool(cur_refunded),
+                    "stock_returned": bool(cur_returned),
+                    "operation": updated,
+                    "error": "Compensation flags are incomplete; cannot finalize refund.",
+                }
+            live_detail = cur_detail or ""
+            merged_detail = (f"{live_detail} | {audit_suffix}"
+                             if live_detail else audit_suffix)
+            won = await claim_purchase_transition(
+                op_id,
+                from_statuses=(PURCHASE_UNCERTAIN, PURCHASE_FAILED),
+                to_status=PURCHASE_REFUNDED,
+                detail=merged_detail,
+                db=db,
+            )
+            if not won:
+                await db.execute("ROLLBACK")
+                updated = await get_purchase(op_id)
+                return {
+                    "success": False,
+                    "op_id": op_id,
+                    "action": normalized,
+                    "status": updated["status"] if updated else None,
+                    "refunded": bool(cur_refunded),
+                    "stock_returned": bool(cur_returned),
+                    "operation": updated,
+                    "error": "Concurrent state change prevented transition to refunded.",
+                }
+            await db.commit()
+        except Exception:
+            try:
+                await db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
     updated = await get_purchase(op_id)
     return {
         "success": True,

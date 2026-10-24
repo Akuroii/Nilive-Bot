@@ -1484,6 +1484,339 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await TO.get_purchase(op_id))["status"],
                          TO.PURCHASE_DELIVERED)
 
+    async def test_finding_1_refund_vs_delivery_race_and_stale_snapshot_guard(self):
+        import asyncio
+
+        listing = shop_item("color", price=500, name="RaceHue",
+                            role_id=997, duration_hours=2, stock=2)
+        start_bal = rows("SELECT balance FROM economy")[0][0]
+
+        # ── Subcase A: Refund commits refunded=1, then a concurrent/interleaved
+        # `delivered` resolution (and direct `claim_purchase_transition` with a
+        # stale snapshot) attempts to mark the operation `delivered` BEFORE
+        # stock restoration or final status update runs.
+        op1 = await TO.open_purchase(
+            GUILD, USER, item_id=listing, item_name="RaceHue",
+            currency="balance", amount=500)
+        await TO.update_purchase(
+            op1, charged=1, stock_reserved=1, status=TO.PURCHASE_UNCERTAIN,
+            detail="race subcase A")
+        execute("UPDATE shop_items SET current_stock=1 WHERE id=?", (listing,))
+
+        real_restore = TO.restore_stock
+        race_results = {}
+
+        async def _restore_with_interleaved_delivered(item_id, *, db=None):
+            # At this exact point, refund_purchase's first BEGIN IMMEDIATE has
+            # committed `refunded=1`, while `status` is still `uncertain` and
+            # `stock_returned` is still `0`. Note that `db` here is the open
+            # stock-restore transaction, so we test the race right BEFORE
+            # `restore_stock` runs by releasing/testing via a separate hook.
+            return await real_restore(item_id, db=db)
+
+        real_refund_purchase = TO.refund_purchase
+
+        async def _interleaved_refund(oid):
+            # Run money refund step by temporarily failing stock restore, then
+            # run concurrent delivered attempts while refunded=1 & status='uncertain',
+            # then finish stock restore.
+            calls = {"n": 0}
+
+            async def _fail_once(item_id, *, db=None):
+                if calls["n"] == 0:
+                    calls["n"] += 1
+                    raise RuntimeError("pause between money credit and stock restore")
+                return await real_restore(item_id, db=db)
+
+            with patch.object(TO, "restore_stock", side_effect=_fail_once):
+                partial = await real_refund_purchase(oid)
+            self.assertFalse(partial["complete"])
+            mid_op = await TO.get_purchase(oid)
+            self.assertEqual(mid_op["status"], TO.PURCHASE_UNCERTAIN)
+            self.assertEqual(mid_op["refunded"], 1)
+            self.assertEqual(mid_op["stock_returned"], 0)
+
+            # Now attempt BOTH a high-level `resolve_purchase_operation(action='delivered')`
+            # AND a low-level `claim_purchase_transition(..., to_status=PURCHASE_DELIVERED)`
+            # simulating a caller that read `op` before `refunded=1` was set.
+            race_results["resolve_delivered"] = await TO.resolve_purchase_operation(
+                oid, action="delivered", confirmed=True,
+                note="concurrent delivered after refund started")
+            race_results["raw_claim_delivered"] = await TO.claim_purchase_transition(
+                oid,
+                from_statuses=(TO.PURCHASE_UNCERTAIN, TO.PURCHASE_FAILED),
+                to_status=TO.PURCHASE_DELIVERED,
+                detail="stale snapshot bypass attempt",
+            )
+            # Now complete the remaining half of refund_purchase:
+            return await real_refund_purchase(oid)
+
+        with patch.object(TO, "refund_purchase", side_effect=_interleaved_refund):
+            res_refund = await TO.resolve_purchase_operation(
+                op1, action="refund", confirmed=True,
+                note="operator refund")
+
+        self.assertFalse(
+            race_results["resolve_delivered"]["success"],
+            "delivered resolution must be rejected once refunded=1 is committed")
+        self.assertFalse(
+            race_results["raw_claim_delivered"],
+            "SQL WHERE clause in claim_purchase_transition must block delivered when refunded=1")
+        self.assertTrue(res_refund["success"], str(res_refund))
+        final_op1 = await TO.get_purchase(op1)
+        self.assertEqual(final_op1["status"], TO.PURCHASE_REFUNDED)
+        self.assertEqual(final_op1["refunded"], 1)
+        self.assertEqual(final_op1["stock_returned"], 1)
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], start_bal + 500)
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
+            [(2,)])
+
+        # ── Subcase B: Also verify that `stock_returned=1` alone (e.g. Free item
+        # with charged=0, stock_reserved=1) blocks `delivered` at the SQL level.
+        op_free = await TO.open_purchase(
+            GUILD, USER, item_id=listing, item_name="RaceHue",
+            currency="balance", amount=0)
+        await TO.update_purchase(
+            op_free, charged=0, stock_reserved=1, stock_returned=1,
+            status=TO.PURCHASE_UNCERTAIN, detail="stock already returned")
+        self.assertFalse(await TO.claim_purchase_transition(
+            op_free,
+            from_statuses=(TO.PURCHASE_UNCERTAIN, TO.PURCHASE_FAILED),
+            to_status=TO.PURCHASE_DELIVERED,
+            detail="must fail because stock_returned=1",
+        ))
+        deliv_free = await TO.resolve_purchase_operation(
+            op_free, action="delivered", confirmed=True, note="must fail")
+        self.assertFalse(deliv_free["success"])
+        self.assertEqual((await TO.get_purchase(op_free))["status"],
+                         TO.PURCHASE_UNCERTAIN)
+
+        # ── Subcase C: Concurrent `delivered` vs `refund` where `delivered`
+        # commits first — `refund` must fail without crediting money or stock.
+        bal_before_c = rows("SELECT balance FROM economy")[0][0]
+        execute("UPDATE shop_items SET current_stock=1 WHERE id=?", (listing,))
+        op2 = await TO.open_purchase(
+            GUILD, USER, item_id=listing, item_name="RaceHue",
+            currency="balance", amount=500)
+        await TO.update_purchase(
+            op2, charged=1, stock_reserved=1, status=TO.PURCHASE_UNCERTAIN,
+            detail="race subcase C")
+
+        async def _refund_after_delivered_wins(oid):
+            # Delivered wins right before refund_purchase enters its BEGIN IMMEDIATE
+            deliv_win = await TO.resolve_purchase_operation(
+                oid, action="delivered", confirmed=True,
+                note="delivered won first")
+            self.assertTrue(deliv_win["success"])
+            return await real_refund_purchase(oid)
+
+        with patch.object(TO, "refund_purchase",
+                          side_effect=_refund_after_delivered_wins):
+            refund_lose = await TO.resolve_purchase_operation(
+                op2, action="refund", confirmed=True,
+                note="late refund attempt")
+
+        self.assertFalse(refund_lose["success"],
+                         "refund must fail when delivered won the race")
+        final_op2 = await TO.get_purchase(op2)
+        self.assertEqual(final_op2["status"], TO.PURCHASE_DELIVERED)
+        self.assertEqual(final_op2["refunded"], 0)
+        self.assertEqual(final_op2["stock_returned"], 0)
+        self.assertEqual(rows("SELECT balance FROM economy")[0][0], bal_before_c,
+                         "no money may be refunded when delivered won")
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
+            [(1,)],
+            "no stock may be restored when delivered won")
+
+        # ── Subcase D: Overlapping concurrent `refund` vs `refund` via asyncio.gather
+        # credits money once, restores stock once, and only one caller wins finalization.
+        op3 = await TO.open_purchase(
+            GUILD, USER, item_id=listing, item_name="RaceHue",
+            currency="balance", amount=500)
+        await TO.update_purchase(
+            op3, charged=1, stock_reserved=1, status=TO.PURCHASE_UNCERTAIN,
+            detail="race subcase D")
+        r1, r2 = await asyncio.gather(
+            TO.resolve_purchase_operation(
+                op3, action="refund", confirmed=True, note="concurrent 1"),
+            TO.resolve_purchase_operation(
+                op3, action="refund", confirmed=True, note="concurrent 2"),
+        )
+        self.assertEqual(
+            sorted([r1["success"], r2["success"]]), [False, True],
+            "exactly one concurrent refund resolution may win finalization")
+        final_op3 = await TO.get_purchase(op3)
+        self.assertEqual(final_op3["status"], TO.PURCHASE_REFUNDED)
+        self.assertEqual(final_op3["refunded"], 1)
+        self.assertEqual(final_op3["stock_returned"], 1)
+        self.assertEqual(
+            rows("SELECT balance FROM economy")[0][0], bal_before_c + 500,
+            "concurrent refunds must credit balance only once")
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (listing,)),
+            [(2,)],
+            "concurrent refunds must restore stock only once")
+
+    async def test_finding_2_entitlement_checks_fail_safely_and_recover(self):
+        from utils.equip_engine import unequip_role
+
+        r_plain = role_stub(998, "PlainTimedColor")
+        r_shared = role_stub(999, "SharedLevelColor")
+        _, person, bot, guild = purchase_ctx(granted_role=r_plain)
+        roles_map = {998: r_plain, 999: r_shared}
+        guild.get_role = lambda rid: roles_map.get(int(rid))
+
+        async def _add_role(r, reason=None):
+            if r not in person.roles:
+                person.roles.append(r)
+
+        async def _rem_role(r, reason=None):
+            person.roles = [x for x in person.roles if x.id != r.id]
+
+        person.add_roles = AsyncMock(side_effect=_add_role)
+        person.remove_roles = AsyncMock(side_effect=_rem_role)
+
+        # ── 1. Successful check with no independent entitlement -> normal removal
+        g1 = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="PlainTimedColor", duration_hours=1,
+            item_type="temp_role", category=TO.CATEGORY_COLOR, role_id=998)
+        self.assertTrue(g1["success"])
+        self.assertIn(r_plain, person.roles)
+        await self._expire(g1["entry_key"])
+
+        self.assertIsNone(
+            await TO.role_still_entitled(
+                GUILD, USER, 998, exclude_entry_key=g1["entry_key"],
+                bot=bot, member=person))
+        stats1 = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats1, {"removed": 1, "kept": 0, "errors": []})
+        person.remove_roles.assert_awaited_once()
+        self.assertNotIn(r_plain, person.roles)
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
+
+        # ── 2. Timed Color + permanent Level role claim sharing the same role_id (999)
+        person.remove_roles.reset_mock()
+        execute("""
+            INSERT INTO level_reward_claims
+                (guild_id, user_id, reward_level, track, reward_ref,
+                 payload_json, status, source, created_at)
+            VALUES (?, ?, 10, 'role', '10', ?, 'fulfilled', 'xp', ?)
+        """, (GUILD, USER, json.dumps({"role_id": 999}), TO.iso()))
+
+        g2 = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="SharedLevelColor", duration_hours=1,
+            item_type="temp_role", category=TO.CATEGORY_COLOR, role_id=999)
+        self.assertTrue(g2["success"])
+        self.assertIn(r_shared, person.roles)
+        await self._expire(g2["entry_key"])
+
+        # ── 3. Database/query failure during entitlement verification:
+        # Break `level_reward_claims` in SQLite (simulating a failed query/missing
+        # table) and verify:
+        #   - `level_claim_role_entitled` and `role_still_entitled` raise
+        #     `EntitlementCheckError` instead of returning None;
+        #   - `cleanup_expired_holdings` does NOT remove the Discord role and
+        #     does NOT delete the expired holding's retry marker;
+        #   - `unequip_role` also refuses to remove the role while entitlement
+        #     verification is failing.
+        execute("ALTER TABLE level_reward_claims RENAME TO _broken_level_reward_claims")
+        try:
+            with self.assertRaises(TO.EntitlementCheckError):
+                await TO.level_claim_role_entitled(
+                    GUILD, USER, 999, bot=bot, member=person)
+            with self.assertRaises(TO.EntitlementCheckError):
+                await TO.role_still_entitled(
+                    GUILD, USER, 999, exclude_entry_key=g2["entry_key"],
+                    bot=bot, member=person)
+
+            stats_fail = await TO.cleanup_expired_holdings(bot)
+            self.assertEqual(stats_fail["removed"], 0)
+            self.assertEqual(stats_fail["kept"], 1)
+            self.assertEqual(len(stats_fail["errors"]), 1)
+            self.assertIn("entitlement check failed", stats_fail["errors"][0])
+            person.remove_roles.assert_not_awaited()
+            self.assertIn(r_shared, person.roles,
+                          "Discord role must stay when entitlement check fails")
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM timed_holdings"), [(1,)],
+                "expired holding retry marker must stay when entitlement check fails")
+
+            unequip_fail = await unequip_role(
+                bot, GUILD, USER, "SharedLevelColor",
+                entry_key=g2["entry_key"])
+            self.assertFalse(unequip_fail["success"])
+            person.remove_roles.assert_not_awaited()
+            self.assertIn(r_shared, person.roles)
+        finally:
+            execute("ALTER TABLE _broken_level_reward_claims RENAME TO level_reward_claims")
+
+        # Also verify that DB failures in `inventory_items` and `prestige_roles`
+        # similarly raise `EntitlementCheckError` and keep the role + retry marker.
+        execute("ALTER TABLE inventory_items RENAME TO _broken_inventory_items")
+        try:
+            with self.assertRaises(TO.EntitlementCheckError):
+                await TO.role_still_entitled(
+                    GUILD, USER, 999, exclude_entry_key=g2["entry_key"],
+                    bot=bot, member=person)
+            stats_inv_fail = await TO.cleanup_expired_holdings(bot)
+            self.assertEqual(stats_inv_fail["removed"], 0)
+            self.assertEqual(stats_inv_fail["kept"], 1)
+            self.assertEqual(len(stats_inv_fail["errors"]), 1)
+            person.remove_roles.assert_not_awaited()
+        finally:
+            execute("ALTER TABLE _broken_inventory_items RENAME TO inventory_items")
+
+        execute("ALTER TABLE prestige_roles RENAME TO _broken_prestige_roles")
+        try:
+            with self.assertRaises(TO.EntitlementCheckError):
+                await TO.member_managed_role_ids(
+                    GUILD, USER, bot=bot, member=person)
+        finally:
+            execute("ALTER TABLE _broken_prestige_roles RENAME TO prestige_roles")
+
+        # ── 4. Recovery on a later cleanup pass after the query failure is removed:
+        # 4a: With the fulfilled Level role claim present, cleanup now succeeds,
+        # retires the expired timed holding, reconciles `equipped_roles`, and
+        # retains the Discord role on the member!
+        stats_recovered_entitled = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(
+            stats_recovered_entitled, {"removed": 1, "kept": 0, "errors": []})
+        person.remove_roles.assert_not_awaited()
+        self.assertIn(r_shared, person.roles,
+                      "permanent Level role claim keeps the Discord role")
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
+        self.assertIsNone(await get_equipped(GUILD, USER))
+
+        # 4b: When no independent entitlement exists and a transient query
+        # failure is resolved on the next pass, the role and retry marker are
+        # kept during the failure and cleanly removed on the recovery pass.
+        execute("DELETE FROM level_reward_claims WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+        g3 = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="SharedLevelColor", duration_hours=1,
+            item_type="temp_role", category=TO.CATEGORY_COLOR, role_id=999)
+        await self._expire(g3["entry_key"])
+
+        execute("ALTER TABLE level_reward_claims RENAME TO _broken_level_reward_claims")
+        try:
+            stats_transient = await TO.cleanup_expired_holdings(bot)
+            self.assertEqual(stats_transient["removed"], 0)
+            self.assertEqual(stats_transient["kept"], 1)
+            self.assertEqual(len(stats_transient["errors"]), 1)
+            person.remove_roles.assert_not_awaited()
+            self.assertIn(r_shared, person.roles)
+            self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(1,)])
+        finally:
+            execute("ALTER TABLE _broken_level_reward_claims RENAME TO level_reward_claims")
+
+        stats_final = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats_final, {"removed": 1, "kept": 0, "errors": []})
+        person.remove_roles.assert_awaited_once()
+        self.assertNotIn(r_shared, person.roles)
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
