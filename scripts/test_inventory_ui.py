@@ -191,13 +191,15 @@ async def main():
     await reset_all()
 
     import discord
-    from utils.inventory import give_item, get_inventory
+    from utils.inventory import give_item, get_inventory, find_entry
     from utils.item_catalog import upsert_catalog_entry
     from utils.currency import set_currency_config, get_currency_config
     from utils.economy_safe import safe_credit
     from cogs.wallet import (
-        TAB_ITEMS, TAB_POTIONS, TAB_TITLES, INVENTORY_PAGE_SIZE,
-        build_inventory_embed, paginate_entries, remaining_hours_minutes,
+        TAB_ITEMS, TAB_COLORS, TAB_POTIONS, TAB_TITLES,
+        INVENTORY_PAGE_SIZE,
+        build_inventory_embed, build_item_embed, paginate_entries,
+        remaining_hours_minutes,
         open_inventory_panel, open_item_panel, InventoryView,
         InventoryItemSelect, InventoryPageButton, InventoryBackButton,
         InventoryTabButton, WalletHubView, ItemPanelView, _decorate,
@@ -375,8 +377,15 @@ async def main():
     check("Select option reuses the prepared emoji",
           opt.emoji is not None and str(opt.emoji.id) == "150000000000000001",
           str(opt.emoji))
-    check("Select value maps back to the real item name",
-          select._by_value[opt.value] == "Sunglasses", str(select._by_value))
+    # The option value identifies the ENTRY, not the name: two entries can
+    # legitimately share a display name, and the panel opened from a stale
+    # view must land on the same record the member selected.
+    check("Select value maps back to the entry_key",
+          select._by_value[opt.value] == f"i:{shade.get('id')}",
+          str(select._by_value))
+    check("that entry_key resolves back to the real item",
+          find_entry(entries, entry_key=select._by_value[opt.value])
+          ["item_name"] == "Sunglasses", str(select._by_value))
 
     # Fallback 1: legacy custom emoji typed into icon_url
     check("fallback to a legacy custom emoji",
@@ -623,7 +632,8 @@ async def main():
                 rows.setdefault(child.row, []).append(child)
 
             tabs = [c for c in rows.get(0, []) if isinstance(c, InventoryTabButton)]
-            if [t.tab for t in tabs] != [TAB_ITEMS, TAB_POTIONS, TAB_TITLES]:
+            if [t.tab for t in tabs] != [TAB_ITEMS, TAB_COLORS,
+                                         TAB_POTIONS, TAB_TITLES]:
                 layout_ok = False
             if not any(isinstance(c, InventoryItemSelect) for c in rows.get(1, [])):
                 layout_ok = False
@@ -931,6 +941,114 @@ async def main():
     hub_embed = build_hub_embed(snap)
     check("wallet hub renderer unchanged", hub_embed.title == "✦ WALLET ✦",
           str(hub_embed.title))
+
+    # ── 11. Colors tab (role-backed, permanent or timed) ───────────────
+    section("11. Colors tab")
+    from utils.timed_ownership import (
+        grant_timed_holding, expiry_from_hours, CATEGORY_COLOR,
+    )
+    from cogs.wallet import (
+        TAB_COLORS, is_color_entry, TAB_AUTHOR_WORD, TAB_EMPTY_TEXT,
+    )
+    from utils.inventory import find_entry
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM inventory_items")
+        await db.execute("DELETE FROM timed_holdings")
+        await db.execute("DELETE FROM equipped_roles")
+        await db.commit()
+
+    async def color_grant(name, role_id, hours, category=CATEGORY_COLOR):
+        # The Discord side is not under test here; this writes exactly the
+        # ownership record a timed Color purchase ends up with.
+        holding_id = await grant_timed_holding(
+            GUILD, USER, name, expires_at=expiry_from_hours(hours),
+            item_type="temp_role", category=category, role_id=role_id,
+            metadata={"role_id": role_id, "category": category})
+        return {"entry_key": f"h:{holding_id}"}
+
+    # A permanent Color (a role-backed inventory row) and a timed one.
+    await give_item(GUILD, USER, "Ember", 1, item_type="role",
+                    metadata={"role_id": 5150, "category": CATEGORY_COLOR})
+    # An ordinary role reward with NO Colors listing: not a Color.
+    await give_item(GUILD, USER, "Guard", 1, item_type="role",
+                    metadata={"role_id": 5151})
+    timed = await color_grant("Frost", 5152, 6)
+
+    entries = await _decorate(
+        GUILD, split_by_tab(await get_inventory(GUILD, USER))[TAB_COLORS])
+    names = sorted(e["item_name"] for e in entries)
+    check("Colors tab holds only category-tagged entries",
+          names == ["Ember", "Frost"], str(names))
+    check("a plain role reward stays in the Items tab",
+          [e["item_name"] for e in split_by_tab(
+              await get_inventory(GUILD, USER))[TAB_ITEMS]] == ["Guard"],
+          "Guard")
+    check("is_color_entry reads provenance, not the item type",
+          is_color_entry({"category": CATEGORY_COLOR, "item_type": "temp_role"})
+          and not is_color_entry({"item_type": "role"}))
+    check("Colors tab has its own author word and empty text",
+          TAB_AUTHOR_WORD.get(TAB_COLORS) and TAB_EMPTY_TEXT.get(TAB_COLORS))
+
+    cemb = build_inventory_embed(TAB_COLORS, entries, bot_name=BOT_NAME,
+                                 username=USERNAME)
+    ctext = cemb.description or ""
+    check("permanent Color is rendered as a role mention",
+          "<@&5150>" in ctext, ctext)
+    check("timed Color is rendered as a role mention too",
+          "<@&5152>" in ctext, ctext)
+    check("no role mention is swallowed by backticks",
+          "` <@&" not in ctext, ctext)
+    check("permanent Color has no countdown",
+          not any("<@&5150>" in ln and ":" in ln.split("<@&5150>")[1]
+                  for ln in lines_of(cemb)), ctext)
+    check("timed Color shows its remaining time",
+          any("<@&5152>" in ln and ":" in ln for ln in lines_of(cemb)), ctext)
+    check("every Colors line keeps the shared template",
+          all(ln.startswith("> - ") for ln in lines_of(cemb)), ctext)
+
+    # Stale-select safety: the option value is the entry_key, so two entries
+    # that share a display name can never be confused for one another.
+    entries.append({**entries[0], "entry_key": "h:999",
+                    "item_name": entries[0]["item_name"]})
+    page_entries, _, _ = paginate_entries(entries, 0)
+    sel = InventoryItemSelect(GUILD, USER, TAB_COLORS, page_entries, 0)
+    keys = list(sel._by_value.values())
+    check("duplicate names get distinct entry_keys in the select",
+          len(set(keys)) == len(keys) and "h:999" in keys, str(keys))
+    check("each option resolves to exactly its own entry",
+          all(find_entry(entries, entry_key=k)["entry_key"] == k for k in keys),
+          str(keys))
+    entries.pop()
+
+    color_entries = await _decorate(
+        GUILD, split_by_tab(await get_inventory(GUILD, USER))[TAB_COLORS])
+    timed_entry = next(e for e in color_entries if e["timed"])
+    item_view = ItemPanelView(GUILD, USER, TAB_COLORS, timed_entry, False, 0)
+    labels = [c.label for c in item_view.children if getattr(c, "label", None)]
+    check("a timed Color offers Equip but no Drop",
+          "Equip" in labels and "Drop" not in labels, str(labels))
+    check("the item panel keeps the entry_key it was opened with",
+          item_view.entry_key == timed["entry_key"], str(item_view.entry_key))
+
+    perm_entry = next(e for e in color_entries if not e["timed"])
+    perm_view = ItemPanelView(GUILD, USER, TAB_COLORS, perm_entry, False, 0)
+    check("a permanent Color still offers Drop",
+          "Drop" in [c.label for c in perm_view.children
+                     if getattr(c, "label", None)],
+          str([getattr(c, "label", None) for c in perm_view.children]))
+
+    colors_guild = FakeGuild()
+    colors_guild._roles = {5150: FakeRole(5150), 5152: FakeRole(5152)}
+    det = build_item_embed(colors_guild, TAB_COLORS, timed_entry, False)
+    det_text = " ".join(f"{f.name} {f.value}" for f in det.fields)
+    check("Colors detail shows the role and the remaining time",
+          "<@&5152>" in det_text and "Time remaining" in det_text, det_text)
+
+    idem = build_item_embed(colors_guild, TAB_COLORS, perm_entry, False)
+    idem_text = " ".join(f"{f.name} {f.value}" for f in idem.fields)
+    check("permanent Colors detail shows no countdown",
+          "Time remaining" not in idem_text, idem_text)
 
     print(f"\n\033[1mResults: {_passed} passed, {_failed} failed\033[0m")
     return 1 if _failed else 0
