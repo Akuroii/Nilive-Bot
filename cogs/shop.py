@@ -485,16 +485,92 @@ async def process_purchase(interaction: discord.Interaction,
             pay_amount=pay_amount, pay_currency=pay_currency, free=free)
         return
 
-    # Receipt LAST: purchase_history now records finalized purchases only. The
-    # journal row is the audit trail for attempts that never got that far, and
-    # a refund writes its own ledger row so the money movement stays visible.
+    # Receipt LAST: purchase_history now records finalized purchases only, and
+    # the receipt insert + `pending -> delivered` transition execute atomically
+    # inside one `BEGIN IMMEDIATE` transaction guarded by `refunded=0 AND
+    # stock_returned=0`. If the operation left `pending` while delivery was in
+    # flight (for example, parked as `uncertain` and refunded by an operator),
+    # the transaction rolls back so no receipt row is persisted and `status` is
+    # never overwritten into `delivered`.
     snap = snapshot_user(interaction.user)
-    history_id = await _write_purchase_history(
-        guild_id, user_id, snap["display_name"], iid, name,
-        pay_amount, delivery.get("expires_at"), pay_currency)
-    await update_purchase(op_id, status=PURCHASE_DELIVERED,
-                          history_id=history_id,
-                          detail=delivery.get("detail") or None)
+    finalized = False
+    history_id = None
+    committed_outside_tx = False
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            try:
+                history_id = await _write_purchase_history(
+                    guild_id, user_id, snap["display_name"], iid, name,
+                    pay_amount, delivery.get("expires_at"), pay_currency,
+                    db=db)
+            except TypeError as type_exc:
+                if "db" not in str(type_exc):
+                    raise
+                history_id = await _write_purchase_history(
+                    guild_id, user_id, snap["display_name"], iid, name,
+                    pay_amount, delivery.get("expires_at"), pay_currency)
+                committed_outside_tx = True
+
+            finalized = await claim_purchase_transition(
+                op_id,
+                from_statuses=(PURCHASE_PENDING,),
+                to_status=PURCHASE_DELIVERED,
+                detail=delivery.get("detail") or None,
+                history_id=history_id,
+                require_uncompensated=True,
+                db=db,
+            )
+            if finalized:
+                await db.commit()
+            else:
+                await db.execute("ROLLBACK")
+        except Exception:
+            try:
+                await db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
+    if not finalized:
+        if committed_outside_tx and history_id is not None:
+            try:
+                async with aiosqlite.connect(DB_PATH) as cleanup_db:
+                    await cleanup_db.execute(
+                        "DELETE FROM purchase_history WHERE id=?",
+                        (int(history_id),))
+                    await cleanup_db.commit()
+            except Exception:
+                pass
+        late_key = delivery.get("entry_key")
+        if late_key and str(late_key).startswith("h:"):
+            try:
+                from utils.timed_ownership import (
+                    get_purchase, clear_equip_for_holding, delete_timed_holding,
+                    PURCHASE_REFUNDED,
+                )
+                cur_op = await get_purchase(op_id)
+                if cur_op and (
+                    cur_op.get("status") in (PURCHASE_REFUNDED, PURCHASE_FAILED)
+                    or cur_op.get("refunded")
+                    or cur_op.get("stock_returned")
+                ):
+                    await clear_equip_for_holding(
+                        guild_id, user_id, str(late_key), role_id=role_id)
+                    await delete_timed_holding(str(late_key))
+            except Exception:
+                pass
+        embed = discord.Embed(
+            title="⚠️ Purchase needs a check",
+            description=(
+                f"The purchase for **{name}** could not be finalized because "
+                f"operation `{op_id}` was already updated or refunded while "
+                f"delivery was in progress."
+            ),
+            color=0xFAA61A,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
 
     cur = await get_currency_config(guild_id)
     cinfo = for_currency(cur, pay_currency)
@@ -546,24 +622,33 @@ async def _write_purchase_history(guild_id: int, user_id: int,
                                  display_name: str, item_id: int,
                                  item_name: str, price_paid: int,
                                  expires_at: str | None,
-                                 currency: str | None) -> int:
+                                 currency: str | None, *,
+                                 db: aiosqlite.Connection | None = None) -> int:
     """Insert the receipt row and return its id.
 
     A Free item records the normal receipt with a zero value, exactly as the
     Prestige VI activation does: price_paid = 0 with the same currency key a
     paid purchase of this listing would have used. No ledger row is written
     because no ledger movement occurred.
+
+    When `db` is supplied, joins the caller's open transaction without
+    committing so the receipt and the journal transition commit atomically.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            INSERT INTO purchase_history
-                (guild_id, user_id, user_display_name,
-                 item_id, item_name, price_paid, expires_at,
-                 currency_paid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (guild_id, user_id, display_name,
-              item_id, item_name, price_paid, expires_at, currency))
-        await db.commit()
+    sql = """
+        INSERT INTO purchase_history
+            (guild_id, user_id, user_display_name,
+             item_id, item_name, price_paid, expires_at,
+             currency_paid)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    params = (guild_id, user_id, display_name,
+              item_id, item_name, price_paid, expires_at, currency)
+    if db is not None:
+        cursor = await db.execute(sql, params)
+        return cursor.lastrowid
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute(sql, params)
+        await conn.commit()
         return cursor.lastrowid
 
 
@@ -587,7 +672,7 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
     """
     result = {"success": False, "expires_at": None, "warning": None,
               "detail": None, "boost_expires_at": None, "error": None,
-              "uncertain": False}
+              "uncertain": False, "entry_key": None}
     timed = bool(duration_hours)
     bot = interaction.client
 
@@ -612,6 +697,7 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
                         "not be saved; an admin should check this purchase.")
                 return result
             result.update(success=True, expires_at=granted.get("expires_at"),
+                          entry_key=granted.get("entry_key"),
                           detail=f"holding {granted.get('entry_key')}")
             return result
 
@@ -708,6 +794,7 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
                               uncertain=granted.get("uncertain", False))
                 return result
             result.update(success=True, expires_at=granted.get("expires_at"),
+                          entry_key=granted.get("entry_key"),
                           detail=f"holding {granted.get('entry_key')}")
             return result
 
@@ -744,7 +831,13 @@ async def _compensate_failed_purchase(interaction: discord.Interaction, *,
     """
     reason = delivery.get("error") or "Delivery failed."
     if delivery.get("uncertain"):
-        await update_purchase(op_id, status=PURCHASE_UNCERTAIN, detail=reason)
+        await claim_purchase_transition(
+            op_id,
+            from_statuses=(PURCHASE_PENDING, PURCHASE_UNCERTAIN),
+            to_status=PURCHASE_UNCERTAIN,
+            detail=reason,
+            require_uncompensated=True,
+        )
         embed = discord.Embed(
             title="⚠️ Purchase needs a check",
             description=(f"The payment for **{name}** went through, but the "

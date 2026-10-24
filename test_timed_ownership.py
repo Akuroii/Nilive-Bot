@@ -1048,14 +1048,19 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         itx, person, bot, _ = purchase_ctx(granted_role=role_obj)
 
         # Case 1: Member already owns a permanent item named "PermShade", and
-        # Discord add_roles fails. Prior inventory row must be preserved intact
-        # and purchase cleanly refunded (not uncertain).
+        # Discord add_roles fails with a definite pre-application rejection
+        # (403 Forbidden). Prior inventory row must be preserved intact and
+        # purchase cleanly refunded (not uncertain).
+        import discord
         await give_item(GUILD, USER, "PermShade", 1, item_type="role",
                         source="event",
                         metadata={"role_id": 989, "category": "color",
                                   "custom_tag": "keep_me"})
         before_bal = rows("SELECT balance FROM economy")[0][0]
-        person.add_roles = AsyncMock(side_effect=RuntimeError("discord 500"))
+        forbidden_403 = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"),
+            {"code": 50013, "message": "Missing Permissions"})
+        person.add_roles = AsyncMock(side_effect=forbidden_403)
         await process_purchase(itx, listing)
 
         self.assertEqual(rows("SELECT balance FROM economy")[0][0], before_bal,
@@ -1816,6 +1821,422 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         person.remove_roles.assert_awaited_once()
         self.assertNotIn(r_shared, person.roles)
         self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
+
+    async def test_p1_paused_process_purchase_cannot_overwrite_operator_refund(self):
+        """P1 regression: a paused `process_purchase` that resumes after an
+        operator refund must not overwrite `status='refunded'` into `delivered`
+        or leave a `purchase_history` receipt.
+        """
+        import asyncio
+        import cogs.shop as shop_mod
+
+        item_id = shop_item(
+            kind="custom", name="P1 Race Relic", price=300, stock=2,
+            duration_hours=24)
+        inter, _, _, _ = purchase_ctx()
+
+        entered_delivery = asyncio.Event()
+        release_delivery = asyncio.Event()
+        real_deliver = shop_mod._deliver_purchase
+
+        async def _slow_deliver(*args, **kwargs):
+            entered_delivery.set()
+            await release_delivery.wait()
+            return await real_deliver(*args, **kwargs)
+
+        with patch.object(shop_mod, "_deliver_purchase", side_effect=_slow_deliver):
+            purchase_task = asyncio.create_task(
+                process_purchase(inter, item_id))
+            await asyncio.wait_for(entered_delivery.wait(), timeout=5.0)
+
+            # While delivery is in flight, charge and stock reservation are committed.
+            op_rows = rows("SELECT op_id, status, charged, stock_reserved "
+                           "FROM shop_purchase_operations")
+            self.assertEqual(len(op_rows), 1)
+            op_id, init_status, init_charged, init_reserved = op_rows[0]
+            self.assertEqual(init_status, TO.PURCHASE_PENDING)
+            self.assertEqual((init_charged, init_reserved), (1, 1))
+            self.assertEqual(
+                rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                     (GUILD, USER)), [(8700,)])
+            self.assertEqual(
+                rows("SELECT current_stock FROM shop_items WHERE id=?",
+                     (item_id,)), [(1,)])
+
+            # Timeout reconciliation parks the stale pending operation as `uncertain`,
+            # and an operator resolves it via `refund` before `_deliver_purchase` finishes.
+            execute("UPDATE shop_purchase_operations "
+                    "SET created_at = datetime('now', '-30 minutes') "
+                    "WHERE op_id=?", (op_id,))
+            rec = await TO.reconcile_purchases(older_than_minutes=15)
+            self.assertEqual(rec["uncertain"], 1)
+            self.assertEqual((await TO.get_purchase(op_id))["status"],
+                             TO.PURCHASE_UNCERTAIN)
+
+            resolved = await TO.resolve_purchase_operation(
+                op_id, action="refund", confirmed=True,
+                note="operator refunded while delivery was stalled")
+            self.assertTrue(resolved["success"], str(resolved))
+            self.assertEqual(resolved["status"], TO.PURCHASE_REFUNDED)
+            self.assertEqual(
+                rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                     (GUILD, USER)), [(9000,)])
+            self.assertEqual(
+                rows("SELECT current_stock FROM shop_items WHERE id=?",
+                     (item_id,)), [(2,)])
+
+            # Release the stalled delivery coroutine so `process_purchase` tries
+            # to write `purchase_history` and mark the operation `delivered`.
+            release_delivery.set()
+            await asyncio.wait_for(purchase_task, timeout=5.0)
+
+        # Direct database-level guards must also reject any attempt to force
+        # `status='delivered'` or `status='uncertain'` on the refunded operation.
+        self.assertFalse(await TO.update_purchase(
+            op_id, status=TO.PURCHASE_DELIVERED, history_id=999,
+            detail="stale direct update"))
+        self.assertFalse(await TO.update_purchase(
+            op_id, status=TO.PURCHASE_UNCERTAIN, detail="stale uncertain update"))
+        self.assertFalse(await TO.claim_purchase_transition(
+            op_id,
+            from_statuses=(TO.PURCHASE_PENDING, TO.PURCHASE_UNCERTAIN,
+                           TO.PURCHASE_REFUNDED),
+            to_status=TO.PURCHASE_DELIVERED,
+            detail="stale transition"))
+
+        final_op = await TO.get_purchase(op_id)
+        self.assertEqual(final_op["status"], TO.PURCHASE_REFUNDED)
+        self.assertEqual(final_op["refunded"], 1)
+        self.assertEqual(final_op["stock_returned"], 1)
+        self.assertIsNone(final_op["history_id"])
+        self.assertEqual(rows("SELECT COUNT(*) FROM purchase_history"), [(0,)],
+                         "refunded purchase must not leave a purchase_history receipt")
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)],
+                         "late timed holding for an already-refunded purchase must be cleaned up")
+
+        text = reply_text(inter)
+        self.assertIn("Purchase needs a check", text)
+        self.assertNotIn("Purchase successful", text)
+
+        # Subsequent refund/reconcile passes must be complete no-ops.
+        again = await TO.refund_purchase(op_id)
+        self.assertTrue(again["complete"])
+        self.assertEqual(
+            rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                 (GUILD, USER)), [(9000,)])
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?",
+                 (item_id,)), [(2,)])
+
+    async def test_p2_ambiguous_vs_definite_discord_role_grant_in_helper_and_shop(self):
+        """P2 regression: ambiguous `member.add_roles()` outcomes (timeout/transport
+        or role observed on member) must return `uncertain=True` and never
+        auto-refund, whereas definite 4xx rejections (`discord.Forbidden`) before
+        role application follow the known-failure compensation path.
+        """
+        import asyncio
+        import discord
+        from utils.reward_engine import give_reward
+
+        # ── 1. Lower-level helper: `grant_timed_product` & `give_reward`
+        r_timed = role_stub(951, "AmbiguousTimedColor")
+        _, person, bot, _ = purchase_ctx(granted_role=r_timed)
+
+        async def _apply_then_timeout(role_obj, reason=None):
+            if role_obj not in person.roles:
+                person.roles.append(role_obj)
+            raise asyncio.TimeoutError("Discord gateway/HTTP timed out after role apply")
+
+        person.add_roles = AsyncMock(side_effect=_apply_then_timeout)
+        res_timed_ambig = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="AmbiguousTimedColor",
+            duration_hours=12, item_type="temp_role",
+            category=TO.CATEGORY_COLOR, role_id=951)
+        self.assertFalse(res_timed_ambig["success"])
+        self.assertTrue(res_timed_ambig["uncertain"],
+                        "timeout after role application must be uncertain=True")
+
+        # Pure transport timeout even without local cache update must also be uncertain=True
+        person.roles = []
+        person.add_roles = AsyncMock(
+            side_effect=TimeoutError("HTTP read timed out waiting for Discord"))
+        res_perm_ambig = await give_reward(
+            bot, GUILD, USER, "role", role_id=951,
+            item_name="AmbiguousPermColor", source="shop")
+        self.assertFalse(res_perm_ambig["success"])
+        self.assertTrue(res_perm_ambig["uncertain"],
+                        "transport timeout on add_roles must be uncertain=True")
+
+        # Definite pre-application rejection (discord.Forbidden 403, role not on member)
+        person.roles = []
+        forbidden_exc = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"),
+            {"code": 50013, "message": "Missing Permissions"})
+        person.add_roles = AsyncMock(side_effect=forbidden_exc)
+        res_timed_def = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="ForbiddenTimedColor",
+            duration_hours=12, item_type="temp_role",
+            category=TO.CATEGORY_COLOR, role_id=951)
+        self.assertFalse(res_timed_def["success"])
+        self.assertFalse(res_timed_def["uncertain"],
+                         "definite 403 Forbidden before role apply must be uncertain=False")
+
+        res_perm_def = await give_reward(
+            bot, GUILD, USER, "role", role_id=951,
+            item_name="ForbiddenPermColor", source="shop")
+        self.assertFalse(res_perm_def["success"])
+        self.assertFalse(res_perm_def["uncertain"],
+                         "definite 403 Forbidden in give_reward must be uncertain=False")
+
+        # ── 2. Propagation through Shop `process_purchase`:
+        # 2a. Ambiguous timeout during timed Color purchase -> parked as `uncertain`, NOT refunded.
+        execute("DELETE FROM inventory_items WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+        timed_id = shop_item(
+            kind="color", name="ShopTimedAmber", price=250, stock=3,
+            role_id=952, duration_hours=24)
+        r_shop_timed = role_stub(952, "ShopTimedAmber")
+        inter_ambig, person_ambig, _, _ = purchase_ctx(granted_role=r_shop_timed)
+
+        async def _shop_apply_then_timeout(role_obj, reason=None):
+            person_ambig.roles.append(role_obj)
+            raise asyncio.TimeoutError("Timed out after Discord applied role")
+
+        person_ambig.add_roles = AsyncMock(side_effect=_shop_apply_then_timeout)
+        await process_purchase(inter_ambig, timed_id)
+
+        op_ambig = rows("SELECT status, charged, refunded, stock_reserved, stock_returned "
+                        "FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1")[0]
+        self.assertEqual(op_ambig, (TO.PURCHASE_UNCERTAIN, 1, 0, 1, 0),
+                         "ambiguous add_roles must park purchase as uncertain without refunding")
+        self.assertEqual(
+            rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                 (GUILD, USER)), [(8750,)])
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?",
+                 (timed_id,)), [(2,)])
+        self.assertIn("Purchase needs a check", reply_text(inter_ambig))
+
+        # 2b. Definite 403 Forbidden rejection during timed Color purchase -> `failed` + auto-refunded.
+        inter_def, person_def, _, _ = purchase_ctx(granted_role=r_shop_timed)
+        person_def.add_roles = AsyncMock(side_effect=forbidden_exc)
+        await process_purchase(inter_def, timed_id)
+        op_def = rows("SELECT status, charged, refunded, stock_reserved, stock_returned "
+                      "FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1")[0]
+        self.assertEqual(op_def, (TO.PURCHASE_FAILED, 1, 1, 1, 1),
+                         "definite 403 rejection must compensate money and stock")
+        self.assertEqual(
+            rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                 (GUILD, USER)), [(8750,)],
+            "second attempt refunded its 250 charge back to 8750")
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?",
+                 (timed_id,)), [(2,)],
+            "second attempt returned its reserved stock unit back to 2")
+        self.assertIn("Purchase not completed", reply_text(inter_def))
+
+    async def test_p2_level_reversal_entitlement_check_fails_safely_on_locked_db(self):
+        """P2 regression: when `timed_holdings` raises `OperationalError('database is locked')`
+        during `_role_granted_elsewhere`, `reconcile_level_drop` must retain the
+        Discord role, record the reversal as `outstanding`, preserve the claim
+        row, and recover cleanly on subsequent passes.
+        """
+        import aiosqlite
+        from utils import level_claims, level_ops
+
+        await level_claims.ensure_tables()
+        r_lvl = role_stub(777, "SharedLevelAndTimedRole")
+        _, person, bot, server = purchase_ctx(granted_role=r_lvl)
+        person.guild = server
+
+        async def _add_role(r, reason=None):
+            if r not in person.roles:
+                person.roles.append(r)
+
+        async def _rem_role(r, reason=None):
+            person.roles = [x for x in person.roles if x.id != r.id]
+
+        person.add_roles = AsyncMock(side_effect=_add_role)
+        person.remove_roles = AsyncMock(side_effect=_rem_role)
+
+        # Member owns a live timed holding for role 777 AND an admin-created
+        # fulfilled Level 10 role claim for the same role 777, now dropped to Level 5.
+        granted_th = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="TimedCrown", duration_hours=24,
+            item_type="temp_role", category=TO.CATEGORY_COLOR, role_id=777)
+        self.assertTrue(granted_th["success"])
+        self.assertIn(r_lvl, person.roles)
+
+        execute("UPDATE levels SET xp = 100, level = 5 WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+        claim_id = execute("""
+            INSERT INTO level_reward_claims
+                (guild_id, user_id, reward_level, track, reward_ref,
+                 payload_json, status, source, operation_id, created_at, fulfilled_at)
+            VALUES (?, ?, 10, 'role', '777', ?, 'fulfilled', 'setxp', 'op-admin-grant', ?, ?)
+        """, (GUILD, USER, json.dumps({"role_id": 777}), TO.iso(), TO.iso()))
+
+        # Pass 1: inject `OperationalError("database is locked")` on the
+        # `timed_holdings` query inside `_role_granted_elsewhere`.
+        real_execute = aiosqlite.Connection.execute
+
+        async def _locked_timed_holdings(conn, sql, *args, **kwargs):
+            if "FROM timed_holdings" in str(sql) and "SELECT id, item_name, expires_at" in str(sql):
+                raise aiosqlite.OperationalError("database is locked")
+            return await real_execute(conn, sql, *args, **kwargs)
+
+        with patch.object(aiosqlite.Connection, "execute", new=_locked_timed_holdings):
+            rep_locked = await level_claims.reconcile_level_drop(
+                GUILD, USER, 5, operation_id="op-drop-1", member=person,
+                reason="test level drop under locked timed_holdings")
+
+        # Role must NOT be removed, claim must NOT be deleted, and reversal must be `outstanding`.
+        person.remove_roles.assert_not_awaited()
+        self.assertIn(r_lvl, person.roles)
+        self.assertEqual(
+            rows("SELECT status FROM level_reward_claims WHERE id=?", (claim_id,)),
+            [("fulfilled",)],
+            "claim row must survive when entitlement verification fails")
+        rev_rows = rows(
+            "SELECT status, reason FROM reward_reversals WHERE claim_id=?",
+            (claim_id,))
+        self.assertEqual(len(rev_rows), 1)
+        self.assertEqual(rev_rows[0][0], level_ops.STATUS_OUTSTANDING)
+        self.assertIn("database is locked", rev_rows[0][1])
+        self.assertEqual(len(rep_locked["role_failures"]), 1)
+
+        # Pass 2: DB lock clears while the independent timed holding is still live.
+        # The role stays on the member because the live timed holding justifies it.
+        rep_live_holding = await level_claims.reconcile_level_drop(
+            GUILD, USER, 5, operation_id="op-drop-2", member=person,
+            reason="retry while timed holding is still live")
+        person.remove_roles.assert_not_awaited()
+        self.assertIn(r_lvl, person.roles)
+        self.assertEqual(
+            rows("SELECT status FROM level_reward_claims WHERE id=?", (claim_id,)),
+            [("fulfilled",)])
+        self.assertTrue(
+            any("timed holding 'TimedCrown'" in item.get("reason", "")
+                for item in rep_live_holding["kept_unresolved"]),
+            str(rep_live_holding["kept_unresolved"]))
+
+        # Pass 3: after the timed holding expires and is cleaned up (no other
+        # entitlement exists), a subsequent retry reverses the role and deletes the claim.
+        await TO.delete_timed_holding(granted_th["entry_key"])
+        rep_clean = await level_claims.reconcile_level_drop(
+            GUILD, USER, 5, operation_id="op-drop-3", member=person,
+            reason="retry after timed holding expired")
+        person.remove_roles.assert_awaited_once()
+        self.assertNotIn(r_lvl, person.roles)
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM level_reward_claims WHERE id=?", (claim_id,)),
+            [(0,)],
+            "claim row is deleted once the role is cleanly reversed with no other entitlement")
+        self.assertEqual(
+            rows("SELECT status FROM reward_reversals WHERE claim_id=?", (claim_id,)),
+            [(level_ops.STATUS_APPLIED,)])
+        self.assertEqual(len(rep_clean["reversed"]["role"]), 1)
+
+    async def test_p3_booster_level_without_fabricating_member_count_and_p5_equip_swap(self):
+        """P3 & P5 regression:
+        1. When `member` is a standard `discord.Member`-like object without a
+           per-member `premium_subscription_count` attribute (even if the guild
+           has `premium_subscription_count=14`), `_booster_level_for` does not
+           infer from the guild count, protects level-1 booster roles, does not
+           fabricate entitlement to unheld level-2 roles, and retains level-2
+           booster roles already worn by an active booster.
+        2. If `remove_roles(old_role)` fails transiently during
+           `swap_and_record_equipped`, timed-holding ownership and subsequent
+           expiry cleanup remain consistent.
+        """
+        execute("""
+            INSERT OR REPLACE INTO boost_config
+                (guild_id, enabled, boost1_role_id, boost2_role_id)
+            VALUES (?, 1, 961, 962)
+        """, (GUILD,))
+        execute("""
+            INSERT INTO boost_color_roles (guild_id, role_id, role_name, requires_boost_level)
+            VALUES (?, 963, 'BoostPink', 1), (?, 964, 'BoostGold', 2)
+        """, (GUILD, GUILD))
+
+        _, person, bot, server = purchase_ctx()
+        server.premium_subscription_count = 14
+        # Ensure `person` has NO `premium_subscription_count` attribute, matching `discord.Member`.
+        if hasattr(person, "premium_subscription_count"):
+            delattr(person, "premium_subscription_count")
+        person.premium_since = TO.utcnow()
+        person.roles = []
+
+        self.assertEqual(TO._booster_level_for(person), (1, False))
+        managed_unworn = await TO.member_managed_role_ids(
+            GUILD, USER, bot=bot, member=person)
+        self.assertIn(961, managed_unworn)
+        self.assertIn(963, managed_unworn)
+        self.assertNotIn(962, managed_unworn,
+                         "must not infer 2x boost from guild.premium_subscription_count")
+        self.assertNotIn(964, managed_unworn)
+
+        # When the active booster is already wearing boost2_role_id (962) or
+        # level-2 boost color (964) on Discord, it is retained while boosting.
+        person.roles = [role_stub(962, "Boost2"), role_stub(964, "BoostGold")]
+        managed_worn = await TO.member_managed_role_ids(
+            GUILD, USER, bot=bot, member=person)
+        self.assertIn(962, managed_worn)
+        self.assertIn(964, managed_worn)
+
+        # Once the member stops boosting (`premium_since = None`), neither is retained.
+        person.premium_since = None
+        managed_after_unboost = await TO.member_managed_role_ids(
+            GUILD, USER, bot=bot, member=person)
+        self.assertNotIn(961, managed_after_unboost)
+        self.assertNotIn(962, managed_after_unboost)
+        self.assertNotIn(963, managed_after_unboost)
+        self.assertNotIn(964, managed_after_unboost)
+
+        # ── P5: Fault injection in `swap_and_record_equipped` when `remove_roles(old_role)` fails
+        r_first = role_stub(965, "FirstTimedRole")
+        r_second = role_stub(966, "SecondTimedRole")
+        _, person2, bot2, server2 = purchase_ctx()
+        roles_map = {965: r_first, 966: r_second}
+        server2.get_role = lambda rid: roles_map.get(int(rid))
+
+        async def _add_role2(r, reason=None):
+            if r not in person2.roles:
+                person2.roles.append(r)
+
+        person2.add_roles = AsyncMock(side_effect=_add_role2)
+
+        g1 = await TO.grant_timed_product(
+            bot2, GUILD, USER, item_name="FirstTimedRole", duration_hours=1,
+            item_type="temp_role", category=TO.CATEGORY_COLOR, role_id=965)
+        self.assertTrue(g1["success"])
+        self.assertIn(r_first, person2.roles)
+
+        # Inject a transient Discord error on `remove_roles` during the second grant's swap
+        person2.remove_roles = AsyncMock(
+            side_effect=RuntimeError("Transient Discord 502 removing old role"))
+        g2 = await TO.grant_timed_product(
+            bot2, GUILD, USER, item_name="SecondTimedRole", duration_hours=24,
+            item_type="temp_role", category=TO.CATEGORY_COLOR, role_id=966)
+        self.assertTrue(g2["success"])
+        self.assertEqual((await get_equipped(GUILD, USER))["entry_key"],
+                         g2["entry_key"])
+        self.assertIn(r_first, person2.roles)
+        self.assertIn(r_second, person2.roles)
+
+        # When `g1` expires and the transient Discord error clears, `cleanup_expired_holdings`
+        # still removes `r_first` from Discord, keeps `g2` equipped, and deletes `g1`.
+        async def _clean_remove(role_obj, reason=None):
+            person2.roles = [r for r in person2.roles if r.id != role_obj.id]
+
+        person2.remove_roles = AsyncMock(side_effect=_clean_remove)
+        await self._expire(g1["entry_key"])
+        stats = await TO.cleanup_expired_holdings(bot2)
+        self.assertEqual(stats, {"removed": 1, "kept": 0, "errors": []})
+        self.assertNotIn(r_first, person2.roles)
+        self.assertIn(r_second, person2.roles)
+        self.assertEqual((await get_equipped(GUILD, USER))["entry_key"],
+                         g2["entry_key"])
 
 
 if __name__ == "__main__":

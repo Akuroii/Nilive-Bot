@@ -443,23 +443,29 @@ async def give_reward(bot: discord.Client,
                 bot, guild_id, user_id, display_name,
                 reason=reason, entry_key=entry_key)
         except Exception as exc:
+            from utils.timed_ownership import is_ambiguous_discord_role_error
             role_added = (not role_was_present) and (role in member.roles)
+            ambiguous = is_ambiguous_discord_role_error(
+                exc, member=member, role=role)
             inv_restored = False
-            if not role_added:
+            if not role_added and not ambiguous:
                 inv_restored = await _restore_prior_inventory()
             return {"success": False, "reward_type": reward_type,
                     "error": f"Failed to equip role: {exc}",
-                    "uncertain": bool(role_added or not inv_restored)}
+                    "uncertain": bool(role_added or ambiguous or not inv_restored)}
 
         if not equip_result.get("success"):
             role_added = (bool(equip_result.get("role_added"))
                           or ((not role_was_present) and (role in member.roles)))
+            equip_uncertain = bool(equip_result.get("uncertain"))
             inv_restored = False
-            if not role_added:
+            if not role_added and not equip_uncertain:
                 inv_restored = await _restore_prior_inventory()
             return {"success": False, "reward_type": reward_type,
                     "error": equip_result.get("error", "Failed to equip role"),
-                    "uncertain": bool(role_added or not inv_restored)}
+                    "uncertain": bool(
+                        role_added or equip_uncertain or not inv_restored
+                    )}
 
         result = {"success": True, "reward_type": reward_type,
                   "role_id": role_id, "item_name": display_name,

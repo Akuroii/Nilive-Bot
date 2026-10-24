@@ -189,8 +189,14 @@ async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
         try:
             await member.add_roles(role, reason=reason)
         except Exception as e:
-            return {"success": False, "error": f"Discord error assigning role: {e}",
-                    "role_added": False}
+            from utils.timed_ownership import is_ambiguous_discord_role_error
+            ambiguous = is_ambiguous_discord_role_error(
+                e, member=member, role=role)
+            role_now_present = role in (getattr(member, "roles", None) or ())
+            return {"success": False,
+                    "error": f"Discord error assigning role: {e}",
+                    "role_added": bool(role_now_present),
+                    "uncertain": bool(ambiguous or role_now_present)}
 
     try:
         await swap_and_record_equipped(
@@ -200,7 +206,8 @@ async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
     except Exception as e:
         return {"success": False,
                 "error": f"Database error recording equipped role: {e}",
-                "role_added": not role_was_present}
+                "role_added": not role_was_present,
+                "uncertain": not role_was_present}
 
     return {"success": True, "item_name": item_name,
             "role_id": role_id, "role_name": role.name,

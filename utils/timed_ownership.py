@@ -418,10 +418,34 @@ def _resolve_member_from_bot(bot, guild_id: int, user_id: int, member=None):
     return guild.get_member(int(user_id)) if hasattr(guild, "get_member") else None
 
 
-def _booster_level_for(member) -> int:
+def _booster_level_for(member) -> tuple[int, bool]:
+    """Return `(boost_level, count_known)` for `member`.
+
+    In discord.py, `discord.Member` exposes `premium_since` (whether the member
+    has an active server boost), while `premium_subscription_count` is a
+    `discord.Guild` attribute (total boosts across the whole server) rather
+    than a per-member attribute. We must NEVER infer a member's boost count
+    from `Guild.premium_subscription_count`.
+
+    * If `member` is `None` or `member.premium_since` is falsy: returns
+      `(0, True)` — the member is definitively not an active booster.
+    * If `member` carries an explicit per-member `premium_subscription_count`
+      attribute (for example from a test double or caller-supplied wrapper):
+      returns `(max(1, int(raw_count)), True)`.
+    * Otherwise (a live `discord.Member` with `premium_since` set and no
+      per-member count attribute): returns `(1, False)` — the member is
+      verified to have at least 1 active boost, while 2+ boost count cannot be
+      determined from `discord.Member` alone.
+    """
     if member is None or not getattr(member, "premium_since", None):
-        return 0
-    return int(getattr(member, "premium_subscription_count", 1) or 1)
+        return 0, True
+    raw_count = getattr(member, "premium_subscription_count", None)
+    if raw_count is not None:
+        try:
+            return max(1, int(raw_count or 1)), True
+        except (TypeError, ValueError):
+            pass
+    return 1, False
 
 
 async def member_managed_role_ids(guild_id: int, user_id: int, *,
@@ -433,9 +457,13 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
         Prestige is enabled.
       * Booster reward roles (`boost1_role_id`, `boost2_role_id`) require an
         active boost (`premium_since`) and sufficient boost count when the
-        Boost system is enabled.
+        Boost system is enabled. When `discord.Member` does not expose a
+        per-member boost count (`count_known=False`), an active booster already
+        wearing `boost2_role_id` or a level-2+ `boost_color_roles` role on
+        Discord retains that role rather than having it stripped on expiry/swap.
       * Self-picked Booster colour roles (`boost_color_roles`) require an
-        active boost with `boost_level >= requires_boost_level`.
+        active boost with `boost_level >= requires_boost_level` (or an active
+        booster already wearing the role when per-member count is unavailable).
 
     Raises `EntitlementCheckError` if any required backing table/query fails so
     callers never mistake a failed query for "no entitlement exists".
@@ -473,8 +501,15 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
             f"Failed to verify Prestige role entitlement: {exc}"
         ) from exc
 
-    boost_level = _booster_level_for(member)
+    boost_level, boost_count_known = _booster_level_for(member)
     if boost_level >= 1:
+        held_role_ids: set[int] = set()
+        for r_obj in (getattr(member, "roles", None) or ()):
+            r_id_attr = getattr(r_obj, "id", r_obj)
+            try:
+                held_role_ids.add(int(r_id_attr))
+            except (TypeError, ValueError):
+                continue
         try:
             async with aiosqlite.connect(DB_PATH) as db:
                 boost_enabled = True
@@ -493,9 +528,14 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
                                 managed.add(int(b1))
                             except (TypeError, ValueError):
                                 pass
-                        if b2 not in (None, "") and boost_level >= 2:
+                        if b2 not in (None, ""):
                             try:
-                                managed.add(int(b2))
+                                b2_id = int(b2)
+                                if boost_level >= 2 or (
+                                    not boost_count_known
+                                    and b2_id in held_role_ids
+                                ):
+                                    managed.add(b2_id)
                             except (TypeError, ValueError):
                                 pass
 
@@ -507,12 +547,16 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
                     for r_id, req_lvl in await cursor.fetchall():
                         if r_id in (None, ""):
                             continue
+                        try:
+                            color_role_id = int(r_id)
+                        except (TypeError, ValueError):
+                            continue
                         needed = max(1, int(req_lvl or 1))
-                        if boost_level >= needed:
-                            try:
-                                managed.add(int(r_id))
-                            except (TypeError, ValueError):
-                                continue
+                        if boost_level >= needed or (
+                            not boost_count_known
+                            and color_role_id in held_role_ids
+                        ):
+                            managed.add(color_role_id)
         except EntitlementCheckError:
             raise
         except Exception as exc:
@@ -1117,16 +1161,35 @@ async def update_purchase(op_id: str, *, status: str | None = None,
         sets.append("history_id=?")
         params.append(int(history_id))
     if not sets:
-        return
+        return False
     sets.append("updated_at=CURRENT_TIMESTAMP")
     params.append(op_id)
-    sql = f"UPDATE shop_purchase_operations SET {', '.join(sets)} WHERE op_id=?"
+    where_extra = ""
+    if status == PURCHASE_DELIVERED:
+        where_extra = (
+            " AND status IN (?, ?, ?)"
+            " AND COALESCE(refunded, 0) = 0"
+            " AND COALESCE(stock_returned, 0) = 0"
+        )
+        params.extend((PURCHASE_PENDING, PURCHASE_UNCERTAIN, PURCHASE_FAILED))
+    elif status == PURCHASE_UNCERTAIN:
+        where_extra = (
+            " AND status IN (?, ?)"
+            " AND COALESCE(refunded, 0) = 0"
+            " AND COALESCE(stock_returned, 0) = 0"
+        )
+        params.extend((PURCHASE_PENDING, PURCHASE_UNCERTAIN))
+    sql = (
+        f"UPDATE shop_purchase_operations SET {', '.join(sets)} "
+        f"WHERE op_id=?{where_extra}"
+    )
     if db is not None:
-        await db.execute(sql, params)
-        return
+        cursor = await db.execute(sql, params)
+        return cursor.rowcount == 1
     async with aiosqlite.connect(DB_PATH) as conn:
-        await conn.execute(sql, params)
+        cursor = await conn.execute(sql, params)
         await conn.commit()
+        return cursor.rowcount == 1
 
 
 async def get_purchase(op_id: str) -> dict | None:
@@ -1143,6 +1206,38 @@ async def get_purchase(op_id: str) -> dict | None:
             "amount", "stock_reserved", "charged", "refunded", "stock_returned",
             "status", "detail", "history_id", "created_at", "updated_at")
     return dict(zip(keys, row))
+
+
+def is_ambiguous_discord_role_error(exc: BaseException, *,
+                                    member=None, role=None) -> bool:
+    """Return True when a `member.add_roles()` exception leaves delivery uncertain.
+
+    A role grant is ONLY a known pre-application failure (`False`) when:
+      1. the target role is not currently present on `member.roles`, AND
+      2. Discord returned a deterministic client/permission rejection before
+         applying the role (`discord.Forbidden`, `discord.NotFound`, or a
+         `discord.HTTPException` with a 4xx status other than 429).
+
+    Any timeout, transport/connection error, 5xx/429 response, unknown
+    exception, or state where the role is observed on `member.roles` is
+    ambiguous (`True`): the HTTP request may have succeeded on Discord's side,
+    so the caller must park the purchase as `uncertain` and never auto-refund.
+    """
+    if member is not None and role is not None:
+        try:
+            if role in (getattr(member, "roles", None) or ()):
+                return True
+        except Exception:
+            return True
+
+    import discord
+    if isinstance(exc, (discord.Forbidden, discord.NotFound)):
+        return False
+    if isinstance(exc, discord.HTTPException):
+        status = getattr(exc, "status", None)
+        if isinstance(status, int) and 400 <= status < 500 and status != 429:
+            return False
+    return True
 
 
 async def grant_timed_product(bot, guild_id: int, user_id: int, *,
@@ -1165,10 +1260,11 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
 
     A role-backed holding adds the Discord role before the ownership row is
     written. If the role cannot be added, nothing is persisted and the caller
-    can compensate cleanly. If the role IS added but the row write fails, the
-    result is reported as `uncertain` rather than failed: the member may hold a
-    role the bot has no record of, and refunding then would hand out a free
-    colour.
+    can compensate cleanly. If the role IS added (or `add_roles` fails with an
+    ambiguous timeout/transport error) or the row write fails after adding the
+    role, the result is reported as `uncertain` rather than failed: the member
+    may hold a role the bot has no record of, and refunding then would hand out
+    a free colour.
     """
     from utils.permissions import check_bot_role_position
 
@@ -1212,10 +1308,12 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
                 await member.add_roles(role, reason=reason)
                 role_added = True
             except Exception as exc:
+                ambiguous = is_ambiguous_discord_role_error(
+                    exc, member=member, role=role)
                 return {"success": False, "entry_key": None,
                         "expires_at": None,
                         "error": f"Discord error assigning role: {exc}",
-                        "uncertain": False}
+                        "uncertain": ambiguous}
 
     try:
         holding_id = await grant_timed_holding(
@@ -1259,6 +1357,7 @@ async def claim_purchase_transition(op_id: str, *,
                                     from_statuses: tuple[str, ...],
                                     to_status: str,
                                     detail: str | None = None,
+                                    history_id: int | None = None,
                                     require_uncompensated: bool | None = None,
                                     db: aiosqlite.Connection | None = None) -> bool:
     """Atomically move one purchase operation between states.
@@ -1268,24 +1367,31 @@ async def claim_purchase_transition(op_id: str, *,
     cannot both win the transition, so a refund or a stock restore can never be
     applied twice. Returns True only for the caller that won.
 
-    Whenever `to_status == PURCHASE_DELIVERED` (or `require_uncompensated=True`),
-    the SQL `WHERE` clause also enforces `COALESCE(refunded, 0) = 0 AND
-    COALESCE(stock_returned, 0) = 0` so an operation that has already begun or
-    completed compensation can never transition to `delivered`.
+    Whenever `to_status in (PURCHASE_DELIVERED, PURCHASE_UNCERTAIN)` (or
+    `require_uncompensated=True`), the SQL `WHERE` clause also enforces
+    `COALESCE(refunded, 0) = 0 AND COALESCE(stock_returned, 0) = 0` so an
+    operation that has already begun or completed compensation can never
+    transition to `delivered` or revert to `uncertain`.
     """
     if require_uncompensated is None:
-        require_uncompensated = (to_status == PURCHASE_DELIVERED)
+        require_uncompensated = (
+            to_status in (PURCHASE_DELIVERED, PURCHASE_UNCERTAIN)
+        )
     marks = ",".join("?" for _ in from_statuses)
     guard_sql = (
         " AND COALESCE(refunded, 0) = 0 AND COALESCE(stock_returned, 0) = 0"
         if require_uncompensated else ""
     )
+    set_cols = ["status=?", "detail=?", "updated_at=CURRENT_TIMESTAMP"]
+    set_params: list = [to_status, detail]
+    if history_id is not None:
+        set_cols.append("history_id=?")
+        set_params.append(int(history_id))
     sql = (
-        f"UPDATE shop_purchase_operations SET status=?, detail=?, "
-        f"updated_at=CURRENT_TIMESTAMP "
+        f"UPDATE shop_purchase_operations SET {', '.join(set_cols)} "
         f"WHERE op_id=? AND status IN ({marks}){guard_sql}"
     )
-    params = (to_status, detail, op_id, *from_statuses)
+    params = (*set_params, op_id, *from_statuses)
     if db is not None:
         cursor = await db.execute(sql, params)
         return cursor.rowcount == 1
