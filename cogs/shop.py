@@ -519,6 +519,7 @@ async def process_purchase(interaction: discord.Interaction,
         ),
         "boost_id": delivery.get("boost_id"),
         "boost_expires_at": delivery.get("boost_expires_at"),
+        "boost_source": delivery.get("boost_source"),
         "inventory_rolled_back": False,
         "equip_reconciled": False,
         "role_reconciled": False,
@@ -883,6 +884,11 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
             success=True,
             boost_expires_at=boost_expires_at,
             boost_id=boost_id,
+            # Provenance for the late-rollback fallback: the shop row is the
+            # only boost this purchase created, so the rollback can identify it
+            # when `boost_id` is unavailable without touching a `level_claim`
+            # or `potion` boost that happens to share the same expiry.
+            boost_source=source,
         )
         return result
 

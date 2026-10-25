@@ -1412,6 +1412,9 @@ PURCHASE_FAILED = "failed"
 
 _LAST_BOT = None
 _PENDING_DELIVERY_ROLLBACKS: dict[str, dict] = {}
+# Per-process attempt counter used only to keep the limited reconciliation
+# window fair. Durable ordering (`updated_at`) remains the cross-process signal.
+_ROLLBACK_SCAN_ATTEMPTS: dict[str, int] = {}
 
 PURCHASE_SCHEMA = (
     """
@@ -1503,6 +1506,13 @@ async def update_purchase(op_id: str, *, status: str | None = None,
                           history_id: int | None = None,
                           delivery_rollback: str | None = None,
                           db: aiosqlite.Connection | None = None) -> None:
+    """Update one purchase operation. Returns True when exactly one row matched.
+
+    Writing a non-empty `delivery_rollback` is conditionally guarded in SQL: it
+    never overwrites the empty-string completed sentinel, so a stale invocation
+    cannot turn a finished rollback back into pending work. Writing `""` (the
+    sentinel itself) is unconditional and always wins.
+    """
     sets, params = [], []
     if status is not None:
         sets.append("status=?")
@@ -1547,9 +1557,20 @@ async def update_purchase(op_id: str, *, status: str | None = None,
             " AND COALESCE(stock_returned, 0) = 0"
         )
         params.extend((PURCHASE_PENDING, PURCHASE_UNCERTAIN))
+    completed_guard = ""
+    if delivery_rollback not in (None, ""):
+        # Database-enforced guard: a non-empty descriptor write must never
+        # overwrite the durable completed sentinel (`''`). An invocation that
+        # lost the race gets 0 rows back instead of resurrecting finished work.
+        # Initial creation from SQL NULL still matches (only the empty-string
+        # sentinel is refused), and progress updates over a live descriptor are
+        # unaffected.
+        completed_guard = (
+            " AND (delivery_rollback IS NULL OR delivery_rollback != '')"
+        )
     sql = (
         f"UPDATE shop_purchase_operations SET {', '.join(sets)} "
-        f"WHERE op_id=?{where_extra}"
+        f"WHERE op_id=?{where_extra}{completed_guard}"
     )
     if db is not None:
         cursor = await db.execute(sql, params)
@@ -1974,10 +1995,12 @@ async def record_pending_delivery_rollback(
 ) -> bool:
     """Persist a durable late-delivery rollback descriptor on the purchase row.
 
-    Returns True only when the descriptor was durably written to
+    Returns True when the descriptor was durably written to
     `shop_purchase_operations` in SQLite (or staged on the caller's open `db`
-    transaction). Always updates the in-memory fallback map for current-process
-    retries, but never treats the in-memory copy as durable persistence.
+    transaction), or when the operation is already durably complete (the
+    guarded write is then rejected and there is nothing left to persist).
+    Always updates the in-memory fallback map for current-process retries, but
+    never treats the in-memory copy as durable persistence.
     """
     global _LAST_BOT
     if bot is not None:
@@ -1992,6 +2015,12 @@ async def record_pending_delivery_rollback(
             db=db,
         )
         if not updated:
+            # The guarded write matches 0 rows when this operation already
+            # reached durable completion; check that before treating the
+            # miss as a persistence problem.
+            if await _durable_delivery_rollback_completed(str(op_id)):
+                _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+                return True
             copied["_durable_unpersisted"] = True
             print(
                 f"[SHOP] Durable delivery_rollback write matched 0 rows "
@@ -2001,6 +2030,9 @@ async def record_pending_delivery_rollback(
         copied.pop("_durable_unpersisted", None)
         return True
     except Exception as exc:
+        if db is None and await _durable_delivery_rollback_completed(str(op_id)):
+            _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+            return True
         copied["_durable_unpersisted"] = True
         print(
             f"[SHOP] Failed to persist durable delivery_rollback descriptor "
@@ -2072,8 +2104,11 @@ async def _ensure_role_retry_marker(
     role_id: int,
     item_id=None,
     category=None,
-) -> str:
+) -> tuple[str, bool]:
     """Create the 1970 late-rollback retry marker exactly once, durably.
+
+    Returns `(entry_key, created)`: `created` is False when an existing marker
+    was adopted instead of a new one being inserted.
 
     Runs inside one `BEGIN IMMEDIATE` transaction so concurrent compensations
     (in this process or another one) cannot each create a duplicate marker for
@@ -2106,7 +2141,7 @@ async def _ensure_role_retry_marker(
                 if isinstance(parsed, dict) and parsed.get("retry_entry_key"):
                     await db.execute("ROLLBACK")
                     in_tx = False
-                    return str(parsed["retry_entry_key"])
+                    return str(parsed["retry_entry_key"]), False
 
             cur = await db.execute(
                 "SELECT id, metadata FROM timed_holdings "
@@ -2122,7 +2157,7 @@ async def _ensure_role_retry_marker(
                 if isinstance(h_meta, dict) and str(h_meta.get("op_id")) == str(op_id):
                     await db.execute("ROLLBACK")
                     in_tx = False
-                    return f"h:{h_id}"
+                    return f"h:{h_id}", False
 
             new_id = await grant_timed_holding(
                 guild_id,
@@ -2143,7 +2178,7 @@ async def _ensure_role_retry_marker(
             )
             await db.commit()
             in_tx = False
-            return f"h:{new_id}"
+            return f"h:{new_id}", True
         except Exception:
             if in_tx:
                 try:
@@ -2329,6 +2364,11 @@ async def compensate_late_delivery(
         rollback_role_inventory_grant,
     )
 
+    # Tracks a retry marker created by *this* invocation, so a completion that
+    # lands while this call is still running can retire it instead of leaving an
+    # orphan marker behind for finished work.
+    own_retry_marker: dict = {"key": None, "created": False}
+
     async def _persist_incomplete(err_msg: str) -> dict:
         # A concurrent (or earlier, in another process) invocation may have
         # durably completed and cleared this rollback while this one was still
@@ -2336,6 +2376,9 @@ async def compensate_late_delivery(
         # descriptor or write stale progress over it.
         if await _durable_delivery_rollback_completed(str(op_id)):
             _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+            if own_retry_marker["created"]:
+                await _retire_own_retry_marker(own_retry_marker["key"])
+                own_retry_marker["created"] = False
             return {
                 "complete": True,
                 "durable_persisted": True,
@@ -2366,6 +2409,23 @@ async def compensate_late_delivery(
             durable_persisted = False
 
         if not durable_persisted:
+            # The guarded write above is rejected (0 rows) when a competing
+            # invocation completed the rollback between our completion check
+            # and this write. Re-read durable state to distinguish that from a
+            # genuine persistence problem.
+            if await _durable_delivery_rollback_completed(str(op_id)):
+                _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+                if own_retry_marker["created"]:
+                    await _retire_own_retry_marker(own_retry_marker["key"])
+                    own_retry_marker["created"] = False
+                return {
+                    "complete": True,
+                    "durable_persisted": True,
+                    "inventory_rolled_back": True,
+                    "equip_reconciled": True,
+                    "role_reconciled": True,
+                    "error": None,
+                }
             try:
                 existing_op = await get_purchase(str(op_id))
                 raw_existing = (
@@ -2404,6 +2464,57 @@ async def compensate_late_delivery(
             "role_reconciled": bool(spec.get("role_reconciled")),
             "error": full_err,
         }
+
+    async def _retire_own_retry_marker(entry_key: str | None) -> None:
+        """Drop a retry marker this invocation created for already-finished work.
+
+        Only called when the operation is durably complete, so the marker would
+        otherwise be an orphan that cleanup would retire anyway.
+        """
+        if not entry_key:
+            return
+        try:
+            await delete_timed_holding(str(entry_key))
+        except Exception:
+            pass
+
+    async def _persist_handoff() -> tuple[bool, bool]:
+        """Write the handoff descriptor with the durable-completion guard.
+
+        Returns `(completed_by_other, durable_ok)`. The in-memory entry is
+        marked `_durable_unpersisted` only when the write genuinely failed;
+        a write rejected because the rollback is already durably complete
+        drops the cache entry instead and never labels it recoverable work.
+        """
+        clean_spec = {k: v for k, v in spec.items() if not str(k).startswith("_")}
+        mem = dict(clean_spec)
+        if spec.get("_durable_unpersisted"):
+            mem["_durable_unpersisted"] = True
+        _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = mem
+        durable_ok = False
+        try:
+            durable_ok = bool(
+                await update_purchase(
+                    str(op_id), delivery_rollback=json.dumps(clean_spec)
+                )
+            )
+        except Exception as exc:
+            print(
+                f"[SHOP] Failed to persist handoff delivery_rollback descriptor "
+                f"for op_id={op_id}: {exc}"
+            )
+            durable_ok = False
+        if durable_ok:
+            _PENDING_DELIVERY_ROLLBACKS[str(op_id)].pop("_durable_unpersisted", None)
+            spec.pop("_durable_unpersisted", None)
+            return False, True
+        if await _durable_delivery_rollback_completed(str(op_id)):
+            _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+            spec.pop("_durable_unpersisted", None)
+            return True, True
+        _PENDING_DELIVERY_ROLLBACKS[str(op_id)]["_durable_unpersisted"] = True
+        spec["_durable_unpersisted"] = True
+        return False, False
 
     guild_obj, target_member = _resolve_guild_and_live_member(
         guild_id, user_id, bot=bot_client, interaction=interaction
@@ -2489,14 +2600,16 @@ async def compensate_late_delivery(
                     "role_reconciled": True,
                     "error": None,
                 }
-            _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(spec)
-            durable_ok = False
-            try:
-                durable_ok = bool(
-                    await update_purchase(str(op_id), delivery_rollback=json.dumps(spec))
-                )
-            except Exception:
-                durable_ok = False
+            completed_by_other, durable_ok = await _persist_handoff()
+            if completed_by_other:
+                return {
+                    "complete": True,
+                    "durable_persisted": True,
+                    "inventory_rolled_back": True,
+                    "equip_reconciled": True,
+                    "role_reconciled": True,
+                    "error": None,
+                }
             return {
                 "complete": False,
                 "durable_persisted": durable_ok,
@@ -2749,23 +2862,22 @@ async def compensate_late_delivery(
                 retry_entry_key = spec.get("retry_entry_key")
                 if not retry_entry_key:
                     try:
-                        retry_entry_key = await _ensure_role_retry_marker(
-                            op_id=str(op_id),
-                            guild_id=guild_id,
-                            user_id=user_id,
-                            item_name=item_name,
-                            role_id=int(role_id),
-                            item_id=item_id,
-                            category=category,
+                        retry_entry_key, marker_created = (
+                            await _ensure_role_retry_marker(
+                                op_id=str(op_id),
+                                guild_id=guild_id,
+                                user_id=user_id,
+                                item_name=item_name,
+                                role_id=int(role_id),
+                                item_id=item_id,
+                                category=category,
+                            )
                         )
                         spec["retry_entry_key"] = retry_entry_key
-                    except Exception as exc:
-                        return await _persist_incomplete(
-                            f"Failed to create role rollback retry marker: {exc}"
-                        )
-
-                if handoff_to_holdings:
-                    if await _durable_delivery_rollback_completed(str(op_id)):
+                        if marker_created:
+                            own_retry_marker["key"] = retry_entry_key
+                            own_retry_marker["created"] = True
+                    except _LateRollbackAlreadyCompleted:
                         _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
                         return {
                             "complete": True,
@@ -2775,14 +2887,38 @@ async def compensate_late_delivery(
                             "role_reconciled": True,
                             "error": None,
                         }
-                    _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(spec)
-                    durable_ok = False
-                    try:
-                        durable_ok = bool(
-                            await update_purchase(str(op_id), delivery_rollback=json.dumps(spec))
+                    except Exception as exc:
+                        return await _persist_incomplete(
+                            f"Failed to create role rollback retry marker: {exc}"
                         )
-                    except Exception:
-                        durable_ok = False
+
+                if handoff_to_holdings:
+                    if await _durable_delivery_rollback_completed(str(op_id)):
+                        _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+                        if own_retry_marker["created"]:
+                            await _retire_own_retry_marker(
+                                own_retry_marker["key"])
+                        return {
+                            "complete": True,
+                            "durable_persisted": True,
+                            "inventory_rolled_back": True,
+                            "equip_reconciled": True,
+                            "role_reconciled": True,
+                            "error": None,
+                        }
+                    completed_by_other, durable_ok = await _persist_handoff()
+                    if completed_by_other:
+                        if own_retry_marker["created"]:
+                            await _retire_own_retry_marker(
+                                own_retry_marker["key"])
+                        return {
+                            "complete": True,
+                            "durable_persisted": True,
+                            "inventory_rolled_back": True,
+                            "equip_reconciled": True,
+                            "role_reconciled": True,
+                            "error": None,
+                        }
                     return {
                         "complete": False,
                         "durable_persisted": durable_ok,
@@ -2992,18 +3128,28 @@ async def compensate_late_delivery(
                                     (int(boost_id), guild_id, user_id),
                                 )
                             elif boost_exp:
+                                # No recorded row id: only ever remove the boost
+                                # this purchase created, identified by its
+                                # provenance. A `level_claim:*` or `potion` boost
+                                # that shares the same expiry string belongs to
+                                # another grant and must never be deleted.
+                                boost_source = str(
+                                    spec.get("boost_source") or "shop"
+                                )
                                 cursor = await cleanup_db.execute(
                                     "SELECT id FROM leveling_active_boosts "
                                     "WHERE guild_id=? AND user_id=? AND expires_at=? "
+                                    "AND source=? "
                                     "ORDER BY id DESC LIMIT 1",
-                                    (guild_id, user_id, str(boost_exp)),
+                                    (guild_id, user_id, str(boost_exp),
+                                     boost_source),
                                 )
                                 b_row = await cursor.fetchone()
                                 if b_row:
                                     await cleanup_db.execute(
                                         "DELETE FROM leveling_active_boosts "
-                                        "WHERE id=?",
-                                        (int(b_row[0]),),
+                                        "WHERE id=? AND source=?",
+                                        (int(b_row[0]), boost_source),
                                     )
                             spec["inventory_rolled_back"] = True
                             spec["equip_reconciled"] = True
@@ -3230,25 +3376,29 @@ async def reconcile_delivery_rollbacks(
     completed = 0
     errors: list[str] = []
     candidates: dict[str, dict | None] = {}
+    order: list[str] = []
 
     async with aiosqlite.connect(DB_PATH) as db:
         try:
+            # Filter actionable statuses in SQL and order deterministically, so
+            # the per-pass limit is never spent on non-actionable rows. Rows
+            # whose progress was durably written last are retried last.
             cursor = await db.execute(
                 "SELECT op_id, status, delivery_rollback "
                 "FROM shop_purchase_operations "
                 "WHERE delivery_rollback IS NOT NULL AND delivery_rollback != '' "
-                "LIMIT ?",
-                (int(limit),),
+                "AND status IN (?, ?) "
+                "ORDER BY updated_at ASC, op_id ASC",
+                (PURCHASE_FAILED, PURCHASE_REFUNDED),
             )
             for op_id, status, raw_spec in await cursor.fetchall():
-                if status not in (PURCHASE_FAILED, PURCHASE_REFUNDED):
-                    continue
                 parsed = None
                 try:
                     parsed = json.loads(raw_spec)
                 except Exception:
                     parsed = None
                 candidates[str(op_id)] = parsed
+                order.append(str(op_id))
         except Exception as exc:
             errors.append(f"query delivery_rollback failed: {exc}")
             return {"completed": completed, "errors": errors}
@@ -3276,8 +3426,22 @@ async def reconcile_delivery_rollbacks(
                 _PENDING_DELIVERY_ROLLBACKS.pop(mem_op_id, None)
             elif row[0] in (PURCHASE_FAILED, PURCHASE_REFUNDED):
                 candidates[mem_op_id] = mem_spec
+                order.append(mem_op_id)
 
-    for op_id, spec in candidates.items():
+    # Fair selection: rows already attempted in this process yield to rows that
+    # have not been attempted yet, so a permanently failing batch can never keep
+    # later markers out of the limited window. Within one attempt count the SQL
+    # order (least recently durably updated first) is preserved, so rotation
+    # also survives a restart.
+    order = sorted(order, key=lambda oid: _ROLLBACK_SCAN_ATTEMPTS.get(oid, 0))
+    selected = order[: int(limit)] if limit is not None else order
+    for stale_key in list(_ROLLBACK_SCAN_ATTEMPTS):
+        if stale_key not in candidates:
+            _ROLLBACK_SCAN_ATTEMPTS.pop(stale_key, None)
+
+    for op_id in selected:
+        spec = candidates[op_id]
+        _ROLLBACK_SCAN_ATTEMPTS[op_id] = _ROLLBACK_SCAN_ATTEMPTS.get(op_id, 0) + 1
         if handoff_to_holdings and spec and spec.get("inventory_rolled_back") and spec.get("equip_reconciled"):
             # Inventory and equip rollback already completed; `expired_holdings`
             # in `cleanup_expired_holdings` will process the `timed_holdings` marker.

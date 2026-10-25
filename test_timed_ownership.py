@@ -4986,9 +4986,18 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                  (GUILD, USER))[0][0],
             balance_before,
             "compensation changed the member's balance")
-        self.assertIsNone(
-            (await TO.get_purchase(op_id)).get("delivery_rollback"),
-            "durable descriptor was not cleared after a completed rollback")
+        # Assert the *raw* durable value: the normalized `delivery_rollback`
+        # field is None for both SQL NULL and the cleared empty-string
+        # sentinel, so it cannot prove which state was persisted.
+        raw_after = (await TO.get_purchase(op_id))["_raw_delivery_rollback"]
+        self.assertEqual(
+            raw_after, "",
+            f"durable descriptor was not cleared to the sentinel (raw={raw_after!r})")
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations "
+                 "WHERE op_id=?", (op_id,)),
+            [("",)],
+            "the persisted delivery_rollback column does not hold the sentinel")
 
     async def test_p7_xp_boost_stale_spec_replay_deletes_exactly_one_row(self):
         """Regression P7: a caller holding a stale specification must not delete a
@@ -5527,6 +5536,356 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             rows("SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=?"
                  " AND item_name=?", (GUILD, USER, name)),
             [(1,)])
+
+
+    # ── P15–P18: findings from the independent review ────────────────────
+
+    async def test_p15_completion_landing_between_check_and_write_wins(self):
+        """Regression P15: completion that lands after the stale invocation's
+        completion check must survive its descriptor write.
+
+        The write is refused by the SQL guard on `update_purchase`, the stale
+        invocation re-reads durable state and reports completion, and it leaves
+        no retry marker or inventory/role side effect behind.
+        """
+        rid = 98001
+        role = role_stub(rid, "P15RaceColor")
+        itx, person, bot, guild = purchase_ctx(granted_role=role)
+        person.roles.append(role)
+        guild.get_role = lambda r: role if int(r) == rid else None
+        person.remove_roles = AsyncMock(side_effect=RuntimeError("Discord 503"))
+
+        from utils.inventory import give_item
+        name = "P15RaceColor"
+        await give_item(GUILD, USER, name, 1, item_type="role", source="shop")
+        await give_item(GUILD, USER, name, 2, item_type="role", source="level_claim")
+
+        op_id = await TO.open_purchase(
+            guild_id=GUILD, user_id=USER, item_id=7801, item_name=name,
+            currency="balance", amount=100)
+        await TO.update_purchase(op_id, status=TO.PURCHASE_REFUNDED, refunded=1)
+        stale_spec = {
+            "guild_id": GUILD,
+            "user_id": USER,
+            "item_id": 7801,
+            "item_name": name,
+            "internal_type": "role",
+            "role_id": rid,
+            "role_added": True,
+            "inventory_rolled_back": True,
+            "equip_reconciled": True,
+            "role_reconciled": False,
+        }
+        await TO.record_pending_delivery_rollback(op_id, stale_spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        self.assertNotEqual(
+            (await TO.get_purchase(op_id))["_raw_delivery_rollback"], "")
+
+        real_update = TO.update_purchase
+        raced = {"done": False, "blocked": 0}
+
+        async def _racing_update(oid, **kwargs):
+            # A competing invocation finishes the rollback exactly between the
+            # stale invocation's completion check and its descriptor write.
+            if not raced["done"] and kwargs.get("delivery_rollback") not in (None, ""):
+                raced["done"] = True
+                await real_update(oid, delivery_rollback="")
+            res = await real_update(oid, **kwargs)
+            if not res and kwargs.get("delivery_rollback") not in (None, ""):
+                raced["blocked"] += 1
+            return res
+
+        TO.update_purchase = _racing_update
+        try:
+            res = await TO.compensate_late_delivery(op_id, dict(stale_spec), bot=bot)
+        finally:
+            TO.update_purchase = real_update
+
+        self.assertTrue(raced["done"], "the probe never staged the completion")
+        self.assertGreaterEqual(
+            raced["blocked"], 1,
+            "the guard never refused the stale descriptor write")
+        self.assertTrue(res["complete"], str(res))
+        self.assertTrue(res["durable_persisted"], str(res))
+        self.assertIsNone(res.get("error"), str(res))
+
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op_id,)),
+            [("",)],
+            "a stale invocation resurrected a completed descriptor")
+        self.assertEqual(
+            rows("SELECT id FROM timed_holdings WHERE source='shop_late_rollback'"),
+            [],
+            "a stale invocation left a retry marker for finished work")
+        self.assertNotIn(op_id, TO._PENDING_DELIVERY_ROLLBACKS)
+        self.assertEqual(
+            rows("SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=?"
+                 " AND item_name=?", (GUILD, USER, name)),
+            [(3,)],
+            "the stale invocation performed an inventory side effect")
+        self.assertIn(role, person.roles,
+                      "the stale invocation removed the Discord role")
+
+    async def test_p16_handoff_persistence_status_is_recorded_both_paths(self):
+        """Regression P16: both `handoff_to_holdings` paths must mark a failed or
+        zero-row descriptor write as non-durable, clear the flag after a
+        successful write, and never label a completed operation recoverable."""
+        rid = 98010
+        role = role_stub(rid, "P16HandoffColor")
+        itx, person, bot, guild = purchase_ctx(granted_role=role)
+        person.roles.append(role)
+        guild.get_role = lambda r: role if int(r) == rid else None
+        person.remove_roles = AsyncMock()
+
+        real_update = TO.update_purchase
+
+        def _fail_writes():
+            async def _failing(oid, **kwargs):
+                if kwargs.get("delivery_rollback") not in (None, ""):
+                    raise RuntimeError("simulated disk error")
+                return await real_update(oid, **kwargs)
+            return _failing
+
+        def _zero_row_writes():
+            async def _zero(oid, **kwargs):
+                if kwargs.get("delivery_rollback") not in (None, ""):
+                    return False
+                return await real_update(oid, **kwargs)
+            return _zero
+
+        async def _role_op():
+            op = await TO.open_purchase(
+                guild_id=GUILD, user_id=USER, item_id=7802,
+                item_name="P16HandoffColor", currency="balance", amount=100)
+            await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
+            spec = {
+                "guild_id": GUILD, "user_id": USER, "item_id": 7802,
+                "item_name": "P16HandoffColor", "internal_type": "role",
+                "role_id": rid, "role_added": True,
+                "inventory_rolled_back": True, "equip_reconciled": True,
+                "role_reconciled": False,
+            }
+            await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+            TO._PENDING_DELIVERY_ROLLBACKS.clear()
+            return op, spec
+
+        async def _holding_op():
+            holding_id = await TO.grant_timed_holding(
+                GUILD, USER, "P16HandoffHolding",
+                expires_at=iso_in(5), role_id=rid, source="shop")
+            op = await TO.open_purchase(
+                guild_id=GUILD, user_id=USER, item_id=7803,
+                item_name="P16HandoffHolding", currency="balance", amount=100)
+            await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
+            spec = {
+                "guild_id": GUILD, "user_id": USER, "item_id": 7803,
+                "item_name": "P16HandoffHolding", "internal_type": "temp_role",
+                "role_id": rid, "role_added": True,
+                "entry_key": f"h:{holding_id}",
+                "inventory_rolled_back": False, "equip_reconciled": False,
+                "role_reconciled": False,
+            }
+            await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+            TO._PENDING_DELIVERY_ROLLBACKS.clear()
+            return op, spec
+
+        # ── A) raising write, permanent-role handoff ──
+        op, spec = await _role_op()
+        TO.update_purchase = _fail_writes()
+        try:
+            res = await TO.compensate_late_delivery(
+                op, dict(spec), bot=bot, handoff_to_holdings=True)
+        finally:
+            TO.update_purchase = real_update
+        self.assertTrue(res.get("handed_off"), str(res))
+        self.assertFalse(res["durable_persisted"], str(res))
+        mem = TO._PENDING_DELIVERY_ROLLBACKS.get(op)
+        self.assertIsNotNone(mem, "the handoff dropped the in-memory retry state")
+        self.assertTrue(mem.get("_durable_unpersisted"),
+                        "a failed handoff write was not marked non-durable")
+
+        # ── B) zero-row write, permanent-role handoff ──
+        op, spec = await _role_op()
+        TO.update_purchase = _zero_row_writes()
+        try:
+            res = await TO.compensate_late_delivery(
+                op, dict(spec), bot=bot, handoff_to_holdings=True)
+        finally:
+            TO.update_purchase = real_update
+        self.assertFalse(res["durable_persisted"], str(res))
+        mem = TO._PENDING_DELIVERY_ROLLBACKS.get(op)
+        self.assertTrue(
+            mem and mem.get("_durable_unpersisted"),
+            "a zero-row handoff write was not marked non-durable")
+
+        # ── C) successful retry clears the flag ──
+        res = await TO.compensate_late_delivery(
+            op, dict(spec), bot=bot, handoff_to_holdings=True)
+        self.assertTrue(res.get("handed_off"), str(res))
+        self.assertTrue(res["durable_persisted"], str(res))
+        mem = TO._PENDING_DELIVERY_ROLLBACKS.get(op)
+        self.assertTrue(mem, str(res))
+        self.assertFalse(
+            mem.get("_durable_unpersisted"),
+            "a confirmed durable handoff write left the non-durable marker set")
+
+        # ── D) timed-holding handoff, raising write ──
+        op_h, spec_h = await _holding_op()
+        TO.update_purchase = _fail_writes()
+        try:
+            res_h = await TO.compensate_late_delivery(
+                op_h, dict(spec_h), bot=bot, handoff_to_holdings=True)
+        finally:
+            TO.update_purchase = real_update
+        self.assertTrue(res_h.get("handed_off"), str(res_h))
+        self.assertFalse(res_h["durable_persisted"], str(res_h))
+        mem_h = TO._PENDING_DELIVERY_ROLLBACKS.get(op_h)
+        self.assertIsNotNone(mem_h, str(res_h))
+        self.assertTrue(mem_h.get("_durable_unpersisted"),
+                        "the timed-holding handoff did not mark its write failure")
+
+        # ── E) completion racing the handoff write: not recoverable pending work ──
+        op_r, spec_r = await _role_op()
+        raced = {"done": False}
+
+        async def _racing(oid, **kwargs):
+            if not raced["done"] and kwargs.get("delivery_rollback") not in (None, ""):
+                raced["done"] = True
+                await real_update(oid, delivery_rollback="")
+            return await real_update(oid, **kwargs)
+
+        TO.update_purchase = _racing
+        try:
+            res_r = await TO.compensate_late_delivery(
+                op_r, dict(spec_r), bot=bot, handoff_to_holdings=True)
+        finally:
+            TO.update_purchase = real_update
+        self.assertTrue(res_r["complete"], str(res_r))
+        self.assertNotIn(op_r, TO._PENDING_DELIVERY_ROLLBACKS,
+                         "a completed handoff race left recoverable pending state")
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op_r,)),
+            [("",)],
+            "the handoff race overwrote the completion sentinel")
+        self.assertEqual(
+            [r for r in rows(
+                "SELECT metadata FROM timed_holdings WHERE source='shop_late_rollback'")
+             if op_r in (r[0] or "")],
+            [],
+            "the handoff race left an orphan retry marker for the completed operation")
+
+    async def test_p17_repeated_failures_do_not_starve_later_markers(self):
+        """Regression P17: with more permanently failing markers than the pass
+        limit, later markers must still be attempted while the failures keep
+        their retry state. This is marker-set fairness, distinct from the
+        ordinary-expiry starvation covered by P9."""
+        rid = 98020
+        role = role_stub(rid, "P17FailRole")
+        itx, person, bot, guild = purchase_ctx()
+        guild.get_role = lambda r: role if int(r) == rid else None
+        person.roles.append(role)
+        person.remove_roles = AsyncMock(side_effect=RuntimeError("Discord 503"))
+
+        failing_ops = []
+        for idx in range(3):
+            op = await TO.open_purchase(
+                guild_id=GUILD, user_id=USER, item_id=7810 + idx,
+                item_name=f"P17Fail{idx}", currency="balance", amount=100)
+            await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
+            await TO.record_pending_delivery_rollback(op, {
+                "guild_id": GUILD, "user_id": USER, "item_id": 7810 + idx,
+                "item_name": f"P17Fail{idx}", "internal_type": "role",
+                "role_id": rid, "role_added": True,
+                "inventory_rolled_back": True, "equip_reconciled": True,
+                "role_reconciled": False,
+            }, bot=bot)
+            failing_ops.append(op)
+
+        # A non-actionable row that used to consume a slot of the limited window.
+        decoy = await TO.open_purchase(
+            guild_id=GUILD, user_id=USER, item_id=7819,
+            item_name="P17Decoy", currency="balance", amount=100)
+        execute(
+            "UPDATE shop_purchase_operations SET delivery_rollback=? WHERE op_id=?",
+            (json.dumps({"guild_id": GUILD, "user_id": USER,
+                         "item_name": "P17Decoy"}), decoy))
+
+        # The later, resolvable marker.
+        good = await TO.open_purchase(
+            guild_id=GUILD, user_id=USER, item_id=7820,
+            item_name="P17Good", currency="balance", amount=100)
+        await TO.update_purchase(
+            good, status=TO.PURCHASE_REFUNDED, refunded=1,
+            delivery_rollback=json.dumps({
+                "guild_id": GUILD, "user_id": USER, "item_id": 7820,
+                "item_name": "P17Good", "internal_type": "role",
+                "role_id": None, "role_added": False,
+                "inventory_rolled_back": True, "equip_reconciled": True,
+                "role_reconciled": False}))
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        # 4 candidates, limit=2: three passes guarantee every one a turn.
+        for _ in range(3):
+            await TO.reconcile_delivery_rollbacks(bot=bot, limit=2)
+
+        self.assertEqual(
+            (await TO.get_purchase(good))["_raw_delivery_rollback"], "",
+            "the later marker was never attempted across repeated limited passes")
+        # The failing markers keep their durable retry state and their rows.
+        for op in failing_ops:
+            raw = (await TO.get_purchase(op))["_raw_delivery_rollback"]
+            self.assertNotEqual(
+                raw, "", f"a failing marker lost its durable retry state: {op}")
+        self.assertEqual(
+            len(rows("SELECT id FROM timed_holdings WHERE source='shop_late_rollback'")),
+            3,
+            "failing markers did not retain exactly one retry marker each")
+
+    async def test_p18_xp_boost_fallback_only_removes_the_shop_boost(self):
+        """Regression P18: when `boost_id` is unavailable the fallback must still
+        identify the purchased boost by provenance, in both insertion orders."""
+        exp = "2099-01-01T00:00:00+00:00"
+
+        async def _run(order, include_source):
+            execute("DELETE FROM leveling_active_boosts")
+            TO._PENDING_DELIVERY_ROLLBACKS.clear()
+            seq = (("shop", "level_claim:77") if order == "shop_first"
+                   else ("level_claim:77", "shop"))
+            for src in seq:
+                execute(
+                    "INSERT INTO leveling_active_boosts"
+                    " (guild_id, user_id, multiplier, expires_at, source)"
+                    " VALUES (?,?,2.0,?,?)", (GUILD, USER, exp, src))
+            op = await TO.open_purchase(
+                guild_id=GUILD, user_id=USER, item_id=7830,
+                item_name="P18Boost", currency="balance", amount=100)
+            await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
+            spec = {
+                "guild_id": GUILD, "user_id": USER, "item_id": 7830,
+                "item_name": "P18Boost", "internal_type": "xp_boost",
+                "boost_id": None, "boost_expires_at": exp,
+                "inventory_rolled_back": False, "equip_reconciled": False,
+                "role_reconciled": False,
+            }
+            if include_source:
+                spec["boost_source"] = "shop"
+            await TO.record_pending_delivery_rollback(op, spec, bot=None)
+            res = await TO.compensate_late_delivery(op, dict(spec))
+            remaining = [r[1] for r in rows(
+                "SELECT id, source FROM leveling_active_boosts ORDER BY id")]
+            label = f"order={order}, boost_source_recorded={include_source}"
+            self.assertNotIn("shop", remaining,
+                             f"the purchased boost was not rolled back ({label})")
+            self.assertTrue(
+                any(s.startswith("level_claim") for s in remaining),
+                f"the independent level_claim boost was deleted ({label}): {remaining}")
+            self.assertTrue(res["complete"], str(res))
+
+        for order in ("shop_first", "claim_first"):
+            for include_source in (False, True):
+                await _run(order, include_source)
 
 
 if __name__ == "__main__":
