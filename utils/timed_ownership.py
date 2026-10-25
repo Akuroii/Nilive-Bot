@@ -962,27 +962,30 @@ def _is_member_not_found(exc: BaseException) -> bool:
 
 
 def _is_role_not_found(exc: BaseException) -> bool:
-    """Return True only when Discord definitively reports the role does not exist (404 NotFound)."""
+    """Return True only when Discord definitively reports Unknown Role (404 NotFound, code 10011)."""
     try:
         import discord
         if isinstance(exc, discord.NotFound):
-            return True
+            return getattr(exc, "code", None) == 10011
     except Exception:
         pass
     return False
 
 
 async def _resolve_guild_role(guild, role_id: int) -> tuple[object | None, bool, str | None]:
-    """Resolve `role_id` on `guild`, distinguishing a deleted role from lookup failures.
+    """Resolve `role_id` on `guild`, distinguishing a confirmed deleted role from lookup failures or cache misses.
 
     Returns `(role_obj, role_deleted, lookup_error)`:
       * `(role, False, None)` when the role exists in the guild.
-      * `(None, True, None)` when the guild is available and the role is
-        confirmed absent from the guild (`guild.get_role(role_id)` returned
-        `None` without raising, and any available `fetch_role` / `fetch_roles`
-        confirmed `discord.NotFound` / absence).
+      * `(None, True, None)` when the role is confirmed deleted via Discord HTTP
+        (`fetch_role` raising `discord.NotFound` with Unknown Role code `10011`,
+        or `fetch_roles` returning a role list that omits `role_id`).
+      * `(None, False, None)` when `guild.get_role(role_id)` is a cache miss and
+        HTTP confirmation is unavailable/unconfirmed.
       * `(None, False, err_str)` when `guild` is unavailable, lacks `get_role`,
-        or `get_role` / `fetch_role` / `fetch_roles` raised a non-404 exception.
+        or `get_role` / `fetch_role` / `fetch_roles` raised a lookup error
+        (including Unknown Guild `10004`, permission error, timeout, rate limit,
+        or transient API failure).
     """
     if guild is None or not hasattr(guild, "get_role"):
         return None, False, "guild role lookup unavailable"
@@ -1008,7 +1011,6 @@ async def _resolve_guild_role(guild, role_id: int) -> tuple[object | None, bool,
             role = await guild.fetch_role(int(role_id))
             if role is not None:
                 return role, False, None
-            return None, True, None
         except Exception as exc:
             if _is_role_not_found(exc):
                 return None, True, None
@@ -1018,18 +1020,17 @@ async def _resolve_guild_role(guild, role_id: int) -> tuple[object | None, bool,
         try:
             roles_list = await guild.fetch_roles()
         except Exception as exc:
-            if _is_role_not_found(exc):
-                return None, True, None
             return None, False, f"role lookup failed: {exc}"
-        for candidate in roles_list or ():
-            try:
-                if int(getattr(candidate, "id", 0)) == int(role_id):
-                    return candidate, False, None
-            except (TypeError, ValueError):
-                continue
-        return None, True, None
+        if roles_list is not None:
+            for candidate in roles_list:
+                try:
+                    if int(getattr(candidate, "id", 0)) == int(role_id):
+                        return candidate, False, None
+                except (TypeError, ValueError):
+                    continue
+            return None, True, None
 
-    return None, True, None
+    return None, False, None
 
 
 async def _late_rollback_prereqs_complete(
@@ -1037,17 +1038,34 @@ async def _late_rollback_prereqs_complete(
     *,
     entry_key: str | None = None,
 ) -> bool:
-    """Return False if a linked late-delivery rollback still needs inventory or equip compensation."""
+    """Return False if a linked late-delivery rollback still needs inventory or equip compensation,
+    or if required rollback state is unreadable or malformed."""
     spec = None
     if op_id:
-        op_row = await get_purchase(str(op_id))
-        raw = op_row.get("delivery_rollback") if op_row else None
-        if raw:
-            try:
-                spec = json.loads(raw)
-            except Exception:
-                spec = None
+        try:
+            op_row = await get_purchase(str(op_id))
+        except Exception:
+            return False
         mem_spec = _PENDING_DELIVERY_ROLLBACKS.get(str(op_id))
+        if mem_spec is not None and not isinstance(mem_spec, dict):
+            return False
+        if op_row is None:
+            if not isinstance(mem_spec, dict):
+                return False
+        else:
+            raw = (
+                op_row.get("_raw_delivery_rollback")
+                if "_raw_delivery_rollback" in op_row
+                else op_row.get("delivery_rollback")
+            )
+            if raw is not None and raw != "":
+                try:
+                    parsed = json.loads(raw)
+                except Exception:
+                    return False
+                if not isinstance(parsed, dict):
+                    return False
+                spec = dict(parsed)
         if isinstance(mem_spec, dict):
             if isinstance(spec, dict):
                 merged = dict(spec)
@@ -1058,33 +1076,43 @@ async def _late_rollback_prereqs_complete(
             else:
                 spec = dict(mem_spec)
     elif entry_key:
-        for mem_spec in _PENDING_DELIVERY_ROLLBACKS.values():
-            if isinstance(mem_spec, dict) and (
-                mem_spec.get("entry_key") == entry_key
-                or mem_spec.get("retry_entry_key") == entry_key
-            ):
-                spec = dict(mem_spec)
-                break
-        if spec is None:
-            try:
-                async with aiosqlite.connect(DB_PATH) as db:
-                    cur = await db.execute(
-                        "SELECT delivery_rollback FROM shop_purchase_operations "
-                        "WHERE delivery_rollback IS NOT NULL AND delivery_rollback != ''"
-                    )
-                    for (raw,) in await cur.fetchall():
-                        try:
-                            cand = json.loads(raw)
-                        except Exception:
-                            continue
-                        if isinstance(cand, dict) and (
-                            cand.get("entry_key") == entry_key
-                            or cand.get("retry_entry_key") == entry_key
-                        ):
-                            spec = cand
-                            break
-            except Exception:
+        for mem_val in _PENDING_DELIVERY_ROLLBACKS.values():
+            if not isinstance(mem_val, dict):
                 return False
+            if (
+                mem_val.get("entry_key") == entry_key
+                or mem_val.get("retry_entry_key") == entry_key
+            ):
+                spec = dict(mem_val)
+                break
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                cur = await db.execute(
+                    "SELECT delivery_rollback FROM shop_purchase_operations "
+                    "WHERE delivery_rollback IS NOT NULL AND delivery_rollback != ''"
+                )
+                for (raw,) in await cur.fetchall():
+                    try:
+                        cand = json.loads(raw)
+                    except Exception:
+                        return False
+                    if not isinstance(cand, dict):
+                        return False
+                    if (
+                        cand.get("entry_key") == entry_key
+                        or cand.get("retry_entry_key") == entry_key
+                    ):
+                        if isinstance(spec, dict):
+                            merged = dict(cand)
+                            for flag in ("inventory_rolled_back", "equip_reconciled", "role_reconciled"):
+                                if spec.get(flag) or cand.get(flag):
+                                    merged[flag] = True
+                            spec = merged
+                        else:
+                            spec = dict(cand)
+                        break
+        except Exception:
+            return False
     if isinstance(spec, dict):
         if not spec.get("inventory_rolled_back") or not spec.get("equip_reconciled"):
             return False
@@ -1383,7 +1411,7 @@ async def update_purchase(op_id: str, *, status: str | None = None,
         params.append(int(history_id))
     if delivery_rollback is not None:
         sets.append("delivery_rollback=?")
-        params.append(delivery_rollback if delivery_rollback != "" else None)
+        params.append(delivery_rollback)
     if not sets:
         return False
     sets.append("updated_at=CURRENT_TIMESTAMP")
@@ -1430,7 +1458,9 @@ async def get_purchase(op_id: str) -> dict | None:
                     "currency", "amount", "stock_reserved", "charged",
                     "refunded", "stock_returned", "status", "detail",
                     "history_id", "delivery_rollback", "created_at", "updated_at")
-        except Exception:
+        except Exception as exc:
+            if "no such column" not in str(exc).lower():
+                raise
             cursor = await db.execute(
                 "SELECT op_id, guild_id, user_id, item_id, item_name, currency,"
                 " amount, stock_reserved, charged, refunded, stock_returned,"
@@ -1444,7 +1474,9 @@ async def get_purchase(op_id: str) -> dict | None:
     if not row:
         return None
     res = dict(zip(keys, row))
-    if "delivery_rollback" not in res:
+    raw_dr = res.get("delivery_rollback")
+    res["_raw_delivery_rollback"] = raw_dr
+    if not raw_dr:
         res["delivery_rollback"] = None
     return res
 
@@ -1834,22 +1866,26 @@ async def record_pending_delivery_rollback(
     global _LAST_BOT
     if bot is not None:
         _LAST_BOT = bot
-    copied = dict(spec)
+    clean_spec = {k: v for k, v in spec.items() if not str(k).startswith("_")}
+    copied = dict(clean_spec)
     _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = copied
     try:
         updated = await update_purchase(
             str(op_id),
-            delivery_rollback=json.dumps(copied),
+            delivery_rollback=json.dumps(clean_spec),
             db=db,
         )
         if not updated:
+            copied["_durable_unpersisted"] = True
             print(
                 f"[SHOP] Durable delivery_rollback write matched 0 rows "
                 f"for op_id={op_id}"
             )
             return False
+        copied.pop("_durable_unpersisted", None)
         return True
     except Exception as exc:
+        copied["_durable_unpersisted"] = True
         print(
             f"[SHOP] Failed to persist durable delivery_rollback descriptor "
             f"for op_id={op_id}: {exc}"
@@ -1918,14 +1954,98 @@ async def compensate_late_delivery(
         _LAST_BOT = bot_client
 
     mem_spec = _PENDING_DELIVERY_ROLLBACKS.get(str(op_id))
-    op_row = await get_purchase(str(op_id))
+    try:
+        op_row = await get_purchase(str(op_id))
+    except Exception as exc:
+        return {
+            "complete": False,
+            "durable_persisted": False,
+            "inventory_rolled_back": False,
+            "equip_reconciled": False,
+            "role_reconciled": False,
+            "error": f"Failed to read purchase rollback state for {op_id}: {exc}",
+        }
+
+    if op_row is None:
+        if spec is None and mem_spec is None:
+            return {
+                "complete": True,
+                "durable_persisted": True,
+                "inventory_rolled_back": True,
+                "equip_reconciled": True,
+                "role_reconciled": True,
+                "error": None,
+            }
+        return {
+            "complete": False,
+            "durable_persisted": False,
+            "inventory_rolled_back": False,
+            "equip_reconciled": False,
+            "role_reconciled": False,
+            "error": f"Purchase operation {op_id} not found for late-delivery rollback",
+        }
+
+    if op_row.get("status") == PURCHASE_DELIVERED:
+        _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+        return {
+            "complete": False,
+            "durable_persisted": False,
+            "inventory_rolled_back": False,
+            "equip_reconciled": False,
+            "role_reconciled": False,
+            "error": f"Cannot roll back delivered operation {op_id}",
+        }
+
+    raw_spec = (
+        op_row.get("_raw_delivery_rollback")
+        if "_raw_delivery_rollback" in op_row
+        else op_row.get("delivery_rollback")
+    )
+    if raw_spec == "":
+        _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+        return {
+            "complete": True,
+            "durable_persisted": True,
+            "inventory_rolled_back": True,
+            "equip_reconciled": True,
+            "role_reconciled": True,
+            "error": None,
+        }
+
     db_spec = None
-    raw_spec = op_row.get("delivery_rollback") if op_row else None
-    if raw_spec:
+    if raw_spec is not None:
         try:
             db_spec = json.loads(raw_spec)
         except Exception:
             db_spec = None
+        if not isinstance(db_spec, dict):
+            return {
+                "complete": False,
+                "durable_persisted": False,
+                "inventory_rolled_back": False,
+                "equip_reconciled": False,
+                "role_reconciled": False,
+                "error": f"Malformed delivery_rollback descriptor for {op_id}",
+            }
+    else:
+        if spec is None and mem_spec is None:
+            return {
+                "complete": True,
+                "durable_persisted": True,
+                "inventory_rolled_back": True,
+                "equip_reconciled": True,
+                "role_reconciled": True,
+                "error": None,
+            }
+        if not isinstance(mem_spec, dict) or not mem_spec.get("_durable_unpersisted"):
+            return {
+                "complete": False,
+                "durable_persisted": False,
+                "inventory_rolled_back": False,
+                "equip_reconciled": False,
+                "role_reconciled": False,
+                "error": f"Durable delivery_rollback descriptor absent for {op_id}",
+            }
 
     if spec is None:
         spec = db_spec if isinstance(db_spec, dict) else mem_spec
@@ -1949,6 +2069,10 @@ async def compensate_late_delivery(
                 spec[flag] = True
         if not spec.get("retry_entry_key") and source_spec.get("retry_entry_key"):
             spec["retry_entry_key"] = source_spec["retry_entry_key"]
+    if isinstance(db_spec, dict):
+        spec.pop("_durable_unpersisted", None)
+    elif isinstance(mem_spec, dict) and mem_spec.get("_durable_unpersisted"):
+        spec["_durable_unpersisted"] = True
 
     guild_id = int(spec["guild_id"])
     user_id = int(spec["user_id"])
@@ -1974,16 +2098,23 @@ async def compensate_late_delivery(
     )
 
     async def _persist_incomplete(err_msg: str) -> dict:
-        _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(spec)
+        clean_spec = {k: v for k, v in spec.items() if not str(k).startswith("_")}
+        mem_copy = dict(clean_spec)
+        if spec.get("_durable_unpersisted"):
+            mem_copy["_durable_unpersisted"] = True
+        _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = mem_copy
         durable_persisted = False
         persist_err = None
         try:
             durable_persisted = bool(
                 await update_purchase(
                     str(op_id),
-                    delivery_rollback=json.dumps(spec),
+                    delivery_rollback=json.dumps(clean_spec),
                 )
             )
+            if durable_persisted:
+                mem_copy.pop("_durable_unpersisted", None)
+                spec.pop("_durable_unpersisted", None)
         except Exception as exc:
             persist_err = str(exc)
             durable_persisted = False
@@ -1996,6 +2127,8 @@ async def compensate_late_delivery(
                 )
                 if raw_existing and str(raw_existing).strip():
                     durable_persisted = True
+                    mem_copy.pop("_durable_unpersisted", None)
+                    spec.pop("_durable_unpersisted", None)
             except Exception as read_exc:
                 if persist_err is None:
                     persist_err = str(read_exc)
@@ -2414,45 +2547,91 @@ async def compensate_late_delivery(
                             (str(op_id),),
                         )
                         op_row_db = await cur.fetchone()
+                        if op_row_db is None:
+                            await rb_db.execute("ROLLBACK")
+                            in_tx = False
+                            return {
+                                "complete": False,
+                                "durable_persisted": False,
+                                "inventory_rolled_back": False,
+                                "equip_reconciled": False,
+                                "role_reconciled": False,
+                                "error": f"Purchase operation {op_id} not found for item rollback",
+                            }
+                        db_status, db_raw_spec = op_row_db
+                        if db_status == PURCHASE_DELIVERED:
+                            await rb_db.execute("ROLLBACK")
+                            in_tx = False
+                            _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+                            return {
+                                "complete": False,
+                                "durable_persisted": False,
+                                "inventory_rolled_back": False,
+                                "equip_reconciled": False,
+                                "role_reconciled": False,
+                                "error": f"Cannot roll back item for delivered operation {op_id}",
+                            }
+                        if db_raw_spec == "":
+                            await rb_db.execute("ROLLBACK")
+                            in_tx = False
+                            _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+                            return {
+                                "complete": True,
+                                "durable_persisted": True,
+                                "inventory_rolled_back": True,
+                                "equip_reconciled": True,
+                                "role_reconciled": True,
+                                "error": None,
+                            }
+
                         already_rolled_back = False
-                        if op_row_db is not None:
-                            db_status, db_raw_spec = op_row_db
-                            if db_status == PURCHASE_DELIVERED:
+                        if db_raw_spec is None:
+                            live_mem = _PENDING_DELIVERY_ROLLBACKS.get(str(op_id))
+                            if not isinstance(live_mem, dict) or not live_mem.get("_durable_unpersisted"):
                                 await rb_db.execute("ROLLBACK")
                                 in_tx = False
-                                return await _persist_incomplete(
-                                    f"Cannot roll back item for delivered operation {op_id}"
-                                )
-                            if db_raw_spec:
-                                try:
-                                    parsed_db_spec = json.loads(db_raw_spec)
-                                except Exception:
-                                    parsed_db_spec = None
-                                if isinstance(parsed_db_spec, dict) and parsed_db_spec.get("inventory_rolled_back"):
-                                    already_rolled_back = True
+                                return {
+                                    "complete": False,
+                                    "durable_persisted": False,
+                                    "inventory_rolled_back": False,
+                                    "equip_reconciled": False,
+                                    "role_reconciled": False,
+                                    "error": f"Durable delivery_rollback descriptor absent for {op_id}",
+                                }
+                            if live_mem.get("inventory_rolled_back"):
+                                already_rolled_back = True
+                        else:
+                            try:
+                                parsed_db_spec = json.loads(db_raw_spec)
+                            except Exception:
+                                parsed_db_spec = None
+                            if not isinstance(parsed_db_spec, dict):
+                                await rb_db.execute("ROLLBACK")
+                                in_tx = False
+                                return {
+                                    "complete": False,
+                                    "durable_persisted": False,
+                                    "inventory_rolled_back": False,
+                                    "equip_reconciled": False,
+                                    "role_reconciled": False,
+                                    "error": f"Malformed delivery_rollback descriptor for {op_id}",
+                                }
+                            for flag in ("inventory_rolled_back", "equip_reconciled", "role_reconciled"):
+                                if parsed_db_spec.get(flag):
+                                    spec[flag] = True
+                            if parsed_db_spec.get("inventory_rolled_back"):
+                                already_rolled_back = True
 
                         if not already_rolled_back:
-                            try:
-                                inv_ok = await rollback_item_inventory_grant(
-                                    guild_id,
-                                    user_id,
-                                    item_name,
-                                    quantity=1,
-                                    prior_inv=prior_inv,
-                                    delivered_inv=delivered_inv,
-                                    db=rb_db,
-                                )
-                            except TypeError as type_exc:
-                                if "db" not in str(type_exc):
-                                    raise
-                                inv_ok = await rollback_item_inventory_grant(
-                                    guild_id,
-                                    user_id,
-                                    item_name,
-                                    quantity=1,
-                                    prior_inv=prior_inv,
-                                    delivered_inv=delivered_inv,
-                                )
+                            inv_ok = await rollback_item_inventory_grant(
+                                guild_id,
+                                user_id,
+                                item_name,
+                                quantity=1,
+                                prior_inv=prior_inv,
+                                delivered_inv=delivered_inv,
+                                db=rb_db,
+                            )
                             if not inv_ok:
                                 await rb_db.execute("ROLLBACK")
                                 in_tx = False
@@ -2460,29 +2639,31 @@ async def compensate_late_delivery(
                                     f"Item inventory rollback failed for {item_name!r}"
                                 )
 
-                        spec["inventory_rolled_back"] = True
-                        spec["equip_reconciled"] = True
-                        spec["role_reconciled"] = True
-                        if op_row_db is not None:
-                            try:
-                                progress_saved = await update_purchase(
-                                    str(op_id),
-                                    delivery_rollback=json.dumps(spec),
-                                    db=rb_db,
-                                )
-                            except TypeError as type_exc:
-                                if "db" not in str(type_exc):
-                                    raise
-                                progress_saved = await update_purchase(
-                                    str(op_id),
-                                    delivery_rollback=json.dumps(spec),
-                                )
+                            spec["inventory_rolled_back"] = True
+                            spec["equip_reconciled"] = True
+                            spec["role_reconciled"] = True
+                            spec.pop("_durable_unpersisted", None)
+                            clean_spec = {
+                                k: v for k, v in spec.items() if not str(k).startswith("_")
+                            }
+                            progress_saved = await update_purchase(
+                                str(op_id),
+                                delivery_rollback=json.dumps(clean_spec),
+                                db=rb_db,
+                            )
                             if not progress_saved:
                                 raise RuntimeError(
                                     f"Durable rollback progress write matched 0 rows for op_id={op_id}"
                                 )
-                        await rb_db.commit()
-                        in_tx = False
+                            await rb_db.commit()
+                            in_tx = False
+                            _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(clean_spec)
+                        else:
+                            await rb_db.execute("ROLLBACK")
+                            in_tx = False
+                            spec["inventory_rolled_back"] = True
+                            spec["equip_reconciled"] = True
+                            spec["role_reconciled"] = True
                     except Exception:
                         if in_tx:
                             try:
