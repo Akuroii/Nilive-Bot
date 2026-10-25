@@ -2514,17 +2514,24 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             shop_mod._deliver_purchase = real_deliver
 
     async def test_priority2b_compensate_failed_purchase_never_falsely_claims_refund_when_claim_lost(self):
-        """Priority 2B regression:
-        When `_compensate_failed_purchase()` loses its `pending -> failed`
-        transition claim because the operation was already moved to `uncertain`
-        with `refunded=0`, the buyer is NEVER told that their payment was
-        returned, and the 'Refund pending' field is shown. Conversely, if the
-        operation was already refunded (`refunded=1, status='refunded'`), the
-        message accurately reflects the committed refund.
+        """Priority 2B + Audit Fix 6 regression:
+        1. When `_compensate_failed_purchase()` loses its `pending -> failed`
+           transition claim because the operation was already moved to `uncertain`
+           with `refunded=0`, the buyer is NEVER told that their payment was
+           returned AND is NEVER told that `uncertain` is retried automatically;
+           instead 'Manual review required' explains the real status.
+        2. When an operation is in `failed` with `refunded=0` (incomplete refund),
+           'Refund pending' explains that reconciliation retries it automatically.
+        3. When the operation was already refunded (`refunded=1, status='refunded'`),
+           the message accurately reflects the committed refund.
+        4. When a `free` item's stock reservation (`stock_reserved=1, stock_returned=0`)
+           remains held (either in `failed` or `uncertain`), the message does NOT
+           describe the purchase as simply cancelled without noting the held stock
+           reservation.
         """
         from cogs.shop import _compensate_failed_purchase
 
-        # Case 1: Operation moved to `uncertain` (refunded=0) before `_compensate_failed_purchase`
+        # Case 1: Paid operation moved to `uncertain` (refunded=0) -> Manual review required (NOT auto-retried)
         itx1, _, _, _ = purchase_ctx()
         op_uncertain = await TO.open_purchase(
             GUILD, USER, item_id=1, item_name="Starlight", currency="balance", amount=250)
@@ -2542,10 +2549,34 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("payment was returned", embed1.description)
         self.assertIn("has not been returned yet", embed1.description)
         self.assertTrue(
-            any(f.name == "Refund pending" for f in embed1.fields),
-            "must include Refund pending field when refund was not committed")
+            any(f.name == "Manual review required" for f in embed1.fields),
+            "uncertain operation must report Manual review required")
+        self.assertFalse(
+            any("retried automatically" in (f.value or "") for f in embed1.fields),
+            "must never claim uncertain operations are retried automatically")
 
-        # Case 2: Operation already refunded by operator (`status='refunded', refunded=1`)
+        # Case 2: Paid operation in `failed` with `refunded=0` -> Refund pending (auto-retried by reconcile_purchases)
+        itx_failed, _, _, _ = purchase_ctx()
+        op_failed_pending = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name="Starlight", currency="balance", amount=250)
+        await TO.update_purchase(op_failed_pending, charged=1, stock_reserved=0)
+        await TO.claim_purchase_transition(
+            op_failed_pending, from_statuses=(TO.PURCHASE_PENDING,),
+            to_status=TO.PURCHASE_FAILED, detail="refund_purchase interrupted")
+
+        await _compensate_failed_purchase(
+            itx_failed, op_id=op_failed_pending,
+            delivery={"success": False, "uncertain": False, "error": "Role not found"},
+            name="Starlight", pay_amount=250, pay_currency="balance", free=False)
+
+        embed_failed = itx_failed.response.send_message.await_args.kwargs["embed"]
+        self.assertIn("has not been returned yet", embed_failed.description)
+        self.assertTrue(
+            any(f.name == "Refund pending" and "retried automatically" in f.value
+                for f in embed_failed.fields),
+            "failed operation with refunded=0 is retried automatically by reconcile_purchases")
+
+        # Case 3: Operation already refunded by operator (`status='refunded', refunded=1`)
         itx2, _, _, _ = purchase_ctx()
         op_refunded = await TO.open_purchase(
             GUILD, USER, item_id=1, item_name="Starlight", currency="balance", amount=250)
@@ -2563,8 +2594,48 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         embed2 = itx2.response.send_message.await_args.kwargs["embed"]
         self.assertIn("payment was returned", embed2.description)
         self.assertFalse(
-            any(f.name == "Refund pending" for f in embed2.fields),
-            "no Refund pending warning when refund is already committed")
+            any(f.name in ("Refund pending", "Manual review required") for f in embed2.fields),
+            "no pending/review warning when refund is already committed")
+
+        # Case 4a: Free item whose stock reservation remains held in `uncertain`
+        itx_free_unc, _, _, _ = purchase_ctx()
+        op_free_unc = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name="FreeGift", currency="balance", amount=0)
+        await TO.update_purchase(op_free_unc, charged=0, stock_reserved=1, stock_returned=0)
+        await TO.claim_purchase_transition(
+            op_free_unc, from_statuses=(TO.PURCHASE_PENDING,),
+            to_status=TO.PURCHASE_UNCERTAIN, detail="parked with stock held")
+
+        await _compensate_failed_purchase(
+            itx_free_unc, op_id=op_free_unc,
+            delivery={"success": False, "uncertain": False, "error": "Role not found"},
+            name="FreeGift", pay_amount=0, pay_currency="balance", free=True)
+
+        embed_free_unc = itx_free_unc.response.send_message.await_args.kwargs["embed"]
+        self.assertIn("stock reservation is still held", embed_free_unc.description)
+        self.assertTrue(
+            any(f.name == "Manual review required" for f in embed_free_unc.fields),
+            "free item in uncertain with held stock must require manual review")
+
+        # Case 4b: Free item whose stock reservation remains held in `failed`
+        itx_free_fail, _, _, _ = purchase_ctx()
+        op_free_fail = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name="FreeGift", currency="balance", amount=0)
+        await TO.update_purchase(op_free_fail, charged=0, stock_reserved=1, stock_returned=0)
+        await TO.claim_purchase_transition(
+            op_free_fail, from_statuses=(TO.PURCHASE_PENDING,),
+            to_status=TO.PURCHASE_FAILED, detail="stock restore failed")
+
+        await _compensate_failed_purchase(
+            itx_free_fail, op_id=op_free_fail,
+            delivery={"success": False, "uncertain": False, "error": "Role not found"},
+            name="FreeGift", pay_amount=0, pay_currency="balance", free=True)
+
+        embed_free_fail = itx_free_fail.response.send_message.await_args.kwargs["embed"]
+        self.assertIn("stock reservation is still held", embed_free_fail.description)
+        self.assertTrue(
+            any(f.name == "Stock release pending" for f in embed_free_fail.fields),
+            "free item in failed with held stock must report Stock release pending")
 
     async def test_priority3_level_test_reset_timed_holding_and_entitlement_failure_lease_cleanup(self):
         """Priority 3 regression for `utils/level_test_reset.py`:
@@ -2576,6 +2647,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
            lease in `level_op_locks` is released (`finally: release_lock`),
            `rolled_back` remains 0, and a subsequent retry succeeds cleanly.
         """
+        import utils.level_test_reset as reset_mod
         from utils import level_claims, level_ops
         from utils.level_test_reset import inspect_member, reset_member, rollback_xp_operation
 
@@ -2622,7 +2694,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             [r["role_id"] for r in preview["plan"]["roles_left_on_member"]],
             [980])
 
-        # 2. Fault-inject `EntitlementCheckError` in `_role_granted_elsewhere` during
+        # 2a. Fault-inject `EntitlementCheckError` in `_role_granted_elsewhere` during
         # `rollback_xp_operation(..., apply=True)` and verify lease cleanup + retryability!
         real_elsewhere = level_claims._role_granted_elsewhere
 
@@ -2645,16 +2717,81 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             rows("SELECT COUNT(*) FROM level_op_locks WHERE guild_id=? AND user_id=?",
                  (GUILD, USER)),
             [(0,)],
-            "per-member lease in level_op_locks must be released on failure")
+            "per-member lease in level_op_locks must be released on rollback_xp_operation failure")
         self.assertEqual(
             rows("SELECT rolled_back FROM xp_mutations WHERE operation_id=?", (op_mut,)),
             [(0,)],
             "xp_mutation must remain un-rolled-back so retry is allowed")
 
-        # 3. Delete the timed holding and retry `rollback_xp_operation` -> succeeds cleanly!
+        # 2b. Exercise `reset_member(..., apply=True)` when the under-lease re-inspection
+        # (or `open_operation`) raises after `acquire_lock`, and verify `level_op_locks` is released!
+        real_inspect = reset_mod.inspect_member
+        inspect_calls = {"n": 0}
+
+        async def _failing_reinspect(*args, **kwargs):
+            inspect_calls["n"] += 1
+            if inspect_calls["n"] == 1:
+                return await real_inspect(*args, **kwargs)
+            held = rows("SELECT COUNT(*) FROM level_op_locks WHERE guild_id=? AND user_id=?",
+                        (GUILD, USER))[0][0]
+            if held != 1:
+                raise AssertionError(f"Expected active lease in level_op_locks, found {held}")
+            raise TO.EntitlementCheckError("simulated failure inside reset_member under lease")
+
+        reset_mod.inspect_member = _failing_reinspect
+        try:
+            with self.assertRaises(TO.EntitlementCheckError):
+                await reset_member(
+                    GUILD, USER, apply=True,
+                    reversed_by=999, reason="reset_member with failure",
+                    allow_production=True,
+                    member=person)
+        finally:
+            reset_mod.inspect_member = real_inspect
+
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM level_op_locks WHERE guild_id=? AND user_id=?",
+                 (GUILD, USER)),
+            [(0,)],
+            "per-member lease in level_op_locks must be released when reset_member raises")
+        self.assertIn(r_shared, person.roles)
+
+        # 2c. Exercise `reset_member(..., apply=True)` while the competing `timed_holdings`
+        # grant is active: XP/level resets to 0, but Discord role 980 is preserved on member!
+        reset_keep = await reset_member(
+            GUILD, USER, apply=True,
+            reversed_by=999, reason="reset_member keeps role due to timed_holdings",
+            allow_production=True,
+            member=person)
+        self.assertTrue(reset_keep["applied"])
+        person.remove_roles.assert_not_awaited()
+        self.assertIn(r_shared, person.roles,
+                      "reset_member must preserve Discord role 980 while timed_holdings row is active")
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM level_op_locks WHERE guild_id=? AND user_id=?",
+                 (GUILD, USER)),
+            [(0,)])
+
+        # 3. Re-seed level 10 claim, delete the timed holding, and run `rollback_xp_operation` -> removes role!
+        execute("INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level) VALUES (?, ?, 5000, 10)",
+                (GUILD, USER))
+        op_mut2 = "xp_set-test-p3-b"
+        await level_ops.record_xp_mutation(
+            guild_id=GUILD, user_id=USER, source="setxp", actor_id=999,
+            reason="grant level 10 again", xp_before=0, xp_after=5000,
+            level_before=0, level_after=10, crossings=[10], operation_id=op_mut2)
+        execute("""
+            INSERT INTO level_reward_claims
+                (guild_id, user_id, reward_level, track, reward_ref, payload_json,
+                 status, created_at, fulfilled_at, source, operation_id)
+            VALUES (?, ?, 10, 'role', '980', ?, 'fulfilled',
+                    '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',
+                    'setxp', ?)
+        """, (GUILD, USER, json.dumps({"role_id": 980}), op_mut2))
+
         await TO.delete_timed_holding(th["entry_key"])
         rb_ok = await rollback_xp_operation(
-            GUILD, USER, operation_id=op_mut, apply=True,
+            GUILD, USER, operation_id=op_mut2, apply=True,
             reversed_by=999, reason="retry after entitlement error cleared",
             member=person)
         self.assertTrue(rb_ok["applied"])
@@ -2665,8 +2802,530 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                  (GUILD, USER)),
             [(0,)])
         self.assertEqual(
-            rows("SELECT rolled_back FROM xp_mutations WHERE operation_id=?", (op_mut,)),
+            rows("SELECT rolled_back FROM xp_mutations WHERE operation_id=?", (op_mut2,)),
             [(1,)])
+
+    async def test_audit_fix_1_permanent_color_and_2_legacy_xp_boost_late_refund(self):
+        """Audit Fixes 1 & 2 regression:
+        1. Permanent Color listing (`type='color', duration_hours=None`, where
+           `itype='color'` and `internal_type='role'`) rolls back its
+           `inventory_items` row, `equipped_roles` slot, and Discord role when
+           late-refunded.
+        2. Legacy `xp_boost` listing (`type='xp_boost'`) deletes the delivered
+           `leveling_active_boosts` row when late-refunded while preserving any
+           unrelated active boosts.
+        """
+        import cogs.shop as shop_mod
+
+        r_color = role_stub(711, "PermanentEmerald")
+        roles_map = {711: r_color}
+        start_bal = rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                         (GUILD, USER))[0][0]
+
+        real_deliver = shop_mod._deliver_purchase
+
+        async def _deliver_then_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            op_id = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            await TO.claim_purchase_transition(
+                op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                to_status=TO.PURCHASE_UNCERTAIN, detail="operator timeout")
+            await TO.resolve_purchase_operation(
+                op_id, action="refund", confirmed=True,
+                note="operator refunded before late delivery finalized")
+            return res
+
+        shop_mod._deliver_purchase = _deliver_then_refund
+        try:
+            # 1. Permanent Color (duration_hours=None -> itype='color', internal_type='role')
+            perm_color_id = shop_item(
+                "color", price=300, name="PermanentEmerald",
+                role_id=711, duration_hours=None, stock=3)
+            itx, person, bot, server = purchase_ctx(granted_role=r_color)
+            server.get_role = lambda rid: roles_map.get(int(rid))
+
+            async def _add_r(r, reason=None):
+                if r not in person.roles:
+                    person.roles.append(r)
+
+            async def _rem_r(r, reason=None):
+                person.roles = [x for x in person.roles if x.id != r.id]
+
+            person.add_roles = AsyncMock(side_effect=_add_r)
+            person.remove_roles = AsyncMock(side_effect=_rem_r)
+
+            await process_purchase(itx, perm_color_id)
+            self.assertEqual(
+                rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                     (GUILD, USER))[0][0],
+                start_bal,
+                "permanent Color buyer refunded")
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='PermanentEmerald' AND quantity > 0",
+                     (GUILD, USER)),
+                [(0,)],
+                "late permanent Color inventory row must be rolled back")
+            self.assertIsNone(
+                await get_equipped(GUILD, USER),
+                "late permanent Color equip slot must be cleared")
+            self.assertNotIn(
+                r_color, person.roles,
+                "late permanent Color Discord role must be removed when unentitled")
+
+            # 2. Legacy xp_boost listing -> removes only its own boost row, keeps unrelated boost
+            execute(
+                "INSERT INTO leveling_active_boosts (guild_id, user_id, multiplier, expires_at, source) "
+                "VALUES (?, ?, 1.5, ?, 'potion')",
+                (GUILD, USER, iso_in(6)))
+            existing_boost_ids = [
+                r[0] for r in rows(
+                    "SELECT id FROM leveling_active_boosts WHERE guild_id=? AND user_id=?",
+                    (GUILD, USER))
+            ]
+            self.assertEqual(len(existing_boost_ids), 1)
+
+            xp_boost_id = shop_item(
+                "xp_boost", price=200, name="LegacyDoubleXP",
+                duration_hours=4, multiplier=2.0, stock=3)
+            itx_boost, _, _, _ = purchase_ctx()
+            itx_boost.user = person
+            itx_boost.guild = server
+            itx_boost.client = bot
+
+            await process_purchase(itx_boost, xp_boost_id)
+            self.assertEqual(
+                rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                     (GUILD, USER))[0][0],
+                start_bal,
+                "xp_boost buyer refunded")
+            remaining_boosts = rows(
+                "SELECT id, multiplier, source FROM leveling_active_boosts WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+            self.assertEqual(
+                remaining_boosts,
+                [(existing_boost_ids[0], 1.5, "potion")],
+                "late xp_boost row removed while unrelated potion boost is preserved")
+        finally:
+            shop_mod._deliver_purchase = real_deliver
+
+    async def test_audit_fix_3_safe_inventory_compensation_prior_and_concurrent_grants(self):
+        """Audit Fix 3 regression:
+        1. When `prior_inventory` exists for a permanent role/Color, late-refund
+           compensation restores `prior_inventory` cleanly when no concurrent
+           write occurred.
+        2. When a concurrent independent role grant (`set_quantity`) or quantity
+           change (`give_item`) modifies `inventory_items` before compensation
+           runs, compensation does NOT delete the row or overwrite it with the
+           stale `prior_inventory` snapshot.
+        3. For stackable items (`potion`, `title`, `custom`), a concurrent
+           independent `give_item` during late-refund compensation loses 0 units
+           (only the 1 unit from the compensated purchase is deducted).
+        """
+        import cogs.shop as shop_mod
+        from utils.inventory import give_item, set_quantity
+
+        r_role = role_stub(712, "SolarCrown")
+        roles_map = {712: r_role}
+
+        # Case 1: `prior_inventory` exists (member already owned SolarCrown from level_claim)
+        await set_quantity(
+            GUILD, USER, "SolarCrown", 1,
+            item_type="role", source="level_claim",
+            metadata={"role_id": 712, "origin": "level_claim"})
+        execute(
+            "UPDATE inventory_items SET updated_at='2026-01-01 00:00:00' "
+            "WHERE guild_id=? AND user_id=? AND item_name='SolarCrown'",
+            (GUILD, USER))
+
+        perm_role_id = shop_item(
+            "role", price=250, name="SolarCrown",
+            role_id=712, duration_hours=None, stock=5)
+        itx1, person1, bot1, server1 = purchase_ctx(
+            granted_role=r_role, roles_held=(r_role,))
+        server1.get_role = lambda rid: roles_map.get(int(rid))
+
+        real_deliver = shop_mod._deliver_purchase
+
+        async def _deliver_then_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            op_id = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            await TO.claim_purchase_transition(
+                op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
+            await TO.resolve_purchase_operation(
+                op_id, action="refund", confirmed=True, note="refunded")
+            return res
+
+        shop_mod._deliver_purchase = _deliver_then_refund
+        try:
+            await process_purchase(itx1, perm_role_id)
+        finally:
+            shop_mod._deliver_purchase = real_deliver
+
+        self.assertEqual(
+            rows("SELECT quantity, source, updated_at FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='SolarCrown'",
+                 (GUILD, USER)),
+            [(1, "level_claim", "2026-01-01 00:00:00")],
+            "prior_inventory snapshot restored when no concurrent write occurred")
+        self.assertIn(r_role, person1.roles)
+
+        # Case 2: No prior row existed, late shop purchase writes SolarCrown, AND
+        # a concurrent independent admin grant overwrites SolarCrown before compensation runs!
+        execute("DELETE FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='SolarCrown'",
+                (GUILD, USER))
+
+        async def _deliver_then_concurrent_admin_grant_and_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            # Simulate concurrent independent admin grant arriving right after shop delivery
+            await set_quantity(
+                GUILD, USER, "SolarCrown", 1,
+                item_type="role", source="admin_grant",
+                metadata={"role_id": 712, "granted_by": "admin"})
+            execute(
+                "UPDATE inventory_items SET source='admin_grant', updated_at='2026-06-01 12:00:00' "
+                "WHERE guild_id=? AND user_id=? AND item_name='SolarCrown'",
+                (GUILD, USER))
+            op_id = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            await TO.claim_purchase_transition(
+                op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
+            await TO.resolve_purchase_operation(
+                op_id, action="refund", confirmed=True, note="refunded")
+            return res
+
+        itx2, person2, bot2, server2 = purchase_ctx(granted_role=r_role)
+        server2.get_role = lambda rid: roles_map.get(int(rid))
+
+        async def _add_r2(r, reason=None):
+            if r not in person2.roles:
+                person2.roles.append(r)
+
+        async def _rem_r2(r, reason=None):
+            person2.roles = [x for x in person2.roles if x.id != r.id]
+
+        person2.add_roles = AsyncMock(side_effect=_add_r2)
+        person2.remove_roles = AsyncMock(side_effect=_rem_r2)
+
+        shop_mod._deliver_purchase = _deliver_then_concurrent_admin_grant_and_refund
+        try:
+            await process_purchase(itx2, perm_role_id)
+        finally:
+            shop_mod._deliver_purchase = real_deliver
+
+        self.assertEqual(
+            rows("SELECT quantity, source, updated_at FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='SolarCrown'",
+                 (GUILD, USER)),
+            [(1, "admin_grant", "2026-06-01 12:00:00")],
+            "concurrent independent admin role grant must NOT be deleted by late shop rollback")
+        self.assertIn(
+            r_role, person2.roles,
+            "Discord role must be retained because concurrent independent admin grant entitles it")
+
+        # Case 3: Stackable item with concurrent independent `give_item(+2)` during late-refund compensation
+        title_id = shop_item("title", price=100, name="StarVoyager", stock=5)
+
+        async def _deliver_item_then_concurrent_grant_and_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            # Concurrent quest grant adds +2 StarVoyager after the shop's +1
+            await give_item(GUILD, USER, "StarVoyager", 2, item_type="title", source="quest")
+            op_id = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            await TO.claim_purchase_transition(
+                op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
+            await TO.resolve_purchase_operation(
+                op_id, action="refund", confirmed=True, note="refunded")
+            return res
+
+        itx3, _, _, _ = purchase_ctx()
+        itx3.user = person2
+        itx3.guild = server2
+        itx3.client = bot2
+
+        shop_mod._deliver_purchase = _deliver_item_then_concurrent_grant_and_refund
+        try:
+            await process_purchase(itx3, title_id)
+        finally:
+            shop_mod._deliver_purchase = real_deliver
+
+        self.assertEqual(
+            rows("SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='StarVoyager'",
+                 (GUILD, USER)),
+            [(2,)],
+            "only the 1 unit from the compensated shop purchase is removed; the 2 concurrent quest units remain")
+
+    async def test_audit_fix_4_preexisting_role_and_independent_entitlements_protected(self):
+        """Audit Fix 4 + (h) regression:
+        1. If the member ALREADY held the Discord role before the purchase (e.g.
+           an admin/reaction role not recorded in any bot DB table), late-refund
+           compensation for both timed Color/role and permanent Color/role never
+           calls `remove_roles` and leaves no retry row to strip it later.
+        2. Even when the purchase DID add the role (or when `role_still_entitled`
+           is evaluated), independent Level (`level_reward_claims`), Prestige
+           (`prestige_config` + `levels.prestige`), and Booster (`booster_roles` +
+           `premium_since`) entitlements protect the Discord role from removal.
+        """
+        import cogs.shop as shop_mod
+
+        r_pre = role_stub(713, "AdminGrantedRole")
+        r_lvl = role_stub(714, "LevelEntitledRole")
+        r_pres = role_stub(715, "PrestigeEntitledRole")
+        r_boost = role_stub(716, "BoosterEntitledRole")
+        roles_map = {
+            713: r_pre,
+            714: r_lvl,
+            715: r_pres,
+            716: r_boost,
+        }
+
+        real_deliver = shop_mod._deliver_purchase
+
+        async def _deliver_then_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            op_id = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            await TO.claim_purchase_transition(
+                op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
+            await TO.resolve_purchase_operation(
+                op_id, action="refund", confirmed=True, note="refunded")
+            return res
+
+        shop_mod._deliver_purchase = _deliver_then_refund
+        try:
+            # 1a. Timed Color where member ALREADY held r_pre on Discord (no DB entitlement)
+            timed_pre_id = shop_item(
+                "color", price=100, name="TimedPreHeld",
+                role_id=713, duration_hours=12, stock=5)
+            itx, person, bot, server = purchase_ctx(
+                granted_role=r_pre, roles_held=(r_pre,))
+            server.get_role = lambda rid: roles_map.get(int(rid))
+            person.remove_roles = AsyncMock()
+
+            await process_purchase(itx, timed_pre_id)
+            person.remove_roles.assert_not_awaited()
+            self.assertIn(r_pre, person.roles,
+                          "pre-existing Discord role must never be removed by timed Color rollback")
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM timed_holdings WHERE guild_id=? AND user_id=? AND role_id=713",
+                     (GUILD, USER)),
+                [(0,)],
+                "no expired timed_holdings retry row left behind to strip pre-existing role later")
+
+            # 1b. Permanent Color where member ALREADY held r_pre on Discord (no DB entitlement)
+            perm_pre_id = shop_item(
+                "color", price=100, name="PermPreHeld",
+                role_id=713, duration_hours=None, stock=5)
+            await process_purchase(itx, perm_pre_id)
+            person.remove_roles.assert_not_awaited()
+            self.assertIn(r_pre, person.roles,
+                          "pre-existing Discord role must never be removed by permanent Color rollback")
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM timed_holdings WHERE guild_id=? AND user_id=? AND role_id=713",
+                     (GUILD, USER)),
+                [(0,)])
+
+            # 2. Purchase adds the role (`role_added=True`), and before rollback runs the member
+            # has an independent Level claim (714), Prestige (715), or Booster (716) entitlement!
+            from utils import level_claims
+            await level_claims.ensure_tables()
+            execute("""
+                INSERT INTO level_reward_claims
+                    (guild_id, user_id, reward_level, track, reward_ref, payload_json,
+                     status, created_at, fulfilled_at, source, operation_id)
+                VALUES (?, ?, 15, 'role', '714', ?, 'fulfilled',
+                        '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',
+                        'level', 'op-lvl-714')
+            """, (GUILD, USER, json.dumps({"role_id": 714})))
+
+            # Member is at Prestige tier 3 (from seed_member)
+            execute("INSERT OR REPLACE INTO prestige_roles (guild_id, tier, role_id) VALUES (?, 3, 715)",
+                    (GUILD,))
+            execute("""
+                INSERT OR REPLACE INTO boost_config
+                    (guild_id, enabled, boost1_role_id, boost2_role_id)
+                VALUES (?, 1, 716, NULL)
+            """, (GUILD,))
+
+            for rid, r_obj, label in (
+                (714, r_lvl, "LevelClaimColor"),
+                (715, r_pres, "PrestigeColor"),
+                (716, r_boost, "BoosterColor"),
+            ):
+                cid = shop_item(
+                    "color", price=100, name=label,
+                    role_id=rid, duration_hours=None, stock=5)
+                itx_e, person_e, bot_e, server_e = purchase_ctx(granted_role=r_obj)
+                server_e.get_role = lambda x: roles_map.get(int(x))
+                if rid == 716:
+                    person_e.premium_since = datetime.now(timezone.utc)
+                    person_e.premium_subscription_count = 1
+                else:
+                    person_e.premium_since = None
+                    person_e.premium_subscription_count = 0
+
+                async def _add_re(r, reason=None, _p=person_e):
+                    if r not in _p.roles:
+                        _p.roles.append(r)
+
+                person_e.add_roles = AsyncMock(side_effect=_add_re)
+                person_e.remove_roles = AsyncMock()
+
+                await process_purchase(itx_e, cid)
+                person_e.remove_roles.assert_not_awaited()
+                self.assertIn(
+                    r_obj, person_e.roles,
+                    f"independent entitlement for {label} (role {rid}) must protect Discord role")
+        finally:
+            shop_mod._deliver_purchase = real_deliver
+
+    async def test_audit_fix_5_retryable_role_removal_failures_for_timed_and_permanent_roles(self):
+        """Audit Fix 5 regression:
+        When `remove_roles` raises a Discord error during late-refund compensation
+        for EITHER a timed holding (`h:<id>`) OR a permanent role/Color (`i:<id>`):
+          1. No active grant is visible in `get_inventory()` or `get_timed_holdings()`.
+          2. A durable expired retry marker remains in `timed_holdings` so the
+             failure is not forgotten.
+          3. Running `cleanup_expired_holdings(bot)` retries `remove_roles`,
+             removes the Discord role once Discord recovers, and deletes the
+             retry marker.
+          4. If the member acquires an independent entitlement before the retry
+             runs, `cleanup_expired_holdings(bot)` preserves the Discord role
+             and deletes the retry marker without calling `remove_roles`.
+        """
+        import cogs.shop as shop_mod
+
+        r_timed = role_stub(717, "RetryTimedRole")
+        r_perm = role_stub(718, "RetryPermColor")
+        r_ent = role_stub(719, "RetryLaterEntitled")
+        roles_map = {717: r_timed, 718: r_perm, 719: r_ent}
+
+        real_deliver = shop_mod._deliver_purchase
+
+        async def _deliver_then_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            op_id = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            await TO.claim_purchase_transition(
+                op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
+            await TO.resolve_purchase_operation(
+                op_id, action="refund", confirmed=True, note="refunded")
+            return res
+
+        shop_mod._deliver_purchase = _deliver_then_refund
+        try:
+            for kind, dur, rid, r_obj, name in (
+                ("color", 24, 717, r_timed, "RetryTimedRole"),
+                ("color", None, 718, r_perm, "RetryPermColor"),
+            ):
+                item_id = shop_item(
+                    kind, price=100, name=name,
+                    role_id=rid, duration_hours=dur, stock=5)
+                itx, person, bot, server = purchase_ctx(granted_role=r_obj)
+                server.get_role = lambda x: roles_map.get(int(x))
+
+                async def _add_r(r, reason=None, _p=person):
+                    if r not in _p.roles:
+                        _p.roles.append(r)
+
+                person.add_roles = AsyncMock(side_effect=_add_r)
+                person.remove_roles = AsyncMock(
+                    side_effect=RuntimeError("Discord 503 during late role removal"))
+
+                await process_purchase(itx, item_id)
+
+                # 1. No active grant visible in inventory or active timed_holdings
+                active_inv = await get_inventory(GUILD, USER, include_empty=False)
+                self.assertEqual(
+                    [e for e in active_inv if e["item_name"] == name],
+                    [],
+                    f"{name}: no active inventory grant may remain when remove_roles fails")
+                self.assertEqual(
+                    [h for h in await TO.get_timed_holdings(GUILD, USER) if h["role_id"] == rid],
+                    [],
+                    f"{name}: no active timed holding may remain when remove_roles fails")
+
+                # 2. Durable expired retry marker exists in timed_holdings while role is still on member
+                self.assertIn(r_obj, person.roles)
+                self.assertEqual(
+                    rows("SELECT COUNT(*) FROM timed_holdings WHERE guild_id=? AND user_id=? AND role_id=?",
+                         (GUILD, USER, rid)),
+                    [(1,)],
+                    f"{name}: expired retry marker must be preserved when remove_roles fails")
+
+                # 3. Retry via `cleanup_expired_holdings(bot)` after Discord recovers
+                async def _rem_ok(r, reason=None, _p=person):
+                    _p.roles = [x for x in _p.roles if x.id != r.id]
+
+                person.remove_roles = AsyncMock(side_effect=_rem_ok)
+                sweep = await TO.cleanup_expired_holdings(bot)
+                self.assertEqual(sweep["removed"], 1)
+                self.assertNotIn(
+                    r_obj, person.roles,
+                    f"{name}: retry cleanup must remove the Discord role once Discord recovers")
+                self.assertEqual(
+                    rows("SELECT COUNT(*) FROM timed_holdings WHERE guild_id=? AND user_id=? AND role_id=?",
+                         (GUILD, USER, rid)),
+                    [(0,)],
+                    f"{name}: retry marker deleted after successful role removal")
+
+            # 4. If `remove_roles` fails during late rollback, and then the member earns an
+            # independent entitlement before retry runs, retry keeps the role and deletes the marker!
+            ent_id = shop_item(
+                "color", price=100, name="RetryLaterEntitled",
+                role_id=719, duration_hours=None, stock=5)
+            itx_e, person_e, bot_e, server_e = purchase_ctx(granted_role=r_ent)
+            server_e.get_role = lambda x: roles_map.get(int(x))
+
+            async def _add_re(r, reason=None):
+                if r not in person_e.roles:
+                    person_e.roles.append(r)
+
+            person_e.add_roles = AsyncMock(side_effect=_add_re)
+            person_e.remove_roles = AsyncMock(
+                side_effect=RuntimeError("Discord 503 during late role removal"))
+
+            await process_purchase(itx_e, ent_id)
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM timed_holdings WHERE guild_id=? AND user_id=? AND role_id=719",
+                     (GUILD, USER)),
+                [(1,)])
+
+            # Grant an independent fulfilled level claim for role 719 before retry runs
+            from utils import level_claims
+            await level_claims.ensure_tables()
+            execute("""
+                INSERT INTO level_reward_claims
+                    (guild_id, user_id, reward_level, track, reward_ref, payload_json,
+                     status, created_at, fulfilled_at, source, operation_id)
+                VALUES (?, ?, 20, 'role', '719', ?, 'fulfilled',
+                        '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',
+                        'level', 'op-lvl-719')
+            """, (GUILD, USER, json.dumps({"role_id": 719})))
+
+            person_e.remove_roles = AsyncMock()
+            sweep2 = await TO.cleanup_expired_holdings(bot_e)
+            self.assertEqual(sweep2["removed"], 1)
+            person_e.remove_roles.assert_not_awaited()
+            self.assertIn(
+                r_ent, person_e.roles,
+                "retry must preserve Discord role when member gained an independent entitlement")
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM timed_holdings WHERE guild_id=? AND user_id=? AND role_id=719",
+                     (GUILD, USER)),
+                [(0,)])
+        finally:
+            shop_mod._deliver_purchase = real_deliver
 
 
 if __name__ == "__main__":

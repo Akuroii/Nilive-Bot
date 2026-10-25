@@ -1350,7 +1350,8 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
                 pass
 
     return {"success": True, "entry_key": entry_key,
-            "expires_at": expires_at, "error": None, "uncertain": False}
+            "expires_at": expires_at, "role_added": role_added,
+            "error": None, "uncertain": False}
 
 
 async def claim_purchase_transition(op_id: str, *,
