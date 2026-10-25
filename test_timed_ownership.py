@@ -3815,6 +3815,405 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         person.remove_roles.assert_not_awaited()
         self.assertIn(r_solar, person.roles)
 
+    async def test_fix_n1_departed_member_expiry_and_late_delivery_rollback(self):
+        """Fix N1 regression:
+        1. `guild.fetch_member` raising `discord.NotFound` during ordinary expiry
+           retires the expired holding (`removed=1`) instead of keeping it forever,
+           while preserving unrelated ownership and equip state.
+        2. Other `fetch_member` exceptions (`discord.HTTPException(503)`,
+           `discord.Forbidden`, `RuntimeError`) remain retryable (`kept=1`).
+        3. In late-delivery compensation (`process_purchase` / `compensate_late_delivery`),
+           when the member has left the guild (`fetch_member` raises `discord.NotFound`)
+           on either timed (`h:`) or permanent-role (`internal_type == "role"`) paths,
+           inventory/equip rollback still runs and the Discord-role portion is marked
+           resolved without attempting `remove_roles` or leaving an endless retry marker.
+        4. An older departed-member expired holding does not starve newer expired
+           holdings within a small `cleanup_expired_holdings(bot, limit=1)` window.
+        """
+        import discord
+        import cogs.shop as shop_mod
+        from cogs.shop import process_purchase
+        from utils.equip_engine import equip_role, get_equipped
+        from utils.inventory import get_inventory, set_quantity
+
+        def _make_not_found():
+            resp = SimpleNamespace(status=404, reason="Not Found")
+            return discord.NotFound(resp, "10007: Unknown Member")
+
+        def _make_http_503():
+            resp = SimpleNamespace(status=503, reason="Service Unavailable")
+            return discord.HTTPException(resp, "503 Service Unavailable")
+
+        r_exp = role_stub(741, "DepartedExpiryRole")
+        r_perm_keep = role_stub(742, "DepartedPermKeepRole")
+        r_active = role_stub(743, "ActiveMemberRole")
+        r_late_t = role_stub(744, "DepartedLateTimedRole")
+        r_late_p = role_stub(745, "DepartedLatePermRole")
+        roles_map = {
+            741: r_exp,
+            742: r_perm_keep,
+            743: r_active,
+            744: r_late_t,
+            745: r_late_p,
+        }
+
+        # ── Part 1 & 2: Ordinary expiry (`NotFound` vs transient `HTTPException`) ──
+        _, person, bot, guild = purchase_ctx(granted_role=r_exp)
+        guild.get_role = lambda rid: roles_map.get(int(rid))
+        granted = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="DepartedTimedColor", duration_hours=1,
+            item_type="temp_role", category=TO.CATEGORY_COLOR, role_id=741)
+        self.assertTrue(granted["success"])
+        hid = int(granted["entry_key"].split(":", 1)[1])
+        execute(
+            "UPDATE timed_holdings SET expires_at='2000-01-01T00:00:00+00:00' WHERE id=?",
+            (hid,))
+
+        # Also give the member an unrelated permanent role item to verify unrelated ownership is untouched
+        await set_quantity(
+            GUILD, USER, "UnrelatedOwnedRole", 1,
+            item_type="role", metadata={"role_id": 742}, source="shop")
+
+        # Member is no longer in `guild.get_member` cache
+        guild.get_member = lambda uid: None
+
+        # 2a. Transient 503 from `fetch_member` must keep the holding for retry
+        guild.fetch_member = AsyncMock(side_effect=_make_http_503())
+        sweep_503 = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(sweep_503["removed"], 0, str(sweep_503))
+        self.assertEqual(sweep_503["kept"], 1, str(sweep_503))
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?", (hid,)),
+            [(1,)],
+            "Transient fetch_member HTTPException must keep the expired holding for retry")
+
+        # 1a. Confirmed `discord.NotFound` from `fetch_member` retires the expired holding
+        guild.fetch_member = AsyncMock(side_effect=_make_not_found())
+        sweep_404 = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(sweep_404["removed"], 1, str(sweep_404))
+        self.assertEqual(sweep_404["kept"], 0, str(sweep_404))
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?", (hid,)),
+            [(0,)],
+            "Confirmed discord.NotFound must retire the expired holding")
+        self.assertIsNone(await get_equipped(GUILD, USER))
+        self.assertEqual(
+            [e["item_name"] for e in await get_inventory(GUILD, USER, include_empty=False)],
+            ["UnrelatedOwnedRole"],
+            "Retiring departed member's expired holding must not clear unrelated ownership")
+
+        # ── Part 4: Departed member row must not starve newer expired holdings under `limit=1` ──
+        departed_uid = USER + 777
+        active_uid = USER + 888
+        active_member = member(active_uid)
+        active_member.roles = [r_active]
+
+        async def _rem_active(r, reason=None):
+            active_member.roles = [x for x in active_member.roles if x.id != r.id]
+
+        active_member.remove_roles = AsyncMock(side_effect=_rem_active)
+
+        h_old_departed = await TO.grant_timed_holding(
+            GUILD, departed_uid, "OldDepartedHolding",
+            expires_at="1999-01-01T00:00:00+00:00",
+            item_type="temp_role", role_id=741)
+        h_new_active = await TO.grant_timed_holding(
+            GUILD, active_uid, "NewerActiveHolding",
+            expires_at="2001-01-01T00:00:00+00:00",
+            item_type="temp_role", role_id=743)
+
+        guild.get_member = lambda uid: active_member if int(uid) == active_uid else None
+
+        async def _fetch_by_uid(uid):
+            if int(uid) == departed_uid:
+                raise _make_not_found()
+            return active_member
+
+        guild.fetch_member = AsyncMock(side_effect=_fetch_by_uid)
+
+        # Tick 1 with `limit=1` retires the older departed-member holding
+        tick1 = await TO.cleanup_expired_holdings(bot, limit=1)
+        self.assertEqual(tick1["removed"], 1, str(tick1))
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?", (h_old_departed,)),
+            [(0,)])
+        # Tick 2 with `limit=1` now reaches and retires the newer active member's holding!
+        tick2 = await TO.cleanup_expired_holdings(bot, limit=1)
+        self.assertEqual(tick2["removed"], 1, str(tick2))
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?", (h_new_active,)),
+            [(0,)])
+        active_member.remove_roles.assert_awaited_once()
+        self.assertNotIn(r_active, active_member.roles)
+
+        # ── Part 3: Late-delivery rollback after member has left the guild ──
+        execute("DELETE FROM inventory_items WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        timed_shop_id = shop_item(
+            "color", price=100, name="DepartedLateTimed",
+            role_id=744, duration_hours=24, stock=5)
+        perm_shop_id = shop_item(
+            "color", price=100, name="DepartedLatePerm",
+            role_id=745, duration_hours=None, stock=5)
+
+        real_deliver = shop_mod._deliver_purchase
+
+        def _make_departed_after_delivery_ctx(granted_role):
+            itx, live_m, bot_l, guild_l = purchase_ctx(granted_role=granted_role)
+            guild_l.get_role = lambda rid: roles_map.get(int(rid))
+            departed_flag = {"left": False}
+
+            async def _add_r(r, reason=None):
+                if r not in live_m.roles:
+                    live_m.roles.append(r)
+
+            live_m.add_roles = AsyncMock(side_effect=_add_r)
+            live_m.remove_roles = AsyncMock()
+
+            stale_itx_user = member()
+            stale_itx_user.roles = [granted_role]
+            stale_itx_user.remove_roles = AsyncMock(
+                side_effect=AssertionError("must not call remove_roles on stale interaction.user after NotFound"))
+            itx.user = stale_itx_user
+
+            guild_l.get_member = lambda uid: (
+                None if departed_flag["left"] else (live_m if int(uid) == USER else None)
+            )
+
+            async def _fetch_m(uid):
+                if departed_flag["left"]:
+                    raise _make_not_found()
+                return live_m
+
+            guild_l.fetch_member = AsyncMock(side_effect=_fetch_m)
+            return itx, stale_itx_user, live_m, bot_l, guild_l, departed_flag
+
+        itx_lt, stale_lt, live_lt, _, _, flag_lt = _make_departed_after_delivery_ctx(r_late_t)
+        itx_lp, stale_lp, live_lp, _, _, flag_lp = _make_departed_after_delivery_ctx(r_late_p)
+        active_flag = {"ref": flag_lt}
+
+        async def _deliver_then_depart_and_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            active_flag["ref"]["left"] = True
+            last_op = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            execute(
+                "UPDATE shop_purchase_operations SET status=? WHERE op_id=?",
+                (TO.PURCHASE_UNCERTAIN, last_op))
+            await TO.resolve_purchase_operation(
+                last_op, action="refund", confirmed=True,
+                note="refunded after member left guild")
+            return res
+
+        shop_mod._deliver_purchase = _deliver_then_depart_and_refund
+        try:
+            # 3a. Timed `h:` late-delivery rollback when member has departed
+            active_flag["ref"] = flag_lt
+            await process_purchase(itx_lt, timed_shop_id)
+            live_lt.remove_roles.assert_not_awaited()
+            stale_lt.remove_roles.assert_not_awaited()
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM timed_holdings WHERE guild_id=? AND user_id=?",
+                     (GUILD, USER)),
+                [(0,)],
+                "Timed h: late rollback for departed member must retire the holding without endless retry")
+            op_lt = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            self.assertFalse(bool((await TO.get_purchase(op_lt)).get("delivery_rollback")))
+
+            # 3b. Permanent role late-delivery rollback when member has departed:
+            # inventory rollback and equip reconciliation complete, and no retry marker is left!
+            active_flag["ref"] = flag_lp
+            await process_purchase(itx_lp, perm_shop_id)
+            live_lp.remove_roles.assert_not_awaited()
+            stale_lp.remove_roles.assert_not_awaited()
+            self.assertEqual(
+                [e for e in await get_inventory(GUILD, USER, include_empty=False)
+                 if e["item_name"] == "DepartedLatePerm"],
+                [],
+                "Departed member late rollback must still roll back the permanent role inventory grant")
+            self.assertIsNone(await get_equipped(GUILD, USER))
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM timed_holdings WHERE guild_id=? AND user_id=?",
+                     (GUILD, USER)),
+                [(0,)],
+                "Departed member permanent-role late rollback must not leave an endless retry marker")
+            op_lp = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            self.assertFalse(bool((await TO.get_purchase(op_lp)).get("delivery_rollback")))
+        finally:
+            shop_mod._deliver_purchase = real_deliver
+
+    async def test_fix_n2_descriptor_persistence_failure_vs_durable_restart_recovery(self):
+        """Fix N2 regression:
+        1. When saving the `delivery_rollback` descriptor fails AND inventory rollback
+           also fails, `record_pending_delivery_rollback` returns `False`,
+           `compensate_late_delivery` reports `durable_persisted=False`, and
+           `process_purchase` reports `"Manual recovery required"` with the operation ID
+           (never claiming `"Rollback pending reconciliation"` or promising automatic
+           recovery after restart), without altering the purchase status to trigger a
+           second refund.
+        2. When descriptor persistence succeeds and inventory rollback fails, a
+           simulated process restart (`_PENDING_DELIVERY_ROLLBACKS.clear()`) followed
+           by `reconcile_purchases(bot=bot)` recovers from the durable SQLite
+           descriptor and completes both inventory rollback and Discord role removal.
+        """
+        import sqlite3
+        import cogs.shop as shop_mod
+        import utils.reward_engine as re_mod
+        from cogs.shop import process_purchase
+        from utils.inventory import get_inventory
+
+        r_n2_fail = role_stub(751, "N2PersistFailColor")
+        r_n2_ok = role_stub(752, "N2DurableRestartColor")
+        roles_map = {751: r_n2_fail, 752: r_n2_ok}
+
+        item_n2_fail = shop_item(
+            "color", price=100, name="N2PersistFailColor",
+            role_id=751, duration_hours=None, stock=5)
+        item_n2_ok = shop_item(
+            "color", price=100, name="N2DurableRestartColor",
+            role_id=752, duration_hours=None, stock=5)
+
+        real_deliver = shop_mod._deliver_purchase
+        real_update_purchase = TO.update_purchase
+        real_rollback_role = re_mod.rollback_role_inventory_grant
+
+        async def _deliver_then_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            last_op = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            execute(
+                "UPDATE shop_purchase_operations SET status=? WHERE op_id=?",
+                (TO.PURCHASE_UNCERTAIN, last_op))
+            await TO.resolve_purchase_operation(
+                last_op, action="refund", confirmed=True,
+                note="late refund for N2 test")
+            return res
+
+        async def _failing_update_delivery_rollback(op_id, **kwargs):
+            if kwargs.get("delivery_rollback") is not None and kwargs.get("delivery_rollback") != "":
+                raise sqlite3.OperationalError("simulated disk error writing delivery_rollback")
+            return await real_update_purchase(op_id, **kwargs)
+
+        async def _failing_inventory_rollback(*args, **kwargs):
+            return False
+
+        shop_mod._deliver_purchase = _deliver_then_refund
+        try:
+            # ── Case 1: Descriptor persistence fails AND inventory rollback fails ──
+            itx1, person1, bot1, guild1 = purchase_ctx(granted_role=r_n2_fail)
+            guild1.get_role = lambda rid: roles_map.get(int(rid))
+
+            async def _add1(r, reason=None):
+                if r not in person1.roles:
+                    person1.roles.append(r)
+
+            person1.add_roles = AsyncMock(side_effect=_add1)
+            person1.remove_roles = AsyncMock()
+
+            TO.update_purchase = _failing_update_delivery_rollback
+            re_mod.rollback_role_inventory_grant = _failing_inventory_rollback
+            try:
+                await process_purchase(itx1, item_n2_fail)
+            finally:
+                TO.update_purchase = real_update_purchase
+                re_mod.rollback_role_inventory_grant = real_rollback_role
+
+            op_fail = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            op_row_fail = await TO.get_purchase(op_fail)
+            self.assertEqual(op_row_fail["status"], TO.PURCHASE_REFUNDED)
+            self.assertEqual(op_row_fail["refunded"], 1)
+            self.assertIsNone(
+                op_row_fail.get("delivery_rollback"),
+                "DB delivery_rollback column is NULL because descriptor persistence failed")
+
+            embed1 = itx1.response.send_message.await_args.kwargs["embed"]
+            field_names1 = [f.name or "" for f in embed1.fields]
+            field_values1 = "\n".join(f.value or "" for f in embed1.fields)
+            self.assertIn(
+                "Manual recovery required",
+                field_names1,
+                f"Must report Manual recovery required when descriptor write failed; got {field_names1}")
+            self.assertNotIn(
+                "Rollback pending reconciliation",
+                field_names1,
+                "Must NOT claim Rollback pending reconciliation when durable descriptor write failed")
+            self.assertNotIn(
+                "queued for automatic reconciliation",
+                field_values1,
+                "Must NOT claim rollback is queued for automatic reconciliation when persistence failed")
+            self.assertIn(op_fail, field_values1)
+            self.assertIn("not guaranteed", field_values1)
+
+            # In-memory retry before restart still works safely and does not double-refund
+            balance_before = rows(
+                "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))[0][0]
+            rec_in_mem = await TO.reconcile_purchases(bot=bot1)
+            self.assertGreaterEqual(rec_in_mem["completed"], 1)
+            balance_after = rows(
+                "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))[0][0]
+            self.assertEqual(
+                balance_after, balance_before,
+                "Reconciling incomplete delivery rollback must never trigger a second refund")
+
+            # ── Case 2: Normal persisted descriptor survives simulated process restart ──
+            itx2, person2, bot2, guild2 = purchase_ctx(granted_role=r_n2_ok)
+            guild2.get_role = lambda rid: roles_map.get(int(rid))
+
+            async def _add2(r, reason=None):
+                if r not in person2.roles:
+                    person2.roles.append(r)
+
+            async def _rem2(r, reason=None):
+                person2.roles = [x for x in person2.roles if x.id != r.id]
+
+            person2.add_roles = AsyncMock(side_effect=_add2)
+            person2.remove_roles = AsyncMock(side_effect=_rem2)
+
+            re_mod.rollback_role_inventory_grant = _failing_inventory_rollback
+            try:
+                await process_purchase(itx2, item_n2_ok)
+            finally:
+                re_mod.rollback_role_inventory_grant = real_rollback_role
+
+            op_ok = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            op_row_ok = await TO.get_purchase(op_ok)
+            self.assertTrue(
+                bool(op_row_ok.get("delivery_rollback")),
+                "Durable descriptor must be saved in shop_purchase_operations when persistence succeeds")
+            embed2 = itx2.response.send_message.await_args.kwargs["embed"]
+            self.assertIn(
+                "Rollback pending reconciliation",
+                [f.name or "" for f in embed2.fields],
+                "When durable persistence succeeded, embed may report Rollback pending reconciliation")
+
+            # Simulate a process restart by wiping the in-memory dictionary
+            TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+            # Reconcile after simulated restart: loads descriptor from SQLite and finishes recovery!
+            rec_restart = await TO.reconcile_purchases(bot=bot2)
+            self.assertGreaterEqual(rec_restart["completed"], 1, str(rec_restart))
+            self.assertEqual(
+                [e for e in await get_inventory(GUILD, USER, include_empty=False)
+                 if e["item_name"] == "N2DurableRestartColor"],
+                [],
+                "Durable retry after simulated restart must roll back the inventory item")
+            person2.remove_roles.assert_awaited_once()
+            self.assertNotIn(r_n2_ok, person2.roles)
+            self.assertFalse(bool((await TO.get_purchase(op_ok)).get("delivery_rollback")))
+        finally:
+            shop_mod._deliver_purchase = real_deliver
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

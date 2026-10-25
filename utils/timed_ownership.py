@@ -950,6 +950,17 @@ async def reconcile_equip_for_expired_holding(guild_id: int, user_id: int,
     return None
 
 
+def _is_member_not_found(exc: BaseException) -> bool:
+    """Return True only when Discord definitively reports the member is not in the guild (404 NotFound)."""
+    try:
+        import discord
+        if isinstance(exc, discord.NotFound):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def expire_one(bot, holding: dict) -> dict:
     """Retire ONE expired holding, reconciling Discord and bookkeeping.
 
@@ -980,12 +991,17 @@ async def expire_one(bot, holding: dict) -> dict:
         return {"status": "kept", "reason": "guild unavailable"}
 
     member = guild.get_member(user_id) if hasattr(guild, "get_member") else None
+    member_departed = False
     if member is None and hasattr(guild, "fetch_member"):
         try:
             member = await guild.fetch_member(user_id)
         except Exception as exc:
-            err = f"member lookup failed: {exc}"
-            return {"status": "kept", "reason": err, "error": err}
+            if _is_member_not_found(exc):
+                member = None
+                member_departed = True
+            else:
+                err = f"member lookup failed: {exc}"
+                return {"status": "kept", "reason": err, "error": err}
     meta = holding.get("metadata") if isinstance(holding.get("metadata"), dict) else {}
     is_late_rollback = bool(
         meta.get("late_rollback") or holding.get("source") == "shop_late_rollback"
@@ -1018,11 +1034,18 @@ async def expire_one(bot, holding: dict) -> dict:
         return {"status": "removed", "reason": f"role retained ({reason})"}
 
     role = guild.get_role(int(role_id)) if hasattr(guild, "get_role") else None
-    if is_late_rollback and (member is None or role is None or not hasattr(member, "remove_roles")):
+    if is_late_rollback and not member_departed and (
+        member is None or role is None or not hasattr(member, "remove_roles")
+    ):
         err = "member or role unavailable for late role rollback"
         return {"status": "kept", "reason": err, "error": err}
     member_roles = getattr(member, "roles", None) or ()
-    if member is not None and role is not None and (is_late_rollback or role in member_roles):
+    if (
+        not member_departed
+        and member is not None
+        and role is not None
+        and (is_late_rollback or role in member_roles)
+    ):
         try:
             await member.remove_roles(role, reason="Timed entitlement expired")
             if isinstance(getattr(member, "roles", None), list) and role in member.roles:
@@ -1050,7 +1073,10 @@ async def expire_one(bot, holding: dict) -> dict:
             await update_purchase(str(linked_op_id), delivery_rollback="")
         except Exception:
             pass
-    return {"status": "removed", "reason": "expired"}
+    return {
+        "status": "removed",
+        "reason": "member departed" if member_departed else "expired",
+    }
 
 
 async def cleanup_expired_holdings(bot, *, limit: int = 200) -> dict:
@@ -1651,22 +1677,40 @@ async def record_pending_delivery_rollback(
     *,
     bot=None,
     db: aiosqlite.Connection | None = None,
-) -> None:
-    """Persist a durable late-delivery rollback descriptor on the purchase row."""
+) -> bool:
+    """Persist a durable late-delivery rollback descriptor on the purchase row.
+
+    Returns True only when the descriptor was durably written to
+    `shop_purchase_operations` in SQLite (or staged on the caller's open `db`
+    transaction). Always updates the in-memory fallback map for current-process
+    retries, but never treats the in-memory copy as durable persistence.
+    """
     global _LAST_BOT
     if bot is not None:
         _LAST_BOT = bot
     copied = dict(spec)
     _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = copied
     try:
-        await update_purchase(
+        updated = await update_purchase(
             str(op_id),
             delivery_rollback=json.dumps(copied),
             db=db,
         )
-    except Exception:
+        if not updated:
+            print(
+                f"[SHOP] Durable delivery_rollback write matched 0 rows "
+                f"for op_id={op_id}"
+            )
+            return False
+        return True
+    except Exception as exc:
+        print(
+            f"[SHOP] Failed to persist durable delivery_rollback descriptor "
+            f"for op_id={op_id}: {exc}"
+        )
         if db is not None:
             raise
+        return False
 
 
 def _resolve_guild_and_live_member(
@@ -1741,6 +1785,7 @@ async def compensate_late_delivery(
         _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
         return {
             "complete": True,
+            "durable_persisted": True,
             "inventory_rolled_back": True,
             "equip_reconciled": True,
             "role_reconciled": True,
@@ -1773,30 +1818,73 @@ async def compensate_late_delivery(
 
     async def _persist_incomplete(err_msg: str) -> dict:
         _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(spec)
+        durable_persisted = False
+        persist_err = None
         try:
-            await update_purchase(
-                str(op_id),
-                delivery_rollback=json.dumps(spec),
+            durable_persisted = bool(
+                await update_purchase(
+                    str(op_id),
+                    delivery_rollback=json.dumps(spec),
+                )
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            persist_err = str(exc)
+            durable_persisted = False
+
+        if not durable_persisted:
+            try:
+                existing_op = await get_purchase(str(op_id))
+                raw_existing = (
+                    existing_op.get("delivery_rollback") if existing_op else None
+                )
+                if raw_existing and str(raw_existing).strip():
+                    durable_persisted = True
+            except Exception as read_exc:
+                if persist_err is None:
+                    persist_err = str(read_exc)
+
+        full_err = err_msg
+        if not durable_persisted:
+            suffix = (
+                f" (durable descriptor write failed: {persist_err})"
+                if persist_err
+                else " (durable descriptor not persisted)"
+            )
+            full_err = f"{err_msg}{suffix}"
+            print(
+                f"[SHOP] ERROR: Late-delivery rollback incomplete and durable "
+                f"persistence failed for op_id={op_id}: {full_err}"
+            )
         return {
             "complete": False,
+            "durable_persisted": durable_persisted,
             "inventory_rolled_back": bool(spec.get("inventory_rolled_back")),
             "equip_reconciled": bool(spec.get("equip_reconciled")),
             "role_reconciled": bool(spec.get("role_reconciled")),
-            "error": err_msg,
+            "error": full_err,
         }
 
     guild_obj, target_member = _resolve_guild_and_live_member(
         guild_id, user_id, bot=bot_client, interaction=interaction
     )
+    member_departed = False
+    member_lookup_error = None
     if target_member is None and guild_obj is not None and hasattr(guild_obj, "fetch_member"):
         try:
             target_member = await guild_obj.fetch_member(int(user_id))
-        except Exception:
-            target_member = None
-    if target_member is None and interaction is not None:
+        except Exception as exc:
+            if _is_member_not_found(exc):
+                target_member = None
+                member_departed = True
+            else:
+                target_member = None
+                member_lookup_error = exc
+    if (
+        target_member is None
+        and not member_departed
+        and member_lookup_error is None
+        and interaction is not None
+    ):
         itx_user = getattr(interaction, "user", None)
         if itx_user is not None and getattr(itx_user, "id", int(user_id)) == int(user_id):
             target_member = itx_user
@@ -1829,12 +1917,16 @@ async def compensate_late_delivery(
 
         if handoff_to_holdings:
             _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(spec)
+            durable_ok = False
             try:
-                await update_purchase(str(op_id), delivery_rollback=json.dumps(spec))
+                durable_ok = bool(
+                    await update_purchase(str(op_id), delivery_rollback=json.dumps(spec))
+                )
             except Exception:
-                pass
+                durable_ok = False
             return {
                 "complete": False,
+                "durable_persisted": durable_ok,
                 "inventory_rolled_back": True,
                 "equip_reconciled": True,
                 "role_reconciled": False,
@@ -1844,13 +1936,17 @@ async def compensate_late_delivery(
 
         if not spec.get("role_reconciled"):
             try:
-                if role_id is not None and role_added_by_delivery:
+                if role_id is not None and role_added_by_delivery and not member_departed:
                     still_entitled = await role_still_entitled(
                         guild_id, user_id, int(role_id),
                         exclude_entry_key=str(late_key),
                         bot=bot_client, member=target_member,
                     )
                     if not still_entitled:
+                        if member_lookup_error is not None:
+                            raise RuntimeError(
+                                f"Member lookup failed for late Discord role rollback: {member_lookup_error}"
+                            )
                         if guild_obj is None:
                             raise RuntimeError(
                                 "Guild unavailable for late Discord role rollback"
@@ -1939,6 +2035,17 @@ async def compensate_late_delivery(
         if not spec.get("role_reconciled"):
             if role_id is None or not role_added_by_delivery:
                 spec["role_reconciled"] = True
+            elif member_departed:
+                retry_entry_key = spec.get("retry_entry_key")
+                if retry_entry_key:
+                    try:
+                        await delete_timed_holding(retry_entry_key)
+                    except Exception as exc:
+                        return await _persist_incomplete(
+                            f"Failed to retire retry marker for departed member: {exc}"
+                        )
+                    spec["retry_entry_key"] = None
+                spec["role_reconciled"] = True
             else:
                 retry_entry_key = spec.get("retry_entry_key")
                 if not retry_entry_key:
@@ -1968,12 +2075,16 @@ async def compensate_late_delivery(
 
                 if handoff_to_holdings:
                     _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(spec)
+                    durable_ok = False
                     try:
-                        await update_purchase(str(op_id), delivery_rollback=json.dumps(spec))
+                        durable_ok = bool(
+                            await update_purchase(str(op_id), delivery_rollback=json.dumps(spec))
+                        )
                     except Exception:
-                        pass
+                        durable_ok = False
                     return {
                         "complete": False,
+                        "durable_persisted": durable_ok,
                         "inventory_rolled_back": True,
                         "equip_reconciled": True,
                         "role_reconciled": False,
@@ -1991,6 +2102,10 @@ async def compensate_late_delivery(
                         member=target_member,
                     )
                     if not still_entitled:
+                        if member_lookup_error is not None:
+                            raise RuntimeError(
+                                f"Member lookup failed for late Discord role rollback: {member_lookup_error}"
+                            )
                         if guild_obj is None:
                             raise RuntimeError(
                                 "Guild unavailable for late Discord role rollback"

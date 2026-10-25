@@ -497,6 +497,7 @@ async def process_purchase(interaction: discord.Interaction,
     history_id = None
     committed_outside_tx = False
     was_compensated = False
+    persisted_descriptor = False
     late_rollback_spec = {
         "op_id": str(op_id),
         "guild_id": int(guild_id),
@@ -571,14 +572,23 @@ async def process_purchase(interaction: discord.Interaction,
                         )
                     )
                     if was_compensated:
-                        await record_pending_delivery_rollback(
+                        staged_ok = await record_pending_delivery_rollback(
                             op_id,
                             late_rollback_spec,
                             bot=interaction.client,
                             db=db,
                         )
-                        await db.commit()
-                except Exception:
+                        if staged_ok:
+                            await db.commit()
+                            persisted_descriptor = True
+                        else:
+                            await db.execute("ROLLBACK")
+                except Exception as stage_exc:
+                    persisted_descriptor = False
+                    print(
+                        f"[SHOP] Pre-compensation descriptor write failed "
+                        f"for op_id={op_id}: {stage_exc}"
+                    )
                     try:
                         await db.execute("ROLLBACK")
                     except Exception:
@@ -600,7 +610,11 @@ async def process_purchase(interaction: discord.Interaction,
                     await cleanup_db.commit()
             except Exception:
                 pass
-        comp_res = {"complete": True, "error": None}
+        comp_res = {
+            "complete": True,
+            "durable_persisted": persisted_descriptor,
+            "error": None,
+        }
         try:
             from utils.timed_ownership import (
                 PURCHASE_REFUNDED,
@@ -618,9 +632,12 @@ async def process_purchase(interaction: discord.Interaction,
                     )
                 )
             if was_compensated:
-                await record_pending_delivery_rollback(
-                    op_id, late_rollback_spec, bot=interaction.client
-                )
+                if not persisted_descriptor:
+                    persisted_descriptor = bool(
+                        await record_pending_delivery_rollback(
+                            op_id, late_rollback_spec, bot=interaction.client
+                        )
+                    )
                 comp_res = await compensate_late_delivery(
                     op_id,
                     late_rollback_spec,
@@ -628,7 +645,11 @@ async def process_purchase(interaction: discord.Interaction,
                     interaction=interaction,
                 )
         except Exception as cleanup_exc:
-            comp_res = {"complete": False, "error": str(cleanup_exc)}
+            comp_res = {
+                "complete": False,
+                "durable_persisted": persisted_descriptor,
+                "error": str(cleanup_exc),
+            }
             print(f"[SHOP] Late delivery cleanup failed for {op_id}: {cleanup_exc}")
         embed = discord.Embed(
             title="⚠️ Purchase needs a check",
@@ -640,14 +661,32 @@ async def process_purchase(interaction: discord.Interaction,
             color=0xFAA61A,
         )
         if was_compensated and not comp_res.get("complete", False):
-            embed.add_field(
-                name="Rollback pending reconciliation",
-                value=(
-                    f"Late-delivery rollback for `{op_id}` did not complete "
-                    f"immediately and has been queued for automatic reconciliation."
-                ),
-                inline=False,
-            )
+            if comp_res.get("durable_persisted", False):
+                embed.add_field(
+                    name="Rollback pending reconciliation",
+                    value=(
+                        f"Late-delivery rollback for `{op_id}` did not complete "
+                        f"immediately and has been queued for automatic reconciliation."
+                    ),
+                    inline=False,
+                )
+            else:
+                print(
+                    f"[SHOP] ERROR: Late-delivery rollback incomplete and durable "
+                    f"recovery state could not be saved for op_id={op_id}: "
+                    f"{comp_res.get('error')}"
+                )
+                embed.add_field(
+                    name="Manual recovery required",
+                    value=(
+                        f"Late-delivery rollback for operation `{op_id}` did not "
+                        f"complete and durable recovery state could not be saved "
+                        f"to the database. Automatic recovery after a restart is "
+                        f"not guaranteed; please contact staff with operation ID "
+                        f"`{op_id}` to inspect and reconcile the remaining delivery state."
+                    ),
+                    inline=False,
+                )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
