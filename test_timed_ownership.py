@@ -4214,6 +4214,386 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         finally:
             shop_mod._deliver_purchase = real_deliver
 
+    async def test_p1_stackable_item_descriptor_clear_failure_no_replay_after_restart(self):
+        """Regression P1: Failed final `delivery_rollback=""` clear on a late-refunded
+        stackable item must NOT deduct a second unit from subsequent legitimate grants
+        after in-memory state is cleared and `reconcile_purchases()` runs."""
+        import cogs.shop as shop_mod
+        from cogs.shop import process_purchase
+        from utils.inventory import give_item, get_inventory
+
+        item_p1 = shop_item(
+            "title", price=250, name="P1Title",
+            role_id=None, duration_hours=None, stock=5)
+
+        real_deliver = shop_mod._deliver_purchase
+        real_update_purchase = TO.update_purchase
+
+        async def _deliver_then_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            last_op = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            execute(
+                "UPDATE shop_purchase_operations SET status=? WHERE op_id=?",
+                (TO.PURCHASE_UNCERTAIN, last_op))
+            await TO.resolve_purchase_operation(
+                last_op, action="refund", confirmed=True,
+                note="simulated timeout before finalization")
+            return res
+
+        clear_attempts = {"count": 0}
+
+        async def _fail_descriptor_clear(op_id, **kwargs):
+            if kwargs.get("delivery_rollback") == "":
+                clear_attempts["count"] += 1
+                if clear_attempts["count"] == 1:
+                    raise RuntimeError("simulated DB failure clearing delivery_rollback")
+            return await real_update_purchase(op_id, **kwargs)
+
+        shop_mod._deliver_purchase = _deliver_then_refund
+        try:
+            itx, person, bot, guild = purchase_ctx()
+            TO.update_purchase = _fail_descriptor_clear
+            try:
+                await process_purchase(itx, item_p1)
+            finally:
+                TO.update_purchase = real_update_purchase
+
+            op_id = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            op_row = await TO.get_purchase(op_id)
+            self.assertEqual(op_row["status"], TO.PURCHASE_REFUNDED)
+            self.assertEqual(op_row["refunded"], 1)
+            self.assertTrue(
+                bool(op_row.get("delivery_rollback")),
+                "Failed clear leaves delivery_rollback populated in SQLite",
+            )
+            saved_spec = json.loads(op_row["delivery_rollback"])
+            self.assertTrue(
+                saved_spec.get("inventory_rolled_back"),
+                "Atomic item rollback must durably persist inventory_rolled_back=True before clear",
+            )
+            # Late-delivered unit was rolled back
+            self.assertEqual(
+                rows(
+                    "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='P1Title'",
+                    (GUILD, USER),
+                ),
+                [],
+            )
+            balance_after_refund = rows(
+                "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                (GUILD, USER),
+            )[0][0]
+
+            # Grant 2 legitimate new units of the same stackable item
+            await give_item(GUILD, USER, "P1Title", 2, item_type="title", source="shop")
+            self.assertEqual(
+                rows(
+                    "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='P1Title'",
+                    (GUILD, USER),
+                ),
+                [(2,)],
+            )
+
+            # Simulate a process restart by clearing in-memory retry state
+            TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+            # Run startup/periodic reconciliation
+            rec = await TO.reconcile_purchases(bot=bot)
+            self.assertGreaterEqual(rec["completed"], 1, str(rec))
+
+            # Both legitimate units remain intact
+            self.assertEqual(
+                rows(
+                    "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='P1Title'",
+                    (GUILD, USER),
+                ),
+                [(2,)],
+                "Reconciling after failed descriptor clear must not deduct a unit from legitimate grants",
+            )
+            inv_entries = [
+                e for e in await get_inventory(GUILD, USER, include_empty=False)
+                if e["item_name"] == "P1Title"
+            ]
+            self.assertEqual(len(inv_entries), 1)
+            self.assertEqual(inv_entries[0]["quantity"], 2)
+
+            # No second refund occurred
+            self.assertEqual(
+                rows(
+                    "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                    (GUILD, USER),
+                )[0][0],
+                balance_after_refund,
+                "Reconciliation must never issue a second refund",
+            )
+
+            # Stale descriptor is now resolved
+            op_after = await TO.get_purchase(op_id)
+            self.assertFalse(
+                bool(op_after.get("delivery_rollback")),
+                f"Expected delivery_rollback to be cleared, got {op_after.get('delivery_rollback')!r}",
+            )
+        finally:
+            shop_mod._deliver_purchase = real_deliver
+
+    async def test_p2_stackable_item_atomic_rollback_and_progress_persistence_failure(self):
+        """Regression P2: A failure between stackable-item inventory rollback and
+        durable progress persistence rolls back the SQLite transaction atomically,
+        and preserves both independent units and `reward_grants` provenance across retries."""
+        import sqlite3
+        import cogs.shop as shop_mod
+        from cogs.shop import process_purchase
+        from utils.inventory import give_item
+
+        # Seed 1 provenance-protected unit + 1 pre-existing independent shop unit (total = 2)
+        await give_item(GUILD, USER, "P2AtomicPotion", 1, item_type="potion", source="level_claim")
+        execute(
+            "INSERT INTO reward_grants (grant_id, guild_id, user_id, claim_id, reward_level, track, kind, item_name, quantity, remaining_quantity, operation_id, created_at) "
+            "VALUES ('grant-p2-1', ?, ?, 902, 5, 'shop', 'inventory', 'P2AtomicPotion', 1, 1, 'op-lvl-p2', '2026-01-01T00:00:00+00:00')",
+            (GUILD, USER),
+        )
+        await give_item(GUILD, USER, "P2AtomicPotion", 1, item_type="potion", source="shop")
+        self.assertEqual(
+            rows(
+                "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='P2AtomicPotion'",
+                (GUILD, USER),
+            ),
+            [(2,)],
+        )
+
+        item_p2 = shop_item(
+            "potion", price=100, name="P2AtomicPotion",
+            duration_hours=2, multiplier=2.0, stock=5)
+
+        real_deliver = shop_mod._deliver_purchase
+        real_update_purchase = TO.update_purchase
+
+        async def _deliver_then_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            last_op = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            execute(
+                "UPDATE shop_purchase_operations SET status=? WHERE op_id=?",
+                (TO.PURCHASE_UNCERTAIN, last_op))
+            await TO.resolve_purchase_operation(
+                last_op, action="refund", confirmed=True,
+                note="simulated timeout before finalization")
+            return res
+
+        tx_progress_fail_once = {"failed": False}
+
+        async def _fail_tx_progress_once(op_id, **kwargs):
+            raw_dr = kwargs.get("delivery_rollback")
+            if (
+                kwargs.get("db") is not None
+                and raw_dr
+                and json.loads(raw_dr).get("inventory_rolled_back")
+                and not tx_progress_fail_once["failed"]
+            ):
+                tx_progress_fail_once["failed"] = True
+                raise sqlite3.OperationalError("simulated progress write failure inside atomic tx")
+            return await real_update_purchase(op_id, **kwargs)
+
+        shop_mod._deliver_purchase = _deliver_then_refund
+        try:
+            itx, person, bot, guild = purchase_ctx()
+            TO.update_purchase = _fail_tx_progress_once
+            try:
+                await process_purchase(itx, item_p2)
+            finally:
+                TO.update_purchase = real_update_purchase
+
+            op_id = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            op_row = await TO.get_purchase(op_id)
+            # Because the progress write inside the shared transaction failed,
+            # the inventory decrement was rolled back atomically (quantity stays 3:
+            # 2 pre-existing + 1 late-delivered) and inventory_rolled_back is False.
+            self.assertEqual(
+                rows(
+                    "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='P2AtomicPotion'",
+                    (GUILD, USER),
+                ),
+                [(3,)],
+                "Failed progress write inside atomic tx must roll back the inventory decrement",
+            )
+            saved_spec = json.loads(op_row["delivery_rollback"])
+            self.assertFalse(saved_spec.get("inventory_rolled_back"))
+
+            # Grant 2 more legitimate independent units before restart reconciliation (total = 5)
+            await give_item(GUILD, USER, "P2AtomicPotion", 2, item_type="potion", source="shop")
+            self.assertEqual(
+                rows(
+                    "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='P2AtomicPotion'",
+                    (GUILD, USER),
+                ),
+                [(5,)],
+            )
+
+            # Simulate restart and reconcile: removes exactly the 1 late-delivered unit (5 -> 4)
+            TO._PENDING_DELIVERY_ROLLBACKS.clear()
+            rec1 = await TO.reconcile_purchases(bot=bot)
+            self.assertGreaterEqual(rec1["completed"], 1, str(rec1))
+            self.assertEqual(
+                rows(
+                    "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='P2AtomicPotion'",
+                    (GUILD, USER),
+                ),
+                [(4,)],
+                "Reconciliation must remove only the 1 late-delivered unit and preserve all 4 legitimate units",
+            )
+            self.assertEqual(
+                rows(
+                    "SELECT remaining_quantity FROM reward_grants WHERE guild_id=? AND user_id=? AND item_name='P2AtomicPotion'",
+                    (GUILD, USER),
+                ),
+                [(1,)],
+                "Reward provenance must remain completely intact",
+            )
+            self.assertFalse(bool((await TO.get_purchase(op_id)).get("delivery_rollback")))
+        finally:
+            shop_mod._deliver_purchase = real_deliver
+
+    async def test_p3_deleted_discord_role_retires_late_rollback_marker_without_stalling_cleanup(self):
+        """Regression P3: When a Discord role no longer exists in the guild,
+        late-rollback retry markers are retired only after inventory and equip
+        compensation have completed, without inferring deletion from lookup errors
+        and without stalling `cleanup_expired_holdings(bot, limit=1)`."""
+        import cogs.shop as shop_mod
+        from cogs.shop import process_purchase
+
+        r_del = role_stub(98031, "DeletedLateColor")
+        r_next = role_stub(98032, "NextExpiredRole")
+        roles_map = {r_del.id: r_del, r_next.id: r_next}
+
+        item_p3 = shop_item(
+            "color", price=200, name="DeletedLateColor",
+            role_id=r_del.id, duration_hours=None, stock=5)
+
+        real_deliver = shop_mod._deliver_purchase
+
+        async def _deliver_then_refund(*args, **kwargs):
+            res = await real_deliver(*args, **kwargs)
+            last_op = rows(
+                "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+            )[0][0]
+            execute(
+                "UPDATE shop_purchase_operations SET status=? WHERE op_id=?",
+                (TO.PURCHASE_UNCERTAIN, last_op))
+            await TO.resolve_purchase_operation(
+                last_op, action="refund", confirmed=True,
+                note="simulated timeout before finalization")
+            return res
+
+        shop_mod._deliver_purchase = _deliver_then_refund
+        try:
+            itx, person, bot, guild = purchase_ctx(granted_role=r_del)
+            guild.get_role = lambda rid: roles_map.get(int(rid))
+
+            async def _add(r, reason=None):
+                if r not in person.roles:
+                    person.roles.append(r)
+
+            person.add_roles = AsyncMock(side_effect=_add)
+            person.remove_roles = AsyncMock(side_effect=RuntimeError("Discord 503 during initial rollback"))
+
+            await process_purchase(itx, item_p3)
+        finally:
+            shop_mod._deliver_purchase = real_deliver
+
+        op_id = rows(
+            "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+        )[0][0]
+        op_row = await TO.get_purchase(op_id)
+        spec = json.loads(op_row["delivery_rollback"])
+        self.assertTrue(spec["inventory_rolled_back"])
+        self.assertTrue(spec["equip_reconciled"])
+        self.assertFalse(spec["role_reconciled"])
+        marker_key = spec["retry_entry_key"]
+        self.assertTrue(marker_key.startswith("h:"))
+
+        # Add a second normal expired holding behind the 1970 late-rollback marker
+        person.roles.append(r_next)
+        h2_id = await TO.grant_timed_holding(
+            GUILD,
+            USER,
+            "NextExpiredRole",
+            expires_at="2000-01-01T00:00:00+00:00",
+            role_id=r_next.id,
+            category="Color",
+        )
+
+        # 1) If inventory_rolled_back is False on the linked op (e.g. inventory rollback
+        # is still failing), expire_one / cleanup_expired_holdings MUST NOT retire the
+        # marker even if the role was deleted from the guild.
+        import utils.reward_engine as re_mod
+        roles_map.pop(r_del.id, None)
+        unready_spec = dict(spec, inventory_rolled_back=False)
+        await TO.update_purchase(op_id, delivery_rollback=json.dumps(unready_spec))
+        TO._PENDING_DELIVERY_ROLLBACKS[op_id] = dict(unready_spec)
+        real_rollback_role = re_mod.rollback_role_inventory_grant
+
+        async def _fail_role_inv_rollback(*args, **kwargs):
+            return False
+
+        re_mod.rollback_role_inventory_grant = _fail_role_inv_rollback
+        try:
+            res_unready = await TO.cleanup_expired_holdings(bot, limit=1)
+        finally:
+            re_mod.rollback_role_inventory_grant = real_rollback_role
+        self.assertEqual(res_unready["removed"], 0)
+        self.assertGreaterEqual(res_unready["kept"], 1)
+        self.assertTrue(
+            any("inventory or equip rollback pending" in e for e in res_unready["errors"]),
+            str(res_unready),
+        )
+
+        # Restore completed inventory/equip flags
+        await TO.update_purchase(op_id, delivery_rollback=json.dumps(spec))
+        TO._PENDING_DELIVERY_ROLLBACKS[op_id] = dict(spec)
+
+        # 2) If role lookup fails with a transient/API error, never infer deletion: keep the marker
+        def _broken_get_role(rid):
+            if int(rid) == r_del.id:
+                raise RuntimeError("transient cache lookup failure")
+            return roles_map.get(int(rid))
+
+        guild.get_role = _broken_get_role
+        res_err = await TO.cleanup_expired_holdings(bot, limit=1)
+        self.assertEqual(res_err["removed"], 0)
+        self.assertEqual(res_err["kept"], 1)
+        self.assertTrue(
+            any("role lookup failed" in e for e in res_err["errors"]),
+            str(res_err),
+        )
+
+        # 3) Role is genuinely deleted from the guild (`get_role` returns None):
+        # `cleanup_expired_holdings(bot, limit=1)` retires the late-rollback marker
+        # and clears the purchase journal's `delivery_rollback` descriptor!
+        guild.get_role = lambda rid: roles_map.get(int(rid))
+        res_deleted = await TO.cleanup_expired_holdings(bot, limit=1)
+        self.assertEqual(res_deleted["removed"], 1, str(res_deleted))
+        self.assertEqual(res_deleted["kept"], 0, str(res_deleted))
+        self.assertEqual(res_deleted["errors"], [])
+        self.assertFalse(bool((await TO.get_purchase(op_id)).get("delivery_rollback")))
+        self.assertNotIn(r_del, person.roles)
+
+        # 4) Next `cleanup_expired_holdings(bot, limit=1)` is no longer blocked and retires h2_id!
+        async def _rem_next(r, reason=None):
+            person.roles = [x for x in person.roles if x.id != r.id]
+
+        person.remove_roles = AsyncMock(side_effect=_rem_next)
+        res_next = await TO.cleanup_expired_holdings(bot, limit=1)
+        self.assertEqual(res_next["removed"], 1, str(res_next))
+        self.assertEqual(res_next["kept"], 0, str(res_next))
+        self.assertEqual(rows("SELECT id FROM timed_holdings WHERE id=?", (h2_id,)), [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
