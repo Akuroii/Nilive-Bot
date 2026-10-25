@@ -496,6 +496,33 @@ async def process_purchase(interaction: discord.Interaction,
     finalized = False
     history_id = None
     committed_outside_tx = False
+    was_compensated = False
+    late_rollback_spec = {
+        "op_id": str(op_id),
+        "guild_id": int(guild_id),
+        "user_id": int(user_id),
+        "item_id": int(item_id) if item_id is not None else None,
+        "item_name": str(delivery.get("item_name") or name),
+        "internal_type": str(internal_type),
+        "category": str(category) if category is not None else None,
+        "role_id": int(role_id) if role_id is not None else None,
+        "entry_key": str(delivery["entry_key"]) if delivery.get("entry_key") else None,
+        "role_added": bool(delivery.get("role_added", True)),
+        "prior_inventory": (
+            list(delivery["prior_inventory"])
+            if delivery.get("prior_inventory") is not None else None
+        ),
+        "delivered_inventory": (
+            list(delivery["delivered_inventory"])
+            if delivery.get("delivered_inventory") is not None else None
+        ),
+        "boost_id": delivery.get("boost_id"),
+        "boost_expires_at": delivery.get("boost_expires_at"),
+        "inventory_rolled_back": False,
+        "equip_reconciled": False,
+        "role_reconciled": False,
+        "retry_entry_key": None,
+    }
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
@@ -525,6 +552,37 @@ async def process_purchase(interaction: discord.Interaction,
                 await db.commit()
             else:
                 await db.execute("ROLLBACK")
+                try:
+                    from utils.timed_ownership import (
+                        PURCHASE_REFUNDED,
+                        record_pending_delivery_rollback,
+                    )
+                    cur = await db.execute(
+                        "SELECT status, refunded, stock_returned "
+                        "FROM shop_purchase_operations WHERE op_id=?",
+                        (op_id,),
+                    )
+                    op_state = await cur.fetchone()
+                    was_compensated = bool(
+                        op_state and (
+                            op_state[0] in (PURCHASE_REFUNDED, PURCHASE_FAILED)
+                            or op_state[1]
+                            or op_state[2]
+                        )
+                    )
+                    if was_compensated:
+                        await record_pending_delivery_rollback(
+                            op_id,
+                            late_rollback_spec,
+                            bot=interaction.client,
+                            db=db,
+                        )
+                        await db.commit()
+                except Exception:
+                    try:
+                        await db.execute("ROLLBACK")
+                    except Exception:
+                        pass
         except Exception:
             try:
                 await db.execute("ROLLBACK")
@@ -542,124 +600,35 @@ async def process_purchase(interaction: discord.Interaction,
                     await cleanup_db.commit()
             except Exception:
                 pass
-        late_key = delivery.get("entry_key")
+        comp_res = {"complete": True, "error": None}
         try:
             from utils.timed_ownership import (
-                get_purchase, clear_equip_for_holding, delete_timed_holding,
-                grant_timed_holding, reconcile_equip_for_expired_holding,
-                role_still_entitled, PURCHASE_REFUNDED,
+                PURCHASE_REFUNDED,
+                compensate_late_delivery,
+                get_purchase,
+                record_pending_delivery_rollback,
             )
-            from utils.reward_engine import (
-                rollback_role_inventory_grant, rollback_item_inventory_grant,
-            )
-            cur_op = await get_purchase(op_id)
-            was_compensated = bool(
-                cur_op and (
-                    cur_op.get("status") in (PURCHASE_REFUNDED, PURCHASE_FAILED)
-                    or cur_op.get("refunded")
-                    or cur_op.get("stock_returned")
+            if not was_compensated:
+                cur_op = await get_purchase(op_id)
+                was_compensated = bool(
+                    cur_op and (
+                        cur_op.get("status") in (PURCHASE_REFUNDED, PURCHASE_FAILED)
+                        or cur_op.get("refunded")
+                        or cur_op.get("stock_returned")
+                    )
                 )
-            )
             if was_compensated:
-                role_added_by_delivery = bool(delivery.get("role_added", True))
-                if late_key and str(late_key).startswith("h:"):
-                    holding_id = int(str(late_key).split(":", 1)[1])
-                    async with aiosqlite.connect(DB_PATH) as cleanup_db:
-                        await cleanup_db.execute(
-                            "UPDATE timed_holdings "
-                            "SET expires_at='1970-01-01T00:00:00+00:00' "
-                            "WHERE id=?",
-                            (holding_id,))
-                        await cleanup_db.commit()
-                    await reconcile_equip_for_expired_holding(
-                        guild_id, user_id, str(late_key), role_id=role_id)
-                    if role_id is not None and role_added_by_delivery:
-                        still_entitled = await role_still_entitled(
-                            guild_id, user_id, int(role_id),
-                            exclude_entry_key=str(late_key),
-                            bot=interaction.client, member=interaction.user)
-                        if not still_entitled:
-                            if interaction.guild is None:
-                                raise RuntimeError(
-                                    "Guild unavailable for late Discord role rollback")
-                            role_obj = interaction.guild.get_role(int(role_id))
-                            if role_obj is None:
-                                raise RuntimeError(
-                                    "Role unavailable for late Discord role rollback")
-                            if role_obj in (getattr(interaction.user, "roles", None) or ()):
-                                await interaction.user.remove_roles(
-                                    role_obj,
-                                    reason="Late delivery after purchase cancellation")
-                    await delete_timed_holding(str(late_key))
-                elif internal_type == "role":
-                    role_item_name = delivery.get("item_name") or name
-                    await rollback_role_inventory_grant(
-                        guild_id, user_id, role_item_name,
-                        prior_inv=delivery.get("prior_inventory"),
-                        delivered_inv=delivery.get("delivered_inventory"))
-                    if late_key:
-                        await reconcile_equip_for_expired_holding(
-                            guild_id, user_id, str(late_key), role_id=role_id)
-                    elif role_id is not None:
-                        await clear_equip_for_holding(
-                            guild_id, user_id, None, role_id=role_id)
-                    if role_id is not None and role_added_by_delivery:
-                        retry_holding_id = await grant_timed_holding(
-                            guild_id, user_id, role_item_name,
-                            expires_at="1970-01-01T00:00:00+00:00",
-                            item_type="temp_role",
-                            metadata={"role_id": int(role_id), "late_rollback": True},
-                            source="shop_late_rollback",
-                            product_id=item_id,
-                            category=category,
-                            role_id=int(role_id))
-                        retry_entry_key = f"h:{retry_holding_id}"
-                        still_entitled = await role_still_entitled(
-                            guild_id, user_id, int(role_id),
-                            exclude_entry_key=retry_entry_key,
-                            bot=interaction.client, member=interaction.user)
-                        if not still_entitled:
-                            if interaction.guild is None:
-                                raise RuntimeError(
-                                    "Guild unavailable for late Discord role rollback")
-                            role_obj = interaction.guild.get_role(int(role_id))
-                            if role_obj is None:
-                                raise RuntimeError(
-                                    "Role unavailable for late Discord role rollback")
-                            if role_obj in (getattr(interaction.user, "roles", None) or ()):
-                                await interaction.user.remove_roles(
-                                    role_obj,
-                                    reason="Late delivery after purchase cancellation")
-                        await delete_timed_holding(retry_entry_key)
-                elif internal_type == "xp_boost":
-                    boost_id = delivery.get("boost_id")
-                    boost_exp = delivery.get("boost_expires_at")
-                    async with aiosqlite.connect(DB_PATH) as cleanup_db:
-                        if boost_id is not None:
-                            await cleanup_db.execute(
-                                "DELETE FROM leveling_active_boosts "
-                                "WHERE id=? AND guild_id=? AND user_id=?",
-                                (int(boost_id), guild_id, user_id))
-                        elif boost_exp:
-                            cursor = await cleanup_db.execute(
-                                "SELECT id FROM leveling_active_boosts "
-                                "WHERE guild_id=? AND user_id=? AND expires_at=? "
-                                "ORDER BY id DESC LIMIT 1",
-                                (guild_id, user_id, str(boost_exp)))
-                            b_row = await cursor.fetchone()
-                            if b_row:
-                                await cleanup_db.execute(
-                                    "DELETE FROM leveling_active_boosts WHERE id=?",
-                                    (int(b_row[0]),))
-                        await cleanup_db.commit()
-                elif internal_type in ("potion", "title", "custom", "shop_custom", "item"):
-                    await rollback_item_inventory_grant(
-                        guild_id, user_id,
-                        delivery.get("item_name") or name,
-                        quantity=1,
-                        prior_inv=delivery.get("prior_inventory"),
-                        delivered_inv=delivery.get("delivered_inventory"))
+                await record_pending_delivery_rollback(
+                    op_id, late_rollback_spec, bot=interaction.client
+                )
+                comp_res = await compensate_late_delivery(
+                    op_id,
+                    late_rollback_spec,
+                    bot=interaction.client,
+                    interaction=interaction,
+                )
         except Exception as cleanup_exc:
+            comp_res = {"complete": False, "error": str(cleanup_exc)}
             print(f"[SHOP] Late delivery cleanup failed for {op_id}: {cleanup_exc}")
         embed = discord.Embed(
             title="⚠️ Purchase needs a check",
@@ -670,6 +639,15 @@ async def process_purchase(interaction: discord.Interaction,
             ),
             color=0xFAA61A,
         )
+        if was_compensated and not comp_res.get("complete", False):
+            embed.add_field(
+                name="Rollback pending reconciliation",
+                value=(
+                    f"Late-delivery rollback for `{op_id}` did not complete "
+                    f"immediately and has been queued for automatic reconciliation."
+                ),
+                inline=False,
+            )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
@@ -1251,7 +1229,10 @@ class Shop(commands.Cog):
         # purchase: that is the one decision this loop must not guess.
         try:
             from utils.timed_ownership import reconcile_purchases
-            stats = await reconcile_purchases()
+            try:
+                stats = await reconcile_purchases(bot=self.bot)
+            except TypeError:
+                stats = await reconcile_purchases()
             if any(stats.values()):
                 print(f"[SHOP] purchase reconciliation: {stats}")
         except Exception as e:

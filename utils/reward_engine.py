@@ -547,69 +547,77 @@ async def rollback_role_inventory_grant(
       with `quantity <= delivered_qty`), leaves the row untouched so the concurrent
       grant is never lost.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute(
-                "SELECT id, quantity, item_type, source, metadata, "
-                "created_at, updated_at FROM inventory_items "
-                "WHERE guild_id=? AND user_id=? AND item_name=?",
-                (guild_id, user_id, item_name),
-            )
-            cur_row = await cursor.fetchone()
-            if cur_row is None:
-                await db.commit()
-                return True
-
-            cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_cat, cur_uat = cur_row
-            cur_qty_int = int(cur_qty or 0)
-            if delivered_inv is not None:
-                matches_delivered = tuple(cur_row) == tuple(delivered_inv)
-            else:
-                matches_delivered = cur_qty_int == 1
-
-            if matches_delivered:
-                if prior_inv is None:
-                    await db.execute(
-                        "DELETE FROM inventory_items "
-                        "WHERE id=? AND quantity IS ? AND item_type IS ? "
-                        "AND source IS ? AND metadata IS ? AND updated_at IS ?",
-                        (cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_uat),
-                    )
-                else:
-                    p_id, p_qty, p_type, p_src, p_meta, p_cat, p_uat = prior_inv
-                    await db.execute(
-                        "UPDATE inventory_items "
-                        "SET quantity=?, item_type=?, source=?, metadata=?, "
-                        "created_at=?, updated_at=? "
-                        "WHERE id=? AND quantity IS ? AND item_type IS ? "
-                        "AND source IS ? AND metadata IS ? AND updated_at IS ?",
-                        (
-                            p_qty, p_type, p_src, p_meta, p_cat, p_uat,
-                            cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_uat,
-                        ),
-                    )
-            else:
-                delivered_qty = int(
-                    (delivered_inv[1] if delivered_inv is not None else 1) or 1
-                )
-                prior_qty = int((prior_inv[1] if prior_inv is not None else 0) or 0)
-                if cur_qty_int > delivered_qty and prior_qty <= 0:
-                    await db.execute(
-                        "UPDATE inventory_items "
-                        "SET quantity = quantity - 1, updated_at = CURRENT_TIMESTAMP "
-                        "WHERE id=? AND quantity = ?",
-                        (cur_id, cur_qty_int),
-                    )
-            await db.commit()
-            return True
-        except Exception as exc:
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            in_tx = False
             try:
-                await db.execute("ROLLBACK")
+                await db.execute("BEGIN IMMEDIATE")
+                in_tx = True
+                cursor = await db.execute(
+                    "SELECT id, quantity, item_type, source, metadata, "
+                    "created_at, updated_at FROM inventory_items "
+                    "WHERE guild_id=? AND user_id=? AND item_name=?",
+                    (guild_id, user_id, item_name),
+                )
+                cur_row = await cursor.fetchone()
+                if cur_row is None:
+                    await db.commit()
+                    in_tx = False
+                    return True
+
+                cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_cat, cur_uat = cur_row
+                cur_qty_int = int(cur_qty or 0)
+                if delivered_inv is not None:
+                    matches_delivered = tuple(cur_row) == tuple(delivered_inv)
+                else:
+                    matches_delivered = cur_qty_int == 1
+
+                if matches_delivered:
+                    if prior_inv is None:
+                        await db.execute(
+                            "DELETE FROM inventory_items "
+                            "WHERE id=? AND quantity IS ? AND item_type IS ? "
+                            "AND source IS ? AND metadata IS ? AND updated_at IS ?",
+                            (cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_uat),
+                        )
+                    else:
+                        p_id, p_qty, p_type, p_src, p_meta, p_cat, p_uat = prior_inv
+                        await db.execute(
+                            "UPDATE inventory_items "
+                            "SET quantity=?, item_type=?, source=?, metadata=?, "
+                            "created_at=?, updated_at=? "
+                            "WHERE id=? AND quantity IS ? AND item_type IS ? "
+                            "AND source IS ? AND metadata IS ? AND updated_at IS ?",
+                            (
+                                p_qty, p_type, p_src, p_meta, p_cat, p_uat,
+                                cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_uat,
+                            ),
+                        )
+                else:
+                    delivered_qty = int(
+                        (delivered_inv[1] if delivered_inv is not None else 1) or 1
+                    )
+                    prior_qty = int((prior_inv[1] if prior_inv is not None else 0) or 0)
+                    if cur_qty_int > delivered_qty and prior_qty <= 0:
+                        await db.execute(
+                            "UPDATE inventory_items "
+                            "SET quantity = quantity - 1, updated_at = CURRENT_TIMESTAMP "
+                            "WHERE id=? AND quantity = ?",
+                            (cur_id, cur_qty_int),
+                        )
+                await db.commit()
+                in_tx = False
+                return True
             except Exception:
-                pass
-            print(f"[REWARD] Failed to roll back role inventory for {item_name!r}: {exc}")
-            return False
+                if in_tx:
+                    try:
+                        await db.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                raise
+    except Exception as exc:
+        print(f"[REWARD] Failed to roll back role inventory for {item_name!r}: {exc}")
+        return False
 
 
 async def rollback_item_inventory_grant(
@@ -632,90 +640,101 @@ async def rollback_item_inventory_grant(
     qty_to_remove = int(quantity or 1)
     if qty_to_remove <= 0:
         return True
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute(
-                "SELECT id, quantity, item_type, source, metadata, "
-                "created_at, updated_at FROM inventory_items "
-                "WHERE guild_id=? AND user_id=? AND item_name=?",
-                (guild_id, user_id, item_name),
-            )
-            cur_row = await cursor.fetchone()
-            if cur_row is None:
-                await db.commit()
-                return True
-
-            cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_cat, cur_uat = cur_row
-            cur_qty_int = int(cur_qty or 0)
-            if cur_qty_int <= 0:
-                await db.commit()
-                return True
-
-            protected_qty = 0
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            in_tx = False
             try:
-                prov_cur = await db.execute(
-                    "SELECT COALESCE(SUM(remaining_quantity), 0) "
-                    "FROM reward_grants "
-                    "WHERE guild_id=? AND user_id=? AND item_name=? "
-                    "AND remaining_quantity > 0 AND COALESCE(unattributed, 0) = 0",
+                await db.execute("BEGIN IMMEDIATE")
+                in_tx = True
+                cursor = await db.execute(
+                    "SELECT id, quantity, item_type, source, metadata, "
+                    "created_at, updated_at FROM inventory_items "
+                    "WHERE guild_id=? AND user_id=? AND item_name=?",
                     (guild_id, user_id, item_name),
                 )
-                prov_row = await prov_cur.fetchone()
-                if prov_row and prov_row[0] is not None:
-                    protected_qty = int(prov_row[0] or 0)
-            except Exception:
-                protected_qty = 0
-
-            if delivered_inv is not None:
-                matches_delivered = tuple(cur_row) == tuple(delivered_inv)
-                delivered_qty = int(delivered_inv[1] or 0)
-                if not matches_delivered and cur_qty_int <= delivered_qty:
-                    # Row was overwritten or already reduced below/at the delivered
-                    # snapshot by an independent write; do not touch it.
+                cur_row = await cursor.fetchone()
+                if cur_row is None:
                     await db.commit()
+                    in_tx = False
                     return True
-            else:
-                matches_delivered = False
 
-            removable = max(0, cur_qty_int - protected_qty)
-            deduct = min(qty_to_remove, removable)
-            if deduct <= 0:
+                cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_cat, cur_uat = cur_row
+                cur_qty_int = int(cur_qty or 0)
+                if cur_qty_int <= 0:
+                    await db.commit()
+                    in_tx = False
+                    return True
+
+                protected_qty = 0
+                try:
+                    prov_cur = await db.execute(
+                        "SELECT COALESCE(SUM(remaining_quantity), 0) "
+                        "FROM reward_grants "
+                        "WHERE guild_id=? AND user_id=? AND item_name=? "
+                        "AND remaining_quantity > 0 AND COALESCE(unattributed, 0) = 0",
+                        (guild_id, user_id, item_name),
+                    )
+                    prov_row = await prov_cur.fetchone()
+                    if prov_row and prov_row[0] is not None:
+                        protected_qty = int(prov_row[0] or 0)
+                except Exception:
+                    protected_qty = 0
+
+                if delivered_inv is not None:
+                    matches_delivered = tuple(cur_row) == tuple(delivered_inv)
+                    delivered_qty = int(delivered_inv[1] or 0)
+                    if not matches_delivered and cur_qty_int <= delivered_qty:
+                        # Row was overwritten or already reduced below/at the delivered
+                        # snapshot by an independent write; do not touch it.
+                        await db.commit()
+                        in_tx = False
+                        return True
+                else:
+                    matches_delivered = False
+
+                removable = max(0, cur_qty_int - protected_qty)
+                deduct = min(qty_to_remove, removable)
+                if deduct <= 0:
+                    await db.commit()
+                    in_tx = False
+                    return True
+
+                new_qty = cur_qty_int - deduct
+                if new_qty <= 0 and prior_inv is None and (delivered_inv is None or matches_delivered):
+                    await db.execute(
+                        "DELETE FROM inventory_items "
+                        "WHERE id=? AND quantity IS ? AND updated_at IS ?",
+                        (cur_id, cur_qty, cur_uat),
+                    )
+                elif matches_delivered and prior_inv is not None:
+                    p_id, p_qty, p_type, p_src, p_meta, p_cat, p_uat = prior_inv
+                    await db.execute(
+                        "UPDATE inventory_items "
+                        "SET quantity=?, item_type=?, source=?, metadata=?, "
+                        "created_at=?, updated_at=? "
+                        "WHERE id=? AND quantity IS ? AND updated_at IS ?",
+                        (
+                            new_qty, p_type, p_src, p_meta, p_cat, p_uat,
+                            cur_id, cur_qty, cur_uat,
+                        ),
+                    )
+                else:
+                    await db.execute(
+                        "UPDATE inventory_items "
+                        "SET quantity = ?, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE id=? AND quantity = ?",
+                        (new_qty, cur_id, cur_qty_int),
+                    )
                 await db.commit()
+                in_tx = False
                 return True
-
-            new_qty = cur_qty_int - deduct
-            if new_qty <= 0 and prior_inv is None and (delivered_inv is None or matches_delivered):
-                await db.execute(
-                    "DELETE FROM inventory_items "
-                    "WHERE id=? AND quantity IS ? AND updated_at IS ?",
-                    (cur_id, cur_qty, cur_uat),
-                )
-            elif matches_delivered and prior_inv is not None:
-                p_id, p_qty, p_type, p_src, p_meta, p_cat, p_uat = prior_inv
-                await db.execute(
-                    "UPDATE inventory_items "
-                    "SET quantity=?, item_type=?, source=?, metadata=?, "
-                    "created_at=?, updated_at=? "
-                    "WHERE id=? AND quantity IS ? AND updated_at IS ?",
-                    (
-                        new_qty, p_type, p_src, p_meta, p_cat, p_uat,
-                        cur_id, cur_qty, cur_uat,
-                    ),
-                )
-            else:
-                await db.execute(
-                    "UPDATE inventory_items "
-                    "SET quantity = ?, updated_at = CURRENT_TIMESTAMP "
-                    "WHERE id=? AND quantity = ?",
-                    (new_qty, cur_id, cur_qty_int),
-                )
-            await db.commit()
-            return True
-        except Exception as exc:
-            try:
-                await db.execute("ROLLBACK")
             except Exception:
-                pass
-            print(f"[REWARD] Failed to roll back item inventory for {item_name!r}: {exc}")
-            return False
+                if in_tx:
+                    try:
+                        await db.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                raise
+    except Exception as exc:
+        print(f"[REWARD] Failed to roll back item inventory for {item_name!r}: {exc}")
+        return False

@@ -979,7 +979,18 @@ async def expire_one(bot, holding: dict) -> dict:
         # the bot is back. It is already hidden from every read path.
         return {"status": "kept", "reason": "guild unavailable"}
 
-    member = guild.get_member(user_id)
+    member = guild.get_member(user_id) if hasattr(guild, "get_member") else None
+    if member is None and hasattr(guild, "fetch_member"):
+        try:
+            member = await guild.fetch_member(user_id)
+        except Exception as exc:
+            err = f"member lookup failed: {exc}"
+            return {"status": "kept", "reason": err, "error": err}
+    meta = holding.get("metadata") if isinstance(holding.get("metadata"), dict) else {}
+    is_late_rollback = bool(
+        meta.get("late_rollback") or holding.get("source") == "shop_late_rollback"
+    )
+    linked_op_id = meta.get("op_id")
     try:
         reason = await role_still_entitled(
             guild_id, user_id, role_id, exclude_entry_key=entry_key,
@@ -998,12 +1009,24 @@ async def expire_one(bot, holding: dict) -> dict:
             err = f"equip bookkeeping cleanup failed: {exc}"
             return {"status": "kept", "reason": err, "error": err}
         await delete_timed_holding(entry_key)
+        if linked_op_id:
+            _PENDING_DELIVERY_ROLLBACKS.pop(str(linked_op_id), None)
+            try:
+                await update_purchase(str(linked_op_id), delivery_rollback="")
+            except Exception:
+                pass
         return {"status": "removed", "reason": f"role retained ({reason})"}
 
-    role = guild.get_role(int(role_id))
-    if member is not None and role is not None and role in member.roles:
+    role = guild.get_role(int(role_id)) if hasattr(guild, "get_role") else None
+    if is_late_rollback and (member is None or role is None or not hasattr(member, "remove_roles")):
+        err = "member or role unavailable for late role rollback"
+        return {"status": "kept", "reason": err, "error": err}
+    member_roles = getattr(member, "roles", None) or ()
+    if member is not None and role is not None and (is_late_rollback or role in member_roles):
         try:
             await member.remove_roles(role, reason="Timed entitlement expired")
+            if isinstance(getattr(member, "roles", None), list) and role in member.roles:
+                member.roles.remove(role)
         except Exception as exc:
             # Keep the row: it is the only marker that this removal is pending.
             return {"status": "kept", "reason": f"Discord removal failed: {exc}"}
@@ -1012,21 +1035,41 @@ async def expire_one(bot, holding: dict) -> dict:
     # idempotent, so a crash after this point simply retries, whereas deleting
     # the holding first would leave an equipped slot pointing at nothing with
     # only this row left to remember it by.
-    try:
-        await clear_equip_for_holding(guild_id, user_id, entry_key,
-                                      role_id=role_id)
-    except Exception as exc:  # pragma: no cover - defensive
-        err = f"equip bookkeeping cleanup failed: {exc}"
-        return {"status": "kept", "reason": err, "error": err}
+    if not is_late_rollback:
+        try:
+            await clear_equip_for_holding(guild_id, user_id, entry_key,
+                                          role_id=role_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            err = f"equip bookkeeping cleanup failed: {exc}"
+            return {"status": "kept", "reason": err, "error": err}
 
     await delete_timed_holding(entry_key)
+    if linked_op_id:
+        _PENDING_DELIVERY_ROLLBACKS.pop(str(linked_op_id), None)
+        try:
+            await update_purchase(str(linked_op_id), delivery_rollback="")
+        except Exception:
+            pass
     return {"status": "removed", "reason": "expired"}
 
 
 async def cleanup_expired_holdings(bot, *, limit: int = 200) -> dict:
     """One cleanup pass. Safe to re-run at any time."""
+    global _LAST_BOT
+    if bot is not None:
+        _LAST_BOT = bot
     removed = kept = 0
     errors: list[str] = []
+    try:
+        rb_stats = await reconcile_delivery_rollbacks(
+            bot=bot, limit=limit, handoff_to_holdings=True
+        )
+        if rb_stats.get("errors"):
+            kept += len(rb_stats["errors"])
+            errors.extend(rb_stats["errors"])
+    except Exception as exc:  # pragma: no cover - defensive
+        errors.append(f"delivery_rollback: {exc}")
+        kept += 1
     for holding in await expired_holdings(limit=limit):
         try:
             result = await expire_one(bot, holding)
@@ -1051,25 +1094,29 @@ PURCHASE_REFUNDED = "refunded"
 PURCHASE_UNCERTAIN = "uncertain"
 PURCHASE_FAILED = "failed"
 
+_LAST_BOT = None
+_PENDING_DELIVERY_ROLLBACKS: dict[str, dict] = {}
+
 PURCHASE_SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS shop_purchase_operations (
-        op_id          TEXT PRIMARY KEY,
-        guild_id       INTEGER NOT NULL,
-        user_id        INTEGER NOT NULL,
-        item_id        INTEGER,
-        item_name      TEXT,
-        currency       TEXT,
-        amount         INTEGER NOT NULL DEFAULT 0,
-        stock_reserved INTEGER NOT NULL DEFAULT 0,
-        charged        INTEGER NOT NULL DEFAULT 0,
-        refunded       INTEGER NOT NULL DEFAULT 0,
-        stock_returned INTEGER NOT NULL DEFAULT 0,
-        status         TEXT NOT NULL,
-        detail         TEXT,
-        history_id     INTEGER,
-        created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        op_id             TEXT PRIMARY KEY,
+        guild_id          INTEGER NOT NULL,
+        user_id           INTEGER NOT NULL,
+        item_id           INTEGER,
+        item_name         TEXT,
+        currency          TEXT,
+        amount            INTEGER NOT NULL DEFAULT 0,
+        stock_reserved    INTEGER NOT NULL DEFAULT 0,
+        charged           INTEGER NOT NULL DEFAULT 0,
+        refunded          INTEGER NOT NULL DEFAULT 0,
+        stock_returned    INTEGER NOT NULL DEFAULT 0,
+        status            TEXT NOT NULL,
+        detail            TEXT,
+        history_id        INTEGER,
+        delivery_rollback TEXT,
+        created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
     """
@@ -1090,6 +1137,7 @@ PURCHASE_SCHEMA = (
 _PURCHASE_EXTRA_COLUMNS = (
     ("refunded", "INTEGER NOT NULL DEFAULT 0"),
     ("stock_returned", "INTEGER NOT NULL DEFAULT 0"),
+    ("delivery_rollback", "TEXT"),
 )
 
 
@@ -1137,6 +1185,7 @@ async def update_purchase(op_id: str, *, status: str | None = None,
                           refunded: int | None = None,
                           stock_returned: int | None = None,
                           history_id: int | None = None,
+                          delivery_rollback: str | None = None,
                           db: aiosqlite.Connection | None = None) -> None:
     sets, params = [], []
     if status is not None:
@@ -1160,6 +1209,9 @@ async def update_purchase(op_id: str, *, status: str | None = None,
     if history_id is not None:
         sets.append("history_id=?")
         params.append(int(history_id))
+    if delivery_rollback is not None:
+        sets.append("delivery_rollback=?")
+        params.append(delivery_rollback if delivery_rollback != "" else None)
     if not sets:
         return False
     sets.append("updated_at=CURRENT_TIMESTAMP")
@@ -1194,18 +1246,35 @@ async def update_purchase(op_id: str, *, status: str | None = None,
 
 async def get_purchase(op_id: str) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT op_id, guild_id, user_id, item_id, item_name, currency,"
-            " amount, stock_reserved, charged, refunded, stock_returned,"
-            " status, detail, history_id, created_at, updated_at"
-            " FROM shop_purchase_operations WHERE op_id=?", (op_id,))
-        row = await cursor.fetchone()
+        try:
+            cursor = await db.execute(
+                "SELECT op_id, guild_id, user_id, item_id, item_name, currency,"
+                " amount, stock_reserved, charged, refunded, stock_returned,"
+                " status, detail, history_id, delivery_rollback,"
+                " created_at, updated_at"
+                " FROM shop_purchase_operations WHERE op_id=?", (op_id,))
+            row = await cursor.fetchone()
+            keys = ("op_id", "guild_id", "user_id", "item_id", "item_name",
+                    "currency", "amount", "stock_reserved", "charged",
+                    "refunded", "stock_returned", "status", "detail",
+                    "history_id", "delivery_rollback", "created_at", "updated_at")
+        except Exception:
+            cursor = await db.execute(
+                "SELECT op_id, guild_id, user_id, item_id, item_name, currency,"
+                " amount, stock_reserved, charged, refunded, stock_returned,"
+                " status, detail, history_id, created_at, updated_at"
+                " FROM shop_purchase_operations WHERE op_id=?", (op_id,))
+            row = await cursor.fetchone()
+            keys = ("op_id", "guild_id", "user_id", "item_id", "item_name",
+                    "currency", "amount", "stock_reserved", "charged",
+                    "refunded", "stock_returned", "status", "detail",
+                    "history_id", "created_at", "updated_at")
     if not row:
         return None
-    keys = ("op_id", "guild_id", "user_id", "item_id", "item_name", "currency",
-            "amount", "stock_reserved", "charged", "refunded", "stock_returned",
-            "status", "detail", "history_id", "created_at", "updated_at")
-    return dict(zip(keys, row))
+    res = dict(zip(keys, row))
+    if "delivery_rollback" not in res:
+        res["delivery_rollback"] = None
+    return res
 
 
 def is_ambiguous_discord_role_error(exc: BaseException, *,
@@ -1576,8 +1645,537 @@ async def refund_purchase(op_id: str) -> dict:
             "complete": complete, "error": error}
 
 
+async def record_pending_delivery_rollback(
+    op_id: str,
+    spec: dict,
+    *,
+    bot=None,
+    db: aiosqlite.Connection | None = None,
+) -> None:
+    """Persist a durable late-delivery rollback descriptor on the purchase row."""
+    global _LAST_BOT
+    if bot is not None:
+        _LAST_BOT = bot
+    copied = dict(spec)
+    _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = copied
+    try:
+        await update_purchase(
+            str(op_id),
+            delivery_rollback=json.dumps(copied),
+            db=db,
+        )
+    except Exception:
+        if db is not None:
+            raise
+
+
+def _resolve_guild_and_live_member(
+    guild_id: int,
+    user_id: int,
+    *,
+    bot=None,
+    interaction=None,
+):
+    """Resolve the guild and live cached guild Member (preferring guild.get_member over interaction.user)."""
+    guild_obj = None
+    if bot is not None and hasattr(bot, "get_guild"):
+        try:
+            guild_obj = bot.get_guild(int(guild_id))
+        except Exception:
+            guild_obj = None
+    if guild_obj is None and interaction is not None:
+        guild_obj = getattr(interaction, "guild", None)
+
+    target_member = None
+    if guild_obj is not None and hasattr(guild_obj, "get_member"):
+        try:
+            target_member = guild_obj.get_member(int(user_id))
+        except Exception:
+            target_member = None
+    return guild_obj, target_member
+
+
+async def compensate_late_delivery(
+    op_id: str,
+    spec: dict | None = None,
+    *,
+    bot=None,
+    interaction=None,
+    handoff_to_holdings: bool = False,
+) -> dict:
+    """Compensate a delivery that completed after its purchase operation was refunded/failed.
+
+    Enforces strict ordering and durability:
+    1. Inventory/holding/boost rollback runs first and its return value is checked.
+       If inventory rollback fails, compensation stops immediately without running
+       equip reconciliation or `role_still_entitled` against the un-rolled-back row,
+       leaving `delivery_rollback` on `shop_purchase_operations` for durable retry.
+    2. For permanent roles (`internal_type == "role"`), equip reconciliation runs
+       only when the member no longer owns the inventory entry after rollback
+       (preserving a pre-existing equipped permanent Color on a refunded re-buy).
+    3. Discord role removal resolves the live cached guild `Member` via
+       `guild.get_member(user_id)` (never gating on `interaction.user.roles`),
+       checks `role_still_entitled`, and retains the durable retry marker until
+       removal succeeds or an independent entitlement is verified.
+    """
+    global _LAST_BOT
+    bot_client = (
+        bot
+        or (getattr(interaction, "client", None) if interaction is not None else None)
+        or _LAST_BOT
+    )
+    if bot_client is not None:
+        _LAST_BOT = bot_client
+
+    if spec is None:
+        spec = _PENDING_DELIVERY_ROLLBACKS.get(str(op_id))
+    if spec is None:
+        op_row = await get_purchase(str(op_id))
+        raw_spec = op_row.get("delivery_rollback") if op_row else None
+        if raw_spec:
+            try:
+                spec = json.loads(raw_spec)
+            except Exception:
+                spec = None
+    if not spec:
+        _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+        return {
+            "complete": True,
+            "inventory_rolled_back": True,
+            "equip_reconciled": True,
+            "role_reconciled": True,
+            "error": None,
+        }
+
+    spec = dict(spec)
+    guild_id = int(spec["guild_id"])
+    user_id = int(spec["user_id"])
+    item_id = spec.get("item_id")
+    item_name = str(spec.get("item_name") or "")
+    internal_type = str(spec.get("internal_type") or "")
+    category = spec.get("category")
+    role_id = int(spec["role_id"]) if spec.get("role_id") is not None else None
+    late_key = spec.get("entry_key")
+    role_added_by_delivery = bool(spec.get("role_added", True))
+    prior_inv = (
+        tuple(spec["prior_inventory"])
+        if spec.get("prior_inventory") is not None else None
+    )
+    delivered_inv = (
+        tuple(spec["delivered_inventory"])
+        if spec.get("delivered_inventory") is not None else None
+    )
+
+    from utils.reward_engine import (
+        rollback_item_inventory_grant,
+        rollback_role_inventory_grant,
+    )
+
+    async def _persist_incomplete(err_msg: str) -> dict:
+        _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(spec)
+        try:
+            await update_purchase(
+                str(op_id),
+                delivery_rollback=json.dumps(spec),
+            )
+        except Exception:
+            pass
+        return {
+            "complete": False,
+            "inventory_rolled_back": bool(spec.get("inventory_rolled_back")),
+            "equip_reconciled": bool(spec.get("equip_reconciled")),
+            "role_reconciled": bool(spec.get("role_reconciled")),
+            "error": err_msg,
+        }
+
+    guild_obj, target_member = _resolve_guild_and_live_member(
+        guild_id, user_id, bot=bot_client, interaction=interaction
+    )
+    if target_member is None and guild_obj is not None and hasattr(guild_obj, "fetch_member"):
+        try:
+            target_member = await guild_obj.fetch_member(int(user_id))
+        except Exception:
+            target_member = None
+    if target_member is None and interaction is not None:
+        itx_user = getattr(interaction, "user", None)
+        if itx_user is not None and getattr(itx_user, "id", int(user_id)) == int(user_id):
+            target_member = itx_user
+
+    # ── Branch 1: Timed holding (`h:<id>`) ──────────────────────────────
+    if late_key and str(late_key).startswith("h:"):
+        holding_id = int(str(late_key).split(":", 1)[1])
+        if not spec.get("inventory_rolled_back"):
+            try:
+                async with aiosqlite.connect(DB_PATH) as cleanup_db:
+                    await cleanup_db.execute(
+                        "UPDATE timed_holdings "
+                        "SET expires_at='1970-01-01T00:00:00+00:00' "
+                        "WHERE id=?",
+                        (holding_id,),
+                    )
+                    await cleanup_db.commit()
+                spec["inventory_rolled_back"] = True
+            except Exception as exc:
+                return await _persist_incomplete(f"Timed holding expiry rollback failed: {exc}")
+
+        if not spec.get("equip_reconciled"):
+            try:
+                await reconcile_equip_for_expired_holding(
+                    guild_id, user_id, str(late_key), role_id=role_id
+                )
+                spec["equip_reconciled"] = True
+            except Exception as exc:
+                return await _persist_incomplete(f"Timed holding equip rollback failed: {exc}")
+
+        if handoff_to_holdings:
+            _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(spec)
+            try:
+                await update_purchase(str(op_id), delivery_rollback=json.dumps(spec))
+            except Exception:
+                pass
+            return {
+                "complete": False,
+                "inventory_rolled_back": True,
+                "equip_reconciled": True,
+                "role_reconciled": False,
+                "handed_off": True,
+                "error": None,
+            }
+
+        if not spec.get("role_reconciled"):
+            try:
+                if role_id is not None and role_added_by_delivery:
+                    still_entitled = await role_still_entitled(
+                        guild_id, user_id, int(role_id),
+                        exclude_entry_key=str(late_key),
+                        bot=bot_client, member=target_member,
+                    )
+                    if not still_entitled:
+                        if guild_obj is None:
+                            raise RuntimeError(
+                                "Guild unavailable for late Discord role rollback"
+                            )
+                        role_obj = (
+                            guild_obj.get_role(int(role_id))
+                            if hasattr(guild_obj, "get_role") else None
+                        )
+                        if role_obj is None:
+                            raise RuntimeError(
+                                "Role unavailable for late Discord role rollback"
+                            )
+                        if target_member is None or not hasattr(target_member, "remove_roles"):
+                            raise RuntimeError(
+                                "Member unavailable for late Discord role rollback"
+                            )
+                        await target_member.remove_roles(
+                            role_obj,
+                            reason="Late delivery after purchase cancellation",
+                        )
+                        if (
+                            isinstance(getattr(target_member, "roles", None), list)
+                            and role_obj in target_member.roles
+                        ):
+                            target_member.roles.remove(role_obj)
+                        itx_user = getattr(interaction, "user", None) if interaction is not None else None
+                        if (
+                            itx_user is not None
+                            and itx_user is not target_member
+                            and isinstance(getattr(itx_user, "roles", None), list)
+                            and role_obj in itx_user.roles
+                        ):
+                            itx_user.roles.remove(role_obj)
+                await delete_timed_holding(str(late_key))
+                spec["role_reconciled"] = True
+            except Exception as exc:
+                return await _persist_incomplete(f"Timed holding Discord role rollback failed: {exc}")
+
+    # ── Branch 2: Permanent role / permanent Color (`internal_type == "role"`) ──
+    elif internal_type == "role":
+        if not spec.get("inventory_rolled_back"):
+            inv_ok = await rollback_role_inventory_grant(
+                guild_id,
+                user_id,
+                item_name,
+                prior_inv=prior_inv,
+                delivered_inv=delivered_inv,
+            )
+            if not inv_ok:
+                return await _persist_incomplete(
+                    f"Role inventory rollback failed for {item_name!r}"
+                )
+            spec["inventory_rolled_back"] = True
+
+        if not spec.get("equip_reconciled"):
+            try:
+                prior_qty = (
+                    int(prior_inv[1] or 0)
+                    if prior_inv is not None and len(prior_inv) > 1
+                    else 0
+                )
+                still_owns_entry = prior_qty > 0
+                if not still_owns_entry:
+                    async with aiosqlite.connect(DB_PATH) as check_db:
+                        cur = await check_db.execute(
+                            "SELECT quantity FROM inventory_items "
+                            "WHERE guild_id=? AND user_id=? AND item_name=?",
+                            (guild_id, user_id, item_name),
+                        )
+                        rem_row = await cur.fetchone()
+                    still_owns_entry = bool(rem_row and int(rem_row[0] or 0) > 0)
+
+                if not still_owns_entry:
+                    if late_key:
+                        await reconcile_equip_for_expired_holding(
+                            guild_id, user_id, str(late_key), role_id=role_id
+                        )
+                    elif role_id is not None:
+                        await clear_equip_for_holding(
+                            guild_id, user_id, None, role_id=role_id
+                        )
+                spec["equip_reconciled"] = True
+            except Exception as exc:
+                return await _persist_incomplete(f"Role equip reconciliation failed: {exc}")
+
+        if not spec.get("role_reconciled"):
+            if role_id is None or not role_added_by_delivery:
+                spec["role_reconciled"] = True
+            else:
+                retry_entry_key = spec.get("retry_entry_key")
+                if not retry_entry_key:
+                    try:
+                        retry_holding_id = await grant_timed_holding(
+                            guild_id,
+                            user_id,
+                            item_name,
+                            expires_at="1970-01-01T00:00:00+00:00",
+                            item_type="temp_role",
+                            metadata={
+                                "role_id": int(role_id),
+                                "late_rollback": True,
+                                "op_id": str(op_id),
+                            },
+                            source="shop_late_rollback",
+                            product_id=item_id,
+                            category=category,
+                            role_id=int(role_id),
+                        )
+                        retry_entry_key = f"h:{retry_holding_id}"
+                        spec["retry_entry_key"] = retry_entry_key
+                    except Exception as exc:
+                        return await _persist_incomplete(
+                            f"Failed to create role rollback retry marker: {exc}"
+                        )
+
+                if handoff_to_holdings:
+                    _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(spec)
+                    try:
+                        await update_purchase(str(op_id), delivery_rollback=json.dumps(spec))
+                    except Exception:
+                        pass
+                    return {
+                        "complete": False,
+                        "inventory_rolled_back": True,
+                        "equip_reconciled": True,
+                        "role_reconciled": False,
+                        "handed_off": True,
+                        "error": None,
+                    }
+
+                try:
+                    still_entitled = await role_still_entitled(
+                        guild_id,
+                        user_id,
+                        int(role_id),
+                        exclude_entry_key=retry_entry_key,
+                        bot=bot_client,
+                        member=target_member,
+                    )
+                    if not still_entitled:
+                        if guild_obj is None:
+                            raise RuntimeError(
+                                "Guild unavailable for late Discord role rollback"
+                            )
+                        role_obj = (
+                            guild_obj.get_role(int(role_id))
+                            if hasattr(guild_obj, "get_role") else None
+                        )
+                        if role_obj is None:
+                            raise RuntimeError(
+                                "Role unavailable for late Discord role rollback"
+                            )
+                        if target_member is None or not hasattr(target_member, "remove_roles"):
+                            raise RuntimeError(
+                                "Member unavailable for late Discord role rollback"
+                            )
+                        await target_member.remove_roles(
+                            role_obj,
+                            reason="Late delivery after purchase cancellation",
+                        )
+                        if (
+                            isinstance(getattr(target_member, "roles", None), list)
+                            and role_obj in target_member.roles
+                        ):
+                            target_member.roles.remove(role_obj)
+                        itx_user = getattr(interaction, "user", None) if interaction is not None else None
+                        if (
+                            itx_user is not None
+                            and itx_user is not target_member
+                            and isinstance(getattr(itx_user, "roles", None), list)
+                            and role_obj in itx_user.roles
+                        ):
+                            itx_user.roles.remove(role_obj)
+                    await delete_timed_holding(retry_entry_key)
+                    spec["retry_entry_key"] = None
+                    spec["role_reconciled"] = True
+                except Exception as exc:
+                    return await _persist_incomplete(
+                        f"Role Discord removal failed for {item_name!r}: {exc}"
+                    )
+
+    # ── Branch 3: XP Boost (`internal_type == "xp_boost"`) ──────────────
+    elif internal_type == "xp_boost":
+        if not spec.get("inventory_rolled_back"):
+            boost_id = spec.get("boost_id")
+            boost_exp = spec.get("boost_expires_at")
+            try:
+                async with aiosqlite.connect(DB_PATH) as cleanup_db:
+                    if boost_id is not None:
+                        await cleanup_db.execute(
+                            "DELETE FROM leveling_active_boosts "
+                            "WHERE id=? AND guild_id=? AND user_id=?",
+                            (int(boost_id), guild_id, user_id),
+                        )
+                    elif boost_exp:
+                        cursor = await cleanup_db.execute(
+                            "SELECT id FROM leveling_active_boosts "
+                            "WHERE guild_id=? AND user_id=? AND expires_at=? "
+                            "ORDER BY id DESC LIMIT 1",
+                            (guild_id, user_id, str(boost_exp)),
+                        )
+                        b_row = await cursor.fetchone()
+                        if b_row:
+                            await cleanup_db.execute(
+                                "DELETE FROM leveling_active_boosts WHERE id=?",
+                                (int(b_row[0]),),
+                            )
+                    await cleanup_db.commit()
+                spec["inventory_rolled_back"] = True
+                spec["equip_reconciled"] = True
+                spec["role_reconciled"] = True
+            except Exception as exc:
+                return await _persist_incomplete(f"XP boost rollback failed: {exc}")
+
+    # ── Branch 4: Stackable item (`internal_type in (...)`) ─────────────
+    elif internal_type in ("potion", "title", "custom", "shop_custom", "item"):
+        if not spec.get("inventory_rolled_back"):
+            inv_ok = await rollback_item_inventory_grant(
+                guild_id,
+                user_id,
+                item_name,
+                quantity=1,
+                prior_inv=prior_inv,
+                delivered_inv=delivered_inv,
+            )
+            if not inv_ok:
+                return await _persist_incomplete(
+                    f"Item inventory rollback failed for {item_name!r}"
+                )
+            spec["inventory_rolled_back"] = True
+        spec["equip_reconciled"] = True
+        spec["role_reconciled"] = True
+    else:
+        spec["inventory_rolled_back"] = True
+        spec["equip_reconciled"] = True
+        spec["role_reconciled"] = True
+
+    _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+    try:
+        await update_purchase(str(op_id), delivery_rollback="")
+    except Exception:
+        pass
+    return {
+        "complete": True,
+        "inventory_rolled_back": True,
+        "equip_reconciled": True,
+        "role_reconciled": True,
+        "error": None,
+    }
+
+
+async def reconcile_delivery_rollbacks(
+    *,
+    bot=None,
+    limit: int = 100,
+    handoff_to_holdings: bool = False,
+) -> dict:
+    """Retry any incomplete late-delivery compensations recorded in the purchase journal."""
+    global _LAST_BOT
+    bot_client = bot or _LAST_BOT
+    if bot_client is not None:
+        _LAST_BOT = bot_client
+
+    completed = 0
+    errors: list[str] = []
+    candidates: dict[str, dict | None] = {}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            cursor = await db.execute(
+                "SELECT op_id, status, delivery_rollback "
+                "FROM shop_purchase_operations "
+                "WHERE delivery_rollback IS NOT NULL AND delivery_rollback != '' "
+                "LIMIT ?",
+                (int(limit),),
+            )
+            for op_id, status, raw_spec in await cursor.fetchall():
+                if status not in (PURCHASE_FAILED, PURCHASE_REFUNDED):
+                    continue
+                parsed = None
+                try:
+                    parsed = json.loads(raw_spec)
+                except Exception:
+                    parsed = None
+                candidates[str(op_id)] = parsed
+        except Exception as exc:
+            errors.append(f"query delivery_rollback failed: {exc}")
+            return {"completed": completed, "errors": errors}
+
+        for mem_op_id, mem_spec in list(_PENDING_DELIVERY_ROLLBACKS.items()):
+            if mem_op_id in candidates:
+                candidates[mem_op_id] = mem_spec
+                continue
+            cur = await db.execute(
+                "SELECT status FROM shop_purchase_operations WHERE op_id=?",
+                (str(mem_op_id),),
+            )
+            row = await cur.fetchone()
+            if not row or row[0] == PURCHASE_DELIVERED:
+                _PENDING_DELIVERY_ROLLBACKS.pop(mem_op_id, None)
+            elif row[0] in (PURCHASE_FAILED, PURCHASE_REFUNDED):
+                candidates[mem_op_id] = mem_spec
+
+    for op_id, spec in candidates.items():
+        if handoff_to_holdings and spec and spec.get("inventory_rolled_back") and spec.get("equip_reconciled"):
+            # Inventory and equip rollback already completed; `expired_holdings`
+            # in `cleanup_expired_holdings` will process the `timed_holdings` marker.
+            continue
+        res = await compensate_late_delivery(
+            op_id,
+            spec,
+            bot=bot_client,
+            handoff_to_holdings=handoff_to_holdings,
+        )
+        if res.get("complete") or res.get("handed_off"):
+            completed += 1
+        elif res.get("error"):
+            errors.append(f"{op_id}: {res['error']}")
+
+    return {"completed": completed, "errors": errors}
+
+
 async def reconcile_purchases(*, older_than_minutes: int = 15,
-                              limit: int = 100) -> dict:
+                              limit: int = 100,
+                              bot=None) -> dict:
     """Finish compensations and quarantine purchases that never resolved.
 
     Two buckets:
@@ -1590,6 +2188,9 @@ async def reconcile_purchases(*, older_than_minutes: int = 15,
       `uncertain` for a human decision. It is NOT auto-refunded: that is exactly
       the "don't refund when delivery is uncertain" rule.
     """
+    global _LAST_BOT
+    if bot is not None:
+        _LAST_BOT = bot
     stats = {"completed": 0, "uncertain": 0, "errors": 0}
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
@@ -1611,6 +2212,14 @@ async def reconcile_purchases(*, older_than_minutes: int = 15,
             stats["completed"] += 1
         else:
             stats["errors"] += 1
+
+    try:
+        rb = await reconcile_delivery_rollbacks(bot=bot, limit=limit)
+        stats["completed"] += int(rb.get("completed") or 0)
+        stats["errors"] += len(rb.get("errors") or ())
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[SHOP] Delivery rollback reconciliation failed: {exc}")
+        stats["errors"] += 1
 
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
