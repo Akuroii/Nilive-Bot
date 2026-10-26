@@ -857,29 +857,36 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
         # Legacy path kept intact: existing listings still deliver the
         # immediate, non-inventory boost they always did. New listings cannot
         # be created with this type (see utils/shop_validation.py).
-        from utils.xp_calculator import grant_xp_boost
+        from utils.xp_calculator import grant_xp_boost_details
         try:
-            boost_expires_at = await grant_xp_boost(
+            boost_grant = await grant_xp_boost_details(
                 guild_id, user_id, multiplier, duration_hours, source=source)
         except Exception as exc:
             result["error"] = f"XP boost grant failed: {exc}"
             return result
+        boost_expires_at = (boost_grant or {}).get("expires_at")
         if not boost_expires_at:
             result["error"] = "XP boost grant failed."
             return result
-        boost_id = None
-        try:
-            async with aiosqlite.connect(DB_PATH) as db:
-                cursor = await db.execute(
-                    "SELECT id FROM leveling_active_boosts "
-                    "WHERE guild_id=? AND user_id=? AND expires_at=? AND source=? "
-                    "ORDER BY id DESC LIMIT 1",
-                    (guild_id, user_id, boost_expires_at, source))
-                b_row = await cursor.fetchone()
-                if b_row:
-                    boost_id = int(b_row[0])
-        except Exception:
-            boost_id = None
+        # The exact inserted row id, so the late-delivery rollback can remove
+        # this purchase's boost instead of re-selecting by
+        # (source, expires_at), which is not unique.
+        boost_id = (boost_grant or {}).get("boost_id")
+        if boost_id is None:
+            # Fallback only, for a grant path that could not report
+            # `lastrowid`: a hint, not a proven identity.
+            try:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cursor = await db.execute(
+                        "SELECT id FROM leveling_active_boosts "
+                        "WHERE guild_id=? AND user_id=? AND expires_at=? AND source=? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (guild_id, user_id, boost_expires_at, source))
+                    b_row = await cursor.fetchone()
+                    if b_row:
+                        boost_id = int(b_row[0])
+            except Exception:
+                boost_id = None
         result.update(
             success=True,
             boost_expires_at=boost_expires_at,

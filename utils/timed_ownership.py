@@ -1103,6 +1103,14 @@ async def _late_rollback_prereqs_complete(
                     if not isinstance(cand, dict):
                         corrupt_rows.append((row_gid, row_uid, row_iname))
                         continue
+                    # A parseable object that cannot be executed (empty object,
+                    # missing identity, wrong field types, unknown branch) is
+                    # just as unusable as unparseable JSON: never let it retire
+                    # a marker by looking like "nothing pending".
+                    usable, _problem = _validate_delivery_rollback_spec(cand)
+                    if not usable:
+                        corrupt_rows.append((row_gid, row_uid, row_iname))
+                        continue
                     if (
                         cand.get("entry_key") == entry_key
                         or cand.get("retry_entry_key") == entry_key
@@ -1195,6 +1203,13 @@ async def _late_rollback_prereqs_complete(
         except Exception:
             return False
     if isinstance(spec, dict):
+        # A descriptor that cannot be executed (empty object, missing identity,
+        # wrong type, unknown branch) must never be retired by cleanup just
+        # because no usable specification could be resolved: keep the marker
+        # and its row for diagnosis and manual recovery.
+        valid, _problem = _validate_delivery_rollback_spec(spec)
+        if not valid:
+            return False
         if not spec.get("inventory_rolled_back") or not spec.get("equip_reconciled"):
             return False
     return True
@@ -1457,6 +1472,11 @@ _PURCHASE_EXTRA_COLUMNS = (
     ("refunded", "INTEGER NOT NULL DEFAULT 0"),
     ("stock_returned", "INTEGER NOT NULL DEFAULT 0"),
     ("delivery_rollback", "TEXT"),
+    # Durable retry fairness for late-delivery rollback candidates. A process
+    # restart clears `_ROLLBACK_SCAN_ATTEMPTS`, so the bounded reconciliation
+    # window needs a persisted attempt count to rotate away from rows that keep
+    # failing closed instead of re-selecting them forever.
+    ("delivery_rollback_attempts", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -1497,6 +1517,9 @@ async def open_purchase(guild_id: int, user_id: int, *, item_id: int | None,
     return op_id
 
 
+_UNSET = object()
+
+
 async def update_purchase(op_id: str, *, status: str | None = None,
                           detail: str | None = None,
                           stock_reserved: int | None = None,
@@ -1505,6 +1528,7 @@ async def update_purchase(op_id: str, *, status: str | None = None,
                           stock_returned: int | None = None,
                           history_id: int | None = None,
                           delivery_rollback: str | None = None,
+                          expect_delivery_rollback=_UNSET,
                           db: aiosqlite.Connection | None = None) -> None:
     """Update one purchase operation. Returns True when exactly one row matched.
 
@@ -1512,6 +1536,13 @@ async def update_purchase(op_id: str, *, status: str | None = None,
     never overwrites the empty-string completed sentinel, so a stale invocation
     cannot turn a finished rollback back into pending work. Writing `""` (the
     sentinel itself) is unconditional and always wins.
+
+    `expect_delivery_rollback` adds a compare-and-swap condition on the exact
+    durable value the caller merged from (`None` for SQL NULL, the sentinel for
+    `''`, the raw JSON string otherwise). A non-empty descriptor therefore
+    cannot overwrite a *different* non-empty descriptor that landed in another
+    process between the read and this write: the write matches 0 rows and the
+    caller re-reads and re-merges (`_persist_delivery_rollback_progress`).
     """
     sets, params = [], []
     if status is not None:
@@ -1568,6 +1599,10 @@ async def update_purchase(op_id: str, *, status: str | None = None,
         completed_guard = (
             " AND (delivery_rollback IS NULL OR delivery_rollback != '')"
         )
+    if expect_delivery_rollback is not _UNSET:
+        # Null-safe equality (`IS`) so an expected SQL NULL is expressible.
+        completed_guard += " AND delivery_rollback IS ?"
+        params.append(expect_delivery_rollback)
     sql = (
         f"UPDATE shop_purchase_operations SET {', '.join(sets)} "
         f"WHERE op_id=?{where_extra}{completed_guard}"
@@ -2008,39 +2043,32 @@ async def record_pending_delivery_rollback(
     clean_spec = {k: v for k, v in spec.items() if not str(k).startswith("_")}
     copied = dict(clean_spec)
     _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = copied
-    try:
-        updated = await update_purchase(
-            str(op_id),
-            delivery_rollback=json.dumps(clean_spec),
-            db=db,
-        )
-        if not updated:
-            # The guarded write matches 0 rows when this operation already
-            # reached durable completion; check that before treating the
-            # miss as a persistence problem.
-            if await _durable_delivery_rollback_completed(str(op_id)):
-                _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
-                return True
-            copied["_durable_unpersisted"] = True
-            print(
-                f"[SHOP] Durable delivery_rollback write matched 0 rows "
-                f"for op_id={op_id}"
-            )
-            return False
+    status, persist_err, merged = await _persist_delivery_rollback_progress(
+        str(op_id), clean_spec, db=db
+    )
+    if merged is not None:
+        _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(merged)
+        copied = _PENDING_DELIVERY_ROLLBACKS[str(op_id)]
+    if status == "persisted":
         copied.pop("_durable_unpersisted", None)
         return True
-    except Exception as exc:
-        if db is None and await _durable_delivery_rollback_completed(str(op_id)):
-            _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
-            return True
-        copied["_durable_unpersisted"] = True
-        print(
-            f"[SHOP] Failed to persist durable delivery_rollback descriptor "
-            f"for op_id={op_id}: {exc}"
-        )
-        if db is not None:
-            raise
-        return False
+    if status == "completed":
+        # The durable `''` sentinel means another invocation already finished
+        # this rollback; there is nothing left to persist and the caller's spec
+        # must never resurrect the descriptor.
+        _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+        return True
+    copied["_durable_unpersisted"] = True
+    print(
+        f"[SHOP] Failed to persist durable delivery_rollback descriptor "
+        f"for op_id={op_id}: {persist_err or status}"
+    )
+    if db is not None and status == "failed":
+        # The caller stages this write inside an open transaction: raising lets
+        # it roll that transaction back instead of committing a delivery whose
+        # rollback descriptor was never recorded.
+        raise RuntimeError(persist_err or "descriptor write failed")
+    return False
 
 
 def _resolve_guild_and_live_member(
@@ -2093,6 +2121,250 @@ async def _durable_delivery_rollback_completed(op_id: str) -> bool:
 
 class _LateRollbackAlreadyCompleted(Exception):
     """Raised internally when the durable descriptor records a finished rollback."""
+
+
+# ── Durable rollback descriptor: classification, validation, monotonic writes ─
+
+_ROLLBACK_PROGRESS_FLAGS = (
+    "inventory_rolled_back",
+    "equip_reconciled",
+    "role_reconciled",
+)
+
+# Identity/provenance fields of a descriptor. Once durably recorded they must
+# never be erased or replaced by a stale caller that is missing the data, so the
+# merge keeps the stored value and only fills holes from the incoming spec.
+_ROLLBACK_IDENTITY_FIELDS = (
+    "retry_entry_key",
+    "boost_id",
+    "boost_expires_at",
+    "boost_source",
+    "prior_inventory",
+    "delivered_inventory",
+)
+
+_ROLLBACK_SUPPORTED_TYPES = (
+    "role",
+    "temp_role",
+    "xp_boost",
+    "potion",
+    "title",
+    "custom",
+    "shop_custom",
+    "item",
+)
+
+
+def _delivery_rollback_state(raw) -> tuple[str, dict | None]:
+    """Classify one durable `delivery_rollback` value.
+
+    Returns `(state, spec)` where state is one of:
+
+    * `"completed"` — the empty-string sentinel, the ONLY value that means the
+      rollback finished and was cleared;
+    * `"absent"` — SQL NULL or a blank string (no descriptor recorded);
+    * `"live"` — a non-empty JSON object (a usable descriptor);
+    * `"malformed"` — unparseable JSON, a non-object, or an empty object `{}`,
+      which carries no identity and cannot be executed.
+    """
+    if raw == "":
+        return "completed", None
+    if raw is None or not str(raw).strip():
+        return "absent", None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return "malformed", None
+    if not isinstance(parsed, dict) or not parsed:
+        return "malformed", None
+    return "live", parsed
+
+
+def _validate_delivery_rollback_spec(spec) -> tuple[bool, str | None]:
+    """Validate a descriptor before ANY side effect or completion claim.
+
+    A descriptor that is not executable must be reported, never treated as
+    finished and never partially guessed at; the caller leaves it in place for
+    diagnosis and manual recovery.
+    """
+    if not isinstance(spec, dict):
+        return False, "descriptor is not a JSON object"
+    if not spec:
+        return False, "descriptor is an empty object"
+    for field in ("guild_id", "user_id"):
+        if spec.get(field) is None:
+            return False, f"missing required field {field!r}"
+        try:
+            int(spec[field])
+        except (TypeError, ValueError):
+            return False, f"invalid {field!r}"
+    item_name = spec.get("item_name")
+    if not isinstance(item_name, str) or not item_name.strip():
+        return False, "missing required field 'item_name'"
+    internal_type = spec.get("internal_type")
+    if not isinstance(internal_type, str) or not internal_type.strip():
+        return False, "missing required field 'internal_type'"
+    if internal_type not in _ROLLBACK_SUPPORTED_TYPES:
+        return False, f"unknown internal_type {internal_type!r}"
+    for flag in _ROLLBACK_PROGRESS_FLAGS:
+        if flag in spec and not isinstance(spec[flag], (bool, int)):
+            return False, f"invalid progress flag {flag!r}"
+    if spec.get("role_id") is not None:
+        try:
+            int(spec["role_id"])
+        except (TypeError, ValueError):
+            return False, "invalid 'role_id'"
+    if "role_added" in spec and not isinstance(spec["role_added"], (bool, int)):
+        return False, "invalid 'role_added'"
+    entry_key = spec.get("entry_key")
+    if entry_key is not None:
+        if not isinstance(entry_key, str):
+            return False, "invalid 'entry_key'"
+        if entry_key.startswith("h:"):
+            try:
+                int(entry_key.split(":", 1)[1])
+            except (TypeError, ValueError):
+                return False, "invalid 'entry_key' holding id"
+    if spec.get("retry_entry_key") is not None and not isinstance(
+            spec["retry_entry_key"], str):
+        return False, "invalid 'retry_entry_key'"
+    for field in ("prior_inventory", "delivered_inventory"):
+        value = spec.get(field)
+        if value is not None and not isinstance(value, (list, tuple)):
+            return False, f"invalid {field!r}"
+    if internal_type == "xp_boost":
+        boost_id = spec.get("boost_id")
+        if boost_id is not None:
+            try:
+                int(boost_id)
+            except (TypeError, ValueError):
+                return False, "invalid 'boost_id'"
+        boost_exp = spec.get("boost_expires_at")
+        if boost_exp is not None and not isinstance(boost_exp, str):
+            return False, "invalid 'boost_expires_at'"
+        if boost_id is None and not (
+                isinstance(boost_exp, str) and boost_exp.strip()):
+            return False, "xp_boost descriptor records no boost identity"
+    return True, None
+
+
+def _rollback_value_absent(value) -> bool:
+    """True for a value that carries no durable information."""
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _merge_delivery_rollback_specs(stored: dict, incoming: dict) -> dict:
+    """Merge a newer durable descriptor with a (possibly stale) caller spec.
+
+    Monotonic by construction:
+
+    * a progress flag (`_ROLLBACK_PROGRESS_FLAGS`) that is durably `True` is
+      never turned back into `False`;
+    * a recorded identity/provenance value (`_ROLLBACK_IDENTITY_FIELDS`, e.g.
+      `retry_entry_key`, `boost_id`) is never erased by missing/`None` incoming
+      data, and a conflicting incoming identity never replaces it;
+    * a field the durable descriptor lacks is filled in from the incoming spec.
+
+    Every other key follows the same "keep the durable value unless it is
+    absent" rule, so an unknown extra field can never silently drop durable
+    state. This is a merge of *this operation's own* descriptor only — identity
+    is separately validated against the operation by
+    `_validate_delivery_rollback_spec`.
+    """
+    merged = dict(stored)
+    for flag in _ROLLBACK_PROGRESS_FLAGS:
+        merged[flag] = bool(stored.get(flag)) or bool(incoming.get(flag))
+    for field in _ROLLBACK_IDENTITY_FIELDS:
+        if _rollback_value_absent(merged.get(field)) and not _rollback_value_absent(
+                incoming.get(field)):
+            merged[field] = incoming[field]
+    for field, value in incoming.items():
+        if field in _ROLLBACK_PROGRESS_FLAGS or field in _ROLLBACK_IDENTITY_FIELDS:
+            continue
+        if _rollback_value_absent(merged.get(field)):
+            merged[field] = value
+    return merged
+
+
+async def _read_delivery_rollback_raw(op_id: str, *, db=None):
+    """Return `(state, raw_value, spec)` for one purchase operation."""
+
+    async def _query(connection):
+        cursor = await connection.execute(
+            "SELECT delivery_rollback FROM shop_purchase_operations WHERE op_id=?",
+            (str(op_id),),
+        )
+        return await cursor.fetchone()
+
+    if db is not None:
+        row = await _query(db)
+    else:
+        async with aiosqlite.connect(DB_PATH) as connection:
+            row = await _query(connection)
+    if row is None:
+        return "missing", None, None
+    state, spec = _delivery_rollback_state(row[0])
+    return state, row[0], spec
+
+
+async def _persist_delivery_rollback_progress(op_id: str, spec: dict, *,
+                                              db: aiosqlite.Connection | None = None,
+                                              attempts: int = 4):
+    """Monotonically and concurrency-safely persist rollback progress.
+
+    Shared by every descriptor writer (`record_pending_delivery_rollback`,
+    `_persist_incomplete`, `_persist_handoff` and the compensation branches), so
+    no writer can regress newer progress written by another one.
+
+    Returns `(status, error, merged_spec)` with status one of:
+
+    * `"persisted"` — the merged descriptor is durably stored;
+    * `"completed"` — the durable `''` sentinel already won; nothing written;
+    * `"malformed"` — the stored value is not a usable descriptor, so writing
+      would destroy diagnostic evidence; nothing written;
+    * `"failed"` — the row is missing, the read failed, or the compare-and-swap
+      write kept losing to concurrent writers. Nothing is claimed as durable.
+
+    The read/merge/write sequence runs as a compare-and-swap against the exact
+    value it merged from, and re-reads when another process (or another
+    connection of this one) advanced the descriptor in between. A caller that
+    already holds a `BEGIN IMMEDIATE` lock passes its `db` so the read and the
+    write are part of that transaction.
+    """
+    clean = {k: v for k, v in spec.items() if not str(k).startswith("_")}
+    last_error = None
+    for _ in range(max(1, int(attempts))):
+        try:
+            state, raw, stored = await _read_delivery_rollback_raw(op_id, db=db)
+        except Exception as exc:
+            return "failed", f"failed to read durable descriptor: {exc}", None
+        if state == "completed":
+            return "completed", None, None
+        if state == "missing":
+            return "failed", f"purchase operation {op_id} not found", None
+        if state == "malformed":
+            return "malformed", (
+                "stored delivery_rollback descriptor is not a usable JSON object"
+            ), None
+        merged = _merge_delivery_rollback_specs(stored or {}, clean)
+        try:
+            written = await update_purchase(
+                str(op_id),
+                delivery_rollback=json.dumps(merged),
+                expect_delivery_rollback=raw,
+                db=db,
+            )
+        except Exception as exc:
+            return "failed", str(exc), None
+        if written:
+            return "persisted", None, merged
+        last_error = "descriptor write lost a race with a newer durable value"
+        if db is not None:
+            # Inside the caller's transaction nothing else can write between our
+            # read and this update, so a zero-row result means the row is gone
+            # or the completion guard refused the write.
+            break
+    return "failed", last_error, None
 
 
 async def _ensure_role_retry_marker(
@@ -2234,15 +2506,8 @@ async def compensate_late_delivery(
         }
 
     if op_row is None:
-        if spec is None and mem_spec is None:
-            return {
-                "complete": True,
-                "durable_persisted": True,
-                "inventory_rolled_back": True,
-                "equip_reconciled": True,
-                "role_reconciled": True,
-                "error": None,
-            }
+        # No row to verify against: never report completion, and never act on a
+        # caller-supplied specification alone.
         return {
             "complete": False,
             "durable_persisted": False,
@@ -2294,16 +2559,26 @@ async def compensate_late_delivery(
                 "role_reconciled": False,
                 "error": f"Malformed delivery_rollback descriptor for {op_id}",
             }
-    else:
-        if spec is None and mem_spec is None:
+        # The durable descriptor is authoritative, so it must itself be usable
+        # before anything is merged from it: a wrong-typed flag (e.g. `"yes"`)
+        # must not be truthy-merged into a valid-looking `True`.
+        _durable_ok, _durable_problem = _validate_delivery_rollback_spec(db_spec)
+        if not _durable_ok:
             return {
-                "complete": True,
-                "durable_persisted": True,
-                "inventory_rolled_back": True,
-                "equip_reconciled": True,
-                "role_reconciled": True,
-                "error": None,
+                "complete": False,
+                "durable_persisted": False,
+                "inventory_rolled_back": False,
+                "equip_reconciled": False,
+                "role_reconciled": False,
+                "error": (
+                    f"Malformed delivery_rollback descriptor for {op_id}: "
+                    f"{_durable_problem}"
+                ),
             }
+    else:
+        # No durable descriptor at all: only an explicitly marked
+        # failed-persistence retry may stand in for it, and a bare `None` means
+        # there is nothing verifiable to compensate.
         if not isinstance(mem_spec, dict) or not mem_spec.get("_durable_unpersisted"):
             return {
                 "complete": False,
@@ -2316,18 +2591,8 @@ async def compensate_late_delivery(
 
     if spec is None:
         spec = db_spec if isinstance(db_spec, dict) else mem_spec
-    if not spec:
-        _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
-        return {
-            "complete": True,
-            "durable_persisted": True,
-            "inventory_rolled_back": True,
-            "equip_reconciled": True,
-            "role_reconciled": True,
-            "error": None,
-        }
 
-    spec = dict(spec)
+    spec = dict(spec) if isinstance(spec, dict) else {}
     for source_spec in (mem_spec, db_spec):
         if not isinstance(source_spec, dict):
             continue
@@ -2340,6 +2605,24 @@ async def compensate_late_delivery(
         spec.pop("_durable_unpersisted", None)
     elif isinstance(mem_spec, dict) and mem_spec.get("_durable_unpersisted"):
         spec["_durable_unpersisted"] = True
+
+    # Validate the complete descriptor BEFORE any side effect or completion
+    # claim. An empty object, a missing identity field, a wrong type, or an
+    # unknown branch is reported and left in place for diagnosis — it is never
+    # treated as finished work and never partially executed.
+    _spec_ok, _spec_problem = _validate_delivery_rollback_spec(spec)
+    if not _spec_ok:
+        return {
+            "complete": False,
+            "durable_persisted": False,
+            "inventory_rolled_back": False,
+            "equip_reconciled": False,
+            "role_reconciled": False,
+            "error": (
+                f"Malformed delivery_rollback descriptor for {op_id}: "
+                f"{_spec_problem}"
+            ),
+        }
 
     guild_id = int(spec["guild_id"])
     user_id = int(spec["user_id"])
@@ -2388,56 +2671,30 @@ async def compensate_late_delivery(
                 "error": None,
             }
         clean_spec = {k: v for k, v in spec.items() if not str(k).startswith("_")}
-        mem_copy = dict(clean_spec)
-        if spec.get("_durable_unpersisted"):
+        # Monotonic, compare-and-swap write through the shared writer: a stale
+        # invocation can never lower a durable `True` flag or erase recorded
+        # identity, whichever writer advanced the descriptor first.
+        status, persist_err, merged = await _persist_delivery_rollback_progress(
+            str(op_id), clean_spec
+        )
+        if status == "completed":
+            _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+            if own_retry_marker["created"]:
+                await _retire_own_retry_marker(own_retry_marker["key"])
+                own_retry_marker["created"] = False
+            return {
+                "complete": True,
+                "durable_persisted": True,
+                "inventory_rolled_back": True,
+                "equip_reconciled": True,
+                "role_reconciled": True,
+                "error": None,
+            }
+        durable_persisted = status == "persisted"
+        mem_copy = dict(merged if merged is not None else clean_spec)
+        if spec.get("_durable_unpersisted") and not durable_persisted:
             mem_copy["_durable_unpersisted"] = True
         _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = mem_copy
-        durable_persisted = False
-        persist_err = None
-        try:
-            durable_persisted = bool(
-                await update_purchase(
-                    str(op_id),
-                    delivery_rollback=json.dumps(clean_spec),
-                )
-            )
-            if durable_persisted:
-                mem_copy.pop("_durable_unpersisted", None)
-                spec.pop("_durable_unpersisted", None)
-        except Exception as exc:
-            persist_err = str(exc)
-            durable_persisted = False
-
-        if not durable_persisted:
-            # The guarded write above is rejected (0 rows) when a competing
-            # invocation completed the rollback between our completion check
-            # and this write. Re-read durable state to distinguish that from a
-            # genuine persistence problem.
-            if await _durable_delivery_rollback_completed(str(op_id)):
-                _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
-                if own_retry_marker["created"]:
-                    await _retire_own_retry_marker(own_retry_marker["key"])
-                    own_retry_marker["created"] = False
-                return {
-                    "complete": True,
-                    "durable_persisted": True,
-                    "inventory_rolled_back": True,
-                    "equip_reconciled": True,
-                    "role_reconciled": True,
-                    "error": None,
-                }
-            try:
-                existing_op = await get_purchase(str(op_id))
-                raw_existing = (
-                    existing_op.get("delivery_rollback") if existing_op else None
-                )
-                if raw_existing and str(raw_existing).strip():
-                    durable_persisted = True
-                    mem_copy.pop("_durable_unpersisted", None)
-                    spec.pop("_durable_unpersisted", None)
-            except Exception as read_exc:
-                if persist_err is None:
-                    persist_err = str(read_exc)
 
         full_err = err_msg
         if not durable_persisted:
@@ -2445,17 +2702,22 @@ async def compensate_late_delivery(
             # the in-memory entry explicitly: a retry in this process may use it,
             # and `compensate_late_delivery` will refuse memory-only state that
             # lacks this marker (never treating the cache as durable recovery).
-            _PENDING_DELIVERY_ROLLBACKS[str(op_id)]["_durable_unpersisted"] = True
+            mem_copy["_durable_unpersisted"] = True
             suffix = (
                 f" (durable descriptor write failed: {persist_err})"
                 if persist_err
-                else " (durable descriptor not persisted)"
+                else f" (durable descriptor not persisted: {status})"
             )
             full_err = f"{err_msg}{suffix}"
             print(
                 f"[SHOP] ERROR: Late-delivery rollback incomplete and durable "
                 f"persistence failed for op_id={op_id}: {full_err}"
             )
+        else:
+            spec.pop("_durable_unpersisted", None)
+            for flag in _ROLLBACK_PROGRESS_FLAGS:
+                if merged is not None and merged.get(flag):
+                    spec[flag] = True
         return {
             "complete": False,
             "durable_persisted": durable_persisted,
@@ -2485,34 +2747,34 @@ async def compensate_late_delivery(
         marked `_durable_unpersisted` only when the write genuinely failed;
         a write rejected because the rollback is already durably complete
         drops the cache entry instead and never labels it recoverable work.
+        Uses the same monotonic compare-and-swap writer as every other
+        descriptor write, so a handoff can never lower newer progress or erase
+        recorded identity.
         """
         clean_spec = {k: v for k, v in spec.items() if not str(k).startswith("_")}
-        mem = dict(clean_spec)
-        if spec.get("_durable_unpersisted"):
+        status, persist_err, merged = await _persist_delivery_rollback_progress(
+            str(op_id), clean_spec
+        )
+        mem = dict(merged if merged is not None else clean_spec)
+        if spec.get("_durable_unpersisted") and status != "persisted":
             mem["_durable_unpersisted"] = True
         _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = mem
-        durable_ok = False
-        try:
-            durable_ok = bool(
-                await update_purchase(
-                    str(op_id), delivery_rollback=json.dumps(clean_spec)
-                )
-            )
-        except Exception as exc:
-            print(
-                f"[SHOP] Failed to persist handoff delivery_rollback descriptor "
-                f"for op_id={op_id}: {exc}"
-            )
-            durable_ok = False
-        if durable_ok:
-            _PENDING_DELIVERY_ROLLBACKS[str(op_id)].pop("_durable_unpersisted", None)
+        if status == "persisted":
+            for flag in _ROLLBACK_PROGRESS_FLAGS:
+                if mem.get(flag):
+                    spec[flag] = True
             spec.pop("_durable_unpersisted", None)
             return False, True
-        if await _durable_delivery_rollback_completed(str(op_id)):
+        if status == "completed":
             _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
             spec.pop("_durable_unpersisted", None)
             return True, True
-        _PENDING_DELIVERY_ROLLBACKS[str(op_id)]["_durable_unpersisted"] = True
+        print(
+            f"[SHOP] Failed to persist handoff delivery_rollback descriptor "
+            f"for op_id={op_id}: {persist_err or status}"
+        )
+        mem["_durable_unpersisted"] = True
+        _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = mem
         spec["_durable_unpersisted"] = True
         return False, False
 
@@ -2778,13 +3040,12 @@ async def compensate_late_delivery(
             clean_spec = {
                 k: v for k, v in spec.items() if not str(k).startswith("_")
             }
-            saved = await update_purchase(
-                str(op_id),
-                delivery_rollback=json.dumps(clean_spec),
-                db=conn,
+            status, _err, _merged = await _persist_delivery_rollback_progress(
+                str(op_id), clean_spec, db=conn
             )
+            saved = status == "persisted"
             role_guard["outcome"] = "persisted" if saved else "post_failed"
-            return bool(saved)
+            return saved
 
         if not spec.get("inventory_rolled_back"):
             inv_ok = await rollback_role_inventory_grant(
@@ -3133,6 +3394,15 @@ async def compensate_late_delivery(
                                 # provenance. A `level_claim:*` or `potion` boost
                                 # that shares the same expiry string belongs to
                                 # another grant and must never be deleted.
+                                #
+                                # `(source, expires_at)` is not a unique identity,
+                                # so this path refuses to guess: exactly one match
+                                # is removable, more than one is ambiguous and
+                                # fails closed (descriptor kept for manual
+                                # recovery) instead of deleting someone else's row.
+                                # The `ORDER BY` below is therefore incidental: it
+                                # never decides between two candidate rows, because
+                                # more than one match deletes nothing at all.
                                 boost_source = str(
                                     spec.get("boost_source") or "shop"
                                 )
@@ -3140,16 +3410,24 @@ async def compensate_late_delivery(
                                     "SELECT id FROM leveling_active_boosts "
                                     "WHERE guild_id=? AND user_id=? AND expires_at=? "
                                     "AND source=? "
-                                    "ORDER BY id DESC LIMIT 1",
+                                    "ORDER BY id ASC",
                                     (guild_id, user_id, str(boost_exp),
                                      boost_source),
                                 )
-                                b_row = await cursor.fetchone()
-                                if b_row:
+                                b_rows = list(await cursor.fetchall())
+                                if len(b_rows) > 1:
+                                    raise RuntimeError(
+                                        f"ambiguous XP boost identity for "
+                                        f"op_id={op_id}: {len(b_rows)} rows match "
+                                        f"source={boost_source!r} and the same "
+                                        f"expiry, and the descriptor recorded no "
+                                        f"boost_id"
+                                    )
+                                if b_rows:
                                     await cleanup_db.execute(
                                         "DELETE FROM leveling_active_boosts "
                                         "WHERE id=? AND source=?",
-                                        (int(b_row[0]), boost_source),
+                                        (int(b_rows[0][0]), boost_source),
                                     )
                             spec["inventory_rolled_back"] = True
                             spec["equip_reconciled"] = True
@@ -3159,20 +3437,20 @@ async def compensate_late_delivery(
                                 for k, v in spec.items()
                                 if not str(k).startswith("_")
                             }
-                            progress_saved_b = await update_purchase(
-                                str(op_id),
-                                delivery_rollback=json.dumps(clean_spec_b),
-                                db=cleanup_db,
+                            status_b, err_b, merged_b = (
+                                await _persist_delivery_rollback_progress(
+                                    str(op_id), clean_spec_b, db=cleanup_db
+                                )
                             )
-                            if not progress_saved_b:
+                            if status_b != "persisted":
                                 raise RuntimeError(
-                                    f"Durable XP boost progress write matched 0 "
-                                    f"rows for op_id={op_id}"
+                                    f"Durable XP boost progress write failed for "
+                                    f"op_id={op_id}: {err_b or status_b}"
                                 )
                             await cleanup_db.commit()
                             boost_in_tx = False
                             _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(
-                                clean_spec_b
+                                merged_b or clean_spec_b
                             )
                     except Exception:
                         if boost_in_tx:
@@ -3298,18 +3576,21 @@ async def compensate_late_delivery(
                             clean_spec = {
                                 k: v for k, v in spec.items() if not str(k).startswith("_")
                             }
-                            progress_saved = await update_purchase(
-                                str(op_id),
-                                delivery_rollback=json.dumps(clean_spec),
-                                db=rb_db,
+                            status_p, err_p, merged_p = (
+                                await _persist_delivery_rollback_progress(
+                                    str(op_id), clean_spec, db=rb_db
+                                )
                             )
-                            if not progress_saved:
+                            if status_p != "persisted":
                                 raise RuntimeError(
-                                    f"Durable rollback progress write matched 0 rows for op_id={op_id}"
+                                    f"Durable rollback progress write failed for "
+                                    f"op_id={op_id}: {err_p or status_p}"
                                 )
                             await rb_db.commit()
                             in_tx = False
-                            _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(clean_spec)
+                            _PENDING_DELIVERY_ROLLBACKS[str(op_id)] = dict(
+                                merged_p or clean_spec
+                            )
                         else:
                             await rb_db.execute("ROLLBACK")
                             in_tx = False
@@ -3361,6 +3642,30 @@ async def compensate_late_delivery(
     }
 
 
+async def _record_rollback_attempt(op_id: str, *, supported: bool = True) -> None:
+    """Durably count one reconciliation attempt on a rollback candidate.
+
+    Durable (not in-memory) so a restart cannot re-select the same permanently
+    failing rows forever. Deliberately does NOT touch `updated_at`, which other
+    consumers read as "last durable progress". A failed counter write only costs
+    fairness for this pass, so it never blocks the compensation attempt itself.
+    """
+    if not supported:
+        return
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE shop_purchase_operations "
+                "SET delivery_rollback_attempts = "
+                "COALESCE(delivery_rollback_attempts, 0) + 1 "
+                "WHERE op_id=?",
+                (str(op_id),),
+            )
+            await db.commit()
+    except Exception as exc:
+        print(f"[SHOP] Failed to record rollback attempt for op_id={op_id}: {exc}")
+
+
 async def reconcile_delivery_rollbacks(
     *,
     bot=None,
@@ -3377,28 +3682,61 @@ async def reconcile_delivery_rollbacks(
     errors: list[str] = []
     candidates: dict[str, dict | None] = {}
     order: list[str] = []
+    durable_attempts: dict[str, int] = {}
+    attempts_supported = True
 
     async with aiosqlite.connect(DB_PATH) as db:
         try:
             # Filter actionable statuses in SQL and order deterministically, so
-            # the per-pass limit is never spent on non-actionable rows. Rows
-            # whose progress was durably written last are retried last.
-            cursor = await db.execute(
-                "SELECT op_id, status, delivery_rollback "
+            # the per-pass limit is never spent on non-actionable rows. The
+            # durable attempt counter leads the ordering: a row that keeps
+            # failing closed yields its bounded slot to rows that have been
+            # attempted fewer times, and that rotation survives a restart
+            # (`_ROLLBACK_SCAN_ATTEMPTS` does not). `updated_at` stays a pure
+            # "last durable progress" signal for every other consumer.
+            select_sql = (
+                "SELECT op_id, status, delivery_rollback, "
+                "COALESCE(delivery_rollback_attempts, 0) "
                 "FROM shop_purchase_operations "
                 "WHERE delivery_rollback IS NOT NULL AND delivery_rollback != '' "
                 "AND status IN (?, ?) "
-                "ORDER BY updated_at ASC, op_id ASC",
-                (PURCHASE_FAILED, PURCHASE_REFUNDED),
+                "ORDER BY COALESCE(delivery_rollback_attempts, 0) ASC, "
+                "updated_at ASC, op_id ASC"
             )
-            for op_id, status, raw_spec in await cursor.fetchall():
+            try:
+                cursor = await db.execute(select_sql,
+                                          (PURCHASE_FAILED, PURCHASE_REFUNDED))
+                fetched = await cursor.fetchall()
+            except Exception as exc:
+                if "no such column" not in str(exc).lower():
+                    raise
+                # Journal not migrated yet: fall back to the pre-attempt
+                # ordering rather than failing the whole pass.
+                attempts_supported = False
+                cursor = await db.execute(
+                    "SELECT op_id, status, delivery_rollback "
+                    "FROM shop_purchase_operations "
+                    "WHERE delivery_rollback IS NOT NULL AND delivery_rollback != '' "
+                    "AND status IN (?, ?) "
+                    "ORDER BY updated_at ASC, op_id ASC",
+                    (PURCHASE_FAILED, PURCHASE_REFUNDED),
+                )
+                fetched = [tuple(row) + (0,) for row in await cursor.fetchall()]
+            for row in fetched:
+                op_key = str(row[0])
+                raw_spec = row[2]
                 parsed = None
                 try:
                     parsed = json.loads(raw_spec)
                 except Exception:
                     parsed = None
-                candidates[str(op_id)] = parsed
-                order.append(str(op_id))
+                if not isinstance(parsed, dict):
+                    # Left as-is so the compensation reports the malformed
+                    # descriptor instead of silently dropping the candidate.
+                    parsed = None
+                candidates[op_key] = parsed
+                durable_attempts[op_key] = int(row[3] or 0)
+                order.append(op_key)
         except Exception as exc:
             errors.append(f"query delivery_rollback failed: {exc}")
             return {"completed": completed, "errors": errors}
@@ -3428,12 +3766,17 @@ async def reconcile_delivery_rollbacks(
                 candidates[mem_op_id] = mem_spec
                 order.append(mem_op_id)
 
-    # Fair selection: rows already attempted in this process yield to rows that
-    # have not been attempted yet, so a permanently failing batch can never keep
-    # later markers out of the limited window. Within one attempt count the SQL
-    # order (least recently durably updated first) is preserved, so rotation
-    # also survives a restart.
-    order = sorted(order, key=lambda oid: _ROLLBACK_SCAN_ATTEMPTS.get(oid, 0))
+    # Fair selection: rows already attempted yield to rows with fewer durable
+    # attempts, so a permanently failing batch can never keep later markers out
+    # of the limited window. The SQL order (durable attempts, then least
+    # recently updated, then op_id) is preserved for ties by the stable sort.
+    order = sorted(
+        order,
+        key=lambda oid: (
+            int(durable_attempts.get(oid, 0)),
+            _ROLLBACK_SCAN_ATTEMPTS.get(oid, 0),
+        ),
+    )
     selected = order[: int(limit)] if limit is not None else order
     for stale_key in list(_ROLLBACK_SCAN_ATTEMPTS):
         if stale_key not in candidates:
@@ -3446,12 +3789,23 @@ async def reconcile_delivery_rollbacks(
             # Inventory and equip rollback already completed; `expired_holdings`
             # in `cleanup_expired_holdings` will process the `timed_holdings` marker.
             continue
-        res = await compensate_late_delivery(
-            op_id,
-            spec,
-            bot=bot_client,
-            handoff_to_holdings=handoff_to_holdings,
-        )
+        await _record_rollback_attempt(op_id, supported=attempts_supported)
+        # One malformed or crashing candidate must never abort the pass: later
+        # independent candidates still get their turn.
+        try:
+            res = await compensate_late_delivery(
+                op_id,
+                spec,
+                bot=bot_client,
+                handoff_to_holdings=handoff_to_holdings,
+            )
+        except Exception as exc:
+            errors.append(f"{op_id}: {type(exc).__name__}: {exc}")
+            print(
+                f"[SHOP] Late-delivery compensation raised for op_id={op_id}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
         if res.get("complete") or res.get("handed_off"):
             completed += 1
         elif res.get("error"):

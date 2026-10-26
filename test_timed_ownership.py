@@ -5887,6 +5887,487 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             for include_source in (False, True):
                 await _run(order, include_source)
 
+    # ── P19–P26: final corrective pass (stale progress, malformed rows,
+    #    durable retry fairness, exact boost identity) ────────────────────
+
+    async def _refunded_op(self, name, item_id, *, internal_type="potion",
+                           role_id=None, extra=None, flags=None):
+        op = await TO.open_purchase(
+            guild_id=GUILD, user_id=USER, item_id=item_id, item_name=name,
+            currency="balance", amount=100)
+        await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
+        spec = {
+            "guild_id": GUILD, "user_id": USER, "item_id": item_id,
+            "item_name": name, "internal_type": internal_type,
+            "role_id": role_id, "role_added": role_id is not None,
+            "inventory_rolled_back": False, "equip_reconciled": False,
+            "role_reconciled": False,
+        }
+        if extra:
+            spec.update(extra)
+        if flags:
+            spec.update(flags)
+        return op, spec
+
+    async def test_p19_stale_progress_cannot_overwrite_newer_durable_progress(self):
+        """P19 (Blocker 1): a stale caller whose own branch fails must not lower
+        newer durable progress written by another invocation.
+
+        Reproduces the reviewed sequence with ONE late-delivered unit and TWO
+        legitimate independent units (qty 3, rollback owed = 1):
+
+          B compensates the late unit, its final clear fails (crash window)
+            -> qty 2, descriptor flags all True
+          A resumes from a stale snapshot whose `BEGIN IMMEDIATE` fails
+            -> must NOT write the all-False descriptor back
+          restart-equivalent reconciliation must therefore NOT decrement again
+            -> qty stays 2
+        """
+        from utils.inventory import give_item
+        name = "P19StalePotion"
+        await give_item(GUILD, USER, name, 3, item_type="potion", source="shop")
+        op, stale_spec = await self._refunded_op(name, 9901)
+        await TO.record_pending_delivery_rollback(op, stale_spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        def _qty():
+            return rows(
+                "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=?"
+                " AND item_name=?", (GUILD, USER, name))
+
+        def _raw():
+            return rows(
+                "SELECT delivery_rollback FROM shop_purchase_operations"
+                " WHERE op_id=?", (op,))[0][0]
+
+        def _flags():
+            spec = json.loads(_raw())
+            return tuple(bool(spec.get(f)) for f in
+                         ("inventory_rolled_back", "equip_reconciled",
+                          "role_reconciled"))
+
+        self.assertEqual(_qty(), [(3,)])
+        stale_op_row = await TO.get_purchase(op)
+
+        # ── B: rollback lands, the completion sentinel write fails ──
+        real_update = TO.update_purchase
+
+        async def _clear_fails(oid, **kwargs):
+            if kwargs.get("delivery_rollback") == "":
+                raise RuntimeError("simulated crash before the completion sentinel")
+            return await real_update(oid, **kwargs)
+
+        TO.update_purchase = _clear_fails
+        try:
+            res_b = await TO.compensate_late_delivery(op, dict(stale_spec))
+        finally:
+            TO.update_purchase = real_update
+        self.assertFalse(res_b["complete"], str(res_b))
+        self.assertIn("clear", str(res_b.get("error") or "").lower(), str(res_b))
+        self.assertEqual(_qty(), [(2,)], "B must roll back exactly one late unit")
+        self.assertEqual(_flags(), (True, True, True),
+                         f"B's progress was not durable: {_raw()!r}")
+
+        # ── A: stale snapshot (read before B) + BEGIN IMMEDIATE fails ──
+        # Emulate a *separate process*: it shares no in-memory retry cache.
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        stale_row = dict(stale_op_row)
+        stale_row["delivery_rollback"] = json.dumps(stale_spec)
+        stale_row["_raw_delivery_rollback"] = json.dumps(stale_spec)
+        real_get_purchase = TO.get_purchase
+        calls = {"n": 0}
+
+        async def _stale_once(oid):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return dict(stale_row)
+            return await real_get_purchase(oid)
+
+        import aiosqlite as _aiosqlite
+        real_connect = _aiosqlite.connect
+
+        class _LockedConn:
+            """Connection whose `BEGIN IMMEDIATE` fails like a locked database."""
+
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, attr):
+                return getattr(self._conn, attr)
+
+            async def execute(self, sql, *args, **kwargs):
+                if str(sql).strip().upper().startswith("BEGIN IMMEDIATE"):
+                    raise TO.aiosqlite.OperationalError("database is locked")
+                return await self._conn.execute(sql, *args, **kwargs)
+
+            async def __aenter__(self):
+                await self._conn.__aenter__()
+                return self
+
+            async def __aexit__(self, *exc):
+                return await self._conn.__aexit__(*exc)
+
+        def _connect(*args, **kwargs):
+            return _LockedConn(real_connect(*args, **kwargs))
+
+        TO.get_purchase = _stale_once
+        try:
+            with patch.object(TO.aiosqlite, "connect", _connect):
+                res_a = await TO.compensate_late_delivery(op, dict(stale_spec))
+        finally:
+            TO.get_purchase = real_get_purchase
+        self.assertFalse(res_a["complete"], str(res_a))
+        self.assertIn("locked", str(res_a.get("error") or "").lower(), str(res_a))
+        self.assertEqual(_qty(), [(2,)], "the stale caller mutated inventory")
+        self.assertEqual(
+            _flags(), (True, True, True),
+            f"a stale descriptor regressed newer durable progress: {_raw()!r}")
+
+        # ── Cold restart + one reconciliation pass ──
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        TO._ROLLBACK_SCAN_ATTEMPTS.clear()
+        stats = await TO.reconcile_delivery_rollbacks(bot=None, limit=10)
+        self.assertEqual(stats["completed"], 1, str(stats))
+        self.assertEqual(stats["errors"], [], str(stats))
+        self.assertEqual(
+            _qty(), [(2,)],
+            "reconciliation destroyed a legitimate inventory unit")
+        self.assertEqual(_raw(), "", "completed work left the descriptor pending")
+
+    async def test_p20_every_descriptor_writer_keeps_newer_progress(self):
+        """P20 (Blocker 1): the other two writers — `record_pending_delivery_rollback`
+        and the `handoff_to_holdings` writer — must also be monotonic, and an
+        initial creation from SQL NULL must still work."""
+        # ── A) initial creation from SQL NULL ──
+        from utils.inventory import give_item
+        name = "P20Potion"
+        await give_item(GUILD, USER, name, 2, item_type="potion", source="shop")
+        op, spec = await self._refunded_op(name, 9920)
+        self.assertIsNone(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0])
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        created = await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        self.assertTrue(created, "initial descriptor creation from NULL broke")
+        self.assertTrue(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0])
+
+        # ── B) a stale all-False spec must not lower True flags ──
+        progressed = dict(spec)
+        progressed.update({"inventory_rolled_back": True,
+                           "equip_reconciled": True,
+                           "retry_entry_key": "h:424242"})
+        self.assertTrue(await TO.update_purchase(
+            op, delivery_rollback=json.dumps(progressed)))
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        stale = dict(spec)
+        stale["retry_entry_key"] = None
+        wrote = await TO.record_pending_delivery_rollback(op, stale, bot=None)
+        self.assertTrue(wrote, "the write was not durably persisted")
+        raw_after = json.loads(rows(
+            "SELECT delivery_rollback FROM shop_purchase_operations WHERE op_id=?",
+            (op,))[0][0])
+        self.assertTrue(raw_after.get("inventory_rolled_back"),
+                        f"record_pending_delivery_rollback regressed progress: {raw_after}")
+        self.assertTrue(raw_after.get("equip_reconciled"),
+                        f"record_pending_delivery_rollback regressed progress: {raw_after}")
+        self.assertEqual(
+            raw_after.get("retry_entry_key"), "h:424242",
+            "a stale spec erased the recorded retry identity")
+
+        # ── C) handoff writer racing a newer durable write ──
+        rid = 9930
+        role = role_stub(rid, "P20HandoffColor")
+        itx, person, bot, guild = purchase_ctx(granted_role=role)
+        person.roles.append(role)
+        guild.get_role = lambda r: role if int(r) == rid else None
+        person.remove_roles = AsyncMock()
+        op_h, spec_h = await self._refunded_op(
+            "P20HandoffColor", 9921, internal_type="role", role_id=rid,
+            flags={"inventory_rolled_back": True, "equip_reconciled": True})
+        await TO.record_pending_delivery_rollback(op_h, spec_h, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        newer = dict(spec_h)
+        newer.update({"inventory_rolled_back": True, "equip_reconciled": True,
+                      "role_reconciled": True})
+        raced = {"done": False}
+
+        async def _newer_write_wins(oid, **kwargs):
+            if not raced["done"] and kwargs.get("delivery_rollback") not in (None, ""):
+                raced["done"] = True
+                # Another process durably finishes the role half first.
+                await real_update(oid, delivery_rollback=json.dumps(newer))
+            return await real_update(oid, **kwargs)
+
+        real_update = TO.update_purchase
+        TO.update_purchase = _newer_write_wins
+        try:
+            res_h = await TO.compensate_late_delivery(
+                op_h, dict(spec_h), bot=bot, handoff_to_holdings=True)
+        finally:
+            TO.update_purchase = real_update
+        self.assertTrue(raced["done"], "the probe never staged the newer write")
+        self.assertTrue(res_h.get("handed_off"), str(res_h))
+        self.assertTrue(res_h["durable_persisted"], str(res_h))
+        raw_h = json.loads(rows(
+            "SELECT delivery_rollback FROM shop_purchase_operations WHERE op_id=?",
+            (op_h,))[0][0])
+        self.assertTrue(
+            raw_h.get("role_reconciled"),
+            f"the handoff writer regressed newer durable progress: {raw_h}")
+        self.assertTrue(raw_h.get("inventory_rolled_back"), str(raw_h))
+
+    async def test_p21_malformed_descriptors_are_reported_and_never_completed(self):
+        """P21 (Blocker 2): `{}`, missing identity, wrong types and unknown branch
+        data must be reported as errors — never as completion, never a leaked
+        KeyError, and never an inventory mutation. The raw value and
+        `updated_at` must be left untouched for diagnosis."""
+        from utils.inventory import give_item
+        name = "P21Potion"
+        await give_item(GUILD, USER, name, 2, item_type="potion", source="shop")
+        cases = [
+            ("{}", "empty object"),
+            (json.dumps({"inventory_rolled_back": False}), "guild_id"),
+            (json.dumps({"guild_id": "not-a-guild", "user_id": USER,
+                         "item_name": name, "internal_type": "potion"}),
+             "guild_id"),
+            (json.dumps({"guild_id": GUILD, "user_id": USER,
+                         "item_name": name, "internal_type": "potion",
+                         "inventory_rolled_back": "yes"}), "progress flag"),
+            (json.dumps({"guild_id": GUILD, "user_id": USER,
+                         "item_name": name, "internal_type": "wat"}), "internal_type"),
+            (json.dumps({"guild_id": GUILD, "user_id": USER,
+                         "item_name": name, "internal_type": "xp_boost"}),
+             "boost identity"),
+            ("{not-valid-json", "malformed"),
+        ]
+        for idx, (raw_value, expected) in enumerate(cases):
+            op, _spec = await self._refunded_op(f"P21Potion{idx}", 9931 + idx)
+            execute("UPDATE shop_purchase_operations SET delivery_rollback=?"
+                    " WHERE op_id=?", (raw_value, op))
+            before = rows(
+                "SELECT delivery_rollback, updated_at FROM shop_purchase_operations"
+                " WHERE op_id=?", (op,))[0]
+            TO._PENDING_DELIVERY_ROLLBACKS.clear()
+            res = await TO.compensate_late_delivery(op, None)
+            self.assertFalse(res["complete"], f"case {raw_value!r}: {res}")
+            self.assertFalse(res["durable_persisted"], str(res))
+            self.assertIn(expected, str(res.get("error") or "").lower(),
+                          f"case {raw_value!r}: {res}")
+            after = rows(
+                "SELECT delivery_rollback, updated_at FROM shop_purchase_operations"
+                " WHERE op_id=?", (op,))[0]
+            self.assertEqual(after[0], before[0],
+                             f"case {raw_value!r}: descriptor was mutated")
+            self.assertEqual(after[1], before[1],
+                             f"case {raw_value!r}: a malformed row was touched")
+            self.assertEqual(
+                rows("SELECT quantity FROM inventory_items WHERE guild_id=?"
+                     " AND user_id=? AND item_name=?", (GUILD, USER, name)),
+                [(2,)], f"case {raw_value!r}: inventory was mutated")
+
+    async def test_p22_one_malformed_row_does_not_abort_the_batch(self):
+        """P22 (Blocker 2): a malformed candidate is reported and later
+        independent candidates are still processed in the same pass."""
+        bad, _ = await self._refunded_op("P22Bad", 9940)
+        execute("UPDATE shop_purchase_operations SET delivery_rollback=?,"
+                " updated_at='2000-01-01 00:00:00' WHERE op_id=?",
+                (json.dumps({"inventory_rolled_back": False}), bad))
+        good, good_spec = await self._refunded_op("P22Good", 9941)
+        good_spec.update({"inventory_rolled_back": True,
+                          "equip_reconciled": True, "role_reconciled": True})
+        await TO.record_pending_delivery_rollback(good, good_spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        TO._ROLLBACK_SCAN_ATTEMPTS.clear()
+
+        stats = await TO.reconcile_delivery_rollbacks(bot=None, limit=10)
+        self.assertEqual(stats["completed"], 1, str(stats))
+        self.assertEqual(len(stats["errors"]), 1, str(stats))
+        self.assertIn(bad, stats["errors"][0], str(stats))
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (good,))[0][0], "",
+            "the valid candidate after the malformed one was never processed")
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (bad,))[0][0],
+            json.dumps({"inventory_rolled_back": False}),
+            "the malformed descriptor was destroyed instead of preserved")
+
+    async def test_p23_restarts_cannot_starve_later_candidates(self):
+        """P23 (Blocker 3): durable retry fairness. Two permanently failing
+        (malformed) rows must stop consuming the limited window after a restart,
+        so a later valid candidate is eventually processed. `updated_at` is never
+        repurposed; the durable attempt counter drives the rotation."""
+        corrupt = []
+        for idx in range(2):
+            op, _ = await self._refunded_op(f"P23Corrupt{idx}", 9950 + idx)
+            execute("UPDATE shop_purchase_operations SET delivery_rollback=?,"
+                    " updated_at='2000-01-01 00:00:0%d' WHERE op_id=?" % idx,
+                    ("{corrupt-%d" % idx, op))
+            corrupt.append(op)
+        good, good_spec = await self._refunded_op("P23Good", 9959)
+        good_spec.update({"inventory_rolled_back": True,
+                          "equip_reconciled": True, "role_reconciled": True})
+        await TO.record_pending_delivery_rollback(good, good_spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        before_updated = {op: rows(
+            "SELECT updated_at FROM shop_purchase_operations WHERE op_id=?",
+            (op,))[0][0] for op in corrupt}
+
+        raw_good = None
+        passes = 0
+        for passes in range(1, 4):
+            TO._ROLLBACK_SCAN_ATTEMPTS.clear()   # simulate a process restart
+            await TO.reconcile_delivery_rollbacks(bot=None, limit=2)
+            raw_good = rows(
+                "SELECT delivery_rollback FROM shop_purchase_operations"
+                " WHERE op_id=?", (good,))[0][0]
+            if raw_good == "":
+                break
+        self.assertEqual(
+            raw_good, "",
+            f"the valid candidate was starved across {passes} restarts")
+        self.assertLessEqual(passes, 2,
+                             "durable attempt rotation took too many passes")
+        for idx, op in enumerate(corrupt):
+            self.assertEqual(
+                rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                     " WHERE op_id=?", (op,))[0][0],
+                "{corrupt-%d" % idx,
+                "a fail-closed row lost its state (or was falsely completed)")
+            self.assertEqual(
+                rows("SELECT updated_at FROM shop_purchase_operations"
+                     " WHERE op_id=?", (op,))[0][0],
+                before_updated[op],
+                "`updated_at` was repurposed for retry fairness")
+            attempts = rows(
+                "SELECT delivery_rollback_attempts FROM shop_purchase_operations"
+                " WHERE op_id=?", (op,))[0][0]
+            self.assertGreater(
+                int(attempts or 0), 0,
+                "the durable attempt counter never advanced for a failing row")
+
+    async def test_p24_unresolvable_descriptor_keeps_its_retry_marker(self):
+        """P24 (Blocker 2): cleanup must not retire a late-rollback marker merely
+        because no usable specification can be resolved for it."""
+        rid = 9960
+        role = role_stub(rid, "P24Role")
+        _, person, bot, _ = purchase_ctx(granted_role=role)
+        person.roles.append(role)
+        op, _ = await self._refunded_op("P24Holding", 9961,
+                                        internal_type="role", role_id=rid)
+        execute("UPDATE shop_purchase_operations SET delivery_rollback=?"
+                " WHERE op_id=?", (json.dumps({"inventory_rolled_back": False}), op))
+        holding_id = await TO.grant_timed_holding(
+            GUILD, USER, "P24Holding", expires_at=iso_in(-2), role_id=rid,
+            source="shop_late_rollback")
+        entry_key = f"h:{holding_id}"
+        execute("UPDATE timed_holdings SET metadata=? WHERE id=?",
+                (json.dumps({"op_id": op, "late_rollback": True}), holding_id))
+
+        self.assertFalse(
+            await TO._late_rollback_prereqs_complete(op),
+            "an unusable descriptor was accepted as rollback-complete")
+        self.assertFalse(
+            await TO._late_rollback_prereqs_complete(None, entry_key=entry_key),
+            "an unusable descriptor let the marker be retired")
+        stats = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats["removed"], 0, str(stats))
+        self.assertEqual(
+            rows("SELECT id FROM timed_holdings WHERE id=?", (holding_id,)),
+            [(holding_id,)],
+            "the retry marker was retired without resolving its descriptor")
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0],
+            json.dumps({"inventory_rolled_back": False}),
+            "cleanup mutated the malformed descriptor")
+
+    async def test_p25_ambiguous_boost_identity_fails_closed(self):
+        """P25 (Secondary): with two same-source/same-expiry boosts and no
+        recorded `boost_id`, compensation must remove neither row and report the
+        ambiguity instead of deleting another grant's boost."""
+        exp = "2099-02-02T00:00:00+00:00"
+        execute("DELETE FROM leveling_active_boosts")
+        execute("INSERT INTO leveling_active_boosts"
+                " (guild_id,user_id,multiplier,expires_at,source)"
+                " VALUES (?,?,2.0,?,'shop')", (GUILD, USER, exp))
+        execute("INSERT INTO leveling_active_boosts"
+                " (guild_id,user_id,multiplier,expires_at,source)"
+                " VALUES (?,?,3.0,?,'shop')", (GUILD, USER, exp))
+        ids = [r[0] for r in rows("SELECT id FROM leveling_active_boosts ORDER BY id")]
+        op, spec = await self._refunded_op(
+            "P25Boost", 9970, internal_type="xp_boost",
+            extra={"boost_id": None, "boost_expires_at": exp,
+                   "boost_source": "shop"})
+        await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        res = await TO.compensate_late_delivery(op, dict(spec))
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("ambiguous", str(res.get("error") or "").lower(), str(res))
+        self.assertEqual(
+            [r[0] for r in rows(
+                "SELECT id FROM leveling_active_boosts ORDER BY id")], ids,
+            "compensation deleted a boost it could not identify")
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "",
+            "the un-identified boost rollback was recorded as finished")
+
+    async def test_p26_boost_grant_reports_and_removes_only_its_own_row(self):
+        """P26 (Secondary): the shop grant path records the exact inserted row id
+        (`lastrowid`), so a rollback removes only the purchased boost even when a
+        second shop boost shares the same `source` AND `expires_at`."""
+        from cogs.shop import _deliver_purchase
+        from utils.xp_calculator import grant_xp_boost
+
+        execute("DELETE FROM leveling_active_boosts")
+        itx = SimpleNamespace(client=None)
+        delivery = await _deliver_purchase(
+            itx, guild_id=GUILD, user_id=USER, itype="xp_boost",
+            listing_type="xp_boost", name="P26Boost", multiplier=2.0,
+            duration_hours=24, source="shop")
+        self.assertTrue(delivery["success"], str(delivery))
+        boost_id = delivery.get("boost_id")
+        self.assertIsNotNone(
+            boost_id, f"the delivery recorded no exact boost id: {delivery}")
+
+        purchased = rows(
+            "SELECT id, expires_at, multiplier FROM leveling_active_boosts"
+            " WHERE id=?", (int(boost_id),))
+        self.assertEqual(len(purchased), 1)
+        self.assertEqual(purchased[0][2], 2.0)
+        self.assertEqual(purchased[0][1], delivery["boost_expires_at"])
+
+        # A second shop boost with the SAME source and the SAME expiry string:
+        # `(source, expires_at)` can no longer identify the purchase.
+        decoy_id = execute(
+            "INSERT INTO leveling_active_boosts"
+            " (guild_id,user_id,multiplier,expires_at,source)"
+            " VALUES (?,?,5.0,?,'shop')",
+            (GUILD, USER, purchased[0][1]))
+        self.assertNotEqual(decoy_id, int(boost_id))
+
+        op, spec = await self._refunded_op(
+            "P26Boost", 9971, internal_type="xp_boost",
+            extra={"boost_id": int(boost_id),
+                   "boost_expires_at": delivery["boost_expires_at"],
+                   "boost_source": "shop"})
+        await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        res = await TO.compensate_late_delivery(op, dict(spec))
+        self.assertTrue(res["complete"], str(res))
+        remaining = [r[0] for r in rows(
+            "SELECT id FROM leveling_active_boosts ORDER BY id")]
+        self.assertEqual(
+            remaining, [decoy_id],
+            "the rollback removed the wrong same-source/same-expiry boost")
+
+        # The public string-returning contract is unchanged for other callers.
+        self.assertIsInstance(await grant_xp_boost(GUILD, USER, 2.0, 1), str)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
