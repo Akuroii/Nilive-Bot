@@ -6369,5 +6369,233 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(await grant_xp_boost(GUILD, USER, 2.0, 1), str)
 
 
+    # ── P27–P30: required identity per rollback branch ────────────────────
+    # `cogs/shop.py::process_purchase` always records the real producer shape:
+    # a timed role carries `entry_key="h:<timed_holdings.id>"` (returned by
+    # `grant_timed_product`), a permanent role carries the `role_id` it added
+    # (`role_added` from `give_reward`). A descriptor that does not identify the
+    # thing the branch must undo can never be treated as rolled back.
+
+    async def _timed_role_setup(self, rid):
+        """A delivered timed role: live holding, member holding the role, op refunded."""
+        purge_timed()
+        role = role_stub(rid, f"P27Role{rid}")
+        itx, person, bot, guild = purchase_ctx(granted_role=role)
+        person.roles.append(role)
+        holding_id = await TO.grant_timed_holding(
+            GUILD, USER, f"P27Holding{rid}", expires_at=iso_in(5), role_id=rid,
+            source="shop")
+        entry_key = f"h:{holding_id}"
+        return role, person, bot, holding_id, entry_key
+
+    async def test_p27_timed_role_without_usable_holding_key_never_completes(self):
+        """P27 (confirmed defect): a `temp_role` descriptor whose `entry_key`
+        does not identify its live holding must stay pending — on 48d7e51 it
+        skipped every branch, hit the generic success path, cleared the
+        descriptor and left the holding and Discord role in place."""
+        rid = 9975
+        for label, bad_key in (
+            ("missing", "__absent__"),
+            ("null", None),
+            ("not-a-key", "not-a-key"),
+            ("malformed-h", "h:abc"),
+            ("no-such-holding", "h:999999"),
+        ):
+            role, person, bot, holding_id, real_key = await self._timed_role_setup(rid)
+            op, spec = await self._refunded_op(
+                f"P27Role{rid}", 9972, internal_type="temp_role", role_id=rid,
+                extra={"entry_key": real_key})
+            if bad_key == "__absent__":
+                spec.pop("entry_key", None)
+            else:
+                spec["entry_key"] = bad_key
+            await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+            TO._PENDING_DELIVERY_ROLLBACKS.clear()
+            before = rows("SELECT expires_at FROM timed_holdings WHERE id=?",
+                          (holding_id,))
+
+            res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+
+            self.assertFalse(res["complete"], f"{label}: {res}")
+            self.assertTrue(res.get("error"), f"{label}: no diagnostic: {res}")
+            self.assertIn("holding", str(res["error"]).lower(), f"{label}: {res}")
+            self.assertEqual(
+                rows("SELECT expires_at FROM timed_holdings WHERE id=?",
+                     (holding_id,)),
+                before,
+                f"{label}: the holding was mutated without a verifiable key")
+            self.assertIn(role, person.roles, f"{label}: the role was silently kept")
+            self.assertEqual(person.remove_roles.await_count, 0, label)
+            durable = rows(
+                "SELECT delivery_rollback FROM shop_purchase_operations"
+                " WHERE op_id=?", (op,))[0][0]
+            self.assertNotEqual(durable, "", f"{label}: descriptor was cleared")
+            self.assertEqual(json.loads(durable)["role_reconciled"], False, label)
+
+        # The clean pass must not retire it either: nothing can be resolved for
+        # its marker because its descriptor is unusable.
+        stats = await TO.reconcile_delivery_rollbacks(bot=bot, limit=10)
+        self.assertEqual(stats.get("completed", 0), 0, str(stats))
+
+        # Control: the real producer shape (a live `h:<id>` key) compensates.
+        role, person, bot, holding_id, real_key = await self._timed_role_setup(rid)
+        op, spec = await self._refunded_op(
+            f"P27Role{rid}", 9973, internal_type="temp_role", role_id=rid,
+            extra={"entry_key": real_key})
+        await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+        self.assertTrue(res["complete"], str(res))
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "",
+            "the valid descriptor never reached the durable completion sentinel")
+        self.assertEqual(
+            rows("SELECT id FROM timed_holdings WHERE id=?", (holding_id,)), [],
+            "the holding of a compensated timed role was not retired")
+        self.assertEqual(person.remove_roles.await_count, 1)
+        self.assertNotIn(role, person.roles)
+
+    async def test_p28_key_of_another_members_holding_is_never_retired(self):
+        """P28: a corrupted descriptor must not delete another member's holding."""
+        role, person, bot, holding_id, real_key = await self._timed_role_setup(9982)
+        other_user = USER + 1
+        seed_member(user=other_user)
+        other_holding = await TO.grant_timed_holding(
+            GUILD, other_user, "P28OtherColor", expires_at=iso_in(50),
+            role_id=9981, source="shop")
+        foreign_key = f"h:{other_holding}"
+        self.assertNotEqual(foreign_key, real_key)
+        op, spec = await self._refunded_op(
+            "P28Role", 9974, internal_type="temp_role", role_id=9982,
+            extra={"entry_key": foreign_key})
+        await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        foreign_before = rows(
+            "SELECT id, guild_id, user_id, expires_at FROM timed_holdings"
+            " WHERE id=?", (other_holding,))
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("does not belong", str(res.get("error", "")))
+        self.assertEqual(
+            rows("SELECT id, guild_id, user_id, expires_at FROM timed_holdings"
+                 " WHERE id=?", (other_holding,)),
+            foreign_before,
+            "another member's holding was expired by a corrupted key")
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0] != "", True)
+
+    async def test_p29_permanent_role_without_role_id_is_not_reconciled(self):
+        """P29: `role_added` defaults to True, so a permanent-role descriptor
+        without `role_id` cannot prove the granted role was removed. The one
+        legitimate alternative form is an explicit `role_added=False` (the
+        member already held the role and nothing was added)."""
+        rid = 9985
+        role = role_stub(rid, "P29Role")
+        itx, person, bot, guild = purchase_ctx(granted_role=role)
+        person.roles.append(role)
+        op, spec = await self._refunded_op(
+            "P29Role", 9975, internal_type="role", role_id=None,
+            extra={"role_added": True})
+        await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("role_id", str(res.get("error", "")))
+        self.assertIn(role, person.roles, "role left behind was silently accepted")
+        durable = rows(
+            "SELECT delivery_rollback FROM shop_purchase_operations"
+            " WHERE op_id=?", (op,))[0][0]
+        self.assertNotEqual(durable, "")
+        self.assertEqual(json.loads(durable)["role_reconciled"], False)
+
+        # Explicit `role_added=False`: nothing was added, nothing to reconcile.
+        op2, spec2 = await self._refunded_op(
+            "P29AlreadyHeld", 9976, internal_type="role", role_id=None,
+            extra={"role_added": False})
+        await TO.record_pending_delivery_rollback(op2, spec2, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        res2 = await TO.compensate_late_delivery(op2, dict(spec2), bot=bot)
+        self.assertTrue(res2["complete"], str(res2))
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op2,))[0][0], "")
+
+    async def test_p30_unhandled_internal_type_never_claims_completion(self):
+        """P30: the terminal fallback in `compensate_late_delivery` must not mark
+        an unknown branch rolled back (on 48d7e51 it set all three flags True).
+
+        Nothing the validator accepts reaches that fallback today, so the branch
+        is exercised directly with the validator accepting a future type — the
+        guard matters when a new `internal_type` is validated before its
+        compensation branch exists.
+        """
+        _, _, bot, _ = purchase_ctx()
+        op, spec = await self._refunded_op(
+            "P30Future", 9977, internal_type="wat")
+        await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        # The validator itself refuses the unknown type (so would any writer).
+        ok, problem = TO._validate_delivery_rollback_spec(dict(spec))
+        self.assertFalse(ok)
+        self.assertIn("unknown internal_type", problem)
+        res0 = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+        self.assertFalse(res0["complete"], str(res0))
+
+        real_validate = TO._validate_delivery_rollback_spec
+
+        def _accept_future(candidate):
+            if candidate.get("internal_type") == "wat":
+                return True, None
+            return real_validate(candidate)
+
+        from unittest.mock import patch
+        with patch.object(TO, "_validate_delivery_rollback_spec", _accept_future):
+            res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("No delivery_rollback branch", str(res.get("error", "")))
+        durable = json.loads(rows(
+            "SELECT delivery_rollback FROM shop_purchase_operations"
+            " WHERE op_id=?", (op,))[0][0])
+        self.assertNotEqual(durable, "")
+        self.assertFalse(durable["inventory_rolled_back"])
+        self.assertFalse(durable["equip_reconciled"])
+        self.assertFalse(durable["role_reconciled"])
+
+
+    async def test_p31_timed_role_without_role_id_is_not_reconciled(self):
+        """P31: the holding can be expired, but without `role_id` the Discord
+        role cannot be removed — the descriptor must stay pending (on 48d7e51 it
+        was marked `role_reconciled=True` and cleared, keeping the role)."""
+        rid = 9988
+        role, person, bot, holding_id, real_key = await self._timed_role_setup(rid)
+        op, spec = await self._refunded_op(
+            f"P31Role{rid}", 9978, internal_type="temp_role", role_id=None,
+            extra={"entry_key": real_key, "role_added": True})
+        # The producer always rewrites role_id from the listing; simulate the
+        # damaged shape (identity lost) while the holding key is still valid.
+        spec["role_id"] = None
+        await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("role_id", str(res.get("error", "")))
+        self.assertIn(role, person.roles, "the granted role was silently retained")
+        self.assertEqual(person.remove_roles.await_count, 0)
+        durable = json.loads(rows(
+            "SELECT delivery_rollback FROM shop_purchase_operations"
+            " WHERE op_id=?", (op,))[0][0])
+        self.assertFalse(durable["role_reconciled"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

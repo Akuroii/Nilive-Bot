@@ -808,6 +808,32 @@ def entry_key_id(entry_key: str) -> int | None:
         return None
 
 
+async def timed_holding_owner(entry_key) -> tuple[int, int] | None:
+    """`(guild_id, user_id)` of an `h:<id>` holding, or None when it no longer exists.
+
+    A rollback key recorded in a purchase descriptor must only ever retire the
+    holding that belongs to that operation's member: a corrupted or mismatched
+    key must not expire or delete another member's ownership record. A holding
+    that is already gone returns None (the rollback is idempotent, nothing left
+    to retire).
+    """
+    key = str(entry_key or "")
+    if not key.startswith("h:"):
+        return None
+    holding_id = entry_key_id(key)
+    if holding_id is None:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT guild_id, user_id FROM timed_holdings WHERE id=?",
+            (holding_id,),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return int(row[0] or 0), int(row[1] or 0)
+
+
 # ── Expiry cleanup ──────────────────────────────────────────────────────
 
 async def expired_holdings(limit: int = 200, *,
@@ -2232,6 +2258,26 @@ def _validate_delivery_rollback_spec(spec) -> tuple[bool, str | None]:
         value = spec.get(field)
         if value is not None and not isinstance(value, (list, tuple)):
             return False, f"invalid {field!r}"
+    if internal_type == "temp_role":
+        # A timed role is delivered as a `timed_holdings` row and identified by
+        # `h:<holding id>` (`grant_timed_product`). Without that key the
+        # compensation cannot expire/retire the holding, and the descriptor would
+        # otherwise reach no branch at all.
+        holding_key = spec.get("entry_key")
+        if not isinstance(holding_key, str) or not holding_key.startswith("h:"):
+            return False, (
+                "temp_role descriptor without a timed-holding 'entry_key'"
+            )
+        try:
+            holding_id = int(holding_key.split(":", 1)[1])
+        except (TypeError, ValueError):
+            return False, (
+                "temp_role descriptor without a timed-holding 'entry_key'"
+            )
+        if holding_id <= 0:
+            return False, (
+                "temp_role descriptor without a timed-holding 'entry_key'"
+            )
     if internal_type == "xp_boost":
         boost_id = spec.get("boost_id")
         if boost_id is not None:
@@ -2367,6 +2413,24 @@ async def _persist_delivery_rollback_progress(op_id: str, spec: dict, *,
     return "failed", last_error, None
 
 
+async def _assert_retry_marker_owned(entry_key, guild_id, user_id) -> None:
+    """Refuse to retire an `h:<id>` marker that belongs to another member.
+
+    Retry markers are created for the compensated operation's own member, so a
+    mismatch means the descriptor was corrupted (or a foreign key was recorded).
+    Deleting that holding would destroy an unrelated member's ownership record.
+    A marker that no longer exists is fine: retiring it is a no-op.
+    """
+    key = str(entry_key or "")
+    if not key.startswith("h:"):
+        raise RuntimeError(f"invalid retry marker key {entry_key!r}")
+    owner = await timed_holding_owner(key)
+    if owner is not None and owner != (int(guild_id), int(user_id)):
+        raise RuntimeError(
+            f"retry marker {key} belongs to another member; refusing to retire it"
+        )
+
+
 async def _ensure_role_retry_marker(
     *,
     op_id: str,
@@ -2411,9 +2475,14 @@ async def _ensure_role_retry_marker(
                 except Exception:
                     parsed = None
                 if isinstance(parsed, dict) and parsed.get("retry_entry_key"):
+                    adopted_key = str(parsed["retry_entry_key"])
                     await db.execute("ROLLBACK")
                     in_tx = False
-                    return str(parsed["retry_entry_key"]), False
+                    # Adopting a corrupted/foreign key must not hand this
+                    # operation somebody else's holding to retire.
+                    await _assert_retry_marker_owned(
+                        adopted_key, guild_id, user_id)
+                    return adopted_key, False
 
             cur = await db.execute(
                 "SELECT id, metadata FROM timed_holdings "
@@ -2806,6 +2875,30 @@ async def compensate_late_delivery(
     # ── Branch 1: Timed holding (`h:<id>`) ──────────────────────────────
     if late_key and str(late_key).startswith("h:"):
         holding_id = int(str(late_key).split(":", 1)[1])
+        # The key must identify THIS operation's holding. A mismatched key (a
+        # corrupted descriptor, or an id belonging to another member) must not
+        # expire or delete somebody else's ownership record.
+        try:
+            holding_owner = await timed_holding_owner(str(late_key))
+        except Exception as exc:
+            return await _persist_incomplete(
+                f"Timed holding lookup failed for {late_key}: {exc}"
+            )
+        if holding_owner is not None and holding_owner != (int(guild_id), int(user_id)):
+            return await _persist_incomplete(
+                f"Timed holding {late_key} does not belong to this purchase's "
+                f"member; refusing to retire it"
+            )
+        if holding_owner is None and not spec.get("inventory_rolled_back"):
+            # The key is shaped like a holding id but no such holding exists, and
+            # no earlier attempt recorded that it retired one. Completing here
+            # would clear the descriptor (and could leave the op's real holding
+            # and Discord role in place) without proof that anything was rolled
+            # back: keep the descriptor pending for diagnosis/retry instead.
+            return await _persist_incomplete(
+                f"Timed holding {late_key} does not exist; cannot verify the "
+                f"timed grant was rolled back"
+            )
         if not spec.get("inventory_rolled_back"):
             try:
                 async with aiosqlite.connect(DB_PATH) as cleanup_db:
@@ -2883,6 +2976,14 @@ async def compensate_late_delivery(
             }
 
         if not spec.get("role_reconciled"):
+            if role_added_by_delivery and role_id is None and not member_departed:
+                # The holding was expired, but the descriptor lost the role
+                # identity: the Discord role granted with it cannot be removed,
+                # so this is not reconciled — keep it pending for diagnosis.
+                return await _persist_incomplete(
+                    "Timed role rollback descriptor has no 'role_id'; cannot "
+                    "reconcile the granted role"
+                )
             try:
                 if role_id is not None and role_added_by_delivery and not member_departed:
                     still_entitled = await role_still_entitled(
@@ -3106,12 +3207,24 @@ async def compensate_late_delivery(
                 return await _persist_incomplete(f"Role equip reconciliation failed: {exc}")
 
         if not spec.get("role_reconciled"):
-            if role_id is None or not role_added_by_delivery:
+            if not role_added_by_delivery:
+                # The delivery added nothing to remove (the member already held
+                # the role), so there is nothing to reconcile.
                 spec["role_reconciled"] = True
+            elif role_id is None:
+                # Without the role identity the branch cannot remove the role it
+                # granted; claiming reconciliation here would silently leave the
+                # member holding a refunded role.
+                return await _persist_incomplete(
+                    "Role rollback descriptor has no 'role_id'; cannot reconcile "
+                    "the granted role"
+                )
             elif member_departed:
                 retry_entry_key = spec.get("retry_entry_key")
                 if retry_entry_key:
                     try:
+                        await _assert_retry_marker_owned(
+                            retry_entry_key, guild_id, user_id)
                         await delete_timed_holding(retry_entry_key)
                     except Exception as exc:
                         return await _persist_incomplete(
@@ -3257,6 +3370,8 @@ async def compensate_late_delivery(
                                 and role_obj in itx_user.roles
                             ):
                                 itx_user.roles.remove(role_obj)
+                    await _assert_retry_marker_owned(
+                        retry_entry_key, guild_id, user_id)
                     await delete_timed_holding(retry_entry_key)
                     spec["retry_entry_key"] = None
                     spec["role_reconciled"] = True
@@ -3614,9 +3729,22 @@ async def compensate_late_delivery(
         spec["equip_reconciled"] = True
         spec["role_reconciled"] = True
     else:
-        spec["inventory_rolled_back"] = True
-        spec["equip_reconciled"] = True
-        spec["role_reconciled"] = True
+        # Defensive: every supported `internal_type` is handled by an explicit
+        # branch above (and `_validate_delivery_rollback_spec` refuses a
+        # `temp_role` without a usable holding key), so a validated descriptor
+        # cannot land here. It must never be able to claim completion for a
+        # branch this code does not know how to roll back.
+        return {
+            "complete": False,
+            "durable_persisted": False,
+            "inventory_rolled_back": bool(spec.get("inventory_rolled_back")),
+            "equip_reconciled": bool(spec.get("equip_reconciled")),
+            "role_reconciled": bool(spec.get("role_reconciled")),
+            "error": (
+                f"No delivery_rollback branch for internal_type="
+                f"{internal_type!r} (op_id={op_id})"
+            ),
+        }
 
     try:
         cleared = await update_purchase(str(op_id), delivery_rollback="")
