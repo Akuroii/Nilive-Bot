@@ -204,7 +204,8 @@ async def get_active_boost_multiplier(guild_id: int, user_id: int) -> float:
 
 async def grant_xp_boost_details(guild_id: int, user_id: int, multiplier: float,
                                  duration_hours: int, source: str = "shop",
-                                 db: aiosqlite.Connection | None = None) -> dict:
+                                 db: aiosqlite.Connection | None = None,
+                                 op_id: str | None = None) -> dict:
     """Insert one active boost and return its exact identity.
 
     Returns `{"expires_at": str, "boost_id": int | None}`. `boost_id` is the
@@ -217,6 +218,14 @@ async def grant_xp_boost_details(guild_id: int, user_id: int, multiplier: float,
 
     A passed connection is not committed. A level_claim source is
     idempotent: an existing row is returned unchanged, including its expiry.
+
+    `op_id` records the Shop purchase operation that created this boost in
+    `origin_op_id`. A compensation descriptor's `boost_id` identifies a row but
+    not the purchase that produced it (one member can hold several boosts), so
+    the late-delivery rollback only deletes a boost whose `origin_op_id` names
+    the operation being compensated. Callers that are not Shop purchases
+    (level claims, potions, admin grants) leave it NULL and keep their existing
+    behaviour; such rows are never removed by a Shop rollback.
     """
     if duration_hours <= 0:
         raise ValueError("duration_hours must be positive")
@@ -243,9 +252,11 @@ async def grant_xp_boost_details(guild_id: int, user_id: int, multiplier: float,
         try:
             cursor = await connection.execute("""
                 INSERT INTO leveling_active_boosts
-                    (guild_id, user_id, multiplier, expires_at, source)
-                VALUES (?, ?, ?, ?, ?)
-            """, (guild_id, user_id, multiplier, expires_at, source))
+                    (guild_id, user_id, multiplier, expires_at, source,
+                     origin_op_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (guild_id, user_id, multiplier, expires_at, source,
+                  (str(op_id) if op_id else None)))
         except Exception as exc:
             if not claim_source or "UNIQUE" not in str(exc).upper():
                 raise
@@ -266,9 +277,11 @@ async def grant_xp_boost_details(guild_id: int, user_id: int, multiplier: float,
         async with aiosqlite.connect(DB_PATH) as connection:
             cursor = await connection.execute("""
                 INSERT INTO leveling_active_boosts
-                    (guild_id, user_id, multiplier, expires_at, source)
-                VALUES (?, ?, ?, ?, ?)
-            """, (guild_id, user_id, multiplier, expires_at, source))
+                    (guild_id, user_id, multiplier, expires_at, source,
+                     origin_op_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (guild_id, user_id, multiplier, expires_at, source,
+                  (str(op_id) if op_id else None)))
             row_id = getattr(cursor, "lastrowid", None)
             await connection.commit()
         return {"expires_at": expires_at,
@@ -287,14 +300,16 @@ async def grant_xp_boost_details(guild_id: int, user_id: int, multiplier: float,
 
 async def grant_xp_boost(guild_id: int, user_id: int, multiplier: float,
                           duration_hours: int, source: str = "shop",
-                          db: aiosqlite.Connection | None = None) -> str:
+                          db: aiosqlite.Connection | None = None,
+                          op_id: str | None = None) -> str:
     """Insert one active boost. Shop and potion callers keep the old path.
 
     Returns the expiry string only; `grant_xp_boost_details()` additionally
     reports the inserted row id for callers that must undo the grant exactly.
     """
     details = await grant_xp_boost_details(
-        guild_id, user_id, multiplier, duration_hours, source=source, db=db)
+        guild_id, user_id, multiplier, duration_hours, source=source, db=db,
+        op_id=op_id)
     return details["expires_at"]
 
 

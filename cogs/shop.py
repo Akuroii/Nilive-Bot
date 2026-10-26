@@ -866,7 +866,8 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
         from utils.xp_calculator import grant_xp_boost_details
         try:
             boost_grant = await grant_xp_boost_details(
-                guild_id, user_id, multiplier, duration_hours, source=source)
+                guild_id, user_id, multiplier, duration_hours, source=source,
+                op_id=str(op_id) if op_id else None)
         except Exception as exc:
             result["error"] = f"XP boost grant failed: {exc}"
             return result
@@ -886,8 +887,10 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
                     cursor = await db.execute(
                         "SELECT id FROM leveling_active_boosts "
                         "WHERE guild_id=? AND user_id=? AND expires_at=? AND source=? "
+                        "AND origin_op_id=? "
                         "ORDER BY id DESC LIMIT 1",
-                        (guild_id, user_id, boost_expires_at, source))
+                        (guild_id, user_id, boost_expires_at, source,
+                         str(op_id) if op_id else None))
                     b_row = await cursor.fetchone()
                     if b_row:
                         boost_id = int(b_row[0])
@@ -897,10 +900,10 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
             success=True,
             boost_expires_at=boost_expires_at,
             boost_id=boost_id,
-            # Provenance for the late-rollback fallback: the shop row is the
-            # only boost this purchase created, so the rollback can identify it
-            # when `boost_id` is unavailable without touching a `level_claim`
-            # or `potion` boost that happens to share the same expiry.
+            # The row's `source` is a hint only: the durable link back to THIS
+            # purchase is `leveling_active_boosts.origin_op_id`, written by the
+            # grant above. A `level_claim` or `potion` boost that happens to
+            # share the same expiry is never removed by a Shop rollback.
             boost_source=source,
         )
         return result

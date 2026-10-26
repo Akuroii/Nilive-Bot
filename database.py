@@ -1013,6 +1013,7 @@ async def init_db():
                 multiplier REAL NOT NULL,
                 expires_at TIMESTAMP NOT NULL,
                 source     TEXT DEFAULT 'shop',
+                origin_op_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -1024,6 +1025,25 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_lab_expires
             ON leveling_active_boosts(expires_at)
         """)
+        # Shop purchases: a boost's `id` is only unique per row, not per
+        # purchase — one member can hold several boosts at once, so a
+        # compensation descriptor carrying a `boost_id` cannot prove the row
+        # belongs to THIS operation from the row id alone. `origin_op_id`
+        # records the purchase operation that created the boost (NULL for
+        # every non-Shop producer and for rows written before this column
+        # existed, which the rollback treats as unprovable and never deletes).
+        # `source` keeps its existing meaning and is not reused for this.
+        # Additive and idempotent, the same pattern as
+        # `equipped_roles.entry_key` above.
+        cursor = await db.execute("PRAGMA table_info(leveling_active_boosts)")
+        if "origin_op_id" not in {c[1] for c in await cursor.fetchall()}:
+            try:
+                await db.execute(
+                    "ALTER TABLE leveling_active_boosts"
+                    " ADD COLUMN origin_op_id TEXT")
+            except Exception as e:
+                print(f"[MIGRATION] leveling_active_boosts.origin_op_id: {e}")
+
         # Level-claim boosts only. Shop and potion rows use other source
         # values, so this index does not limit those inserts.
         await db.execute("""

@@ -227,7 +227,8 @@ async def grant_timed_holding(guild_id: int, user_id: int, item_name: str,
     specific `h:<id>` key belongs to a specific operation: member, item name
     and product id are all shared when one member buys the same product twice.
     A late-delivery rollback refuses to retire a holding whose marker names a
-    different operation.
+    different operation, and refuses to touch one that records no operation at
+    all (legacy rows) — those stay pending for an operator.
     """
     if not expires_at:
         raise ValueError("grant_timed_holding requires an explicit expires_at")
@@ -822,11 +823,15 @@ def entry_key_id(entry_key: str) -> int | None:
 async def timed_holding_owner(entry_key) -> tuple[int, int] | None:
     """`(guild_id, user_id)` of an `h:<id>` holding, or None when it no longer exists.
 
-    A rollback key recorded in a purchase descriptor must only ever retire the
-    holding that belongs to that operation's member: a corrupted or mismatched
-    key must not expire or delete another member's ownership record. A holding
-    that is already gone returns None (the rollback is idempotent, nothing left
-    to retire).
+    This is a MEMBER-level check only. It is NOT provenance: one member can hold
+    several holdings (and several late-rollback markers) at once, so a matching
+    owner says nothing about which purchase a key belongs to. Compensation paths
+    must use `timed_holding_provenance()` (origin operation) or
+    `_assert_retry_marker_owned()` (marker source + recorded operation) instead
+    of treating this answer as proof.
+
+    A holding that is already gone returns None (the rollback is idempotent,
+    nothing left to retire).
     """
     key = str(entry_key or "")
     if not key.startswith("h:"):
@@ -855,9 +860,14 @@ async def timed_holding_provenance(entry_key) -> dict | None:
 
     A holding's member is NOT enough to identify its purchase: one member can
     buy the same timed product repeatedly, and those holdings share guild,
-    member, item name and product id. Only `origin_op_id` (or, for legacy rows,
-    the operation's own journal record naming this exact key) binds a holding
-    to the operation that must be compensated.
+    member, item name and product id. Only `origin_op_id` binds a holding to the
+    operation that must be compensated. A holding without it (any row granted
+    before this marker, and marks written by another grant path) cannot be
+    reconciled automatically: the late-delivery rollback keeps the descriptor
+    pending for manual recovery rather than expiring or deleting it. The
+    purchase journal's `detail` is deliberately NOT accepted as a substitute —
+    it is written only by the `pending -> delivered` transition, so an operation
+    eligible for late compensation never carries it.
     """
     key = str(entry_key or "")
     if not key.startswith("h:"):
@@ -887,27 +897,27 @@ async def timed_holding_provenance(entry_key) -> dict | None:
     }
 
 
-async def purchase_operation_names_holding(op_id, entry_key) -> bool:
-    """True when this operation's journal records creating exactly `entry_key`.
+async def _boost_origin_op(conn, boost_id) -> dict | None:
+    """`{guild_id, user_id, origin_op_id}` for one `leveling_active_boosts` row.
 
-    `shop_purchase_operations.detail` is written as `holding h:<id>` in the same
-    transaction as the `pending -> delivered` transition, so for a holding that
-    predates the `origin_op_id` marker it is the durable, operation-scoped
-    evidence that the key is this purchase's own. An operator note or any other
-    detail value makes the answer False (fail closed, descriptor preserved).
+    Returns None when the row no longer exists. `origin_op_id` is NULL for every
+    row written by a non-Shop producer (level claim, potion, admin) and for rows
+    written before the column existed; both are unprovable and must be left
+    alone rather than deleted by a Shop compensation.
     """
-    key = str(entry_key or "")
-    if not key.startswith("h:") or entry_key_id(key) is None:
-        return False
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT detail FROM shop_purchase_operations WHERE op_id=?",
-            (str(op_id),),
-        )
-        row = await cursor.fetchone()
+    cursor = await conn.execute(
+        "SELECT guild_id, user_id, origin_op_id FROM leveling_active_boosts"
+        " WHERE id=?",
+        (int(boost_id),),
+    )
+    row = await cursor.fetchone()
     if row is None:
-        return False
-    return str(row[0] or "").strip() == f"holding {key}"
+        return None
+    return {
+        "guild_id": int(row[0] or 0),
+        "user_id": int(row[1] or 0),
+        "origin_op_id": str(row[2]) if row[2] else None,
+    }
 
 
 # ── Expiry cleanup ──────────────────────────────────────────────────────
@@ -2518,21 +2528,68 @@ async def _persist_delivery_rollback_progress(op_id: str, spec: dict, *,
     return "failed", last_error, None
 
 
-async def _assert_retry_marker_owned(entry_key, guild_id, user_id) -> None:
-    """Refuse to retire an `h:<id>` marker that belongs to another member.
+async def _assert_retry_marker_owned(entry_key, guild_id, user_id, *,
+                                     op_id) -> None:
+    """Refuse to retire an `h:<id>` marker that this operation does not own.
 
-    Retry markers are created for the compensated operation's own member, so a
-    mismatch means the descriptor was corrupted (or a foreign key was recorded).
-    Deleting that holding would destroy an unrelated member's ownership record.
+    A retry marker is created *for one purchase operation* (`source =
+    'shop_late_rollback'`, `metadata['op_id']`/`metadata['origin_op_id']` = that
+    operation). Sharing the member is not evidence: one member can hold several
+    markers and holdings at once, so a descriptor's `retry_entry_key` pointing
+    at another operation's live holding would otherwise let this rollback delete
+    somebody else's ownership record — and, because this runs in the role
+    branch, do it after stripping a Discord role.
+
+    All three facts are required before the caller may delete the marker, change
+    equipment, remove a role, or claim completion:
+
+    * the holding belongs to this operation's member;
+    * its `source` is exactly `shop_late_rollback` (not `shop`, not any other
+      grant path);
+    * its recorded operation id is this `op_id`.
+
     A marker that no longer exists is fine: retiring it is a no-op.
     """
     key = str(entry_key or "")
     if not key.startswith("h:"):
         raise RuntimeError(f"invalid retry marker key {entry_key!r}")
-    owner = await timed_holding_owner(key)
-    if owner is not None and owner != (int(guild_id), int(user_id)):
+    holding_id = entry_key_id(key)
+    if holding_id is None:
+        raise RuntimeError(f"invalid retry marker key {entry_key!r}")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT guild_id, user_id, source, metadata FROM timed_holdings"
+            " WHERE id=?",
+            (holding_id,),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return
+    row_guild, row_user, source, meta_raw = row
+    if (int(row_guild or 0), int(row_user or 0)) != (int(guild_id), int(user_id)):
         raise RuntimeError(
             f"retry marker {key} belongs to another member; refusing to retire it"
+        )
+    if str(source or "") != "shop_late_rollback":
+        raise RuntimeError(
+            f"retry marker {key} has source {source!r}, not 'shop_late_rollback';"
+            f" it is not a late-rollback marker for operation {op_id} and must"
+            f" not be retired as one"
+        )
+    try:
+        meta = json.loads(meta_raw) if meta_raw else {}
+    except Exception:
+        meta = None
+    if not isinstance(meta, dict):
+        raise RuntimeError(
+            f"retry marker {key} has unreadable metadata; refusing to retire it"
+        )
+    marker_op = meta.get("origin_op_id") or meta.get("op_id")
+    if str(marker_op or "") != str(op_id):
+        raise RuntimeError(
+            f"retry marker {key} was created for purchase operation"
+            f" {marker_op!r}, not {op_id}; refusing to retire another"
+            f" operation's holding"
         )
 
 
@@ -2586,7 +2643,7 @@ async def _ensure_role_retry_marker(
                     # Adopting a corrupted/foreign key must not hand this
                     # operation somebody else's holding to retire.
                     await _assert_retry_marker_owned(
-                        adopted_key, guild_id, user_id)
+                        adopted_key, guild_id, user_id, op_id=op_id)
                     return adopted_key, False
 
             cur = await db.execute(
@@ -2617,6 +2674,7 @@ async def _ensure_role_retry_marker(
                     "op_id": str(op_id),
                 },
                 source="shop_late_rollback",
+                op_id=str(op_id),
                 product_id=item_id,
                 category=category,
                 role_id=int(role_id),
@@ -3004,18 +3062,26 @@ async def compensate_late_delivery(
         # may never have created, so require durable proof of the link.
         if provenance is not None:
             origin_op = provenance.get("origin_op_id")
-            if origin_op is not None:
-                if str(origin_op) != str(op_id):
-                    return await _persist_incomplete(
-                        f"Timed holding {late_key} was created by purchase "
-                        f"operation {origin_op}, not {op_id}; refusing to expire "
-                        f"or delete another operation's holding"
-                    )
-            elif not await purchase_operation_names_holding(str(op_id), str(late_key)):
+            if origin_op is None:
+                # Granted before the operation marker existed. The purchase
+                # journal cannot stand in for it: `detail` is only written by the
+                # `pending -> delivered` transition, and that transition makes the
+                # operation `delivered`, which this function refuses to
+                # compensate — so a `detail` naming this key is not a state the
+                # runtime produces. Nothing durable ties the holding to this
+                # purchase, and one member may hold several such rows, so this
+                # fails closed for an operator instead of guessing.
                 return await _persist_incomplete(
-                    f"Timed holding {late_key} has no durable record linking it "
-                    f"to purchase operation {op_id}; refusing to expire or delete "
-                    f"a holding that may belong to another purchase"
+                    f"Timed holding {late_key} records no originating purchase "
+                    f"operation (granted before operation provenance existed); "
+                    f"cannot prove it belongs to {op_id}, so it is kept for "
+                    f"manual recovery instead of being expired or deleted"
+                )
+            if str(origin_op) != str(op_id):
+                return await _persist_incomplete(
+                    f"Timed holding {late_key} was created by purchase "
+                    f"operation {origin_op}, not {op_id}; refusing to expire "
+                    f"or delete another operation's holding"
                 )
         if holding_owner is None and not spec.get("inventory_rolled_back"):
             # The key is shaped like a holding id but no such holding exists, and
@@ -3352,7 +3418,7 @@ async def compensate_late_delivery(
                 if retry_entry_key:
                     try:
                         await _assert_retry_marker_owned(
-                            retry_entry_key, guild_id, user_id)
+                            retry_entry_key, guild_id, user_id, op_id=op_id)
                         await delete_timed_holding(retry_entry_key)
                     except Exception as exc:
                         return await _persist_incomplete(
@@ -3393,6 +3459,19 @@ async def compensate_late_delivery(
                         return await _persist_incomplete(
                             f"Failed to create role rollback retry marker: {exc}"
                         )
+
+                # Prove the marker belongs to THIS operation before anything is
+                # mutated for it — before the handoff, the entitlement check, the
+                # Discord role removal and the marker deletion. A descriptor whose
+                # `retry_entry_key` names another operation's holding (or a
+                # non-marker holding at all) must fail closed here.
+                try:
+                    await _assert_retry_marker_owned(
+                        retry_entry_key, guild_id, user_id, op_id=op_id)
+                except Exception as exc:
+                    return await _persist_incomplete(
+                        f"Role rollback retry marker is not this operation's: {exc}"
+                    )
 
                 if handoff_to_holdings:
                     if await _durable_delivery_rollback_completed(str(op_id)):
@@ -3499,7 +3578,7 @@ async def compensate_late_delivery(
                             ):
                                 itx_user.roles.remove(role_obj)
                     await _assert_retry_marker_owned(
-                        retry_entry_key, guild_id, user_id)
+                        retry_entry_key, guild_id, user_id, op_id=op_id)
                     await delete_timed_holding(retry_entry_key)
                     spec["retry_entry_key"] = None
                     spec["role_reconciled"] = True
@@ -3626,11 +3705,46 @@ async def compensate_late_delivery(
                             boost_in_tx = False
                         else:
                             if boost_id is not None:
-                                await cleanup_db.execute(
-                                    "DELETE FROM leveling_active_boosts "
-                                    "WHERE id=? AND guild_id=? AND user_id=?",
-                                    (int(boost_id), guild_id, user_id),
-                                )
+                                boost_origin = await _boost_origin_op(
+                                    cleanup_db, int(boost_id))
+                                if boost_origin is not None:
+                                    if (
+                                        boost_origin["guild_id"] != int(guild_id)
+                                        or boost_origin["user_id"] != int(user_id)
+                                    ):
+                                        raise RuntimeError(
+                                            f"XP boost {int(boost_id)} belongs to "
+                                            f"another member; refusing to delete it"
+                                        )
+                                    if boost_origin["origin_op_id"] is None:
+                                        raise RuntimeError(
+                                            f"XP boost {int(boost_id)} records no "
+                                            f"originating purchase operation "
+                                            f"(a non-Shop grant, or written before "
+                                            f"provenance existed); it cannot be "
+                                            f"shown to belong to {op_id}, so it is "
+                                            f"kept for manual recovery"
+                                        )
+                                    if (
+                                        str(boost_origin["origin_op_id"])
+                                        != str(op_id)
+                                    ):
+                                        raise RuntimeError(
+                                            f"XP boost {int(boost_id)} was created "
+                                            f"by purchase operation "
+                                            f"{boost_origin['origin_op_id']}, not "
+                                            f"{op_id}; refusing to delete another "
+                                            f"operation's boost"
+                                        )
+                                    await cleanup_db.execute(
+                                        "DELETE FROM leveling_active_boosts "
+                                        "WHERE id=? AND guild_id=? AND user_id=?"
+                                        " AND origin_op_id=?",
+                                        (int(boost_id), guild_id, user_id,
+                                         str(op_id)),
+                                    )
+                                # A missing row means the boost is already gone:
+                                # retiring it is a no-op.
                             elif boost_exp:
                                 # No recorded row id: only ever remove the boost
                                 # this purchase created, identified by its
@@ -3650,7 +3764,8 @@ async def compensate_late_delivery(
                                     spec.get("boost_source") or "shop"
                                 )
                                 cursor = await cleanup_db.execute(
-                                    "SELECT id FROM leveling_active_boosts "
+                                    "SELECT id, origin_op_id "
+                                    "FROM leveling_active_boosts "
                                     "WHERE guild_id=? AND user_id=? AND expires_at=? "
                                     "AND source=? "
                                     "ORDER BY id ASC",
@@ -3658,19 +3773,38 @@ async def compensate_late_delivery(
                                      boost_source),
                                 )
                                 b_rows = list(await cursor.fetchall())
-                                if len(b_rows) > 1:
+                                owned_rows = [
+                                    r for r in b_rows
+                                    if str(r[1] or "") == str(op_id)
+                                ]
+                                if len(owned_rows) > 1:
                                     raise RuntimeError(
                                         f"ambiguous XP boost identity for "
-                                        f"op_id={op_id}: {len(b_rows)} rows match "
-                                        f"source={boost_source!r} and the same "
+                                        f"op_id={op_id}: {len(owned_rows)} rows "
+                                        f"record this operation and the same "
                                         f"expiry, and the descriptor recorded no "
                                         f"boost_id"
                                     )
-                                if b_rows:
+                                if len(owned_rows) == 1:
                                     await cleanup_db.execute(
                                         "DELETE FROM leveling_active_boosts "
-                                        "WHERE id=? AND source=?",
-                                        (int(b_rows[0][0]), boost_source),
+                                        "WHERE id=? AND source=? AND origin_op_id=?",
+                                        (int(owned_rows[0][0]), boost_source,
+                                         str(op_id)),
+                                    )
+                                elif b_rows:
+                                    # Rows match (member, expiry, source) but none
+                                    # records this operation: an unprovable legacy
+                                    # or foreign boost. Deleting by
+                                    # `(source, expires_at)` would remove another
+                                    # grant, so fail closed.
+                                    raise RuntimeError(
+                                        f"XP boost identity for op_id={op_id} is "
+                                        f"unprovable: {len(b_rows)} row(s) match "
+                                        f"source={boost_source!r} and the same "
+                                        f"expiry but none records this purchase "
+                                        f"operation, and the descriptor recorded "
+                                        f"no boost_id"
                                     )
                             spec["inventory_rolled_back"] = True
                             spec["equip_reconciled"] = True

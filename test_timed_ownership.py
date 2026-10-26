@@ -5003,14 +5003,16 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         """Regression P7: a caller holding a stale specification must not delete a
         second XP-boost row that belongs to an independent (legitimate) grant."""
         exp = "2099-01-01T00:00:00+00:00"
-        execute(
-            "INSERT INTO leveling_active_boosts"
-            " (guild_id, user_id, multiplier, expires_at, source)"
-            " VALUES (?,?,2.0,?,'level_claim'), (?,?,2.0,?,'shop')",
-            (GUILD, USER, exp, GUILD, USER, exp))
         op_id = await TO.open_purchase(
             guild_id=GUILD, user_id=USER, item_id=7702, item_name="P7RaceBoost",
             currency="balance", amount=100)
+        # The shop row records its originating operation, exactly as the real
+        # grant path writes it; the level_claim row is an independent grant.
+        execute(
+            "INSERT INTO leveling_active_boosts"
+            " (guild_id, user_id, multiplier, expires_at, source, origin_op_id)"
+            " VALUES (?,?,2.0,?,'level_claim',NULL), (?,?,2.0,?,'shop',?)",
+            (GUILD, USER, exp, GUILD, USER, exp, str(op_id)))
         await TO.update_purchase(op_id, status=TO.PURCHASE_REFUNDED, refunded=1)
         stale_spec = {
             "guild_id": GUILD,
@@ -5851,16 +5853,20 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         async def _run(order, include_source):
             execute("DELETE FROM leveling_active_boosts")
             TO._PENDING_DELIVERY_ROLLBACKS.clear()
+            op = await TO.open_purchase(
+                guild_id=GUILD, user_id=USER, item_id=7830,
+                item_name="P18Boost", currency="balance", amount=100)
+            # The shop row carries the operation that created it, as the real
+            # grant path writes it; the level-claim row is independent.
             seq = (("shop", "level_claim:77") if order == "shop_first"
                    else ("level_claim:77", "shop"))
             for src in seq:
                 execute(
                     "INSERT INTO leveling_active_boosts"
-                    " (guild_id, user_id, multiplier, expires_at, source)"
-                    " VALUES (?,?,2.0,?,?)", (GUILD, USER, exp, src))
-            op = await TO.open_purchase(
-                guild_id=GUILD, user_id=USER, item_id=7830,
-                item_name="P18Boost", currency="balance", amount=100)
+                    " (guild_id, user_id, multiplier, expires_at, source,"
+                    " origin_op_id) VALUES (?,?,2.0,?,?,?)",
+                    (GUILD, USER, exp, src,
+                     str(op) if src == "shop" else None))
             await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
             spec = {
                 "guild_id": GUILD, "user_id": USER, "item_id": 7830,
@@ -6308,32 +6314,45 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
     async def test_p25_ambiguous_boost_identity_fails_closed(self):
         """P25 (Secondary): with two same-source/same-expiry boosts and no
         recorded `boost_id`, compensation must remove neither row and report the
-        ambiguity instead of deleting another grant's boost."""
+        ambiguity instead of deleting another grant's boost.
+
+        Two variants, because they are now different failures:
+        * both rows record THIS operation (a duplicated grant) — ambiguous;
+        * neither records it (legacy / non-Shop rows) — unprovable.
+        Both must fail closed and keep every row.
+        """
         exp = "2099-02-02T00:00:00+00:00"
-        execute("DELETE FROM leveling_active_boosts")
-        execute("INSERT INTO leveling_active_boosts"
-                " (guild_id,user_id,multiplier,expires_at,source)"
-                " VALUES (?,?,2.0,?,'shop')", (GUILD, USER, exp))
-        execute("INSERT INTO leveling_active_boosts"
-                " (guild_id,user_id,multiplier,expires_at,source)"
-                " VALUES (?,?,3.0,?,'shop')", (GUILD, USER, exp))
-        ids = [r[0] for r in rows("SELECT id FROM leveling_active_boosts ORDER BY id")]
-        op, spec = await self._refunded_op(
-            "P25Boost", 9970, internal_type="xp_boost",
-            extra={"boost_id": None, "boost_expires_at": exp,
-                   "boost_source": "shop"})
-        await TO.record_pending_delivery_rollback(op, spec, bot=None)
-        res = await TO.compensate_late_delivery(op, dict(spec))
-        self.assertFalse(res["complete"], str(res))
-        self.assertIn("ambiguous", str(res.get("error") or "").lower(), str(res))
-        self.assertEqual(
-            [r[0] for r in rows(
-                "SELECT id FROM leveling_active_boosts ORDER BY id")], ids,
-            "compensation deleted a boost it could not identify")
-        self.assertNotEqual(
-            rows("SELECT delivery_rollback FROM shop_purchase_operations"
-                 " WHERE op_id=?", (op,))[0][0], "",
-            "the un-identified boost rollback was recorded as finished")
+        for label, owned in (("both rows owned by this operation", True),
+                             ("no row records this operation", False)):
+            execute("DELETE FROM leveling_active_boosts")
+            op, spec = await self._refunded_op(
+                "P25Boost", 9970, internal_type="xp_boost",
+                extra={"boost_id": None, "boost_expires_at": exp,
+                       "boost_source": "shop"})
+            for multiplier in (2.0, 3.0):
+                execute(
+                    "INSERT INTO leveling_active_boosts"
+                    " (guild_id,user_id,multiplier,expires_at,source,origin_op_id)"
+                    " VALUES (?,?,?,?,'shop',?)",
+                    (GUILD, USER, multiplier, exp,
+                     str(op) if owned else None))
+            ids = [r[0] for r in rows(
+                "SELECT id FROM leveling_active_boosts ORDER BY id")]
+            await TO.record_pending_delivery_rollback(op, spec, bot=None)
+            res = await TO.compensate_late_delivery(op, dict(spec))
+            self.assertFalse(res["complete"], f"{label}: {res}")
+            expected = "ambiguous" if owned else "unprovable"
+            self.assertIn(expected, str(res.get("error") or "").lower(),
+                          f"{label}: {res}")
+            self.assertEqual(
+                [r[0] for r in rows(
+                    "SELECT id FROM leveling_active_boosts ORDER BY id")], ids,
+                f"{label}: compensation deleted a boost it could not identify")
+            self.assertNotEqual(
+                rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                     " WHERE op_id=?", (op,))[0][0], "",
+                f"{label}: the un-identified boost rollback was recorded as "
+                f"finished")
 
     async def test_p26_boost_grant_reports_and_removes_only_its_own_row(self):
         """P26 (Secondary): the shop grant path records the exact inserted row id
@@ -6344,10 +6363,13 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
 
         execute("DELETE FROM leveling_active_boosts")
         itx = SimpleNamespace(client=None)
+        op, spec = await self._refunded_op(
+            "P26Boost", 9971, internal_type="xp_boost")
+        boost_op = op
         delivery = await _deliver_purchase(
             itx, guild_id=GUILD, user_id=USER, itype="xp_boost",
             listing_type="xp_boost", name="P26Boost", multiplier=2.0,
-            duration_hours=24, source="shop")
+            duration_hours=24, source="shop", op_id=str(boost_op))
         self.assertTrue(delivery["success"], str(delivery))
         boost_id = delivery.get("boost_id")
         self.assertIsNotNone(
@@ -6369,11 +6391,13 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             (GUILD, USER, purchased[0][1]))
         self.assertNotEqual(decoy_id, int(boost_id))
 
-        op, spec = await self._refunded_op(
-            "P26Boost", 9971, internal_type="xp_boost",
-            extra={"boost_id": int(boost_id),
-                   "boost_expires_at": delivery["boost_expires_at"],
-                   "boost_source": "shop"})
+        spec.update({"boost_id": int(boost_id),
+                     "boost_expires_at": delivery["boost_expires_at"],
+                     "boost_source": "shop"})
+        self.assertEqual(
+            rows("SELECT origin_op_id FROM leveling_active_boosts WHERE id=?",
+                 (int(boost_id),)), [(str(boost_op),)],
+            "the delivery did not record the operation that created the boost")
         await TO.record_pending_delivery_rollback(op, spec, bot=None)
         res = await TO.compensate_late_delivery(op, dict(spec))
         self.assertTrue(res["complete"], str(res))
@@ -6969,12 +6993,19 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                  " WHERE op_id=?", (op_a,))[0][0], "",
             "a verified rollback never reached the durable completion sentinel")
 
-    async def test_p38_legacy_holding_is_bound_by_the_operation_journal(self):
-        """P38 (legacy compatibility): a holding granted before the marker
-        existed still rolls back when this operation's journal names that exact
-        key — ordinary compensation is not blocked for existing data."""
+    async def test_p38_journal_detail_is_not_accepted_as_holding_provenance(self):
+        """P38 (F3, corrected): a journal `detail` naming the key is NOT proof.
+
+        This test previously wrote `detail='holding h:<id>'` onto a refunded
+        operation by hand and treated it as reachable legacy evidence. It is not
+        reachable: that detail is written only by the `pending -> delivered`
+        transition (`claim_purchase_transition`), and a `delivered` operation is
+        refused by `compensate_late_delivery`, so an operation that is actually
+        compensated never carries it. A holding with no recorded origin operation
+        therefore cannot be tied to this purchase and must be kept.
+        """
         own, other, _person, _bot, _role, name = await self._legacy_two_holdings(3)
-        own_key, other_key = f"h:{own}", f"h:{other}"
+        own_key = f"h:{own}"
         self.assertIsNone(
             (await TO.timed_holding_provenance(own_key))["origin_op_id"],
             "fixture: this holding must have no origin marker")
@@ -6983,24 +7014,28 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         spec["entry_key"] = own_key
         await TO.record_pending_delivery_rollback(op, spec, bot=None)
         TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        before = rows("SELECT id, expires_at FROM timed_holdings ORDER BY id")
 
         res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
 
-        self.assertTrue(res["complete"], str(res))
-        self.assertEqual(rows("SELECT id FROM timed_holdings WHERE id=?", (own,)), [],
-                         "the operation's own legacy holding was not retired")
-        self.assertEqual(len(rows("SELECT id FROM timed_holdings WHERE id=?", (other,))),
-                         1, "an unrelated legacy holding was retired")
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("no originating purchase operation",
+                      str(res.get("error", "")), str(res))
+        self.assertEqual(rows("SELECT id, expires_at FROM timed_holdings ORDER BY id"),
+                         before, "a journal detail string authorized a deletion")
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "",
+            "the descriptor was cleared without provenance")
 
-    async def test_p39_unidentifiable_legacy_holding_fails_closed(self):
-        """P39: a legacy holding this operation cannot be shown to own (no
-        marker, journal no longer naming it) is preserved and the descriptor
-        stays pending. On 130c6dc it was expired and deleted, and the operation
-        was reported complete."""
-        own, other, _person, _bot, _role, name = await self._legacy_two_holdings(4)
+    async def test_p39_unprovable_legacy_holding_keeps_pending_descriptor(self):
+        """P39 (F3): a holding with no recorded operation, and a journal detail
+        that no longer names it, stays pending for operator recovery — with a
+        diagnostic that says so, never a silent expiry and never a false
+        'complete'. (On 130c6dc it was expired, deleted and reported complete.)"""
+        own, _other, _person, _bot, _role, name = await self._legacy_two_holdings(4)
         own_key = f"h:{own}"
         op, spec = await self._refunded_op(name, 8804, internal_type="shop_custom")
-        # An operator note replaced the delivery detail: no durable link remains.
         await TO.update_purchase(op, detail="Operator resolved via refund")
         spec["entry_key"] = own_key
         await TO.record_pending_delivery_rollback(op, spec, bot=None)
@@ -7010,14 +7045,265 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
 
         self.assertFalse(res["complete"], str(res))
-        self.assertIn("no durable record", str(res.get("error", "")), str(res))
+        self.assertIn("manual recovery", str(res.get("error", "")), str(res))
         self.assertEqual(rows("SELECT id, expires_at FROM timed_holdings ORDER BY id"),
-                         before, "an unidentifiable holding was expired or deleted")
+                         before, "an unprovable holding was expired or deleted")
         self.assertNotEqual(
             rows("SELECT delivery_rollback FROM shop_purchase_operations"
                  " WHERE op_id=?", (op,))[0][0], "",
             "the descriptor was cleared without proof")
+        # The supported manual-recovery path still surfaces the operation.
+        self.assertTrue(
+            any(r.get("op_id") == op
+                for r in await TO.list_purchase_operations(status=None)),
+            "the operator listing lost the pending operation")
 
+    # ── P40–P44: cross-operation ownership (Akuroi's review) ──────────────
+
+    async def _role_rollback_ready(self, rid, name="P40Color"):
+        """A refunded permanent-role operation whose delivery added the role."""
+        role = role_stub(rid, name)
+        itx, person, bot, guild = purchase_ctx(granted_role=role)
+        person.roles.append(role)
+        guild.get_role = lambda r: role if int(r) == rid else None
+        person.remove_roles = AsyncMock()
+        op, spec = await self._refunded_op(
+            name, 8810, internal_type="role", role_id=rid,
+            extra={"inventory_rolled_back": True, "equip_reconciled": True})
+        return op, spec, role, person, bot
+
+    async def test_p40_other_operations_holding_is_never_retired_as_a_marker(self):
+        """P40 (F1, Akuroi's case): a descriptor whose `retry_entry_key` names
+        ANOTHER operation's holding must not delete it, must not strip a Discord
+        role, must not change equipment and must not complete.
+
+        On 8bc0a59 the member-only check passed: the foreign holding was deleted,
+        `remove_roles` was called once and the descriptor was cleared as fully
+        compensated.
+        """
+        rid = 9941
+        for label, kind in (("a live non-marker holding", "holding"),
+                            ("another operation's late-rollback marker", "marker")):
+            await reset_database(); seed_member(); purge_timed()
+            op_b = await TO.open_purchase(
+                guild_id=GUILD, user_id=USER, item_id=8811,
+                item_name="P40Live", currency="balance", amount=100)
+            if kind == "holding":
+                await TO.update_purchase(op_b, status=TO.PURCHASE_DELIVERED, charged=1)
+                granted = await TO.grant_timed_product(
+                    None, GUILD, USER, item_name="P40Live", duration_hours=24,
+                    item_type="shop_custom", product_id=8811, source="shop",
+                    op_id=op_b, reason="Shop purchase: P40Live")
+                foreign_key = granted["entry_key"]
+            else:
+                await TO.update_purchase(op_b, status=TO.PURCHASE_REFUNDED, refunded=1)
+                foreign_key, _created = await TO._ensure_role_retry_marker(
+                    op_id=str(op_b), guild_id=GUILD, user_id=USER,
+                    item_name="P40Live", role_id=rid, item_id=8811,
+                    category=None)
+            from utils.equip_engine import record_equipped
+            await record_equipped(GUILD, USER, "P40Live", role_id=rid,
+                                  entry_key=foreign_key)
+
+            op, spec, role, person, bot = await self._role_rollback_ready(rid)
+            before_holding = self._holding_row(foreign_key)
+            before_equipped = rows(
+                "SELECT item_name, role_id, entry_key FROM equipped_roles"
+                " WHERE guild_id=? AND user_id=?", (GUILD, USER))
+            spec["retry_entry_key"] = foreign_key
+            await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+            TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+            res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+
+            self.assertFalse(res["complete"], f"{label}: {res}")
+            self.assertIn("retry marker", str(res.get("error", "")).lower(),
+                          f"{label}: {res}")
+            self.assertEqual(self._holding_row(foreign_key), before_holding,
+                             f"{label}: the foreign holding was retired")
+            self.assertEqual(person.remove_roles.await_count, 0,
+                             f"{label}: a Discord role was removed for a foreign marker")
+            self.assertIn(role, person.roles, f"{label}: the role was stripped")
+            self.assertEqual(
+                rows("SELECT item_name, role_id, entry_key FROM equipped_roles"
+                     " WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+                before_equipped, f"{label}: equipment was changed")
+            self.assertNotEqual(
+                rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                     " WHERE op_id=?", (op,))[0][0], "",
+                f"{label}: the descriptor was cleared")
+
+    async def test_p41_legitimate_retry_marker_is_still_retired(self):
+        """P41 (control for F1): the operation's OWN marker is still retired, the
+        role removed exactly once and the descriptor completed."""
+        rid = 9942
+        op, spec, role, person, bot = await self._role_rollback_ready(rid, "P41Color")
+        marker_key, created = await TO._ensure_role_retry_marker(
+            op_id=str(op), guild_id=GUILD, user_id=USER, item_name="P41Color",
+            role_id=rid, item_id=8810, category=None)
+        self.assertTrue(created)
+        spec["retry_entry_key"] = marker_key
+        await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+
+        self.assertTrue(res["complete"], str(res))
+        self.assertEqual(
+            rows("SELECT id FROM timed_holdings WHERE id=?",
+                 (int(marker_key.split(":")[1]),)), [],
+            "the operation's own marker was not retired")
+        self.assertEqual(person.remove_roles.await_count, 1)
+        self.assertNotIn(role, person.roles)
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "")
+
+    async def test_p42_other_operations_boost_is_never_deleted(self):
+        """P42 (F2, Akuroi's case): a descriptor carrying ANOTHER operation's
+        live `boost_id` must not delete that boost, and must not complete.
+
+        On 8bc0a59 the delete was `WHERE id=? AND guild_id=? AND user_id=?`, so a
+        same-member boost of a different purchase was removed and the operation
+        was reported compensated.
+        """
+        from utils.xp_calculator import grant_xp_boost_details
+        await reset_database(); seed_member(); purge_timed()
+        op_b = await TO.open_purchase(
+            guild_id=GUILD, user_id=USER, item_id=8812, item_name="P42BoostB",
+            currency="balance", amount=150)
+        await TO.update_purchase(op_b, status=TO.PURCHASE_DELIVERED, charged=1)
+        b = await grant_xp_boost_details(GUILD, USER, 2.0, 2, source="shop",
+                                         op_id=str(op_b))
+        claim = await grant_xp_boost_details(GUILD, USER, 1.5, 24,
+                                             source="level_claim:42")
+        op_a, spec = await self._refunded_op(
+            "P42BoostA", 8813, internal_type="xp_boost",
+            extra={"boost_id": b["boost_id"],
+                   "boost_expires_at": b["expires_at"],
+                   "boost_source": "shop"})
+        await TO.record_pending_delivery_rollback(op_a, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        before = rows("SELECT id, source FROM leveling_active_boosts ORDER BY id")
+
+        res = await TO.compensate_late_delivery(op_a, dict(spec), bot=None)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("another operation's boost", str(res.get("error", "")), str(res))
+        self.assertEqual(
+            rows("SELECT id, source FROM leveling_active_boosts ORDER BY id"),
+            before, "a boost belonging to another purchase was deleted")
+        self.assertIn(b["boost_id"], [r[0] for r in before])
+        self.assertIn(claim["boost_id"], [r[0] for r in before])
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op_a,))[0][0], "",
+            "the descriptor was cleared")
+
+    async def test_p42b_legacy_shop_boost_of_another_purchase_is_kept(self):
+        """P42b (F2, behavioural on both trees): a Shop boost written before the
+        provenance column existed records no operation. If a descriptor for op A
+        names op B's boost, the old code deleted it and reported completion
+        (`complete=True`, B's boost gone). The fix keeps it and leaves the
+        descriptor pending, so an operator decides."""
+        from utils.xp_calculator import grant_xp_boost_details
+        await reset_database(); seed_member(); purge_timed()
+        op_b = await TO.open_purchase(
+            guild_id=GUILD, user_id=USER, item_id=8817, item_name="P42bBoostB",
+            currency="balance", amount=150)
+        await TO.update_purchase(op_b, status=TO.PURCHASE_DELIVERED, charged=1)
+        # The pre-provenance shape: a real Shop grant with no recorded operation.
+        b = await grant_xp_boost_details(GUILD, USER, 2.0, 2, source="shop")
+        op_a, spec = await self._refunded_op(
+            "P42bBoostA", 8818, internal_type="xp_boost",
+            extra={"boost_id": b["boost_id"],
+                   "boost_expires_at": b["expires_at"],
+                   "boost_source": "shop"})
+        await TO.record_pending_delivery_rollback(op_a, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        before = rows("SELECT id, source FROM leveling_active_boosts ORDER BY id")
+
+        res = await TO.compensate_late_delivery(op_a, dict(spec), bot=None)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertEqual(
+            rows("SELECT id, source FROM leveling_active_boosts ORDER BY id"),
+            before, "another purchase's Shop boost was deleted")
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op_a,))[0][0], "",
+            "the descriptor was cleared")
+
+    async def test_p43_boost_without_recorded_operation_fails_closed(self):
+        """P43 (F2): a boost written by a non-Shop producer (or before the
+        provenance column existed) records no operation. A descriptor naming it
+        must keep it and stay pending — deleting it could destroy a level-claim
+        or potion grant."""
+        from utils.xp_calculator import grant_xp_boost_details
+        await reset_database(); seed_member(); purge_timed()
+        legacy = await grant_xp_boost_details(GUILD, USER, 2.0, 2, source="potion")
+        self.assertEqual(
+            rows("SELECT origin_op_id FROM leveling_active_boosts WHERE id=?",
+                 (legacy["boost_id"],)), [(None,)],
+            "fixture: this boost must carry no origin operation")
+        op, spec = await self._refunded_op(
+            "P43Boost", 8814, internal_type="xp_boost",
+            extra={"boost_id": legacy["boost_id"],
+                   "boost_expires_at": legacy["expires_at"],
+                   "boost_source": "potion"})
+        await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("records no originating purchase operation",
+                      str(res.get("error", "")), str(res))
+        self.assertEqual(
+            rows("SELECT id, source FROM leveling_active_boosts"),
+            [(legacy["boost_id"], "potion")], "an unprovable boost was deleted")
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "")
+
+    async def test_p44_verified_boost_is_rolled_back_exactly(self):
+        """P44 (control for F2): a boost recorded against THIS operation is
+        removed, while a level-claim boost and another operation's boost of the
+        same member survive."""
+        from utils.xp_calculator import grant_xp_boost_details
+        await reset_database(); seed_member(); purge_timed()
+        op_a, spec = await self._refunded_op(
+            "P44Boost", 8815, internal_type="xp_boost")
+        a = await grant_xp_boost_details(GUILD, USER, 2.0, 2, source="shop",
+                                         op_id=str(op_a))
+        other_op = await TO.open_purchase(
+            guild_id=GUILD, user_id=USER, item_id=8816,
+            item_name="P44Other", currency="balance", amount=150)
+        await TO.update_purchase(other_op, status=TO.PURCHASE_DELIVERED, charged=1)
+        other = await grant_xp_boost_details(GUILD, USER, 3.0, 2, source="shop",
+                                             op_id=str(other_op))
+        claim = await grant_xp_boost_details(GUILD, USER, 1.5, 24,
+                                             source="level_claim:44")
+        spec.update({"boost_id": a["boost_id"],
+                     "boost_expires_at": a["expires_at"],
+                     "boost_source": "shop"})
+        await TO.record_pending_delivery_rollback(op_a, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op_a, dict(spec), bot=None)
+
+        self.assertTrue(res["complete"], str(res))
+        remaining = [r[0] for r in rows(
+            "SELECT id FROM leveling_active_boosts ORDER BY id")]
+        self.assertNotIn(a["boost_id"], remaining,
+                         "this purchase's boost was not rolled back")
+        self.assertIn(other["boost_id"], remaining,
+                      "another operation's boost was deleted")
+        self.assertIn(claim["boost_id"], remaining,
+                      "an independent level-claim boost was deleted")
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op_a,))[0][0], "")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
