@@ -853,10 +853,12 @@ async def timed_holding_owner(entry_key) -> tuple[int, int] | None:
 async def timed_holding_provenance(entry_key) -> dict | None:
     """Identity of an `h:<id>` holding, including the purchase that created it.
 
-    Returns `{"guild_id", "user_id", "origin_op_id"}` or None when the holding
-    no longer exists. `origin_op_id` is the Shop purchase operation recorded in
-    the holding's metadata at creation time (`grant_timed_holding(op_id=...)`),
-    or None for holdings granted before that marker existed.
+    Returns `{"guild_id", "user_id", "origin_op_id", "role_id"}` or None when
+    the holding no longer exists. `origin_op_id` is the Shop purchase operation
+    recorded in the holding's metadata at creation time
+    (`grant_timed_holding(op_id=...)`), or None for holdings granted before that
+    marker existed. `role_id` is the role the holding actually entitled, written
+    to the row itself rather than taken from any caller-supplied descriptor.
 
     A holding's member is NOT enough to identify its purchase: one member can
     buy the same timed product repeatedly, and those holdings share guild,
@@ -877,7 +879,8 @@ async def timed_holding_provenance(entry_key) -> dict | None:
         return None
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT guild_id, user_id, metadata FROM timed_holdings WHERE id=?",
+            "SELECT guild_id, user_id, metadata, role_id FROM timed_holdings"
+            " WHERE id=?",
             (holding_id,),
         )
         row = await cursor.fetchone()
@@ -894,6 +897,9 @@ async def timed_holding_provenance(entry_key) -> dict | None:
         "guild_id": int(row[0] or 0),
         "user_id": int(row[1] or 0),
         "origin_op_id": str(origin) if origin else None,
+        # The role this holding actually entitles, as written at grant time.
+        # `role_id` in a descriptor is NOT evidence; this column is.
+        "role_id": int(row[3]) if row[3] is not None else None,
     }
 
 
@@ -2528,6 +2534,123 @@ async def _persist_delivery_rollback_progress(op_id: str, spec: dict, *,
     return "failed", last_error, None
 
 
+async def _delivered_role_identity(delivered_inv, guild_id, user_id,
+                                   item_name) -> int | None:
+    """The role id the delivered inventory record actually entitles, or None.
+
+    `metadata.role_id` is written by `give_reward(..., "role" | "temp_role")`
+    when the row is created, so it states which role the purchase granted. A
+    descriptor's own `role_id` cannot: it is a plain integer the rollback would
+    otherwise hand straight to `remove_roles`. When the snapshot carries no
+    role identity, fall back to the live row for the same name; if neither
+    yields one the caller must fail closed rather than strip an unverified role.
+    """
+    meta_raw = None
+    if delivered_inv is not None and len(delivered_inv) > 4:
+        meta_raw = delivered_inv[4]
+    if meta_raw is None:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "SELECT metadata FROM inventory_items "
+                "WHERE guild_id=? AND user_id=? AND item_name=?",
+                (guild_id, user_id, item_name),
+            )
+            row = await cur.fetchone()
+        meta_raw = row[0] if row else None
+    if meta_raw is None:
+        return None
+    try:
+        meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
+    except Exception:
+        return None
+    if not isinstance(meta, dict):
+        return None
+    role_value = meta.get("role_id")
+    if role_value is None:
+        return None
+    try:
+        return int(role_value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _inventory_identity_conflict(guild_id, user_id, item_name,
+                                       delivered_inv, prior_inv,
+                                       conn=None) -> str | None:
+    """Why the descriptor's inventory identities do not describe one row, or None.
+
+    The delivered snapshot is `(id, quantity, item_type, source, metadata,
+    created_at, updated_at)` of the row this purchase created, so its first
+    element is the only thing that says WHICH row may be touched. Both rollback
+    helpers select the row by `item_name`, so a descriptor whose `item_name`
+    (or `prior_inventory`) points at a different row would decrement, delete or
+    overwrite an unrelated grant while reporting success.
+
+    Returns None when the descriptor is consistent, or when no row carries
+    `item_name` at all (the name-addressed rollback is then a no-op). A snapshot
+    row that has vanished while a different row still carries the name is a
+    conflict, not a no-op: the delivered grant is gone and the remaining row is
+    somebody else's.
+    """
+    if delivered_inv is None:
+        return None
+    try:
+        snap_id = int(delivered_inv[0])
+    except (TypeError, ValueError, IndexError):
+        return "delivered_inventory has no usable row id"
+    if prior_inv is not None:
+        try:
+            prior_id = int(prior_inv[0])
+        except (TypeError, ValueError, IndexError):
+            return "prior_inventory has no usable row id"
+        if prior_id != snap_id:
+            return (
+                f"prior_inventory describes row {prior_id} but the delivered "
+                f"row is {snap_id}"
+            )
+    async def _check(db) -> str | None:
+        cur = await db.execute(
+            "SELECT id FROM inventory_items "
+            "WHERE guild_id=? AND user_id=? AND item_name=?",
+            (guild_id, user_id, item_name),
+        )
+        named = await cur.fetchone()
+        if named is None:
+            # Nothing carries this name any more, so the name-addressed rollback
+            # is a no-op and cannot reach an unrelated row.
+            return None
+        named_id = int(named[0])
+        if named_id == snap_id:
+            return None
+        if prior_inv is not None and named_id == prior_id:
+            # The row is already back at the pre-grant state this descriptor
+            # recorded (a retry whose progress flag never persisted). Both
+            # rollback helpers treat that as a no-op, so it is safe.
+            return None
+        cur = await db.execute(
+            "SELECT item_name FROM inventory_items WHERE id=?", (snap_id,))
+        return named_id, await cur.fetchone()
+
+    if conn is not None:
+        checked = await _check(conn)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            checked = await _check(db)
+    if checked is None:
+        return None
+    named_id, snap_row = checked
+    if snap_row is None:
+        return (
+            f"item_name {item_name!r} addresses inventory row {named_id}, but "
+            f"the delivered snapshot is row {snap_id}, which no longer exists; "
+            f"refusing to touch a row this purchase did not create"
+        )
+    return (
+        f"item_name {item_name!r} addresses inventory row {named_id}, but the "
+        f"delivered snapshot is row {snap_id} ({snap_row[0]!r})"
+    )
+
+
 async def _assert_retry_marker_owned(entry_key, guild_id, user_id, *,
                                      op_id) -> None:
     """Refuse to retire an `h:<id>` marker that this operation does not own.
@@ -3093,6 +3216,31 @@ async def compensate_late_delivery(
                 f"Timed holding {late_key} does not exist; cannot verify the "
                 f"timed grant was rolled back"
             )
+        # A descriptor's `role_id` is an integer the rollback hands straight to
+        # `remove_roles`; it is not evidence of which role this holding entitled.
+        # The holding row records the granted `role_id` at creation time, so a
+        # descriptor naming a different role is either corrupted or forged and
+        # must not strip a role this purchase never granted.
+        if (
+            role_id is not None
+            and role_added_by_delivery
+            and not spec.get("role_reconciled")
+            and provenance is not None
+        ):
+            holding_role = provenance.get("role_id")
+            if holding_role is None:
+                return await _persist_incomplete(
+                    f"Timed holding {late_key} records no role identity; cannot "
+                    f"prove role {int(role_id)} was granted by it, so it is kept "
+                    f"for manual recovery"
+                )
+            if int(holding_role) != int(role_id):
+                return await _persist_incomplete(
+                    f"Timed holding {late_key} granted role {int(holding_role)}, "
+                    f"but the descriptor names role {int(role_id)}; refusing to "
+                    f"remove a role this purchase did not grant"
+                )
+
         if not spec.get("inventory_rolled_back"):
             try:
                 async with aiosqlite.connect(DB_PATH) as cleanup_db:
@@ -3304,6 +3452,17 @@ async def compensate_late_delivery(
                         spec["inventory_rolled_back"] = True
                         role_guard["outcome"] = "already_done"
                         return "already_done"
+                    conflict = await _inventory_identity_conflict(
+                        guild_id, user_id, item_name, delivered_inv, prior_inv,
+                        conn=conn,
+                    )
+                    if conflict is not None:
+                        role_guard["outcome"] = "abort"
+                        role_guard["reason"] = (
+                            f"Role rollback descriptor does not describe the "
+                            f"delivered inventory grant: {conflict}"
+                        )
+                        return "abort"
                     role_guard["outcome"] = "proceed"
                     return "proceed"
                 try:
@@ -3328,6 +3487,17 @@ async def compensate_late_delivery(
                 if parsed.get("inventory_rolled_back"):
                     role_guard["outcome"] = "already_done"
                     return "already_done"
+                conflict = await _inventory_identity_conflict(
+                    guild_id, user_id, item_name, delivered_inv, prior_inv,
+                    conn=conn,
+                )
+                if conflict is not None:
+                    role_guard["outcome"] = "abort"
+                    role_guard["reason"] = (
+                        f"Role rollback descriptor does not describe the "
+                        f"delivered inventory grant: {conflict}"
+                    )
+                    return "abort"
                 role_guard["outcome"] = "proceed"
                 return "proceed"
 
@@ -3368,6 +3538,36 @@ async def compensate_late_delivery(
                     f"Role inventory rollback failed for {item_name!r}"
                 )
             spec["inventory_rolled_back"] = True
+
+        # Which Discord role this purchase granted is recorded by the producer in
+        # the delivered inventory row (`metadata.role_id`), not by the
+        # descriptor's own `role_id` — that integer is what the code below hands
+        # to `remove_roles`, and equipment reconciliation keys off the same
+        # holding. Refuse before anything Discord-side or equipment-side is
+        # touched when the two disagree. (Placed after the inventory step so a
+        # descriptor without durable backing still fails closed on that, without
+        # this check fabricating a descriptor.)
+        if (
+            role_id is not None
+            and role_added_by_delivery
+            and not spec.get("role_reconciled")
+        ):
+            delivered_role = await _delivered_role_identity(
+                delivered_inv, guild_id, user_id, item_name
+            )
+            if delivered_role is None:
+                return await _persist_incomplete(
+                    f"Delivered inventory for {item_name!r} records no role "
+                    f"identity; cannot prove role {int(role_id)} was granted by "
+                    f"this purchase, so it is kept for manual recovery"
+                )
+            if int(delivered_role) != int(role_id):
+                return await _persist_incomplete(
+                    f"Delivered inventory for {item_name!r} granted role "
+                    f"{int(delivered_role)}, but the descriptor names role "
+                    f"{int(role_id)}; refusing to remove a role this purchase "
+                    f"did not grant"
+                )
 
         if not spec.get("equip_reconciled"):
             try:
@@ -3940,6 +4140,33 @@ async def compensate_late_delivery(
                                 already_rolled_back = True
 
                         if not already_rolled_back:
+                            # The snapshot's row id — not the item name —
+                            # identifies the grant. Both rollback helpers select
+                            # the row by name, so a descriptor naming another
+                            # item would decrement (or delete) an unrelated grant
+                            # while leaving this purchase's unit in place. Checked
+                            # here, inside the durable transaction and before the
+                            # mutation, so it can neither act on a forged name nor
+                            # fabricate a descriptor where none is durable.
+                            inv_conflict = await _inventory_identity_conflict(
+                                guild_id, user_id, item_name, delivered_inv,
+                                prior_inv, conn=rb_db,
+                            )
+                            if inv_conflict is not None:
+                                await rb_db.execute("ROLLBACK")
+                                in_tx = False
+                                return {
+                                    "complete": False,
+                                    "durable_persisted": False,
+                                    "inventory_rolled_back": False,
+                                    "equip_reconciled": False,
+                                    "role_reconciled": False,
+                                    "error": (
+                                        "Stackable rollback descriptor does not "
+                                        "describe the delivered inventory grant: "
+                                        f"{inv_conflict}"
+                                    ),
+                                }
                             inv_ok = await rollback_item_inventory_grant(
                                 guild_id,
                                 user_id,
@@ -4780,6 +5007,34 @@ def format_purchase_inspection(evidence: dict) -> str:
         f"Created / Upd  : {op.get('created_at')} / {op.get('updated_at')}",
         f"Detail         : {op.get('detail') or '(none)'}",
     ]
+    # Late-delivery rollback state. A descriptor that is still present means
+    # compensation is unfinished: `reconcile_delivery_rollbacks` retries it, and
+    # a descriptor that cannot be reconciled with the grant (wrong role id,
+    # wrong inventory row, missing provenance) is deliberately left here for an
+    # operator instead of being completed.
+    raw_rb = op.get("_raw_delivery_rollback", op.get("delivery_rollback"))
+    if raw_rb is None:
+        lines.append("Delivery Rollback: (none recorded)")
+    elif raw_rb == "":
+        lines.append("Delivery Rollback: completed")
+    else:
+        parsed_rb = None
+        try:
+            parsed_rb = json.loads(raw_rb)
+        except Exception:
+            parsed_rb = None
+        if isinstance(parsed_rb, dict):
+            flags = ", ".join(
+                f"{flag}={bool(parsed_rb.get(flag))}"
+                for flag in ("inventory_rolled_back", "equip_reconciled",
+                             "role_reconciled"))
+            lines.append(f"Delivery Rollback: PENDING ({flags})")
+            if parsed_rb.get("retry_entry_key"):
+                lines.append(
+                    f"  Retry marker : {parsed_rb['retry_entry_key']}")
+            lines.append(f"  Descriptor   : {json.dumps(parsed_rb, sort_keys=True)}")
+        else:
+            lines.append(f"Delivery Rollback: PENDING (unreadable) {raw_rb!r}")
     wallet = evidence.get("member_wallet")
     if wallet is not None:
         lines.append(

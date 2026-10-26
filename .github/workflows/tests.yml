@@ -1,0 +1,46 @@
+name: tests
+
+# Minimal, deliberately partial CI.
+#
+# It runs ONLY the two suites that are known-green with the real dependency set
+# from a clean checkout:
+#
+#   * `test_timed_ownership.py` — the ownership / late-delivery-rollback suite
+#     (`pip install -r requirements.txt pytest`, no secrets, no Discord socket).
+#   * `npm test` — the hand-written Node harnesses for the dashboard JS
+#     (`scripts/run_js_tests.sh`; node only, no npm dependencies).
+#
+# The remaining root and `scripts/` Python suites are script-style harnesses
+# with documented pre-existing failures (4 of 72 `scripts/test_*.py`, 30 of 41
+# root `test_*.py` under pytest — see the audit report). They are NOT gated
+# here: a red build must mean a real regression, not a known-broken file.
+# Widen this workflow only after those files are green.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-ownership:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Ownership / rollback suite
+        run: python -m pytest -q test_timed_ownership.py
+
+  js-harnesses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Node harnesses
+        run: npm test

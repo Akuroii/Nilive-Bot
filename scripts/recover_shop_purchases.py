@@ -12,6 +12,28 @@ Read-only by default:
       wallet balance, ledger rows, inventory items, timed holdings, temp_roles,
       equipped role) without mutating any state.
 
+Pending late-delivery rollbacks (`delivery_rollback`):
+  `--op-id` inspection prints the operation's `Delivery Rollback` line. Three
+  states are possible, and they are NOT interchangeable:
+    * `(none recorded)`   - no late-delivery compensation was ever needed.
+    * `completed`         - compensation finished; the descriptor was cleared.
+    * `PENDING (...)`     - compensation is unfinished. `reconcile_delivery_rollbacks`
+                            retries it automatically, including after a restart.
+  A descriptor stays PENDING on purpose when the rollback cannot be reconciled
+  with the grant it claims - for example a `role_id` that disagrees with the
+  timed holding or with the delivered inventory row's `metadata.role_id`, an
+  `item_name` that addresses a different inventory row than the delivered
+  snapshot, a holding that names another operation as its origin, or a
+  malformed `entry_key`. The diagnostic in the journal's last error names the
+  conflict. Resolve the CONFLICT (fix the recorded grant, or compensate the
+  member by hand and record why), then let reconciliation retry; do not blank
+  `delivery_rollback` with SQL, which would silently mark uncompensated state
+  as done.
+  Note: `--resolve` applies only to operations in status `uncertain` or
+  `failed`. An operation whose rollback is pending is usually already
+  `refunded`; it is not resolvable here and needs the runtime reconciliation
+  above.
+
 Explicit operator resolution (requires `--op-id`, `--resolve`, `--yes`, and `--note`):
   * `python scripts/recover_shop_purchases.py --db /path/to/nilive.db --op-id <op_id> --resolve refund --yes --note "verified role not granted"`
       Atomically and idempotently refunds charged currency and restores reserved

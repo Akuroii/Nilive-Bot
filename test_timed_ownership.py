@@ -5096,7 +5096,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             "role_id": rid,
             "role_added": True,
             "prior_inventory": None,
-            "delivered_inventory": None,
+            "delivered_inventory": self._role_snapshot(rid),
             "inventory_rolled_back": True,
             "equip_reconciled": True,
             "role_reconciled": False,
@@ -5665,6 +5665,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                 "guild_id": GUILD, "user_id": USER, "item_id": 7802,
                 "item_name": "P16HandoffColor", "internal_type": "role",
                 "role_id": rid, "role_added": True,
+                "delivered_inventory": self._role_snapshot(rid),
                 "inventory_rolled_back": True, "equip_reconciled": True,
                 "role_reconciled": False,
             }
@@ -5800,6 +5801,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                 "guild_id": GUILD, "user_id": USER, "item_id": 7810 + idx,
                 "item_name": f"P17Fail{idx}", "internal_type": "role",
                 "role_id": rid, "role_added": True,
+                "delivered_inventory": self._role_snapshot(rid),
                 "inventory_rolled_back": True, "equip_reconciled": True,
                 "role_reconciled": False,
             }, bot=bot)
@@ -5896,6 +5898,21 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
     # ── P19–P26: final corrective pass (stale progress, malformed rows,
     #    durable retry fairness, exact boost identity) ────────────────────
 
+    @staticmethod
+    def _role_snapshot(role_id, quantity=1):
+        """The `delivered_inventory` tuple `give_reward()` returns for a role.
+
+        The role delivery path always writes the granted role into the
+        inventory row's metadata (`{"role_id": ...}`, see `give_reward`) and
+        hands that row back to the shop, so every producer-generated
+        descriptor carries this snapshot — including on a retry, where the row
+        itself may already have been rolled back. A hand-built descriptor
+        without it describes a state the shop cannot produce.
+        """
+        return [1, quantity, "role", "shop",
+                json.dumps({"role_id": int(role_id), "expires_at": None}),
+                "2026-01-01 00:00:00", "2026-01-01 00:00:00"]
+
     async def _refunded_op(self, name, item_id, *, internal_type="potion",
                            role_id=None, extra=None, flags=None):
         op = await TO.open_purchase(
@@ -5909,6 +5926,8 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             "inventory_rolled_back": False, "equip_reconciled": False,
             "role_reconciled": False,
         }
+        if role_id is not None and not (extra or {}).get("delivered_inventory"):
+            spec["delivered_inventory"] = self._role_snapshot(role_id)
         if extra:
             spec.update(extra)
         if flags:
@@ -7304,6 +7323,273 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             rows("SELECT delivery_rollback FROM shop_purchase_operations"
                  " WHERE op_id=?", (op_a,))[0][0], "")
+
+    # ── P45–P49: descriptor identity must be reconciled with the grant ─────
+    # A descriptor's own `role_id` / `item_name` is a claim, not evidence. The
+    # authoritative record is the one the producer wrote at delivery time: the
+    # timed holding's `role_id`, the delivered inventory row's
+    # `metadata.role_id`, and that row's id (captured in the snapshot). Where a
+    # hand-built descriptor disagrees, the rollback must refuse instead of
+    # acting on a role or a unit this purchase never granted.
+
+    async def test_p45_timed_role_descriptor_role_id_must_match_the_holding(self):
+        """P45 (confirmed defect): a `temp_role` descriptor whose `role_id` is
+        not the holding's recorded role must not remove that other role, must
+        not retire the holding or its equipment, and must not complete.
+
+        A forged descriptor naming a role the purchase never granted used to be
+        passed straight to `remove_roles` while the holding and its equipped
+        slot were deleted, and the operation was reported compensated.
+        """
+        granted, other = 7001, 7002
+        op, spec = await self._refunded_op(
+            "P45Color", 8817, internal_type="temp_role", role_id=granted,
+            flags={"role_added": True})
+        role, person, bot, holding_id, entry_key = await self._timed_role_setup(
+            granted, op=op)
+        other_role = role_stub(other, "P45BystanderRole")
+        person.roles.append(other_role)
+        # The forged role must be resolvable: on the unpatched tree the rollback
+        # looked it up and handed it to `remove_roles`.
+        guild = bot.get_guild(GUILD)
+        guild.get_role = lambda r: (
+            role if int(r) == granted
+            else other_role if int(r) == other else None)
+        from utils.equip_engine import record_equipped
+        await record_equipped(GUILD, USER, "P45Color", role_id=granted,
+                              entry_key=entry_key)
+        spec["entry_key"] = entry_key
+        spec["role_id"] = other          # forged / corrupted
+        await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        before_holdings = rows("SELECT id, role_id FROM timed_holdings ORDER BY id")
+        before_equipped = rows(
+            "SELECT item_name, role_id, entry_key FROM equipped_roles"
+            " WHERE guild_id=? AND user_id=?", (GUILD, USER))
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("granted role", str(res.get("error", "")), str(res))
+        self.assertEqual(person.remove_roles.await_count, 0,
+                         "a Discord role was removed for a role_id that nothing "
+                         "ties to this purchase")
+        self.assertIn(role, person.roles)
+        self.assertIn(other_role, person.roles)
+        self.assertEqual(rows("SELECT id, role_id FROM timed_holdings ORDER BY id"),
+                         before_holdings, "the holding was retired")
+        self.assertEqual(
+            rows("SELECT item_name, role_id, entry_key FROM equipped_roles"
+                 " WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+            before_equipped, "equipment was changed")
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "",
+            "the descriptor was cleared without reconciling the role")
+
+    async def test_p46_timed_role_control_removes_only_the_holding_role(self):
+        """P46 (control for P45): the holding's own role is still removed once,
+        its holding retired, its equipped slot cleared and the descriptor
+        completed."""
+        rid = 7003
+        op, spec = await self._refunded_op(
+            "P46Color", 8818, internal_type="temp_role", role_id=rid,
+            flags={"role_added": True})
+        role, person, bot, holding_id, entry_key = await self._timed_role_setup(
+            rid, op=op)
+        from utils.equip_engine import record_equipped
+        await record_equipped(GUILD, USER, "P46Color", role_id=rid,
+                              entry_key=entry_key)
+        spec["entry_key"] = entry_key
+        await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+
+        self.assertTrue(res["complete"], str(res))
+        self.assertEqual(person.remove_roles.await_count, 1)
+        removed = person.remove_roles.await_args[0][0]
+        self.assertEqual(getattr(removed, "id", None), rid,
+                         "the rollback removed a role other than the granted one")
+        self.assertNotIn(role, person.roles)
+        self.assertEqual(rows("SELECT id FROM timed_holdings WHERE id=?",
+                              (holding_id,)), [])
+        self.assertEqual(rows("SELECT item_name FROM equipped_roles"
+                              " WHERE guild_id=? AND user_id=?", (GUILD, USER)), [])
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "")
+
+    async def test_p47_permanent_role_descriptor_role_id_must_match_delivered_row(self):
+        """P47 (confirmed defect): a permanent-role descriptor naming a
+        different role than the one recorded in its delivered inventory row must
+        not strip that other role from the member, and must not complete.
+
+        The inventory half is still rolled back (it is identity-verified); the
+        Discord/equipment half must refuse. On the unpatched tree the descriptor
+        named the role handed to `remove_roles`, so the member lost a role this
+        purchase never granted while keeping the refunded one.
+        """
+        granted, other = 7004, 7005
+        name = "P47Perm"
+        rid = granted
+        role = role_stub(rid, name)
+        itx, person, bot, guild = purchase_ctx(granted_role=role)
+        person.roles.append(role)
+        person.remove_roles = AsyncMock()
+
+        from utils.inventory import set_quantity
+        await set_quantity(GUILD, USER, name, 1, item_type="role", source="shop",
+                           metadata={"role_id": granted, "expires_at": None})
+        delivered = rows(
+            "SELECT id, quantity, item_type, source, metadata, created_at,"
+            " updated_at FROM inventory_items WHERE guild_id=? AND user_id=?"
+            " AND item_name=?", (GUILD, USER, name))[0]
+        op, spec = await self._refunded_op(
+            name, 8819, internal_type="role", role_id=granted,
+            extra={"delivered_inventory": list(delivered)})
+        spec["role_id"] = other
+        other_role = role_stub(other, "P47BystanderRole")
+        person.roles.append(other_role)
+        guild.get_role = lambda r: (
+            role if int(r) == granted
+            else other_role if int(r) == other else None)
+        await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        before_equipped = rows(
+            "SELECT item_name, role_id, entry_key FROM equipped_roles"
+            " WHERE guild_id=? AND user_id=?", (GUILD, USER))
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("granted role", str(res.get("error", "")), str(res))
+        self.assertEqual(person.remove_roles.await_count, 0,
+                         "a Discord role was removed for a role_id that the "
+                         "delivered inventory record contradicts")
+        self.assertIn(role, person.roles)
+        self.assertIn(other_role, person.roles)
+        self.assertEqual(
+            rows("SELECT item_name, role_id, entry_key FROM equipped_roles"
+                 " WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+            before_equipped, "equipment was changed")
+        durable = json.loads(rows(
+            "SELECT delivery_rollback FROM shop_purchase_operations"
+            " WHERE op_id=?", (op,))[0][0])
+        self.assertTrue(durable.get("inventory_rolled_back"), str(durable))
+        self.assertFalse(durable.get("role_reconciled"), str(durable))
+
+    async def test_p48_stackable_descriptor_item_name_must_match_the_snapshot(self):
+        """P48 (confirmed defect): a stackable descriptor whose `item_name`
+        addresses a different row than its `delivered_inventory` snapshot must
+        not decrement or delete that unrelated grant, and must not complete.
+
+        On the unpatched tree `rollback_item_inventory_grant` selected by name,
+        so an unrelated three-unit claim row was decremented to two while this
+        purchase's own row was left untouched.
+        """
+        own_name, other_name = "P48Own", "P48Other"
+        from utils.inventory import give_item
+        await give_item(GUILD, USER, other_name, 3, item_type="shop_custom",
+                        source="level_claim")
+        await give_item(GUILD, USER, own_name, 1, item_type="shop_custom",
+                        source="shop")
+        delivered = rows(
+            "SELECT id, quantity, item_type, source, metadata, created_at,"
+            " updated_at FROM inventory_items WHERE guild_id=? AND user_id=?"
+            " AND item_name=?", (GUILD, USER, own_name))[0]
+        op, spec = await self._refunded_op(
+            own_name, 8820, internal_type="shop_custom",
+            extra={"delivered_inventory": list(delivered)})
+        spec["item_name"] = other_name
+        await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        before = rows("SELECT item_name, quantity, source FROM inventory_items"
+                      " WHERE guild_id=? AND user_id=? ORDER BY item_name",
+                      (GUILD, USER))
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("delivered inventory grant", str(res.get("error", "")), str(res))
+        self.assertEqual(
+            rows("SELECT item_name, quantity, source FROM inventory_items"
+                 " WHERE guild_id=? AND user_id=? ORDER BY item_name",
+                 (GUILD, USER)),
+            before, "an unrelated grant was decremented or deleted")
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "",
+            "the descriptor was cleared without identifying the grant")
+
+    async def test_p49_delivered_snapshot_row_must_still_be_the_named_row(self):
+        """P49: a snapshot whose row no longer exists, while a different row now
+        carries the descriptor's `item_name`, is a conflict — not a no-op.
+
+        Completing there would claim the delivered unit was rolled back while
+        deleting/decrementing a row this purchase never created.
+        """
+        name = "P49Own"
+        from utils.inventory import give_item
+        await give_item(GUILD, USER, name, 2, item_type="shop_custom",
+                        source="level_claim")
+        delivered = rows(
+            "SELECT id, quantity, item_type, source, metadata, created_at,"
+            " updated_at FROM inventory_items WHERE guild_id=? AND user_id=?"
+            " AND item_name=?", (GUILD, USER, name))[0]
+        fake = list(delivered)
+        fake[0] = int(delivered[0]) + 900
+        op, spec = await self._refunded_op(
+            name, 8821, internal_type="shop_custom",
+            extra={"delivered_inventory": fake})
+        await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        before = rows("SELECT item_name, quantity FROM inventory_items"
+                      " WHERE guild_id=? AND user_id=?", (GUILD, USER))
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("no longer exists", str(res.get("error", "")), str(res))
+        self.assertEqual(
+            rows("SELECT item_name, quantity FROM inventory_items"
+                 " WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+            before, "a row this purchase did not create was mutated")
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "")
+
+    async def test_p50_conflicting_role_id_never_removes_or_completes_across_replays(self):
+        """P50: a conflicting descriptor stays refused on every replay, so an
+        operator must resolve it — no silent completion, and the bystander role
+        is never removed even after repeated reconciliation passes.
+        """
+        granted, other = 7006, 7007
+        op, spec = await self._refunded_op(
+            "P50Color", 8822, internal_type="temp_role", role_id=granted,
+            flags={"role_added": True})
+        role, person, bot, holding_id, entry_key = await self._timed_role_setup(
+            granted, op=op)
+        bystander = role_stub(other, "P50Bystander")
+        person.roles.append(bystander)
+        guild = bot.get_guild(GUILD)
+        guild.get_role = lambda r: (
+            role if int(r) == granted
+            else bystander if int(r) == other else None)
+        spec["entry_key"] = entry_key
+        spec["role_id"] = other
+        await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+        for _ in range(3):
+            TO._PENDING_DELIVERY_ROLLBACKS.clear()
+            await TO.reconcile_delivery_rollbacks(bot=bot, limit=5)
+        self.assertEqual(person.remove_roles.await_count, 0)
+        self.assertIn(bystander, person.roles)
+        self.assertIn(role, person.roles)
+        self.assertEqual(rows("SELECT id FROM timed_holdings WHERE id=?",
+                              (holding_id,)), [(holding_id,)])
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
