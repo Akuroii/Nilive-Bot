@@ -5926,7 +5926,13 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         from utils.inventory import give_item
         name = "P19StalePotion"
         await give_item(GUILD, USER, name, 3, item_type="potion", source="shop")
-        op, stale_spec = await self._refunded_op(name, 9901)
+        delivered_snapshot = rows(
+            "SELECT id, quantity, item_type, source, metadata, created_at,"
+            " updated_at FROM inventory_items"
+            " WHERE guild_id=? AND user_id=? AND item_name=?",
+            (GUILD, USER, name))[0]
+        op, stale_spec = await self._refunded_op(
+            name, 9901, extra={"delivered_inventory": list(delivered_snapshot)})
         await TO.record_pending_delivery_rollback(op, stale_spec, bot=None)
         TO._PENDING_DELIVERY_ROLLBACKS.clear()
 
@@ -6175,7 +6181,13 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         execute("UPDATE shop_purchase_operations SET delivery_rollback=?,"
                 " updated_at='2000-01-01 00:00:00' WHERE op_id=?",
                 (json.dumps({"inventory_rolled_back": False}), bad))
-        good, good_spec = await self._refunded_op("P22Good", 9941)
+        from utils.inventory import give_item
+        await give_item(GUILD, USER, "P22Good", 1, item_type="potion", source="shop")
+        p22_snapshot = rows(
+            "SELECT id, quantity, item_type, source, metadata, created_at,"
+            " updated_at FROM inventory_items WHERE item_name='P22Good'")[0]
+        good, good_spec = await self._refunded_op(
+            "P22Good", 9941, extra={"delivered_inventory": list(p22_snapshot)})
         good_spec.update({"inventory_rolled_back": True,
                           "equip_reconciled": True, "role_reconciled": True})
         await TO.record_pending_delivery_rollback(good, good_spec, bot=None)
@@ -6208,7 +6220,13 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                     " updated_at='2000-01-01 00:00:0%d' WHERE op_id=?" % idx,
                     ("{corrupt-%d" % idx, op))
             corrupt.append(op)
-        good, good_spec = await self._refunded_op("P23Good", 9959)
+        from utils.inventory import give_item
+        await give_item(GUILD, USER, "P23Good", 1, item_type="potion", source="shop")
+        p23_snapshot = rows(
+            "SELECT id, quantity, item_type, source, metadata, created_at,"
+            " updated_at FROM inventory_items WHERE item_name='P23Good'")[0]
+        good, good_spec = await self._refunded_op(
+            "P23Good", 9959, extra={"delivered_inventory": list(p23_snapshot)})
         good_spec.update({"inventory_rolled_back": True,
                           "equip_reconciled": True, "role_reconciled": True})
         await TO.record_pending_delivery_rollback(good, good_spec, bot=None)
@@ -6595,6 +6613,127 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             "SELECT delivery_rollback FROM shop_purchase_operations"
             " WHERE op_id=?", (op,))[0][0])
         self.assertFalse(durable["role_reconciled"])
+
+
+    # ── P32–P33: stackable/timed rollbacks need real provenance ───────────
+    # `cogs/shop.py::_deliver_purchase` delivers a timed Item as a holding
+    # (`entry_key="h:<id>"`, no inventory snapshot) and a stackable grant with
+    # the `delivered_inventory` snapshot `give_reward()` returned. A descriptor
+    # missing BOTH cannot identify what this purchase delivered.
+
+    async def test_p32_timed_item_without_holding_key_never_guesses(self):
+        """P32: a timed Item whose `h:` key was lost must not fall into the
+        stackable branch — on 83f097f it deleted an independently granted
+        same-named unit, left the holding live and reported completion."""
+        for label, bad_key in (("missing", "__absent__"), ("null", None),
+                               ("not-a-key", "not-a-key")):
+            await reset_database()
+            seed_member()
+            purge_timed()
+            holding_id = await TO.grant_timed_holding(
+                GUILD, USER, "Rental Badge",
+                expires_at="2099-01-01T00:00:00+00:00",
+                item_type="shop_custom", source="shop")
+            # An INDEPENDENT grant of the same item name (e.g. a level claim).
+            from utils.inventory import give_item
+            await give_item(GUILD, USER, "Rental Badge", 1,
+                            item_type="shop_custom", source="level_claim")
+            op, spec = await self._refunded_op(
+                "Rental Badge", 9979, internal_type="shop_custom",
+                extra={"entry_key": f"h:{holding_id}"})
+            if bad_key == "__absent__":
+                spec.pop("entry_key", None)
+            else:
+                spec["entry_key"] = bad_key
+            await TO.record_pending_delivery_rollback(op, spec, bot=None)
+            TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+            res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
+
+            self.assertFalse(res["complete"], f"{label}: {res}")
+            self.assertIn("delivered-inventory snapshot", str(res.get("error")),
+                          f"{label}: {res}")
+            self.assertEqual(
+                rows("SELECT quantity FROM inventory_items"
+                     " WHERE item_name='Rental Badge' AND source='level_claim'"),
+                [(1,)],
+                f"{label}: the independently granted unit was destroyed")
+            self.assertEqual(
+                rows("SELECT id FROM timed_holdings WHERE id=?", (holding_id,)),
+                [(holding_id,)],
+                f"{label}: the holding was retired without a verifiable key")
+            self.assertNotEqual(
+                rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                     " WHERE op_id=?", (op,))[0][0], "",
+                f"{label}: descriptor was cleared")
+
+        # Control: the real producer shape (holding key) still rolls back.
+        await reset_database(); seed_member(); purge_timed()
+        holding_id = await TO.grant_timed_holding(
+            GUILD, USER, "Rental Badge", expires_at="2099-01-01T00:00:00+00:00",
+            item_type="shop_custom", source="shop")
+        op, spec = await self._refunded_op(
+            "Rental Badge", 9980, internal_type="shop_custom",
+            extra={"entry_key": f"h:{holding_id}"})
+        await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
+        self.assertTrue(res["complete"], str(res))
+        self.assertEqual(rows("SELECT id FROM timed_holdings WHERE id=?",
+                              (holding_id,)), [])
+
+    async def test_p33_stackable_rollback_requires_delivered_snapshot(self):
+        """P33: a stackable descriptor with no `delivered_inventory` snapshot
+        must not remove a same-named unit that was granted independently — on
+        83f097f it deleted the unit and reported completion."""
+        from utils.inventory import give_item
+        await reset_database(); seed_member(); purge_timed()
+        await give_item(GUILD, USER, "Golden Key", 1, item_type="shop_custom",
+                        source="level_claim")
+        op, spec = await self._refunded_op(
+            "Golden Key", 9981, internal_type="shop_custom")
+        await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("delivered-inventory snapshot", str(res.get("error")))
+        self.assertEqual(
+            rows("SELECT item_name, quantity, source FROM inventory_items"),
+            [("Golden Key", 1, "level_claim")],
+            "the independent unit was removed by a snapshot-less rollback")
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "")
+
+        # Control: with the real delivered snapshot the shop's unit is removed
+        # and the independent unit survives.
+        await reset_database(); seed_member(); purge_timed()
+        await give_item(GUILD, USER, "Golden Key", 1, item_type="shop_custom",
+                        source="level_claim")
+        before_snap = rows(
+            "SELECT id,quantity,item_type,source,metadata,created_at,updated_at"
+            " FROM inventory_items WHERE item_name='Golden Key'")[0]
+        await give_item(GUILD, USER, "Golden Key", 1, item_type="shop_custom",
+                        source="shop")
+        after_snap = rows(
+            "SELECT id,quantity,item_type,source,metadata,created_at,updated_at"
+            " FROM inventory_items WHERE item_name='Golden Key'")[0]
+        op2, spec2 = await self._refunded_op(
+            "Golden Key", 9982, internal_type="shop_custom",
+            extra={"prior_inventory": list(before_snap),
+                   "delivered_inventory": list(after_snap)})
+        await TO.record_pending_delivery_rollback(op2, spec2, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        res2 = await TO.compensate_late_delivery(op2, dict(spec2), bot=None)
+        self.assertTrue(res2["complete"], str(res2))
+        self.assertEqual(
+            rows("SELECT quantity FROM inventory_items WHERE item_name='Golden Key'"),
+            [(1,)], "the independent unit did not survive a correct rollback")
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op2,))[0][0], "")
 
 
 if __name__ == "__main__":

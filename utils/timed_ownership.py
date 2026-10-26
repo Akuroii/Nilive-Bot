@@ -2169,6 +2169,12 @@ _ROLLBACK_IDENTITY_FIELDS = (
     "delivered_inventory",
 )
 
+# Products delivered as a stack of `inventory_items` units (no holding row).
+# Their rollback must be able to identify the unit THIS purchase delivered;
+# without that evidence the only thing a rollback could do is remove a
+# same-named unit that may have been granted independently.
+_STACKABLE_ROLLBACK_TYPES = ("potion", "title", "custom", "shop_custom", "item")
+
 _ROLLBACK_SUPPORTED_TYPES = (
     "role",
     "temp_role",
@@ -2278,6 +2284,27 @@ def _validate_delivery_rollback_spec(spec) -> tuple[bool, str | None]:
             return False, (
                 "temp_role descriptor without a timed-holding 'entry_key'"
             )
+    if internal_type in _STACKABLE_ROLLBACK_TYPES:
+        # Two legitimate shapes, and no third:
+        #   * a timed product (`entry_key` = `h:<holding id>`), rolled back by
+        #     retiring its holding — its descriptor has no inventory snapshot;
+        #   * a stackable grant, identified by the `delivered_inventory`
+        #     snapshot `give_reward()` returned at delivery time.
+        # A descriptor with neither would fall through to the stackable branch
+        # and remove whatever unit happens to share the item name — possibly an
+        # independent grant — while leaving a live holding in place. Keep it
+        # pending for diagnosis instead of guessing.
+        holding_key = spec.get("entry_key")
+        holding_backed = (
+            isinstance(holding_key, str) and holding_key.startswith("h:")
+        )
+        if not holding_backed:
+            delivered = spec.get("delivered_inventory")
+            if not isinstance(delivered, (list, tuple)) or len(delivered) < 2:
+                return False, (
+                    f"{internal_type} descriptor has neither a timed-holding "
+                    f"'entry_key' nor a delivered-inventory snapshot"
+                )
     if internal_type == "xp_boost":
         boost_id = spec.get("boost_id")
         if boost_id is not None:
@@ -3578,7 +3605,17 @@ async def compensate_late_delivery(
                 return await _persist_incomplete(f"XP boost rollback failed: {exc}")
 
     # ── Branch 4: Stackable item (`internal_type in (...)`) ─────────────
-    elif internal_type in ("potion", "title", "custom", "shop_custom", "item"):
+    elif internal_type in _STACKABLE_ROLLBACK_TYPES:
+        if not spec.get("inventory_rolled_back") and delivered_inv is None:
+            # Validation already refuses this shape; repeating the check here
+            # keeps the guarantee local to the mutation: without the delivered
+            # snapshot there is no way to tell this purchase's unit from an
+            # independently granted one, and `rollback_item_inventory_grant`
+            # would remove a unit by name.
+            return await _persist_incomplete(
+                f"{internal_type} rollback for {item_name!r} has no delivered "
+                f"inventory snapshot; refusing to guess which unit to remove"
+            )
         if not spec.get("inventory_rolled_back"):
             try:
                 async with aiosqlite.connect(DB_PATH) as rb_db:
