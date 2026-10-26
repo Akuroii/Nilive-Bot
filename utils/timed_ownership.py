@@ -211,6 +211,7 @@ async def grant_timed_holding(guild_id: int, user_id: int, item_name: str,
                               product_id: int | None = None,
                               category: str | None = None,
                               role_id: int | None = None,
+                              op_id: str | None = None,
                               db: aiosqlite.Connection | None = None) -> int:
     """Insert one timed holding. Call ONLY after delivery has succeeded.
 
@@ -220,12 +221,22 @@ async def grant_timed_holding(guild_id: int, user_id: int, item_name: str,
 
     An optional caller-owned connection is joined, not committed — the same
     contract as `utils.inventory.give_item(..., db=)`.
+
+    `op_id` records the Shop purchase operation that created this holding in
+    `metadata["origin_op_id"]`. That marker is the only durable proof that a
+    specific `h:<id>` key belongs to a specific operation: member, item name
+    and product id are all shared when one member buys the same product twice.
+    A late-delivery rollback refuses to retire a holding whose marker names a
+    different operation.
     """
     if not expires_at:
         raise ValueError("grant_timed_holding requires an explicit expires_at")
     if int(quantity) <= 0:
         raise ValueError("quantity must be positive")
-    payload = json.dumps(metadata) if metadata else None
+    meta_payload = dict(metadata) if metadata else {}
+    if op_id:
+        meta_payload["origin_op_id"] = str(op_id)
+    payload = json.dumps(meta_payload) if meta_payload else None
     role_value = role_id
     if role_value is None and metadata:
         try:
@@ -832,6 +843,71 @@ async def timed_holding_owner(entry_key) -> tuple[int, int] | None:
     if row is None:
         return None
     return int(row[0] or 0), int(row[1] or 0)
+
+
+async def timed_holding_provenance(entry_key) -> dict | None:
+    """Identity of an `h:<id>` holding, including the purchase that created it.
+
+    Returns `{"guild_id", "user_id", "origin_op_id"}` or None when the holding
+    no longer exists. `origin_op_id` is the Shop purchase operation recorded in
+    the holding's metadata at creation time (`grant_timed_holding(op_id=...)`),
+    or None for holdings granted before that marker existed.
+
+    A holding's member is NOT enough to identify its purchase: one member can
+    buy the same timed product repeatedly, and those holdings share guild,
+    member, item name and product id. Only `origin_op_id` (or, for legacy rows,
+    the operation's own journal record naming this exact key) binds a holding
+    to the operation that must be compensated.
+    """
+    key = str(entry_key or "")
+    if not key.startswith("h:"):
+        return None
+    holding_id = entry_key_id(key)
+    if holding_id is None:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT guild_id, user_id, metadata FROM timed_holdings WHERE id=?",
+            (holding_id,),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    try:
+        meta = json.loads(row[2]) if row[2] else {}
+    except Exception:
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    origin = meta.get("origin_op_id")
+    return {
+        "guild_id": int(row[0] or 0),
+        "user_id": int(row[1] or 0),
+        "origin_op_id": str(origin) if origin else None,
+    }
+
+
+async def purchase_operation_names_holding(op_id, entry_key) -> bool:
+    """True when this operation's journal records creating exactly `entry_key`.
+
+    `shop_purchase_operations.detail` is written as `holding h:<id>` in the same
+    transaction as the `pending -> delivered` transition, so for a holding that
+    predates the `origin_op_id` marker it is the durable, operation-scoped
+    evidence that the key is this purchase's own. An operator note or any other
+    detail value makes the answer False (fail closed, descriptor preserved).
+    """
+    key = str(entry_key or "")
+    if not key.startswith("h:") or entry_key_id(key) is None:
+        return False
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT detail FROM shop_purchase_operations WHERE op_id=?",
+            (str(op_id),),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return False
+    return str(row[0] or "").strip() == f"holding {key}"
 
 
 # ── Expiry cleanup ──────────────────────────────────────────────────────
@@ -1719,6 +1795,7 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
                               product_id: int | None = None,
                               category: str | None = None,
                               role_id: int | None = None,
+                              op_id: str | None = None,
                               reason: str = "Timed reward") -> dict:
     """Deliver a timed holding. Call ONLY after the charge/reservation is safe.
 
@@ -1790,7 +1867,8 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
         holding_id = await grant_timed_holding(
             guild_id, user_id, item_name, expires_at=expires_at,
             item_type=item_type, metadata=meta, source=source,
-            product_id=product_id, category=category, role_id=role_id)
+            product_id=product_id, category=category, role_id=role_id,
+            op_id=op_id)
     except Exception as exc:
         return {"success": False, "entry_key": None, "expires_at": None,
                 "error": f"Could not record ownership: {exc}",
@@ -2906,16 +2984,39 @@ async def compensate_late_delivery(
         # corrupted descriptor, or an id belonging to another member) must not
         # expire or delete somebody else's ownership record.
         try:
-            holding_owner = await timed_holding_owner(str(late_key))
+            provenance = await timed_holding_provenance(str(late_key))
         except Exception as exc:
             return await _persist_incomplete(
                 f"Timed holding lookup failed for {late_key}: {exc}"
             )
+        holding_owner = (
+            (provenance["guild_id"], provenance["user_id"])
+            if provenance is not None else None
+        )
         if holding_owner is not None and holding_owner != (int(guild_id), int(user_id)):
             return await _persist_incomplete(
                 f"Timed holding {late_key} does not belong to this purchase's "
                 f"member; refusing to retire it"
             )
+        # Same member is NOT the same purchase: one member can hold several
+        # timed grants of the same product at once. Expiring this key retires a
+        # record (and, for a timed Color, an equipped slot) that this operation
+        # may never have created, so require durable proof of the link.
+        if provenance is not None:
+            origin_op = provenance.get("origin_op_id")
+            if origin_op is not None:
+                if str(origin_op) != str(op_id):
+                    return await _persist_incomplete(
+                        f"Timed holding {late_key} was created by purchase "
+                        f"operation {origin_op}, not {op_id}; refusing to expire "
+                        f"or delete another operation's holding"
+                    )
+            elif not await purchase_operation_names_holding(str(op_id), str(late_key)):
+                return await _persist_incomplete(
+                    f"Timed holding {late_key} has no durable record linking it "
+                    f"to purchase operation {op_id}; refusing to expire or delete "
+                    f"a holding that may belong to another purchase"
+                )
         if holding_owner is None and not spec.get("inventory_rolled_back"):
             # The key is shaped like a holding id but no such holding exists, and
             # no earlier attempt recorded that it retired one. Completing here

@@ -5671,13 +5671,13 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             return op, spec
 
         async def _holding_op():
-            holding_id = await TO.grant_timed_holding(
-                GUILD, USER, "P16HandoffHolding",
-                expires_at=iso_in(5), role_id=rid, source="shop")
             op = await TO.open_purchase(
                 guild_id=GUILD, user_id=USER, item_id=7803,
                 item_name="P16HandoffHolding", currency="balance", amount=100)
             await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
+            holding_id = await TO.grant_timed_holding(
+                GUILD, USER, "P16HandoffHolding",
+                expires_at=iso_in(5), role_id=rid, source="shop", op_id=op)
             spec = {
                 "guild_id": GUILD, "user_id": USER, "item_id": 7803,
                 "item_name": "P16HandoffHolding", "internal_type": "temp_role",
@@ -6394,15 +6394,20 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
     # (`role_added` from `give_reward`). A descriptor that does not identify the
     # thing the branch must undo can never be treated as rolled back.
 
-    async def _timed_role_setup(self, rid):
-        """A delivered timed role: live holding, member holding the role, op refunded."""
+    async def _timed_role_setup(self, rid, op=None):
+        """A delivered timed role: live holding, member holding the role, op refunded.
+
+        The holding is created with `op_id=op`, exactly as
+        `cogs/shop.py::_deliver_purchase` creates it, so the rollback can prove
+        the key belongs to this operation instead of merely the same member.
+        """
         purge_timed()
         role = role_stub(rid, f"P27Role{rid}")
         itx, person, bot, guild = purchase_ctx(granted_role=role)
         person.roles.append(role)
         holding_id = await TO.grant_timed_holding(
             GUILD, USER, f"P27Holding{rid}", expires_at=iso_in(5), role_id=rid,
-            source="shop")
+            source="shop", op_id=op)
         entry_key = f"h:{holding_id}"
         return role, person, bot, holding_id, entry_key
 
@@ -6419,10 +6424,11 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             ("malformed-h", "h:abc"),
             ("no-such-holding", "h:999999"),
         ):
-            role, person, bot, holding_id, real_key = await self._timed_role_setup(rid)
             op, spec = await self._refunded_op(
-                f"P27Role{rid}", 9972, internal_type="temp_role", role_id=rid,
-                extra={"entry_key": real_key})
+                f"P27Role{rid}", 9972, internal_type="temp_role", role_id=rid)
+            role, person, bot, holding_id, real_key = await self._timed_role_setup(
+                rid, op=op)
+            spec["entry_key"] = real_key
             if bad_key == "__absent__":
                 spec.pop("entry_key", None)
             else:
@@ -6455,11 +6461,13 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         stats = await TO.reconcile_delivery_rollbacks(bot=bot, limit=10)
         self.assertEqual(stats.get("completed", 0), 0, str(stats))
 
-        # Control: the real producer shape (a live `h:<id>` key) compensates.
-        role, person, bot, holding_id, real_key = await self._timed_role_setup(rid)
+        # Control: the real producer shape (a live `h:<id>` key owned by this
+        # operation) compensates.
         op, spec = await self._refunded_op(
-            f"P27Role{rid}", 9973, internal_type="temp_role", role_id=rid,
-            extra={"entry_key": real_key})
+            f"P27Role{rid}", 9973, internal_type="temp_role", role_id=rid)
+        role, person, bot, holding_id, real_key = await self._timed_role_setup(
+            rid, op=op)
+        spec["entry_key"] = real_key
         await TO.record_pending_delivery_rollback(op, spec, bot=bot)
         TO._PENDING_DELIVERY_ROLLBACKS.clear()
         res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
@@ -6593,10 +6601,12 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         role cannot be removed — the descriptor must stay pending (on 48d7e51 it
         was marked `role_reconciled=True` and cleared, keeping the role)."""
         rid = 9988
-        role, person, bot, holding_id, real_key = await self._timed_role_setup(rid)
         op, spec = await self._refunded_op(
             f"P31Role{rid}", 9978, internal_type="temp_role", role_id=None,
-            extra={"entry_key": real_key, "role_added": True})
+            extra={"role_added": True})
+        role, person, bot, holding_id, real_key = await self._timed_role_setup(
+            rid, op=op)
+        spec["entry_key"] = real_key
         # The producer always rewrites role_id from the listing; simulate the
         # damaged shape (identity lost) while the holding key is still valid.
         spec["role_id"] = None
@@ -6630,17 +6640,17 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await reset_database()
             seed_member()
             purge_timed()
+            op, spec = await self._refunded_op(
+                "Rental Badge", 9979, internal_type="shop_custom")
             holding_id = await TO.grant_timed_holding(
                 GUILD, USER, "Rental Badge",
                 expires_at="2099-01-01T00:00:00+00:00",
-                item_type="shop_custom", source="shop")
+                item_type="shop_custom", source="shop", op_id=op)
             # An INDEPENDENT grant of the same item name (e.g. a level claim).
             from utils.inventory import give_item
             await give_item(GUILD, USER, "Rental Badge", 1,
                             item_type="shop_custom", source="level_claim")
-            op, spec = await self._refunded_op(
-                "Rental Badge", 9979, internal_type="shop_custom",
-                extra={"entry_key": f"h:{holding_id}"})
+            spec["entry_key"] = f"h:{holding_id}"
             if bad_key == "__absent__":
                 spec.pop("entry_key", None)
             else:
@@ -6669,12 +6679,12 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
 
         # Control: the real producer shape (holding key) still rolls back.
         await reset_database(); seed_member(); purge_timed()
+        op, spec = await self._refunded_op(
+            "Rental Badge", 9980, internal_type="shop_custom")
         holding_id = await TO.grant_timed_holding(
             GUILD, USER, "Rental Badge", expires_at="2099-01-01T00:00:00+00:00",
-            item_type="shop_custom", source="shop")
-        op, spec = await self._refunded_op(
-            "Rental Badge", 9980, internal_type="shop_custom",
-            extra={"entry_key": f"h:{holding_id}"})
+            item_type="shop_custom", source="shop", op_id=op)
+        spec["entry_key"] = f"h:{holding_id}"
         await TO.record_pending_delivery_rollback(op, spec, bot=None)
         TO._PENDING_DELIVERY_ROLLBACKS.clear()
         res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
@@ -6734,6 +6744,279 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             rows("SELECT delivery_rollback FROM shop_purchase_operations"
                  " WHERE op_id=?", (op2,))[0][0], "")
+
+    # ── P34–P39: a holding belongs to an OPERATION, not just to a member ──
+    # One member can hold the same timed product twice (two purchases). Member,
+    # item name and product id are then identical, so only the operation
+    # recorded on the holding at creation (`origin_op_id`) — or, for legacy
+    # rows, the operation's own journal entry naming that exact key — binds it.
+    # P34/P35/P39 are written in the legacy shape so the defect is demonstrable
+    # on the PREVIOUS code; P36/P37 exercise the `origin_op_id` binding.
+
+    def _holding_row(self, entry_key):
+        return rows(
+            "SELECT id, expires_at, metadata FROM timed_holdings WHERE id=?",
+            (int(str(entry_key).split(":", 1)[1]),))
+
+    async def _legacy_two_holdings(self, sid, rid=None):
+        """Two holdings for the SAME member, granted without an origin marker.
+
+        This is the shape every holding written before `origin_op_id` existed
+        has, and the only evidence available for it is the operation journal.
+        """
+        purge_timed()
+        person = bot = role = None
+        if rid is not None:
+            role = role_stub(rid, f"P34Color{rid}")
+            itx, person, bot, guild = purchase_ctx(granted_role=role)
+            person.roles.append(role)
+            guild.get_role = lambda r: role if int(r) == rid else None
+        name = f"P34Color{rid}" if rid is not None else f"P35Rental{sid}"
+        expire = iso_in(24)
+        own = await TO.grant_timed_holding(
+            GUILD, USER, name, expires_at=expire, item_type="shop_custom",
+            source="shop", role_id=rid)
+        other = await TO.grant_timed_holding(
+            GUILD, USER, name, expires_at=expire, item_type="shop_custom",
+            source="shop", role_id=rid)
+        if rid is not None:
+            from utils.equip_engine import record_equipped
+            await record_equipped(GUILD, USER, name, role_id=rid,
+                                  entry_key=f"h:{other}")
+        return own, other, person, bot, role, name
+
+    async def test_p34_other_operations_holding_is_never_retired(self):
+        """P34 (confirmed defect): a descriptor pointing at ANOTHER operation's
+        holding of the same member must not expire, delete or unequip it, and
+        must not complete.
+
+        On 130c6dc the member-only ownership check passed: the other purchase's
+        holding was expired and deleted, the equipped slot was re-pointed to this
+        operation's holding, and the descriptor was cleared as compensated.
+        """
+        rid = 9931
+        own, other, person, bot, role, name = await self._legacy_two_holdings(
+            1, rid=rid)
+        own_key, target_key = f"h:{own}", f"h:{other}"
+        before_target = self._holding_row(target_key)
+        before_own = self._holding_row(own_key)
+        before_equipped = rows(
+            "SELECT item_name, role_id, entry_key FROM equipped_roles"
+            " WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        self.assertEqual(before_equipped, [(name, rid, target_key)],
+                         "fixture: the second purchase must own the equipped slot")
+        removes_before = person.remove_roles.await_count
+
+        op, spec = await self._refunded_op(
+            name, 8801, internal_type="temp_role", role_id=rid)
+        # The operation's OWN journal records the holding it really created.
+        await TO.update_purchase(op, detail=f"holding {own_key}")
+        # The descriptor is corrupted to point at the other purchase's holding.
+        spec["entry_key"] = target_key
+        await TO.record_pending_delivery_rollback(op, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertEqual(self._holding_row(target_key), before_target,
+                         "another operation's holding was expired or stamped")
+        self.assertEqual(self._holding_row(own_key), before_own,
+                         "this operation's own holding was touched")
+        self.assertEqual(
+            rows("SELECT item_name, role_id, entry_key FROM equipped_roles"
+                 " WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+            before_equipped, "the equipped slot of the other holding was changed")
+        self.assertEqual(person.remove_roles.await_count, removes_before,
+                         "a Discord role was removed for a foreign holding")
+        self.assertIn(role, person.roles)
+        durable = rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                       " WHERE op_id=?", (op,))[0][0]
+        self.assertNotEqual(durable, "", "the descriptor was cleared")
+        durable_spec = json.loads(durable)
+        self.assertFalse(durable_spec["inventory_rolled_back"])
+        self.assertFalse(durable_spec["role_reconciled"])
+        # The ordinary 10-minute sweep must not retire it either.
+        stats = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats.get("removed", 0), 0, str(stats))
+        self.assertEqual(self._holding_row(target_key), before_target)
+
+    async def test_p35_other_operations_timed_item_is_never_deleted(self):
+        """P35: the same gap for a timed Item, whose `internal_type` is a
+        stackable one — Branch 1 runs before the stackable fallback, so nothing
+        else stops the deletion. On 130c6dc it completed and deleted the other
+        purchase's holding."""
+        own, other, _person, _bot, _role, name = await self._legacy_two_holdings(2)
+        own_key, target_key = f"h:{own}", f"h:{other}"
+        before_target = self._holding_row(target_key)
+
+        op, spec = await self._refunded_op(name, 8802, internal_type="shop_custom")
+        await TO.update_purchase(op, detail=f"holding {own_key}")
+        spec["entry_key"] = target_key
+        spec["role_added"] = False
+        await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertEqual(self._holding_row(target_key), before_target,
+                         "the other operation's timed item was expired or deleted")
+        self.assertEqual(len(self._holding_row(own_key)), 1,
+                         "this operation's own holding was touched")
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "",
+            "the descriptor was cleared without compensating anything")
+
+    async def _marked_two_holdings(self, rid):
+        """Two timed Colours, each recording the operation that created it."""
+        purge_timed()
+        role = role_stub(rid, f"P36Color{rid}")
+        itx, person, bot, guild = purchase_ctx(granted_role=role)
+        person.roles.append(role)
+        guild.get_role = lambda r: role if int(r) == rid else None
+        op_a = await TO.open_purchase(
+            guild_id=GUILD, user_id=USER, item_id=8805,
+            item_name=f"P36Color{rid}", currency="balance", amount=250)
+        await TO.update_purchase(op_a, status=TO.PURCHASE_REFUNDED, refunded=1)
+        a = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name=f"P36Color{rid}", duration_hours=24,
+            item_type="temp_role", category="color", product_id=8805,
+            role_id=rid, source="shop", op_id=op_a,
+            reason=f"Shop purchase: P36Color{rid}")
+        person.add_roles = AsyncMock()
+        op_b = await TO.open_purchase(
+            guild_id=GUILD, user_id=USER, item_id=8805,
+            item_name=f"P36Color{rid}", currency="balance", amount=250)
+        await TO.update_purchase(op_b, status=TO.PURCHASE_DELIVERED, charged=1)
+        b = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name=f"P36Color{rid}", duration_hours=24,
+            item_type="temp_role", category="color", product_id=8805,
+            role_id=rid, source="shop", op_id=op_b,
+            reason=f"Shop purchase: P36Color{rid}")
+        return op_a, op_b, a["entry_key"], b["entry_key"], person, bot, role
+
+    async def test_p36_origin_marker_that_names_another_operation_is_refused(self):
+        """P36: the creation-time `origin_op_id` marker identifies the purchase.
+        A descriptor carrying the other operation's marked holding is refused
+        without touching either holding."""
+        rid = 9936
+        op_a, op_b, own_key, target_key, person, bot, role = await self._marked_two_holdings(rid)
+        self.assertEqual(
+            (await TO.timed_holding_provenance(target_key))["origin_op_id"],
+            str(op_b), "fixture: the target must record the other operation")
+        before_target = self._holding_row(target_key)
+        before_equipped = rows(
+            "SELECT item_name, role_id, entry_key FROM equipped_roles"
+            " WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        spec = {
+            "guild_id": GUILD, "user_id": USER, "item_id": 8805,
+            "item_name": f"P36Color{rid}", "internal_type": "temp_role",
+            "role_id": rid, "role_added": True, "entry_key": target_key,
+            "inventory_rolled_back": False, "equip_reconciled": False,
+            "role_reconciled": False,
+        }
+        await TO.record_pending_delivery_rollback(op_a, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op_a, dict(spec), bot=bot)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("another operation", str(res.get("error", "")), str(res))
+        self.assertEqual(self._holding_row(target_key), before_target)
+        self.assertEqual(len(self._holding_row(own_key)), 1)
+        self.assertEqual(
+            rows("SELECT item_name, role_id, entry_key FROM equipped_roles"
+                 " WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+            before_equipped)
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op_a,))[0][0], "")
+
+    async def test_p37_verified_operation_still_compensates_only_its_own(self):
+        """P37 (control): when the holding records THIS operation, the rollback
+        completes, retires only its own holding and leaves the other purchase
+        (holding and equipped slot) untouched."""
+        rid = 9937
+        op_a, op_b, own_key, target_key, person, bot, role = await self._marked_two_holdings(rid)
+        before_equipped = rows(
+            "SELECT item_name, role_id, entry_key FROM equipped_roles"
+            " WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        spec = {
+            "guild_id": GUILD, "user_id": USER, "item_id": 8805,
+            "item_name": f"P36Color{rid}", "internal_type": "temp_role",
+            "role_id": rid, "role_added": True, "entry_key": own_key,
+            "inventory_rolled_back": False, "equip_reconciled": False,
+            "role_reconciled": False,
+        }
+        await TO.record_pending_delivery_rollback(op_a, spec, bot=bot)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op_a, dict(spec), bot=bot)
+
+        self.assertTrue(res["complete"], str(res))
+        self.assertEqual(self._holding_row(own_key), [],
+                         "this operation's own holding was not retired")
+        self.assertEqual(len(self._holding_row(target_key)), 1,
+                         "the other operation's holding was retired")
+        self.assertEqual(
+            rows("SELECT item_name, role_id, entry_key FROM equipped_roles"
+                 " WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+            before_equipped, "the other purchase's equipped slot was disturbed")
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op_a,))[0][0], "",
+            "a verified rollback never reached the durable completion sentinel")
+
+    async def test_p38_legacy_holding_is_bound_by_the_operation_journal(self):
+        """P38 (legacy compatibility): a holding granted before the marker
+        existed still rolls back when this operation's journal names that exact
+        key — ordinary compensation is not blocked for existing data."""
+        own, other, _person, _bot, _role, name = await self._legacy_two_holdings(3)
+        own_key, other_key = f"h:{own}", f"h:{other}"
+        self.assertIsNone(
+            (await TO.timed_holding_provenance(own_key))["origin_op_id"],
+            "fixture: this holding must have no origin marker")
+        op, spec = await self._refunded_op(name, 8803, internal_type="shop_custom")
+        await TO.update_purchase(op, detail=f"holding {own_key}")
+        spec["entry_key"] = own_key
+        await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
+
+        self.assertTrue(res["complete"], str(res))
+        self.assertEqual(rows("SELECT id FROM timed_holdings WHERE id=?", (own,)), [],
+                         "the operation's own legacy holding was not retired")
+        self.assertEqual(len(rows("SELECT id FROM timed_holdings WHERE id=?", (other,))),
+                         1, "an unrelated legacy holding was retired")
+
+    async def test_p39_unidentifiable_legacy_holding_fails_closed(self):
+        """P39: a legacy holding this operation cannot be shown to own (no
+        marker, journal no longer naming it) is preserved and the descriptor
+        stays pending. On 130c6dc it was expired and deleted, and the operation
+        was reported complete."""
+        own, other, _person, _bot, _role, name = await self._legacy_two_holdings(4)
+        own_key = f"h:{own}"
+        op, spec = await self._refunded_op(name, 8804, internal_type="shop_custom")
+        # An operator note replaced the delivery detail: no durable link remains.
+        await TO.update_purchase(op, detail="Operator resolved via refund")
+        spec["entry_key"] = own_key
+        await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        before = rows("SELECT id, expires_at FROM timed_holdings ORDER BY id")
+
+        res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
+
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("no durable record", str(res.get("error", "")), str(res))
+        self.assertEqual(rows("SELECT id, expires_at FROM timed_holdings ORDER BY id"),
+                         before, "an unidentifiable holding was expired or deleted")
+        self.assertNotEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op,))[0][0], "",
+            "the descriptor was cleared without proof")
 
 
 if __name__ == "__main__":

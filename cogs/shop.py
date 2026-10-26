@@ -477,7 +477,7 @@ async def process_purchase(interaction: discord.Interaction,
         itype=internal_type, listing_type=itype, name=name,
         role_id=role_id, duration_hours=duration_hours,
         multiplier=xp_boost_multiplier,
-        category=category, product_id=iid, source="shop")
+        category=category, product_id=iid, source="shop", op_id=str(op_id))
 
     if not delivery["success"]:
         await _compensate_failed_purchase(
@@ -777,7 +777,8 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
                             role_id=None, duration_hours=None,
                             multiplier=None, category: str | None = None,
                             product_id: int | None = None,
-                            source: str = "shop") -> dict:
+                            source: str = "shop",
+                            op_id: str | None = None) -> dict:
     """Deliver one purchased product; returns a result dict, never raises.
 
     Every branch reports success explicitly. There is no "unknown type"
@@ -788,6 +789,11 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
     (Colors, Items). Potion/Title/xp_boost keep their dedicated semantics — a
     potion's duration is its effect once activated, a title has no expiry and
     an XP boost is applied immediately.
+
+    `op_id` is passed to the timed-holding grants so each holding records the
+    purchase operation that created it. Without that, a late-delivery rollback
+    could only compare the holding's member, and one member's second purchase
+    of the same product is indistinguishable from the first.
     """
     result = {"success": False, "expires_at": None, "warning": None,
               "detail": None, "boost_expires_at": None, "error": None,
@@ -805,7 +811,7 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
                 bot, guild_id, user_id, item_name=name,
                 duration_hours=duration_hours, item_type="temp_role",
                 category=category, product_id=product_id,
-                role_id=role_id, source=source,
+                role_id=role_id, source=source, op_id=op_id,
                 reason=f"Shop purchase: {name}")
             if not granted["success"]:
                 result.update(error=granted.get("error"),
@@ -958,7 +964,7 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
                 bot, guild_id, user_id, item_name=name,
                 duration_hours=duration_hours, item_type="shop_custom",
                 category=category, product_id=product_id, source=source,
-                reason=f"Shop purchase: {name}")
+                op_id=op_id, reason=f"Shop purchase: {name}")
             if not granted["success"]:
                 result.update(error=granted.get("error"),
                               uncertain=granted.get("uncertain", False))
