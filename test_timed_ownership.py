@@ -8145,6 +8145,238 @@ def producer_spec(name="ReviewPotion", internal_type="potion", **extra):
     return spec
 
 
+# ── 14. `_complete_linked_rollback` (the late-rollback completion write) ───
+
+class LinkedRollbackCompletionTests(unittest.IsolatedAsyncioTestCase):
+    """Covers the helper that clears `delivery_rollback` after a holding retired.
+
+    The observable contract is the DURABLE column, so every assertion re-reads it
+    through a fresh connection (`rows()`) rather than trusting the returned
+    outcome. That is also how the commit-ownership cases are proved: a reported
+    `cleared` that was never committed is invisible from another connection.
+    """
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        for table in ("shop_purchase_operations", "inventory_items",
+                      "equipped_roles", "leveling_active_boosts",
+                      "timed_holdings"):
+            execute(f"DELETE FROM {table}")
+
+    async def _op(self, name="LinkedThing", status=None):
+        """A refunded operation (the settled state that permits completion)."""
+        op_id = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name=name, currency="balance",
+            amount=100)
+        await TO.update_purchase(op_id, status=status or TO.PURCHASE_REFUNDED,
+                                 refunded=1)
+        return op_id
+
+    async def _undelivered_op(self, name="LinkedThing"):
+        """A still-pending operation: the only state `delivered` can follow."""
+        return await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name=name, currency="balance",
+            amount=100)
+
+    def _raw(self, op_id):
+        return rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                    " WHERE op_id=?", (op_id,))[0][0]
+
+    def _pending_spec(self, name="LinkedThing"):
+        return {"guild_id": GUILD, "user_id": USER, "item_id": 1,
+                "item_name": name, "internal_type": "potion",
+                "inventory_rolled_back": False, "equip_reconciled": False,
+                "role_reconciled": False, "entry_key": None,
+                "delivered_inventory": [999999, 1, "potion", "shop",
+                                        None, None, None]}
+
+    async def _pending(self, name="LinkedThing", status=None, refunded=True):
+        op_id = (await self._op(name, status=status) if refunded
+                 else await self._undelivered_op(name))
+        await TO.record_pending_delivery_rollback(
+            op_id, self._pending_spec(name), bot=None)
+        self.assertTrue(self._raw(op_id), "fixture did not persist a descriptor")
+        return op_id
+
+    async def _deliver(self, op_id):
+        """Move an operation to `delivered`, asserting the guard let it through.
+
+        `update_purchase` only allows the delivered transition out of
+        pending/uncertain/failed with nothing refunded or returned, so a silently
+        unmatched update would leave this test asserting the wrong status.
+        """
+        await TO.update_purchase(op_id, status=TO.PURCHASE_DELIVERED)
+        self.assertEqual(
+            rows("SELECT status FROM shop_purchase_operations WHERE op_id=?",
+                 (op_id,)), [(TO.PURCHASE_DELIVERED,)],
+            "fixture could not reach the delivered status")
+
+    # ── refused states ──────────────────────────────────────────────────
+
+    async def test_delivered_operation_refuses_and_preserves_the_descriptor(self):
+        # Goods were kept: no refund, and the rollback is still pending because
+        # the delivery path recorded it and never completed it.
+        op_id = await self._pending("LinkedDelivered", refunded=False)
+        await self._deliver(op_id)
+        before = self._raw(op_id)
+
+        outcome, detail = await TO._complete_linked_rollback(op_id)
+
+        self.assertEqual(outcome, "refused", detail)
+        self.assertIn("delivered", detail or "")
+        self.assertEqual(self._raw(op_id), before,
+                         "a delivered operation's descriptor was overwritten")
+
+    async def test_malformed_descriptor_is_preserved_byte_for_byte(self):
+        for label, raw in (("unparseable", "{not json"),
+                           ("non-object", "[1, 2]"),
+                           ("empty object", "{}"),
+                           ("null", "null")):
+            op_id = await self._op(f"LinkedMalformed{abs(hash(label)) % 1000}")
+            execute("UPDATE shop_purchase_operations SET delivery_rollback=?"
+                    " WHERE op_id=?", (raw, op_id))
+            outcome, detail = await TO._complete_linked_rollback(op_id)
+            self.assertIn(outcome, ("malformed", "refused"),
+                          f"{label}: {outcome} / {detail}")
+            self.assertEqual(self._raw(op_id), raw,
+                             f"{label}: the descriptor was rewritten")
+
+    async def test_null_descriptor_is_never_fabricated(self):
+        op_id = await self._op("LinkedNull")
+        self.assertIsNone(self._raw(op_id))
+
+        outcome, detail = await TO._complete_linked_rollback(op_id)
+
+        self.assertEqual(outcome, "malformed", detail)
+        self.assertIn("no durable descriptor", detail or "")
+        self.assertIsNone(
+            self._raw(op_id),
+            "the helper created a descriptor where there was none")
+
+    async def test_unknown_operation_refuses_safely(self):
+        outcome, detail = await TO._complete_linked_rollback("no-such-op-id")
+        self.assertEqual(outcome, "malformed", detail)
+        self.assertIn("not found", detail or "")
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM shop_purchase_operations"), [(0,)])
+
+    async def test_completed_sentinel_is_an_idempotent_noop(self):
+        op_id = await self._op("LinkedDone")
+        execute("UPDATE shop_purchase_operations SET delivery_rollback='',"
+                " detail='kept' WHERE op_id=?", (op_id,))
+        before = rows("SELECT delivery_rollback, detail"
+                      " FROM shop_purchase_operations WHERE op_id=?", (op_id,))
+
+        for _ in range(3):
+            outcome, detail = await TO._complete_linked_rollback(op_id)
+            self.assertEqual(outcome, "already", detail)
+
+        self.assertEqual(
+            rows("SELECT delivery_rollback, detail"
+                 " FROM shop_purchase_operations WHERE op_id=?", (op_id,)),
+            before, "repeated completions mutated the finished row")
+
+    # ── the successful path, including the commit ───────────────────────
+
+    async def test_settled_pending_descriptor_is_cleared_and_committed(self):
+        op_id = await self._pending("LinkedClear")
+
+        outcome, detail = await TO._complete_linked_rollback(op_id)
+
+        self.assertEqual(outcome, "cleared", detail)
+        # `rows()` opens its own connection: this only sees the value if the
+        # helper's own commit actually happened.
+        self.assertEqual(self._raw(op_id), "",
+                         "the reported clear was not committed to the database")
+
+    async def test_cleared_path_is_idempotent_across_passes(self):
+        op_id = await self._pending("LinkedClearTwice")
+        first, _ = await TO._complete_linked_rollback(op_id)
+        second, detail = await TO._complete_linked_rollback(op_id)
+        self.assertEqual(first, "cleared")
+        self.assertEqual(second, "already", detail)
+        self.assertEqual(self._raw(op_id), "")
+
+    # ── compare-and-swap against a concurrent writer ────────────────────
+
+    async def test_a_concurrent_advance_is_not_overwritten(self):
+        op_id = await self._pending("LinkedRace")
+        newer = json.dumps({**self._pending_spec("LinkedRace"),
+                            "inventory_rolled_back": True,
+                            "last_error": "written by another process"})
+        real_update = TO.update_purchase
+        calls = {"n": 0}
+
+        async def racing_update(oid, **kwargs):
+            if calls["n"] == 0 and kwargs.get("delivery_rollback") == "":
+                calls["n"] += 1
+                # Another process advances the descriptor between this call's
+                # read and its compare-and-swap write.
+                execute("UPDATE shop_purchase_operations"
+                        " SET delivery_rollback=? WHERE op_id=?", (newer, oid))
+            return await real_update(oid, **kwargs)
+
+        with patch.object(TO, "update_purchase", side_effect=racing_update):
+            outcome, detail = await TO._complete_linked_rollback(op_id)
+
+        self.assertEqual(calls["n"], 1,
+                         "the concurrent advance never ran: test is vacuous")
+        self.assertEqual(outcome, "already", detail)
+        self.assertEqual(self._raw(op_id), newer,
+                         "a stale completion overwrote a newer descriptor")
+        self.assertEqual(json.loads(self._raw(op_id))["inventory_rolled_back"],
+                         True)
+
+    # ── connection / transaction ownership ──────────────────────────────
+
+    async def test_caller_owned_transaction_is_not_committed_by_the_helper(self):
+        import aiosqlite
+        from phase1_support import DB_FILE
+
+        op_id = await self._pending("LinkedCallerTx")
+        async with aiosqlite.connect(DB_FILE) as conn:
+            outcome, detail = await TO._complete_linked_rollback(op_id, db=conn)
+            self.assertEqual(outcome, "cleared", detail)
+            # Still uncommitted: another connection cannot see the sentinel.
+            self.assertTrue(
+                self._raw(op_id),
+                "the helper committed a transaction it does not own")
+            await conn.rollback()
+
+        self.assertTrue(
+            self._raw(op_id),
+            "a rolled-back caller transaction still cleared the descriptor")
+
+    async def test_caller_commit_makes_the_clear_durable(self):
+        import aiosqlite
+        from phase1_support import DB_FILE
+
+        op_id = await self._pending("LinkedCallerCommit")
+        async with aiosqlite.connect(DB_FILE) as conn:
+            outcome, _ = await TO._complete_linked_rollback(op_id, db=conn)
+            self.assertEqual(outcome, "cleared")
+            await conn.commit()
+        self.assertEqual(self._raw(op_id), "",
+                         "a committed caller transaction did not persist")
+
+    async def test_caller_transaction_still_refuses_a_delivered_operation(self):
+        import aiosqlite
+        from phase1_support import DB_FILE
+
+        # Goods were kept: no refund, and the rollback is still pending because
+        # the delivery path recorded it and never completed it.
+        op_id = await self._pending("LinkedCallerDelivered", refunded=False)
+        await self._deliver(op_id)
+        before = self._raw(op_id)
+        async with aiosqlite.connect(DB_FILE) as conn:
+            outcome, _ = await TO._complete_linked_rollback(op_id, db=conn)
+            self.assertEqual(outcome, "refused")
+            await conn.commit()
+        self.assertEqual(self._raw(op_id), before)
+
+
 class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
     """Each test here failed against `87687c5`; see REVIEW_FINDINGS §D1-D5."""
 
