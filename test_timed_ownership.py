@@ -8094,6 +8094,7 @@ class OperatorCliTests(unittest.IsolatedAsyncioTestCase):
         rc, out = self._cli()
         self.assertEqual(rc, 0, out)
         self.assertIn("descriptor is unreadable", out)
+        self.assertIn("preserved for diagnosis", out)
 
         rc, out = self._cli("--op-id", op_id, "--check-rollback")
         self.assertEqual(rc, 1, out)
@@ -8292,6 +8293,19 @@ class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 self._raw(op_id), raw_value,
                 f"{label}: the descriptor was rewritten; recovery evidence lost")
+
+    async def test_d2_listing_reports_a_malformed_descriptor_as_malformed(self):
+        """Operators must not be told a non-executable descriptor is "pending"."""
+        op_id = await self._settled("MalformedShown")
+        execute("UPDATE shop_purchase_operations SET delivery_rollback='{}'"
+                " WHERE op_id=?", (op_id,))
+        summaries = await TO._pending_rollback_summaries()
+        self.assertIn(str(op_id), summaries)
+        self.assertIn("not an executable descriptor", summaries[str(op_id)])
+        self.assertNotIn("no reason recorded", summaries[str(op_id)])
+        rc, out = self._cli()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("preserved for diagnosis", out)
 
     async def test_d2_a_completed_descriptor_has_nothing_to_retire(self):
         op_id = await self._settled("AlreadyDone")

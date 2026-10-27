@@ -5295,13 +5295,20 @@ async def _pending_rollback_summaries() -> dict[str, str]:
         except Exception:
             return out
     for op_id, raw in fetched:
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            out[str(op_id)] = "descriptor is unreadable"
+        # Same classifier the compensation path uses, so the listing cannot call
+        # a descriptor "pending" that the runtime would refuse to execute (an
+        # empty object, a non-object, or unparseable JSON) - those are preserved
+        # for diagnosis and must say so here.
+        state, parsed = _delivery_rollback_state(raw)
+        if state == "malformed":
+            try:
+                json.loads(raw)
+                problem = "not an executable descriptor (preserved for diagnosis)"
+            except Exception:
+                problem = "unreadable, preserved for diagnosis"
+            out[str(op_id)] = f"descriptor is {problem}"
             continue
-        if not isinstance(parsed, dict):
-            out[str(op_id)] = "descriptor is not a JSON object"
+        if state != "live" or not isinstance(parsed, dict):
             continue
         flags = [
             flag for flag in _ROLLBACK_PROGRESS_FLAGS if not parsed.get(flag)
