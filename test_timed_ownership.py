@@ -8458,6 +8458,84 @@ class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Rollback retired by operator",
                       (await TO.get_purchase(op_id))["detail"] or "")
 
+    # ── CP1: `unequip_role` must not erase a slot equipped while it waits ──
+
+    async def test_unequip_role_does_not_erase_a_slot_equipped_while_discord_is_awaited(self):
+        """The await on Discord is the failure window, not just the DB read.
+
+        `unequip_role` validates the slot, awaits entitlement checks and
+        `member.remove_roles`, and then deletes the member's equipment row. A
+        legitimate equip that lands inside that await owns the slot by the time
+        the delete runs, and only an identity predicate in the DELETE keeps it.
+        """
+        from utils.equip_engine import record_equipped, unequip_role
+
+        old_role = role_stub(9611, "RaceOldRole")
+        new_role = role_stub(9612, "RaceNewRole")
+        roles = {9611: old_role, 9612: new_role}
+        _, person, bot, guild = purchase_ctx(granted_role=old_role)
+        guild.get_role = lambda rid: roles.get(int(rid))
+        person.roles = [old_role]
+        await record_equipped(GUILD, USER, "RaceOldRole", role_id=9611,
+                             entry_key="h:old")
+        self.assertEqual(
+            rows("SELECT item_name, entry_key FROM equipped_roles"),
+            [("RaceOldRole", "h:old")])
+
+        async def _racing_remove(role, reason=None):
+            # A concurrent, entirely legitimate equip lands while this call is
+            # suspended on the Discord round-trip.
+            await record_equipped(GUILD, USER, "RaceNewRole", role_id=9612,
+                                  entry_key="h:new")
+            person.roles = [r for r in person.roles if r.id != role.id]
+
+        person.remove_roles = AsyncMock(side_effect=_racing_remove)
+
+        result = await unequip_role(bot, GUILD, USER, "RaceOldRole",
+                                    entry_key="h:old")
+
+        self.assertEqual(
+            rows("SELECT item_name, entry_key, role_id FROM equipped_roles"),
+            [("RaceNewRole", "h:new", 9612)],
+            "the slot equipped during the await was erased by the stale unequip")
+        self.assertIsNot(result.get("item_name"), "RaceNewRole",
+                         "the stale unequip reported the new slot as removed")
+        self.assertFalse(
+            result.get("success"),
+            f"a stale unequip claimed the equip state changed: {result}")
+        self.assertIn("changed", str(result.get("error", "")).lower())
+
+    async def test_unequip_role_legacy_null_key_predicate_uses_the_role_id(self):
+        """A legacy slot's identity is (NULL entry_key, role_id).
+
+        A concurrent equip that lands in the await installs a legacy record for
+        a DIFFERENT role, so the predicate must not match on `NULL` alone.
+        """
+        from utils.equip_engine import record_equipped, unequip_role
+
+        old_role = role_stub(9613, "LegacyRaceOld")
+        new_role = role_stub(9614, "LegacyRaceNew")
+        roles = {9613: old_role, 9614: new_role}
+        _, person, bot, guild = purchase_ctx(granted_role=old_role)
+        guild.get_role = lambda rid: roles.get(int(rid))
+        person.roles = [old_role]
+        await record_equipped(GUILD, USER, "LegacyRaceOld", role_id=9613,
+                              entry_key=None)
+
+        async def _racing_remove(role, reason=None):
+            await record_equipped(GUILD, USER, "LegacyRaceNew", role_id=9614,
+                                  entry_key=None)
+            person.roles = [r for r in person.roles if r.id != role.id]
+
+        person.remove_roles = AsyncMock(side_effect=_racing_remove)
+        result = await unequip_role(bot, GUILD, USER, "LegacyRaceOld")
+
+        self.assertEqual(
+            rows("SELECT item_name, entry_key, role_id FROM equipped_roles"),
+            [("LegacyRaceNew", None, 9614)],
+            "the legacy predicate matched the wrong role's slot")
+        self.assertFalse(result.get("success"), str(result))
+
     # ── D4: a pending rollback must never become unreachable ────────────
 
     async def test_d4_delivered_resolution_is_refused_while_compensation_pends(self):

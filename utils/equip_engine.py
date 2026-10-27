@@ -282,11 +282,32 @@ async def unequip_role(bot: discord.Client, guild_id: int, user_id: int,
                     return {"success": False,
                             "error": f"Discord error removing role: {e}"}
 
+    # Conditional delete carrying the identity that was validated. Everything
+    # above this point can suspend on the Discord round-trip, and a legitimate
+    # equip that lands in that window owns the slot by now; deleting by member
+    # alone would erase it and report the NEW item as removed.
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?",
-            (guild_id, user_id))
+        if current_key:
+            cursor = await db.execute(
+                "DELETE FROM equipped_roles"
+                " WHERE guild_id=? AND user_id=? AND entry_key=?",
+                (guild_id, user_id, current_key))
+        else:
+            # Legacy row: its identity is "no entry_key, this role".
+            cursor = await db.execute(
+                "DELETE FROM equipped_roles"
+                " WHERE guild_id=? AND user_id=?"
+                " AND (entry_key IS NULL OR entry_key='') AND role_id=?",
+                (guild_id, user_id, role_id))
+        cleared = int(getattr(cursor, "rowcount", 0) or 0)
         await db.commit()
+
+    if not cleared:
+        # The slot moved on. Say so instead of claiming an equip state change
+        # this call did not make; the newer slot is left exactly as it is.
+        return {"success": False,
+                "error": ("The equipped role changed while it was being "
+                          "unequipped; nothing was cleared.")}
 
     return {"success": True, "item_name": removed_name, "role_id": role_id}
 
