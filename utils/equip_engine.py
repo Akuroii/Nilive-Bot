@@ -1,3 +1,6 @@
+import asyncio
+import functools
+
 import discord
 import aiosqlite
 from database import DB_PATH
@@ -31,6 +34,51 @@ from utils.permissions import check_bot_role_position
 # system." This module only manages the Discord-role side + the
 # equipped_roles bookkeeping table.
 # ═══════════════════════════════════════════════════════════════════════
+
+
+# ── Per-member equip-slot serialisation ──────────────────────────────────────
+# `equip_role` and `unequip_role` do not just write a row: each decides what the
+# member's single equip slot should be, acts on Discord, and only afterwards
+# writes `equipped_roles`. Their decisions are not independent. `equip_role`
+# skips `add_roles` when it sees the role already worn, and `unequip_role`
+# removes the role BEFORE it writes. Interleaved on one member they strip a role
+# the newer equip deliberately kept in place, leaving the database naming an
+# equip the member does not wear. The conditional DELETE cannot repair that: it
+# decides which ROW survives, not what Discord shows.
+#
+# This SQLite file is owned by one process, so one lock per member is the whole
+# coordination required - the two operations become sequential and the later one
+# re-reads the state the earlier one left. The lock is held across the Discord
+# calls on purpose: that await IS the window being closed. It is never held while
+# acquiring another lock, and `swap_and_record_equipped` stays lock-free so the
+# reward and timed-delivery paths can call it from inside a caller that already
+# holds this lock.
+#
+# The registry is keyed per event loop as well as per member: an `asyncio.Lock`
+# binds to the loop it is first awaited on, and a cached lock would then raise
+# "bound to a different event loop" for any later loop (tests, `asyncio.run`,
+# a reloaded cog). A lock is only ever reused by the loop that created it.
+_SLOT_LOCKS: dict[tuple[int, int],
+                   tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
+
+
+def slot_lock(guild_id: int, user_id: int) -> asyncio.Lock:
+    """The lock serialising one member's equip-slot operations on this loop."""
+    loop = asyncio.get_running_loop()
+    key = (int(guild_id), int(user_id))
+    entry = _SLOT_LOCKS.get(key)
+    if entry is None or entry[0] is not loop:
+        entry = _SLOT_LOCKS[key] = (loop, asyncio.Lock())
+    return entry[1]
+
+
+def _serialised_per_member(func):
+    """Hold the member's slot lock for all of `func(bot, guild_id, user_id, ...)`."""
+    @functools.wraps(func)
+    async def wrapper(bot, guild_id, user_id, *args, **kwargs):
+        async with slot_lock(guild_id, user_id):
+            return await func(bot, guild_id, user_id, *args, **kwargs)
+    return wrapper
 
 
 async def get_equipped(guild_id: int, user_id: int) -> dict | None:
@@ -129,6 +177,7 @@ async def swap_and_record_equipped(bot: discord.Client | None,
             "role_id": int(role_id)}
 
 
+@_serialised_per_member
 async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
                       item_name: str, reason: str = "Equipped",
                       *, entry_key: str | None = None) -> dict:
@@ -214,6 +263,7 @@ async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
             "entry_key": owned_key, "role_added": not role_was_present}
 
 
+@_serialised_per_member
 async def unequip_role(bot: discord.Client, guild_id: int, user_id: int,
                        item_name: str | None = None,
                        *, entry_key: str | None = None) -> dict:

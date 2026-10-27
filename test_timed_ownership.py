@@ -8401,6 +8401,155 @@ class LinkedRollbackCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._raw(op_id), before)
 
 
+class SameRoleSlotRaceTests(unittest.IsolatedAsyncioTestCase):
+    """One Discord role, two holdings, two slot operations in flight.
+
+    The equip slot is a *single Discord role*, so `equip_role` and `unequip_role`
+    cannot decide independently: `equip_role` skips `add_roles` when it sees the
+    role already worn, and `unequip_role` removes the role and only afterwards
+    writes the slot. Interleaved on the same member, the stale removal strips a
+    role the newer equip deliberately left in place: the durable slot names an
+    equip the member does not wear. The conditional DELETE cannot help - it only
+    decides which row survives, not what Discord shows.
+    """
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        for table in ("equipped_roles", "inventory_items", "timed_holdings"):
+            execute(f"DELETE FROM {table}")
+
+    async def _same_role_pair(self, role_id):
+        """One permanent and one timed holding of the SAME Discord role."""
+        role = role_stub(role_id, "SameRoleItem")
+        _, person, bot, guild = purchase_ctx(granted_role=role)
+        guild.get_role = lambda rid: role if int(rid) == int(role_id) else None
+        person.roles = [role]
+
+        added = []
+
+        async def _add(target, reason=None):
+            added.append(int(target.id))
+            if target not in person.roles:
+                person.roles.append(target)
+
+        person.add_roles = AsyncMock(side_effect=_add)
+
+        execute("INSERT INTO inventory_items (guild_id,user_id,item_name,item_type,"
+                "quantity,metadata,source) VALUES (?,?,'SameRolePerm','role',1,?,'shop')",
+                (GUILD, USER, f'{{"role_id": {int(role_id)}}}'))
+        inv_id = rows("SELECT id FROM inventory_items WHERE guild_id=? AND user_id=?"
+                      " AND item_name='SameRolePerm'", (GUILD, USER))[0][0]
+        permanent_key = f"i:{inv_id}"
+
+        holding_id = await TO.grant_timed_holding(
+            GUILD, USER, "SameRoleTimed", expires_at=iso_in(5),
+            item_type="temp_role", metadata={"role_id": int(role_id)},
+            role_id=int(role_id), source="shop")
+        timed_key = f"h:{holding_id}"
+
+        return {"role": role, "person": person, "bot": bot, "guild": guild,
+                "added": added, "permanent": permanent_key, "timed": timed_key,
+                "item_permanent": "SameRolePerm", "item_timed": "SameRoleTimed"}
+
+    async def _wait_in_window(self, task, budget=1.5):
+        """Let `task` finish inside the current await window if it can.
+
+        Returns True when the concurrent operation completed while the caller
+        was suspended - which the unfixed code allows and a serialised
+        implementation must not - and False when it is still waiting its turn.
+        """
+        import asyncio
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=budget)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def test_equip_of_the_same_role_during_an_unequip_keeps_it_worn(self):
+        """The reported race: the surviving slot must match what Discord shows."""
+        import asyncio
+        from utils.equip_engine import record_equipped, unequip_role, equip_role
+
+        ctx = await self._same_role_pair(9631)
+        role, person = ctx["role"], ctx["person"]
+        await record_equipped(GUILD, USER, ctx["item_permanent"],
+                              role_id=9631, entry_key=ctx["permanent"])
+
+        window = {}
+
+        async def _racing_remove(target, reason=None):
+            # A legitimate equip of ANOTHER holding of the same role, exactly as
+            # a second click / another device would issue it.
+            task = asyncio.create_task(
+                equip_role(ctx["bot"], GUILD, USER, ctx["item_timed"],
+                           entry_key=ctx["timed"]))
+            window["task"] = task
+            window["finished_in_window"] = await self._wait_in_window(task)
+            person.roles = [r for r in person.roles if r.id != target.id]
+
+        person.remove_roles = AsyncMock(side_effect=_racing_remove)
+
+        result = await unequip_role(ctx["bot"], GUILD, USER,
+                                    ctx["item_permanent"],
+                                    entry_key=ctx["permanent"])
+        equip_result = await window["task"]
+
+        slot = await get_equipped(GUILD, USER)
+        self.assertTrue(equip_result.get("success"), equip_result)
+        self.assertEqual(slot["entry_key"], ctx["timed"],
+                         "the slot must belong to the holding that was equipped")
+        self.assertIn(
+            role, person.roles,
+            "the database records the role as equipped but the member does not "
+            f"wear it (concurrent equip completed in the window: "
+            f"{window['finished_in_window']})")
+        self.assertEqual(ctx["added"], [9631],
+                         "the surviving equip had to re-add the role itself")
+        self.assertFalse(
+            window["finished_in_window"],
+            "the concurrent equip ran to completion inside the unequip's Discord "
+            "await, so nothing serialises the two operations")
+        # The stale unequip must never claim it removed the new holding.
+        self.assertFalse(
+            result.get("success") and result.get("item_name") == ctx["item_timed"],
+            result)
+
+    async def test_a_later_unequip_still_clears_the_serialised_slot(self):
+        """The fix must not leave a slot (or role) that can no longer be cleared."""
+        import asyncio
+        from utils.equip_engine import record_equipped, unequip_role, equip_role
+
+        ctx = await self._same_role_pair(9632)
+        role, person = ctx["role"], ctx["person"]
+        await record_equipped(GUILD, USER, ctx["item_permanent"],
+                              role_id=9632, entry_key=ctx["permanent"])
+
+        window = {}
+
+        async def _racing_remove(target, reason=None):
+            task = asyncio.create_task(
+                equip_role(ctx["bot"], GUILD, USER, ctx["item_timed"],
+                           entry_key=ctx["timed"]))
+            window["task"] = task
+            await self._wait_in_window(task)
+            person.roles = [r for r in person.roles if r.id != target.id]
+
+        person.remove_roles = AsyncMock(side_effect=_racing_remove)
+        await unequip_role(ctx["bot"], GUILD, USER, ctx["item_permanent"],
+                           entry_key=ctx["permanent"])
+        await window["task"]
+
+        later = await unequip_role(ctx["bot"], GUILD, USER, ctx["item_timed"],
+                                   entry_key=ctx["timed"])
+
+        self.assertTrue(later.get("success"), later)
+        self.assertIsNone(await get_equipped(GUILD, USER))
+        self.assertNotIn(role, person.roles,
+                         "the later unequip left the role worn with no slot")
+
+
 class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
     """Each test here failed against `87687c5`; see REVIEW_FINDINGS §D1-D5."""
 
