@@ -8617,8 +8617,13 @@ class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
         await set_quantity(GUILD, USER, "ExpiredTempRole", 1,
                            item_type="temp_role", source="shop",
                            metadata={"role_id": 750})
+        # The slot must key to the row this cleanup will match, otherwise the
+        # function returns before touching anything and the test proves nothing.
+        row_id = rows("SELECT id FROM inventory_items WHERE guild_id=? AND"
+                      " user_id=? AND item_name='ExpiredTempRole'",
+                      (GUILD, USER))[0][0]
         await record_equipped(GUILD, USER, "ExpiredTempRole", role_id=750,
-                              entry_key="i:77")
+                              entry_key=f"i:{row_id}")
         real_get = equip_engine.get_equipped
         fired = {"n": 0}
 
