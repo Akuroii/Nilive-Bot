@@ -7707,23 +7707,47 @@ class RollbackOwnershipBoundaryTests(unittest.IsolatedAsyncioTestCase):
             [(2,)], "an unidentifiable descriptor still mutated inventory")
 
     async def test_a_foreign_descriptor_is_refused_before_any_discord_lookup(self):
-        """The boundary must precede external calls, not follow them."""
-        from unittest.mock import AsyncMock
+        """The ownership boundary must precede external calls, not follow them.
+
+        The ordering is observed with an explicit call log rather than an
+        exception side effect: production catches exceptions around the member
+        lookup, so a raising stub could be swallowed and this test would pass
+        without ever proving where the boundary sits.
+        """
         op_id = await self._op()
         victim = await self._row("BoundThing", user=OTHER_USER, qty=1)
         role = role_stub(703, "VictimRole")
         itx, person, bot, guild = purchase_ctx(granted_role=role)
-        guild.fetch_member = AsyncMock(side_effect=AssertionError(
-            "fetched a member on behalf of a descriptor this purchase does not own"))
-        guild.get_member = lambda uid: person
+
+        calls = []
+
+        def _logged(name, fn):
+            def wrapper(*args, **kwargs):
+                calls.append(name)
+                return fn(*args, **kwargs)
+            return wrapper
+
+        async def _fetch_member(uid):
+            calls.append("fetch_member")
+            return person
+
+        bot.get_guild = _logged("bot.get_guild", bot.get_guild)
+        guild.get_member = _logged("guild.get_member", guild.get_member)
+        guild.fetch_member = _fetch_member
+
         res = await self._compensate(
             op_id, self._spec(item_name="BoundThing", user_id=OTHER_USER,
                               internal_type="role", role_id=703,
                               role_added=True, entry_key="h:1",
                               delivered_inventory=victim),
             bot=bot)
+
         self.assertFalse(res["complete"], str(res))
         self.assertIn("not bound to this purchase", str(res["error"]))
+        self.assertEqual(
+            calls, [],
+            "the descriptor was refused only after touching Discord lookups: "
+            f"{calls}")
         self.assertEqual(
             rows("SELECT quantity FROM inventory_items WHERE id=?",
                  (victim[0],)), [(1,)])
