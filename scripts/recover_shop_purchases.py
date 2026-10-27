@@ -4,9 +4,21 @@
 Requires an explicit SQLite database target via `--db <path>` or `DATABASE_PATH`
 so the CLI can never silently target or create a default production database.
 
+Runs with no environment configuration beyond the database target: the
+`OWNER_ID` the bot runtime requires is not needed here and must not be exported.
+
+Exit codes (stable, so this can be scripted):
+    0  success / the requested check passed (`--check-rollback` found it SAFE)
+    1  the requested check failed, the operation was not found, or performance
+       was refused; nothing was changed unless the output says otherwise
+    2  usage error: a required flag (`--yes`, `--note`) was missing
+
 Read-only by default:
   * `python scripts/recover_shop_purchases.py --db /path/to/nilive.db`
-      Lists all `uncertain` purchase operations.
+      Lists `uncertain` purchase operations AND every operation whose
+      late-delivery rollback is still pending, each with its durably recorded
+      refusal reason. `--pending-rollbacks` lists only the latter;
+      `--all-statuses` lists everything; `--status <s>` filters to one status.
   * `python scripts/recover_shop_purchases.py --db /path/to/nilive.db --op-id <op_id>`
       Displays full SQLite diagnostic evidence (operation journal, shop listing,
       wallet balance, ledger rows, inventory items, timed holdings, temp_roles,
@@ -31,8 +43,29 @@ Pending late-delivery rollbacks (`delivery_rollback`):
   as done.
   Note: `--resolve` applies only to operations in status `uncertain` or
   `failed`. An operation whose rollback is pending is usually already
-  `refunded`; it is not resolvable here and needs the runtime reconciliation
-  above.
+  `refunded`; `--resolve` is refused for it (see the retirement procedure
+  below), and the runtime reconciliation above keeps retrying instead.
+
+Retiring a rollback that cannot be reconciled (evidence-based, audited):
+  1. `--op-id <op_id> --check-rollback`
+       Read-only. Prints SAFE / NOT SAFE plus the evidence the verdict is based
+       on: the delivered inventory row (present or absent), any rows still
+       carrying the item name, live boosts recording this operation, holdings
+       recording it, and the last recorded refusal. Exit code 0 = SAFE, 1 = not.
+       A permanent role can never be SAFE here: proving its Discord membership
+       needs live state this tool does not read, so it must be resolved by hand.
+  2. If the outstanding effects really are gone (or you compensated the member
+     by hand), retire the descriptor:
+       `--op-id <op_id> --retire-rollback --yes --note "verified: nothing left to compensate"`
+       This REFUSES unless the operation is settled (`refunded` or `failed`) and
+       the evidence above proves the operation's own effects are absent; a
+       `pending`/`uncertain` operation may still have a delivery in flight, so
+       let the runtime finish and retry first. It always refuses without
+       `--note`. It appends the evidence
+       and your note to the operation's `detail` (the audit trail) and records
+       durable completion, so compensation never runs again for it.
+     There is deliberately no blanket "clear descriptor" / "mark complete"
+     switch, and no flag that skips the evidence check.
 
 Explicit operator resolution (requires `--op-id`, `--resolve`, `--yes`, and `--note`):
   * `python scripts/recover_shop_purchases.py --db /path/to/nilive.db --op-id <op_id> --resolve refund --yes --note "verified role not granted"`
@@ -54,6 +87,15 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+# `database.py` refuses to import without OWNER_ID because the RUNTIME must not
+# boot with an unknown owner. This tool is an offline operator console: it never
+# acts as (or on behalf of) the owner and never touches `dashboard_users`, so the
+# documented `--db <path>` invocation must work without export OWNER_ID=…
+# A sentinel is used rather than a real-looking id, and it is only ever read by
+# `dashboard` owner-gating code the CLI does not call.
+if not os.environ.get("OWNER_ID", "").strip():
+    os.environ["OWNER_ID"] = "0"
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -903,6 +903,22 @@ async def timed_holding_provenance(entry_key) -> dict | None:
     }
 
 
+async def _boosts_for_origin(conn, guild_id, user_id, op_id) -> list[int]:
+    """Ids of live boosts this purchase operation created.
+
+    `origin_op_id` is the only durable link between a `leveling_active_boosts`
+    row and the purchase that granted it, so "is this operation compensated?"
+    is answered by looking for rows that record it — not by asking whether the
+    id a descriptor happens to cite still exists.
+    """
+    cursor = await conn.execute(
+        "SELECT id FROM leveling_active_boosts"
+        " WHERE guild_id=? AND user_id=? AND origin_op_id=?",
+        (int(guild_id), int(user_id), str(op_id)),
+    )
+    return [int(r[0]) for r in await cursor.fetchall()]
+
+
 async def _boost_origin_op(conn, boost_id) -> dict | None:
     """`{guild_id, user_id, origin_op_id}` for one `leveling_active_boosts` row.
 
@@ -2263,6 +2279,12 @@ _ROLLBACK_IDENTITY_FIELDS = (
     "delivered_inventory",
 )
 
+# Diagnostic fields. Unlike the identity fields, these describe the LATEST
+# attempt rather than the grant, so the newest observation wins: an operator
+# reading a pending descriptor must see why the most recent retry refused, not
+# the first failure that ever happened.
+_ROLLBACK_DIAGNOSTIC_FIELDS = ("last_error", "last_error_at")
+
 # Products delivered as a stack of `inventory_items` units (no holding row).
 # Their rollback must be able to identify the unit THIS purchase delivered;
 # without that evidence the only thing a rollback could do is remove a
@@ -2306,6 +2328,92 @@ def _delivery_rollback_state(raw) -> tuple[str, dict | None]:
     return "live", parsed
 
 
+_ENTRY_KEY_PREFIXES = ("h:", "i:")
+
+
+def _canonical_entry_key_id(key) -> int | None:
+    """Parse `h:<id>` / `i:<id>` and return the id only for the canonical form.
+
+    `int()` is far too permissive for a value that is compared as a STRING
+    against `timed_holdings.entry_key`/`equipped_roles.entry_key`: it accepts
+    `"+1"`, `" 1"`, `"01"`, `"1_0"` (-> 10) and non-ASCII digits such as `"١"`
+    (-> 1). Every one of those describes holding 1 while comparing unequal to
+    the stored `"h:1"`, so a rollback could retire the holding and leave the
+    equipped slot dangling on it. Only the round-trip form is accepted.
+
+    Returns None for a malformed or non-canonical key, and for anything that is
+    not `h:`/`i:`.
+    """
+    if not isinstance(key, str):
+        return None
+    for prefix in _ENTRY_KEY_PREFIXES:
+        if key.startswith(prefix):
+            suffix = key[len(prefix):]
+            break
+    else:
+        return None
+    if not suffix or not suffix.isascii() or not suffix.isdigit():
+        return None
+    try:
+        parsed = int(suffix)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0 or str(parsed) != suffix:
+        return None
+    return parsed
+
+
+def _bind_descriptor_to_operation(spec: dict,
+                                  op_row: dict) -> tuple[bool, str | None]:
+    """Reconcile a descriptor's target with the purchase operation's own row.
+
+    This is the single ownership boundary for late-delivery compensation. Every
+    branch mutates state addressed by `spec["guild_id"]`/`spec["user_id"]`, so
+    those two values decide WHOSE inventory, holdings, boosts and Discord roles
+    are touched. They are only ever legitimate when they are the operation's own
+    columns: a descriptor that is internally consistent but names another member
+    or another guild is not a rollback of this purchase, it is a request to
+    modify someone else's state.
+
+    `item_id` is checked only when both sides carry one, because it is not used
+    to target any mutation (see `_validate_delivery_rollback_spec`) and older
+    descriptors legitimately recorded it as absent.
+
+    Returns `(True, None)` when the descriptor belongs to this operation, or
+    `(False, reason)` so the caller can fail closed with a durable diagnostic.
+    """
+    if not isinstance(op_row, dict):
+        return False, "purchase operation row is unavailable"
+    for field in ("guild_id", "user_id"):
+        try:
+            descriptor_value = int(spec.get(field))
+        except (TypeError, ValueError):
+            return False, f"descriptor has no usable {field!r}"
+        try:
+            operation_value = int(op_row.get(field))
+        except (TypeError, ValueError):
+            return False, f"purchase operation has no usable {field!r}"
+        if descriptor_value != operation_value:
+            return False, (
+                f"descriptor targets {field}={descriptor_value}, but purchase "
+                f"operation {op_row.get('op_id')} belongs to "
+                f"{field}={operation_value}; refusing to modify another "
+                f"operation's state"
+            )
+    descriptor_item = spec.get("item_id")
+    operation_item = op_row.get("item_id")
+    if descriptor_item is not None and operation_item is not None:
+        try:
+            if int(descriptor_item) != int(operation_item):
+                return False, (
+                    f"descriptor names item_id={int(descriptor_item)}, but the "
+                    f"purchase operation recorded item_id={int(operation_item)}"
+                )
+        except (TypeError, ValueError):
+            return False, "descriptor has no usable 'item_id'"
+    return True, None
+
+
 def _validate_delivery_rollback_spec(spec) -> tuple[bool, str | None]:
     """Validate a descriptor before ANY side effect or completion claim.
 
@@ -2346,14 +2454,26 @@ def _validate_delivery_rollback_spec(spec) -> tuple[bool, str | None]:
     if entry_key is not None:
         if not isinstance(entry_key, str):
             return False, "invalid 'entry_key'"
-        if entry_key.startswith("h:"):
-            try:
-                int(entry_key.split(":", 1)[1])
-            except (TypeError, ValueError):
-                return False, "invalid 'entry_key' holding id"
-    if spec.get("retry_entry_key") is not None and not isinstance(
-            spec["retry_entry_key"], str):
-        return False, "invalid 'retry_entry_key'"
+        if entry_key.startswith(_ENTRY_KEY_PREFIXES):
+            if _canonical_entry_key_id(entry_key) is None:
+                return False, (
+                    f"non-canonical 'entry_key' {entry_key!r} holding key; "
+                    f"expected the exact form 'h:<holding id>' or "
+                    f"'i:<inventory row id>'"
+                )
+    retry_entry_key = spec.get("retry_entry_key")
+    if retry_entry_key is not None:
+        if not isinstance(retry_entry_key, str):
+            return False, "invalid 'retry_entry_key'"
+        # A retry marker is always a timed holding, and it is later compared as
+        # a string against stored keys, so it must be canonical too.
+        if _canonical_entry_key_id(retry_entry_key) is None or not \
+                retry_entry_key.startswith("h:"):
+            return False, "invalid 'retry_entry_key' holding key"
+    for field in _ROLLBACK_DIAGNOSTIC_FIELDS:
+        if field in spec and spec[field] is not None and not isinstance(
+                spec[field], str):
+            return False, f"invalid {field!r}"
     for field in ("prior_inventory", "delivered_inventory"):
         value = spec.get(field)
         if value is not None and not isinstance(value, (list, tuple)):
@@ -2364,17 +2484,8 @@ def _validate_delivery_rollback_spec(spec) -> tuple[bool, str | None]:
         # compensation cannot expire/retire the holding, and the descriptor would
         # otherwise reach no branch at all.
         holding_key = spec.get("entry_key")
-        if not isinstance(holding_key, str) or not holding_key.startswith("h:"):
-            return False, (
-                "temp_role descriptor without a timed-holding 'entry_key'"
-            )
-        try:
-            holding_id = int(holding_key.split(":", 1)[1])
-        except (TypeError, ValueError):
-            return False, (
-                "temp_role descriptor without a timed-holding 'entry_key'"
-            )
-        if holding_id <= 0:
+        holding_id = _canonical_entry_key_id(holding_key)
+        if holding_id is None or not str(holding_key).startswith("h:"):
             return False, (
                 "temp_role descriptor without a timed-holding 'entry_key'"
             )
@@ -2402,9 +2513,12 @@ def _validate_delivery_rollback_spec(spec) -> tuple[bool, str | None]:
     if internal_type == "xp_boost":
         boost_id = spec.get("boost_id")
         if boost_id is not None:
-            try:
-                int(boost_id)
-            except (TypeError, ValueError):
+            # A row id, not a truthy value: `True`/`1.7`/`"1"` all coerce to a
+            # plausible number and would silently address whatever row happens
+            # to carry that id.
+            if isinstance(boost_id, bool) or not isinstance(boost_id, int):
+                return False, "invalid 'boost_id'"
+            if boost_id <= 0:
                 return False, "invalid 'boost_id'"
         boost_exp = spec.get("boost_expires_at")
         if boost_exp is not None and not isinstance(boost_exp, str):
@@ -2445,8 +2559,13 @@ def _merge_delivery_rollback_specs(stored: dict, incoming: dict) -> dict:
         if _rollback_value_absent(merged.get(field)) and not _rollback_value_absent(
                 incoming.get(field)):
             merged[field] = incoming[field]
+    for field in _ROLLBACK_DIAGNOSTIC_FIELDS:
+        if not _rollback_value_absent(incoming.get(field)):
+            merged[field] = incoming[field]
     for field, value in incoming.items():
         if field in _ROLLBACK_PROGRESS_FLAGS or field in _ROLLBACK_IDENTITY_FIELDS:
+            continue
+        if field in _ROLLBACK_DIAGNOSTIC_FIELDS:
             continue
         if _rollback_value_absent(merged.get(field)):
             merged[field] = value
@@ -2534,8 +2653,44 @@ async def _persist_delivery_rollback_progress(op_id: str, spec: dict, *,
     return "failed", last_error, None
 
 
+async def _role_entry_key_conflict(entry_key, delivered_inv) -> str | None:
+    """Why a permanent-role descriptor's `entry_key` cannot be trusted, or None.
+
+    The producer records the equipped slot for a permanent role as
+    `i:<delivered row id>` (`utils/inventory.py` builds `i:<id>` for every
+    inventory row and `equip_role()` stores that same key), so the descriptor's
+    key is only meaningful when it IS the delivered row. `late_key` is later
+    handed to `reconcile_equip_for_expired_holding`, which acts as soon as the
+    value equals the stored slot key — meaning a conflicting `i:<other row>`
+    clears an unrelated equipped slot.
+    """
+    if entry_key is None:
+        return None
+    parsed = _canonical_entry_key_id(entry_key)
+    if parsed is None or not str(entry_key).startswith("i:"):
+        return (
+            f"entry_key {entry_key!r} is not a canonical inventory key "
+            f"'i:<row id>', which is what a permanent role records"
+        )
+    if delivered_inv is None:
+        return (
+            "descriptor has no delivered inventory snapshot, so entry_key "
+            f"{entry_key!r} cannot be verified against the grant"
+        )
+    try:
+        delivered_id = int(delivered_inv[0])
+    except (TypeError, ValueError, IndexError):
+        return "delivered_inventory has no usable row id"
+    if parsed != delivered_id:
+        return (
+            f"entry_key {entry_key!r} addresses inventory row {parsed}, but the "
+            f"delivered snapshot is row {delivered_id}"
+        )
+    return None
+
+
 async def _delivered_role_identity(delivered_inv, guild_id, user_id,
-                                   item_name) -> int | None:
+                                   item_name, conn=None) -> int | None:
     """The role id the delivered inventory record actually entitles, or None.
 
     `metadata.role_id` is written by `give_reward(..., "role" | "temp_role")`
@@ -2549,14 +2704,20 @@ async def _delivered_role_identity(delivered_inv, guild_id, user_id,
     if delivered_inv is not None and len(delivered_inv) > 4:
         meta_raw = delivered_inv[4]
     if meta_raw is None:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async def _live_meta(db):
             cur = await db.execute(
                 "SELECT metadata FROM inventory_items "
                 "WHERE guild_id=? AND user_id=? AND item_name=?",
                 (guild_id, user_id, item_name),
             )
-            row = await cur.fetchone()
-        meta_raw = row[0] if row else None
+            fetched = await cur.fetchone()
+            return fetched[0] if fetched else None
+
+        if conn is not None:
+            meta_raw = await _live_meta(conn)
+        else:
+            async with aiosqlite.connect(DB_PATH) as db:
+                meta_raw = await _live_meta(db)
     if meta_raw is None:
         return None
     try:
@@ -3025,7 +3186,40 @@ async def compensate_late_delivery(
                 "role_reconciled": True,
                 "error": None,
             }
+        # Annotate, never fabricate. `record_pending_delivery_rollback` is the
+        # only writer allowed to CREATE a descriptor: it runs immediately after
+        # the delivery that makes one true. Reaching here with SQL NULL means
+        # this invocation only holds a caller-supplied specification (a stale
+        # local row, another process's cache), and persisting it would turn that
+        # unverified guess into durable recovery state that a later
+        # reconciliation pass would act on. Report the reason; leave the journal
+        # alone. A descriptor this process knows it failed to persist is the one
+        # exception: the write is then an attempt to recover, not an invention.
+        try:
+            _state, _raw, _ = await _read_delivery_rollback_raw(str(op_id))
+        except Exception:
+            _state = "live"  # let the writer below report the read failure
+        if _state == "absent" and not spec.get("_durable_unpersisted"):
+            return {
+                "complete": False,
+                "durable_persisted": False,
+                "inventory_rolled_back": bool(spec.get("inventory_rolled_back")),
+                "equip_reconciled": bool(spec.get("equip_reconciled")),
+                "role_reconciled": bool(spec.get("role_reconciled")),
+                "error": (
+                    f"{err_msg} (no durable delivery_rollback descriptor is "
+                    f"recorded for op_id={op_id}, so nothing was written)"
+                ),
+            }
         clean_spec = {k: v for k, v in spec.items() if not str(k).startswith("_")}
+        # Record WHY this attempt stopped, in the durable descriptor itself. An
+        # operator inspecting a stuck operation must not have to infer the
+        # conflict from raw JSON or from a log line that may be long gone; the
+        # runtime retries the same descriptor indefinitely, so the reason has to
+        # travel with it. Diagnostics are latest-wins, so a retry that fails for
+        # a new reason overwrites the old message instead of keeping the first.
+        clean_spec["last_error"] = str(err_msg)[:1000]
+        clean_spec["last_error_at"] = utcnow().isoformat()
         # Monotonic, compare-and-swap write through the shared writer: a stale
         # invocation can never lower a durable `True` flag or erase recorded
         # identity, whichever writer advanced the descriptor first.
@@ -3157,6 +3351,19 @@ async def compensate_late_delivery(
         itx_user = getattr(interaction, "user", None)
         if itx_user is not None and getattr(itx_user, "id", int(user_id)) == int(user_id):
             target_member = itx_user
+
+    # ── Ownership boundary ───────────────────────────────────────────────
+    # Shape validation cannot catch a descriptor that is internally consistent
+    # but names a different guild or member, and every branch below mutates
+    # state addressed by exactly those two values. Reconcile them with the
+    # operation's own journal row before dispatching, so no branch can be
+    # reached with a descriptor that belongs to somebody else's purchase.
+    _bound, _bind_problem = _bind_descriptor_to_operation(spec, op_row)
+    if not _bound:
+        return await _persist_incomplete(
+            f"Delivery rollback descriptor is not bound to this purchase: "
+            f"{_bind_problem}"
+        )
 
     # ── Branch 1: Timed holding (`h:<id>`) ──────────────────────────────
     if late_key and str(late_key).startswith("h:"):
@@ -3400,6 +3607,70 @@ async def compensate_late_delivery(
     elif internal_type == "role":
         role_guard: dict = {"outcome": None, "reason": None}
 
+        async def _role_precheck_reason(conn) -> str | None:
+            """Every identity this branch needs, checked before it mutates.
+
+            Runs inside the durable `BEGIN IMMEDIATE` (the `tx_guard` "pre"
+            phase), so it only ever executes when a durable descriptor actually
+            backs this attempt — it can neither fabricate a descriptor nor
+            refuse on behalf of one that was never persisted. Everything it
+            verifies is verified BEFORE `rollback_role_inventory_grant`
+            decrements or deletes anything, because a failure afterwards would
+            leave an unrelated row already damaged while the descriptor stays
+            pending for a retry.
+            """
+            # 1. Without a role identity nothing downstream can remove what the
+            #    delivery granted, so report that gap first: it is what the
+            #    operator has to supply.
+            if role_added_by_delivery and role_id is None:
+                return (
+                    "Role rollback descriptor has no 'role_id'; cannot reconcile "
+                    "the granted role"
+                )
+            # 2. The inventory row this descriptor addresses must be the row the
+            #    purchase delivered.
+            conflict = await _inventory_identity_conflict(
+                guild_id, user_id, item_name, delivered_inv, prior_inv, conn=conn
+            )
+            if conflict is not None:
+                return (
+                    f"Role rollback descriptor does not describe the delivered "
+                    f"inventory grant: {conflict}"
+                )
+            # 3. A permanent role is delivered as an inventory row, and the
+            #    producer always hands that row's snapshot to the shop. Without
+            #    it the name-addressed rollback cannot tell this purchase's row
+            #    from an independent same-named grant, so refuse before the
+            #    first mutation rather than after it.
+            if delivered_inv is None:
+                return (
+                    f"Role rollback descriptor for {item_name!r} records no "
+                    f"delivered inventory snapshot; refusing to touch an "
+                    f"inventory row it cannot identify"
+                )
+            # 4. The equipped slot key must be this purchase's own row key.
+            key_conflict = await _role_entry_key_conflict(late_key, delivered_inv)
+            if key_conflict is not None:
+                return f"Role rollback descriptor key is unusable: {key_conflict}"
+            if role_id is not None and role_added_by_delivery:
+                delivered_role = await _delivered_role_identity(
+                    delivered_inv, guild_id, user_id, item_name, conn=conn
+                )
+                if delivered_role is None:
+                    return (
+                        f"Delivered inventory for {item_name!r} records no role "
+                        f"identity; cannot prove role {int(role_id)} was granted "
+                        f"by this purchase, so it is kept for manual recovery"
+                    )
+                if int(delivered_role) != int(role_id):
+                    return (
+                        f"Delivered inventory for {item_name!r} granted role "
+                        f"{int(delivered_role)}, but the descriptor names role "
+                        f"{int(role_id)}; refusing to remove a role this "
+                        f"purchase did not grant"
+                    )
+            return None
+
         async def _role_inv_guard(phase, conn):
             """Re-validate durable rollback state inside `BEGIN IMMEDIATE`.
 
@@ -3452,16 +3723,10 @@ async def compensate_late_delivery(
                         spec["inventory_rolled_back"] = True
                         role_guard["outcome"] = "already_done"
                         return "already_done"
-                    conflict = await _inventory_identity_conflict(
-                        guild_id, user_id, item_name, delivered_inv, prior_inv,
-                        conn=conn,
-                    )
-                    if conflict is not None:
+                    abort_reason = await _role_precheck_reason(conn)
+                    if abort_reason is not None:
                         role_guard["outcome"] = "abort"
-                        role_guard["reason"] = (
-                            f"Role rollback descriptor does not describe the "
-                            f"delivered inventory grant: {conflict}"
-                        )
+                        role_guard["reason"] = abort_reason
                         return "abort"
                     role_guard["outcome"] = "proceed"
                     return "proceed"
@@ -3487,16 +3752,10 @@ async def compensate_late_delivery(
                 if parsed.get("inventory_rolled_back"):
                     role_guard["outcome"] = "already_done"
                     return "already_done"
-                conflict = await _inventory_identity_conflict(
-                    guild_id, user_id, item_name, delivered_inv, prior_inv,
-                    conn=conn,
-                )
-                if conflict is not None:
+                abort_reason = await _role_precheck_reason(conn)
+                if abort_reason is not None:
                     role_guard["outcome"] = "abort"
-                    role_guard["reason"] = (
-                        f"Role rollback descriptor does not describe the "
-                        f"delivered inventory grant: {conflict}"
-                    )
+                    role_guard["reason"] = abort_reason
                     return "abort"
                 role_guard["outcome"] = "proceed"
                 return "proceed"
@@ -3523,17 +3782,16 @@ async def compensate_late_delivery(
             )
             if not inv_ok:
                 if role_guard.get("outcome") == "abort":
-                    return {
-                        "complete": False,
-                        "durable_persisted": False,
-                        "inventory_rolled_back": bool(
-                            spec.get("inventory_rolled_back")
-                        ),
-                        "equip_reconciled": bool(spec.get("equip_reconciled")),
-                        "role_reconciled": bool(spec.get("role_reconciled")),
-                        "error": role_guard.get("reason")
-                        or f"Role inventory rollback aborted for {item_name!r}",
-                    }
+                    # The abort happened inside the rollback's own transaction,
+                    # which has been rolled back, so nothing this attempt did
+                    # survives. Record WHY it refused in the durable descriptor:
+                    # otherwise the operation looks stuck for no stated reason,
+                    # and the operator has to re-derive the conflict from raw
+                    # JSON (or from a log line that is long gone).
+                    return await _persist_incomplete(
+                        role_guard.get("reason")
+                        or f"Role inventory rollback aborted for {item_name!r}"
+                    )
                 return await _persist_incomplete(
                     f"Role inventory rollback failed for {item_name!r}"
                 )
@@ -3943,8 +4201,35 @@ async def compensate_late_delivery(
                                         (int(boost_id), guild_id, user_id,
                                          str(op_id)),
                                     )
-                                # A missing row means the boost is already gone:
-                                # retiring it is a no-op.
+                                else:
+                                    # The cited id resolves to NO row. That says
+                                    # nothing about this operation's boost, which
+                                    # may still be live: a descriptor with a
+                                    # stale, wrong-but-plausible or foreign-looking
+                                    # id used to fall through to "already gone"
+                                    # and complete while the purchased boost kept
+                                    # granting XP. Resolve the boost this
+                                    # operation actually created instead, and let
+                                    # the post-condition below decide.
+                                    owned = await _boosts_for_origin(
+                                        cleanup_db, guild_id, user_id, str(op_id)
+                                    )
+                                    if len(owned) > 1:
+                                        raise RuntimeError(
+                                            f"ambiguous XP boost identity for "
+                                            f"op_id={op_id}: {len(owned)} live "
+                                            f"boosts record this operation and the "
+                                            f"descriptor's boost_id resolves to no "
+                                            f"row, so none can be singled out"
+                                        )
+                                    if owned:
+                                        await cleanup_db.execute(
+                                            "DELETE FROM leveling_active_boosts "
+                                            "WHERE id=? AND guild_id=? AND user_id=?"
+                                            " AND origin_op_id=?",
+                                            (owned[0], guild_id, user_id,
+                                             str(op_id)),
+                                        )
                             elif boost_exp:
                                 # No recorded row id: only ever remove the boost
                                 # this purchase created, identified by its
@@ -4006,6 +4291,21 @@ async def compensate_late_delivery(
                                         f"operation, and the descriptor recorded "
                                         f"no boost_id"
                                     )
+                            # Invariant, checked inside the same transaction as
+                            # the delete: an operation is never fully
+                            # compensated while a boost it created is still
+                            # active. This is what makes every wrong-id shape
+                            # fail closed instead of completing.
+                            still_live = await _boosts_for_origin(
+                                cleanup_db, guild_id, user_id, str(op_id)
+                            )
+                            if still_live:
+                                raise RuntimeError(
+                                    f"XP boost rollback did not retire the boost "
+                                    f"this purchase created (row(s) "
+                                    f"{still_live} still record op_id={op_id}); "
+                                    f"refusing to report compensation"
+                                )
                             spec["inventory_rolled_back"] = True
                             spec["equip_reconciled"] = True
                             spec["role_reconciled"] = True
@@ -4155,18 +4455,16 @@ async def compensate_late_delivery(
                             if inv_conflict is not None:
                                 await rb_db.execute("ROLLBACK")
                                 in_tx = False
-                                return {
-                                    "complete": False,
-                                    "durable_persisted": False,
-                                    "inventory_rolled_back": False,
-                                    "equip_reconciled": False,
-                                    "role_reconciled": False,
-                                    "error": (
-                                        "Stackable rollback descriptor does not "
-                                        "describe the delivered inventory grant: "
-                                        f"{inv_conflict}"
-                                    ),
-                                }
+                                # Persist the refusal, not just return it: this
+                                # descriptor will be retried by every
+                                # reconciliation pass, so the reason has to be
+                                # durable for whoever eventually has to resolve
+                                # it by hand.
+                                return await _persist_incomplete(
+                                    "Stackable rollback descriptor does not "
+                                    "describe the delivered inventory grant: "
+                                    f"{inv_conflict}"
+                                )
                             inv_ok = await rollback_item_inventory_grant(
                                 guild_id,
                                 user_id,
@@ -4508,11 +4806,32 @@ async def reconcile_purchases(*, older_than_minutes: int = 15,
 async def list_purchase_operations(*, status: str | None = PURCHASE_UNCERTAIN,
                                    guild_id: int | None = None,
                                    user_id: int | None = None,
-                                   limit: int = 100) -> list[dict]:
-    """List purchase operations filtered by status, guild, and/or user."""
+                                   limit: int = 100,
+                                   pending_rollbacks_only: bool = False,
+                                   include_pending_rollbacks: bool = False
+                                   ) -> list[dict]:
+    """List purchase operations filtered by status, guild, and/or user.
+
+    `include_pending_rollbacks` widens the listing to operations whose
+    `delivery_rollback` descriptor is still present. Those are the operations an
+    operator most needs to find, and they are usually in status `refunded` /
+    `failed` — not `uncertain` — so a status-filtered listing silently hides
+    exactly the stuck work this tool exists to surface.
+    `pending_rollbacks_only` narrows it to just those.
+    """
     clauses: list[str] = []
     params: list = []
-    if status is not None:
+    if pending_rollbacks_only:
+        clauses.append("delivery_rollback IS NOT NULL AND delivery_rollback != ''")
+    elif include_pending_rollbacks:
+        status_clause = "" if status is None else "status=? OR "
+        if status is not None:
+            params.append(status)
+        clauses.append(
+            f"({status_clause}delivery_rollback IS NOT NULL"
+            f" AND delivery_rollback != '')"
+        )
+    elif status is not None:
         clauses.append("status=?")
         params.append(status)
     if guild_id is not None:
@@ -4536,6 +4855,212 @@ async def list_purchase_operations(*, status: str | None = PURCHASE_UNCERTAIN,
             "amount", "stock_reserved", "charged", "refunded", "stock_returned",
             "status", "detail", "history_id", "created_at", "updated_at")
     return [dict(zip(keys, row)) for row in rows]
+
+
+async def rollback_retirement_evidence(op_id: str, *, db=None,
+                                      op: dict | None = None) -> dict:
+    """Can this pending rollback be retired safely, on local evidence alone?
+
+    A stuck descriptor must not be cleared by assertion: this checks whether the
+    operation's own delivered effects are *provably absent from the database*,
+    which is what makes "nothing is left to compensate" true rather than
+    assumed. It is read-only and returns the evidence either way.
+
+    `permanent_role` is deliberately never retirable here. Proving a refunded
+    role was removed requires Discord membership, which an offline SQLite tool
+    cannot observe — the honest answer is "not verifiable locally", not a guess.
+    """
+    if op is None:
+        op = await get_purchase(op_id)
+    if op is None:
+        return {"safe": False, "type": None,
+                "reason": f"Unknown purchase operation {op_id}", "evidence": []}
+    settle_problem = _retirement_status_problem(op)
+    if settle_problem is not None:
+        return {"safe": False, "type": None, "reason": settle_problem,
+                "evidence": []}
+    raw = op.get("_raw_delivery_rollback")
+    if not raw:
+        return {"safe": False, "type": None,
+                "reason": "Operation has no pending rollback descriptor",
+                "evidence": []}
+    try:
+        spec = json.loads(raw)
+    except Exception:
+        return {"safe": False, "type": None,
+                "reason": "Descriptor is unreadable; treat as unrecoverable here",
+                "evidence": [raw[:200]]}
+    if not isinstance(spec, dict):
+        return {"safe": False, "type": None,
+                "reason": "Descriptor is not a JSON object", "evidence": []}
+
+    internal_type = spec.get("internal_type")
+    guild_id, user_id = int(spec.get("guild_id") or 0), int(spec.get("user_id") or 0)
+    item_name = spec.get("item_name")
+    evidence: list[str] = [
+        f"descriptor internal_type={internal_type!r} item_name={item_name!r} "
+        f"guild={guild_id} user={user_id}",
+        f"last recorded refusal: {spec.get('last_error') or '(none)'}",
+    ]
+
+    async def _evidence(conn) -> dict:
+        if internal_type == "xp_boost":
+            live = await _boosts_for_origin(conn, guild_id, user_id, op_id)
+            evidence.append(f"live boosts recording this operation: {live or 'none'}")
+            if live:
+                return {"safe": False, "type": internal_type,
+                        "reason": (f"{len(live)} boost(s) this purchase created are "
+                                   f"still active; compensate them first"),
+                        "evidence": evidence}
+            return {"safe": True, "type": internal_type,
+                    "reason": "no boost records this operation", "evidence": evidence}
+
+        if internal_type in ("temp_role",) or spec.get("entry_key", "").startswith("h:"):
+            cursor = await conn.execute(
+                "SELECT id FROM timed_holdings WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id))
+            remaining = []
+            for (holding_id,) in await cursor.fetchall():
+                prov = await timed_holding_provenance(f"h:{int(holding_id)}")
+                if prov is not None and str(prov.get("origin_op_id")) == str(op_id):
+                    remaining.append(int(holding_id))
+            evidence.append(
+                f"holdings recording this operation: {remaining or 'none'}")
+            if remaining:
+                return {"safe": False, "type": internal_type,
+                        "reason": (f"holding(s) {remaining} still belong to this "
+                                   f"purchase; retire them first"),
+                        "evidence": evidence}
+        if internal_type == "role":
+            return {
+                "safe": False, "type": internal_type,
+                "reason": ("a permanent role's Discord membership cannot be "
+                           "verified from the database; confirm on Discord and "
+                           "resolve by hand, or compensate the member directly "
+                           "and record it in the operation detail"),
+                "evidence": evidence + [
+                    "role removal requires live Discord state this tool cannot read"
+                ],
+            }
+
+        # Inventory-backed types: the delivered row is the identity evidence.
+        delivered = spec.get("delivered_inventory")
+        if isinstance(delivered, (list, tuple)) and delivered:
+            try:
+                delivered_id = int(delivered[0])
+            except (TypeError, ValueError):
+                delivered_id = None
+            if delivered_id is not None:
+                cursor = await conn.execute(
+                    "SELECT id, item_name, quantity FROM inventory_items"
+                    " WHERE id=?", (delivered_id,))
+                row = await cursor.fetchone()
+                evidence.append(
+                    f"delivered inventory row {delivered_id}: "
+                    f"{'present ' + str(row) if row else 'absent'}")
+                if row is not None:
+                    return {"safe": False, "type": internal_type,
+                            "reason": (f"delivered inventory row {delivered_id} "
+                                       f"still exists; it has not been rolled back"),
+                            "evidence": evidence}
+        else:
+            evidence.append(
+                "descriptor records no delivered inventory snapshot: the specific "
+                "grant cannot be identified, so absence cannot be proven")
+
+        cursor = await conn.execute(
+            "SELECT id, quantity, source FROM inventory_items"
+            " WHERE guild_id=? AND user_id=? AND item_name=?",
+            (guild_id, user_id, item_name))
+        leftover = await cursor.fetchall()
+        evidence.append(f"rows still carrying {item_name!r}: {leftover or 'none'}")
+        if leftover:
+            # Inventory rows carry no operation binding, so a row under this name
+            # cannot be attributed to this purchase OR ruled out as its grant.
+            # The descriptor is exactly the thing under suspicion, so its
+            # snapshot cannot be used to dismiss a row that is still there.
+            return {
+                "safe": False, "type": internal_type,
+                "reason": (
+                    f"{len(leftover)} inventory row(s) still carry "
+                    f"{item_name!r} and cannot be attributed to this purchase "
+                    f"from the database; compensate the member by hand if "
+                    f"needed, then retire"
+                ),
+                "evidence": evidence + [
+                    "inventory rows have no origin operation, so ownership of a "
+                    "surviving row cannot be proven here"
+                ],
+            }
+
+        return {"safe": True, "type": internal_type,
+                "reason": ("no inventory row, holding or boost attributable to "
+                           "this purchase remains, so nothing is left to "
+                           "compensate"),
+                "evidence": evidence}
+
+    if db is not None:
+        # Inside the caller's `BEGIN IMMEDIATE`: no other writer can change the
+        # rows this verdict depends on before the retirement commits.
+        return await _evidence(db)
+    async with aiosqlite.connect(DB_PATH) as conn:
+        return await _evidence(conn)
+
+
+def _retirement_status_problem(op: dict) -> str | None:
+    """Why this operation's rollback may not be retired yet, or None.
+
+    Only a settled operation (refunded or failed) can have its rollback retired.
+    A `pending`/`uncertain` operation may still be inside `process_purchase`
+    with a delivery in flight, and a `delivered` operation is not being
+    compensated at all — retiring either would convert "nothing is missing
+    right now" into a promise that nothing ever will be.
+    """
+    status = str(op.get("status") or "")
+    if status in (PURCHASE_REFUNDED, PURCHASE_FAILED):
+        return None
+    return (
+        f"operation status is {status!r}; only a settled (refunded or failed) "
+        f"purchase can have its rollback retired — if a delivery may still be "
+        f"in flight, let it finish and the runtime retry first"
+    )
+
+
+async def _pending_rollback_summaries() -> dict[str, str]:
+    """`{op_id: reason}` for every operation whose rollback is still pending.
+
+    The reason is the durably recorded `last_error` when present, so an operator
+    does not have to reconstruct why compensation stopped from the descriptor's
+    raw JSON (or from a log line that may be long gone).
+    """
+    out: dict[str, str] = {}
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            cursor = await db.execute(
+                "SELECT op_id, delivery_rollback FROM shop_purchase_operations"
+                " WHERE delivery_rollback IS NOT NULL AND delivery_rollback != ''"
+                " ORDER BY created_at DESC"
+            )
+            fetched = await cursor.fetchall()
+        except Exception:
+            return out
+    for op_id, raw in fetched:
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            out[str(op_id)] = "descriptor is unreadable"
+            continue
+        if not isinstance(parsed, dict):
+            out[str(op_id)] = "descriptor is not a JSON object"
+            continue
+        flags = [
+            flag for flag in _ROLLBACK_PROGRESS_FLAGS if not parsed.get(flag)
+        ]
+        reason = parsed.get("last_error") or "no reason recorded"
+        out[str(op_id)] = (
+            f"{reason} [outstanding: {', '.join(flags) or 'none'}]"
+        )
+    return out
 
 
 async def inspect_purchase_operation(op_id: str) -> dict | None:
@@ -4717,6 +5242,78 @@ async def inspect_purchase_operation(op_id: str) -> dict | None:
         pass
 
     return evidence
+
+
+async def retire_pending_rollback(op_id: str, *, confirmed: bool = False,
+                                  note: str | None = None) -> tuple[bool, str]:
+    """Clear a pending rollback ONLY when local evidence proves it is finished.
+
+    Refuses when `rollback_retirement_evidence` cannot demonstrate that the
+    operation's own delivered effects are gone, so this can never become a
+    generic "clear the descriptor" command. The evidence summary and the operator
+    note are appended to the operation's `detail`, which is the audit trail a
+    later reader needs; the descriptor is then set to the durable-completion
+    sentinel so no reconciliation pass re-runs the compensation.
+    """
+    if not confirmed:
+        return False, "Confirmation required (--yes)."
+    operator_note = (note or "").strip()
+    if not operator_note:
+        return False, "An operator note recording what was verified is required."
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            # Re-read and re-verify inside the write transaction. The evidence is
+            # only meaningful together with the descriptor it justifies: if the
+            # runtime advanced or cleared the rollback in between, the operator
+            # verdict no longer describes what is on disk.
+            cursor = await db.execute(
+                "SELECT status, delivery_rollback, detail"
+                " FROM shop_purchase_operations WHERE op_id=?", (str(op_id),))
+            row = await cursor.fetchone()
+            if row is None:
+                await db.execute("ROLLBACK")
+                return False, f"Unknown purchase operation {op_id}"
+            status_now, current, existing_detail = row
+            if not current:
+                await db.execute("ROLLBACK")
+                return False, "Operation has no pending rollback to retire"
+
+            verdict = await rollback_retirement_evidence(
+                op_id,
+                db=db,
+                op={"op_id": str(op_id), "status": status_now,
+                    "_raw_delivery_rollback": current},
+            )
+            if not verdict.get("safe"):
+                await db.execute("ROLLBACK")
+                return False, (
+                    f"Refused: {verdict.get('reason')} "
+                    f"(evidence: {'; '.join(verdict.get('evidence') or [])})"
+                )
+
+            stamp = utcnow().isoformat()
+            audit = (
+                f"[{stamp}] Rollback retired by operator: {operator_note} | "
+                f"evidence: {verdict.get('reason')} | "
+                f"{'; '.join(verdict.get('evidence') or [])}"
+            )
+            existing = (existing_detail or "").strip()
+            merged_detail = f"{existing}\n{audit}" if existing else audit
+            await db.execute(
+                "UPDATE shop_purchase_operations SET delivery_rollback='',"
+                " detail=?, updated_at=CURRENT_TIMESTAMP WHERE op_id=?",
+                (merged_detail, str(op_id)))
+            await db.commit()
+        except Exception as exc:
+            try:
+                await db.execute("ROLLBACK")
+            except Exception:
+                pass
+            return False, f"Failed to retire rollback: {exc}"
+    _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+    return True, audit
 
 
 async def resolve_purchase_operation(op_id: str, *, action: str,
@@ -5032,6 +5629,15 @@ def format_purchase_inspection(evidence: dict) -> str:
             if parsed_rb.get("retry_entry_key"):
                 lines.append(
                     f"  Retry marker : {parsed_rb['retry_entry_key']}")
+            last_error = parsed_rb.get("last_error")
+            if last_error:
+                lines.append(f"  Last error   : {last_error}")
+                lines.append(
+                    f"  Last attempt : {parsed_rb.get('last_error_at') or '(unknown)'}")
+            else:
+                lines.append(
+                    "  Last error   : (none recorded; written before refusal "
+                    "reasons were persisted)")
             lines.append(f"  Descriptor   : {json.dumps(parsed_rb, sort_keys=True)}")
         else:
             lines.append(f"Delivery Rollback: PENDING (unreadable) {raw_rb!r}")
@@ -5127,8 +5733,17 @@ async def _cli_async(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--op-id", help="Specific purchase operation ID to inspect or resolve.")
     parser.add_argument(
-        "--status", default=PURCHASE_UNCERTAIN,
-        help="Filter operations by status when listing (default: uncertain).")
+        "--status", default=None,
+        help=("Filter operations by status when listing. By default the listing "
+              "shows uncertain operations AND any operation whose late-delivery "
+              "rollback is still pending. Use 'any' for no status filter."))
+    parser.add_argument(
+        "--pending-rollbacks", action="store_true",
+        help=("List only operations whose delivery_rollback descriptor is still "
+              "pending (unfinished compensation, including refused ones)."))
+    parser.add_argument(
+        "--all-statuses", action="store_true",
+        help="List operations of every status, not just uncertain/pending rollbacks.")
     parser.add_argument(
         "--guild-id", type=int, default=None,
         help="Filter operations by guild_id when listing.")
@@ -5141,6 +5756,17 @@ async def _cli_async(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--resolve", choices=("refund", "delivered"), default=None,
         help="Resolution action for --op-id ('refund' or 'delivered').")
+    parser.add_argument(
+        "--check-rollback", action="store_true",
+        help=("With --op-id: report whether that operation's pending "
+              "late-delivery rollback can be retired safely on local evidence, "
+              "without changing anything."))
+    parser.add_argument(
+        "--retire-rollback", action="store_true",
+        help=("With --op-id --yes --note: retire a pending late-delivery rollback "
+              "ONLY when the operation's own delivered effects are provably absent "
+              "from the database. Records the evidence and the operator note in "
+              "the operation detail."))
     parser.add_argument(
         "--yes", action="store_true",
         help="Confirm and execute the --resolve state transition.")
@@ -5175,16 +5801,46 @@ async def _cli_async(argv: list[str] | None = None) -> int:
 
     prior_db = _swap_db_path(target_db)
     try:
+        status_filter = args.status
+        if isinstance(status_filter, str) and status_filter.strip().lower() in (
+                "any", "all"):
+            status_filter = None
         if not args.op_id:
-            ops = await list_purchase_operations(
-                status=args.status, guild_id=args.guild_id,
-                user_id=args.user_id, limit=args.limit)
-            if args.json:
-                print(json.dumps({"operations": ops}, indent=2, default=str))
-            elif not ops:
-                print(f"No purchase operations found with status={args.status!r}.")
+            if args.pending_rollbacks:
+                ops = await list_purchase_operations(
+                    status=None, guild_id=args.guild_id, user_id=args.user_id,
+                    limit=args.limit, pending_rollbacks_only=True)
+            elif args.all_statuses or status_filter is not None:
+                ops = await list_purchase_operations(
+                    status=status_filter, guild_id=args.guild_id,
+                    user_id=args.user_id, limit=args.limit)
             else:
-                print(f"Found {len(ops)} operation(s) with status={args.status!r}:")
+                # Default: the work an operator is looking for. A pending
+                # rollback is usually attached to a refunded/failed operation, so
+                # listing only `uncertain` hides it.
+                ops = await list_purchase_operations(
+                    status=PURCHASE_UNCERTAIN, guild_id=args.guild_id,
+                    user_id=args.user_id, limit=args.limit,
+                    include_pending_rollbacks=True)
+            if args.json:
+                print(json.dumps(
+                    {"operations": ops,
+                     "pending_rollbacks": await _pending_rollback_summaries()},
+                    indent=2, default=str))
+            elif not ops:
+                if args.pending_rollbacks:
+                    print("No operations have a pending late-delivery rollback.")
+                else:
+                    print("No purchase operations found for this filter.")
+            else:
+                if args.pending_rollbacks:
+                    label = "with a pending late-delivery rollback"
+                elif args.all_statuses or status_filter is not None:
+                    label = f"with status={status_filter!r}"
+                else:
+                    label = "uncertain or with a pending late-delivery rollback"
+                print(f"Found {len(ops)} operation(s) {label}:")
+                pending = await _pending_rollback_summaries()
                 for op in ops:
                     print(
                         f"  {op['op_id']}  guild={op['guild_id']} "
@@ -5194,6 +5850,14 @@ async def _cli_async(argv: list[str] | None = None) -> int:
                         f"reserved={op['stock_reserved']} "
                         f"returned={op['stock_returned']} "
                         f"detail={op.get('detail')!r}")
+                    summary = pending.get(str(op["op_id"]))
+                    if summary:
+                        print(f"      rollback    : PENDING — {summary}")
+                if pending and not args.pending_rollbacks:
+                    print(
+                        f"  ({len(pending)} operation(s) with a pending "
+                        f"late-delivery rollback; use --op-id <id> for the full "
+                        f"evidence and reason)")
             return 0
 
         evidence = await inspect_purchase_operation(args.op_id)
@@ -5204,6 +5868,45 @@ async def _cli_async(argv: list[str] | None = None) -> int:
             else:
                 print(f"Error: Unknown purchase operation {args.op_id!r}.")
             return 1
+
+        if args.check_rollback or args.retire_rollback:
+            verdict = await rollback_retirement_evidence(args.op_id)
+            if args.check_rollback and not args.retire_rollback:
+                if args.json:
+                    print(json.dumps({"op_id": args.op_id, "verdict": verdict},
+                                     indent=2, default=str))
+                else:
+                    print(format_purchase_inspection(evidence))
+                    print()
+                    print(f"Rollback retirement: "
+                          f"{'SAFE' if verdict['safe'] else 'NOT SAFE'}")
+                    print(f"  Why: {verdict['reason']}")
+                    for line in verdict["evidence"]:
+                        print(f"  evidence: {line}")
+                return 0 if verdict["safe"] else 1
+            if not args.yes:
+                msg = ("Refusing to retire a rollback without --yes. Inspect with "
+                       "--check-rollback first.")
+                print(json.dumps({"success": False, "error": msg}, indent=2)
+                      if args.json else f"[DRY-RUN] {msg}")
+                return 2
+            if not (args.note and args.note.strip()):
+                msg = ("Refusing to retire a rollback without an operator --note "
+                       "recording what was verified.")
+                print(json.dumps({"success": False, "error": msg}, indent=2)
+                      if args.json else f"Error: {msg}")
+                return 2
+            retired, detail = await retire_pending_rollback(
+                args.op_id, confirmed=True, note=args.note)
+            payload = {"success": retired, "op_id": args.op_id,
+                       "reason": verdict["reason"],
+                       "evidence": verdict["evidence"], "detail": detail}
+            if args.json:
+                print(json.dumps(payload, indent=2, default=str))
+            else:
+                print(f"{'Retired' if retired else 'Not retired'} {args.op_id}: "
+                      f"{detail}")
+            return 0 if retired else 1
 
         if not args.resolve:
             if args.json:

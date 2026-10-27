@@ -20,6 +20,12 @@ on:
   push:
   pull_request:
 
+# No step needs to write to the repository or read secrets; both jobs only run
+# the checked-out code. Declare that explicitly instead of inheriting the
+# repository default (which can be read/write).
+permissions:
+  contents: read
+
 jobs:
   python-ownership:
     runs-on: ubuntu-latest

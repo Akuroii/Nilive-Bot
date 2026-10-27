@@ -17,6 +17,7 @@ Run: python test_timed_ownership.py
 """
 import json
 import unittest
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -26,7 +27,7 @@ from phase1_support import (
 )
 
 from utils import timed_ownership as TO
-from utils.inventory import get_inventory, find_entry
+from utils.inventory import get_inventory, find_entry, set_quantity
 from utils.equip_engine import get_equipped, equip_role
 from utils.reward_engine import give_reward
 from utils.shop_validation import shop_input, ShopValidationError
@@ -6583,10 +6584,13 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(durable, "")
         self.assertEqual(json.loads(durable)["role_reconciled"], False)
 
-        # Explicit `role_added=False`: nothing was added, nothing to reconcile.
+        # Explicit `role_added=False`: nothing was added to Discord, but the
+        # permanent role is still delivered as an inventory row, so the
+        # descriptor carries that row's snapshot exactly as the shop writes it.
         op2, spec2 = await self._refunded_op(
             "P29AlreadyHeld", 9976, internal_type="role", role_id=None,
-            extra={"role_added": False})
+            extra={"role_added": False,
+                   "delivered_inventory": self._role_snapshot(9985)})
         await TO.record_pending_delivery_rollback(op2, spec2, bot=bot)
         TO._PENDING_DELIVERY_ROLLBACKS.clear()
         res2 = await TO.compensate_late_delivery(op2, dict(spec2), bot=bot)
@@ -7476,8 +7480,16 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         durable = json.loads(rows(
             "SELECT delivery_rollback FROM shop_purchase_operations"
             " WHERE op_id=?", (op,))[0][0])
-        self.assertTrue(durable.get("inventory_rolled_back"), str(durable))
+        # The role identity is now reconciled BEFORE the inventory mutation, so a
+        # descriptor that cannot prove which role it granted leaves the member's
+        # inventory untouched for the operator instead of rolling half of it back
+        # first. Nothing was compensated, and nothing was claimed.
+        self.assertFalse(durable.get("inventory_rolled_back"), str(durable))
         self.assertFalse(durable.get("role_reconciled"), str(durable))
+        self.assertEqual(
+            rows("SELECT quantity FROM inventory_items WHERE guild_id=? AND"
+                 " user_id=? AND item_name=?", (GUILD, USER, name)),
+            [(1,)], "inventory was rolled back despite an unprovable role")
 
     async def test_p48_stackable_descriptor_item_name_must_match_the_snapshot(self):
         """P48 (confirmed defect): a stackable descriptor whose `item_name`
@@ -7593,3 +7605,485 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ── 12. ownership/provenance boundary (cycle 2 regressions) ─────────────────
+
+OTHER_GUILD = GUILD + 1
+OTHER_USER = USER + 1
+
+
+class RollbackOwnershipBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    """Every rollback branch must address the operation, not the descriptor.
+
+    Each case below was a live defect before the boundary existed: a
+    self-consistent descriptor naming a foreign guild/member, a conflicting
+    inventory key, missing delivered evidence or a wrong boost id could mutate
+    (or report completion over) state the purchase never created.
+    """
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        execute("DELETE FROM shop_purchase_operations")
+        execute("DELETE FROM equipped_roles")
+        execute("DELETE FROM leveling_active_boosts")
+
+    async def _row(self, name, *, guild=GUILD, user=USER, qty=1,
+                   item_type="custom", source="shop", metadata=None):
+        await set_quantity(guild, user, name, qty, item_type=item_type,
+                           source=source, metadata=metadata)
+        return rows(
+            "SELECT id, quantity, item_type, source, metadata, created_at,"
+            " updated_at FROM inventory_items"
+            " WHERE guild_id=? AND user_id=? AND item_name=?",
+            (guild, user, name))[0]
+
+    async def _op(self, name="BoundThing", amount=100):
+        return await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name=name, currency="balance",
+            amount=amount)
+
+    @staticmethod
+    def _spec(**overrides):
+        spec = {"guild_id": GUILD, "user_id": USER, "item_id": 1,
+                "item_name": "BoundThing", "internal_type": "potion",
+                "inventory_rolled_back": False, "equip_reconciled": False,
+                "role_reconciled": False}
+        spec.update(overrides)
+        return spec
+
+    @staticmethod
+    def _forged_snapshot(row_id=999999, quantity=1):
+        """A snapshot row id that does not exist, shaped like the producer's."""
+        return (row_id, quantity, "custom", "shop", None, None, None)
+
+    async def _compensate(self, op_id, spec, **kwargs):
+        """Arm the durable descriptor the runtime writes, then compensate.
+
+        `compensate_late_delivery` only ever touches state on behalf of a
+        persisted descriptor (that is the recovery contract), so a descriptor
+        must exist first — the same order `process_purchase` uses.
+        """
+        await TO.record_pending_delivery_rollback(op_id, spec, bot=None)
+        return await TO.compensate_late_delivery(op_id, spec, **kwargs)
+
+    # ── A: descriptor identity vs. journal row ──────────────────────────
+
+    async def test_a_descriptor_for_another_guild_cannot_touch_that_guild(self):
+        op_id = await self._op()
+        victim = await self._row("BoundThing", guild=OTHER_GUILD, qty=3)
+        res = await self._compensate(
+            op_id, self._spec(guild_id=OTHER_GUILD, delivered_inventory=victim))
+        self.assertFalse(res["complete"], str(res))
+        self.assertEqual(
+            rows("SELECT quantity FROM inventory_items WHERE id=?",
+                 (victim[0],)),
+            [(3,)], "a descriptor naming another guild mutated its inventory")
+        stored = json.loads((await TO.get_purchase(op_id))[
+            "_raw_delivery_rollback"])
+        self.assertIn("not bound to this purchase", stored["last_error"])
+        self.assertTrue(stored["last_error_at"])
+
+    async def test_a_descriptor_for_another_member_cannot_touch_that_member(self):
+        op_id = await self._op()
+        victim = await self._row("BoundThing", user=OTHER_USER, qty=2)
+        res = await self._compensate(
+            op_id, self._spec(user_id=OTHER_USER, delivered_inventory=victim))
+        self.assertFalse(res["complete"], str(res))
+        self.assertEqual(
+            rows("SELECT quantity FROM inventory_items WHERE id=?",
+                 (victim[0],)),
+            [(2,)], "a descriptor naming another member mutated their inventory")
+
+    async def test_a_descriptor_missing_its_identity_is_refused(self):
+        op_id = await self._op()
+        mine = await self._row("BoundThing", qty=2)
+        spec = self._spec(delivered_inventory=mine)
+        spec.pop("guild_id")
+        res = await self._compensate(op_id, spec)
+        self.assertFalse(res["complete"], str(res))
+        self.assertEqual(
+            rows("SELECT quantity FROM inventory_items WHERE id=?", (mine[0],)),
+            [(2,)], "an unidentifiable descriptor still mutated inventory")
+
+    async def test_a_legitimate_stackable_descriptor_still_completes(self):
+        op_id = await self._op()
+        mine = await self._row("BoundThing", qty=1)
+        res = await self._compensate(
+            op_id, self._spec(delivered_inventory=mine))
+        self.assertTrue(res["complete"], str(res))
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM inventory_items WHERE id=?", (mine[0],)),
+            [(0,)], "the delivered row was not rolled back")
+        self.assertEqual((await TO.get_purchase(op_id))[
+            "_raw_delivery_rollback"], "")
+
+    # ── B/C: role descriptor key and evidence ───────────────────────────
+
+    async def test_b_role_descriptor_with_foreign_entry_key_clears_no_slot(self):
+        op_id = await self._op("Knight", amount=250)
+        mine = await self._row("Knight", item_type="role",
+                               metadata={"role_id": 702})
+        unrelated = await self._row("Squire", item_type="role",
+                                    metadata={"role_id": 703})
+        from utils.equip_engine import record_equipped
+        await record_equipped(GUILD, USER, "Squire", role_id=703,
+                                 entry_key=f"i:{unrelated[0]}")
+        res = await self._compensate(
+            op_id, self._spec(item_name="Knight", internal_type="role",
+                              role_id=702, role_added=True,
+                              entry_key=f"i:{unrelated[0]}",
+                              delivered_inventory=mine))
+        self.assertFalse(res["complete"], str(res))
+        self.assertEqual(
+            rows("SELECT item_name, entry_key FROM equipped_roles"),
+            [("Squire", f"i:{unrelated[0]}")],
+            "a conflicting descriptor key cleared an unrelated equip slot")
+        self.assertEqual(
+            rows("SELECT quantity FROM inventory_items WHERE id=?", (mine[0],)),
+            [(1,)])
+
+    async def test_c_role_descriptor_without_evidence_refuses_before_mutation(self):
+        op_id = await self._op("Knight", amount=250)
+        mine = await self._row("Knight", item_type="role",
+                               metadata={"role_id": 702})
+        res = await self._compensate(
+            op_id, self._spec(item_name="Knight", internal_type="role",
+                              role_id=702, role_added=True))
+        self.assertFalse(res["complete"], str(res))
+        self.assertEqual(
+            rows("SELECT quantity FROM inventory_items WHERE id=?", (mine[0],)),
+            [(1,)], "a descriptor with no evidence mutated before refusing")
+        stored = json.loads((await TO.get_purchase(op_id))[
+            "_raw_delivery_rollback"])
+        self.assertIn("records no delivered inventory snapshot",
+                      stored["last_error"])
+        self.assertNotIn(
+            (await TO.get_purchase(op_id))["status"],
+            (TO.PURCHASE_DELIVERED, TO.PURCHASE_REFUNDED),
+            "a refused rollback must not report the operation as settled")
+        self.assertTrue(
+            (await TO.get_purchase(op_id))["_raw_delivery_rollback"],
+            "the refused descriptor must be kept for recovery")
+
+    async def test_c_legitimate_role_descriptor_still_completes(self):
+        op_id = await self._op("Knight", amount=250)
+        mine = await self._row("Knight", item_type="role",
+                               metadata={"role_id": 702})
+        role = role_stub(702, "Knight")
+        itx, person, bot, guild = purchase_ctx(granted_role=role,
+                                               roles_held=[role])
+        res = await self._compensate(
+            op_id, self._spec(item_name="Knight", internal_type="role",
+                              role_id=702, role_added=True,
+                              entry_key=f"i:{mine[0]}",
+                              delivered_inventory=mine),
+            bot=bot)
+        self.assertTrue(res["complete"], str(res))
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM inventory_items WHERE id=?", (mine[0],)),
+            [(0,)], "the delivered role record was not rolled back")
+        person.remove_roles.assert_awaited()
+
+    # ── D: an operation cannot complete while its own boost is live ─────
+
+    async def test_d_wrong_boost_id_cannot_complete_over_a_live_own_boost(self):
+        exp = "2099-01-01T00:00:00+00:00"
+        op_id = await self._op("BoundBoost", amount=300)
+        execute(
+            "INSERT INTO leveling_active_boosts"
+            " (guild_id, user_id, multiplier, expires_at, source, origin_op_id)"
+            " VALUES (?,?,2.0,?,'shop',?), (?,?,2.0,?,'level_claim',NULL)",
+            (GUILD, USER, exp, str(op_id), GUILD, USER, exp))
+        ids = [r[0] for r in rows(
+            "SELECT id FROM leveling_active_boosts ORDER BY id")]
+        independent_id = ids[1]
+        res = await self._compensate(
+            op_id, self._spec(item_name="BoundBoost", internal_type="xp_boost",
+                              boost_id=independent_id, boost_expires_at=exp))
+        self.assertFalse(res["complete"], str(res))
+        remaining = rows("SELECT id, source FROM leveling_active_boosts"
+                         " ORDER BY id")
+        self.assertEqual(len(remaining), 2,
+                         f"a refusal mutated boosts: {remaining}")
+
+    async def test_d_own_boost_is_deleted_by_provenance_when_id_is_stale(self):
+        exp = "2099-01-01T00:00:00+00:00"
+        op_id = await self._op("BoundBoost", amount=300)
+        execute(
+            "INSERT INTO leveling_active_boosts"
+            " (guild_id, user_id, multiplier, expires_at, source, origin_op_id)"
+            " VALUES (?,?,2.0,?,'shop',?), (?,?,2.0,?,'level_claim',NULL)",
+            (GUILD, USER, exp, str(op_id), GUILD, USER, exp))
+        res = await self._compensate(
+            op_id, self._spec(item_name="BoundBoost", internal_type="xp_boost",
+                              boost_id=999999, boost_expires_at=exp))
+        self.assertTrue(res["complete"], str(res))
+        self.assertEqual(
+            rows("SELECT source FROM leveling_active_boosts"),
+            [("level_claim",)],
+            "the purchase's own boost survived, or the independent one died")
+
+    # ── E: canonical keys only, and the legitimate producer shape ───────
+
+    def test_e_non_canonical_keys_are_rejected(self):
+        for bad in ("h:+1", "h: 1", "h:01", "h:\u0661", "h:", "h:abc",
+                    "i:01", "i: 4", "i:+4", "h:1.0"):
+            spec = self._spec(internal_type="temp_role", entry_key=bad)
+            ok, problem = TO._validate_delivery_rollback_spec(spec)
+            self.assertFalse(ok, f"{bad!r} was accepted")
+            self.assertIn("entry_key", problem or "")
+        for good in ("h:1", "h:42", "i:7"):
+            spec = self._spec(internal_type="temp_role", entry_key=good)
+            ok, problem = TO._validate_delivery_rollback_spec(spec)
+            if good.startswith("h:"):
+                self.assertTrue(ok, f"{good!r} rejected: {problem}")
+
+    # ── F: durable reason, discovery and auditable retirement ───────────
+
+    async def _settled_op(self, name="BoundThing"):
+        """A refunded operation, the state a pending rollback really lives in."""
+        op_id = await self._op(name)
+        await TO.update_purchase(op_id, status=TO.PURCHASE_REFUNDED, refunded=1)
+        return op_id
+
+    async def test_f_refused_reason_is_durable_and_discoverable(self):
+        op_id = await self._settled_op()
+        await self._row("BoundThing", qty=1)
+        await self._compensate(
+            op_id, self._spec(delivered_inventory=self._forged_snapshot()))
+        summaries = await TO._pending_rollback_summaries()
+        self.assertIn(str(op_id), summaries)
+        self.assertIn("outstanding", summaries[str(op_id)])
+
+        verdict = await TO.rollback_retirement_evidence(op_id)
+        self.assertFalse(verdict["safe"], str(verdict))
+        self.assertTrue(verdict["evidence"])
+
+        ok, detail = await TO.retire_pending_rollback(op_id, confirmed=True)
+        self.assertFalse(ok, "retirement needs an operator note")
+        self.assertIn("note", detail)
+        ok, detail = await TO.retire_pending_rollback(
+            op_id, confirmed=True, note="manual")
+        self.assertFalse(ok, f"unattributable row was retired: {detail}")
+
+    async def test_f_retirement_requires_proof_and_records_an_audit_trail(self):
+        op_id = await self._settled_op()
+        mine = await self._row("BoundThing", qty=1)
+        await self._compensate(
+            op_id, self._spec(delivered_inventory=self._forged_snapshot()))
+        execute("DELETE FROM inventory_items WHERE id=?", (mine[0],))
+
+        verdict = await TO.rollback_retirement_evidence(op_id)
+        self.assertTrue(verdict["safe"], str(verdict))
+
+        ok, detail = await TO.retire_pending_rollback(
+            op_id, confirmed=True, note="verified in Discord: nothing delivered")
+        self.assertTrue(ok, detail)
+        op = await TO.get_purchase(op_id)
+        self.assertEqual(op["_raw_delivery_rollback"], "")
+        self.assertIn("Rollback retired by operator", op["detail"] or "")
+        self.assertIn("verified in Discord", op["detail"] or "")
+
+        # Second retirement can neither double-record nor re-run compensation.
+        ok2, detail2 = await TO.retire_pending_rollback(
+            op_id, confirmed=True, note="again")
+        self.assertFalse(ok2, detail2)
+        self.assertNotIn("again", (await TO.get_purchase(op_id))["detail"] or "")
+        self.assertEqual(
+            (await TO.get_purchase(op_id))["detail"].count("Rollback retired"),
+            1)
+
+    async def test_f_unsettled_operation_cannot_have_its_rollback_retired(self):
+        op_id = await self._op()          # status 'pending': delivery may be live
+        await self._row("BoundThing", qty=1)
+        await self._compensate(
+            op_id, self._spec(delivered_inventory=self._forged_snapshot()))
+        execute("DELETE FROM inventory_items WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+        verdict = await TO.rollback_retirement_evidence(op_id)
+        self.assertFalse(verdict["safe"], str(verdict))
+        self.assertIn("settled", verdict["reason"])
+        ok, detail = await TO.retire_pending_rollback(
+            op_id, confirmed=True, note="too early")
+        self.assertFalse(ok, detail)
+        self.assertTrue((await TO.get_purchase(op_id))["_raw_delivery_rollback"],
+                        "an unsettled operation's descriptor was cleared")
+
+    async def test_f_role_and_boost_retirement_is_refused_while_live(self):
+        exp = "2099-01-01T00:00:00+00:00"
+        boost_op = await self._settled_op("LiveBoost")
+        execute(
+            "INSERT INTO leveling_active_boosts"
+            " (guild_id, user_id, multiplier, expires_at, source, origin_op_id)"
+            " VALUES (?,?,2.0,?,'shop',?)", (GUILD, USER, exp, str(boost_op)))
+        await TO.record_pending_delivery_rollback(
+            boost_op, self._spec(item_name="LiveBoost",
+                                 internal_type="xp_boost",
+                                 boost_expires_at=exp), bot=None)
+        verdict = await TO.rollback_retirement_evidence(boost_op)
+        self.assertFalse(verdict["safe"], str(verdict))
+        self.assertIn("still active", verdict["reason"])
+
+        role_op = await self._settled_op("LiveRole")
+        mine = await self._row("LiveRole", item_type="role",
+                               metadata={"role_id": 702})
+        await TO.record_pending_delivery_rollback(
+            role_op, self._spec(item_name="LiveRole", internal_type="role",
+                                role_id=702, role_added=True,
+                                entry_key=f"i:{mine[0]}",
+                                delivered_inventory=mine), bot=None)
+        verdict = await TO.rollback_retirement_evidence(role_op)
+        self.assertFalse(verdict["safe"], str(verdict))
+        self.assertIn("Discord", verdict["reason"])
+
+
+class OperatorCliTests(unittest.IsolatedAsyncioTestCase):
+    """The real CLI (`scripts/recover_shop_purchases.py`) against real states.
+
+    The operator path is part of the safety contract, so it is exercised the way
+    an operator runs it: a subprocess, a `--db` path, and no `OWNER_ID` in the
+    environment (the docs promise `--db` is enough).
+    """
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        execute("DELETE FROM shop_purchase_operations")
+        execute("DELETE FROM inventory_items")
+        execute("DELETE FROM equipped_roles")
+        execute("DELETE FROM leveling_active_boosts")
+
+    def _cli(self, *args):
+        import os
+        import subprocess
+        import sys
+        from phase1_support import DB_FILE
+        env = {k: v for k, v in os.environ.items() if k != "OWNER_ID"}
+        proc = subprocess.run(
+            [sys.executable, "scripts/recover_shop_purchases.py",
+             "--db", str(DB_FILE), *args],
+            cwd=str(Path(__file__).resolve().parent),
+            env=env, capture_output=True, text=True, timeout=120)
+        return proc.returncode, proc.stdout + proc.stderr
+
+    async def _refused_case(self, name="CliThing"):
+        op_id = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name=name, currency="balance",
+            amount=100)
+        await TO.update_purchase(op_id, status=TO.PURCHASE_REFUNDED, refunded=1)
+        # The name exists (so the name-addressed rollback has a target) but the
+        # descriptor's snapshot points at a different row id: a conflict the
+        # runtime refuses, which is what leaves a descriptor PENDING.
+        await set_quantity(GUILD, USER, name, 1, source="shop")
+        snapshot = (999999, 1, "custom", "shop", None, None, None)
+        await TO.record_pending_delivery_rollback(op_id, {
+            "guild_id": GUILD, "user_id": USER, "item_id": 1,
+            "item_name": name, "internal_type": "potion",
+            "inventory_rolled_back": False, "equip_reconciled": False,
+            "role_reconciled": False,
+            "delivered_inventory": list(snapshot),
+        }, bot=None)
+        await TO.compensate_late_delivery(op_id, {
+            "guild_id": GUILD, "user_id": USER, "item_id": 1,
+            "item_name": name, "internal_type": "potion",
+            "inventory_rolled_back": False, "equip_reconciled": False,
+            "role_reconciled": False,
+            "delivered_inventory": list(snapshot),
+        })
+        return op_id
+
+    async def test_cli_lists_a_pending_rollback_without_being_asked(self):
+        op_id = await self._refused_case()
+        rc, out = self._cli()
+        self.assertEqual(rc, 0, out)
+        self.assertIn(op_id, out)
+        self.assertIn("PENDING", out)
+        self.assertIn("does not describe the delivered inventory grant", out)
+        rc, out = self._cli("--pending-rollbacks")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(op_id, out)
+        rc, out = self._cli("--json")
+        self.assertEqual(rc, 0, out)
+        payload = json.loads(out)
+        self.assertIn(op_id, payload["pending_rollbacks"])
+
+    async def test_cli_refuses_to_retire_without_proof_or_a_note(self):
+        op_id = await self._refused_case()
+        rc, out = self._cli("--op-id", op_id, "--check-rollback")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NOT SAFE", out)
+
+        rc, out = self._cli("--op-id", op_id, "--retire-rollback")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("--yes", out)
+
+        rc, out = self._cli("--op-id", op_id, "--retire-rollback", "--yes")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("note", out)
+
+        rc, out = self._cli("--op-id", op_id, "--retire-rollback", "--yes",
+                            "--note", "tried anyway")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("Refused", out)
+        self.assertIn("cannot be attributed", out)
+        self.assertEqual(
+            [r[0] for r in rows(
+                "SELECT delivery_rollback FROM shop_purchase_operations"
+                " WHERE op_id=?", (op_id,))],
+            [json.dumps(json.loads(rows(
+                "SELECT delivery_rollback FROM shop_purchase_operations"
+                " WHERE op_id=?", (op_id,))[0][0]))],
+            "a refused retirement must leave the descriptor untouched")
+        self.assertIsNone((await TO.get_purchase(op_id))["detail"])
+
+    async def test_cli_retires_only_once_and_keeps_the_audit_trail(self):
+        op_id = await self._refused_case()
+        execute("DELETE FROM inventory_items WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+        rc, out = self._cli("--op-id", op_id, "--check-rollback")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("SAFE", out)
+
+        rc, out = self._cli("--op-id", op_id, "--retire-rollback", "--yes",
+                            "--note", "verified in Discord, nothing delivered")
+        self.assertEqual(rc, 0, out)
+        op = await TO.get_purchase(op_id)
+        self.assertEqual(op["_raw_delivery_rollback"], "")
+        self.assertIn("Rollback retired by operator", op["detail"])
+        self.assertIn("verified in Discord", op["detail"])
+
+        rc, out = self._cli("--op-id", op_id, "--retire-rollback", "--yes",
+                            "--note", "second attempt")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(
+            (await TO.get_purchase(op_id))["detail"].count("Rollback retired"),
+            1, "a duplicate retirement was recorded")
+
+    async def test_cli_reports_a_legacy_unreadable_descriptor_and_keeps_it(self):
+        op_id = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name="LegacyThing",
+            currency="balance", amount=100)
+        await TO.update_purchase(op_id, status=TO.PURCHASE_REFUNDED, refunded=1)
+        execute("UPDATE shop_purchase_operations SET delivery_rollback=?"
+                " WHERE op_id=?", ("{not json", op_id))
+
+        rc, out = self._cli()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("descriptor is unreadable", out)
+
+        rc, out = self._cli("--op-id", op_id, "--check-rollback")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("unreadable", out)
+
+        rc, out = self._cli("--op-id", op_id, "--retire-rollback", "--yes",
+                            "--note", "give up")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                 " WHERE op_id=?", (op_id,)),
+            [("{not json",)],
+            "the unreadable descriptor must be preserved as evidence")

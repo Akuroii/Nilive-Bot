@@ -1037,12 +1037,29 @@ async def init_db():
         # `equipped_roles.entry_key` above.
         cursor = await db.execute("PRAGMA table_info(leveling_active_boosts)")
         if "origin_op_id" not in {c[1] for c in await cursor.fetchall()}:
+            # This column is required, not optional: every shop boost INSERT
+            # names it, and the late-delivery rollback uses it to prove which
+            # purchase created a boost. Logging the failure and continuing (as
+            # this used to) starts the bot against a schema where every boost
+            # grant raises `no such column: origin_op_id` — a silent, delayed
+            # outage that looks like a grant bug. Refuse to start instead, and
+            # name the fix.
             try:
                 await db.execute(
                     "ALTER TABLE leveling_active_boosts"
                     " ADD COLUMN origin_op_id TEXT")
-            except Exception as e:
-                print(f"[MIGRATION] leveling_active_boosts.origin_op_id: {e}")
+            except Exception as exc:
+                print("=" * 60)
+                print("FATAL: could not add leveling_active_boosts.origin_op_id")
+                print(f"  {exc}")
+                print("  -> Shop XP boosts cannot be granted or rolled back")
+                print("     without this column, so startup is aborted rather")
+                print("     than continuing into an inconsistent schema.")
+                print("  -> Check database write permissions / disk space, then")
+                print("     restart. Existing rows keep working once the ALTER")
+                print("     succeeds (it is additive and idempotent).")
+                print("=" * 60)
+                raise
 
         # Level-claim boosts only. Shop and potion rows use other source
         # values, so this index does not limit those inserts.
