@@ -335,8 +335,20 @@ async def cleanup_expired_role_item(guild_id: int, user_id: int, role_id: int):
     if current and current["role_id"] == role_id:
         cur_key = current.get("entry_key")
         if cur_key is None or cur_key == match_key:
+            # Conditional delete: the check above reads a snapshot, and the slot
+            # can be replaced between that read and this write (a purchase, a
+            # swap, another cleanup). Deleting by member alone would erase the
+            # newer entry; matching the identity we verified leaves it alone.
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    "DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?",
-                    (guild_id, user_id))
+                if cur_key is None:
+                    await db.execute(
+                        "DELETE FROM equipped_roles"
+                        " WHERE guild_id=? AND user_id=?"
+                        " AND (entry_key IS NULL OR entry_key='') AND role_id=?",
+                        (guild_id, user_id, int(role_id)))
+                else:
+                    await db.execute(
+                        "DELETE FROM equipped_roles"
+                        " WHERE guild_id=? AND user_id=? AND entry_key=?",
+                        (guild_id, user_id, cur_key))
                 await db.commit()

@@ -7603,8 +7603,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             rows("SELECT delivery_rollback FROM shop_purchase_operations"
                  " WHERE op_id=?", (op,))[0][0], "")
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 # ── 12. ownership/provenance boundary (cycle 2 regressions) ─────────────────
@@ -7707,6 +7705,28 @@ class RollbackOwnershipBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             rows("SELECT quantity FROM inventory_items WHERE id=?", (mine[0],)),
             [(2,)], "an unidentifiable descriptor still mutated inventory")
+
+    async def test_a_foreign_descriptor_is_refused_before_any_discord_lookup(self):
+        """The boundary must precede external calls, not follow them."""
+        from unittest.mock import AsyncMock
+        op_id = await self._op()
+        victim = await self._row("BoundThing", user=OTHER_USER, qty=1)
+        role = role_stub(703, "VictimRole")
+        itx, person, bot, guild = purchase_ctx(granted_role=role)
+        guild.fetch_member = AsyncMock(side_effect=AssertionError(
+            "fetched a member on behalf of a descriptor this purchase does not own"))
+        guild.get_member = lambda uid: person
+        res = await self._compensate(
+            op_id, self._spec(item_name="BoundThing", user_id=OTHER_USER,
+                              internal_type="role", role_id=703,
+                              role_added=True, entry_key="h:1",
+                              delivered_inventory=victim),
+            bot=bot)
+        self.assertFalse(res["complete"], str(res))
+        self.assertIn("not bound to this purchase", str(res["error"]))
+        self.assertEqual(
+            rows("SELECT quantity FROM inventory_items WHERE id=?",
+                 (victim[0],)), [(1,)])
 
     async def test_a_legitimate_stackable_descriptor_still_completes(self):
         op_id = await self._op()
@@ -8087,3 +8107,610 @@ class OperatorCliTests(unittest.IsolatedAsyncioTestCase):
                  " WHERE op_id=?", (op_id,)),
             [("{not json",)],
             "the unreadable descriptor must be preserved as evidence")
+
+
+# ── 13. D1-D5 regressions from the independent review ──────────────────────
+
+def producer_spec(name="ReviewPotion", internal_type="potion", **extra):
+    """The descriptor `cogs/shop.py` actually builds, key for key.
+
+    `entry_key` is explicitly `None` for every delivery that has no key (potions,
+    titles, untimed custom items, and the permanent-role path before
+    `equip_role` returns one), so a consumer that assumes a string crashes on
+    the most common shape in production rather than on an edge case.
+    """
+    spec = {
+        "op_id": None,
+        "guild_id": GUILD,
+        "user_id": USER,
+        "item_id": 1,
+        "item_name": name,
+        "internal_type": internal_type,
+        "category": None,
+        "role_id": None,
+        "entry_key": None,
+        "role_added": True,
+        "prior_inventory": None,
+        "delivered_inventory": None,
+        "boost_id": None,
+        "boost_expires_at": None,
+        "boost_source": None,
+        "inventory_rolled_back": False,
+        "equip_reconciled": False,
+        "role_reconciled": False,
+        "retry_entry_key": None,
+    }
+    spec.update(extra)
+    return spec
+
+
+class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
+    """Each test here failed against `87687c5`; see REVIEW_FINDINGS §D1-D5."""
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        for table in ("shop_purchase_operations", "inventory_items",
+                      "equipped_roles", "leveling_active_boosts"):
+            execute(f"DELETE FROM {table}")
+
+    async def _settled(self, name, status=None):
+        op_id = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name=name, currency="balance",
+            amount=100)
+        await TO.update_purchase(op_id, status=status or TO.PURCHASE_REFUNDED,
+                                 refunded=1)
+        return op_id
+
+    async def _store(self, op_id, spec):
+        await TO.record_pending_delivery_rollback(op_id, spec, bot=None)
+
+    def _raw(self, op_id):
+        return rows("SELECT delivery_rollback FROM shop_purchase_operations"
+                    " WHERE op_id=?", (op_id,))[0][0]
+
+    # ── D1: the producer's own descriptor must not crash the check ──────
+
+    async def test_d1_check_rollback_accepts_a_producer_descriptor_with_none_entry_key(self):
+        """`entry_key: None` is what the Shop writes for every inventory product."""
+        await set_quantity(GUILD, USER, "ReviewPotion", 1, source="shop")
+        snap = rows(
+            "SELECT id, quantity, item_type, source, metadata, created_at,"
+            " updated_at FROM inventory_items WHERE item_name='ReviewPotion'")[0]
+        op_id = await self._settled("ReviewPotion")
+        spec = producer_spec(delivered_inventory=list(snap))
+        await self._store(op_id, spec)
+        self.assertIsNone(json.loads(self._raw(op_id))["entry_key"])
+
+        verdict = await TO.rollback_retirement_evidence(op_id)
+        self.assertFalse(verdict["safe"], str(verdict))
+        self.assertIn("delivered inventory row", verdict["reason"])
+
+        # And the real CLI, with no OWNER_ID, must complete normally.
+        rc, out = self._cli("--op-id", op_id, "--check-rollback")
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("AttributeError", out)
+        self.assertIn("Rollback retirement: NOT SAFE", out)
+
+        # Once the delivered row is genuinely gone the same descriptor is SAFE.
+        execute("DELETE FROM inventory_items WHERE id=?", (snap[0],))
+        verdict = await TO.rollback_retirement_evidence(op_id)
+        self.assertTrue(verdict["safe"], str(verdict))
+        rc, out = self._cli("--op-id", op_id, "--check-rollback")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Rollback retirement: SAFE", out)
+
+    async def test_d1_producer_descriptors_for_every_product_type_do_not_crash(self):
+        """Every producer shape is consumable; a live effect is never "safe".
+
+        The descriptors below are the ones `cogs/shop.py` writes, each paired
+        with the effect that delivered product really leaves behind, so the
+        verdict under test is "this cannot be retired", not merely "no crash".
+        """
+        exp = "2099-01-01T00:00:00+00:00"
+        for label in ("potion", "title", "custom"):
+            op_id = await self._settled(f"Type{label}")
+            await set_quantity(GUILD, USER, f"Type{label}", 1, source="shop")
+            snap = rows(
+                "SELECT id, quantity, item_type, source, metadata, created_at,"
+                " updated_at FROM inventory_items WHERE item_name=?",
+                (f"Type{label}",))[0]
+            await self._store(op_id, producer_spec(
+                f"Type{label}", internal_type=label,
+                delivered_inventory=list(snap)))
+            verdict = await TO.rollback_retirement_evidence(op_id)
+            self.assertFalse(verdict["safe"], f"{label}: {verdict}")
+            rc, out = self._cli("--op-id", op_id, "--check-rollback")
+            self.assertNotIn("Traceback", out, f"{label}: CLI crashed")
+
+        # Timed product: its holding row is the effect.
+        op_id = await self._settled("TypeTimerole")
+        holding = execute(
+            "INSERT INTO timed_holdings (guild_id, user_id, item_name,"
+            " item_type, metadata, expires_at, role_id)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (GUILD, USER, "TypeTimerole", "shop_custom",
+             json.dumps({"origin_op_id": str(op_id)}), exp, 701))
+        await self._store(op_id, producer_spec(
+            "TypeTimerole", internal_type="temp_role", role_id=701,
+            entry_key=f"h:{holding}"))
+        self.assertFalse(
+            (await TO.rollback_retirement_evidence(op_id))["safe"],
+            "a live holding was reported as absent")
+        rc, out = self._cli("--op-id", op_id, "--check-rollback")
+        self.assertNotIn("Traceback", out)
+
+        # XP boost: its row is the effect.
+        op_id = await self._settled("TypeBoost")
+        execute("INSERT INTO leveling_active_boosts"
+                " (guild_id, user_id, multiplier, expires_at, source,"
+                " origin_op_id) VALUES (?,?,2.0,?,'shop',?)",
+                (GUILD, USER, exp, str(op_id)))
+        await self._store(op_id, producer_spec(
+            "TypeBoost", internal_type="xp_boost", boost_expires_at=exp))
+        self.assertFalse(
+            (await TO.rollback_retirement_evidence(op_id))["safe"],
+            "a live boost was reported as absent")
+        rc, out = self._cli("--op-id", op_id, "--check-rollback")
+        self.assertNotIn("Traceback", out)
+
+        # Permanent role: never machine-retirable (needs Discord state).
+        op_id = await self._settled("TypeRole")
+        await self._store(op_id, producer_spec(
+            "TypeRole", internal_type="role", role_id=702))
+        verdict = await TO.rollback_retirement_evidence(op_id)
+        self.assertFalse(verdict["safe"], f"role: {verdict}")
+        self.assertEqual(verdict["code"], "discord_state_unobservable")
+
+    # ── D2: a non-executable descriptor is never retired or erased ──────
+
+    async def test_d2_malformed_descriptors_are_never_retired_or_erased(self):
+        cases = {
+            "empty object": "{}",
+            "null": "null",
+            "list": "[1, 2]",
+            "string": '"text"',
+            "unparseable": "{not json",
+            "empty object with flags": json.dumps(
+                {"inventory_rolled_back": False, "equip_reconciled": False,
+                 "role_reconciled": False}),
+            "identity-less but typed": json.dumps(
+                {"internal_type": "potion", "delivered_inventory": [999999]}),
+        }
+        for label, raw_value in cases.items():
+            op_id = await self._settled(f"Malformed {label}")
+            execute("UPDATE shop_purchase_operations SET delivery_rollback=?"
+                    " WHERE op_id=?", (raw_value, op_id))
+            verdict = await TO.rollback_retirement_evidence(op_id)
+            self.assertFalse(verdict["safe"], f"{label}: reported safe")
+            self.assertIn("code", verdict)
+            ok, detail = await TO.retire_pending_rollback(
+                op_id, confirmed=True, note="review regression")
+            self.assertFalse(ok, f"{label}: retired ({detail})")
+            self.assertEqual(
+                self._raw(op_id), raw_value,
+                f"{label}: the descriptor was rewritten; recovery evidence lost")
+
+    async def test_d2_a_completed_descriptor_has_nothing_to_retire(self):
+        op_id = await self._settled("AlreadyDone")
+        execute("UPDATE shop_purchase_operations SET delivery_rollback=''"
+                " WHERE op_id=?", (op_id,))
+        verdict = await TO.rollback_retirement_evidence(op_id)
+        self.assertFalse(verdict["safe"], str(verdict))
+        ok, _ = await TO.retire_pending_rollback(
+            op_id, confirmed=True, note="noop")
+        self.assertFalse(ok)
+        self.assertEqual(self._raw(op_id), "")
+
+    # ── D3: evidence comes from the operation, never the descriptor ─────
+
+    async def test_d3_foreign_guild_descriptor_cannot_hide_a_live_boost(self):
+        exp = "2099-01-01T00:00:00+00:00"
+        op_id = await self._settled("ForeignGuildBoost")
+        execute("INSERT INTO leveling_active_boosts"
+                " (guild_id, user_id, multiplier, expires_at, source,"
+                " origin_op_id) VALUES (?,?,2.0,?,'shop',?)",
+                (GUILD, USER, exp, str(op_id)))
+        await self._store(op_id, producer_spec(
+            "ForeignGuildBoost", internal_type="xp_boost",
+            guild_id=GUILD + 1, boost_expires_at=exp))
+
+        verdict = await TO.rollback_retirement_evidence(op_id)
+        self.assertFalse(verdict["safe"], str(verdict))
+        ok, detail = await TO.retire_pending_rollback(
+            op_id, confirmed=True, note="review regression")
+        self.assertFalse(ok, detail)
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM leveling_active_boosts"
+                 " WHERE origin_op_id=?", (str(op_id),)), [(1,)],
+            "the operation's own boost was lost while the descriptor hid it")
+
+    async def test_d3_foreign_member_descriptor_cannot_hide_a_live_holding(self):
+        exp = "2099-01-01T00:00:00+00:00"
+        op_id = await self._settled("ForeignMemberHold")
+        holding = execute(
+            "INSERT INTO timed_holdings (guild_id, user_id, item_name, item_type,"
+            " metadata, expires_at, role_id) VALUES (?,?,?,?,?,?,?)",
+            (GUILD, USER, "ForeignMemberHold", "shop_custom",
+             json.dumps({"origin_op_id": str(op_id)}), exp, 701))
+        await self._store(op_id, producer_spec(
+            "ForeignMemberHold", internal_type="temp_role", role_id=701,
+            entry_key=f"h:{holding}", user_id=USER + 1))
+        verdict = await TO.rollback_retirement_evidence(op_id)
+        self.assertFalse(verdict["safe"], str(verdict))
+        ok, _ = await TO.retire_pending_rollback(
+            op_id, confirmed=True, note="review regression")
+        self.assertFalse(ok)
+        self.assertTrue(rows("SELECT id FROM timed_holdings WHERE id=?",
+                             (holding,)))
+
+    async def test_d3_live_holding_named_by_the_descriptor_blocks_retirement(self):
+        exp = "2099-01-01T00:00:00+00:00"
+        op_id = await self._settled("LiveHolding")
+        holding = execute(
+            "INSERT INTO timed_holdings (guild_id, user_id, item_name, item_type,"
+            " metadata, expires_at, role_id) VALUES (?,?,?,?,?,?,?)",
+            (GUILD, USER, "LiveHolding", "shop_custom",
+             json.dumps({"origin_op_id": str(op_id)}), exp, 701))
+        await self._store(op_id, producer_spec(
+            "LiveHolding", internal_type="temp_role", role_id=701,
+            entry_key=f"h:{holding}"))
+        verdict = await TO.rollback_retirement_evidence(op_id)
+        self.assertFalse(verdict["safe"], str(verdict))
+        self.assertEqual(verdict["code"], "effects_live")
+
+    async def test_d1_malformed_boost_ids_never_report_completion(self):
+        """Only a real row id addresses a row; coercible values must not."""
+        exp = "2099-01-01T00:00:00+00:00"
+        for bad in ("1", " 1", "\x001", 0, -5, 1.7, True, [1], {"id": 1}, "١"):
+            op_id = await self._settled(f"BadBoost{abs(hash(str(bad))) % 10000}")
+            execute("INSERT INTO leveling_active_boosts"
+                    " (guild_id, user_id, multiplier, expires_at, source,"
+                    " origin_op_id) VALUES (?,?,2.0,?,'shop',?)",
+                    (GUILD, USER, exp, str(op_id)))
+            spec = producer_spec(
+                json.loads(self._raw(op_id))["item_name"]
+                if self._raw(op_id) else "BadBoost",
+                internal_type="xp_boost", boost_id=bad,
+                boost_expires_at=exp)
+            await self._store(op_id, spec)
+            res = await TO.compensate_late_delivery(op_id, dict(spec))
+            self.assertFalse(res["complete"], f"{bad!r} reported completion")
+            self.assertEqual(
+                rows("SELECT COUNT(*) FROM leveling_active_boosts"
+                     " WHERE origin_op_id=?", (str(op_id),)), [(1,)],
+                f"{bad!r} deleted the live boost")
+            verdict = await TO.rollback_retirement_evidence(op_id)
+            self.assertFalse(verdict["safe"], f"{bad!r} looked retirable")
+
+    async def test_d3_missing_provenance_is_not_evidence_of_absence(self):
+        """A legacy row with no `origin_op_id` could be this purchase's grant."""
+        exp = "2099-01-01T00:00:00+00:00"
+        boost_op = await self._settled("LegacyBoost")
+        execute("INSERT INTO leveling_active_boosts"
+                " (guild_id, user_id, multiplier, expires_at, source,"
+                " origin_op_id) VALUES (?,?,2.0,?,'shop',NULL)",
+                (GUILD, USER, exp))
+        await self._store(boost_op, producer_spec(
+            "LegacyBoost", internal_type="xp_boost", boost_id=1,
+            boost_expires_at=exp))
+        verdict = await TO.rollback_retirement_evidence(boost_op)
+        self.assertFalse(verdict["safe"], str(verdict))
+        self.assertEqual(verdict["code"], "provenance_unprovable")
+        ok, _ = await TO.retire_pending_rollback(
+            boost_op, confirmed=True, note="review regression")
+        self.assertFalse(ok)
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM leveling_active_boosts"), [(1,)])
+
+        hold_op = await self._settled("LegacyHold")
+        holding = execute(
+            "INSERT INTO timed_holdings (guild_id, user_id, item_name, item_type,"
+            " metadata, expires_at, role_id) VALUES (?,?,?,?,NULL,?,?)",
+            (GUILD, USER, "LegacyHold", "shop_custom", exp, 702))
+        await self._store(hold_op, producer_spec(
+            "LegacyHold", internal_type="temp_role", role_id=702,
+            entry_key=f"h:{holding}"))
+        execute("DELETE FROM timed_holdings WHERE id=?", (holding,))
+        orphan = execute(
+            "INSERT INTO timed_holdings (guild_id, user_id, item_name, item_type,"
+            " metadata, expires_at, role_id) VALUES (?,?,?,?,NULL,?,?)",
+            (GUILD, USER, "LegacyHold", "shop_custom", exp, 702))
+        # Re-point the descriptor at a holding that does not exist, leaving the
+        # unattributable row as the only candidate.
+        spec = json.loads(self._raw(hold_op))
+        spec["entry_key"] = "h:999999"
+        execute("UPDATE shop_purchase_operations SET delivery_rollback=?"
+                " WHERE op_id=?", (json.dumps(spec), hold_op))
+        verdict = await TO.rollback_retirement_evidence(hold_op)
+        self.assertFalse(verdict["safe"], str(verdict))
+        self.assertEqual(verdict["code"], "provenance_unprovable",
+                         f"unattributable holding {orphan} was treated as absent")
+
+    async def test_d3_control_a_fully_absent_operation_is_retirable(self):
+        op_id = await self._settled("ReallyGone")
+        await self._store(op_id, producer_spec(
+            "ReallyGone", delivered_inventory=[999999, 1, "potion", "shop",
+                                               None, None, None]))
+        verdict = await TO.rollback_retirement_evidence(op_id)
+        self.assertTrue(verdict["safe"], str(verdict))
+        self.assertEqual(verdict["code"], "proven_absent")
+        ok, detail = await TO.retire_pending_rollback(
+            op_id, confirmed=True, note="verified absent")
+        self.assertTrue(ok, detail)
+        self.assertEqual(self._raw(op_id), "")
+        self.assertIn("Rollback retired by operator",
+                      (await TO.get_purchase(op_id))["detail"] or "")
+
+    # ── D4: a pending rollback must never become unreachable ────────────
+
+    async def test_d4_delivered_resolution_is_refused_while_compensation_pends(self):
+        op_id = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name="PendingOrphan",
+            currency="balance", amount=100)
+        await TO.update_purchase(op_id, status=TO.PURCHASE_FAILED, charged=1,
+                                 stock_reserved=1)
+        await self._store(op_id, producer_spec(
+            "PendingOrphan", delivered_inventory=[999999, 1, "potion", "shop",
+                                                  None, None, None]))
+
+        res = await TO.resolve_purchase_operation(
+            op_id, action="delivered", confirmed=True, note="review regression")
+        self.assertFalse(res["success"], str(res))
+        self.assertIn("delivery_rollback", res["error"])
+        self.assertEqual(
+            rows("SELECT status FROM shop_purchase_operations WHERE op_id=?",
+                 (op_id,)), [("failed",)],
+            "the operation was transitioned to delivered anyway")
+        self.assertTrue(self._raw(op_id), "the descriptor was dropped")
+
+        # Still reachable by the runtime's retry scan.
+        stats = await TO.reconcile_delivery_rollbacks(bot=None, limit=50)
+        self.assertTrue(stats["completed"] or stats["errors"], str(stats))
+
+        rc, out = self._cli("--op-id", op_id, "--resolve", "delivered",
+                            "--yes", "--note", "review regression")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("cannot", out.lower())
+
+    async def test_d4_delivered_resolution_still_works_without_a_rollback(self):
+        op_id = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name="CleanUncertain",
+            currency="balance", amount=100)
+        await TO.update_purchase(op_id, status=TO.PURCHASE_UNCERTAIN)
+        res = await TO.resolve_purchase_operation(
+            op_id, action="delivered", confirmed=True, note="verified in Discord")
+        self.assertTrue(res["success"], str(res))
+        self.assertEqual(res["status"], TO.PURCHASE_DELIVERED)
+
+    async def test_d4_a_completed_rollback_also_blocks_delivered(self):
+        op_id = await TO.open_purchase(
+            GUILD, USER, item_id=1, item_name="CompensatedAlready",
+            currency="balance", amount=100)
+        await TO.update_purchase(op_id, status=TO.PURCHASE_FAILED)
+        execute("UPDATE shop_purchase_operations SET delivery_rollback=''"
+                " WHERE op_id=?", (op_id,))
+        res = await TO.resolve_purchase_operation(
+            op_id, action="delivered", confirmed=True, note="too late")
+        self.assertFalse(res["success"], str(res))
+        self.assertIn("already completed", res["error"])
+
+    # ── D5: the cleanup must not erase a slot that changed underneath ───
+
+    async def test_d5_clear_equip_leaves_a_slot_equipped_after_it_was_read(self):
+        from utils import equip_engine
+        from utils.equip_engine import record_equipped
+
+        await record_equipped(GUILD, USER, "OldColor", role_id=701,
+                              entry_key="h:old")
+        real_get = equip_engine.get_equipped
+        fired = {"n": 0}
+
+        async def racing_get(guild_id, user_id):
+            slot = await real_get(guild_id, user_id)
+            if fired["n"] == 0:
+                fired["n"] += 1
+                await record_equipped(GUILD, USER, "NewColor", role_id=702,
+                                      entry_key="h:new")
+            return slot
+
+        equip_engine.get_equipped = racing_get
+        try:
+            cleared = await TO.clear_equip_for_holding(GUILD, USER, "h:old",
+                                                       role_id=701)
+        finally:
+            equip_engine.get_equipped = real_get
+
+        self.assertFalse(cleared, "a stale cleanup reported clearing a slot")
+        self.assertEqual(
+            rows("SELECT item_name, entry_key, role_id FROM equipped_roles"),
+            [("NewColor", "h:new", 702)],
+            "the cleanup erased equipment installed after it read the slot")
+
+    async def test_d5_legacy_slot_cleanup_is_conditional_too(self):
+        from utils import equip_engine
+        from utils.equip_engine import record_equipped
+
+        await record_equipped(GUILD, USER, "Legacy", role_id=701,
+                              entry_key=None)
+        real_get = equip_engine.get_equipped
+        fired = {"n": 0}
+
+        async def racing_get(guild_id, user_id):
+            slot = await real_get(guild_id, user_id)
+            if fired["n"] == 0:
+                fired["n"] += 1
+                await record_equipped(GUILD, USER, "Fresh", role_id=702,
+                                      entry_key="h:fresh")
+            return slot
+
+        equip_engine.get_equipped = racing_get
+        try:
+            cleared = await TO.clear_equip_for_holding(GUILD, USER, "h:none",
+                                                       role_id=701)
+        finally:
+            equip_engine.get_equipped = real_get
+        self.assertFalse(cleared)
+        self.assertEqual(
+            rows("SELECT entry_key FROM equipped_roles"), [("h:fresh",)],
+            "the role_id fallback deleted a slot written by another equipper")
+
+    async def test_d5_legitimate_cleanup_still_clears_its_own_slot(self):
+        from utils.equip_engine import record_equipped
+
+        await record_equipped(GUILD, USER, "Mine", role_id=701,
+                              entry_key="h:mine")
+        self.assertTrue(
+            await TO.clear_equip_for_holding(GUILD, USER, "h:mine",
+                                             role_id=701))
+        self.assertEqual(rows("SELECT COUNT(*) FROM equipped_roles"), [(0,)])
+
+    async def test_d5_expiry_cleanup_does_not_erase_a_newer_equip(self):
+        """The `expire_one` caller gets the same guarantee end to end."""
+        from utils import equip_engine
+        from utils.equip_engine import record_equipped
+
+        past = (TO.utcnow() - timedelta(hours=2)).isoformat()
+        holding = execute(
+            "INSERT INTO timed_holdings (guild_id, user_id, item_name, item_type,"
+            " metadata, expires_at, role_id) VALUES (?,?,?,?,?,?,NULL)",
+            (GUILD, USER, "OldTimed", "shop_custom", None, past))
+        await record_equipped(GUILD, USER, "OldTimed", role_id=700,
+                              entry_key=f"h:{holding}")
+        real_get = equip_engine.get_equipped
+        fired = {"n": 0}
+
+        async def racing_get(guild_id, user_id):
+            slot = await real_get(guild_id, user_id)
+            if fired["n"] == 0:
+                fired["n"] += 1
+                await record_equipped(GUILD, USER, "BrandNew", role_id=999,
+                                      entry_key="h:brandnew")
+            return slot
+
+        equip_engine.get_equipped = racing_get
+        try:
+            from utils.timed_ownership import expire_one
+            result = await expire_one(None, {
+                "id": holding, "entry_key": f"h:{holding}",
+                "guild_id": GUILD, "user_id": USER, "item_name": "OldTimed",
+                "item_type": "shop_custom", "metadata": None,
+                "expires_at": past, "role_id": None, "source": "shop",
+            })
+        finally:
+            equip_engine.get_equipped = real_get
+        self.assertEqual(result["status"], "removed", str(result))
+        self.assertEqual(
+            rows("SELECT entry_key FROM equipped_roles"), [("h:brandnew",)],
+            "expiry cleanup erased a newer equip slot")
+
+    # ── the shared root cause, retested at the new boundary ─────────────
+
+    async def test_d5_expired_role_item_cleanup_is_conditional(self):
+        """`cleanup_expired_role_item` had the same read-then-delete shape."""
+        from utils import equip_engine
+        from utils.equip_engine import record_equipped
+        from utils.inventory import set_quantity
+
+        await set_quantity(GUILD, USER, "ExpiredTempRole", 1,
+                           item_type="temp_role", source="shop",
+                           metadata={"role_id": 750})
+        await record_equipped(GUILD, USER, "ExpiredTempRole", role_id=750,
+                              entry_key="i:77")
+        real_get = equip_engine.get_equipped
+        fired = {"n": 0}
+
+        async def racing_get(guild_id, user_id):
+            slot = await real_get(guild_id, user_id)
+            if fired["n"] == 0:
+                fired["n"] += 1
+                # A legitimate purchase equips a different entry between the
+                # check and the delete.
+                await record_equipped(guild_id, user_id, "NewlyBought",
+                                      role_id=750, entry_key="i:99")
+            return slot
+
+        equip_engine.get_equipped = racing_get
+        try:
+            await equip_engine.cleanup_expired_role_item(GUILD, USER, 750)
+        finally:
+            equip_engine.get_equipped = real_get
+        self.assertEqual(
+            rows("SELECT item_name, entry_key FROM equipped_roles"),
+            [("NewlyBought", "i:99")],
+            "expired-item cleanup erased an equip written after its check")
+
+    async def test_d5_equip_cleanup_is_idempotent(self):
+        from utils.equip_engine import record_equipped
+
+        await record_equipped(GUILD, USER, "Mine", role_id=701,
+                              entry_key="h:mine")
+        self.assertTrue(await TO.clear_equip_for_holding(
+            GUILD, USER, "h:mine", role_id=701))
+        self.assertFalse(await TO.clear_equip_for_holding(
+            GUILD, USER, "h:mine", role_id=701),
+            "a second clear reported clearing a slot that was already gone")
+
+    async def test_all_regression_classes_are_discoverable(self):
+        """Both documented invocation modes must reach every regression class."""
+        import inspect
+        import sys as _sys
+        module = _sys.modules[__name__]
+        expected = {
+            "RollbackOwnershipBoundaryTests": ("test_a_", "test_b_", "test_c_",
+                                               "test_d_", "test_e_", "test_f_"),
+            "OperatorCliTests": ("test_cli_",),
+            "ReviewFindingsTests": ("test_d1_", "test_d2_", "test_d3_",
+                                    "test_d4_", "test_d5_"),
+        }
+        for class_name, prefixes in expected.items():
+            cls = getattr(module, class_name, None)
+            self.assertIsNotNone(cls, f"{class_name} is not defined")
+            methods = [n for n in dir(cls) if n.startswith("test_")]
+            for prefix in prefixes:
+                self.assertTrue(
+                    any(m.startswith(prefix) for m in methods),
+                    f"{class_name} has no {prefix}* test")
+            self.assertTrue(inspect.iscoroutinefunction(
+                getattr(cls, methods[0])), "expected async tests")
+
+    async def test_entry_point_is_last(self):
+        """Script mode must reach every class (D6/test-invocation correction)."""
+        import pathlib
+        text = pathlib.Path(__file__).read_text(encoding="utf-8")
+        idx = text.index('if __name__ == "__main__":')
+        tail = text[idx:]
+        self.assertEqual(
+            [ln for ln in tail.splitlines() if ln.startswith("class ")],
+            [],
+            "a test class is defined after the __main__ entry point, so "
+            "script mode would skip it")
+        for name in ("RollbackOwnershipBoundaryTests", "OperatorCliTests",
+                     "ReviewFindingsTests"):
+            self.assertLess(text.index(f"class {name}"), idx,
+                            f"{name} is defined after the entry point")
+        for name in ("test_d1_", "test_d2_", "test_d3_", "test_d4_", "test_d5_"):
+            self.assertLess(text.index(f"async def {name}"), idx)
+
+    def _cli(self, *args):
+        import os
+        import subprocess
+        import sys
+        from phase1_support import DB_FILE
+        env = {k: v for k, v in os.environ.items() if k != "OWNER_ID"}
+        proc = subprocess.run(
+            [sys.executable, "scripts/recover_shop_purchases.py",
+             "--db", str(DB_FILE), *args],
+            cwd=str(Path(__file__).resolve().parent),
+            env=env, capture_output=True, text=True, timeout=180)
+        return proc.returncode, proc.stdout + proc.stderr
+
+
+# Everything below the entry point used to be unreachable in script mode
+# (`python test_timed_ownership.py`), which silently skipped the ownership-
+# boundary and operator-CLI regressions. The entry point is now the last
+# statement in the file, and `test_entry_point_is_last` keeps it there.
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

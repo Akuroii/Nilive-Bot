@@ -31,6 +31,13 @@ Pending late-delivery rollbacks (`delivery_rollback`):
     * `completed`         - compensation finished; the descriptor was cleared.
     * `PENDING (...)`     - compensation is unfinished. `reconcile_delivery_rollbacks`
                             retries it automatically, including after a restart.
+  A descriptor that is not an EXECUTABLE descriptor - unparseable JSON, a
+  non-object, an empty object, or one missing its identity - is preserved
+  byte-for-byte. The runtime keeps it as the only surviving record of what the
+  operation was doing, so `--retire-rollback` refuses it and says so; inspect the
+  raw row and resolve by hand. A descriptor that already completed was cleared to
+  the `''` sentinel, which is also not retirable (there is nothing left to do).
+
   A descriptor stays PENDING on purpose when the rollback cannot be reconciled
   with the grant it claims - for example a `role_id` that disagrees with the
   timed holding or with the delivered inventory row's `metadata.role_id`, an
@@ -65,7 +72,16 @@ Retiring a rollback that cannot be reconciled (evidence-based, audited):
        and your note to the operation's `detail` (the audit trail) and records
        durable completion, so compensation never runs again for it.
      There is deliberately no blanket "clear descriptor" / "mark complete"
-     switch, and no flag that skips the evidence check.
+     switch, and no flag that skips the evidence check. Evidence is gathered
+     from the OPERATION's own guild/member, never from the descriptor's, so a
+     descriptor naming someone else cannot hide the real operation's boost,
+     holding or inventory row. Effects whose provenance cannot be established
+     (a legacy boost or holding with no `origin_op_id`) count as "not proven
+     absent" and block retirement: verify those on Discord first.
+  `--resolve delivered` refuses while any `delivery_rollback` state exists
+  (pending, unreadable, or already completed). Marking such an operation
+  delivered would move it out of the retry scan while leaving the descriptor on
+  the row, making it unreachable from both reconciliation and this tool.
 
 Explicit operator resolution (requires `--op-id`, `--resolve`, `--yes`, and `--note`):
   * `python scripts/recover_shop_purchases.py --db /path/to/nilive.db --op-id <op_id> --resolve refund --yes --note "verified role not granted"`

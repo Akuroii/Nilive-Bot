@@ -995,12 +995,29 @@ async def clear_equip_for_holding(guild_id: int, user_id: int,
     else:
         if role_id is None or int(current.get("role_id") or 0) != int(role_id):
             return False
+    # Conditional delete, not delete-by-member. Reading the slot and then
+    # deleting "the member's slot" is a read-then-write race: between the two, a
+    # legitimate equip (a new purchase, a swap, another cleanup repointing the
+    # slot) can install a DIFFERENT entry, and the unconditional DELETE erases
+    # that instead. The WHERE clause carries the exact identity we just verified,
+    # so a slot that changed underneath this call is left alone, and the affected
+    # row count says whether we actually cleared the one we inspected.
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?",
-            (guild_id, user_id))
+        if stored:
+            cursor = await db.execute(
+                "DELETE FROM equipped_roles"
+                " WHERE guild_id=? AND user_id=? AND entry_key=?",
+                (guild_id, user_id, stored))
+        else:
+            # Legacy row: identity is "no entry_key, this role".
+            cursor = await db.execute(
+                "DELETE FROM equipped_roles"
+                " WHERE guild_id=? AND user_id=?"
+                " AND (entry_key IS NULL OR entry_key='') AND role_id=?",
+                (guild_id, user_id, int(role_id)))
+        deleted = int(getattr(cursor, "rowcount", 0) or 0)
         await db.commit()
-    return True
+    return deleted > 0
 
 
 async def reconcile_equip_for_expired_holding(guild_id: int, user_id: int,
@@ -1014,7 +1031,7 @@ async def reconcile_equip_for_expired_holding(guild_id: int, user_id: int,
     clears the slot so `equipped_roles.entry_key` never dangles on a deleted
     holding.
     """
-    from utils.equip_engine import get_equipped, record_equipped
+    from utils.equip_engine import get_equipped
     from utils.inventory import get_inventory
 
     current = await get_equipped(guild_id, user_id)
@@ -1075,10 +1092,33 @@ async def reconcile_equip_for_expired_holding(guild_id: int, user_id: int,
             ))
         if candidates:
             chosen = candidates[0]
-            await record_equipped(
-                guild_id, user_id, chosen["item_name"],
-                role_id=rid, entry_key=chosen["entry_key"])
-            return chosen["entry_key"]
+            # Same read-then-write hazard as `clear_equip_for_holding`: this
+            # repoint must not overwrite a slot that changed since it was
+            # inspected. `record_equipped` is an upsert with no precondition, so
+            # the guarded write is spelled out here.
+            async with aiosqlite.connect(DB_PATH) as db:
+                if stored:
+                    cursor = await db.execute(
+                        "UPDATE equipped_roles SET item_name=?, role_id=?,"
+                        " entry_key=?, equipped_at=CURRENT_TIMESTAMP"
+                        " WHERE guild_id=? AND user_id=? AND entry_key=?",
+                        (chosen["item_name"], rid, chosen["entry_key"],
+                         guild_id, user_id, stored))
+                else:
+                    cursor = await db.execute(
+                        "UPDATE equipped_roles SET item_name=?, role_id=?,"
+                        " entry_key=?, equipped_at=CURRENT_TIMESTAMP"
+                        " WHERE guild_id=? AND user_id=?"
+                        " AND (entry_key IS NULL OR entry_key='') AND role_id=?",
+                        (chosen["item_name"], rid, chosen["entry_key"],
+                         guild_id, user_id, int(role_id)))
+                repointed = int(getattr(cursor, "rowcount", 0) or 0)
+                await db.commit()
+            if repointed:
+                return chosen["entry_key"]
+            # The slot is no longer the one this call was asked to reconcile:
+            # leave whatever is there now alone.
+            return None
 
     await clear_equip_for_holding(guild_id, user_id, entry_key, role_id=role_id)
     return None
@@ -1418,11 +1458,12 @@ async def expire_one(bot, holding: dict) -> dict:
             return {"status": "kept", "reason": err, "error": err}
         await delete_timed_holding(entry_key)
         if linked_op_id:
-            _PENDING_DELIVERY_ROLLBACKS.pop(str(linked_op_id), None)
-            try:
-                await update_purchase(str(linked_op_id), delivery_rollback="")
-            except Exception:
-                pass
+            # Only clear when the operation visibly belongs to this holding and
+            # its descriptor is still pending: `delivery_rollback=""` is the
+            # completion sentinel, so writing it unconditionally would report
+            # compensated work for a `delivered` operation and destroy a
+            # malformed descriptor that is still needed for diagnosis.
+            await _complete_linked_rollback(linked_op_id)
         return {"status": "removed", "reason": f"role retained ({reason})"}
 
     role, role_deleted, role_lookup_err = await _resolve_guild_role(guild, int(role_id))
@@ -1468,11 +1509,7 @@ async def expire_one(bot, holding: dict) -> dict:
 
     await delete_timed_holding(entry_key)
     if linked_op_id:
-        _PENDING_DELIVERY_ROLLBACKS.pop(str(linked_op_id), None)
-        try:
-            await update_purchase(str(linked_op_id), delivery_rollback="")
-        except Exception:
-            pass
+        await _complete_linked_rollback(linked_op_id)
     return {
         "status": "removed",
         "reason": (
@@ -2593,6 +2630,65 @@ async def _read_delivery_rollback_raw(op_id: str, *, db=None):
     return state, row[0], spec
 
 
+async def _complete_linked_rollback(linked_op_id, *, db=None) -> tuple[str, str | None]:
+    """Clear `delivery_rollback` after a late-rollback holding was retired.
+
+    Reports `(outcome, detail)` with outcome one of:
+
+    * `"cleared"`   — the descriptor was still pending and is now the `''`
+                      completion sentinel;
+    * `"already"`   — it was already cleared (another pass won); nothing written;
+    * `"refused"`   — the operation is `delivered`: its goods were kept, so a
+                      holding retirement must not mark compensation complete;
+    * `"malformed"` — the stored value is not an executable descriptor (or the
+                      row is gone): it is left untouched, because overwriting it
+                      would destroy the only diagnostic record of the operation.
+
+    The write is a compare-and-swap on the exact value that was read, so a
+    concurrent compensation that advanced the descriptor in between cannot be
+    overwritten by this caller.
+    """
+    async def _run(conn) -> tuple[str, str | None]:
+        cursor = await conn.execute(
+            "SELECT status, delivery_rollback FROM shop_purchase_operations"
+            " WHERE op_id=?", (str(linked_op_id),))
+        row = await cursor.fetchone()
+        if row is None:
+            return "malformed", f"purchase operation {linked_op_id} not found"
+        status, raw = row
+        state, _ = _delivery_rollback_state(raw)
+        if state == "completed":
+            return "already", None
+        if state == "absent":
+            # Never create a descriptor here: only the delivery path may do that.
+            return "malformed", "no durable descriptor to complete"
+        if str(status) == PURCHASE_DELIVERED:
+            return "refused", (
+                f"operation {linked_op_id} is delivered; its goods were kept, so "
+                f"a holding retirement cannot complete its compensation"
+            )
+        if state == "malformed":
+            return "malformed", "stored descriptor is not an executable descriptor"
+        written = await update_purchase(
+            str(linked_op_id), delivery_rollback="", expect_delivery_rollback=raw,
+            db=conn)
+        if not written:
+            return "already", "a concurrent writer advanced the descriptor"
+        return "cleared", None
+
+    if db is not None:
+        # Caller owns the transaction; it commits or rolls back with its own work.
+        return await _run(db)
+    async with aiosqlite.connect(DB_PATH) as conn:
+        outcome, detail = await _run(conn)
+        if outcome == "cleared":
+            # This helper owns the connection, so it owns the commit. Reporting
+            # "cleared" without one would leave the descriptor pending while the
+            # caller believes the compensation finished.
+            await conn.commit()
+        return outcome, detail
+
+
 async def _persist_delivery_rollback_progress(op_id: str, spec: dict, *,
                                               db: aiosqlite.Connection | None = None,
                                               attempts: int = 4):
@@ -3327,6 +3423,20 @@ async def compensate_late_delivery(
         spec["_durable_unpersisted"] = True
         return False, False
 
+    # ── Ownership boundary ───────────────────────────────────────────────
+    # Shape validation cannot catch a descriptor that is internally consistent
+    # but names a different guild or member, and every branch below mutates
+    # state addressed by exactly those two values. Reconcile them with the
+    # operation's own journal row FIRST — before the Discord member lookup
+    # below, which would otherwise read another guild's member on behalf of a
+    # descriptor this purchase does not own (and could hit the API for it).
+    _bound, _bind_problem = _bind_descriptor_to_operation(spec, op_row)
+    if not _bound:
+        return await _persist_incomplete(
+            f"Delivery rollback descriptor is not bound to this purchase: "
+            f"{_bind_problem}"
+        )
+
     guild_obj, target_member = _resolve_guild_and_live_member(
         guild_id, user_id, bot=bot_client, interaction=interaction
     )
@@ -3351,19 +3461,6 @@ async def compensate_late_delivery(
         itx_user = getattr(interaction, "user", None)
         if itx_user is not None and getattr(itx_user, "id", int(user_id)) == int(user_id):
             target_member = itx_user
-
-    # ── Ownership boundary ───────────────────────────────────────────────
-    # Shape validation cannot catch a descriptor that is internally consistent
-    # but names a different guild or member, and every branch below mutates
-    # state addressed by exactly those two values. Reconcile them with the
-    # operation's own journal row before dispatching, so no branch can be
-    # reached with a descriptor that belongs to somebody else's purchase.
-    _bound, _bind_problem = _bind_descriptor_to_operation(spec, op_row)
-    if not _bound:
-        return await _persist_incomplete(
-            f"Delivery rollback descriptor is not bound to this purchase: "
-            f"{_bind_problem}"
-        )
 
     # ── Branch 1: Timed holding (`h:<id>`) ──────────────────────────────
     if late_key and str(late_key).startswith("h:"):
@@ -4857,147 +4954,300 @@ async def list_purchase_operations(*, status: str | None = PURCHASE_UNCERTAIN,
     return [dict(zip(keys, row)) for row in rows]
 
 
+async def _holding_facts(conn, holding_id: int) -> dict | None:
+    """`{guild_id, user_id, role_id, item_name, origin_op_id}` for one holding.
+
+    Provenance lives in the row's `metadata` (`grant_timed_holding` writes
+    `origin_op_id` there); `origin_op_id` is None for rows granted before that
+    marker existed. Reads on the caller's connection so the retirement check runs
+    inside the same transaction as the write it justifies.
+    """
+    cursor = await conn.execute(
+        "SELECT guild_id, user_id, metadata, role_id, item_name"
+        " FROM timed_holdings WHERE id=?",
+        (int(holding_id),),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    try:
+        meta = json.loads(row[2]) if row[2] else {}
+    except Exception:
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    origin = meta.get("origin_op_id")
+    return {
+        "guild_id": row[0],
+        "user_id": row[1],
+        "role_id": row[3],
+        "item_name": row[4],
+        "origin_op_id": str(origin) if origin is not None else None,
+    }
+
+
 async def rollback_retirement_evidence(op_id: str, *, db=None,
                                       op: dict | None = None) -> dict:
     """Can this pending rollback be retired safely, on local evidence alone?
 
-    A stuck descriptor must not be cleared by assertion: this checks whether the
-    operation's own delivered effects are *provably absent from the database*,
-    which is what makes "nothing is left to compensate" true rather than
-    assumed. It is read-only and returns the evidence either way.
+    A stuck descriptor must not be cleared by assertion. Three separate questions
+    are answered here, in this order, because each one can make the others
+    meaningless:
 
-    `permanent_role` is deliberately never retirable here. Proving a refunded
+    1. **Is there a descriptor the runtime considers executable?** The same
+       classifier (`_delivery_rollback_state`) and validator
+       (`_validate_delivery_rollback_spec`) the compensation path uses decide
+       that. A malformed, empty, non-object or identity-less descriptor is NOT
+       retirable: the runtime preserves those deliberately as diagnostic
+       evidence, and "a query returned no rows" says nothing about a record that
+       cannot even be read.
+    2. **Does it describe THIS operation?** `_bind_descriptor_to_operation`
+       reconciles guild/member/item with the journal row. Every query below is
+       then issued against the OPERATION's own columns, never the descriptor's
+       — otherwise a descriptor naming another guild makes the evidence search
+       someone else's state and "prove" absence there.
+    3. **Are this operation's own effects provably gone?** Provable means
+       attributable-to-someone-else or attributable-to-nothing. A record that
+       cannot be attributed at all (a legacy boost or holding with no
+       `origin_op_id`) is NOT absence — it is unprovable, and the answer is to
+       keep the descriptor and investigate.
+
+    `permanent_role` is deliberately never retirable here: proving a refunded
     role was removed requires Discord membership, which an offline SQLite tool
-    cannot observe — the honest answer is "not verifiable locally", not a guess.
+    cannot observe.
     """
     if op is None:
         op = await get_purchase(op_id)
     if op is None:
-        return {"safe": False, "type": None,
+        return {"safe": False, "type": None, "code": "unknown_operation",
                 "reason": f"Unknown purchase operation {op_id}", "evidence": []}
     settle_problem = _retirement_status_problem(op)
     if settle_problem is not None:
-        return {"safe": False, "type": None, "reason": settle_problem,
-                "evidence": []}
+        return {"safe": False, "type": None, "code": "not_settled",
+                "reason": settle_problem, "evidence": []}
+
     raw = op.get("_raw_delivery_rollback")
-    if not raw:
-        return {"safe": False, "type": None,
+    state, spec = _delivery_rollback_state(raw)
+    if state == "absent":
+        return {"safe": False, "type": None, "code": "no_descriptor",
                 "reason": "Operation has no pending rollback descriptor",
                 "evidence": []}
-    try:
-        spec = json.loads(raw)
-    except Exception:
-        return {"safe": False, "type": None,
-                "reason": "Descriptor is unreadable; treat as unrecoverable here",
-                "evidence": [raw[:200]]}
-    if not isinstance(spec, dict):
-        return {"safe": False, "type": None,
-                "reason": "Descriptor is not a JSON object", "evidence": []}
+    if state == "completed":
+        # The `''` sentinel: the runtime already finished compensating this
+        # operation and cleared the descriptor. There is nothing to retire, and
+        # writing anything here would resurrect finished work.
+        return {"safe": False, "type": None, "code": "already_completed",
+                "reason": ("this operation's late-delivery rollback already "
+                           "completed (descriptor cleared); there is nothing to "
+                           "retire"),
+                "evidence": [f"raw delivery_rollback: {str(raw)!r}"]}
+    if state == "malformed":
+        # Preserved on purpose by the runtime: it is the only surviving record
+        # of whatever the operation was doing. Never overwrite it with `''`.
+        return {"safe": False, "type": None, "code": "malformed_descriptor",
+                "reason": (
+                    "the stored delivery_rollback value is not an executable "
+                    "descriptor (unparseable, not a JSON object, or empty), so "
+                    "it cannot be shown to describe nothing — the runtime keeps "
+                    "it as diagnostic evidence; inspect the raw row and resolve "
+                    "by hand"),
+                "evidence": [f"raw delivery_rollback: {str(raw)[:200]}"]}
 
-    internal_type = spec.get("internal_type")
-    guild_id, user_id = int(spec.get("guild_id") or 0), int(spec.get("user_id") or 0)
+    ok, problem = _validate_delivery_rollback_spec(spec)
+    if not ok:
+        return {"safe": False, "type": (spec or {}).get("internal_type"),
+                "code": "unusable_descriptor",
+                "reason": (f"the existing descriptor is not usable ({problem}), "
+                           f"so whether anything is left to compensate cannot be "
+                           f"established from it; it is kept for diagnosis"),
+                "evidence": [f"raw delivery_rollback: {str(raw)[:200]}"]}
+
+    bound, bind_problem = _bind_descriptor_to_operation(spec, op)
+    if not bound:
+        return {"safe": False, "type": spec.get("internal_type"),
+                "code": "foreign_descriptor",
+                "reason": (f"the descriptor does not belong to this operation: "
+                           f"{bind_problem}; evidence about this operation "
+                           f"cannot be drawn from another target"),
+                "evidence": [f"operation {op.get('op_id')} guild="
+                             f"{op.get('guild_id')} user={op.get('user_id')}"]}
+
+    # From here on, address the OPERATION's identity — never the descriptor's.
+    internal_type = str(spec.get("internal_type") or "")
+    guild_id = int(op["guild_id"])
+    user_id = int(op["user_id"])
     item_name = spec.get("item_name")
+    role_id = spec.get("role_id")
+    entry_key = spec.get("entry_key")
+    boost_exp = spec.get("boost_expires_at")
     evidence: list[str] = [
-        f"descriptor internal_type={internal_type!r} item_name={item_name!r} "
-        f"guild={guild_id} user={user_id}",
+        f"descriptor internal_type={internal_type!r} item_name={item_name!r}",
+        f"operation guild={guild_id} user={user_id} item={op.get('item_name')!r}",
         f"last recorded refusal: {spec.get('last_error') or '(none)'}",
     ]
+
+    def _no(code: str, reason: str, extra: list[str] | None = None) -> dict:
+        return {"safe": False, "type": internal_type, "code": code,
+                "reason": reason, "evidence": evidence + (extra or [])}
+
+    def _yes(reason: str) -> dict:
+        return {"safe": True, "type": internal_type, "code": "proven_absent",
+                "reason": reason, "evidence": evidence}
 
     async def _evidence(conn) -> dict:
         if internal_type == "xp_boost":
             live = await _boosts_for_origin(conn, guild_id, user_id, op_id)
-            evidence.append(f"live boosts recording this operation: {live or 'none'}")
+            evidence.append(f"boosts recording this operation: {live or 'none'}")
             if live:
-                return {"safe": False, "type": internal_type,
-                        "reason": (f"{len(live)} boost(s) this purchase created are "
-                                   f"still active; compensate them first"),
-                        "evidence": evidence}
-            return {"safe": True, "type": internal_type,
-                    "reason": "no boost records this operation", "evidence": evidence}
-
-        if internal_type in ("temp_role",) or spec.get("entry_key", "").startswith("h:"):
+                return _no("effects_live",
+                           f"{len(live)} boost(s) this purchase created are still "
+                           f"active; compensate them first")
+            # A row with no `origin_op_id` cannot be attributed to this purchase
+            # OR cleared of being its grant. Legacy rows (granted before the
+            # marker existed) land here, and so does anything written by a
+            # non-Shop path that omitted it.
             cursor = await conn.execute(
-                "SELECT id FROM timed_holdings WHERE guild_id=? AND user_id=?",
-                (guild_id, user_id))
-            remaining = []
+                "SELECT id, source, expires_at FROM leveling_active_boosts"
+                " WHERE guild_id=? AND user_id=? AND origin_op_id IS NULL"
+                " ORDER BY id", (guild_id, user_id))
+            legacy = list(await cursor.fetchall())
+            if boost_exp:
+                legacy = [r for r in legacy if str(r[2]) == str(boost_exp)]
+            evidence.append(
+                f"unattributable boosts (no origin_op_id): "
+                f"{[(r[0], r[1]) for r in legacy] or 'none'}")
+            if legacy:
+                return _no(
+                    "provenance_unprovable",
+                    f"{len(legacy)} boost(s) for this member record no "
+                    f"originating purchase, so whether one of them is this "
+                    f"operation's grant cannot be proven from the database; "
+                    f"verify on Discord and resolve by hand")
+            boost_id = spec.get("boost_id")
+            if boost_id is not None:
+                cursor = await conn.execute(
+                    "SELECT id, guild_id, user_id FROM leveling_active_boosts"
+                    " WHERE id=?", (int(boost_id),))
+                cited = await cursor.fetchone()
+                evidence.append(f"descriptor boost_id {boost_id}: {cited or 'absent'}")
+                if cited is not None and (int(cited[1]), int(cited[2])) == (
+                        guild_id, user_id):
+                    return _no("effects_live",
+                               f"boost row {boost_id} named by the descriptor "
+                               f"still exists")
+            return _yes("no boost records this operation and none is "
+                        "unattributable")
+
+        if internal_type == "temp_role" or (
+                isinstance(entry_key, str) and entry_key.startswith("h:")):
+            named_id = _canonical_entry_key_id(entry_key)
+            if named_id is not None:
+                named = await _holding_facts(conn, named_id)
+                evidence.append(
+                    f"holding named by the descriptor: "
+                    f"{'present ' + str(named) if named else 'absent'}")
+                if named is not None:
+                    return _no("effects_live",
+                               f"holding {entry_key} named by the descriptor "
+                               f"still exists; retire it first")
+            cursor = await conn.execute(
+                "SELECT id FROM timed_holdings WHERE guild_id=? AND user_id=?"
+                " ORDER BY id", (guild_id, user_id))
+            remaining, unattributable = [], []
             for (holding_id,) in await cursor.fetchall():
-                prov = await timed_holding_provenance(f"h:{int(holding_id)}")
-                if prov is not None and str(prov.get("origin_op_id")) == str(op_id):
+                facts = await _holding_facts(conn, int(holding_id))
+                if facts is None:
+                    continue
+                if facts["origin_op_id"] == str(op_id):
                     remaining.append(int(holding_id))
+                elif facts["origin_op_id"] is None:
+                    # Narrow by what the descriptor does know before calling it
+                    # unprovable: a holding for a different role, or under a
+                    # different product name, is a different grant.
+                    if role_id is not None and facts["role_id"] is not None \
+                            and int(facts["role_id"]) != int(role_id):
+                        continue
+                    if item_name and facts["item_name"] \
+                            and str(facts["item_name"]) != str(item_name):
+                        continue
+                    unattributable.append(int(holding_id))
             evidence.append(
                 f"holdings recording this operation: {remaining or 'none'}")
+            evidence.append(
+                f"unattributable holdings (no origin_op_id): "
+                f"{unattributable or 'none'}")
             if remaining:
-                return {"safe": False, "type": internal_type,
-                        "reason": (f"holding(s) {remaining} still belong to this "
-                                   f"purchase; retire them first"),
-                        "evidence": evidence}
+                return _no("effects_live",
+                           f"holding(s) {remaining} still belong to this "
+                           f"purchase; retire them first")
+            if unattributable:
+                return _no(
+                    "provenance_unprovable",
+                    f"holding(s) {unattributable} record no originating purchase "
+                    f"and cannot be ruled out as this operation's grant, so "
+                    f"absence cannot be proven; verify on Discord and resolve by "
+                    f"hand")
+            # A timed product's whole local footprint IS its holding row: the
+            # named one is gone, none records this operation, and none is
+            # unattributable, so nothing is left to compensate here.
+            return _yes(
+                "the holding this purchase created is gone and no unattributable "
+                "holding could be it")
         if internal_type == "role":
-            return {
-                "safe": False, "type": internal_type,
-                "reason": ("a permanent role's Discord membership cannot be "
-                           "verified from the database; confirm on Discord and "
-                           "resolve by hand, or compensate the member directly "
-                           "and record it in the operation detail"),
-                "evidence": evidence + [
-                    "role removal requires live Discord state this tool cannot read"
-                ],
-            }
+            return _no(
+                "discord_state_unobservable",
+                "a permanent role's Discord membership cannot be verified from "
+                "the database; confirm on Discord and resolve by hand, or "
+                "compensate the member directly and record it in the operation "
+                "detail",
+                ["role removal requires live Discord state this tool cannot read"])
 
         # Inventory-backed types: the delivered row is the identity evidence.
         delivered = spec.get("delivered_inventory")
+        delivered_id = None
         if isinstance(delivered, (list, tuple)) and delivered:
             try:
                 delivered_id = int(delivered[0])
             except (TypeError, ValueError):
                 delivered_id = None
-            if delivered_id is not None:
-                cursor = await conn.execute(
-                    "SELECT id, item_name, quantity FROM inventory_items"
-                    " WHERE id=?", (delivered_id,))
-                row = await cursor.fetchone()
-                evidence.append(
-                    f"delivered inventory row {delivered_id}: "
-                    f"{'present ' + str(row) if row else 'absent'}")
-                if row is not None:
-                    return {"safe": False, "type": internal_type,
-                            "reason": (f"delivered inventory row {delivered_id} "
-                                       f"still exists; it has not been rolled back"),
-                            "evidence": evidence}
-        else:
+        if delivered_id is not None:
+            cursor = await conn.execute(
+                "SELECT id, guild_id, user_id, item_name, quantity"
+                " FROM inventory_items WHERE id=?", (delivered_id,))
+            row = await cursor.fetchone()
             evidence.append(
-                "descriptor records no delivered inventory snapshot: the specific "
-                "grant cannot be identified, so absence cannot be proven")
+                f"delivered inventory row {delivered_id}: "
+                f"{'present ' + str(row) if row else 'absent'}")
+            if row is not None:
+                return _no("effects_live",
+                           f"delivered inventory row {delivered_id} still "
+                           f"exists; it has not been rolled back")
+        else:
+            return _no(
+                "no_delivered_identity",
+                "the descriptor records no delivered inventory snapshot, so the "
+                "specific grant cannot be identified and its absence cannot be "
+                "proven")
 
+        # The unit can also still be present under the name without being the
+        # row this purchase created (a re-add, or a grant this purchase never
+        # made). Either way it cannot be attributed, so it is not absence.
         cursor = await conn.execute(
             "SELECT id, quantity, source FROM inventory_items"
             " WHERE guild_id=? AND user_id=? AND item_name=?",
             (guild_id, user_id, item_name))
-        leftover = await cursor.fetchall()
+        leftover = list(await cursor.fetchall())
         evidence.append(f"rows still carrying {item_name!r}: {leftover or 'none'}")
         if leftover:
-            # Inventory rows carry no operation binding, so a row under this name
-            # cannot be attributed to this purchase OR ruled out as its grant.
-            # The descriptor is exactly the thing under suspicion, so its
-            # snapshot cannot be used to dismiss a row that is still there.
-            return {
-                "safe": False, "type": internal_type,
-                "reason": (
-                    f"{len(leftover)} inventory row(s) still carry "
-                    f"{item_name!r} and cannot be attributed to this purchase "
-                    f"from the database; compensate the member by hand if "
-                    f"needed, then retire"
-                ),
-                "evidence": evidence + [
-                    "inventory rows have no origin operation, so ownership of a "
-                    "surviving row cannot be proven here"
-                ],
-            }
-
-        return {"safe": True, "type": internal_type,
-                "reason": ("no inventory row, holding or boost attributable to "
-                           "this purchase remains, so nothing is left to "
-                           "compensate"),
-                "evidence": evidence}
+            return _no(
+                "provenance_unprovable",
+                f"{len(leftover)} inventory row(s) still carry {item_name!r} "
+                f"and cannot be attributed to this purchase from the database; "
+                f"compensate the member by hand if needed, then retire",
+                ["inventory rows have no origin operation, so ownership of a "
+                 "surviving row cannot be proven here"])
+        return _yes("no inventory row, holding or boost attributable to this "
+                    "purchase remains, and none is unattributable")
 
     if db is not None:
         # Inside the caller's `BEGIN IMMEDIATE`: no other writer can change the
@@ -5269,13 +5519,15 @@ async def retire_pending_rollback(op_id: str, *, confirmed: bool = False,
             # runtime advanced or cleared the rollback in between, the operator
             # verdict no longer describes what is on disk.
             cursor = await db.execute(
-                "SELECT status, delivery_rollback, detail"
+                "SELECT status, delivery_rollback, detail, guild_id, user_id,"
+                " item_id, item_name"
                 " FROM shop_purchase_operations WHERE op_id=?", (str(op_id),))
             row = await cursor.fetchone()
             if row is None:
                 await db.execute("ROLLBACK")
                 return False, f"Unknown purchase operation {op_id}"
-            status_now, current, existing_detail = row
+            (status_now, current, existing_detail, guild_now, user_now,
+             item_now, name_now) = row
             if not current:
                 await db.execute("ROLLBACK")
                 return False, "Operation has no pending rollback to retire"
@@ -5284,6 +5536,8 @@ async def retire_pending_rollback(op_id: str, *, confirmed: bool = False,
                 op_id,
                 db=db,
                 op={"op_id": str(op_id), "status": status_now,
+                    "guild_id": guild_now, "user_id": user_now,
+                    "item_id": item_now, "item_name": name_now,
                     "_raw_delivery_rollback": current},
             )
             if not verdict.get("safe"):
@@ -5422,6 +5676,43 @@ async def resolve_purchase_operation(op_id: str, *, action: str,
                         "error": (
                             f"Cannot resolve operation in status {cur_status!r}; "
                             "only 'uncertain' or 'failed' operations may be resolved."
+                        ),
+                    }
+                # A pending (or unreadable, or already completed) delivery
+                # rollback means this operation's goods are being, or have been,
+                # taken back. Marking it `delivered` would move it out of the
+                # retry scan (`reconcile_delivery_rollbacks` skips delivered)
+                # while leaving the descriptor on the row: the compensation path
+                # then refuses it ("cannot roll back delivered operation") and
+                # the retirement path refuses it too (only a settled operation
+                # can be retired), so the descriptor becomes permanently
+                # unreachable. Refuse and say what to do instead.
+                cursor = await db.execute(
+                    "SELECT delivery_rollback FROM shop_purchase_operations"
+                    " WHERE op_id=?", (op_id,))
+                raw_rb = (await cursor.fetchone())[0]
+                rb_state, _ = _delivery_rollback_state(raw_rb)
+                if rb_state != "absent":
+                    await db.execute("ROLLBACK")
+                    hint = {
+                        "live": ("a late-delivery compensation is still pending; "
+                                 "resolve it with --check-rollback / "
+                                 "--retire-rollback, or let the runtime retry it"),
+                        "malformed": ("the recorded compensation descriptor is "
+                                      "unreadable; inspect the raw row and "
+                                      "resolve it by hand"),
+                        "completed": ("its delivery rollback already completed, "
+                                      "so the goods were taken back and "
+                                      "'delivered' would be false"),
+                    }.get(rb_state, "its delivery rollback state is not settled")
+                    return {
+                        "success": False,
+                        "op_id": op_id,
+                        "action": normalized,
+                        "status": cur_status,
+                        "error": (
+                            f"Cannot mark operation as delivered: {hint} "
+                            f"(delivery_rollback={raw_rb!r})."
                         ),
                     }
                 if int(cur_refunded or 0) != 0 or int(cur_stock_returned or 0) != 0:

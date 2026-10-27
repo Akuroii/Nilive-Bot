@@ -1,12 +1,24 @@
 # Test baseline
 
-Recorded on `4f6d8f2716c7b0ea83fdebf0c2c4d03da0f8b2d5` (the commit these results
-were measured against), from a clean clone with:
+| role | commit |
+| --- | --- |
+| baseline (start of this cycle) | `4f6d8f2716c7b0ea83fdebf0c2c4d03da0f8b2d5` |
+| later re-measured against | `670ffebf1571954537ef4549b2bc850357b4b280` |
+| current candidate | the commit this file ships with (`git log -1`) |
+
+Measured from a clean clone with:
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt pytest
+export OWNER_ID=1        # required: `database.py` refuses to import without it
+export PYTHONPATH=.      # required: the suites import top-level modules
 ```
+
+`OWNER_ID` is mandatory for **every** command below, including the operator CLI's
+tests: `database.py` exits at import time when it is missing. (`scripts/recover_shop_purchases.py`
+sets its own sentinel because that tool never acts as the owner, so an operator
+does not have to export a real owner id to use it — that is the one exception.)
 
 Nothing in this file is a result of the current change: these files were already
 red (or already silent) before it. A failure that is **not** in this file is a new
@@ -17,10 +29,17 @@ exit codes are the baseline to compare against.
 
 | matrix | command | count |
 | --- | --- | --- |
-| root (pytest collection) | `PYTHONPATH=. python -m pytest -q <file>` for every root `test_*.py` | 41 files |
-| root (script mode) | `PYTHONPATH=. python <file>` for every root `test_*.py` | 41 files |
-| `scripts/` Python | `PYTHONPATH=. python scripts/<file>` | 72 files |
+| root (pytest collection) | `OWNER_ID=1 PYTHONPATH=. python -m pytest -q <file>` for every root `test_*.py` | 41 files |
+| root (script mode) | `OWNER_ID=1 PYTHONPATH=. python <file>` for every root `test_*.py` | 41 files |
+| `scripts/` Python | `OWNER_ID=1 PYTHONPATH=. python scripts/<file>` | 72 files |
 | `scripts/` Node | `node scripts/<file>` (or `npm test`, which runs all of them) | 18 files |
+
+`test_timed_ownership.py` must be runnable both ways, and both must execute the
+same tests: `python -m pytest -q test_timed_ownership.py` and
+`python test_timed_ownership.py`. The file keeps its `unittest.main()` entry point
+as the **last** statement, and `test_entry_point_is_last` plus
+`test_all_regression_classes_are_discoverable` fail if a test class is ever added
+below it (script mode would silently skip it).
 
 `PYTHONPATH=.` and a working directory of the repo root are required; the root
 copies of the `scripts/` suites resolve `__file__` two levels up and therefore
@@ -48,10 +67,13 @@ Details:
 
 * `test_afk.py` — `169/170 passed`: one pre-existing check fails in the voice-AFK
   rewrite; unrelated to ownership/rollback.
-* `test_booster_rewards.py` — exits 0 while printing
+* `test_booster_rewards.py` — **exits 1**, raising
   `AttributeError: 'types.SimpleNamespace' object has no attribute 'followup'`
   (its `claim_all` path calls `interaction.followup`, which the harness's stub
-  does not provide). A *noisy pass*, not a gated failure.
+  does not provide). An earlier revision of this file called it a "noisy pass"
+  with exit 0; that was wrong, and it contradicted this file's own table. It is
+  a **harness** defect in an unhandled `claim_all` path, not a product failure,
+  and it is unchanged across the baseline and the candidate.
 * `test_leveling_voice_hard_blocks.py` — 9 `VOICE GUARD` checks fail with the
   guard OFF (legacy behaviour not preserved).
 * `test_phase2_backend.py` — fails on its own assertions in this environment.
