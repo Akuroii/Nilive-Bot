@@ -29,6 +29,10 @@ permissions:
 jobs:
   python-ownership:
     runs-on: ubuntu-latest
+    # A suite that never exits must fail the check, not sit "in progress" until
+    # the runner's 6-hour ceiling. The step below is the real bound; this is the
+    # backstop (install + suite, with room to spare).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,7 +43,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest
       - name: Ownership / rollback suite
-        run: python -m pytest -q test_timed_ownership.py
+        # `-v` names each test as it completes, so a hang shows the last test
+        # reached. `timeout -s ABRT` bounds the step and, with faulthandler
+        # enabled, dumps every thread's stack on the way out - that is what
+        # distinguishes "still running a test" from "finished, stuck in
+        # interpreter shutdown". This is a diagnostic bound, not a fix: a
+        # genuine hang still fails the job (exit 124/134).
+        run: PYTHONFAULTHANDLER=1 timeout -s ABRT 600 python -m pytest -v --tb=short test_timed_ownership.py
 
   js-harnesses:
     runs-on: ubuntu-latest
