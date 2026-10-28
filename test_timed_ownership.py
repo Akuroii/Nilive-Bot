@@ -8551,6 +8551,17 @@ class SameRoleSlotRaceTests(unittest.IsolatedAsyncioTestCase):
                            entry_key=ctx["permanent"])
         await window["task"]
 
+        # The racing stub exists to create exactly ONE concurrent equip. Left
+        # installed, the second unequip would spawn a second equip task that
+        # nothing awaits: it races this test's own assertions, and when the
+        # event loop closes with it still pending, the aiosqlite connection it
+        # opened is never closed - its non-daemon worker thread then keeps the
+        # interpreter alive at shutdown (the suite hangs after printing its
+        # summary). Restore a plain stub before the follow-up unequip.
+        person.remove_roles = AsyncMock(
+            side_effect=lambda target, reason=None: person.roles.remove(target)
+            if target in person.roles else None)
+
         later = await unequip_role(ctx["bot"], GUILD, USER, ctx["item_timed"],
                                    entry_key=ctx["timed"])
 
