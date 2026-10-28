@@ -8510,6 +8510,11 @@ class SameRoleSlotRaceTests(unittest.IsolatedAsyncioTestCase):
             f"{window['finished_in_window']})")
         self.assertEqual(ctx["added"], [9631],
                          "the surviving equip had to re-add the role itself")
+        # The unequip clears the entry it validated BEFORE the queued grant
+        # records the new holding, so it succeeds; the grant owns the slot. A
+        # `success or error` style check would also accept the old behaviour
+        # (refused because the slot had changed), which is the opposite result.
+        self.assertTrue(result["success"], result)
         self.assertFalse(
             window["finished_in_window"],
             "the concurrent equip ran to completion inside the unequip's Discord "
@@ -8672,7 +8677,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(roles[9641], person.roles,
                       "the slot names a holding whose role the member does not "
                       "wear")
-        self.assertTrue(result.get("success") or result.get("error"), result)
+
         self.assertFalse(
             seen["ran_in_window"],
             "the grant ran to completion inside the unequip's Discord await")
@@ -8824,12 +8829,21 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         from cogs.shop import Shop
 
         class _CogShim:
-            """The real sweep step, bound to a stub bot (no cog scaffolding)."""
+            """`self` for the real sweep coroutine, with no cog scaffolding.
 
-            _retire_expired_temp_role = Shop._retire_expired_temp_role
+            The coroutine is run on both source layouts: before the refactor the
+            whole per-row body was inline in `temp_role_cleanup`, afterwards it
+            calls `_retire_expired_temp_role`. Binding the helper only when the
+            implementation has it keeps the failure against the old tree
+            behavioural (the role really is stripped) instead of an
+            AttributeError from the fixture.
+            """
 
             def __init__(self, bot):
                 self.bot = bot
+
+        if hasattr(Shop, "_retire_expired_temp_role"):
+            _CogShim._retire_expired_temp_role = Shop._retire_expired_temp_role
 
         await Shop.temp_role_cleanup.coro(_CogShim(bot))
         granted = await seen["grant"]
@@ -8945,7 +8959,10 @@ class SlotLockLifecycleTests(unittest.IsolatedAsyncioTestCase):
             EE.unequip_role(bot, GUILD, USER, "CancelledRole",
                             entry_key=f"h:{holding_id}"),
             timeout=5)
-        self.assertIn("success", freed, freed)
+        # The gate is free (the timeout above would have raised otherwise) AND
+        # the interrupted expiry left the slot for this call to clear.
+        self.assertTrue(freed["success"], freed)
+        self.assertIsNone(await get_equipped(GUILD, USER))
 
     async def test_one_members_slot_work_does_not_block_another(self):
         """The gate is per member: a stalled grant must not stall the guild."""
