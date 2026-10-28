@@ -9004,6 +9004,119 @@ class SlotLockLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(granted["success"], granted)
 
 
+class LateCompensationSlotTests(unittest.IsolatedAsyncioTestCase):
+    """A late-delivery compensation is a role remover like any other.
+
+    `compensate_late_delivery` asks `role_still_entitled`, then calls
+    `remove_roles`. Between those two the answer can change: a rebuy that lands
+    in the removal's Discord await records a live holding and an equip slot for
+    the very role the compensation is about to strip. The entitlement check
+    cannot see it, because it already ran.
+    """
+
+    WINDOW = 0.75
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        for table in ("shop_purchase_operations", "inventory_items",
+                      "equipped_roles", "timed_holdings", "temp_roles"):
+            execute(f"DELETE FROM {table}")
+
+    @staticmethod
+    def _role_snapshot(role_id, quantity=1):
+        return [1, quantity, "role", "shop",
+                json.dumps({"role_id": int(role_id), "expires_at": None}),
+                "2026-01-01 00:00:00", "2026-01-01 00:00:00"]
+
+    def _world(self, role_id, worn=True):
+        role = role_stub(role_id, "LateComp")
+        person = member()
+        person.roles = [role] if worn else []
+        person.add_roles = AsyncMock()
+        person.remove_roles = AsyncMock()
+        guild = SimpleNamespace(
+            id=GUILD, owner_id=99,
+            me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
+            get_role=lambda rid: role if int(rid) == int(role_id) else None,
+            get_member=lambda uid: person if uid == person.id else None,
+        )
+        bot = SimpleNamespace(
+            get_guild=lambda gid: guild if gid == GUILD else None)
+        return role, person, bot
+
+    def _faithful(self, person, gate):
+        async def _add(target, reason=None):
+            await gate("add", target)
+            if target not in person.roles:
+                person.roles.append(target)
+
+        async def _remove(target, reason=None):
+            await gate("remove", target)
+            person.roles = [r for r in person.roles if r.id != target.id]
+
+        person.add_roles = AsyncMock(side_effect=_add)
+        person.remove_roles = AsyncMock(side_effect=_remove)
+
+    async def _settle(self, task):
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=self.WINDOW)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def _refunded_role_op(self, name, role_id):
+        """A refunded permanent-role operation with a pending rollback."""
+        op = await TO.open_purchase(
+            guild_id=GUILD, user_id=USER, item_id=8830, item_name=name,
+            currency="balance", amount=100)
+        await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
+        marker, _created = await TO._ensure_role_retry_marker(
+            op_id=str(op), guild_id=GUILD, user_id=USER, item_name=name,
+            role_id=int(role_id), item_id=8830, category=None)
+        spec = {"guild_id": GUILD, "user_id": USER, "item_id": 8830,
+                "item_name": name, "internal_type": "role",
+                "role_id": int(role_id), "role_added": True,
+                "inventory_rolled_back": True, "equip_reconciled": True,
+                "role_reconciled": False, "retry_entry_key": marker,
+                "delivered_inventory": self._role_snapshot(role_id)}
+        await TO.record_pending_delivery_rollback(op, spec, bot=None)
+        TO._PENDING_DELIVERY_ROLLBACKS.clear()
+        return op, spec
+
+    async def test_late_compensation_keeps_the_role_a_rebuy_just_equipped(self):
+        """The compensation removal must not strip the rebuy's role."""
+        role, person, bot = self._world(9701)
+        op, spec = await self._refunded_role_op("LateComp", 9701)
+        seen = {}
+
+        async def gate(kind, target):
+            if kind != "remove":
+                return
+            seen["grant"] = asyncio.create_task(TO.grant_timed_product(
+                bot, GUILD, USER, item_name="LateCompRebuy", duration_hours=5,
+                item_type="temp_role", role_id=9701, source="shop"))
+            seen["ran_in_window"] = await self._settle(seen["grant"])
+
+        self._faithful(person, gate)
+        result = await TO.compensate_late_delivery(op, dict(spec), bot=bot)
+        granted = await seen["grant"]
+
+        slot = rows("SELECT item_name, entry_key, role_id FROM equipped_roles")
+        self.assertTrue(granted["success"], granted)
+        self.assertTrue(result["complete"], result)
+        self.assertEqual(len(slot), 1, f"expected one slot row, got {slot}")
+        self.assertEqual(slot[0][1], granted["entry_key"],
+                         "the slot must name the holding the rebuy created")
+        self.assertIn(role, person.roles,
+                      "the late compensation stripped the role the live "
+                      "holding needs")
+        self.assertFalse(
+            seen["ran_in_window"],
+            "the rebuy ran to completion inside the compensation's removal")
+
+
 class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
     """Each test here failed against `87687c5`; see REVIEW_FINDINGS §D1-D5."""
 

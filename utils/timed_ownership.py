@@ -3671,83 +3671,93 @@ async def compensate_late_delivery(
             }
 
         if not spec.get("role_reconciled"):
-            if role_added_by_delivery and role_id is None and not member_departed:
-                # The holding was expired, but the descriptor lost the role
-                # identity: the Discord role granted with it cannot be removed,
-                # so this is not reconciled — keep it pending for diagnosis.
-                return await _persist_incomplete(
-                    "Timed role rollback descriptor has no 'role_id'; cannot "
-                    "reconcile the granted role"
-                )
-            try:
-                if role_id is not None and role_added_by_delivery and not member_departed:
-                    still_entitled = await role_still_entitled(
-                        guild_id, user_id, int(role_id),
-                        exclude_entry_key=str(late_key),
-                        bot=bot_client, member=target_member,
+            # One member, one gate. `role_still_entitled` answers a
+            # question about NOW; the removal that acts on that answer
+            # happens later, on the far side of a Discord round-trip. A
+            # rebuy or equip that lands in that gap records a live entry
+            # and an equip slot for this very role, and the stale removal
+            # then strips it. Holding the member's equip-slot lock across
+            # [entitlement answer -> role removal -> retry-marker
+            # transition] makes the two decisions sequential instead.
+            from utils.equip_engine import slot_lock
+            async with slot_lock(guild_id, user_id):
+                if role_added_by_delivery and role_id is None and not member_departed:
+                    # The holding was expired, but the descriptor lost the role
+                    # identity: the Discord role granted with it cannot be removed,
+                    # so this is not reconciled — keep it pending for diagnosis.
+                    return await _persist_incomplete(
+                        "Timed role rollback descriptor has no 'role_id'; cannot "
+                        "reconcile the granted role"
                     )
-                    if not still_entitled:
-                        if guild_obj is None:
-                            raise RuntimeError(
-                                "Guild unavailable for late Discord role rollback"
-                            )
-                        role_obj, role_deleted, role_lookup_err = await _resolve_guild_role(
-                            guild_obj, int(role_id)
+                try:
+                    if role_id is not None and role_added_by_delivery and not member_departed:
+                        still_entitled = await role_still_entitled(
+                            guild_id, user_id, int(role_id),
+                            exclude_entry_key=str(late_key),
+                            bot=bot_client, member=target_member,
                         )
-                        if role_lookup_err is not None:
-                            raise RuntimeError(
-                                f"Role lookup failed for late Discord role rollback: {role_lookup_err}"
+                        if not still_entitled:
+                            if guild_obj is None:
+                                raise RuntimeError(
+                                    "Guild unavailable for late Discord role rollback"
+                                )
+                            role_obj, role_deleted, role_lookup_err = await _resolve_guild_role(
+                                guild_obj, int(role_id)
                             )
-                        if role_deleted:
-                            if target_member is not None and isinstance(getattr(target_member, "roles", None), list):
-                                target_member.roles[:] = [
-                                    r for r in target_member.roles
-                                    if getattr(r, "id", None) != int(role_id)
-                                ]
-                            itx_user = getattr(interaction, "user", None) if interaction is not None else None
-                            if (
-                                itx_user is not None
-                                and itx_user is not target_member
-                                and isinstance(getattr(itx_user, "roles", None), list)
-                            ):
-                                itx_user.roles[:] = [
-                                    r for r in itx_user.roles
-                                    if getattr(r, "id", None) != int(role_id)
-                                ]
-                        else:
-                            if member_lookup_error is not None:
+                            if role_lookup_err is not None:
                                 raise RuntimeError(
-                                    f"Member lookup failed for late Discord role rollback: {member_lookup_error}"
+                                    f"Role lookup failed for late Discord role rollback: {role_lookup_err}"
                                 )
-                            if role_obj is None:
-                                raise RuntimeError(
-                                    "Role unavailable for late Discord role rollback"
+                            if role_deleted:
+                                if target_member is not None and isinstance(getattr(target_member, "roles", None), list):
+                                    target_member.roles[:] = [
+                                        r for r in target_member.roles
+                                        if getattr(r, "id", None) != int(role_id)
+                                    ]
+                                itx_user = getattr(interaction, "user", None) if interaction is not None else None
+                                if (
+                                    itx_user is not None
+                                    and itx_user is not target_member
+                                    and isinstance(getattr(itx_user, "roles", None), list)
+                                ):
+                                    itx_user.roles[:] = [
+                                        r for r in itx_user.roles
+                                        if getattr(r, "id", None) != int(role_id)
+                                    ]
+                            else:
+                                if member_lookup_error is not None:
+                                    raise RuntimeError(
+                                        f"Member lookup failed for late Discord role rollback: {member_lookup_error}"
+                                    )
+                                if role_obj is None:
+                                    raise RuntimeError(
+                                        "Role unavailable for late Discord role rollback"
+                                    )
+                                if target_member is None or not hasattr(target_member, "remove_roles"):
+                                    raise RuntimeError(
+                                        "Member unavailable for late Discord role rollback"
+                                    )
+                                await target_member.remove_roles(
+                                    role_obj,
+                                    reason="Late delivery after purchase cancellation",
                                 )
-                            if target_member is None or not hasattr(target_member, "remove_roles"):
-                                raise RuntimeError(
-                                    "Member unavailable for late Discord role rollback"
-                                )
-                            await target_member.remove_roles(
-                                role_obj,
-                                reason="Late delivery after purchase cancellation",
-                            )
-                            if (
-                                isinstance(getattr(target_member, "roles", None), list)
-                                and role_obj in target_member.roles
-                            ):
-                                target_member.roles.remove(role_obj)
-                            itx_user = getattr(interaction, "user", None) if interaction is not None else None
-                            if (
-                                itx_user is not None
-                                and itx_user is not target_member
-                                and isinstance(getattr(itx_user, "roles", None), list)
-                                and role_obj in itx_user.roles
-                            ):
-                                itx_user.roles.remove(role_obj)
-                await delete_timed_holding(str(late_key))
-                spec["role_reconciled"] = True
-            except Exception as exc:
-                return await _persist_incomplete(f"Timed holding Discord role rollback failed: {exc}")
+                                if (
+                                    isinstance(getattr(target_member, "roles", None), list)
+                                    and role_obj in target_member.roles
+                                ):
+                                    target_member.roles.remove(role_obj)
+                                itx_user = getattr(interaction, "user", None) if interaction is not None else None
+                                if (
+                                    itx_user is not None
+                                    and itx_user is not target_member
+                                    and isinstance(getattr(itx_user, "roles", None), list)
+                                    and role_obj in itx_user.roles
+                                ):
+                                    itx_user.roles.remove(role_obj)
+                    await delete_timed_holding(str(late_key))
+                    spec["role_reconciled"] = True
+                except Exception as exc:
+                    return await _persist_incomplete(f"Timed holding Discord role rollback failed: {exc}")
 
     # ── Branch 2: Permanent role / permanent Color (`internal_type == "role"`) ──
     elif internal_type == "role":
@@ -4005,191 +4015,201 @@ async def compensate_late_delivery(
                 return await _persist_incomplete(f"Role equip reconciliation failed: {exc}")
 
         if not spec.get("role_reconciled"):
-            if not role_added_by_delivery:
-                # The delivery added nothing to remove (the member already held
-                # the role), so there is nothing to reconcile.
-                spec["role_reconciled"] = True
-            elif role_id is None:
-                # Without the role identity the branch cannot remove the role it
-                # granted; claiming reconciliation here would silently leave the
-                # member holding a refunded role.
-                return await _persist_incomplete(
-                    "Role rollback descriptor has no 'role_id'; cannot reconcile "
-                    "the granted role"
-                )
-            elif member_departed:
-                retry_entry_key = spec.get("retry_entry_key")
-                if retry_entry_key:
+            # One member, one gate. `role_still_entitled` answers a
+            # question about NOW; the removal that acts on that answer
+            # happens later, on the far side of a Discord round-trip. A
+            # rebuy or equip that lands in that gap records a live entry
+            # and an equip slot for this very role, and the stale removal
+            # then strips it. Holding the member's equip-slot lock across
+            # [entitlement answer -> role removal -> retry-marker
+            # transition] makes the two decisions sequential instead.
+            from utils.equip_engine import slot_lock
+            async with slot_lock(guild_id, user_id):
+                if not role_added_by_delivery:
+                    # The delivery added nothing to remove (the member already held
+                    # the role), so there is nothing to reconcile.
+                    spec["role_reconciled"] = True
+                elif role_id is None:
+                    # Without the role identity the branch cannot remove the role it
+                    # granted; claiming reconciliation here would silently leave the
+                    # member holding a refunded role.
+                    return await _persist_incomplete(
+                        "Role rollback descriptor has no 'role_id'; cannot reconcile "
+                        "the granted role"
+                    )
+                elif member_departed:
+                    retry_entry_key = spec.get("retry_entry_key")
+                    if retry_entry_key:
+                        try:
+                            await _assert_retry_marker_owned(
+                                retry_entry_key, guild_id, user_id, op_id=op_id)
+                            await delete_timed_holding(retry_entry_key)
+                        except Exception as exc:
+                            return await _persist_incomplete(
+                                f"Failed to retire retry marker for departed member: {exc}"
+                            )
+                        spec["retry_entry_key"] = None
+                    spec["role_reconciled"] = True
+                else:
+                    retry_entry_key = spec.get("retry_entry_key")
+                    if not retry_entry_key:
+                        try:
+                            retry_entry_key, marker_created = (
+                                await _ensure_role_retry_marker(
+                                    op_id=str(op_id),
+                                    guild_id=guild_id,
+                                    user_id=user_id,
+                                    item_name=item_name,
+                                    role_id=int(role_id),
+                                    item_id=item_id,
+                                    category=category,
+                                )
+                            )
+                            spec["retry_entry_key"] = retry_entry_key
+                            if marker_created:
+                                own_retry_marker["key"] = retry_entry_key
+                                own_retry_marker["created"] = True
+                        except _LateRollbackAlreadyCompleted:
+                            _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+                            return {
+                                "complete": True,
+                                "durable_persisted": True,
+                                "inventory_rolled_back": True,
+                                "equip_reconciled": True,
+                                "role_reconciled": True,
+                                "error": None,
+                            }
+                        except Exception as exc:
+                            return await _persist_incomplete(
+                                f"Failed to create role rollback retry marker: {exc}"
+                            )
+
+                    # Prove the marker belongs to THIS operation before anything is
+                    # mutated for it — before the handoff, the entitlement check, the
+                    # Discord role removal and the marker deletion. A descriptor whose
+                    # `retry_entry_key` names another operation's holding (or a
+                    # non-marker holding at all) must fail closed here.
                     try:
                         await _assert_retry_marker_owned(
                             retry_entry_key, guild_id, user_id, op_id=op_id)
-                        await delete_timed_holding(retry_entry_key)
                     except Exception as exc:
                         return await _persist_incomplete(
-                            f"Failed to retire retry marker for departed member: {exc}"
+                            f"Role rollback retry marker is not this operation's: {exc}"
                         )
-                    spec["retry_entry_key"] = None
-                spec["role_reconciled"] = True
-            else:
-                retry_entry_key = spec.get("retry_entry_key")
-                if not retry_entry_key:
+
+                    if handoff_to_holdings:
+                        if await _durable_delivery_rollback_completed(str(op_id)):
+                            _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+                            if own_retry_marker["created"]:
+                                await _retire_own_retry_marker(
+                                    own_retry_marker["key"])
+                            return {
+                                "complete": True,
+                                "durable_persisted": True,
+                                "inventory_rolled_back": True,
+                                "equip_reconciled": True,
+                                "role_reconciled": True,
+                                "error": None,
+                            }
+                        completed_by_other, durable_ok = await _persist_handoff()
+                        if completed_by_other:
+                            if own_retry_marker["created"]:
+                                await _retire_own_retry_marker(
+                                    own_retry_marker["key"])
+                            return {
+                                "complete": True,
+                                "durable_persisted": True,
+                                "inventory_rolled_back": True,
+                                "equip_reconciled": True,
+                                "role_reconciled": True,
+                                "error": None,
+                            }
+                        return {
+                            "complete": False,
+                            "durable_persisted": durable_ok,
+                            "inventory_rolled_back": True,
+                            "equip_reconciled": True,
+                            "role_reconciled": False,
+                            "handed_off": True,
+                            "error": None,
+                        }
+
                     try:
-                        retry_entry_key, marker_created = (
-                            await _ensure_role_retry_marker(
-                                op_id=str(op_id),
-                                guild_id=guild_id,
-                                user_id=user_id,
-                                item_name=item_name,
-                                role_id=int(role_id),
-                                item_id=item_id,
-                                category=category,
-                            )
+                        still_entitled = await role_still_entitled(
+                            guild_id,
+                            user_id,
+                            int(role_id),
+                            exclude_entry_key=retry_entry_key,
+                            bot=bot_client,
+                            member=target_member,
                         )
-                        spec["retry_entry_key"] = retry_entry_key
-                        if marker_created:
-                            own_retry_marker["key"] = retry_entry_key
-                            own_retry_marker["created"] = True
-                    except _LateRollbackAlreadyCompleted:
-                        _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
-                        return {
-                            "complete": True,
-                            "durable_persisted": True,
-                            "inventory_rolled_back": True,
-                            "equip_reconciled": True,
-                            "role_reconciled": True,
-                            "error": None,
-                        }
+                        if not still_entitled:
+                            if guild_obj is None:
+                                raise RuntimeError(
+                                    "Guild unavailable for late Discord role rollback"
+                                )
+                            role_obj, role_deleted, role_lookup_err = await _resolve_guild_role(
+                                guild_obj, int(role_id)
+                            )
+                            if role_lookup_err is not None:
+                                raise RuntimeError(
+                                    f"Role lookup failed for late Discord role rollback: {role_lookup_err}"
+                                )
+                            if role_deleted:
+                                if target_member is not None and isinstance(getattr(target_member, "roles", None), list):
+                                    target_member.roles[:] = [
+                                        r for r in target_member.roles
+                                        if getattr(r, "id", None) != int(role_id)
+                                    ]
+                                itx_user = getattr(interaction, "user", None) if interaction is not None else None
+                                if (
+                                    itx_user is not None
+                                    and itx_user is not target_member
+                                    and isinstance(getattr(itx_user, "roles", None), list)
+                                ):
+                                    itx_user.roles[:] = [
+                                        r for r in itx_user.roles
+                                        if getattr(r, "id", None) != int(role_id)
+                                    ]
+                            else:
+                                if member_lookup_error is not None:
+                                    raise RuntimeError(
+                                        f"Member lookup failed for late Discord role rollback: {member_lookup_error}"
+                                    )
+                                if role_obj is None:
+                                    raise RuntimeError(
+                                        "Role unavailable for late Discord role rollback"
+                                    )
+                                if target_member is None or not hasattr(target_member, "remove_roles"):
+                                    raise RuntimeError(
+                                        "Member unavailable for late Discord role rollback"
+                                    )
+                                await target_member.remove_roles(
+                                    role_obj,
+                                    reason="Late delivery after purchase cancellation",
+                                )
+                                if (
+                                    isinstance(getattr(target_member, "roles", None), list)
+                                    and role_obj in target_member.roles
+                                ):
+                                    target_member.roles.remove(role_obj)
+                                itx_user = getattr(interaction, "user", None) if interaction is not None else None
+                                if (
+                                    itx_user is not None
+                                    and itx_user is not target_member
+                                    and isinstance(getattr(itx_user, "roles", None), list)
+                                    and role_obj in itx_user.roles
+                                ):
+                                    itx_user.roles.remove(role_obj)
+                        await _assert_retry_marker_owned(
+                            retry_entry_key, guild_id, user_id, op_id=op_id)
+                        await delete_timed_holding(retry_entry_key)
+                        spec["retry_entry_key"] = None
+                        spec["role_reconciled"] = True
                     except Exception as exc:
                         return await _persist_incomplete(
-                            f"Failed to create role rollback retry marker: {exc}"
+                            f"Role Discord removal failed for {item_name!r}: {exc}"
                         )
-
-                # Prove the marker belongs to THIS operation before anything is
-                # mutated for it — before the handoff, the entitlement check, the
-                # Discord role removal and the marker deletion. A descriptor whose
-                # `retry_entry_key` names another operation's holding (or a
-                # non-marker holding at all) must fail closed here.
-                try:
-                    await _assert_retry_marker_owned(
-                        retry_entry_key, guild_id, user_id, op_id=op_id)
-                except Exception as exc:
-                    return await _persist_incomplete(
-                        f"Role rollback retry marker is not this operation's: {exc}"
-                    )
-
-                if handoff_to_holdings:
-                    if await _durable_delivery_rollback_completed(str(op_id)):
-                        _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
-                        if own_retry_marker["created"]:
-                            await _retire_own_retry_marker(
-                                own_retry_marker["key"])
-                        return {
-                            "complete": True,
-                            "durable_persisted": True,
-                            "inventory_rolled_back": True,
-                            "equip_reconciled": True,
-                            "role_reconciled": True,
-                            "error": None,
-                        }
-                    completed_by_other, durable_ok = await _persist_handoff()
-                    if completed_by_other:
-                        if own_retry_marker["created"]:
-                            await _retire_own_retry_marker(
-                                own_retry_marker["key"])
-                        return {
-                            "complete": True,
-                            "durable_persisted": True,
-                            "inventory_rolled_back": True,
-                            "equip_reconciled": True,
-                            "role_reconciled": True,
-                            "error": None,
-                        }
-                    return {
-                        "complete": False,
-                        "durable_persisted": durable_ok,
-                        "inventory_rolled_back": True,
-                        "equip_reconciled": True,
-                        "role_reconciled": False,
-                        "handed_off": True,
-                        "error": None,
-                    }
-
-                try:
-                    still_entitled = await role_still_entitled(
-                        guild_id,
-                        user_id,
-                        int(role_id),
-                        exclude_entry_key=retry_entry_key,
-                        bot=bot_client,
-                        member=target_member,
-                    )
-                    if not still_entitled:
-                        if guild_obj is None:
-                            raise RuntimeError(
-                                "Guild unavailable for late Discord role rollback"
-                            )
-                        role_obj, role_deleted, role_lookup_err = await _resolve_guild_role(
-                            guild_obj, int(role_id)
-                        )
-                        if role_lookup_err is not None:
-                            raise RuntimeError(
-                                f"Role lookup failed for late Discord role rollback: {role_lookup_err}"
-                            )
-                        if role_deleted:
-                            if target_member is not None and isinstance(getattr(target_member, "roles", None), list):
-                                target_member.roles[:] = [
-                                    r for r in target_member.roles
-                                    if getattr(r, "id", None) != int(role_id)
-                                ]
-                            itx_user = getattr(interaction, "user", None) if interaction is not None else None
-                            if (
-                                itx_user is not None
-                                and itx_user is not target_member
-                                and isinstance(getattr(itx_user, "roles", None), list)
-                            ):
-                                itx_user.roles[:] = [
-                                    r for r in itx_user.roles
-                                    if getattr(r, "id", None) != int(role_id)
-                                ]
-                        else:
-                            if member_lookup_error is not None:
-                                raise RuntimeError(
-                                    f"Member lookup failed for late Discord role rollback: {member_lookup_error}"
-                                )
-                            if role_obj is None:
-                                raise RuntimeError(
-                                    "Role unavailable for late Discord role rollback"
-                                )
-                            if target_member is None or not hasattr(target_member, "remove_roles"):
-                                raise RuntimeError(
-                                    "Member unavailable for late Discord role rollback"
-                                )
-                            await target_member.remove_roles(
-                                role_obj,
-                                reason="Late delivery after purchase cancellation",
-                            )
-                            if (
-                                isinstance(getattr(target_member, "roles", None), list)
-                                and role_obj in target_member.roles
-                            ):
-                                target_member.roles.remove(role_obj)
-                            itx_user = getattr(interaction, "user", None) if interaction is not None else None
-                            if (
-                                itx_user is not None
-                                and itx_user is not target_member
-                                and isinstance(getattr(itx_user, "roles", None), list)
-                                and role_obj in itx_user.roles
-                            ):
-                                itx_user.roles.remove(role_obj)
-                    await _assert_retry_marker_owned(
-                        retry_entry_key, guild_id, user_id, op_id=op_id)
-                    await delete_timed_holding(retry_entry_key)
-                    spec["retry_entry_key"] = None
-                    spec["role_reconciled"] = True
-                except Exception as exc:
-                    return await _persist_incomplete(
-                        f"Role Discord removal failed for {item_name!r}: {exc}"
-                    )
 
     # ── Branch 3: XP Boost (`internal_type == "xp_boost"`) ──────────────
     elif internal_type == "xp_boost":
