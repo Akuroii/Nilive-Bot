@@ -8845,6 +8845,165 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             "the grant ran to completion inside the sweep's Discord await")
 
 
+class SlotLockLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    """The slot gate must be released by every exit path, and stay per member.
+
+    These are guards for the coordination added around grants, expiry and the
+    legacy sweep; they do not reproduce a defect on the pre-lock code (which had
+    no gate to leak). They exist because a lock held across Discord awaits is
+    only safe if an exception, a cancellation, or a different member's work
+    leaves it usable.
+    """
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        for table in ("equipped_roles", "inventory_items", "timed_holdings",
+                      "temp_roles"):
+            execute(f"DELETE FROM {table}")
+
+    def _world(self, person, roles):
+        guild = SimpleNamespace(
+            id=GUILD, owner_id=99,
+            me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
+            get_role=lambda rid: roles.get(int(rid)),
+            get_member=lambda uid: person if uid == person.id else None,
+        )
+        return SimpleNamespace(
+            get_guild=lambda gid: guild if gid == GUILD else None)
+
+    async def test_a_failed_grant_releases_the_slot_gate(self):
+        role = role_stub(9711, "LifecycleRole")
+        person = member()
+        person.roles = [role]
+        bot = self._world(person, {9711: role})
+
+        async def _boom(target, reason=None):
+            raise RuntimeError("Discord said no")
+
+        person.add_roles = AsyncMock(side_effect=_boom)
+        person.remove_roles = AsyncMock()
+        person.roles = []      # force the add path
+
+        failed = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="LifecycleRole", duration_hours=5,
+            item_type="temp_role", role_id=9711, source="shop")
+        self.assertFalse(failed["success"], failed)
+
+        # The gate must still be free: a new equip of an owned entry completes.
+        execute("INSERT INTO inventory_items (guild_id,user_id,item_name,item_type,"
+                "quantity,metadata,source) VALUES (?,?,'LifecyclePerm','role',1,?,'shop')",
+                (GUILD, USER, json.dumps({"role_id": 9712})))
+        role2 = role_stub(9712, "LifecyclePerm")
+        person.roles = []
+        person.add_roles = AsyncMock(
+            side_effect=lambda target, reason=None: person.roles.append(target))
+        # `_world`'s get_role closure must know the second role too.
+        bot = self._world(person, {9711: role, 9712: role2})
+        perm = f"i:{rows('SELECT id FROM inventory_items WHERE item_name=?', ('LifecyclePerm',))[0][0]}"
+
+        equipped = await asyncio.wait_for(
+            equip_role(bot, GUILD, USER, "LifecyclePerm", entry_key=perm),
+            timeout=5)
+        self.assertTrue(equipped["success"], equipped)
+
+    async def test_a_cancelled_expiry_releases_the_slot_gate(self):
+        role = role_stub(9721, "CancelledRole")
+        person = member()
+        person.roles = [role]
+        bot = self._world(person, {9721: role})
+        entered = asyncio.Event()
+
+        async def _hanging_remove(target, reason=None):
+            entered.set()
+            await asyncio.Event().wait()      # never completes by itself
+
+        person.remove_roles = AsyncMock(side_effect=_hanging_remove)
+        holding_id = await TO.grant_timed_holding(
+            GUILD, USER, "CancelledRole", expires_at=iso_in(-2),
+            item_type="temp_role", metadata={"role_id": 9721},
+            role_id=9721, source="shop")
+        await EE.record_equipped(GUILD, USER, "CancelledRole", role_id=9721,
+                                 entry_key=f"h:{holding_id}")
+        holding = (await TO.expired_holdings(limit=None))[0]
+
+        task = asyncio.create_task(TO.expire_one(bot, holding))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        # The interrupted expiry kept its retry marker and released the gate.
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?", (holding_id,)),
+            [(1,)], "a cancelled expiry must keep its row as the retry marker")
+        person.remove_roles = AsyncMock()
+        person.roles = []
+        freed = await asyncio.wait_for(
+            EE.unequip_role(bot, GUILD, USER, "CancelledRole",
+                            entry_key=f"h:{holding_id}"),
+            timeout=5)
+        self.assertIn("success", freed, freed)
+
+    async def test_one_members_slot_work_does_not_block_another(self):
+        """The gate is per member: a stalled grant must not stall the guild."""
+        role = role_stub(9731, "SharedRole")
+        other = 555
+        mine = member()
+        mine.roles = []
+        theirs = member()
+        theirs.id = other
+        theirs.roles = []
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_add(target, reason=None):
+            entered.set()
+            await release.wait()
+            theirs.roles.append(target)
+
+        theirs.add_roles = AsyncMock(side_effect=_slow_add)
+        guild = SimpleNamespace(
+            id=GUILD, owner_id=99,
+            me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
+            get_role=lambda rid: role if int(rid) == 9731 else None,
+            get_member=lambda uid: {USER: mine, other: theirs}.get(uid),
+        )
+        bot = SimpleNamespace(
+            get_guild=lambda gid: guild if gid == GUILD else None)
+
+        stalled = asyncio.create_task(TO.grant_timed_product(
+            bot, GUILD, other, item_name="OtherMemberItem", duration_hours=5,
+            item_type="temp_role", role_id=9731, source="shop"))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        # A different member's slot work must complete while that one is stuck:
+        # if the gate were global, this equip would wait out the timeout.
+        spare = role_stub(9732, "SpareRole")
+        guild.get_role = lambda rid: {9731: role, 9732: spare}.get(int(rid))
+        execute("INSERT INTO inventory_items (guild_id,user_id,item_name,item_type,"
+                "quantity,metadata,source) VALUES (?,?,'SpareItem','role',1,?,'shop')",
+                (GUILD, USER, json.dumps({"role_id": 9732})))
+        spare_key = "i:%d" % rows(
+            "SELECT id FROM inventory_items WHERE item_name='SpareItem'")[0][0]
+        mine.add_roles = AsyncMock(
+            side_effect=lambda target, reason=None: mine.roles.append(target))
+        equipped = await asyncio.wait_for(
+            EE.equip_role(bot, GUILD, USER, "SpareItem", entry_key=spare_key),
+            timeout=5)
+        self.assertTrue(equipped["success"], equipped)
+        mine_holding = await asyncio.wait_for(
+            TO.grant_timed_holding(GUILD, USER, "Unrelated", expires_at=iso_in(3),
+                                   item_type="shop_custom", source="shop"),
+            timeout=5)
+        self.assertIsInstance(mine_holding, int)
+
+        release.set()
+        granted = await stalled
+        self.assertTrue(granted["success"], granted)
+
+
 class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
     """Each test here failed against `87687c5`; see REVIEW_FINDINGS §D1-D5."""
 
