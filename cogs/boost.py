@@ -199,6 +199,16 @@ class Boost(commands.Cog):
         for cr in color_roles:
             role = guild.get_role(cr["role_id"])
             if role and role in member.roles:
+                # Same rule as the two loops above: losing the boost retires the
+                # BOOST-COLOUR perk, while the same role ID may also be owned
+                # through the Shop, which this must not revoke.
+                from utils.timed_ownership import role_removal_blocked
+                kept_reason = await role_removal_blocked(
+                    guild.id, member.id, int(role.id))
+                if kept_reason:
+                    print(f"[BOOST] Keeping colour role {role.id} for "
+                          f"{member.id}: still {kept_reason}")
+                    continue
                 try:
                     await member.remove_roles(role, reason="Boost ended")
                 except Exception:

@@ -19,6 +19,8 @@ import asyncio
 import json
 import unittest
 from pathlib import Path
+import io
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -9323,6 +9325,52 @@ class CrossSystemRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
         await self._unboost(person, guild, bot, 6531)
         self.assertNotIn(roles[6531], person.roles)
 
+    # ── 4b: the self-picked Booster colour loop on unboost ──────────────
+
+    async def _unboost_colour_only(self, person, guild, bot, colour_role_id):
+        """Run the real unboost handler with ONLY the colour loop in play.
+
+        `boost1_id`/`boost2_id` are None and no `booster_only` reaction role is
+        configured, so the only role this call can remove is the one from
+        `boost_color_roles` - the loop under test.
+        """
+        from cogs.boost import Boost
+        execute("INSERT INTO boost_color_roles (guild_id,role_id,role_name,"
+                "requires_boost_level) VALUES (?,?,?,1)",
+                (GUILD, int(colour_role_id), "Picked"))
+        execute("DELETE FROM reaction_roles")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            await Boost._handle_unboost(
+                SimpleNamespace(bot=bot), guild, person, None, None,
+                {"auto_remove_on_unboost": 1})
+        return out.getvalue()
+
+    async def test_4b_boost_colour_is_kept_on_unboost_while_shop_owned(self):
+        person, guild, bot, roles = self._world([6551], worn=[6551])
+        key = await self._shop_owns(6551)
+        log = await self._unboost_colour_only(person, guild, bot, 6551)
+        # Behaviour first: the role and its durable ownership must survive.
+        self.assertIn(roles[6551], person.roles,
+                      "an unboost revoked a Shop-owned Booster colour role")
+        self.assertEqual(self._slot()[1], key,
+                         "the Shop holding no longer owns the equip slot")
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE role_id=?", (6551,)),
+            [(1,)], "the independent holding was retired by the unboost")
+        self.assertIn("Keeping colour role 6551", log,
+                      f"the preservation was not reported: {log!r}")
+
+    async def test_4b_boost_colour_is_removed_on_unboost_without_shop_ownership(self):
+        person, guild, bot, roles = self._world([6551], worn=[6551])
+        log = await self._unboost_colour_only(person, guild, bot, 6551)
+        self.assertNotIn(roles[6551], person.roles,
+                         "ordinary unboost cleanup stopped working")
+        self.assertNotIn("Keeping colour role", log,
+                         "the guard fired without independent ownership")
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)],
+                         "the control case created ownership records")
+
     # ── 5: /boostcolor switch ───────────────────────────────────────────
 
     async def _switch_colour(self, person, guild, bot, old_id, new_id):
@@ -9357,6 +9405,123 @@ class CrossSystemRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
         await self._switch_colour(person, guild, bot, 6541, 6542)
         self.assertNotIn(roles[6541], person.roles)
         self.assertIn(roles[6542], person.roles)
+
+
+class UnequipWithSystemEntitlementTests(unittest.IsolatedAsyncioTestCase):
+    """Unequipping a Shop entry must not strip a role a system still grants.
+
+    `unequip_role` clears the equip SLOT (that is what the member asked for) but
+    only calls `remove_roles` when `non_slot_role_entitlement` finds no other
+    justification. These cases pin that down against real helper-backed state -
+    a fulfilled Level claim, an effective Prestige tier and an active boost -
+    rather than a mocked `protected=True`, which is what the earlier coverage
+    used.
+    """
+
+    class _Role(SimpleNamespace):
+        __hash__ = object.__hash__
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        for table in ("equipped_roles", "inventory_items", "timed_holdings",
+                      "temp_roles", "level_reward_claims", "prestige_roles",
+                      "boost_config", "boost_color_roles",
+                      "prestige_vi_activations"):
+            execute(f"DELETE FROM {table}")
+        from utils.level_claims import ensure_tables
+        await ensure_tables()
+
+    async def _equipped_shop_role(self, rid):
+        role = self._Role(id=rid, name=f"Shop{rid}", position=1,
+                          mention=f"<@&{rid}>")
+        person = member()
+        person.roles = [role]
+
+        async def _add(target, reason=None):
+            if target not in person.roles:
+                person.roles.append(target)
+
+        async def _remove(target, reason=None):
+            person.roles = [r for r in person.roles if r.id != target.id]
+
+        person.add_roles = AsyncMock(side_effect=_add)
+        person.remove_roles = AsyncMock(side_effect=_remove)
+        guild = SimpleNamespace(
+            id=GUILD, owner_id=99,
+            me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
+            get_role=lambda r: role if int(r) == rid else None,
+            get_member=lambda uid: person if uid == person.id else None,
+        )
+        person.guild = guild
+        bot = SimpleNamespace(
+            get_guild=lambda gid: guild if gid == GUILD else None)
+        execute("INSERT INTO inventory_items (guild_id,user_id,item_name,"
+                "item_type,quantity,metadata,source) VALUES (?,?,'ShopRole',"
+                "'role',1,?,'shop')",
+                (GUILD, USER, json.dumps({"role_id": rid})))
+        inv_id = rows("SELECT id FROM inventory_items WHERE item_name='ShopRole'"
+                      " AND guild_id=? AND user_id=?", (GUILD, USER))[0][0]
+        key = f"i:{inv_id}"
+        await EE.record_equipped(GUILD, USER, "ShopRole", role_id=rid,
+                                 entry_key=key)
+        return role, person, bot, key
+
+    def _slot(self):
+        found = rows("SELECT item_name, entry_key FROM equipped_roles")
+        return found[0] if found else None
+
+    async def _assert_preserved(self, rid):
+        role, person, bot, key = await self._equipped_shop_role(rid)
+        result = await EE.unequip_role(bot, GUILD, USER, "ShopRole",
+                                       entry_key=key)
+        self.assertTrue(result["success"], result)
+        self.assertIn(role, person.roles,
+                      "unequipping revoked a role a system still grants")
+        # The slot is what the member asked to clear, and clearing it is
+        # correct: the role stays worn on the strength of the OTHER grant.
+        self.assertIsNone(self._slot(), "the equip slot was not cleared")
+        return person
+
+    async def test_unequip_keeps_a_role_a_fulfilled_level_claim_still_grants(self):
+        execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+                "reward_ref,track,status,payload_json,created_at) VALUES "
+                "(?,?,5,'member','role','fulfilled',?,CURRENT_TIMESTAMP)",
+                (GUILD, USER, json.dumps({"role_id": 7601})))
+        await self._assert_preserved(7601)
+
+    async def test_unequip_keeps_a_role_the_effective_prestige_tier_grants(self):
+        execute("UPDATE levels SET prestige=3 WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+        execute("INSERT INTO prestige_roles (guild_id,tier,role_id)"
+                " VALUES (?,?,?)", (GUILD, 3, 7602))
+        await self._assert_preserved(7602)
+
+    async def test_unequip_keeps_a_role_an_active_boost_grants(self):
+        execute("INSERT INTO boost_config (guild_id,boost1_role_id,enabled,"
+                "auto_remove_on_unboost) VALUES (?,?,1,1)", (GUILD, 7603))
+        role, person, bot, key = await self._equipped_shop_role(7603)
+        # `member()` has premium_since set only when asked; an active boost is
+        # what makes `boost1_role_id` an entitlement.
+        person.premium_since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        person.premium_subscription_count = 1
+        result = await EE.unequip_role(bot, GUILD, USER, "ShopRole",
+                                       entry_key=key)
+        self.assertTrue(result["success"], result)
+        self.assertIn(role, person.roles,
+                      "unequipping revoked an active booster's role")
+        self.assertIsNone(self._slot())
+
+    async def test_unequip_still_removes_the_role_with_no_other_entitlement(self):
+        """The control: the preservation above must not be unconditional."""
+        role, person, bot, key = await self._equipped_shop_role(7604)
+        result = await EE.unequip_role(bot, GUILD, USER, "ShopRole",
+                                       entry_key=key)
+        self.assertTrue(result["success"], result)
+        self.assertNotIn(role, person.roles,
+                         "an entitling role was left worn for no reason")
+        self.assertIsNone(self._slot())
 
 
 class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
