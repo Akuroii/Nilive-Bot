@@ -58,6 +58,21 @@ from utils.permissions import check_bot_role_position
 # binds to the loop it is first awaited on, and a cached lock would then raise
 # "bound to a different event loop" for any later loop (tests, `asyncio.run`,
 # a reloaded cog). A lock is only ever reused by the loop that created it.
+#
+# Scope and limits, stated so nobody mistakes this for more than it is:
+#   * it is PROCESS-LOCAL. This SQLite file is owned by one process, so one lock
+#     per member covers every writer in the bot; it is NOT a distributed mutex
+#     and does nothing if a second process ever writes the same database.
+#   * entries are retained for the lifetime of the process (one per member per
+#     loop, a few hundred bytes each). Eviction is deliberately not implemented:
+#     dropping a lock that is currently held or waited on would silently create
+#     two locks for one member, which is a correctness bug, and there is no
+#     measurement suggesting the memory matters.
+#   * the loop-aware lookup assumes no single slot operation STRADDLES a change
+#     of event loop. The bot runs one loop for its lifetime, so an operation
+#     cannot outlive the loop that started it; a deployment that spun a second
+#     loop while the first still had slot work in flight would get two locks for
+#     the same member. That is not a supported configuration.
 _SLOT_LOCKS: dict[tuple[int, int],
                    tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
 
