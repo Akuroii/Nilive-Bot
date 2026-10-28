@@ -15,6 +15,7 @@ Covers the four behaviours the Shop's new product model depends on:
 Run: python test_timed_ownership.py
      python -m pytest test_timed_ownership.py
 """
+import asyncio
 import json
 import unittest
 from pathlib import Path
@@ -27,6 +28,7 @@ from phase1_support import (
 )
 
 from utils import timed_ownership as TO
+from utils import equip_engine as EE
 from utils.inventory import get_inventory, find_entry, set_quantity
 from utils.equip_engine import get_equipped, equip_role
 from utils.reward_engine import give_reward
@@ -8549,6 +8551,181 @@ class SameRoleSlotRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(role, person.roles,
                          "the later unequip left the role worn with no slot")
 
+
+class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    """Every role-bearing path that decides "is the role worn?" needs one gate.
+
+    `equip_role` and `unequip_role` are serialised per member, but a timed grant,
+    an expiry and the legacy temp-role sweep are the same kind of operation: each
+    reads the member's roles, acts on Discord, and writes the single
+    `equipped_roles` row. Outside the same lock they interleave inside each
+    other's Discord await, and the durable slot ends up naming an equip the
+    member does not wear - a state no read path repairs, because the later
+    operation already saw the role present and skipped adding it.
+    """
+
+    WINDOW = 0.75   # how long a competing operation is watched for
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        for table in ("equipped_roles", "inventory_items", "timed_holdings",
+                      "temp_roles"):
+            execute(f"DELETE FROM {table}")
+
+    # ── fixtures ────────────────────────────────────────────────────────
+
+    def _world(self, role_ids, worn=()):
+        roles = {rid: role_stub(rid, f"SlotRole{rid}") for rid in role_ids}
+        person = member()
+        person.roles = [roles[rid] for rid in worn]
+        person.add_roles = AsyncMock()
+        person.remove_roles = AsyncMock()
+        guild = SimpleNamespace(
+            id=GUILD, owner_id=99,
+            me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
+            get_role=lambda rid: roles.get(int(rid)),
+            get_member=lambda uid: person if uid == person.id else None,
+        )
+        bot = SimpleNamespace(
+            get_guild=lambda gid: guild if gid == GUILD else None)
+        return person, guild, bot, roles
+
+    def _faithful_roles(self, person, gate):
+        """add_roles/remove_roles that really update `person.roles`.
+
+        `gate(kind, role)` is awaited at the very start of the Discord call, so a
+        test can hold that operation inside its own await window.
+        """
+        async def _add(role, reason=None):
+            await gate("add", role)
+            if role not in person.roles:
+                person.roles.append(role)
+
+        async def _remove(role, reason=None):
+            await gate("remove", role)
+            person.roles = [r for r in person.roles if r.id != role.id]
+
+        person.add_roles = AsyncMock(side_effect=_add)
+        person.remove_roles = AsyncMock(side_effect=_remove)
+
+    async def _holding(self, role_id, name, *, expired=False):
+        holding_id = await TO.grant_timed_holding(
+            GUILD, USER, name,
+            expires_at=(iso_in(-2) if expired else iso_in(5)),
+            item_type="temp_role", metadata={"role_id": int(role_id)},
+            role_id=int(role_id), source="shop")
+        return holding_id, f"h:{holding_id}"
+
+    def _permanent(self, role_id, name):
+        execute("INSERT INTO inventory_items (guild_id,user_id,item_name,item_type,"
+                "quantity,metadata,source) VALUES (?,?,?,'role',1,?,'shop')",
+                (GUILD, USER, name, json.dumps({"role_id": int(role_id)})))
+        inv_id = rows("SELECT id FROM inventory_items WHERE guild_id=? AND user_id=?"
+                      " AND item_name=?", (GUILD, USER, name))[0][0]
+        return f"i:{inv_id}"
+
+    async def _settle(self, task):
+        """True when `task` completed while the caller was suspended."""
+        try:
+            await asyncio.wait_for(asyncio.shield(task),
+                                   timeout=self.WINDOW)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    def _slot(self):
+        found = rows("SELECT item_name, entry_key, role_id FROM equipped_roles")
+        return found[0] if found else None
+
+    def _worn_ids(self, person):
+        return {r.id for r in person.roles}
+
+    # ── R1: timed grant vs an in-flight unequip ─────────────────────────
+
+    async def test_a_timed_grant_keeps_the_role_it_equipped(self):
+        person, guild, bot, roles = self._world([9641], worn=[9641])
+        await EE.record_equipped(GUILD, USER, "SlotOwner", role_id=9641,
+                              entry_key="h:owner")
+        seen = {}
+
+        async def gate(kind, target):
+            if kind != "remove":
+                return
+            seen["grant"] = asyncio.create_task(TO.grant_timed_product(
+                bot, GUILD, USER, item_name="SlotRebuy", duration_hours=5,
+                item_type="temp_role", role_id=9641, source="shop"))
+            seen["ran_in_window"] = await self._settle(seen["grant"])
+
+        self._faithful_roles(person, gate)
+        result = await EE.unequip_role(bot, GUILD, USER, "SlotOwner",
+                                    entry_key="h:owner")
+        granted = await seen["grant"]
+
+        slot = self._slot()
+        self.assertTrue(granted["success"], granted)
+        self.assertIsNotNone(slot, "no slot survived the pair of operations")
+        self.assertEqual(slot[1], granted["entry_key"],
+                         "the durable slot must name the newly granted holding")
+        self.assertIn(roles[9641], person.roles,
+                      "the slot names a holding whose role the member does not "
+                      "wear")
+        self.assertTrue(result.get("success") or result.get("error"), result)
+        self.assertFalse(
+            seen["ran_in_window"],
+            "the grant ran to completion inside the unequip's Discord await")
+
+    # ── R3: a locked equip vs the timed-grant swap ──────────────────────
+
+    async def test_an_equip_does_not_orphan_a_role_against_a_timed_grant(self):
+        person, guild, bot, roles = self._world([9651, 9652, 9653],
+                                                worn=[9651])
+        await EE.record_equipped(GUILD, USER, "SlotA", role_id=9651,
+                              entry_key="i:a")
+        perm = self._permanent(9652, "SlotB")
+
+        async def _noop(kind, role):
+            return None
+
+        self._faithful_roles(person, _noop)
+
+        release = asyncio.Event()
+        stalled = asyncio.Event()
+        real_record = EE.record_equipped
+        calls = {"n": 0}
+
+        async def _record(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # The grant has already read the old slot inside
+                # swap_and_record_equipped; hold it at its slot write.
+                stalled.set()
+                await release.wait()
+            return await real_record(*args, **kwargs)
+
+        with patch.object(EE, "record_equipped", side_effect=_record):
+            grant = asyncio.create_task(TO.grant_timed_product(
+                bot, GUILD, USER, item_name="SlotTimed", duration_hours=5,
+                item_type="temp_role", role_id=9653, source="shop"))
+            await asyncio.wait_for(stalled.wait(), timeout=2)
+            equip = asyncio.create_task(equip_role(
+                bot, GUILD, USER, "SlotB", entry_key=perm))
+            ran_in_window = await self._settle(equip)
+            release.set()
+            granted, equipped = await asyncio.gather(grant, equip)
+
+        self.assertTrue(granted["success"], granted)
+        self.assertTrue(equipped["success"], equipped)
+        slot = self._slot()
+        self.assertIsNotNone(slot, "no slot survived the pair of operations")
+        self.assertEqual(
+            self._worn_ids(person), {slot[2]},
+            "exactly the role the durable slot names must be worn; worn="
+            f"{sorted(self._worn_ids(person))}, slot role={slot[2]}")
+        self.assertFalse(
+            ran_in_window,
+            "the equip ran to completion inside the grant's slot write")
 
 class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
     """Each test here failed against `87687c5`; see REVIEW_FINDINGS §D1-D5."""

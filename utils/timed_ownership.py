@@ -44,6 +44,7 @@ edited or deleted later.
 """
 from __future__ import annotations
 
+import functools
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -1856,6 +1857,31 @@ def is_ambiguous_discord_role_error(exc: BaseException, *,
     return True
 
 
+def _serialised_role_grant(func):
+    """Run a role-bearing timed grant under the member's equip-slot lock.
+
+    A grant decides whether the member already wears the role, adds it if not,
+    and only then writes the holding and the single `equipped_roles` row. Every
+    other role-bearing operation on that member makes the same decision about
+    the same single slot, so the whole sequence is one critical section rather
+    than a locked final write: by the time `swap_and_record_equipped` runs, the
+    presence check and the `add_roles` have long since happened.
+
+    Grants with no `role_id` touch neither Discord nor the equip slot, so they
+    keep running unserialised - only role-bearing deliveries queue behind this
+    member's slot work.
+    """
+    @functools.wraps(func)
+    async def wrapper(bot, guild_id, user_id, *args, **kwargs):
+        if kwargs.get("role_id") is None:
+            return await func(bot, guild_id, user_id, *args, **kwargs)
+        from utils.equip_engine import slot_lock
+        async with slot_lock(guild_id, user_id):
+            return await func(bot, guild_id, user_id, *args, **kwargs)
+    return wrapper
+
+
+@_serialised_role_grant
 async def grant_timed_product(bot, guild_id: int, user_id: int, *,
                               item_name: str, duration_hours,
                               item_type: str = "shop_custom",
