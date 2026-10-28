@@ -1153,6 +1153,78 @@ class Shop(commands.Cog):
         self.temp_role_cleanup.cancel()
 
     # ─── TEMP ROLE CLEANUP ──────────────────────────────
+    async def _retire_expired_temp_role(self, entry_id, guild_id, user_id,
+                                        role_id):
+        """Remove one expired legacy temp role and catch its bookkeeping up.
+
+        Called under the member's equip-slot lock by `temp_role_cleanup`. The
+        body is the original sweep step unchanged: only the caller's boundary
+        moved, so a concurrent grant or equip cannot interleave with the
+        presence check, the `remove_roles` call, or the slot cleanup that
+        follows it.
+        """
+        guild = self.bot.get_guild(guild_id)
+        removal_ok = True
+        if guild:
+            member = guild.get_member(user_id)
+            if member is None and hasattr(guild, "fetch_member"):
+                try:
+                    member = await guild.fetch_member(user_id)
+                except discord.NotFound:
+                    member = None
+                except Exception as e:
+                    print(f"[SHOP] Failed to fetch member {user_id} "
+                          f"for expired role {role_id} in {guild_id}: {e}")
+                    removal_ok = False
+            role = guild.get_role(role_id)
+            if removal_ok and member and role and role in member.roles:
+                try:
+                    from utils.timed_ownership import role_still_entitled
+                    still_entitled = await role_still_entitled(
+                        guild_id, user_id, role_id,
+                        bot=self.bot, member=member)
+                except Exception as e:
+                    print(f"[SHOP] Failed to verify role entitlement "
+                          f"for expired role {role_id} on {user_id} in "
+                          f"{guild_id}: {e}")
+                    removal_ok = False
+                else:
+                    if not still_entitled:
+                        try:
+                            await member.remove_roles(
+                                role, reason="Temp role expired")
+                        except Exception as e:
+                            print(f"[SHOP] Failed to remove expired "
+                                  f"role {role_id} from {user_id} in "
+                                  f"{guild_id}: {e}")
+                            removal_ok = False
+        else:
+            # Bot isn't in this guild right now — keep the
+            # row so it's retried once it rejoins.
+            removal_ok = False
+
+        if removal_ok:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "DELETE FROM temp_roles WHERE id = ?",
+                    (entry_id,))
+                await db.commit()
+
+            # Rank Card foundation / Equip system: the role's
+            # inventory row (and equipped_roles entry, if this
+            # was the equipped one) need to catch up now that
+            # the Discord role is actually gone — otherwise
+            # /inventory and the rank card would keep showing
+            # an item the member no longer has.
+            try:
+                from utils.equip_engine import cleanup_expired_role_item
+                await cleanup_expired_role_item(
+                    guild_id, user_id, role_id)
+            except Exception as e:
+                print(f"[SHOP] temp_role inventory cleanup "
+                      f"failed for entry {entry_id} "
+                      f"(user={user_id} role={role_id}): {e}")
+
     @tasks.loop(minutes=10)
     async def temp_role_cleanup(self):
         """
@@ -1187,67 +1259,19 @@ class Shop(commands.Cog):
 
         for (entry_id, guild_id, user_id, role_id) in expired:
             try:
-                guild = self.bot.get_guild(guild_id)
-                removal_ok = True
-                if guild:
-                    member = guild.get_member(user_id)
-                    if member is None and hasattr(guild, "fetch_member"):
-                        try:
-                            member = await guild.fetch_member(user_id)
-                        except discord.NotFound:
-                            member = None
-                        except Exception as e:
-                            print(f"[SHOP] Failed to fetch member {user_id} "
-                                  f"for expired role {role_id} in {guild_id}: {e}")
-                            removal_ok = False
-                    role = guild.get_role(role_id)
-                    if removal_ok and member and role and role in member.roles:
-                        try:
-                            from utils.timed_ownership import role_still_entitled
-                            still_entitled = await role_still_entitled(
-                                guild_id, user_id, role_id,
-                                bot=self.bot, member=member)
-                        except Exception as e:
-                            print(f"[SHOP] Failed to verify role entitlement "
-                                  f"for expired role {role_id} on {user_id} in "
-                                  f"{guild_id}: {e}")
-                            removal_ok = False
-                        else:
-                            if not still_entitled:
-                                try:
-                                    await member.remove_roles(
-                                        role, reason="Temp role expired")
-                                except Exception as e:
-                                    print(f"[SHOP] Failed to remove expired "
-                                          f"role {role_id} from {user_id} in "
-                                          f"{guild_id}: {e}")
-                                    removal_ok = False
-                else:
-                    # Bot isn't in this guild right now — keep the
-                    # row so it's retried once it rejoins.
-                    removal_ok = False
-
-                if removal_ok:
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute(
-                            "DELETE FROM temp_roles WHERE id = ?",
-                            (entry_id,))
-                        await db.commit()
-
-                    # Rank Card foundation / Equip system: the role's
-                    # inventory row (and equipped_roles entry, if this
-                    # was the equipped one) need to catch up now that
-                    # the Discord role is actually gone — otherwise
-                    # /inventory and the rank card would keep showing
-                    # an item the member no longer has.
-                    try:
-                        from utils.equip_engine import cleanup_expired_role_item
-                        await cleanup_expired_role_item(
-                            guild_id, user_id, role_id)
-                    except Exception as e:
-                        print(f"[SHOP] temp_role inventory cleanup "
-                              f"failed for entry {entry_id} "
-                              f"(user={user_id} role={role_id}): {e}")
+                # One member, one gate. The sweep is the third path that reads
+                # "is this role still needed?", removes the Discord role and then
+                # reconciles the single `equipped_roles` row, so it takes the
+                # same lock as `equip_role`, `unequip_role`, expiry and a
+                # role-bearing grant. Acquiring it HERE - before the member and
+                # entitlement lookups - is what matters: a lock taken only inside
+                # `cleanup_expired_role_item` would be far too late, because by
+                # then `remove_roles` has already run. The lock is per member and
+                # per row, so the guild-wide sweep is not serialised.
+                from utils.equip_engine import slot_lock
+                async with slot_lock(guild_id, user_id):
+                    await self._retire_expired_temp_role(
+                        entry_id, guild_id, user_id, role_id)
             except Exception as e:
                 print(f"[SHOP] temp_role_cleanup error for entry "
                       f"{entry_id}: {e}")

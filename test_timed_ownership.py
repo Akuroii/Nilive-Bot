@@ -8803,6 +8803,48 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             seen["ran_in_window"],
             "the equip ran to completion inside the expiry's Discord await")
 
+    # ── R5: the legacy temp-role sweep ──────────────────────────────────
+
+    async def test_the_legacy_temp_role_sweep_keeps_a_concurrent_grant_alive(self):
+        person, guild, bot, roles = self._world([9681], worn=[9681])
+        execute("INSERT INTO temp_roles (guild_id,user_id,role_id,expires_at,source)"
+                " VALUES (?,?,?,?,'shop')", (GUILD, USER, 9681, iso_in(-2)))
+        seen = {}
+
+        async def gate(kind, target):
+            if kind != "remove":
+                return
+            seen["grant"] = asyncio.create_task(TO.grant_timed_product(
+                bot, GUILD, USER, item_name="SlotSweepRebuy", duration_hours=5,
+                item_type="temp_role", role_id=9681, source="shop"))
+            seen["ran_in_window"] = await self._settle(seen["grant"])
+
+        self._faithful_roles(person, gate)
+        from cogs.shop import Shop
+
+        class _CogShim:
+            """The real sweep step, bound to a stub bot (no cog scaffolding)."""
+
+            _retire_expired_temp_role = Shop._retire_expired_temp_role
+
+            def __init__(self, bot):
+                self.bot = bot
+
+        await Shop.temp_role_cleanup.coro(_CogShim(bot))
+        granted = await seen["grant"]
+
+        self.assertEqual(rows("SELECT COUNT(*) FROM temp_roles"), [(0,)],
+                         "the swept legacy row must still be deleted")
+        self.assertTrue(granted["success"], granted)
+        self.assertEqual(self._slot()[1], granted["entry_key"],
+                         "the slot must name the live holding")
+        self.assertIn(roles[9681], person.roles,
+                      "the legacy sweep stripped a role a live holding needs")
+        self.assertFalse(
+            seen["ran_in_window"],
+            "the grant ran to completion inside the sweep's Discord await")
+
+
 class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
     """Each test here failed against `87687c5`; see REVIEW_FINDINGS §D1-D5."""
 
