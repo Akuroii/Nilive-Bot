@@ -8676,6 +8676,45 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             seen["ran_in_window"],
             "the grant ran to completion inside the unequip's Discord await")
 
+    # ── R2: expiry vs a rebuy of the same role ──────────────────────────
+
+    async def test_expiry_does_not_strip_the_role_a_rebuy_now_needs(self):
+        person, guild, bot, roles = self._world([9661], worn=[9661])
+        old_id, old_key = await self._holding(9661, "SlotExpired", expired=True)
+        await EE.record_equipped(GUILD, USER, "SlotExpired", role_id=9661,
+                              entry_key=old_key)
+        seen = {}
+
+        async def gate(kind, target):
+            if kind != "remove":
+                return
+            seen["grant"] = asyncio.create_task(TO.grant_timed_product(
+                bot, GUILD, USER, item_name="SlotRebuy", duration_hours=5,
+                item_type="temp_role", role_id=9661, source="shop"))
+            seen["ran_in_window"] = await self._settle(seen["grant"])
+
+        self._faithful_roles(person, gate)
+        holding = (await TO.expired_holdings(limit=None))[0]
+        outcome = await TO.expire_one(bot, holding)
+        granted = await seen["grant"]
+
+        self.assertEqual(outcome["status"], "removed", outcome)
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?", (old_id,)),
+            [(0,)], "the expired holding must still be retired")
+        self.assertTrue(granted["success"], granted)
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?",
+                 (int(granted["entry_key"].split(":")[1]),)),
+            [(1,)], "the new paid holding must remain live")
+        self.assertEqual(self._slot()[1], granted["entry_key"],
+                         "the slot must name the live holding")
+        self.assertIn(roles[9661], person.roles,
+                      "expiry stripped the role the new holding needs")
+        self.assertFalse(
+            seen["ran_in_window"],
+            "the rebuy ran to completion inside the expiry's Discord await")
+
     # ── R3: a locked equip vs the timed-grant swap ──────────────────────
 
     async def test_an_equip_does_not_orphan_a_role_against_a_timed_grant(self):
@@ -8726,6 +8765,43 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             ran_in_window,
             "the equip ran to completion inside the grant's slot write")
+
+    # ── R4: expiry vs a permanent same-role equip ───────────────────────
+
+    async def test_expiry_does_not_strip_a_role_a_permanent_equip_selected(self):
+        person, guild, bot, roles = self._world([9671], worn=[9671])
+        old_id, old_key = await self._holding(9671, "SlotExpiredPerm",
+                                              expired=True)
+        await EE.record_equipped(GUILD, USER, "SlotExpiredPerm", role_id=9671,
+                              entry_key=old_key)
+        seen = {}
+
+        async def gate(kind, target):
+            if kind != "remove":
+                return
+            # The permanent entry is bought now, inside the expiry's await: it
+            # did not exist when expiry made its entitlement decision.
+            seen["perm"] = self._permanent(9671, "SlotPermSameRole")
+            seen["equip"] = asyncio.create_task(equip_role(
+                bot, GUILD, USER, "SlotPermSameRole", entry_key=seen["perm"]))
+            seen["ran_in_window"] = await self._settle(seen["equip"])
+
+        self._faithful_roles(person, gate)
+        holding = (await TO.expired_holdings(limit=None))[0]
+        outcome = await TO.expire_one(bot, holding)
+        equipped = await seen["equip"]
+
+        self.assertEqual(outcome["status"], "removed", outcome)
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?", (old_id,)),
+            [(0,)], "the expired holding must still be retired")
+        self.assertEqual(self._slot()[1], seen["perm"],
+                         "the permanent entry must own the slot")
+        self.assertIn(roles[9671], person.roles,
+                      "expiry stripped the role the permanent entry needs")
+        self.assertFalse(
+            seen["ran_in_window"],
+            "the equip ran to completion inside the expiry's Discord await")
 
 class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
     """Each test here failed against `87687c5`; see REVIEW_FINDINGS §D1-D5."""

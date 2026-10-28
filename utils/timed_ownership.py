@@ -1390,6 +1390,29 @@ async def _late_rollback_prereqs_complete(
     return True
 
 
+def _serialised_expiry(func):
+    """Run one holding's expiry under that member's equip-slot lock.
+
+    Expiry is the mirror of a grant: it asks whether anything still entitles the
+    member to the role, removes it, and only then reconciles the single
+    `equipped_roles` row. A rebuy or a permanent same-role equip that lands in
+    the removal's Discord await would otherwise have written the slot while the
+    old removal was still in flight, and the removal - already past its
+    entitlement check - strips the role the new entry needs.
+
+    The lock is taken per holding, inside `cleanup_expired_holdings`' loop, so a
+    guild-wide sweep is never serialised: each member's expiry takes and
+    releases the lock on its own.
+    """
+    @functools.wraps(func)
+    async def wrapper(bot, holding, *args, **kwargs):
+        from utils.equip_engine import slot_lock
+        async with slot_lock(holding["guild_id"], holding["user_id"]):
+            return await func(bot, holding, *args, **kwargs)
+    return wrapper
+
+
+@_serialised_expiry
 async def expire_one(bot, holding: dict) -> dict:
     """Retire ONE expired holding, reconciling Discord and bookkeeping.
 
