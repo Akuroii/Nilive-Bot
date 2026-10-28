@@ -621,6 +621,16 @@ async def sync_prestige_roles(bot, guild, member, effective_tier=None) -> None:
         if not role or role not in member.roles:
             continue
         if int(tier) != int(effective_tier):
+            # This retires the PREVIOUS tier's entitlement. The same role ID can
+            # also be owned through the Shop, so check the ownership records
+            # before taking it off: a tier change is not a refund.
+            from utils.timed_ownership import role_removal_blocked
+            kept_reason = await role_removal_blocked(
+                guild.id, member.id, int(role_id))
+            if kept_reason:
+                print(f"[PRESTIGE] Keeping tier {tier} role {role_id} for "
+                      f"{member.id}: still {kept_reason}")
+                continue
             try:
                 await member.remove_roles(role, reason="Prestige tier changed")
             except Exception as e:

@@ -147,6 +147,35 @@ A role is only removed when its removal is provably ours to make: if this member
 also holds the same role through another recorded grant (a `temp_roles` row with a
 different source, or an `inventory_items` role marker written by another system)
 then taking it off would revoke something else's grant. Such a role is left on the
+
+## Policy: one Discord role ID may be owned by several systems
+
+That principle is not specific to this tool. A Discord role ID can legitimately be
+configured as a Level reward, a Prestige tier role, a Booster(-only) role AND a
+Shop item at the same time. The supported, backwards-compatible policy is that
+such sharing is ALLOWED - existing guilds rely on it, and rejecting it would need
+a migration and an operational review of those configurations.
+
+What follows from the policy is an obligation on every remover: it may retire only
+its OWN entitlement, and must leave the role on the member while any other
+recorded source still justifies it. Concretely, before `remove_roles`:
+
+* `utils/level_claims.enforce_role_progression` and `strip_booster_roles`,
+  `utils/prestige.sync_prestige_roles`, `cogs/boost._handle_unboost` and the
+  `/boostcolor` switch all call
+  `utils.timed_ownership.role_removal_blocked(guild_id, user_id, role_id)`;
+* that helper consults only the OWNERSHIP records (a live timed holding, an
+  unexpired `temp_roles` row, an owned role item). It deliberately does not ask
+  the Level/Prestige/Booster ledgers, because the caller is retiring exactly one
+  of those and counting it would retain the role forever;
+* an unreadable ownership table is reported as a reason to KEEP the role, so a
+  failed query can never be read as "nobody else owns this".
+
+Declining a removal never changes the system's own state: the Level claim stays
+fulfilled, the Booster eligibility check stays authoritative, and the Prestige
+tier is still the effective one. Only the Discord removal is skipped, and it is
+reported (a `preserved` list, a `roles_left_on_member`-style entry, or an explicit
+log line where the API has no report object).
 member, the claim record IS deleted (the other grant, not this one, is keeping it
 on), and the report lists it under `roles_left_on_member` with the competing
 sources. This list is not exhaustive - a role granted by a system that records

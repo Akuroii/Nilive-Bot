@@ -710,7 +710,8 @@ async def member_reward_role_ids(guild_id: int, user_id: int) -> set[int]:
 async def enforce_role_progression(member, guild_id: int, user_id: int,
                                    level: int, role_id: int,
                                    failures: list | None = None, *,
-                                   booster: bool = False) -> list[int]:
+                                   booster: bool = False,
+                                   preserved: list | None = None) -> list[int]:
     """Drop superseded Level-reward roles; return IDs actually removed.
 
     Call only after every required role at the highest Level is fulfilled and
@@ -727,9 +728,20 @@ async def enforce_role_progression(member, guild_id: int, user_id: int,
     guild = getattr(member, "guild", None)
     held = set(getattr(member, "roles", None) or [])
     removed = []
+    preserved = preserved if preserved is not None else []
     for stale_id in stale:
         role = guild.get_role(stale_id) if guild is not None else None
         if role is None or role not in held:
+            continue
+        # A superseded Level role may also be a role the member OWNS through the
+        # Shop (the same role ID configured in both is supported). This system
+        # retires only its own claim; another recorded grant keeps the role.
+        from utils.timed_ownership import role_removal_blocked
+        kept_reason = await role_removal_blocked(guild_id, user_id, stale_id)
+        if kept_reason:
+            preserved.append(stale_id)
+            print(f"[LEVEL] Keeping superseded role {stale_id} for {user_id} "
+                  f"in {guild_id}: still {kept_reason}")
             continue
         try:
             await member.remove_roles(
@@ -1004,11 +1016,16 @@ async def strip_booster_roles(member, guild_id: int, user_id: int) -> dict:
     create an entitlement and are therefore never granted retroactively.
 
     Returns ``{"removed": [...], "failed": [...], "not_held": [...],
-    "unverified": bool, "still_boosting": bool}``; failures are
-    ``(role_id, reason)`` pairs and never raise into the Discord event.
+    "preserved": [...], "unverified": bool, "still_boosting": bool}``; failures
+    are ``(role_id, reason)`` pairs and never raise into the Discord event.
+    ``preserved`` holds ``(role_id, reason)`` pairs for role ids left on the
+    member because the member still owns them independently (a Shop holding, an
+    unexpired ``temp_roles`` grant, or an owned role item): losing a boost retires
+    the Booster-only claim, not somebody's purchase.
     """
     result: dict = {"removed": [], "failed": [], "not_held": [],
-                    "unverified": False, "still_boosting": False}
+                    "preserved": [], "unverified": False,
+                    "still_boosting": False}
     if member is None or not hasattr(member, "premium_since"):
         result["unverified"] = True
         return result
@@ -1058,6 +1075,13 @@ async def strip_booster_roles(member, guild_id: int, user_id: int) -> dict:
         role = guild.get_role(role_id) if guild is not None else None
         if role is None:
             result["failed"].append((role_id, "Role is not resolvable in the guild"))
+            continue
+        # The member may own this role through the Shop as well; losing a boost
+        # retires the Booster-only claim, not somebody's purchase.
+        from utils.timed_ownership import role_removal_blocked
+        kept_reason = await role_removal_blocked(guild_id, user_id, role_id)
+        if kept_reason:
+            result["preserved"].append((role_id, kept_reason))
             continue
         try:
             await member.remove_roles(role, reason="Server boost ended")

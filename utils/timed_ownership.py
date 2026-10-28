@@ -813,6 +813,115 @@ async def role_still_entitled(guild_id: int, user_id: int, role_id: int,
     return None
 
 
+
+async def shop_role_still_owned(guild_id: int, user_id: int,
+                                role_id: int) -> str | None:
+    """A reason the member still owns this role through Shop/Ownership records.
+
+    This answers the *other* half of the entitlement question. The Level, Prestige
+    and Booster systems each revoke a role they configured; the Shop sells a role
+    the member owns outright, and the same Discord role ID may be configured in
+    both (the supported policy - see the role-ownership principle documented in
+    `utils.level_test_reset.py`). Before such a system removes "its" role it must
+    ask whether a separate recorded grant still justifies it.
+
+    Only ownership sources are consulted:
+
+      1. an unexpired timed holding for the role,
+      2. an unexpired legacy `temp_roles` row,
+      3. a valid inventory `role` (or live, non-stale `temp_role`) entry.
+
+    Level claims, Prestige tiers and Booster status are deliberately NOT
+    consulted: the caller is retiring exactly one of those, so counting it would
+    make the check retain the role forever. Callers pass the entitlement they are
+    revoking implicitly by not asking this helper about it.
+
+    Raises `EntitlementCheckError` when the ownership records cannot be read -
+    a caller must treat "could not verify" as "keep the role", never as "no
+    other owner".
+    """
+    try:
+        rid = int(role_id)
+    except (TypeError, ValueError):
+        return None
+    now = utcnow()
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT expires_at FROM timed_holdings"
+                " WHERE guild_id=? AND user_id=? AND role_id=?",
+                (guild_id, user_id, rid))
+            for (expires_at,) in await cursor.fetchall():
+                if not is_expired(expires_at, now=now):
+                    return "an unexpired timed holding"
+
+            cursor = await db.execute(
+                "SELECT expires_at FROM temp_roles"
+                " WHERE guild_id=? AND user_id=? AND role_id=?",
+                (guild_id, user_id, rid))
+            tr_rows = await cursor.fetchall()
+            for (expires_at,) in tr_rows:
+                if not is_expired(expires_at, now=now):
+                    return "an unexpired temp_roles grant"
+            has_expired_temp_roles_row = bool(tr_rows)
+
+            cursor = await db.execute(
+                "SELECT item_name, item_type, source, metadata, quantity"
+                " FROM inventory_items WHERE guild_id=? AND user_id=?"
+                " AND item_type IN ('role','temp_role')",
+                (guild_id, user_id))
+            for item_name, item_type, source, metadata, quantity in await cursor.fetchall():
+                if not quantity or int(quantity) <= 0:
+                    continue
+                try:
+                    meta = json.loads(metadata) if metadata else {}
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    if int((meta or {}).get("role_id")) != rid:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                meta_exp = (meta or {}).get("expires_at")
+                if item_type == "temp_role":
+                    # Same staleness rules as `role_still_entitled`: an expired
+                    # temp_role marker, or an orphaned level_claim unit, is not
+                    # independent ownership.
+                    if has_expired_temp_roles_row:
+                        continue
+                    if str(source or "") == "level_claim":
+                        continue
+                    if meta_exp in (None, "") or is_expired(meta_exp, now=now):
+                        continue
+                    return f"an owned temp_role item ({item_name})"
+                if meta_exp not in (None, "") and is_expired(meta_exp, now=now):
+                    continue
+                return f"an owned role item ({item_name})"
+    except EntitlementCheckError:
+        raise
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify Shop ownership of role {rid}: {exc}"
+        ) from exc
+    return None
+
+
+async def role_removal_blocked(guild_id: int, user_id: int,
+                               role_id: int) -> str | None:
+    """Reason NOT to remove this role, or None when removal is allowed.
+
+    The one call every system-side remover should make before `remove_roles`.
+    A verification failure is returned as a reason to keep (fail closed) so an
+    unreadable ownership table can never be read as "nobody owns this".
+    """
+    try:
+        return await shop_role_still_owned(guild_id, user_id, role_id)
+    except EntitlementCheckError as exc:
+        print(f"[ROLES] Keeping role {role_id} for {user_id} in {guild_id}: "
+              f"ownership could not be verified ({exc})")
+        return "Shop ownership could not be verified"
+
+
 def entry_key_id(entry_key: str) -> int | None:
     """Numeric id inside an `h:<id>` / `i:<id>` key (None when malformed)."""
     try:
