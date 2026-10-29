@@ -167,15 +167,26 @@ entitlement, and must leave the role on the member while any other source still
 justifies it. Both directions are guarded:
 
 * direction 1 - the system retires its own grant. Before `remove_roles`, these call
-  `utils.timed_ownership.role_removal_blocked(guild_id, user_id, role_id)`, which
-  answers "does an independent SHOP ownership record still justify this role?":
-  `utils.level_claims.enforce_role_progression` and `strip_booster_roles`,
-  `utils.prestige.sync_prestige_roles`, `cogs.boost._handle_unboost`, the
-  `/boostcolor` switch, `cogs.twitch._go_offline` and the `cogs.mvp` rollover. The
-  helper consults only the ownership records (a live timed holding, an unexpired
-  `temp_roles` row, an owned role item); asking the Level/Prestige/Booster/Twitch/
-  MVP ledgers here would count the entitlement being retired and retain the role
-  forever;
+  `utils.timed_ownership.role_removal_blocked(guild_id, user_id, role_id,
+  retiring=...)`: `utils.level_claims.enforce_role_progression` and
+  `strip_booster_roles`, `utils.prestige.sync_prestige_roles`,
+  `cogs.boost._handle_unboost`, the `/boostcolor` switch, `cogs.twitch._go_offline`
+  and the `cogs.mvp` rollover. The helper asks whether ANY other source still grants
+  the role - Shop ownership, a fulfilled Level claim, the effective Prestige tier,
+  an active Booster role, a live Twitch watch, the newest MVP award - and the
+  required `retiring=` argument names the source the caller is itself retiring so
+  that source is never counted against itself. That exclusion is what keeps the
+  check from retaining a role forever: the Level ledger still shows the claim whose
+  role is being superseded, and the Boost config still names the role a boost loss
+  is retiring. A caller that forgets `retiring=` fails loudly (`ValueError`) rather
+  than silently falling back to "does the Shop own it?";
+
+  Two of the sources need no exclusion, because their retiring grant is already
+  invisible by the time the removal runs: the Twitch poller writes `is_live = 0`
+  before `_go_offline`, and the MVP rollover writes the new winner's `mvp_history`
+  row before cleaning up the previous holders. That is also why a SECOND live
+  configuration of the same source - another live watch awarding the same role -
+  still protects the role, while the grant being retired does not;
 
 * direction 2 - the member unequips the Shop copy while another system still grants
   the role. That is `utils.timed_ownership.non_slot_role_entitlement`, consulted by

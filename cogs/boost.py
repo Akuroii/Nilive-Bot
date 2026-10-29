@@ -159,7 +159,8 @@ class Boost(commands.Cog):
                 # revoke.
                 from utils.timed_ownership import role_removal_blocked
                 kept_reason = await role_removal_blocked(
-                    guild.id, member.id, int(role_id))
+                    guild.id, member.id, int(role_id), retiring="booster",
+                    member=member)
                 if kept_reason:
                     print(f"[BOOST] Keeping role {role_id} for {member.id}: "
                           f"still {kept_reason}")
@@ -181,7 +182,8 @@ class Boost(commands.Cog):
             if role and role in member.roles:
                 from utils.timed_ownership import role_removal_blocked
                 kept_reason = await role_removal_blocked(
-                    guild.id, member.id, int(role_id))
+                    guild.id, member.id, int(role_id), retiring="booster",
+                    member=member)
                 if kept_reason:
                     print(f"[BOOST] Keeping booster-only role {role_id} for "
                           f"{member.id}: still {kept_reason}")
@@ -204,7 +206,8 @@ class Boost(commands.Cog):
                 # through the Shop, which this must not revoke.
                 from utils.timed_ownership import role_removal_blocked
                 kept_reason = await role_removal_blocked(
-                    guild.id, member.id, int(role.id))
+                    guild.id, member.id, int(role.id), retiring="booster",
+                    member=member)
                 if kept_reason:
                     print(f"[BOOST] Keeping colour role {role.id} for "
                           f"{member.id}: still {kept_reason}")
@@ -421,7 +424,9 @@ class Boost(commands.Cog):
             still_owned = []
             for candidate in to_remove:
                 kept_reason = await role_removal_blocked(
-                    interaction.guild.id, interaction.user.id, int(candidate.id))
+                    interaction.guild.id, interaction.user.id,
+                    int(candidate.id), retiring="booster",
+                    member=interaction.user)
                 if kept_reason:
                     still_owned.append(candidate)
                     print(f"[BOOST] Keeping colour role {candidate.id} for "

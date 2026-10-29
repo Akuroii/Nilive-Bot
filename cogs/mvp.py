@@ -189,7 +189,8 @@ class MVP(commands.Cog):
                                 # revoking it would delete a purchase.
                                 from utils.timed_ownership import role_removal_blocked
                                 kept_reason = await role_removal_blocked(
-                                    guild.id, m.id, int(mvp_role.id))
+                                    guild.id, m.id, int(mvp_role.id),
+                                    retiring="mvp", member=m)
                                 if kept_reason:
                                     print(f"[MVP] Keeping MVP role {mvp_role.id} "
                                           f"for {m.id}: still {kept_reason}")

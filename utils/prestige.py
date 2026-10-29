@@ -626,7 +626,8 @@ async def sync_prestige_roles(bot, guild, member, effective_tier=None) -> None:
             # before taking it off: a tier change is not a refund.
             from utils.timed_ownership import role_removal_blocked
             kept_reason = await role_removal_blocked(
-                guild.id, member.id, int(role_id))
+                guild.id, member.id, int(role_id), retiring="prestige",
+                member=member)
             if kept_reason:
                 print(f"[PRESTIGE] Keeping tier {tier} role {role_id} for "
                       f"{member.id}: still {kept_reason}")

@@ -9535,6 +9535,359 @@ class UnequipWithSystemEntitlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self._slot())
 
 
+class SystemToSystemRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    """Overlap between two SYSTEMS, with no Shop ownership anywhere.
+
+    The policy allows one role ID to be configured by several systems at once, so
+    a remover must retire only its own grant. These cases pair each system-side
+    remover with a *different* live system grant of the same role and assert the
+    role survives; every case has a control with only the retiring grant, which
+    must still be removed (that is what proves the check is not counting the
+    entitlement being retired).
+    """
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        for table in ("equipped_roles", "inventory_items", "timed_holdings",
+                      "temp_roles", "level_reward_claims", "leveling_rewards",
+                      "prestige_roles", "prestige_config", "boost_config",
+                      "boost_color_roles", "reaction_roles", "twitch_config",
+                      "mvp_config", "mvp_scores", "mvp_history"):
+            execute(f"DELETE FROM {table}")
+        from utils.level_claims import ensure_tables
+        await ensure_tables()
+        from utils import creator_notify_engine as engine
+        await engine.ensure_tables()
+
+    class _Role(SimpleNamespace):
+        __hash__ = object.__hash__
+
+    # ── fixtures ────────────────────────────────────────────────────────
+
+    def _world(self, role_ids, worn):
+        roles = {rid: self._Role(id=rid, name=f"SysRole{rid}", position=1,
+                                 mention=f"<@&{rid}>") for rid in role_ids}
+        person = member()
+        person.roles = [roles[rid] for rid in worn]
+        person.add_roles = AsyncMock(
+            side_effect=lambda r, reason=None: person.roles.append(r)
+            if r not in person.roles else None)
+        person.remove_roles = AsyncMock(
+            side_effect=lambda r, reason=None: person.roles.remove(r)
+            if r in person.roles else None)
+        guild = SimpleNamespace(
+            id=GUILD, owner_id=99, members=[person],
+            me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
+            get_role=lambda rid: roles.get(int(rid)),
+            get_member=lambda uid: person if uid == person.id else None,
+        )
+        person.guild = guild
+        bot = SimpleNamespace(
+            get_guild=lambda gid: guild if gid == GUILD else None)
+        return person, guild, bot, roles
+
+    def _claim(self, level, role_id, ref="member"):
+        execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+                "reward_ref,track,status,payload_json,created_at) VALUES "
+                "(?,?,?,?,'role','fulfilled',?,CURRENT_TIMESTAMP)",
+                (GUILD, USER, level, ref, json.dumps({"role_id": int(role_id)})))
+
+    def _twitch_live(self, role_id, user_id=None):
+        """A *live* Twitch watch that awards `role_id` to `user_id`."""
+        return execute(
+            "INSERT INTO twitch_config (guild_id, twitch_username,"
+            " discord_channel_id, give_role_id, discord_user_id, is_live,"
+            " enabled) VALUES (?,?,?,?,?,1,1)",
+            (GUILD, "streamer", 4242, int(role_id), user_id or USER))
+
+    def _slot(self):
+        found = rows("SELECT item_name, entry_key, role_id FROM equipped_roles")
+        return found[0] if found else None
+
+    def _assert_no_shop_rows(self):
+        """These cases must prove system-to-system overlap, not Shop ownership."""
+        for table in ("timed_holdings", "temp_roles", "inventory_items"):
+            self.assertEqual(rows(f"SELECT COUNT(*) FROM {table}"), [(0,)],
+                             f"{table} is not empty: this case would not be "
+                             f"system-to-system")
+
+    # ── 1: Booster unboost vs a live Twitch grant ────────────────────────
+
+    async def _unboost(self, person, guild, bot, role_id):
+        from cogs.boost import Boost
+        out = io.StringIO()
+        with redirect_stdout(out):
+            await Boost._handle_unboost(
+                SimpleNamespace(bot=bot), guild, person, int(role_id), None,
+                {"auto_remove_on_unboost": 1})
+        return out.getvalue()
+
+    async def test_1_boost_role_shared_with_a_live_twitch_session_survives(self):
+        person, guild, bot, roles = self._world([9701], worn=[9701])
+        self._twitch_live(9701)
+        log = await self._unboost(person, guild, bot, 9701)
+        self.assertIn(roles[9701], person.roles,
+                      "an unboost revoked a role a live Twitch session grants")
+        self.assertIn("Keeping role 9701", log,
+                      f"the preservation was not reported: {log!r}")
+        self._assert_no_shop_rows()
+
+    async def test_1_boost_role_is_removed_when_boost_is_the_only_grant(self):
+        person, guild, bot, roles = self._world([9701], worn=[9701])
+        log = await self._unboost(person, guild, bot, 9701)
+        self.assertNotIn(roles[9701], person.roles,
+                         "ordinary unboost cleanup stopped working")
+        self.assertNotIn("Keeping role 9701", log)
+
+    # ── 2: Level progression vs a live Twitch grant ──────────────────────
+
+    async def test_2_superseded_level_role_shared_with_a_live_twitch_session_is_kept(self):
+        from utils.level_claims import enforce_role_progression
+        person, _guild, _bot, roles = self._world([9702, 9703],
+                                                  worn=[9702, 9703])
+        self._claim(5, 9702)
+        self._claim(10, 9703)
+        self._twitch_live(9702)
+        preserved = []
+        removed = await enforce_role_progression(
+            person, GUILD, USER, 10, 9703, failures=[], preserved=preserved)
+        self.assertIn(roles[9702], person.roles,
+                      "a superseded role a live Twitch session grants was removed")
+        self.assertEqual(removed, [])
+        self.assertEqual(preserved, [9702])
+        self._assert_no_shop_rows()
+
+    async def test_2_superseded_level_role_is_still_removed_when_level_is_the_only_grant(self):
+        """The Level ledger holds the claim being superseded - it must not count."""
+        from utils.level_claims import enforce_role_progression
+        person, _guild, _bot, roles = self._world([9702, 9703],
+                                                  worn=[9702, 9703])
+        self._claim(5, 9702)
+        self._claim(10, 9703)
+        preserved = []
+        removed = await enforce_role_progression(
+            person, GUILD, USER, 10, 9703, failures=[], preserved=preserved)
+        self.assertEqual(removed, [9702],
+                         "Level counted its own superseded claim as another grant")
+        self.assertEqual(preserved, [])
+        self.assertNotIn(roles[9702], person.roles)
+
+    # ── 3: Prestige tier change vs a live Twitch grant ───────────────────
+
+    async def _sync_prestige(self, person, guild, bot):
+        from utils.prestige import sync_prestige_roles
+        out = io.StringIO()
+        with redirect_stdout(out):
+            await sync_prestige_roles(bot, guild, person)
+        return out.getvalue()
+
+    def _prestige_world(self):
+        person, guild, bot, roles = self._world([9704, 9705], worn=[9704])
+        execute("UPDATE levels SET prestige=2 WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+        execute("INSERT INTO prestige_roles (guild_id,tier,role_id) VALUES (?,?,?)",
+                (GUILD, 1, 9704))
+        execute("INSERT INTO prestige_roles (guild_id,tier,role_id) VALUES (?,?,?)",
+                (GUILD, 2, 9705))
+        return person, guild, bot, roles
+
+    async def test_3_old_prestige_tier_role_shared_with_a_live_twitch_session_is_kept(self):
+        person, guild, bot, roles = self._prestige_world()
+        self._twitch_live(9704)
+        log = await self._sync_prestige(person, guild, bot)
+        self.assertIn(roles[9704], person.roles,
+                      "a tier change revoked a role a live Twitch session grants")
+        self.assertIn("Keeping tier 1 role 9704", log, f"{log!r}")
+        self.assertIn(roles[9705], person.roles, "the new tier role was not granted")
+        self._assert_no_shop_rows()
+
+    async def test_3_old_prestige_tier_role_is_still_removed_without_another_grant(self):
+        person, guild, bot, roles = self._prestige_world()
+        await self._sync_prestige(person, guild, bot)
+        self.assertNotIn(roles[9704], person.roles,
+                         "ordinary tier cleanup stopped working")
+        self.assertIn(roles[9705], person.roles)
+
+    # ── 4: Booster-only Level role on a confirmed unboost vs Twitch ──────
+
+    async def test_4_booster_only_level_role_shared_with_a_live_twitch_session_is_kept(self):
+        from utils.level_claims import strip_booster_roles
+        person, _guild, _bot, roles = self._world([9706], worn=[9706])
+        self._claim(5, 9706, ref="booster:level")
+        self._twitch_live(9706)
+        result = await strip_booster_roles(person, GUILD, USER)
+        self.assertIn(roles[9706], person.roles,
+                      "an unboost revoked a role a live Twitch session grants")
+        self.assertEqual(result["removed"], [], str(result))
+        self.assertEqual([r[0] for r in result.get("preserved") or []], [9706],
+                         str(result))
+        self._assert_no_shop_rows()
+
+    async def test_4_booster_only_level_role_is_still_removed_without_another_grant(self):
+        from utils.level_claims import strip_booster_roles
+        person, _guild, _bot, roles = self._world([9706], worn=[9706])
+        self._claim(5, 9706, ref="booster:level")
+        result = await strip_booster_roles(person, GUILD, USER)
+        self.assertEqual([r for r in result["removed"]], [9706], str(result))
+        self.assertNotIn(roles[9706], person.roles)
+
+    # ── 5: one Twitch watch ending while another is still live ───────────
+
+    def _twitch_config(self, role_id, is_live):
+        return execute(
+            "INSERT INTO twitch_config (guild_id, twitch_username,"
+            " discord_channel_id, give_role_id, discord_user_id, is_live,"
+            " enabled) VALUES (?,?,?,?,?,?,1)",
+            (GUILD, "streamer", 4242, int(role_id), USER, 1 if is_live else 0))
+
+    async def _stream_ends(self, guild, bot, person, cid, role_id):
+        from cogs.twitch import Twitch
+        out = io.StringIO()
+        with redirect_stdout(out):
+            await Twitch._go_offline(SimpleNamespace(bot=bot), guild, GUILD,
+                                     cid, "streamer", int(role_id), person.id)
+        return out.getvalue()
+
+    async def test_5_ending_one_watch_keeps_the_role_while_another_is_live(self):
+        person, guild, bot, roles = self._world([9707], worn=[9707])
+        self._twitch_config(9707, is_live=True)          # another live watch
+        ending = self._twitch_config(9707, is_live=False)  # this one ends
+        log = await self._stream_ends(guild, bot, person, ending, 9707)
+        self.assertIn(roles[9707], person.roles,
+                      "ending one watch revoked a role another live watch grants")
+        self.assertIn("Keeping Twitch live role 9707", log, f"{log!r}")
+
+    async def test_5_ending_the_only_watch_removes_the_role(self):
+        person, guild, bot, roles = self._world([9707], worn=[9707])
+        ending = self._twitch_config(9707, is_live=False)
+        log = await self._stream_ends(guild, bot, person, ending, 9707)
+        self.assertNotIn(roles[9707], person.roles,
+                         "ordinary stream-end cleanup stopped working")
+        self.assertNotIn("Keeping Twitch live role", log)
+
+    # ── 6: MVP rollover vs a live Twitch grant on the previous holder ────
+
+    async def _rollover(self, guild, bot, role_id, winner, previous):
+        from cogs.mvp import MVP
+        from utils.timezone import get_cairo_daily_key
+        now = datetime.now(timezone.utc)
+        execute("INSERT INTO mvp_config (guild_id, mvp_role_id,"
+                " announce_channel_id, cycle_hours, chat_word_weight,"
+                " voice_minute_weight, enabled) VALUES (?,?,NULL,6,1.0,2.0,1)",
+                (GUILD, int(role_id)))
+        execute("INSERT INTO mvp_scores (guild_id, user_id, date, message_score,"
+                " voice_minutes, total_score) VALUES (?,?,?,0,0,?)",
+                (GUILD, winner.id, get_cairo_daily_key(now), 100))
+        execute("INSERT INTO mvp_history (guild_id, user_id, user_display_name,"
+                " cycle_start, cycle_end, score) VALUES (?,?,?,?,?,?)",
+                (GUILD, previous.id, "Previous",
+                 (now - timedelta(hours=16)).isoformat(),
+                 (now - timedelta(hours=10)).isoformat(), 55))
+        bot.guilds = [guild]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            await MVP.mvp_cycle_task.coro(SimpleNamespace(bot=bot))
+        return out.getvalue()
+
+    def _mvp_world(self, rid):
+        previous = member()
+        previous.id = USER
+        winner = member()
+        winner.id = 424250
+        role = self._Role(id=rid, name=f"SysRole{rid}", position=1,
+                          mention=f"<@&{rid}>")
+        previous.roles = [role]
+        winner.roles = []
+        for who in (previous, winner):
+            who.add_roles = AsyncMock(side_effect=lambda r, reason=None, w=who:
+                                      w.roles.append(r) if r not in w.roles else None)
+            who.remove_roles = AsyncMock(side_effect=lambda r, reason=None, w=who:
+                                         w.roles.remove(r) if r in w.roles else None)
+        guild = SimpleNamespace(
+            id=GUILD, owner_id=99, members=[previous, winner],
+            me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
+            get_role=lambda r: role if int(r) == rid else None,
+            get_member=lambda uid: {previous.id: previous,
+                                    winner.id: winner}.get(uid),
+        )
+        for who in (previous, winner):
+            who.guild = guild
+        bot = SimpleNamespace(get_guild=lambda gid: guild if gid == GUILD else None)
+        return previous, winner, guild, bot, role
+
+    async def test_6_rollover_keeps_the_role_for_a_previous_holder_who_is_live_on_twitch(self):
+        previous, winner, guild, bot, role = self._mvp_world(9708)
+        self._twitch_live(9708, user_id=previous.id)
+        log = await self._rollover(guild, bot, 9708, winner, previous)
+        self.assertIn(role, winner.roles, "the new MVP did not receive the role")
+        self.assertIn(role, previous.roles,
+                      "the rollover revoked a role a live Twitch session grants")
+        self.assertIn("Keeping MVP role 9708", log, f"{log!r}")
+
+    # ── 7: the check never counts the grant being retired ────────────────
+
+    async def test_the_retiring_source_is_never_counted_against_itself(self):
+        """Each source must be invisible to the caller retiring *that* source.
+
+        This is the contract `role_removal_blocked(retiring=...)` exists for: the
+        granting system is still configured for the role (the Level claim is still
+        fulfilled, the Boost config still names it, the Prestige tier still lists
+        it), so a blind "does any other source grant this?" would retain the role
+        forever. Each source gets its own role, so the only other grant visible is
+        the one deliberately being excluded.
+        """
+        person, _guild, _bot, _roles = self._world([9711, 9712, 9713], worn=[])
+        self._claim(5, 9711)                       # Level only
+        execute("INSERT INTO boost_config (guild_id, boost1_role_id, enabled,"
+                " auto_remove_on_unboost) VALUES (?,?,1,1)", (GUILD, 9712))
+        execute("UPDATE levels SET prestige=2 WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+        execute("INSERT INTO prestige_roles (guild_id,tier,role_id)"
+                " VALUES (?,?,?)", (GUILD, 2, 9713))
+        person.premium_since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        person.premium_subscription_count = 1
+
+        self.assertIsNone(
+            await TO.role_removal_blocked(GUILD, USER, 9711, retiring="level",
+                                          member=person),
+            "Level counted its own fulfilled claim as another entitlement")
+        self.assertIsNone(
+            await TO.role_removal_blocked(GUILD, USER, 9712, retiring="booster",
+                                          member=person),
+            "Booster counted its own configured role as another entitlement")
+        self.assertIsNone(
+            await TO.role_removal_blocked(GUILD, USER, 9713, retiring="prestige",
+                                          member=person),
+            "Prestige counted its own tier role as another entitlement")
+
+        # ... while each is still visible to a caller retiring something else:
+        # the exclusion filters one source, it does not switch the check off.
+        self.assertIn("fulfilled",
+                      await TO.role_removal_blocked(GUILD, USER, 9711,
+                                                    retiring="mvp", member=person))
+        self.assertIn("Booster",
+                      await TO.role_removal_blocked(GUILD, USER, 9712,
+                                                    retiring="mvp", member=person))
+        self.assertIn("Prestige",
+                      await TO.role_removal_blocked(GUILD, USER, 9713,
+                                                    retiring="mvp", member=person))
+
+    async def test_an_unknown_retiring_source_fails_loudly(self):
+        """A future caller must state what it retires; no silent Shop-only mode."""
+        with self.assertRaises(ValueError):
+            await TO.role_removal_blocked(GUILD, USER, 9712, retiring="nonsense")
+
+    async def test_6_rollover_still_removes_the_role_from_a_previous_holder_with_no_other_grant(self):
+        previous, winner, guild, bot, role = self._mvp_world(9708)
+        log = await self._rollover(guild, bot, 9708, winner, previous)
+        self.assertNotIn(role, previous.roles,
+                         "ordinary rollover cleanup stopped working")
+        self.assertNotIn("Keeping MVP role", log)
+        self.assertIn(role, winner.roles)
+
+
 class TwitchAndMvpRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
     """The two remaining live role removers, checked in BOTH directions.
 

@@ -461,6 +461,131 @@ def _booster_level_for(member) -> tuple[int, bool]:
     return 1, False
 
 
+async def prestige_role_entitled_ids(guild_id: int, user_id: int, *,
+                                     bot=None, member=None) -> set[int]:
+    """The roles of the member's EFFECTIVE Prestige tier, and no others.
+
+    Configuration alone never proves entitlement: a tier role counts only when
+    Prestige is enabled and the member's effective tier is > 0. Splitting this
+    out from `member_managed_role_ids` lets a caller ask about Prestige without
+    also asking about Booster (a tier change retires one, not the other).
+
+    Raises `EntitlementCheckError` if the backing tables cannot be read.
+    """
+    entitled: set[int] = set()
+    member = _resolve_member_from_bot(bot, guild_id, user_id, member)
+    try:
+        from utils.prestige import get_effective_prestige
+        prestige_enabled = True
+        async with aiosqlite.connect(DB_PATH) as db:
+            row = (await (await db.execute(
+                "SELECT enabled FROM prestige_config WHERE guild_id=?",
+                (guild_id,))).fetchone())
+            if row is not None and row[0] is not None and int(row[0]) == 0:
+                prestige_enabled = False
+        if prestige_enabled:
+            effective_tier = await get_effective_prestige(
+                guild_id, user_id, bot=bot, member=member)
+            if int(effective_tier or 0) > 0:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cursor = await db.execute(
+                        "SELECT role_id FROM prestige_roles WHERE guild_id=? AND tier=?",
+                        (guild_id, int(effective_tier)))
+                    for (r_id,) in await cursor.fetchall():
+                        if r_id not in (None, ""):
+                            try:
+                                entitled.add(int(r_id))
+                            except (TypeError, ValueError):
+                                continue
+    except EntitlementCheckError:
+        raise
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify Prestige role entitlement: {exc}"
+        ) from exc
+    return entitled
+
+
+async def booster_role_entitled_ids(guild_id: int, user_id: int, *,
+                                    bot=None, member=None) -> set[int]:
+    """Booster reward and self-picked colour roles the member may wear NOW.
+
+    Requires an active boost (`premium_since`) and enough boosts for the level
+    of the role; when `discord.Member` exposes no per-member boost count
+    (`count_known=False`) an active booster already wearing the role keeps it.
+    Split out from `member_managed_role_ids` for the same reason as the Prestige
+    half: losing a boost retires these and must not be asked about them.
+
+    Raises `EntitlementCheckError` if the backing tables cannot be read.
+    """
+    entitled: set[int] = set()
+    member = _resolve_member_from_bot(bot, guild_id, user_id, member)
+    boost_level, boost_count_known = _booster_level_for(member)
+    if boost_level < 1:
+        return entitled
+    held_role_ids: set[int] = set()
+    for r_obj in (getattr(member, "roles", None) or ()):
+        r_id_attr = getattr(r_obj, "id", r_obj)
+        try:
+            held_role_ids.add(int(r_id_attr))
+        except (TypeError, ValueError):
+            continue
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            boost_enabled = True
+            cursor = await db.execute(
+                "SELECT enabled, boost1_role_id, boost2_role_id "
+                "FROM boost_config WHERE guild_id=?",
+                (guild_id,))
+            row = await cursor.fetchone()
+            if row:
+                enabled, b1, b2 = row
+                if enabled is not None and int(enabled) == 0:
+                    boost_enabled = False
+                else:
+                    if b1 not in (None, "") and boost_level >= 1:
+                        try:
+                            entitled.add(int(b1))
+                        except (TypeError, ValueError):
+                            pass
+                    if b2 not in (None, ""):
+                        try:
+                            b2_id = int(b2)
+                            if boost_level >= 2 or (
+                                not boost_count_known
+                                and b2_id in held_role_ids
+                            ):
+                                entitled.add(b2_id)
+                        except (TypeError, ValueError):
+                            pass
+
+            if boost_enabled:
+                cursor = await db.execute(
+                    "SELECT role_id, requires_boost_level "
+                    "FROM boost_color_roles WHERE guild_id=?",
+                    (guild_id,))
+                for r_id, req_lvl in await cursor.fetchall():
+                    if r_id in (None, ""):
+                        continue
+                    try:
+                        color_role_id = int(r_id)
+                    except (TypeError, ValueError):
+                        continue
+                    needed = max(1, int(req_lvl or 1))
+                    if boost_level >= needed or (
+                        not boost_count_known
+                        and color_role_id in held_role_ids
+                    ):
+                        entitled.add(color_role_id)
+    except EntitlementCheckError:
+        raise
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify Booster role entitlement: {exc}"
+        ) from exc
+    return entitled
+
+
 async def member_managed_role_ids(guild_id: int, user_id: int, *,
                                   bot=None, member=None) -> set[int]:
     """Roles a guild-level subsystem currently entitles THIS member to wear.
@@ -478,105 +603,18 @@ async def member_managed_role_ids(guild_id: int, user_id: int, *,
         active boost with `boost_level >= requires_boost_level` (or an active
         booster already wearing the role when per-member count is unavailable).
 
+    This is the union of `prestige_role_entitled_ids` and
+    `booster_role_entitled_ids`; a caller that is retiring one of the two must
+    ask the other one directly instead of using the union.
+
     Raises `EntitlementCheckError` if any required backing table/query fails so
     callers never mistake a failed query for "no entitlement exists".
     """
-    managed: set[int] = set()
     member = _resolve_member_from_bot(bot, guild_id, user_id, member)
-
-    try:
-        from utils.prestige import get_effective_prestige
-        prestige_enabled = True
-        async with aiosqlite.connect(DB_PATH) as db:
-            row = await (await db.execute(
-                "SELECT enabled FROM prestige_config WHERE guild_id=?",
-                (guild_id,))).fetchone()
-            if row is not None and row[0] is not None and int(row[0]) == 0:
-                prestige_enabled = False
-        if prestige_enabled:
-            effective_tier = await get_effective_prestige(
-                guild_id, user_id, bot=bot, member=member)
-            if int(effective_tier or 0) > 0:
-                async with aiosqlite.connect(DB_PATH) as db:
-                    cursor = await db.execute(
-                        "SELECT role_id FROM prestige_roles WHERE guild_id=? AND tier=?",
-                        (guild_id, int(effective_tier)))
-                    for (r_id,) in await cursor.fetchall():
-                        if r_id not in (None, ""):
-                            try:
-                                managed.add(int(r_id))
-                            except (TypeError, ValueError):
-                                continue
-    except EntitlementCheckError:
-        raise
-    except Exception as exc:
-        raise EntitlementCheckError(
-            f"Failed to verify Prestige role entitlement: {exc}"
-        ) from exc
-
-    boost_level, boost_count_known = _booster_level_for(member)
-    if boost_level >= 1:
-        held_role_ids: set[int] = set()
-        for r_obj in (getattr(member, "roles", None) or ()):
-            r_id_attr = getattr(r_obj, "id", r_obj)
-            try:
-                held_role_ids.add(int(r_id_attr))
-            except (TypeError, ValueError):
-                continue
-        try:
-            async with aiosqlite.connect(DB_PATH) as db:
-                boost_enabled = True
-                cursor = await db.execute(
-                    "SELECT enabled, boost1_role_id, boost2_role_id "
-                    "FROM boost_config WHERE guild_id=?",
-                    (guild_id,))
-                row = await cursor.fetchone()
-                if row:
-                    enabled, b1, b2 = row
-                    if enabled is not None and int(enabled) == 0:
-                        boost_enabled = False
-                    else:
-                        if b1 not in (None, "") and boost_level >= 1:
-                            try:
-                                managed.add(int(b1))
-                            except (TypeError, ValueError):
-                                pass
-                        if b2 not in (None, ""):
-                            try:
-                                b2_id = int(b2)
-                                if boost_level >= 2 or (
-                                    not boost_count_known
-                                    and b2_id in held_role_ids
-                                ):
-                                    managed.add(b2_id)
-                            except (TypeError, ValueError):
-                                pass
-
-                if boost_enabled:
-                    cursor = await db.execute(
-                        "SELECT role_id, requires_boost_level "
-                        "FROM boost_color_roles WHERE guild_id=?",
-                        (guild_id,))
-                    for r_id, req_lvl in await cursor.fetchall():
-                        if r_id in (None, ""):
-                            continue
-                        try:
-                            color_role_id = int(r_id)
-                        except (TypeError, ValueError):
-                            continue
-                        needed = max(1, int(req_lvl or 1))
-                        if boost_level >= needed or (
-                            not boost_count_known
-                            and color_role_id in held_role_ids
-                        ):
-                            managed.add(color_role_id)
-        except EntitlementCheckError:
-            raise
-        except Exception as exc:
-            raise EntitlementCheckError(
-                f"Failed to verify Booster role entitlement: {exc}"
-            ) from exc
-
+    managed = await prestige_role_entitled_ids(
+        guild_id, user_id, bot=bot, member=member)
+    managed |= await booster_role_entitled_ids(
+        guild_id, user_id, bot=bot, member=member)
     return managed
 
 
@@ -1018,20 +1056,109 @@ async def shop_role_still_owned(guild_id: int, user_id: int,
     return None
 
 
-async def role_removal_blocked(guild_id: int, user_id: int,
-                               role_id: int) -> str | None:
-    """Reason NOT to remove this role, or None when removal is allowed.
+#: Every independent source that can justify one Discord role, in the order the
+#: source-aware check consults them (cheapest and most common first).
+ROLE_ENTITLEMENT_SOURCES = ("shop", "level", "prestige", "booster",
+                            "twitch", "mvp")
 
-    The one call every system-side remover should make before `remove_roles`.
-    A verification failure is returned as a reason to keep (fail closed) so an
-    unreadable ownership table can never be read as "nobody owns this".
+#: For each system-side remover, the source(s) it is itself retiring and must
+#: therefore not count as "another" grant.
+#:
+#: `twitch` and `mvp` deliberately exclude nothing. Their retiring grant is
+#: already invisible by the time the removal runs - the Twitch poller writes
+#: `is_live = 0` before `_go_offline`, and the MVP rollover writes the new
+#: winner's `mvp_history` row before cleaning up the previous holders - so the
+#: check cannot count the grant being retired, while a SECOND live config of the
+#: same source (another live watch awarding the same role) still counts.
+RETIRING_SOURCES = {
+    "level": frozenset({"level"}),
+    "booster": frozenset({"booster"}),
+    "prestige": frozenset({"prestige"}),
+    "twitch": frozenset(),
+    "mvp": frozenset(),
+}
+
+
+async def other_role_entitlement(guild_id: int, user_id: int, role_id: int, *,
+                                 exclude=frozenset(), bot=None,
+                                 member=None) -> str | None:
+    """A reason some source OTHER than `exclude` still grants this role.
+
+    This answers "does anything else still justify the Discord role?" for a
+    system-side remover that is about to retire its own grant. Every source is
+    consulted at the level at which it actually grants:
+
+      * `shop` - live timed holding, unexpired `temp_roles` row, owned role item;
+      * `level` - a fulfilled, permanent Level role claim;
+      * `prestige` - a role of the member's EFFECTIVE tier;
+      * `booster` - boost reward / self-picked colour roles while boosting;
+      * `twitch` - a live watch that awards this role to this member;
+      * `mvp` - the newest MVP award, for the member holding it.
+
+    Raises `EntitlementCheckError` when a store cannot be read: "could not
+    verify" must never be read as "no other source", so callers keep the role.
     """
     try:
-        return await shop_role_still_owned(guild_id, user_id, role_id)
+        rid = int(role_id)
+    except (TypeError, ValueError):
+        return None
+    if "shop" not in exclude:
+        reason = await shop_role_still_owned(guild_id, user_id, rid)
+        if reason:
+            return reason
+    if "level" not in exclude:
+        reason = await level_claim_role_entitled(
+            guild_id, user_id, rid, bot=bot, member=member)
+        if reason:
+            return reason
+    if "prestige" not in exclude:
+        if rid in await prestige_role_entitled_ids(
+                guild_id, user_id, bot=bot, member=member):
+            return "an effective Prestige tier role"
+    if "booster" not in exclude:
+        if rid in await booster_role_entitled_ids(
+                guild_id, user_id, bot=bot, member=member):
+            return "an active Booster role"
+    if "twitch" not in exclude:
+        reason = await twitch_role_entitled(guild_id, user_id, rid)
+        if reason:
+            return reason
+    if "mvp" not in exclude:
+        reason = await mvp_role_entitled(guild_id, user_id, rid)
+        if reason:
+            return reason
+    return None
+
+
+async def role_removal_blocked(guild_id: int, user_id: int, role_id: int, *,
+                               retiring: str, bot=None,
+                               member=None) -> str | None:
+    """Reason NOT to remove this role, or None when removal is allowed.
+
+    The one call every system-side remover makes before `remove_roles`.
+    `retiring` names the source whose grant the caller is removing; it is
+    required so a caller cannot silently fall back to "does the Shop own it?"
+    and so a source is never counted against itself (the Level ledger still
+    shows a claim whose role is being superseded, and the Booster config still
+    names a role a boost loss is retiring).
+
+    A verification failure is returned as a reason to keep (fail closed) so an
+    unreadable store can never be read as "nobody else grants this".
+    """
+    try:
+        exclude = RETIRING_SOURCES[retiring]
+    except KeyError:
+        raise ValueError(
+            f"unknown retiring source {retiring!r}; expected one of "
+            f"{sorted(RETIRING_SOURCES)}") from None
+    try:
+        return await other_role_entitlement(
+            guild_id, user_id, role_id, exclude=exclude,
+            bot=bot, member=member)
     except EntitlementCheckError as exc:
         print(f"[ROLES] Keeping role {role_id} for {user_id} in {guild_id}: "
-              f"ownership could not be verified ({exc})")
-        return "Shop ownership could not be verified"
+              f"entitlement could not be verified ({exc})")
+        return "another entitlement could not be verified"
 
 
 def entry_key_id(entry_key: str) -> int | None:

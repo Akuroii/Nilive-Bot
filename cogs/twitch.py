@@ -319,7 +319,8 @@ class Twitch(commands.Cog):
                 # it in both places), which this must not revoke.
                 from utils.timed_ownership import role_removal_blocked
                 kept_reason = await role_removal_blocked(
-                    guild_id, int(discord_user_id), int(give_role_id))
+                    guild_id, int(discord_user_id), int(give_role_id),
+                    retiring="twitch", member=member)
                 if kept_reason:
                     print(f"[TWITCH] Keeping Twitch live role {give_role_id} "
                           f"for {discord_user_id}: still {kept_reason}")
