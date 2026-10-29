@@ -16,8 +16,11 @@ name: tests
 # here: a red build must mean a real regression, not a known-broken file.
 # Widen this workflow only after those files are green.
 
+# Pull requests only: a branch push must not start a build. CI runs when the
+# change is proposed for review, which is the point at which the result is
+# attached to a decision. Run `python -m pytest test_timed_ownership.py` and
+# `npm test` locally before pushing; nothing here does it for you.
 on:
-  push:
   pull_request:
 
 # No step needs to write to the repository or read secrets; both jobs only run
