@@ -287,7 +287,14 @@ async def get_effective_prestige(guild_id: int, user_id: int,
         if guild is not None:
             if guild.id != guild_id:
                 return permanent
-            current = guild.get_member(user_id)
+            # A member object that cannot re-resolve itself from its guild is
+            # "unknown context", not an error: return the permanent tier and
+            # leave the VI session alone, exactly like a failed refresh below.
+            # Callers reach this with a snapshot whose guild is a partial stub.
+            get_member = getattr(guild, "get_member", None)
+            if get_member is None:
+                return permanent
+            current = get_member(user_id)
             if current is None:
                 # An event/interaction snapshot may predate a new session.
                 # Without a cache entry, refresh rather than trusting it.
