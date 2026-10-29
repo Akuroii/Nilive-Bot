@@ -10142,6 +10142,179 @@ class GrantLevelExclusionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(roles[9834], person.roles)
 
 
+class BoosterColourSelectionTests(unittest.IsolatedAsyncioTestCase):
+    """Being ELIGIBLE for a colour is not the same as having SELECTED it.
+
+    `/boostcolor` is single-select: it adds the picked colour and swaps out any
+    other configured colour role the member holds. Nothing records the pick -
+    `boost_color_roles` is guild configuration only, and the worn role list is
+    the only evidence - while `booster_role_entitlements()["color"]` reports
+    every configured colour the member's boost level qualifies for.
+
+    The class pins the selection semantics (they are what makes eligibility
+    different from a grant), the two correct outcomes, and the one gap they
+    leave open; see `test_known_gap_...`.
+    """
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        for table in ("equipped_roles", "inventory_items", "timed_holdings",
+                      "temp_roles", "level_reward_claims", "leveling_rewards",
+                      "prestige_roles", "prestige_config", "boost_config",
+                      "boost_color_roles", "reaction_roles", "twitch_config",
+                      "mvp_config", "mvp_scores", "mvp_history"):
+            execute(f"DELETE FROM {table}")
+        from utils.level_claims import ensure_tables
+        await ensure_tables()
+
+    class _Role(SimpleNamespace):
+        __hash__ = object.__hash__
+
+    def _world(self, role_ids, worn):
+        roles = {rid: self._Role(id=rid, name=f"SysRole{rid}", position=1,
+                                 mention=f"<@&{rid}>") for rid in role_ids}
+        person = member()
+        person.roles = [roles[rid] for rid in worn]
+        person.premium_since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        person.premium_subscription_count = 2
+
+        async def _add(*new_roles, reason=None):
+            for r in new_roles:
+                if r not in person.roles:
+                    person.roles.append(r)
+
+        async def _remove(*gone, reason=None):
+            for r in gone:
+                if r in person.roles:
+                    person.roles.remove(r)
+
+        person.add_roles = AsyncMock(side_effect=_add)
+        person.remove_roles = AsyncMock(side_effect=_remove)
+        guild = SimpleNamespace(
+            id=GUILD, owner_id=99, members=[person],
+            me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
+            get_role=lambda rid: roles.get(int(rid)),
+            get_member=lambda uid: person if uid == person.id else None,
+        )
+        person.guild = guild
+        bot = SimpleNamespace(get_guild=lambda gid: guild if gid == GUILD else None)
+        return person, guild, bot, roles
+
+    def _claim(self, level, role_id, ref="member"):
+        execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+                "reward_ref,track,status,payload_json,created_at) VALUES "
+                "(?,?,?,?,'role','fulfilled',?,CURRENT_TIMESTAMP)",
+                (GUILD, USER, level, ref, json.dumps({"role_id": int(role_id)})))
+
+    def _colour(self, role_id, requires=2):
+        execute("INSERT INTO boost_color_roles (guild_id,role_id,role_name,"
+                "requires_boost_level) VALUES (?,?,?,?)",
+                (GUILD, int(role_id), f"Colour{role_id}", requires))
+
+    def _assert_no_shop_rows(self):
+        for table in ("timed_holdings", "temp_roles", "inventory_items"):
+            self.assertEqual(rows(f"SELECT COUNT(*) FROM {table}"), [(0,)],
+                             f"{table} is not empty: this is not a colour-vs-Level case")
+
+    async def _pick_colour(self, person, guild, bot, role_id):
+        from cogs.boost import Boost
+        itx = SimpleNamespace(
+            user=person, guild=guild, client=bot,
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+        callback = getattr(Boost.boostcolor, "callback", Boost.boostcolor)
+        await callback(SimpleNamespace(bot=bot), itx, str(role_id))
+        return itx
+
+    async def _progress(self, person, new_level, new_role_id):
+        """Run the real Level progression pass and return (removed, preserved, log)."""
+        from utils.level_claims import enforce_role_progression
+        out = io.StringIO()
+        preserved = []
+        with redirect_stdout(out):
+            removed = await enforce_role_progression(
+                person, GUILD, USER, new_level, new_role_id,
+                failures=[], preserved=preserved)
+        return removed, preserved, out.getvalue()
+
+    # ── The selection semantics that make eligibility ≠ grant ────────────
+
+    async def test_boostcolor_keeps_exactly_one_configured_colour(self):
+        """Picking B takes A off: at most one configured colour is ever selected."""
+        person, guild, bot, roles = self._world([9881, 9882], worn=[9881])
+        self._colour(9881)
+        self._colour(9882)
+        await self._pick_colour(person, guild, bot, 9882)
+        self.assertIn(roles[9882], person.roles, "the picked colour was not granted")
+        self.assertNotIn(roles[9881], person.roles,
+                         "single-select stopped swapping the previous colour out")
+        self._assert_no_shop_rows()
+
+    # ── Correct outcomes ─────────────────────────────────────────────────
+
+    async def test_selected_colour_is_preserved_by_level_progression(self):
+        """Control: the colour actually worn as the selection keeps its role."""
+        person, _guild, _bot, roles = self._world([9881, 9883], worn=[9881])
+        self._colour(9881)
+        self._colour(9882)                      # eligible too, but not selected
+        self._claim(5, 9881)                    # superseded Level claim, same role
+        self._claim(10, 9883)                   # the new top role
+        removed, preserved, log = await self._progress(person, 10, 9883)
+        self.assertIn(roles[9881], person.roles,
+                      "a colour switch revoked the selected colour")
+        self.assertEqual(removed, [])
+        self.assertEqual(preserved, [9881])
+        self.assertIn("still an active self-picked Booster colour", log)
+        self._assert_no_shop_rows()
+
+    async def test_a_colour_that_is_not_configured_does_not_block_removal(self):
+        """Control: with only colour A configured, an obsolete role B still goes."""
+        person, _guild, _bot, roles = self._world([9882, 9883], worn=[9882])
+        self._colour(9881)
+        self._claim(5, 9882)
+        self._claim(10, 9883)
+        removed, preserved, _log = await self._progress(person, 10, 9883)
+        self.assertNotIn(roles[9882], person.roles)
+        self.assertEqual(removed, [9882])
+        self.assertEqual(preserved, [])
+        self._assert_no_shop_rows()
+
+    # ── The gap this documents, and why it is not fixed here ─────────────
+
+    async def test_known_gap_unselected_eligible_colour_blocks_level_removal(self):
+        """KNOWN GAP - this asserts today's behaviour, not the desired one.
+
+        The member selected colour A (they wear it) and also wears colour B,
+        which only the superseded Level claim granted. Nothing records the
+        selection - `boost_color_roles` has no per-member row and the picker
+        writes no state - so once both colours are worn the data cannot say
+        which one was picked. `booster_role_entitlements()` reports every
+        eligible configured colour, so the obsolete Level grant for B is never
+        retired and the role stays on the member until they pick any colour
+        again (the picker then takes B off, because no other source grants it)
+        or lose the boost.
+
+        When the selected colour is persisted, this expectation must FLIP to
+        `removed == [9882]`: that is the point of keeping it here.
+        """
+        person, _guild, _bot, roles = self._world([9881, 9882, 9883],
+                                                  worn=[9881, 9882])
+        self._colour(9881)
+        self._colour(9882)
+        self._claim(5, 9882)                    # superseded, and also colour B
+        self._claim(10, 9883)
+        removed, preserved, log = await self._progress(person, 10, 9883)
+        self.assertIn(roles[9882], person.roles,
+                      "the premise changed: B is no longer blocked")
+        self.assertEqual(removed, [])
+        self.assertEqual(preserved, [9882])
+        self.assertIn("Keeping superseded role 9882", log)
+        self.assertIn("still an active self-picked Booster colour", log)
+        self._assert_no_shop_rows()
+
+
 class TwitchAndMvpRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
     """The two remaining live role removers, checked in BOTH directions.
 
