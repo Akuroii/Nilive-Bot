@@ -699,9 +699,115 @@ async def level_claim_role_entitled(guild_id: int, user_id: int,
     return None
 
 
+def _missing_table(exc: Exception) -> bool:
+    """True when the query failed only because the feature's table is absent.
+
+    A guild whose database predates a feature has no rows for it, and "no table"
+    therefore means exactly the same thing as "no rows": the member is not
+    entitled. Treating it as an unreadable-but-present store would make every
+    unrelated role removal fail closed for that guild.
+    """
+    return "no such table" in str(exc).lower()
+
+
+async def twitch_role_entitled(guild_id: int, user_id: int,
+                               role_id: int) -> str | None:
+    """Currently live on Twitch, for a watch that awards this very role.
+
+    This is the Twitch half of "another system still grants the role". The state
+    it reads is the same state the poller writes: `is_live` is set to 0 before
+    `_go_offline` removes the role, so a removal already in progress can never
+    see itself as a surviving entitlement.
+
+    Raises `EntitlementCheckError` when the configuration cannot be read.
+    """
+    try:
+        rid = int(role_id)
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return None
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM twitch_config"
+                " WHERE guild_id=? AND enabled=1 AND is_live=1"
+                " AND give_role_id=? AND discord_user_id=? LIMIT 1",
+                (guild_id, rid, uid))
+            if await cursor.fetchone():
+                return "an active Twitch live session"
+    except aiosqlite.OperationalError as exc:
+        if _missing_table(exc):
+            return None
+        raise EntitlementCheckError(
+            f"Failed to verify Twitch live-role entitlement: {exc}") from exc
+    except EntitlementCheckError:
+        raise
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify Twitch live-role entitlement: {exc}") from exc
+    return None
+
+
+async def mvp_role_entitled(guild_id: int, user_id: int,
+                            role_id: int) -> str | None:
+    """The member crowned by the most recent MVP cycle holds this role.
+
+    `mvp_config.mvp_role_id` is the only role the MVP system manages, and the
+    rollover writes the winner's `mvp_history` row immediately before granting
+    it, so "most recent `mvp_history` row" is the award the system itself acts
+    on (the same row it reads to decide a cycle has elapsed). The configured role
+    ID is compared as well: after an administrator points the system at a
+    different role, the older crown says nothing about the new one.
+
+    Raises `EntitlementCheckError` when the award cannot be read.
+    """
+    try:
+        rid = int(role_id)
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return None
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT mvp_role_id, enabled FROM mvp_config"
+                " WHERE guild_id=?", (guild_id,))
+            row = await cursor.fetchone()
+            if not row or row[0] in (None, ""):
+                return None
+            try:
+                if int(row[0]) != rid:
+                    return None
+            except (TypeError, ValueError):
+                return None
+            if row[1] is not None and int(row[1]) == 0:
+                return None
+            cursor = await db.execute(
+                "SELECT user_id FROM mvp_history WHERE guild_id=?"
+                " ORDER BY created_at DESC, id DESC LIMIT 1", (guild_id,))
+            latest = await cursor.fetchone()
+            if latest and latest[0] is not None and int(latest[0]) == uid:
+                return "the current MVP cycle award"
+    except aiosqlite.OperationalError as exc:
+        if _missing_table(exc):
+            return None
+        raise EntitlementCheckError(
+            f"Failed to verify MVP role entitlement: {exc}") from exc
+    except EntitlementCheckError:
+        raise
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify MVP role entitlement: {exc}") from exc
+    return None
+
+
 async def non_slot_role_entitlement(guild_id: int, user_id: int, role_id: int, *,
                                     bot=None, member=None) -> str | None:
-    """Entitlements outside the single equip slot (Level claims, Prestige, Booster)."""
+    """Entitlements outside the single equip slot.
+
+    Level claims, the effective Prestige/Booster tier, and the two systems whose
+    grant is expressed as configuration plus a live state rather than a Shop
+    record: an active Twitch live session and the current MVP award.
+    """
     try:
         rid = int(role_id)
     except (TypeError, ValueError):
@@ -713,6 +819,12 @@ async def non_slot_role_entitlement(guild_id: int, user_id: int, role_id: int, *
     if rid in await member_managed_role_ids(
             guild_id, user_id, bot=bot, member=member):
         return "member-entitled Prestige/Booster role"
+    twitch_reason = await twitch_role_entitled(guild_id, user_id, rid)
+    if twitch_reason:
+        return twitch_reason
+    mvp_reason = await mvp_role_entitled(guild_id, user_id, rid)
+    if mvp_reason:
+        return mvp_reason
     return None
 
 

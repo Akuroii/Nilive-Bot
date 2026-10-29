@@ -183,6 +183,17 @@ class MVP(commands.Cog):
                         # Remove from all current holders
                         for m in guild.members:
                             if mvp_role in m.roles and m.id != mvp_user_id:
+                                # The cycle ending retires the MVP award. A
+                                # holder who also owns this role through the
+                                # Shop keeps it: that grant is theirs, and
+                                # revoking it would delete a purchase.
+                                from utils.timed_ownership import role_removal_blocked
+                                kept_reason = await role_removal_blocked(
+                                    guild.id, m.id, int(mvp_role.id))
+                                if kept_reason:
+                                    print(f"[MVP] Keeping MVP role {mvp_role.id} "
+                                          f"for {m.id}: still {kept_reason}")
+                                    continue
                                 try:
                                     await m.remove_roles(
                                         mvp_role,

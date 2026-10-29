@@ -314,11 +314,21 @@ class Twitch(commands.Cog):
             role = guild.get_role(int(give_role_id))
             member = guild.get_member(int(discord_user_id))
             if role and member and role in member.roles:
-                try:
-                    await member.remove_roles(role, reason="Stream ended")
-                except Exception as e:
-                    print(f"[TWITCH] Failed to remove live role from "
-                          f"{discord_user_id} in {guild_id}: {e}")
+                # Going offline retires the TWITCH grant. The same role ID may
+                # also be owned through the Shop (nothing prevents configuring
+                # it in both places), which this must not revoke.
+                from utils.timed_ownership import role_removal_blocked
+                kept_reason = await role_removal_blocked(
+                    guild_id, int(discord_user_id), int(give_role_id))
+                if kept_reason:
+                    print(f"[TWITCH] Keeping Twitch live role {give_role_id} "
+                          f"for {discord_user_id}: still {kept_reason}")
+                else:
+                    try:
+                        await member.remove_roles(role, reason="Stream ended")
+                    except Exception as e:
+                        print(f"[TWITCH] Failed to remove live role from "
+                              f"{discord_user_id} in {guild_id}: {e}")
 
     @check_streams.before_loop
     async def before_check(self):

@@ -9535,6 +9535,267 @@ class UnequipWithSystemEntitlementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self._slot())
 
 
+class TwitchAndMvpRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    """The two remaining live role removers, checked in BOTH directions.
+
+    Twitch's live role (`twitch_config.give_role_id`) and the MVP role
+    (`mvp_config.mvp_role_id`) take any role ID, and nothing validates them
+    against the Shop's catalog, so either can be the same role ID as a Shop
+    item - the shared-ID configuration the policy allows. A system-side remover
+    must then retire only its own grant (direction 1), and a Shop unequip must
+    not strip a role the system still grants (direction 2).
+
+    Every case drives the real production entry point: `Twitch._go_offline`,
+    `MVP.mvp_cycle_task.coro(...)` and `equip_engine.unequip_role`.
+    """
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        for table in ("equipped_roles", "inventory_items", "timed_holdings",
+                      "temp_roles", "level_reward_claims", "prestige_roles",
+                      "boost_config", "boost_color_roles", "twitch_config",
+                      "mvp_config", "mvp_scores", "mvp_history",
+                      "reaction_roles"):
+            execute(f"DELETE FROM {table}")
+        from utils.level_claims import ensure_tables
+        await ensure_tables()
+        from utils import creator_notify_engine as engine
+        await engine.ensure_tables()
+
+    class _Role(SimpleNamespace):
+        __hash__ = object.__hash__
+
+    def _person(self, rid, worn=True):
+        who = member()
+        role = self._Role(id=rid, name=f"Shared{rid}", position=1,
+                          mention=f"<@&{rid}>")
+        who.roles = [role] if worn else []
+        who.add_roles = AsyncMock(
+            side_effect=lambda r, reason=None: who.roles.append(r)
+            if r not in who.roles else None)
+        who.remove_roles = AsyncMock(
+            side_effect=lambda r, reason=None: who.roles.remove(r)
+            if r in who.roles else None)
+        return who, role
+
+    def _guild(self, rid, *people):
+        role = next(iter(people))[1]
+        roles = {rid: role}
+        g = SimpleNamespace(
+            id=GUILD, owner_id=99, members=[p for p, _ in people],
+            me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
+            get_role=lambda r: roles.get(int(r)),
+            get_member=lambda uid: next((p for p, _ in people
+                                         if p.id == uid), None),
+            get_channel=lambda cid: None,
+        )
+        for p, _ in people:
+            p.guild = g
+        bot = SimpleNamespace(get_guild=lambda gid: g if gid == GUILD else None)
+        return g, bot
+
+    async def _shop_owns(self, rid, name="OwnedThroughShop"):
+        """A live Shop holding of the very same role, equipped in the slot."""
+        holding_id = await TO.grant_timed_holding(
+            GUILD, USER, name, expires_at=iso_in(5), item_type="temp_role",
+            metadata={"role_id": int(rid)}, role_id=int(rid), source="shop")
+        key = f"h:{holding_id}"
+        await EE.record_equipped(GUILD, USER, name, role_id=int(rid),
+                                 entry_key=key)
+        return key
+
+    def _slot(self):
+        found = rows("SELECT item_name, entry_key, role_id FROM equipped_roles")
+        return found[0] if found else None
+
+    # ── Twitch, direction 1: the stream ends ─────────────────────────────
+
+    async def _stream_ends(self, guild, bot, who, role_id, live=False):
+        from cogs.twitch import Twitch
+        cid = execute(
+            "INSERT INTO twitch_config (guild_id, twitch_username,"
+            " discord_channel_id, give_role_id, discord_user_id, is_live,"
+            " enabled) VALUES (?,?,?,?,?,?,1)",
+            (GUILD, "streamer", 4242, int(role_id), who.id, 1 if live else 0))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            await Twitch._go_offline(SimpleNamespace(bot=bot), guild, GUILD,
+                                     cid, "streamer", int(role_id), who.id)
+        return out.getvalue()
+
+    async def test_twitch_stream_end_keeps_a_shop_owned_role(self):
+        who, role = self._person(9611)
+        guild, bot = self._guild(9611, (who, role))
+        key = await self._shop_owns(9611)
+        log = await self._stream_ends(guild, bot, who, 9611)
+        self.assertIn(role, who.roles,
+                      "the stream ending revoked a Shop-owned role")
+        self.assertEqual(self._slot()[1], key,
+                         "the Shop holding no longer owns the equip slot")
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE role_id=?", (9611,)),
+            [(1,)], "the independent holding was retired by the stream ending")
+        self.assertIn("Keeping Twitch live role 9611", log,
+                      f"the preservation was not reported: {log!r}")
+
+    async def test_twitch_stream_end_removes_the_role_without_shop_ownership(self):
+        who, role = self._person(9612)
+        guild, bot = self._guild(9612, (who, role))
+        log = await self._stream_ends(guild, bot, who, 9612)
+        self.assertNotIn(role, who.roles,
+                         "ordinary stream-end cleanup stopped working")
+        self.assertNotIn("Keeping Twitch live role", log,
+                         "the guard fired without independent ownership")
+
+    # ── Twitch, direction 2: the Shop copy is unequipped while live ──────
+
+    async def _unequip_shop_role(self, guild, bot, rid, key, name="OwnedThroughShop"):
+        return await EE.unequip_role(bot, GUILD, USER, name, entry_key=key)
+
+    async def test_twitch_live_session_keeps_the_role_when_the_shop_grant_is_unequipped(self):
+        who, role = self._person(9613)
+        guild, bot = self._guild(9613, (who, role))
+        key = await self._shop_owns(9613)
+        execute("INSERT INTO twitch_config (guild_id, twitch_username,"
+                " discord_channel_id, give_role_id, discord_user_id, is_live,"
+                " enabled) VALUES (?,?,?,?,?,1,1)",
+                (GUILD, "streamer", 4242, 9613, who.id))
+        result = await self._unequip_shop_role(guild, bot, 9613, key)
+        self.assertTrue(result["success"], result)
+        self.assertIn(role, who.roles,
+                      "unequipping revoked a role the live session still grants")
+        self.assertIsNone(self._slot(), "the equip slot was not cleared")
+
+    async def test_twitch_role_is_removed_on_unequip_once_the_stream_has_ended(self):
+        who, role = self._person(9614)
+        guild, bot = self._guild(9614, (who, role))
+        key = await self._shop_owns(9614)
+        execute("INSERT INTO twitch_config (guild_id, twitch_username,"
+                " discord_channel_id, give_role_id, discord_user_id, is_live,"
+                " enabled) VALUES (?,?,?,?,?,0,1)",
+                (GUILD, "streamer", 4242, 9614, who.id))
+        result = await self._unequip_shop_role(guild, bot, 9614, key)
+        self.assertTrue(result["success"], result)
+        self.assertNotIn(role, who.roles,
+                         "an ended stream still protected the role")
+        self.assertIsNone(self._slot())
+
+    # ── MVP, direction 1: rollover removes the role from old holders ─────
+
+    async def _rollover(self, guild, bot, role_id, winner, previous):
+        from cogs.mvp import MVP
+        from utils.timezone import get_cairo_daily_key
+        now = datetime.now(timezone.utc)
+        execute("INSERT INTO mvp_config (guild_id, mvp_role_id,"
+                " announce_channel_id, cycle_hours, chat_word_weight,"
+                " voice_minute_weight, enabled) VALUES (?,?,NULL,6,1.0,2.0,1)",
+                (GUILD, int(role_id)))
+        execute("INSERT INTO mvp_scores (guild_id, user_id, date,"
+                " message_score, voice_minutes, total_score) VALUES (?,?,?,0,0,?)",
+                (GUILD, winner.id, get_cairo_daily_key(now), 100))
+        execute("INSERT INTO mvp_history (guild_id, user_id, user_display_name,"
+                " cycle_start, cycle_end, score) VALUES (?,?,?,?,?,?)",
+                (GUILD, previous.id, "Previous",
+                 (now - timedelta(hours=16)).isoformat(),
+                 (now - timedelta(hours=10)).isoformat(), 55))
+        bot.guilds = [guild]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            await MVP.mvp_cycle_task.coro(SimpleNamespace(bot=bot))
+        return out.getvalue(), now
+
+    async def test_mvp_rollover_keeps_a_shop_owned_role_for_the_previous_holder(self):
+        previous, role = self._person(9621)
+        winner, _ = self._person(9621, worn=False)
+        winner.id = 424242
+        guild, bot = self._guild(9621, (previous, role), (winner, role))
+        key = await self._shop_owns(9621)
+        log, _ = await self._rollover(guild, bot, 9621, winner, previous)
+        # The rollover really ran: the new winner was crowned and given the role.
+        self.assertEqual(
+            rows("SELECT user_id FROM mvp_history WHERE guild_id=?", (GUILD,))[-1][0],
+            winner.id, "the rollover did not run")
+        self.assertIn(role, winner.roles, "the new MVP did not receive the role")
+        self.assertIn(role, previous.roles,
+                      "the rollover revoked the previous holder's Shop-owned role")
+        self.assertEqual(self._slot()[1], key,
+                         "the Shop holding no longer owns the equip slot")
+        self.assertIn("Keeping MVP role 9621", log,
+                      f"the preservation was not reported: {log!r}")
+
+    async def test_mvp_rollover_removes_the_role_from_a_previous_holder_without_ownership(self):
+        previous, role = self._person(9622)
+        winner, _ = self._person(9622, worn=False)
+        winner.id = 424243
+        guild, bot = self._guild(9622, (previous, role), (winner, role))
+        log, _ = await self._rollover(guild, bot, 9622, winner, previous)
+        self.assertNotIn(role, previous.roles,
+                         "ordinary rollover cleanup stopped working")
+        self.assertNotIn("Keeping MVP role", log,
+                         "the guard fired without independent ownership")
+        self.assertIn(role, winner.roles, "the new MVP did not receive the role")
+
+    # ── MVP, direction 2: the Shop copy is unequipped while still MVP ────
+
+    async def _make_current_mvp(self, who, role_id):
+        now = datetime.now(timezone.utc)
+        execute("INSERT INTO mvp_config (guild_id, mvp_role_id,"
+                " announce_channel_id, cycle_hours, chat_word_weight,"
+                " voice_minute_weight, enabled) VALUES (?,?,NULL,6,1.0,2.0,1)",
+                (GUILD, int(role_id)))
+        execute("INSERT INTO mvp_history (guild_id, user_id, user_display_name,"
+                " cycle_start, cycle_end, score) VALUES (?,?,?,?,?,?)",
+                (GUILD, who.id, "Current",
+                 (now - timedelta(hours=5)).isoformat(), now.isoformat(), 90))
+
+    async def test_mvp_crown_keeps_the_role_when_the_shop_grant_is_unequipped(self):
+        who, role = self._person(9623)
+        guild, bot = self._guild(9623, (who, role))
+        key = await self._shop_owns(9623)
+        await self._make_current_mvp(who, 9623)
+        result = await self._unequip_shop_role(guild, bot, 9623, key)
+        self.assertTrue(result["success"], result)
+        self.assertIn(role, who.roles,
+                      "unequipping revoked a role the MVP award still grants")
+        self.assertIsNone(self._slot(), "the equip slot was not cleared")
+
+    async def test_mvp_role_is_removed_on_unequip_for_a_member_who_is_not_the_current_mvp(self):
+        who, role = self._person(9624)
+        guild, bot = self._guild(9624, (who, role))
+        key = await self._shop_owns(9624)
+        # Somebody else holds the current crown.
+        await self._make_current_mvp(SimpleNamespace(id=424244), 9624)
+        result = await self._unequip_shop_role(guild, bot, 9624, key)
+        self.assertTrue(result["success"], result)
+        self.assertNotIn(role, who.roles,
+                         "a member who is not the MVP kept the role")
+        self.assertIsNone(self._slot())
+
+    # ── error semantics of the two new entitlement sources ───────────────
+
+    async def test_absent_twitch_table_is_not_an_entitlement(self):
+        """A database that predates the feature must not block removals."""
+        execute("DROP TABLE twitch_config")
+        self.assertIsNone(await TO.twitch_role_entitled(GUILD, USER, 9631))
+        self.assertIsNone(await TO.mvp_role_entitled(GUILD, USER, 9631))
+
+    async def test_unreadable_twitch_configuration_keeps_the_role(self):
+        """Schema drift is "could not verify", which must never mean "remove"."""
+        who, role = self._person(9632)
+        guild, bot = self._guild(9632, (who, role))
+        key = await self._shop_owns(9632)
+        execute("ALTER TABLE twitch_config DROP COLUMN give_role_id")
+        result = await self._unequip_shop_role(guild, bot, 9632, key)
+        self.assertFalse(result["success"], result)
+        self.assertIn("Could not verify role entitlements", result["error"])
+        self.assertIn(role, who.roles,
+                      "an unverifiable configuration stripped the role")
+        self.assertEqual(self._slot()[1], key,
+                         "the slot was cleared although nothing was verified")
+
+
 class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
     """Each test here failed against `87687c5`; see REVIEW_FINDINGS §D1-D5."""
 
