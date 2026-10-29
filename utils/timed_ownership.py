@@ -506,19 +506,21 @@ async def prestige_role_entitled_ids(guild_id: int, user_id: int, *,
     return entitled
 
 
-async def booster_role_entitled_ids(guild_id: int, user_id: int, *,
-                                    bot=None, member=None) -> set[int]:
-    """Booster reward and self-picked colour roles the member may wear NOW.
+async def booster_role_entitlements(guild_id: int, user_id: int, *,
+                                    bot=None, member=None) -> dict[str, set[int]]:
+    """Booster roles the member may wear NOW, split by which grant supplies them.
 
-    Requires an active boost (`premium_since`) and enough boosts for the level
-    of the role; when `discord.Member` exposes no per-member boost count
-    (`count_known=False`) an active booster already wearing the role keeps it.
-    Split out from `member_managed_role_ids` for the same reason as the Prestige
-    half: losing a boost retires these and must not be asked about them.
+    ``{"reward": {...}, "color": {...}}``:
+      * ``reward`` - the configured `boost1_role_id` / `boost2_role_id`;
+      * ``color`` - the self-picked `boost_color_roles` the member qualifies for.
+
+    The two are retired by different actions (`/boostcolor` replaces the picked
+    colour; losing the boost retires both), so a caller must be able to exclude
+    one without hiding the other.
 
     Raises `EntitlementCheckError` if the backing tables cannot be read.
     """
-    entitled: set[int] = set()
+    entitled: dict[str, set[int]] = {"reward": set(), "color": set()}
     member = _resolve_member_from_bot(bot, guild_id, user_id, member)
     boost_level, boost_count_known = _booster_level_for(member)
     if boost_level < 1:
@@ -545,7 +547,7 @@ async def booster_role_entitled_ids(guild_id: int, user_id: int, *,
                 else:
                     if b1 not in (None, "") and boost_level >= 1:
                         try:
-                            entitled.add(int(b1))
+                            entitled["reward"].add(int(b1))
                         except (TypeError, ValueError):
                             pass
                     if b2 not in (None, ""):
@@ -555,7 +557,7 @@ async def booster_role_entitled_ids(guild_id: int, user_id: int, *,
                                 not boost_count_known
                                 and b2_id in held_role_ids
                             ):
-                                entitled.add(b2_id)
+                                entitled["reward"].add(b2_id)
                         except (TypeError, ValueError):
                             pass
 
@@ -576,7 +578,7 @@ async def booster_role_entitled_ids(guild_id: int, user_id: int, *,
                         not boost_count_known
                         and color_role_id in held_role_ids
                     ):
-                        entitled.add(color_role_id)
+                        entitled["color"].add(color_role_id)
     except EntitlementCheckError:
         raise
     except Exception as exc:
@@ -584,6 +586,14 @@ async def booster_role_entitled_ids(guild_id: int, user_id: int, *,
             f"Failed to verify Booster role entitlement: {exc}"
         ) from exc
     return entitled
+
+
+async def booster_role_entitled_ids(guild_id: int, user_id: int, *,
+                                    bot=None, member=None) -> set[int]:
+    """Union of `booster_role_entitlements()` - reward and self-picked colours."""
+    grants = await booster_role_entitlements(
+        guild_id, user_id, bot=bot, member=member)
+    return grants["reward"] | grants["color"]
 
 
 async def member_managed_role_ids(guild_id: int, user_id: int, *,
@@ -635,8 +645,15 @@ async def guild_managed_role_ids(guild_id: int,
 
 async def level_claim_role_entitled(guild_id: int, user_id: int,
                                     role_id: int, *,
-                                    bot=None, member=None) -> str | None:
+                                    bot=None, member=None,
+                                    exclude_audiences=frozenset()) -> str | None:
     """Check if a fulfilled permanent Level role claim entitles this member to `role_id`.
+
+    `exclude_audiences` names the Level audiences whose claims must NOT count
+    (`False` = the normal track, `True` = the Booster-only track). Role
+    progression runs one pass per audience and retires only that audience's
+    superseded claims, so a claim for the same role in the OTHER audience is a
+    separate, still-valid grant and must keep the role.
 
     Raises `EntitlementCheckError` if a backing table/query cannot be read so
     callers never treat a failed query as absence of entitlement.
@@ -714,6 +731,8 @@ async def level_claim_role_entitled(guild_id: int, user_id: int,
         group["claim_ids_by_role"].setdefault(claimed_role, set()).add(cid)
 
     for audience in (False, True):
+        if audience in exclude_audiences:
+            continue
         by_level = partitions[audience]
         if not by_level:
             continue
@@ -1056,44 +1075,112 @@ async def shop_role_still_owned(guild_id: int, user_id: int,
     return None
 
 
-#: Every independent source that can justify one Discord role, in the order the
-#: source-aware check consults them (cheapest and most common first).
-ROLE_ENTITLEMENT_SOURCES = ("shop", "level", "prestige", "booster",
-                            "twitch", "mvp")
-
-#: For each system-side remover, the source(s) it is itself retiring and must
-#: therefore not count as "another" grant.
+#: `retiring=` tokens that name ONE grant of a source rather than the whole
+#: family. A source can grant the same role more than once - the Level system
+#: has a normal and a Booster-only track, the configured Booster reward role and
+#: the self-picked colour are different grants, and one role ID may be
+#: configured at several Prestige tiers - so a remover must exclude only what it
+#: actually takes away:
 #:
-#: `twitch` and `mvp` deliberately exclude nothing. Their retiring grant is
-#: already invisible by the time the removal runs - the Twitch poller writes
-#: `is_live = 0` before `_go_offline`, and the MVP rollover writes the new
-#: winner's `mvp_history` row before cleaning up the previous holders - so the
-#: check cannot count the grant being retired, while a SECOND live config of the
-#: same source (another live watch awarding the same role) still counts.
-RETIRING_SOURCES = {
-    "level": frozenset({"level"}),
-    "booster": frozenset({"booster"}),
-    "prestige": frozenset({"prestige"}),
-    "twitch": frozenset(),
-    "mvp": frozenset(),
-}
+#:   level:member / level:booster - one progression pass, one audience;
+#:   booster:reward / booster:color - the configured `boost1`/`boost2` role vs
+#:       the colour `/boostcolor` replaces;
+#:   prestige:<tier> - one tier's assignment (tiers are configured per guild, so
+#:       this discriminator is validated separately).
+GRANT_TOKENS = frozenset({
+    "level:member", "level:booster", "booster:reward", "booster:color",
+})
+
+#: `retiring=` tokens that retire every grant of a source. Correct only for an
+#: action that really does remove all of them - a boost ending takes the reward
+#: role, the picked colour and the Booster-only Level claims with it.
+FAMILY_TOKENS = frozenset({"level", "prestige", "booster"})
+
+#: Sources whose retiring grant is already invisible by the time the removal
+#: runs: the Twitch poller writes `is_live = 0` before `_go_offline`, and the MVP
+#: rollover writes the new winner's `mvp_history` row first. Excluding them would
+#: hide a SECOND live configuration of the same source that still grants the
+#: role, so they exclude nothing.
+PASS_THROUGH_TOKENS = frozenset({"twitch", "mvp"})
+
+
+def _retiring_tokens(retiring) -> frozenset[str]:
+    """Normalize a `retiring=` declaration into exclusion tokens.
+
+    Accepts one token or an iterable of tokens: a `GRANT_TOKENS` /
+    `FAMILY_TOKENS` / `PASS_THROUGH_TOKENS` entry, or `prestige:<tier>`. An
+    unknown one raises `ValueError` so a new remover cannot silently fall back
+    to "does the Shop own this?".
+    """
+    if isinstance(retiring, str):
+        tokens = (retiring,)
+    else:
+        try:
+            tokens = tuple(retiring)
+        except TypeError:
+            raise ValueError(
+                f"retiring must be a token or an iterable of tokens, got "
+                f"{retiring!r}") from None
+    if not tokens:
+        raise ValueError("retiring must not be empty: name the grant you retire")
+    out: set[str] = set()
+    for token in tokens:
+        if isinstance(token, str) and token.startswith("prestige:"):
+            # A tier change retires one tier, and tier IDs come from the
+            # guild's configuration, so this discriminator is not enumerable.
+            tier = token.split(":", 1)[1]
+            if not tier.isdigit():
+                raise ValueError(
+                    f"unknown retiring grant {token!r}: expected prestige:<tier>")
+            out.add(f"prestige:{int(tier)}")
+            continue
+        if not isinstance(token, str):
+            raise ValueError(f"retiring token must be a str, got {token!r}")
+        if token in PASS_THROUGH_TOKENS:
+            continue
+        if token not in GRANT_TOKENS and token not in FAMILY_TOKENS:
+            known = sorted(GRANT_TOKENS | FAMILY_TOKENS | PASS_THROUGH_TOKENS)
+            raise ValueError(
+                f"unknown retiring grant {token!r}; expected one of {known} "
+                f"or prestige:<tier>")
+        out.add(token)
+    return frozenset(out)
+
+
+def _excluded_level_audiences(tokens: frozenset[str]) -> frozenset[bool]:
+    """Level audiences whose claims must not count (`False` normal, `True` booster)."""
+    if "level" in tokens:
+        return frozenset({False, True})
+    audiences = set()
+    if "level:member" in tokens:
+        audiences.add(False)
+    if "level:booster" in tokens:
+        audiences.add(True)
+    return frozenset(audiences)
+
+
+def _excluded_booster_grants(tokens: frozenset[str]) -> frozenset[str]:
+    """Booster grants that must not count: `{"reward", "color"}`."""
+    if "booster" in tokens:
+        return frozenset({"reward", "color"})
+    grants = set()
+    if "booster:reward" in tokens:
+        grants.add("reward")
+    if "booster:color" in tokens:
+        grants.add("color")
+    return frozenset(grants)
 
 
 async def other_role_entitlement(guild_id: int, user_id: int, role_id: int, *,
                                  exclude=frozenset(), bot=None,
                                  member=None) -> str | None:
-    """A reason some source OTHER than `exclude` still grants this role.
+    """A reason some grant OTHER than the excluded ones still justifies this role.
 
-    This answers "does anything else still justify the Discord role?" for a
-    system-side remover that is about to retire its own grant. Every source is
-    consulted at the level at which it actually grants:
-
-      * `shop` - live timed holding, unexpired `temp_roles` row, owned role item;
-      * `level` - a fulfilled, permanent Level role claim;
-      * `prestige` - a role of the member's EFFECTIVE tier;
-      * `booster` - boost reward / self-picked colour roles while boosting;
-      * `twitch` - a live watch that awards this role to this member;
-      * `mvp` - the newest MVP award, for the member holding it.
+    Every source is consulted at the level at which it actually grants, and the
+    exclusions are grant-scoped, not source-scoped: retiring the normal Level
+    claim for a role does not hide a Booster-only claim for the same role,
+    replacing a picked colour does not hide the configured reward role, and
+    retiring one Prestige tier does not hide the effective tier.
 
     Raises `EntitlementCheckError` when a store cannot be read: "could not
     verify" must never be read as "no other source", so callers keep the role.
@@ -1106,19 +1193,29 @@ async def other_role_entitlement(guild_id: int, user_id: int, role_id: int, *,
         reason = await shop_role_still_owned(guild_id, user_id, rid)
         if reason:
             return reason
-    if "level" not in exclude:
+    level_audiences = _excluded_level_audiences(exclude)
+    if level_audiences != frozenset({False, True}):
         reason = await level_claim_role_entitled(
-            guild_id, user_id, rid, bot=bot, member=member)
+            guild_id, user_id, rid, bot=bot, member=member,
+            exclude_audiences=level_audiences)
         if reason:
             return reason
     if "prestige" not in exclude:
+        # `prestige:<tier>` retires one tier's assignment only. This check asks
+        # about the EFFECTIVE tier, which `sync_prestige_roles` never retires
+        # (it only removes roles of tiers != effective), so a role configured
+        # at both the stale and the effective tier still counts as granted.
         if rid in await prestige_role_entitled_ids(
                 guild_id, user_id, bot=bot, member=member):
             return "an effective Prestige tier role"
-    if "booster" not in exclude:
-        if rid in await booster_role_entitled_ids(
-                guild_id, user_id, bot=bot, member=member):
-            return "an active Booster role"
+    booster_grants = _excluded_booster_grants(exclude)
+    if booster_grants != frozenset({"reward", "color"}):
+        grants = await booster_role_entitlements(
+            guild_id, user_id, bot=bot, member=member)
+        if rid in grants["reward"] and "reward" not in booster_grants:
+            return "an active Booster reward role"
+        if rid in grants["color"] and "color" not in booster_grants:
+            return "an active self-picked Booster colour"
     if "twitch" not in exclude:
         reason = await twitch_role_entitled(guild_id, user_id, rid)
         if reason:
@@ -1136,21 +1233,17 @@ async def role_removal_blocked(guild_id: int, user_id: int, role_id: int, *,
     """Reason NOT to remove this role, or None when removal is allowed.
 
     The one call every system-side remover makes before `remove_roles`.
-    `retiring` names the source whose grant the caller is removing; it is
-    required so a caller cannot silently fall back to "does the Shop own it?"
-    and so a source is never counted against itself (the Level ledger still
-    shows a claim whose role is being superseded, and the Booster config still
-    names a role a boost loss is retiring).
+    `retiring` names the grant the caller is removing (see `GRANT_TOKENS`); it
+    is required so a caller cannot silently fall back to "does the Shop own it?"
+    and so the retiring grant is never counted against itself - the Level ledger
+    still shows the claim whose role is being superseded, and the Booster config
+    still names the role a boost loss is retiring. Naming a `FAMILY_TOKENS`
+    entry retires every grant of that source.
 
     A verification failure is returned as a reason to keep (fail closed) so an
     unreadable store can never be read as "nobody else grants this".
     """
-    try:
-        exclude = RETIRING_SOURCES[retiring]
-    except KeyError:
-        raise ValueError(
-            f"unknown retiring source {retiring!r}; expected one of "
-            f"{sorted(RETIRING_SOURCES)}") from None
+    exclude = _retiring_tokens(retiring)
     try:
         return await other_role_entitlement(
             guild_id, user_id, role_id, exclude=exclude,

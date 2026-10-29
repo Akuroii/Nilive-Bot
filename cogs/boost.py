@@ -423,9 +423,12 @@ class Boost(commands.Cog):
             from utils.timed_ownership import role_removal_blocked
             still_owned = []
             for candidate in to_remove:
+                # Only the self-picked colour is retired here. The configured
+                # `boost1`/`boost2` reward roles are a different Booster grant
+                # and stay effective while the member keeps boosting.
                 kept_reason = await role_removal_blocked(
                     interaction.guild.id, interaction.user.id,
-                    int(candidate.id), retiring="booster",
+                    int(candidate.id), retiring="booster:color",
                     member=interaction.user)
                 if kept_reason:
                     still_owned.append(candidate)

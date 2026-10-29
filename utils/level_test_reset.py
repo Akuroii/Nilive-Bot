@@ -174,12 +174,18 @@ justifies it. Both directions are guarded:
   and the `cogs.mvp` rollover. The helper asks whether ANY other source still grants
   the role - Shop ownership, a fulfilled Level claim, the effective Prestige tier,
   an active Booster role, a live Twitch watch, the newest MVP award - and the
-  required `retiring=` argument names the source the caller is itself retiring so
-  that source is never counted against itself. That exclusion is what keeps the
-  check from retaining a role forever: the Level ledger still shows the claim whose
-  role is being superseded, and the Boost config still names the role a boost loss
-  is retiring. A caller that forgets `retiring=` fails loudly (`ValueError`) rather
-  than silently falling back to "does the Shop own it?";
+  required `retiring=` argument names the GRANT the caller is itself retiring, so
+  that grant is never counted against itself. One source can grant the same role
+  more than once, so the argument is a grant, not a family: `level:member` /
+  `level:booster` for one progression audience, `prestige:<tier>` for one tier,
+  `booster:color` for the picked colour against the configured `boost1`/`boost2`
+  reward role, and the bare `booster` only where the boost itself ends and every
+  Booster grant really is retired. That exclusion is what keeps the check from
+  retaining a role forever: the Level ledger still shows the claim whose role is
+  being superseded, and the Boost config still names the role a boost loss is
+  retiring. A caller that forgets `retiring=`, or names a grant that does not
+  exist, fails loudly (`ValueError`) rather than silently falling back to "does
+  the Shop own it?";
 
   Two of the sources need no exclusion, because their retiring grant is already
   invisible by the time the removal runs: the Twitch poller writes `is_live = 0`

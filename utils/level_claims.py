@@ -737,8 +737,13 @@ async def enforce_role_progression(member, guild_id: int, user_id: int,
         # Shop (the same role ID configured in both is supported). This system
         # retires only its own claim; another recorded grant keeps the role.
         from utils.timed_ownership import role_removal_blocked
+        # This pass retires the SUPERSEDED claims of one audience only. A claim
+        # for the same role in the other audience is a separate, still-valid
+        # grant (a member who keeps boosting keeps the Booster-only role).
         kept_reason = await role_removal_blocked(
-            guild_id, user_id, stale_id, retiring="level", member=member)
+            guild_id, user_id, stale_id,
+            retiring="level:booster" if booster else "level:member",
+            member=member)
         if kept_reason:
             preserved.append(stale_id)
             print(f"[LEVEL] Keeping superseded role {stale_id} for {user_id} "
@@ -1081,7 +1086,8 @@ async def strip_booster_roles(member, guild_id: int, user_id: int) -> dict:
         # retires the Booster-only claim, not somebody's purchase.
         from utils.timed_ownership import role_removal_blocked
         kept_reason = await role_removal_blocked(
-            guild_id, user_id, role_id, retiring="booster", member=member)
+            guild_id, user_id, role_id,
+            retiring="booster", member=member)
         if kept_reason:
             result["preserved"].append((role_id, kept_reason))
             continue

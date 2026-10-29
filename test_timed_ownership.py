@@ -9888,6 +9888,260 @@ class SystemToSystemRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(role, winner.roles)
 
 
+class GrantLevelExclusionTests(unittest.IsolatedAsyncioTestCase):
+    """`retiring=` must name the GRANT being retired, not a whole source family.
+
+    A source can grant the same role more than once: the Level system has a
+    normal and a Booster-only audience, the Booster system has a configured
+    reward role and the member's self-picked colour, and one role ID may be
+    configured at several Prestige tiers. Excluding the whole family hides the
+    second, still-valid grant and lets a cleanup revoke it.
+    """
+
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=5000)
+        purge_timed()
+        for table in ("equipped_roles", "inventory_items", "timed_holdings",
+                      "temp_roles", "level_reward_claims", "leveling_rewards",
+                      "prestige_roles", "prestige_config", "boost_config",
+                      "boost_color_roles", "reaction_roles", "twitch_config",
+                      "mvp_config", "mvp_scores", "mvp_history"):
+            execute(f"DELETE FROM {table}")
+        from utils.level_claims import ensure_tables
+        await ensure_tables()
+
+    class _Role(SimpleNamespace):
+        __hash__ = object.__hash__
+
+    def _world(self, role_ids, worn):
+        roles = {rid: self._Role(id=rid, name=f"SysRole{rid}", position=1,
+                                 mention=f"<@&{rid}>") for rid in role_ids}
+        person = member()
+        person.roles = [roles[rid] for rid in worn]
+        person.add_roles = AsyncMock(
+            side_effect=lambda r, reason=None: person.roles.append(r)
+            if r not in person.roles else None)
+        person.remove_roles = AsyncMock(
+            side_effect=lambda r, reason=None: person.roles.remove(r)
+            if r in person.roles else None)
+        guild = SimpleNamespace(
+            id=GUILD, owner_id=99, members=[person],
+            me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
+            get_role=lambda rid: roles.get(int(rid)),
+            get_member=lambda uid: person if uid == person.id else None,
+        )
+        person.guild = guild
+        bot = SimpleNamespace(
+            get_guild=lambda gid: guild if gid == GUILD else None)
+        return person, guild, bot, roles
+
+    def _claim(self, level, role_id, ref="member"):
+        execute("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+                "reward_ref,track,status,payload_json,created_at) VALUES "
+                "(?,?,?,?,'role','fulfilled',?,CURRENT_TIMESTAMP)",
+                (GUILD, USER, level, ref, json.dumps({"role_id": int(role_id)})))
+
+    def _assert_no_shop_rows(self):
+        for table in ("timed_holdings", "temp_roles", "inventory_items"):
+            self.assertEqual(rows(f"SELECT COUNT(*) FROM {table}"), [(0,)],
+                             f"{table} is not empty: this is not a same-source case")
+
+    async def test_an_unknown_retiring_grant_fails_loudly(self):
+        """A remover must name a real grant, never silently fall back to Shop-only."""
+        from utils.timed_ownership import role_removal_blocked
+        for bad in ("boost", "", (), ("level", "nonsense"), "prestige:abc"):
+            with self.subTest(retiring=bad):
+                with self.assertRaises(ValueError):
+                    await role_removal_blocked(GUILD, USER, 9851, retiring=bad)
+
+    # ── Unboost: the Booster family really is retired as a whole ─────────
+
+    async def test_unboost_still_retires_a_role_only_a_booster_claim_grants(self):
+        """Losing the boost retires the grant, it does not leak the role.
+
+        The role is both a Booster-only reaction role and a fulfilled Booster
+        Level claim. Once the member stops boosting, neither grant is valid, so
+        keeping it "because another source still grants it" would be a leak.
+        """
+        from cogs.boost import Boost
+        person, guild, bot, roles = self._world([9841], worn=[9841])
+        person.premium_since = None
+        person.premium_subscription_count = 0
+        self._claim(5, 9841, ref="booster:level")
+        execute("INSERT INTO reaction_roles (guild_id, channel_id, message_id,"
+                " button_label, role_id, booster_only) VALUES (?,?,?,?,?,1)",
+                (GUILD, 1, 2, "Boost", 9841))
+
+        class _CogShim:
+            _handle_unboost = Boost._handle_unboost
+
+            def __init__(self, bot):
+                self.bot = bot
+
+        await Boost._handle_unboost(_CogShim(bot), guild, person, None, None,
+                                    {"auto_remove_on_unboost": 1})
+        self.assertNotIn(roles[9841], person.roles,
+                         "an unboost left a role whose only grants were Booster grants")
+        self._assert_no_shop_rows()
+
+    # ── Case A: normal Level audience vs a Booster-only claim ────────────
+
+    async def test_a_normal_progression_keeps_a_role_a_booster_only_claim_still_grants(self):
+        """`reconcile_role_progression` runs one pass per audience.
+
+        The normal pass retires the superseded normal claim for this role. The
+        Booster-only claim for the SAME role is a different grant and must keep
+        it - the member is still boosting.
+        """
+        from utils.level_claims import enforce_role_progression
+        person, _guild, _bot, roles = self._world([9801, 9802],
+                                                  worn=[9801, 9802])
+        person.premium_since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        person.premium_subscription_count = 1
+        self._claim(5, 9801, ref="member")            # superseded normal claim
+        self._claim(5, 9801, ref="booster:level")     # still-valid booster claim
+        self._claim(10, 9802, ref="member")           # the new top role
+        preserved = []
+        removed = await enforce_role_progression(
+            person, GUILD, USER, 10, 9802, failures=[], preserved=preserved)
+        self.assertIn(roles[9801], person.roles,
+                      "the normal pass revoked a role the Booster-only claim grants")
+        self.assertEqual(removed, [], f"reported removed: {removed}")
+        self.assertEqual(preserved, [9801], f"the skip was not reported: {preserved}")
+        self._assert_no_shop_rows()
+
+    async def test_a_normal_progression_still_removes_a_role_with_no_other_grant(self):
+        """Control: the normal claim alone must still be superseded."""
+        from utils.level_claims import enforce_role_progression
+        person, _guild, _bot, roles = self._world([9801, 9802],
+                                                  worn=[9801, 9802])
+        person.premium_since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self._claim(5, 9801, ref="member")
+        self._claim(10, 9802, ref="member")
+        preserved = []
+        removed = await enforce_role_progression(
+            person, GUILD, USER, 10, 9802, failures=[], preserved=preserved)
+        self.assertEqual(removed, [9801],
+                         "the normal pass stopped retiring its own claim")
+        self.assertEqual(preserved, [])
+        self.assertNotIn(roles[9801], person.roles)
+
+    async def test_a_booster_pass_keeps_a_role_a_normal_claim_still_grants(self):
+        """And symmetrically: the Booster pass must not retire the normal grant."""
+        from utils.level_claims import enforce_role_progression
+        person, _guild, _bot, roles = self._world([9811, 9812],
+                                                  worn=[9811, 9812])
+        person.premium_since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        person.premium_subscription_count = 1
+        self._claim(5, 9811, ref="booster:level")     # superseded booster claim
+        self._claim(5, 9811, ref="member")            # still-valid normal claim
+        self._claim(10, 9812, ref="booster:level")
+        preserved = []
+        removed = await enforce_role_progression(
+            person, GUILD, USER, 10, 9812, failures=[], preserved=preserved,
+            booster=True)
+        self.assertIn(roles[9811], person.roles,
+                      "the Booster pass revoked a role the normal claim grants")
+        self.assertEqual(removed, [])
+        self.assertEqual(preserved, [9811])
+
+    async def test_a_booster_pass_still_removes_a_role_with_no_other_grant(self):
+        from utils.level_claims import enforce_role_progression
+        person, _guild, _bot, roles = self._world([9811, 9812],
+                                                  worn=[9811, 9812])
+        person.premium_since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self._claim(5, 9811, ref="booster:level")
+        self._claim(10, 9812, ref="booster:level")
+        preserved = []
+        removed = await enforce_role_progression(
+            person, GUILD, USER, 10, 9812, failures=[], preserved=preserved,
+            booster=True)
+        self.assertEqual(removed, [9811])
+        self.assertEqual(preserved, [])
+        self.assertNotIn(roles[9811], person.roles)
+
+    # ── Case B: /boostcolor vs the configured boost1 reward role ─────────
+
+    async def _switch_colour(self, person, guild, bot, old_id, new_id):
+        from cogs.boost import Boost
+        execute("INSERT INTO boost_color_roles (guild_id,role_id,role_name,"
+                "requires_boost_level) VALUES (?,?,?,1), (?,?,?,1)",
+                (GUILD, old_id, "Old", GUILD, new_id, "New"))
+        person.premium_since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        person.premium_subscription_count = 2
+        itx = SimpleNamespace(
+            user=person, guild=guild, client=bot,
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+        cmd = Boost.boostcolor
+        callback = getattr(cmd, "callback", cmd)
+        await callback(SimpleNamespace(bot=bot), itx, str(new_id))
+        return itx
+
+    async def test_b_colour_switch_keeps_a_role_the_boost1_reward_still_grants(self):
+        """The colour grant is retired; the configured reward grant is not."""
+        person, guild, bot, roles = self._world([9821, 9822], worn=[9821])
+        execute("INSERT INTO boost_config (guild_id, boost1_role_id, enabled,"
+                " auto_remove_on_unboost) VALUES (?,?,1,1)", (GUILD, 9821))
+        itx = await self._switch_colour(person, guild, bot, 9821, 9822)
+        self.assertIn(roles[9821], person.roles,
+                      "a colour switch revoked the configured boost1 reward role")
+        self.assertIn(roles[9822], person.roles, "the new colour was not granted")
+        sent = itx.response.send_message.call_args
+        self.assertIn("Kept", str(sent), "the skip was not reported to the member")
+        self._assert_no_shop_rows()
+
+    async def test_b_colour_switch_still_removes_an_obsolete_colour(self):
+        """Control: no configured reward role, so the old colour goes."""
+        person, guild, bot, roles = self._world([9821, 9822], worn=[9821])
+        await self._switch_colour(person, guild, bot, 9821, 9822)
+        self.assertNotIn(roles[9821], person.roles,
+                         "ordinary colour switching stopped removing the old colour")
+        self.assertIn(roles[9822], person.roles)
+
+    # ── Prestige: the same role at a stale AND the effective tier ────────
+
+    def _prestige_world(self, rid):
+        person, guild, bot, roles = self._world([rid, 9832], worn=[rid])
+        execute("UPDATE levels SET prestige=2 WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+        execute("INSERT INTO prestige_roles (guild_id,tier,role_id) VALUES (?,?,?)",
+                (GUILD, 1, rid))          # stale tier, same role id
+        execute("INSERT INTO prestige_roles (guild_id,tier,role_id) VALUES (?,?,?)",
+                (GUILD, 2, rid))          # effective tier, same role id
+        return person, guild, bot, roles
+
+    async def _sync_prestige(self, person, guild, bot):
+        from utils.prestige import sync_prestige_roles
+        out = io.StringIO()
+        with redirect_stdout(out):
+            await sync_prestige_roles(bot, guild, person)
+        return out.getvalue()
+
+    async def test_prestige_switch_keeps_a_role_the_effective_tier_also_grants(self):
+        """Assigning one role ID to two tiers must not delete it on a tier change."""
+        person, guild, bot, roles = self._prestige_world(9831)
+        log = await self._sync_prestige(person, guild, bot)
+        self.assertIn(roles[9831], person.roles,
+                      "the stale-tier loop revoked a role the effective tier grants")
+        self.assertIn("Keeping tier 1 role 9831", log, f"{log!r}")
+        self._assert_no_shop_rows()
+
+    async def test_prestige_switch_still_removes_a_role_only_the_stale_tier_grants(self):
+        person, guild, bot, roles = self._world([9833, 9834], worn=[9833])
+        execute("UPDATE levels SET prestige=2 WHERE guild_id=? AND user_id=?",
+                (GUILD, USER))
+        execute("INSERT INTO prestige_roles (guild_id,tier,role_id) VALUES (?,?,?)",
+                (GUILD, 1, 9833))
+        execute("INSERT INTO prestige_roles (guild_id,tier,role_id) VALUES (?,?,?)",
+                (GUILD, 2, 9834))
+        await self._sync_prestige(person, guild, bot)
+        self.assertNotIn(roles[9833], person.roles,
+                         "ordinary tier cleanup stopped working")
+        self.assertIn(roles[9834], person.roles)
+
+
 class TwitchAndMvpRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
     """The two remaining live role removers, checked in BOTH directions.
 
