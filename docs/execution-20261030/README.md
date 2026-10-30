@@ -81,6 +81,7 @@ Only required equipped_roles.entry_key migration was repaired here. Previously i
 - npm test: all 18 harnesses passed, exit 0; includes actual Shop form JavaScript harness.
 - An initial new descriptor test used an unsupported member= argument; an initial race fixture used an unhashable role; an initial F diagnostic used a nonexistent helper. Corrected test defects, not claimed product defects. Raw attempts are retained. The valid Level race subsequently failed on its safety assertion before the production fix.
 - The historical Booster harness failure from TEST_BASELINE.md was a mock/output-contract defect. It was repaired without replacing the real Claim All callback.
+- The initial safety-first output is preserved losslessly in safety-first.raw.json (stdout_stderr field), since its literal trailing whitespace fails Git whitespace checks; decode the JSON field to recover the exact output matching its recorded hash. Generated CSV uses LF line endings.
 - Outputs captured directly with subprocess.run, not Python piped to tail. Per-command recorded exit codes are authoritative, not the exit code of the last command in a shell batch.
 - Exact clean-commit reruns are to be captured AFTER committing this checkpoint, outside the worktree to avoid changing the tested SHA. No final-delivery claim is made here.
 
