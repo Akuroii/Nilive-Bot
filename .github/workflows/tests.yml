@@ -2,11 +2,13 @@ name: tests
 
 # Minimal, deliberately partial CI.
 #
-# It runs ONLY the two suites that are known-green with the real dependency set
+# It runs ONLY the selected suites that are known-green with the real dependency set
 # from a clean checkout:
 #
 #   * `test_timed_ownership.py` — the ownership / late-delivery-rollback suite
 #     (`pip install -r requirements.txt pytest`, no secrets, no Discord socket).
+#   * `test_delivery_safety.py` — wallet deletion surface, descriptor isolation,
+#     atomic potion activation, required migration and Level/equip race.
 #   * `npm test` — the hand-written Node harnesses for the dashboard JS
 #     (`scripts/run_js_tests.sh`; node only, no npm dependencies).
 #
@@ -45,14 +47,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest
-      - name: Ownership / rollback suite
+      - name: Ownership / rollback / delivery safety
         # `-v` names each test as it completes, so a hang shows the last test
         # reached. `timeout -s ABRT` bounds the step and, with faulthandler
         # enabled, dumps every thread's stack on the way out - that is what
         # distinguishes "still running a test" from "finished, stuck in
         # interpreter shutdown". This is a diagnostic bound, not a fix: a
         # genuine hang still fails the job (exit 124/134).
-        run: PYTHONFAULTHANDLER=1 timeout -s ABRT 600 python -m pytest -v --tb=short test_timed_ownership.py
+        run: PYTHONFAULTHANDLER=1 timeout -s ABRT 600 python -m pytest -v --tb=short test_timed_ownership.py test_delivery_safety.py
 
   js-harnesses:
     runs-on: ubuntu-latest

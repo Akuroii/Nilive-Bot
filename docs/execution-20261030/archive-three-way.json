@@ -1,0 +1,259 @@
+{
+  "base": "a6b812be26d35f3048db39d0425374d23cd804ea",
+  "candidate": "8eb8e3d4fc18c1e96cf9ec3e6d6b55aa63fc0436",
+  "archive_commit": "6c04021ef5b422998a80bddcf5d4635a8b529039",
+  "files": [
+    {
+      "path": "cogs/shop.py",
+      "classification": "changed_after_snapshot",
+      "base_sha256": "a6f99ea3980ab9a3c80230d2be9072659413b2daa620f39c9ab6ffd234f322d4",
+      "archive_sha256": "62bda73b78c4662720593b796dcf65a0ab81ddf05c3d9767b2f246934b8c136a",
+      "candidate_sha256": "fea014921222dfa1a9c4e3d4754f60973c1263b2433c1bb31c4efa3df34015f9",
+      "decision": "superseded_by_newer",
+      "reason": "Newer implementation: operation-linked boosts and member-locked legacy expiry; no old function removed."
+    },
+    {
+      "path": "cogs/trade.py",
+      "classification": "present",
+      "base_sha256": "c13ec49d74adf592cd65b5bf8e7fc386c1a3aaf171f49707f98ad126f16de6e9",
+      "archive_sha256": "21f3fcf4f08c932ad792b1cc402fce5d8521fbfd9d3fe6159c0b2032da1a9861",
+      "candidate_sha256": "21f3fcf4f08c932ad792b1cc402fce5d8521fbfd9d3fe6159c0b2032da1a9861",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "cogs/wallet.py",
+      "classification": "present",
+      "base_sha256": "ec5a2de02bff2b37ed14b1e94fbd335ef6c0121758db9524c41c9717deff01f6",
+      "archive_sha256": "76b25431fa48395ca52469e5e445262892ea6fe6c0123fc25cb93cba8390072b",
+      "candidate_sha256": "76b25431fa48395ca52469e5e445262892ea6fe6c0123fc25cb93cba8390072b",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "dashboard/templates/systems/shop.html",
+      "classification": "present",
+      "base_sha256": "cce393d856712f87cbff3dc2aed08d46be5471c58e58e55152bc56d73dfe5373",
+      "archive_sha256": "4f65a4417343cf0df5eb81c24630ca67192e3f21bb52c4fab4f15297d721cfce",
+      "candidate_sha256": "4f65a4417343cf0df5eb81c24630ca67192e3f21bb52c4fab4f15297d721cfce",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "database.py",
+      "classification": "changed_after_snapshot",
+      "base_sha256": "1baa6ced8902aa5a71e7fbd7befaebbfbbe3d929ed49458b12515de4b10ed9ae",
+      "archive_sha256": "0ced9c67584b0b66f32fdd591a2e0fd4eb71371444f5f6d8e4dde079dfe6c8db",
+      "candidate_sha256": "7a27c18d2ba08ffe17b1b83f39174476214ca398ee98ded46b3e50732a7e5700",
+      "decision": "superseded_by_newer",
+      "reason": "Newer implementation: required origin_op_id migration and boost provenance column."
+    },
+    {
+      "path": "scripts/test_free_shop_items.py",
+      "classification": "present",
+      "base_sha256": "d7c2533671b9717ebe49c8870b578cdfe207b32ec6e822709d5e583ce160fe4f",
+      "archive_sha256": "b5468276d5696004d0d38352993d9d3c4b7ec4cc1426edf84b17665d8075a92c",
+      "candidate_sha256": "b5468276d5696004d0d38352993d9d3c4b7ec4cc1426edf84b17665d8075a92c",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "scripts/test_vi_shop_api.py",
+      "classification": "present",
+      "base_sha256": "4b3ca047f5dd205048a994f38c2b3c4ab2b723749f87d0028d07e0b444a9d865",
+      "archive_sha256": "1996d4e702d0bc7408f262a216e3848a03edb6f476003b2802731476624bb337",
+      "candidate_sha256": "1996d4e702d0bc7408f262a216e3848a03edb6f476003b2802731476624bb337",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "scripts/test_vi_shop_form.js",
+      "classification": "present",
+      "base_sha256": "a02e63e1d195d5f2f18431eff44348f933581210c26c0b599e7dc95468e3d674",
+      "archive_sha256": "0ebafed2aa06afb3f33f44296ae3d1387a5c51e8a04ad598c5ece005ae822494",
+      "candidate_sha256": "0ebafed2aa06afb3f33f44296ae3d1387a5c51e8a04ad598c5ece005ae822494",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "scripts/test_wallet_phase2.py",
+      "classification": "present",
+      "base_sha256": "29ad247de6a9b249e022a209e8356d80807e97f0950783240f7e650913de9483",
+      "archive_sha256": "81c56ffde16b8915640c81e16c6171e221e736224ea46dcbdb533d9db3a5d5a5",
+      "candidate_sha256": "81c56ffde16b8915640c81e16c6171e221e736224ea46dcbdb533d9db3a5d5a5",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "test_free_shop_items.py",
+      "classification": "present",
+      "base_sha256": "d7c2533671b9717ebe49c8870b578cdfe207b32ec6e822709d5e583ce160fe4f",
+      "archive_sha256": "b5468276d5696004d0d38352993d9d3c4b7ec4cc1426edf84b17665d8075a92c",
+      "candidate_sha256": "b5468276d5696004d0d38352993d9d3c4b7ec4cc1426edf84b17665d8075a92c",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "test_vi_shop_api.py",
+      "classification": "present",
+      "base_sha256": "4b3ca047f5dd205048a994f38c2b3c4ab2b723749f87d0028d07e0b444a9d865",
+      "archive_sha256": "1996d4e702d0bc7408f262a216e3848a03edb6f476003b2802731476624bb337",
+      "candidate_sha256": "1996d4e702d0bc7408f262a216e3848a03edb6f476003b2802731476624bb337",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "test_wallet_phase2.py",
+      "classification": "present",
+      "base_sha256": "29ad247de6a9b249e022a209e8356d80807e97f0950783240f7e650913de9483",
+      "archive_sha256": "81c56ffde16b8915640c81e16c6171e221e736224ea46dcbdb533d9db3a5d5a5",
+      "candidate_sha256": "81c56ffde16b8915640c81e16c6171e221e736224ea46dcbdb533d9db3a5d5a5",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "utils/economy_safe.py",
+      "classification": "present",
+      "base_sha256": "6d6d25dd10296614dd8eb482e8f2031f1ecd5a3a8a37f0a02d7f73a36c9de0f4",
+      "archive_sha256": "7b86c56e20afd29032b89faae673f36d2181b25e54a1884110482ebe18658679",
+      "candidate_sha256": "7b86c56e20afd29032b89faae673f36d2181b25e54a1884110482ebe18658679",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "utils/equip_engine.py",
+      "classification": "changed_after_snapshot",
+      "base_sha256": "b241ca22663315f2b1042a5aba1a3d27a6e9bbd42d076ec70d8d079f79b49b95",
+      "archive_sha256": "667c47e8be5f293eb7b54abb08eaa3a5a5646568957e08a1a5edab6c80649d68",
+      "candidate_sha256": "c5c4e50675521e94cc2439518e873ed215484f420aa6959abb6af9bbe10d8d8a",
+      "decision": "superseded_by_newer",
+      "reason": "Newer implementation: per-member slot locks and identity-conditional slot cleanup."
+    },
+    {
+      "path": "utils/inventory.py",
+      "classification": "present",
+      "base_sha256": "8f0df35c43f9b7a9957dc45305ccdcf8c0a3f10e33db838337a6a4679956d53c",
+      "archive_sha256": "2771fa7a5771152e73c389ea57daccd5b26767a11a30fb2dd20a51c2bd3370f4",
+      "candidate_sha256": "2771fa7a5771152e73c389ea57daccd5b26767a11a30fb2dd20a51c2bd3370f4",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "utils/level_claims.py",
+      "classification": "changed_after_snapshot",
+      "base_sha256": "adf378c581d5d0dad758e204ca7c8a1a566157a0c14f6597ed63e77210499cee",
+      "archive_sha256": "03c3ddcc0009654277ae27bdf5df78eafb0c2d3fa2a38bbfed5e503ecfea498c",
+      "candidate_sha256": "f536ebb3ee54620056a1e8ba171e544827266cc337b65d6d9f37808f220dbe4d",
+      "decision": "superseded_by_newer",
+      "reason": "Newer implementation: shared-role preservation in progression and unboost."
+    },
+    {
+      "path": "utils/level_test_reset.py",
+      "classification": "changed_after_snapshot",
+      "base_sha256": "97fe447c6a588894f0dfe7ed7d536b939bc49451e22e492278eb52fb7f22a029",
+      "archive_sha256": "79b563353c45f43146dd46f42ff519ba364b0d922825e63aeb7cbe2341de6a93",
+      "candidate_sha256": "871b79da7bed07ffdf25ae49139ce2b99cbc27d6e0d8a731014ec775f8d196cd",
+      "decision": "already_present",
+      "reason": "Existing implementation; candidate difference is ownership-policy documentation only."
+    },
+    {
+      "path": "utils/potion_engine.py",
+      "classification": "present",
+      "base_sha256": "97210c82f994258ac8ed46c35ad39dbd78e45e56ad7c08fad794be8c183dab1e",
+      "archive_sha256": "c81a09ce0674300dd03c91c1fdfbf1bbae004a83081af363f7365ddd78fcfdcf",
+      "candidate_sha256": "c81a09ce0674300dd03c91c1fdfbf1bbae004a83081af363f7365ddd78fcfdcf",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "utils/rank_card_data.py",
+      "classification": "present",
+      "base_sha256": "36a15665476a368bd237754c7de5a4f335d6d63ba9e74f9c4e32daa584f9e594",
+      "archive_sha256": "d7b1592577a76c3a51ad4d36f8e77ca3a0b692c0b1aa2cae5ea828d2b3d6da65",
+      "candidate_sha256": "d7b1592577a76c3a51ad4d36f8e77ca3a0b692c0b1aa2cae5ea828d2b3d6da65",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "utils/reward_engine.py",
+      "classification": "present",
+      "base_sha256": "a6220f8a8f5d25c9630842b4447830c94a4c3e921f5da24bd14bdb2c10dc9a75",
+      "archive_sha256": "b8ff9275570e094217bef1386f2a4174990ff53a42aedd47621ef9dff0729131",
+      "candidate_sha256": "b8ff9275570e094217bef1386f2a4174990ff53a42aedd47621ef9dff0729131",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "utils/shop_validation.py",
+      "classification": "present",
+      "base_sha256": "b188415edf217e4b06fcb4813a1f949de6138d36186ee4dd4146c446c17ef243",
+      "archive_sha256": "2a731eb5764199b8d8acb358ea97706fe9611208328056b9d3b328d02a2a1d2f",
+      "candidate_sha256": "2a731eb5764199b8d8acb358ea97706fe9611208328056b9d3b328d02a2a1d2f",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "utils/title_engine.py",
+      "classification": "present",
+      "base_sha256": "f924213ca4bc5393c32e760a8896e7a004395f0baa02c99ecee34cfdb29e114b",
+      "archive_sha256": "d28017bafe429a3a2f7d410ffd087b293dd1a17cca77fba97f4df68e77619f90",
+      "candidate_sha256": "d28017bafe429a3a2f7d410ffd087b293dd1a17cca77fba97f4df68e77619f90",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "utils/xp_calculator.py",
+      "classification": "changed_after_snapshot",
+      "base_sha256": "105708a5412d9ab6e15b009987ef41c7ba4eace377c89d4f9e398e8ed85d663e",
+      "archive_sha256": "b0034b4fc591ea95f54db68a42b674b2a98e1d001c533f0439e993de0791fe3c",
+      "candidate_sha256": "4bda4a34728244caa8c275f30e12cdabcc79da8710692c0bb517347f596fe563",
+      "decision": "superseded_by_newer",
+      "reason": "Newer implementation: origin_op_id in boost inserts and API forwarding."
+    },
+    {
+      "path": "scripts/recover_shop_purchases.py",
+      "classification": "changed_after_snapshot",
+      "base_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_sha256": "63ec1d2eaf8bb679366d768d5f9eddc0df710ad392a208982067620d618fdc13",
+      "candidate_sha256": "a6a3748ebcb904e48962b049fc0d790abab55e63267f429ea3a050584c7c2573",
+      "decision": "superseded_by_newer",
+      "reason": "Newer implementation: operator safety guidance and non-owner sentinel."
+    },
+    {
+      "path": "scripts/test_inventory_ui.py",
+      "classification": "present",
+      "base_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_sha256": "2b70c7b13d37e0f21eb5d42b183c1723f5fc711ebe2ca5edd1e002473471fb56",
+      "candidate_sha256": "2b70c7b13d37e0f21eb5d42b183c1723f5fc711ebe2ca5edd1e002473471fb56",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "test_inventory_ui.py",
+      "classification": "present",
+      "base_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_sha256": "2b70c7b13d37e0f21eb5d42b183c1723f5fc711ebe2ca5edd1e002473471fb56",
+      "candidate_sha256": "2b70c7b13d37e0f21eb5d42b183c1723f5fc711ebe2ca5edd1e002473471fb56",
+      "decision": "already_present",
+      "reason": "Archive and candidate are byte-identical: no restoration needed for this file. This is not a functional certification."
+    },
+    {
+      "path": "test_timed_ownership.py",
+      "classification": "changed_after_snapshot",
+      "base_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_sha256": "075da18c5fdd5dd83eee6b65731247b3867d2c0a890162db0c639c8c4d8a3c17",
+      "candidate_sha256": "b8a1ec65601918cbafee71d67045f5230ab587c366a9154c04adfdf48a8c9abf",
+      "decision": "superseded_by_newer",
+      "reason": "Newer regressions; old P38/P39 legacy inference expectations must not overwrite fail-closed provenance checks."
+    },
+    {
+      "path": "utils/timed_ownership.py",
+      "classification": "changed_after_snapshot",
+      "base_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_sha256": "2e92a1f3bce95353dd7449b650eaec05685f2882eeaeb352dc6c795dcd58f92e",
+      "candidate_sha256": "baed79d5f24cdadab2c3ed798e56c658c484c9640499fadea6798fbd52e89ea7",
+      "decision": "superseded_by_newer",
+      "reason": "Newer ownership boundary, provenance, reconciliation, retirement and synchronization. Removed journal-only holding inference is intentionally not restored."
+    }
+  ]
+}

@@ -1033,8 +1033,8 @@ async def main():
 
     perm_entry = next(e for e in color_entries if not e["timed"])
     perm_view = ItemPanelView(GUILD, USER, TAB_COLORS, perm_entry, False, 0)
-    check("a permanent Color still offers Drop",
-          "Drop" in [c.label for c in perm_view.children
+    check("a permanent Color never offers Drop",
+          "Drop" not in [c.label for c in perm_view.children
                      if getattr(c, "label", None)],
           str([getattr(c, "label", None) for c in perm_view.children]))
 

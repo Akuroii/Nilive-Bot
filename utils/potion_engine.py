@@ -76,80 +76,63 @@ def is_usable(metadata: dict | None) -> bool:
 
 
 async def use_potion(guild_id: int, user_id: int, item_name: str) -> dict:
+    """Commit consumption, provenance and the XP effect as one SQLite transaction.
+
+    Metadata is read under the same write transaction as consumption. An error
+    or cancellation before commit rolls everything back; there is no refund
+    transaction and no window with only consumption durably recorded. This does
+    not deduplicate separate UI requests when multiple copies are owned.
     """
-    Consumes one copy of a potion and applies its effect.
-
-    Order matters: the stack is decremented FIRST (remove_item runs
-    inside its own BEGIN IMMEDIATE, so two concurrent Use clicks on the
-    last potion can't both pass the ownership check), and only then is
-    the effect granted. A double-click therefore burns at most the
-    quantity actually owned. If the effect grant itself fails after the
-    decrement, the copy is refunded so the member is never charged for
-    nothing — that refund is the only place this module writes back to
-    inventory.
-
-    Never raises for user-facing failures; returns {"success": False,
-    "error": ...} like equip_engine/title_engine do.
-    """
-    from utils.inventory import (
-        get_inventory, remove_item, give_item, InsufficientItems,
-    )
-
-    items = await get_inventory(guild_id, user_id, include_empty=False)
-    # Potions are permanent stacks in `inventory_items`; the duration on a
-    # potion is its EFFECT once activated, not an ownership expiry. A timed
-    # holding that happens to share the name is a different record and
-    # `remove_item()` could not consume it, so it is never a candidate here.
-    owned = next((it for it in items
-                  if not it.get("timed") and it["item_name"] == item_name),
-                 None)
-    if not owned:
-        return {"success": False, "error": f"You don't own **{item_name}**."}
-    if owned["item_type"] != POTION_ITEM_TYPE:
-        return {"success": False,
-                "error": f"**{item_name}** isn't a potion."}
-
-    meta = owned.get("metadata") or {}
-    if not is_usable(meta):
-        return {"success": False,
-                "error": (f"**{item_name}** has no valid effect configured "
-                          f"— ask an admin to check its setup.")}
-
-    try:
-        remaining = await remove_item(guild_id, user_id, item_name, quantity=1)
-    except InsufficientItems:
-        return {"success": False,
-                "error": f"You don't have any **{item_name}** left."}
-
-    multiplier = float(meta["multiplier"])
-    duration_hours = int(meta["duration_hours"])
-
+    import json
+    from utils.inventory import remove_item, InsufficientItems
     from utils.xp_calculator import grant_xp_boost
-    try:
-        expires_at = await grant_xp_boost(
-            guild_id, user_id, multiplier, duration_hours, source="potion")
-    except Exception as e:
-        # Refund the consumed copy — the member clicked Use and got
-        # nothing. give_item's upsert restores the exact stack size.
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
         try:
-            await give_item(
-                guild_id, user_id, item_name, quantity=1,
-                item_type=POTION_ITEM_TYPE, metadata=meta, source="refund")
-        except Exception as refund_error:
-            print(f"[POTION] Effect grant AND refund both failed "
-                  f"(guild={guild_id} user={user_id} item={item_name}): "
-                  f"{e} / {refund_error}")
-        return {"success": False,
-                "error": f"Couldn't apply the effect ({e}). Nothing was used."}
+            cursor = await db.execute(
+                "SELECT quantity, item_type, metadata FROM inventory_items "
+                "WHERE guild_id=? AND user_id=? AND item_name=?",
+                (guild_id, user_id, item_name))
+            owned = await cursor.fetchone()
+            if not owned or owned[0] <= 0:
+                return {"success": False,
+                        "error": f"You don't own **{item_name}**."}
+            if owned[1] != POTION_ITEM_TYPE:
+                return {"success": False,
+                        "error": f"**{item_name}** isn't a potion."}
+            try:
+                meta = json.loads(owned[2]) if owned[2] else {}
+            except (TypeError, ValueError):
+                meta = {}
+            if not isinstance(meta, dict) or not is_usable(meta):
+                return {"success": False,
+                        "error": (f"**{item_name}** has no valid effect configured "
+                                  "— ask an admin to check its setup.")}
+            multiplier = float(meta["multiplier"])
+            duration_hours = int(meta["duration_hours"])
+            remaining = await remove_item(
+                guild_id, user_id, item_name, quantity=1, db=db)
+            expires_at = await grant_xp_boost(
+                guild_id, user_id, multiplier, duration_hours,
+                source="potion", db=db)
+            await db.commit()
+        except InsufficientItems:
+            await db.rollback()
+            return {"success": False,
+                    "error": f"You don't have any **{item_name}** left."}
+        except Exception:
+            await db.rollback()
+            return {"success": False,
+                    "error": "Couldn't apply the effect. Nothing was used."}
+        except BaseException:
+            await db.rollback()
+            raise
 
     return {
-        "success": True,
-        "item_name": item_name,
-        "effect": meta["effect"],
-        "multiplier": multiplier,
-        "duration_hours": duration_hours,
-        "expires_at": expires_at,
-        "remaining": remaining,
+        "success": True, "item_name": item_name, "effect": meta["effect"],
+        "multiplier": multiplier, "duration_hours": duration_hours,
+        "expires_at": expires_at, "remaining": remaining,
     }
 
 

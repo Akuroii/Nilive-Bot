@@ -712,6 +712,23 @@ async def enforce_role_progression(member, guild_id: int, user_id: int,
                                    failures: list | None = None, *,
                                    booster: bool = False,
                                    preserved: list | None = None) -> list[int]:
+    """Serialize entitlement checks and removals against member slot changes.
+
+    The lock must precede the ownership read, not just the Discord removal.
+    This public entry point must not be called while holding slot_lock already.
+    """
+    from utils.equip_engine import slot_lock
+    async with slot_lock(guild_id, user_id):
+        return await _enforce_role_progression_locked(
+            member, guild_id, user_id, level, role_id, failures,
+            booster=booster, preserved=preserved)
+
+
+async def _enforce_role_progression_locked(member, guild_id: int, user_id: int,
+                                   level: int, role_id: int,
+                                   failures: list | None = None, *,
+                                   booster: bool = False,
+                                   preserved: list | None = None) -> list[int]:
     """Drop superseded Level-reward roles; return IDs actually removed.
 
     Call only after every required role at the highest Level is fulfilled and

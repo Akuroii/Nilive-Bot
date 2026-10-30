@@ -1,0 +1,10 @@
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+{'newer_purchase_units': 2, 'rollback_reported_success': True, 'remaining': [(1,)], 'safe': False}
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+{'newer_purchase_units': 1, 'rollback_reported_success': True, 'remaining': [], 'safe': False}
+Traceback (most recent call last):
+  File "/home/user/Nilive-execution/.inventory-diagnostic.py", line 24, in <module>
+    assert not failures, f'BLOCKER: old rollback removed newer purchase units: {failures}'
+AssertionError: BLOCKER: old rollback removed newer purchase units: [2, 1]

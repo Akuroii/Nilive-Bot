@@ -1,0 +1,60 @@
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+Initializing database (dashboard process)...
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+Database ready (dashboard process).
+[PASS] API accepts normal and Boosters-only definitions in all three tracks — [{'success': True}, {'success': True}, {'success': True}, {'success': True}, {'success': True}, {'success': True}, {'success': True}, {'success': True}, {'success': True}, {'success': True}, {'success': True}, {'success': True}, {'success': True}, {'success': True}]
+[PASS] API rejects an unknown audience and stores nothing
+[PASS] accepted limitation: same shop item cannot be Everyone and Boosters at one level
+[PASS] GET APIs and the live page expose the audience
+[PASS] user 8201 reached level 1
+[PASS] user 8202 reached level 1
+[PASS] boosting member gets normal AND Boosters-only entitlements at level 1 — [(1, 'currency', 'balance', 'pending'), (1, 'currency', 'booster:balance', 'pending'), (1, 'role', '600', 'pending'), (1, 'role', 'booster:601', 'pending'), (1, 'shop', '1', 'pending'), (1, 'shop', 'booster:2', 'pending')]
+[PASS] non-boosting member gets only the normal entitlements — [(1, 'currency', 'balance', 'pending'), (1, 'role', '600', 'pending'), (1, 'shop', '1', 'pending')]
+[PASS] booster claim fulfils normal + Boosters-only (additive, nothing locked) — {'owner_token': '1523c94ff23346e38a28985e0dd14f09', 'owned': 6, 'fulfilled': [3, 4, 5, 6, 1, 2], 'failed': [], 'delivered_currency': 2, 'delivered_roles': 2, 'delivered_shop': 2, 'delivered_boost': 0, 'locked': 0, 'booster_unverified': False, 'reconciled': {'restored': [], 'removed': [], 'failed': [], 'blocked': False}, 'current_level': 1} bal=(600, 0) roles=[600, 601]
+[PASS] non-booster still receives the normal rewards unchanged — {'owner_token': 'a0e9a54f148243e68f0f3025f0e40555', 'owned': 3, 'fulfilled': [8, 9, 7], 'failed': [], 'delivered_currency': 1, 'delivered_roles': 1, 'delivered_shop': 1, 'delivered_boost': 0, 'locked': 0, 'booster_unverified': False, 'reconciled': {'restored': [], 'removed': [], 'failed': [], 'blocked': False}, 'current_level': 1}
+[PASS] starting to boost later does NOT unlock Booster rewards for past levels — [(1, 'currency', 'balance', 'fulfilled'), (1, 'role', '600', 'fulfilled'), (1, 'shop', '1', 'fulfilled')]
+[PASS] user 8202 reached level 2
+[PASS] crossing while boosting creates Booster entitlements for that level only — [(2, 'role', '600', 'pending'), (2, 'role', 'booster:600', 'pending')]
+[PASS] same role id in both audiences keeps two distinct ledger identities — [(2, 'role', '600', 'fulfilled'), (2, 'role', 'booster:600', 'pending')]
+[PASS] user 8201 reached level 3
+[PASS] boosting stopped: normal claim delivers, Booster reward is locked, not failed — {'owner_token': '395084d21017427ca3b10889d0adb452', 'owned': 2, 'fulfilled': [14, 12], 'failed': [], 'delivered_currency': 1, 'delivered_roles': 1, 'delivered_shop': 0, 'delivered_boost': 0, 'locked': 2, 'booster_unverified': False, 'reconciled': {'restored': [], 'removed': [], 'failed': [], 'blocked': False}, 'current_level': 3} [(3, 'currency', 'balance', 'fulfilled'), (3, 'currency', 'booster:balance', 'pending')]
+[PASS] already-fulfilled Booster rewards are never revoked
+[PASS] boosting again makes the locked reward claimable — {'owner_token': 'c4721aaf34284e89b161da2d28679e98', 'owned': 2, 'fulfilled': [15, 13], 'failed': [], 'delivered_currency': 1, 'delivered_roles': 1, 'delivered_shop': 0, 'delivered_boost': 0, 'locked': 0, 'booster_unverified': False, 'reconciled': {'restored': [], 'removed': [], 'failed': [], 'blocked': False}, 'current_level': 3} bal=(630, 0)
+[PASS] user 8202 reached level 3
+[PASS] unverifiable boost status: Booster reward fails closed, normal still pays — {'owner_token': '6d46b7c471ab4093b30370570eca5637', 'owned': 1, 'fulfilled': [16], 'failed': [], 'delivered_currency': 1, 'delivered_roles': 0, 'delivered_shop': 0, 'delivered_boost': 0, 'locked': 2, 'booster_unverified': True, 'reconciled': {'restored': [], 'removed': [], 'failed': [], 'blocked': False}, 'current_level': 3}
+[PASS] user 8201 reached level 4
+[PASS] user 8201 reached level 5
+[PASS] locked and failed are reported separately — تم الاستلام: 1. إخفاقات قابلة لإعادة المحاولة: 1. مقفلة (Boosters فقط): 2.
+[PASS] no locked text when nothing is locked
+[PASS] concurrent Claim All delivers every reward exactly once — delta=1007 fulfilled=3
+[PASS] no duplicate ledger identities
+[PASS] repeat claim is a no-op
+[PASS] /level hides the locked Booster reward on the Level page for a non-booster — Nothing to claim right now.
+[PASS] /level shows the same reward as claimable for a booster — - ⭐ 20x Coins (Boosters only) · pending
+- L2 · <@&600> · ready to claim
+[PASS] Claim All button stays disabled when only locked rewards remain
+[PASS] Stats page counts locked rewards separately from waiting ones — Claimed
+5 of 7 crossed rewards
+Latest: L3 · 10x Coins · just now
+Waiting
+0 pending · 0 retryable failure(s) · 2 locked (Boosters only)
+Highest unclaimed
+nothing claimable now: 2 locked (Boosters only)
+Traceback (most recent call last):
+  File "/home/user/Nilive-execution/scripts/test_booster_rewards.py", line 399, in <module>
+    asyncio.run(main())
+  File "/usr/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/base_events.py", line 653, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/user/Nilive-execution/scripts/test_booster_rewards.py", line 362, in main
+    sent = interaction.edit_original_response.await_args.kwargs
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'kwargs'

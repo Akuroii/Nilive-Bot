@@ -15,7 +15,7 @@ from utils.currency import (
 )
 from utils.emoji import as_partial_emoji
 from utils.inventory import (
-    get_inventory, drop_item, find_entry,
+    get_inventory, find_entry,
     ROLE_ITEM_TYPES,
 )
 from utils.timed_ownership import CATEGORY_COLOR
@@ -67,8 +67,8 @@ from utils.formatters import format_relative
 #   diamonds.
 #
 # * Item actions derive from type and state, so a potion never offers
-#   Equip, an equipped title offers Unequip, and Drop always asks for
-#   confirmation before destroying the stack.
+#   Equip and an equipped title offers Unequip. Inventory deletion is
+#   deliberately not exposed through the wallet.
 # ═══════════════════════════════════════════════════════════════════════
 
 WALLET_COLOR = 0x7c5cbf
@@ -1130,7 +1130,7 @@ class ItemPanelView(WalletBaseView):
       * Potions     -> Activate (disabled if effect is misconfigured)
       * Titles      -> Equip or Unequip, whichever applies
       * Equippables -> Equip or Unequip, whichever applies
-      * All items   -> Drop (with confirmation) and Back
+      * All items   -> Back (inventory deletion is not exposed)
     """
 
     def __init__(self, guild_id: int, user_id: int, tab: str,
@@ -1154,12 +1154,6 @@ class ItemPanelView(WalletBaseView):
         else:
             self.add_item(EquipToggleButton(equipped))
 
-        # Dropping is permanent-row only. A timed holding is retired by its
-        # own expiry (which also has to strip the Discord role and clear the
-        # equipped slot), so offering "Drop" here would either leave a role
-        # behind or silently promise something this button cannot do.
-        if not self.timed:
-            self.add_item(DropButton())
         self.add_item(ItemBackButton())
 
 
@@ -1233,18 +1227,6 @@ class EquipToggleButton(discord.ui.Button):
             view.tab, page=view.page, entry_key=view.entry_key)
 
 
-class DropButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Drop", emoji="🗑️",
-                         style=discord.ButtonStyle.danger)
-
-    async def callback(self, interaction: discord.Interaction):
-        view: ItemPanelView = self.view
-        await open_drop_confirm(
-            interaction, view.guild_id, view.user_id,
-            view.tab, view.item_name, view.page, entry_key=view.entry_key)
-
-
 class ItemBackButton(discord.ui.Button):
     def __init__(self):
         # Not a paging arrow: this returns to the Inventory list the
@@ -1256,91 +1238,6 @@ class ItemBackButton(discord.ui.Button):
         view: ItemPanelView = self.view
         await open_inventory_panel(
             interaction, view.guild_id, view.user_id, view.tab, view.page)
-
-
-# ─── Drop confirmation ─────────────────────────────────────────────────
-
-def build_drop_confirm_embed(tab: str, item_name: str,
-                             item: dict) -> discord.Embed:
-    glyph = _rarity_glyph(item["rarity"])
-    emoji = _item_display(item, glyph)
-    thumb = _item_thumbnail_url(item)
-    embed = discord.Embed(
-        title=f"{emoji} {item_name}",
-        description=(
-            "Are you sure you want to drop this item?\n"
-            "*This cannot be undone.*"),
-        color=0xE74C3C)
-    embed.add_field(
-        name="Quantity",
-        value=f"×{int(item['quantity'] or 0)} (all copies)",
-        inline=True)
-    embed.add_field(name="Rarity",
-                    value=_rarity_label(item["rarity"]), inline=True)
-    if thumb:
-        embed.set_thumbnail(url=thumb)
-    return embed
-
-
-class DropConfirmView(WalletBaseView):
-    def __init__(self, guild_id: int, user_id: int, tab: str,
-                 item_name: str, page: int = 0):
-        super().__init__(guild_id, user_id)
-        self.tab = tab
-        self.item_name = item_name
-        self.page = page
-
-    @discord.ui.button(label="Confirm", emoji="🗑️",
-                       style=discord.ButtonStyle.danger)
-    async def confirm_button(self, interaction: discord.Interaction,
-                             button: discord.ui.Button):
-        # Unequip first if needed, then delete the stack. Order
-        # matters: equip/title cleanup looks at inventory to decide
-        # what to clear; drop_item removes the row, so we resolve the
-        # current equipped state up front.
-        if self.tab == TAB_TITLES:
-            current = await get_equipped_title(self.guild_id, self.user_id)
-            if current and current["item_name"] == self.item_name:
-                await unequip_title(self.guild_id, self.user_id,
-                                    self.item_name)
-        elif self.tab in (TAB_ITEMS, TAB_COLORS):
-            current = await get_equipped(self.guild_id, self.user_id)
-            if current and current["item_name"] == self.item_name:
-                await unequip_role(interaction.client, self.guild_id,
-                                   self.user_id, self.item_name)
-
-        result = await drop_item(self.guild_id, self.user_id, self.item_name)
-        if not result.get("success"):
-            await interaction.response.send_message(
-                f"Could not drop that item — {result.get('error', 'something went wrong.')}",
-                ephemeral=True)
-            return
-        await open_inventory_panel(
-            interaction, self.guild_id, self.user_id, self.tab, self.page)
-
-    @discord.ui.button(label="Cancel", emoji="✖",
-                       style=discord.ButtonStyle.secondary)
-    async def cancel_button(self, interaction: discord.Interaction,
-                            button: discord.ui.Button):
-        await open_item_panel(
-            interaction, self.guild_id, self.user_id,
-            self.tab, self.item_name, self.page)
-
-
-async def open_drop_confirm(interaction: discord.Interaction,
-                            guild_id: int, user_id: int,
-                            tab: str, item_name: str, page: int = 0,
-                            *, entry_key: str | None = None):
-    items = await get_inventory(guild_id, user_id, include_empty=False)
-    entries = await _decorate(guild_id, split_by_tab(items)[tab])
-    item = find_entry(entries, entry_key=entry_key, item_name=item_name)
-    if not item:
-        await open_inventory_panel(interaction, guild_id, user_id, tab, page)
-        return
-    view = DropConfirmView(guild_id, user_id, tab, item_name, page)
-    await interaction.response.edit_message(
-        embed=build_drop_confirm_embed(tab, item_name, item), view=view)
-    view.message = interaction.message
 
 
 async def open_item_panel(interaction: discord.Interaction, guild_id: int,

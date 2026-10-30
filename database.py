@@ -1557,7 +1557,10 @@ async def init_db():
                 await db.execute(
                     "ALTER TABLE equipped_roles ADD COLUMN entry_key TEXT")
             except Exception as e:
-                print(f"[MIGRATION] equipped_roles.entry_key: {e}")
+                raise RuntimeError(
+                    "Required migration equipped_roles.entry_key failed; "
+                    "startup aborted to protect ownership identity"
+                ) from e
 
         # Wallet pass: equipped_titles is the Title equip slot. It is a
         # SEPARATE table from equipped_roles on purpose — the locked

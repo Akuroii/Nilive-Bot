@@ -1,0 +1,61 @@
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+== 1. [ON] first Level reward role ==
+  PASS the L5 role was delivered
+  PASS nothing was removed on a first reward
+  PASS the unrelated role survived
+  PASS the claim is fulfilled
+== 2. [ON] replacing an older Level reward role ==
+  PASS only the newly crossed level is pending
+  PASS the L10 role was added
+  PASS the L5 role was removed
+  PASS exactly the superseded role was removed
+  PASS the unrelated role still survived
+  PASS both claims are fulfilled and neither duplicated
+  PASS the delivery counted the new role
+== 3. [ON] skipping multiple reward levels ==
+  PASS both skipped levels got their own entitlement
+  PASS only the highest level's role is held
+  PASS the intermediate role was not left behind
+  PASS each skipped level keeps exactly one fulfilled row
+== 4. [ON] unrelated roles ==
+  PASS a manual/other-system role is untouched
+  PASS the current progression role is untouched
+  PASS a no-op claim pass removes nothing
+== 4b. [ON] a role id shared by two levels is never removed ==
+  PASS the shared role stays after the highest level is delivered
+  PASS both levels are fulfilled
+== 5. [ON] a failed removal leaves the successful higher claim fulfilled ==
+  PASS historical state: L5 fulfilled and held
+  PASS the higher role claim stays fulfilled when old-role removal fails
+  PASS the failure creates no extra entitlement and preserves the old role
+  PASS the next explicit pass retries only Discord reconciliation
+  PASS successful reconciliation then removes only the superseded role
+  PASS a further claim pass is a no-op
+== 5b. [ON] a failed add retries cleanly and removes nothing ==
+  PASS a failed add removes nothing and keeps the old role
+  PASS the retry delivers the new role and supersedes the old one
+== 5c. [ON] multiple same-Level roles are independent and atomic for replacement ==
+  PASS one successful L10 role does not remove L5 while its sibling fails
+  PASS same-Level role claims stay independent; successful and failed states persist
+  PASS role definitions were neither collapsed nor rewritten
+  PASS after all highest-Level deliveries succeed, both roles stay and L5 is removed
+  PASS the retried same-Level claim is fulfilled without deleting definitions
+== 6. [OFF] the toggle is off: old roles accumulate ==
+  PASS [OFF] the L5 role is held
+  PASS [OFF] the L10 role is added
+  PASS [OFF] the old L5 role is NOT removed
+  PASS [OFF] unrelated roles are still untouched
+  PASS [OFF] both claims are fulfilled as usual
+== 7. switching OFF → ON ==
+  PASS flipping the setting leaves the claim ledger untouched
+  PASS no extra entitlement row was created by the flip
+  PASS [ON] the next delivery supersedes the accumulated lower roles
+  PASS [ON] unrelated roles still survive the supersede
+  PASS [ON] every claim stays fulfilled exactly once
+== 8. switching ON → OFF ==
+  PASS [OFF] a new role is added and the older one stays
+  PASS [OFF] claims remain fulfilled and unduplicated
+  PASS [OFF] a second pass is still a no-op
+
+LEVEL ROLE PROGRESSION: 46 passed, 0 failed

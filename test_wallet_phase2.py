@@ -13,7 +13,7 @@ existing engine tests:
   7. Claim panel embeds match the spec field names.
   8. Receipts format uses relative time and configured currency names.
   9. Inventory embeds do NOT contain "Expires"/"Paid"/"Bought".
- 10. Item detail embed has Equip/Unequip/Drop/Back for equippables.
+ 10. Item detail embed has Equip/Unequip/Back (no Drop) for equippables.
 """
 import os
 import sys
@@ -187,7 +187,7 @@ async def main():
         check(f"inventory list contains no '{banned}'",
               banned.lower() not in ir.lower(), ir)
 
-    section("7. Item detail includes Equip/Drop/Back; no Expires")
+    section("7. Item detail includes Equip/Back; no Drop; no Expires")
     # We don't have a real Guild to pass, but we can build the View class
     # to confirm button labels.
     from cogs.wallet import ItemPanelView
@@ -200,7 +200,7 @@ async def main():
     view = ItemPanelView(GUILD, USER, TAB_ITEMS, item, equipped=False)
     labels = sorted((c.label or "") for c in view.children)
     check("buttons include Equip", "Equip" in labels, str(labels))
-    check("buttons include Drop", "Drop" in labels, str(labels))
+    check("buttons never include Drop", "Drop" not in labels, str(labels))
     check("buttons include a Back action",
           any(lbl.startswith("Back") for lbl in labels), str(labels))
 

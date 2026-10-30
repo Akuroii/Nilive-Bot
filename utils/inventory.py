@@ -91,43 +91,46 @@ async def give_item(guild_id: int, user_id: int, item_name: str,
 
 
 async def remove_item(guild_id: int, user_id: int, item_name: str,
-                       quantity: int = 1) -> int:
+                       quantity: int = 1,
+                       db: aiosqlite.Connection | None = None) -> int:
+    """Consume quantity and provenance together, optionally in a caller transaction.
+
+    A supplied connection must already be in the caller's write transaction;
+    this helper never commits or rolls it back.
+    """
     if quantity <= 0:
         raise ValueError("quantity must be positive")
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute("""
-                SELECT quantity FROM inventory_items
-                WHERE guild_id=? AND user_id=? AND item_name=?
-            """, (guild_id, user_id, item_name))
-            row = await cursor.fetchone()
-            current = row[0] if row else 0
-            if current < quantity:
-                await db.execute("ROLLBACK")
-                raise InsufficientItems(
-                    f"Has {current}x {item_name}, needs {quantity}")
+    async def apply(connection):
+        cursor = await connection.execute("""
+            SELECT quantity FROM inventory_items
+            WHERE guild_id=? AND user_id=? AND item_name=?
+        """, (guild_id, user_id, item_name))
+        row = await cursor.fetchone()
+        current = row[0] if row else 0
+        if current < quantity:
+            raise InsufficientItems(
+                f"Has {current}x {item_name}, needs {quantity}")
+        new_qty = current - quantity
+        await connection.execute("""
+            UPDATE inventory_items
+            SET quantity = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE guild_id=? AND user_id=? AND item_name=?
+        """, (new_qty, guild_id, user_id, item_name))
+        await _consume_provenance(
+            connection, guild_id, user_id, item_name, quantity)
+        return new_qty
 
-            new_qty = current - quantity
-            await db.execute("""
-                UPDATE inventory_items
-                SET quantity = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE guild_id=? AND user_id=? AND item_name=?
-            """, (new_qty, guild_id, user_id, item_name))
-            # Level-reward provenance: the units leaving the stack are taken off
-            # the oldest attributable reward grants first, inside this same
-            # transaction, so `reward_grants.remaining_quantity` keeps meaning
-            # "units of that reward that are still here". Without this the only
-            # way to judge a reversal would be the merged stack total, which
-            # cannot tell a reward's units from a quest's.
-            await _consume_provenance(db, guild_id, user_id, item_name, quantity)
-            await db.commit()
-            return new_qty
-        except InsufficientItems:
-            raise
-        except Exception:
-            await db.execute("ROLLBACK")
+    if db is not None:
+        return await apply(db)
+    async with aiosqlite.connect(DB_PATH) as connection:
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            result = await apply(connection)
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
             raise
 
 
@@ -173,12 +176,10 @@ async def set_quantity(guild_id: int, user_id: int, item_name: str,
 
 async def drop_item(guild_id: int, user_id: int, item_name: str) -> dict:
     """
-    Remove ALL copies of an owned item, regardless of quantity. Used
-    by Wallet → Item → Drop after the user has confirmed. Returns the
-    quantity that was removed, or {"success": False, ...} if the item
-    isn't owned. Does NOT touch Discord roles or equipped_* tables —
-    the Wallet layer is responsible for that cleanup (equip_engine /
-    title_engine / potion_engine) so this helper stays type-agnostic.
+    Internal full-stack removal, retained for provenance consumers and tests.
+    Wallet UI does not expose this operation. Returns the removed quantity or
+    {"success": False, ...} if not owned. Does NOT touch Discord roles or
+    equipped_* tables; internal callers are responsible for those effects.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
