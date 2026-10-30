@@ -1,0 +1,63 @@
+G — Purchase Grant Ledger — review delivery
+===========================================
+Repository      : Akuroii/Nilive-Bot
+Change commit   : 3768d96f80c83aef008e665df132f04450ee77fa
+Parent commit   : 09d37782e6bfc84132dde8e0b82b765adca2ca89   (local branch arena/pr3-delivery-fixes before G)
+Base lineage    : 09d37782e6bfc84132dde8e0b82b765adca2ca89 -> 868622d -> 8eb8e3d (arena/pr2-hardening == origin/review/phase22-final)
+                  -> ... -> baa6883a (head of PR #104, origin/arena/884b26a8-nilive-bot)
+                  merge-base with origin/main = a6b812be26d35f3048db39d0425374d23cd804ea
+Intended review branch name : review/g-purchase-grant-ledger  (NOT pushed by the agent; no credentials)
+Generated       : 2026-10-30T16:32:32Z
+
+repo-files/ — 11 files, byte-exact copies of the blobs in commit 3768d96f80c83aef008e665df132f04450ee77fa
+(verified with git hash-object against git rev-parse <commit>:<path>; see blob-verification.txt)
+
+  Status  Path
+  ------  ----
+  A       test_purchase_grant_ledger.py
+  A       docs/execution-20261030/G-purchase-grant-ledger.md
+  M       utils/level_ops.py
+  M       utils/reward_engine.py
+  M       utils/timed_ownership.py
+  M       utils/level_test_reset.py
+  M       cogs/shop.py
+  M       test_timed_ownership.py
+  M       docs/execution-20261030/reproduce_inventory_ambiguity.py
+  M       docs/execution-20261030/README.md
+  M       .github/workflows/tests.yml
+
+  Added: 2   Modified: 9   Deleted: 0   Total: 11
+  Function removed inside a modified file: utils/reward_engine.rollback_item_inventory_grant (unsafe snapshot comparator, no remaining caller)
+
+review-materials/
+  diff-09d3778..3768d96.patch              full `git diff 09d37782e6bfc84132dde8e0b82b765adca2ca89 3768d96f80c83aef008e665df132f04450ee77fa`
+  0001-G-purchase-grant-ledger.patch       `git format-patch -1 3768d96f80c83aef008e665df132f04450ee77fa` (applies with `git am`; keeps author/message, SHA will differ if parent differs)
+  diff-stat.txt, name-status.txt           `git diff --stat` / `git diff-tree --name-status`
+  blob-verification.txt                    per-file git blob id check (all OK)
+  clean-3768d96-tests.log                  test commands + results + exit codes on a clean detached checkout of 3768d96f80c83aef008e665df132f04450ee77fa (dirty=0)
+  reproduce_inventory_ambiguity.output.txt full reproducer output, exit 0 (legacy + provenanced paths, 2 newer units and ABA each)
+  reproduce_booster_obligation_gap.output.txt  exit 1 — F deliberately NOT in this change
+  G-report.md                              copy of docs/execution-20261030/G-purchase-grant-ledger.md (design, policy, runbook, behaviour changes)
+  SHA256SUMS-repo-files.txt                sha256 of every file under repo-files/ (paths relative to repo-files/)
+  SHA256SUMS-review-materials.txt          sha256 of every file in this folder (excluding itself)
+
+Test summary on clean checkout of 3768d96f80c83aef008e665df132f04450ee77fa (Python 3.13.16, aiosqlite 0.19.0, discord.py 2.7.1):
+  pytest test_timed_ownership.py test_delivery_safety.py test_purchase_grant_ledger.py -> 285 passed, 19 subtests, exit 0
+  reproduce_inventory_ambiguity.py -> exit 0 ; reproduce_booster_obligation_gap.py -> exit 1 (F, out of scope)
+  scripts/test_level_ops_provenance, test_level_test_reset, test_xp_rollback, test_currency_reversal_consistency,
+  test_correction_lease_fence, test_inflight_role_correction, test_lease_expiry_role_recovery,
+  test_one_shot_xp_durability, test_xp_safety_audit -> all exit 0
+
+Important notes for the reviewer
+  1. Idempotency of purchase reversals lives on the reward_grants row (reversed_at, guarded UPDATE); no reward_reversals row is written for purchases (that journal is claim_id-keyed; no fake claim ids).
+  2. Legacy policy (owner decision): purchases without a grant stay pending as legacy_no_provenance; the runtime never removes a unit for them. Operator closes with --retire-rollback --yes --accept-unprovable --note (removes nothing; refuses effects_live).
+  3. Regression found and fixed during implementation: the first grant_source backfill ran on every ensure_tables() call and was reached from a read-only preview (scripts/test_level_test_reset.py "preview changed no table at all"). Fixed in the product: backfill now runs only in the call that adds the column; every reader treats NULL grant_source as level_reward. Two test adjustments followed, both documented in-file (test_purchase_grant_ledger::test_null_grant_source_rows_sort_with_level_grants; test_timed_ownership::test_p2 COALESCE filter).
+  4. Eight tests in test_timed_ownership.py encoded the old snapshot semantics and were updated (fixtures deliver through the ledger / new refusal codes). Protected invariants are asserted unchanged; no guard weakened. List: P1, P2, P19, P33 (control half), P48, P49, test_a_legitimate_stackable_descriptor_still_completes, test_cli_lists_a_pending_rollback_without_being_asked, test_cli_refuses_to_retire_without_proof_or_a_note, test_d1_check_rollback_accepts_a_producer_descriptor_with_none_entry_key (the last two are message-string only).
+  5. Behaviour changes on prod: emptied stack stays as quantity=0 row (not deleted); prior_inventory metadata restore removed; pending stackable rollbacks recorded before this change become legacy_no_provenance on next reconciliation.
+  6. Nothing in this archive is a credential, database, .env or .git content.
+
+Suggested manual publication
+  git checkout -b review/g-purchase-grant-ledger 09d37782e6bfc84132dde8e0b82b765adca2ca89      # or any checkout of 09d3778
+  (copy repo-files/* over the tree, preserving paths)    # or: git am review-materials/0001-G-purchase-grant-ledger.patch
+  git add -A && git commit                               # SHA will differ from 3768d96f80c83aef008e665df132f04450ee77fa unless `git am` on exactly 09d37782e6bfc84132dde8e0b82b765adca2ca89 with the same committer
+  git push origin review/g-purchase-grant-ledger

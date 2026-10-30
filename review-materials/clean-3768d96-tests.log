@@ -1,0 +1,26 @@
+HEAD=3768d96f80c83aef008e665df132f04450ee77fa dirty=0 date=2026-10-30T16:14:24Z python=Python 3.13.16
+$ OWNER_ID=1 PYTHONFAULTHANDLER=1 timeout -s ABRT 1500 python3 -m pytest -q --tb=short --no-header -p no:cacheprovider test_timed_ownership.py test_delivery_safety.py test_purchase_grant_ledger.py
+285 passed, 19 subtests passed in 119.48s (0:01:59)
+exit=0
+$ OWNER_ID=1 PYTHONPATH=.:scripts timeout 300 python3 docs/execution-20261030/reproduce_inventory_ambiguity.py
+  -> exit=0 :: OK: no unprovable deduction on any path
+$ OWNER_ID=1 PYTHONPATH=.:scripts timeout 300 python3 docs/execution-20261030/reproduce_booster_obligation_gap.py
+  -> exit=1 :: AssertionError: BLOCKER: source ended under unknown Booster eligibility without a durable retry obligation
+$ OWNER_ID=1 PYTHONPATH=.:scripts timeout 300 python3 scripts/test_level_ops_provenance.py
+  -> exit=0 :: ALL PROVENANCE CHECKS PASSED
+$ OWNER_ID=1 PYTHONPATH=.:scripts timeout 300 python3 scripts/test_level_test_reset.py
+  -> exit=0 :: ALL LEVEL TEST RESET CHECKS PASSED
+$ OWNER_ID=1 PYTHONPATH=.:scripts timeout 300 python3 scripts/test_xp_rollback.py
+  -> exit=0 :: ALL XP ROLLBACK CHECKS PASSED
+$ OWNER_ID=1 PYTHONPATH=.:scripts timeout 300 python3 scripts/test_currency_reversal_consistency.py
+  -> exit=0 :: ALL CURRENCY REVERSAL CONSISTENCY CHECKS PASSED
+$ OWNER_ID=1 PYTHONPATH=.:scripts timeout 300 python3 scripts/test_correction_lease_fence.py
+  -> exit=0 :: ALL CORRECTION-LEASE FENCE CHECKS PASSED
+$ OWNER_ID=1 PYTHONPATH=.:scripts timeout 300 python3 scripts/test_inflight_role_correction.py
+  -> exit=0 :: ALL IN-FLIGHT ROLE CORRECTION CHECKS PASSED
+$ OWNER_ID=1 PYTHONPATH=.:scripts timeout 300 python3 scripts/test_lease_expiry_role_recovery.py
+  -> exit=0 :: ALL LEASE-EXPIRY ROLE RECOVERY CHECKS PASSED
+$ OWNER_ID=1 PYTHONPATH=.:scripts timeout 300 python3 scripts/test_one_shot_xp_durability.py
+  -> exit=0 :: ALL ONE-SHOT XP DURABILITY CHECKS PASSED
+$ OWNER_ID=1 PYTHONPATH=.:scripts timeout 300 python3 scripts/test_xp_safety_audit.py
+  -> exit=0 :: XP SAFETY AUDIT: 121 passed, 0 failed
