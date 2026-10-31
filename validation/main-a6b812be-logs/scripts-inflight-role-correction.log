@@ -1,0 +1,224 @@
+
+== A. the role is absent while the reset runs, then it is delivered ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] A: the claim really reached the in-flight state
+[PASS] A: the role is not on the member yet
+[PASS] A: the preview counts the in-flight claim as KEPT, not deleted
+[PASS] A: the reset does NOT report the role as removed
+[PASS] A: the reset does NOT say it removed a Discord role
+[PASS] A: the reset does NOT journal the role as applied
+[PASS] A: the role is reported as deferred, not removed
+[PASS] A: the report tells the admin the role was NOT removed
+[PASS] A: the claim is kept and this is not a clean New Game
+[PASS] A: the applied embed says this is NOT a clean New Game
+[PASS] A: the delivery finishes and the role is worn
+[PASS] A: the claim is fulfilled and still names the worn role
+[PASS] A: the correction removes the role
+[PASS] A: the correction deletes the claim it just reversed
+[PASS] A: the reversal is reported, not silently claimed
+[PASS] A: no worn reward role is left without a claim record
+[PASS] A: the journal row finally written is truthful (applied, role gone)
+[PASS] A: a later inspection sees neither the role nor a hidden record
+[PASS] case_a_role_absent_during_reset: end state has no hidden worn reward role
+
+== B. the role is already worn when the reset runs ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] B: the claim reached the in-flight state
+[PASS] B: the Discord add landed
+[PASS] B: the reset really removed the role
+[PASS] B: this time the applied journal row is truthful
+[PASS] B: nothing was deferred and the claim is kept
+[PASS] B: the delivery still marks the claim fulfilled
+[PASS] B: the correction deletes the claim and no role is worn
+[PASS] B: no orphan state is reachable
+[PASS] B: the correction does not invent a second role reversal
+[PASS] B: the journal still holds exactly the truthful reset row
+[PASS] case_b_role_present_during_reset: end state has no hidden worn reward role
+
+== C. stale applied + worn role + Discord refuses the removal ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] C: the role is still worn
+[PASS] C: the claim is NOT deleted while the role is live
+[PASS] C: the failure is reported as an unresolved case
+[PASS] C: the failure is reported per role too
+[PASS] C: the terminal journal row is left untouched (documented limit)
+[PASS] C: because the row is terminal it is not listed as an open case (retry is the correction itself / a reset, see the retry below)
+[PASS] C: re-running the correction retries the removal and succeeds
+[PASS] C: and only then is the claim deleted
+[PASS] C: the retry reports the reversal
+[PASS] C: the documented limit is that /level_reconcile cannot see it, but the claim stays inspectable until a retry/reset collects it
+[PASS] case_c_stale_applied_and_removal_fails: end state has no hidden worn reward role
+
+== D. the role is shared by a claim that is not being reversed ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] D: the stale row is closed without touching the shared role
+[PASS] D: the role stays on the member, still justified by the other claim
+[PASS] D: the claim that names the worn role survives
+[PASS] D: therefore no worn role is left undocumented
+
+== E. two stale rows for the same role, both above the level ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] E: the role is removed, not left wearing two failed records
+[PASS] E: both claims are deleted because the effect really is gone
+[PASS] E: the end state has no worn role without a record
+[PASS] case_e_two_stale_rows_same_role: end state has no hidden worn reward role
+
+== F. stale applied row and the role is already gone ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] F: the claim is deleted
+[PASS] F: no Discord removal was attempted
+[PASS] F: the claim is closed with no unresolved case
+[PASS] F: no second removal is reported for an effect already gone
+[PASS] case_f_stale_applied_role_gone: end state has no hidden worn reward role
+
+== G. stale applied row with no member object ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] G: the claim is deleted as before (unchanged contract)
+[PASS] case_g_stale_applied_no_member: end state has no hidden worn reward role
+
+== H. the reset's role removal fails ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] H: the failure is reported, not called a removal
+[PASS] H: no applied journal row is written on a failed removal
+[PASS] H: the claim is kept and the reset is not a clean New Game
+[PASS] H: the admin is told the role was not removed
+[PASS] H: a second reset removes the role and closes the claim
+[PASS] H: and only then is the reset a clean New Game
+[PASS] case_h_reset_removal_fails: end state has no hidden worn reward role
+
+== I. /xp_rollback and a role configured at two levels ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] I: the change delivered the same role at both levels
+[PASS] I: both rows carry the operation id being rolled back
+[PASS] I: the role is removed, not kept by the row being reversed
+[PASS] I: no claim from the operation survives above the target level
+[PASS] I: the report does not cite a claim this run deletes as the reason to keep the role
+[PASS] I: the operation is complete because every effect is gone
+
+== I2. an INDEPENDENT claim for the same role still justifies it ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] I2: the administrative change created only its own claim
+[PASS] I2: the role is worn and documented by both rows
+[PASS] I2: the role stays, because a claim that is NOT being reversed grants it
+[PASS] I2: the independent claim survives untouched
+[PASS] I2: the caused claim is preserved with that reason, not deleted
+[PASS] I2: the role is never left undocumented
+
+== J. /xp_rollback while a caused claim is still being delivered ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] J: the claim reached the in-flight state
+[PASS] J: the role is not on the member yet
+[PASS] J: the in-flight claim is reported, not dropped
+[PASS] J: the claim is kept and the reason says the rollback is not complete
+[PASS] J: the operation is PARTIAL, never completed
+[PASS] J: the XP was still rolled back
+[PASS] J: the late delivery is still documented by its claim row
+
+== K. an earlier open reversal case blocks a clean New Game ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] K: the reset still reports the open case
+[PASS] K: and refuses to call the result a clean New Game
+[PASS] K: the embed footer agrees
+[PASS] case_k_open_case_blocks_clean_verdict: end state has no hidden worn reward role
+
+== L. correction, two delivered claims for one role, role worn ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] L: the role is removed, not kept because the rows cite each other
+[PASS] L: both claims are deleted, so neither blocks the other
+[PASS] L: no claim is left outstanding and no case cites a sibling
+[PASS] L: both role outcomes are recorded as applied, not outstanding
+[PASS] L: a retry has nothing left to do
+[PASS] case_l_correction_two_claims_same_role_worn: end state has no hidden worn reward role
+
+== M. correction, two delivered claims, role already absent ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] M: neither claim is left permanently outstanding
+[PASS] M: both rows are deleted and recorded as gone
+[PASS] M: no Discord removal is attempted for an absent role
+[PASS] M: it is reported as already gone, not as a removal failure
+[PASS] case_m_correction_two_claims_same_role_absent: end state has no hidden worn reward role
+
+== N. correction: an independent claim still protects the role ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] N: the role stays, because another claim still grants it
+[PASS] N: the shared-role claim is kept, not deleted
+[PASS] N: the genuinely independent claim survives untouched
+[PASS] N: the report names the independent grant as the reason
+[PASS] N: no removal is claimed and no orphan is created
+
+== O. shop pair, different item names, role worn ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] O: the role is removed, not kept by the other claim's marker
+[PASS] O: both claims are deleted, so neither marker blocks the other
+[PASS] O: no case cites a marker or a sibling
+[PASS] O: both journals are applied, not outstanding
+[PASS] O: both markers were reversed, not left behind
+[PASS] O: a retry has nothing left to do
+[PASS] case_o_shop_pair_same_role_worn: end state has no hidden worn reward role
+
+== P. shop pair, role already absent ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] P: both rows are deleted and recorded as gone
+[PASS] P: no Discord removal is attempted
+[PASS] P: nothing is left outstanding and no failure is claimed
+[PASS] P: both markers are cleared
+[PASS] case_p_shop_pair_same_role_absent: end state has no hidden worn reward role
+
+== Q. an independent inventory marker still protects the role ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] Q: the role stays, because a purchase marker grants it
+[PASS] Q: both correction claims are kept, not deleted
+[PASS] Q: the reason names the purchase marker
+[PASS] Q: no removal is attempted
+
+== Q2. a grant that belongs to no claim is independent too ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] Q2: an unclaimed grant also protects the role
+[PASS] Q2: and nothing is removed
+
+== R. shop pair, first removal fails, retry closes the rest ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] R: the failing claim stays open, its marker untouched
+[PASS] R: the failure is reported
+[PASS] R: the sibling removes the role and closes
+[PASS] R: the retry reverses the remaining marker and closes the claim
+[PASS] case_r_shop_partial_failure_retry: end state has no hidden worn reward role
+
+== S. /xp_rollback with two shop temp-role claims ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] S: the change delivered both shop rewards and the role
+[PASS] S: the role is removed, not kept by the other marker
+[PASS] S: both markers are reversed
+[PASS] S: no claim survives and none is preserved
+[PASS] S: the role is not reported as granted elsewhere
+[PASS] S: the operation completes
+[PASS] case_s_rollback_shop_markers: end state has no hidden worn reward role
+
+== T. restore: an open case's marker is not an independent grant ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] T: the role is withheld, not restored from the open case's marker
+[PASS] T: the open case is still open and the claim still terminal
+
+ALL IN-FLIGHT ROLE CORRECTION CHECKS PASSED

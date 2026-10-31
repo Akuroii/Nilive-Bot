@@ -1,0 +1,8 @@
+..................                                         [100%]
+=============================== warnings summary ===============================
+test_delivery_safety.py::WalletDeletionSurfaceTests::test_no_drop_for_any_item_panel_category
+  /tmp/tvenv/lib/python3.11/site-packages/discord/player.py:30: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13
+    import audioop
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+18 passed, 1 warning, 14 subtests passed in 7.90s

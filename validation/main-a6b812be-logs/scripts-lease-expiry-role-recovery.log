@@ -1,0 +1,26 @@
+========================================================================
+REPRO 2: lease expires inside remove_roles; member re-crosses
+========================================================================
+  setup: level=12 claim=fulfilled held=[Role(7001)]
+  inside remove_roles: lease expired, re-cross award -> {'success': True, 'reward_type': 'xp', 'amount': 4156, 'new_xp': 22068, 'old_level': 11, 'new_level': 12, 'leveled_up': True}
+
+  final level        = 12
+  roles held         = [Role(7001)]
+  claim 1 status  = fulfilled
+  journal            = [('rev-dd9f0677cebc4cfc', 1, 'role', 'resolved:level_reached', 'reward role removed from the member / already absent | the member re-reached this reward level during the correction, so the reversal was undone and the claim and its effect are kept')]
+  lease_lost         = None
+  kept_reached       = [{'claim_id': 1, 'reward_level': 12, 'track': 'role', 'reward_ref': '7001', 'status': 'fulfilled', 'origin_operation': 'op-setlevel-audit', 'source': 'setlevel', 'legacy_admin': False, 'effect': {'role_id': 7001}, 'role_id': 7001, 'reason': 'the member legitimately re-reached Level 12 while the correction was running, so the reward is still earned and both its effect and its claim row are kept'}]
+  deleted_claims     = []
+  roles_restored     = [7001]
+
+  reconcile_role_progression -> {'restored': [], 'removed': [], 'failed': [], 'blocked': False, 'withheld': []}
+  open cases         = []
+
+  B1-style invariant: at an eligible level, is the reward recoverable?
+    eligible(level>=12)=True  role_worn=True  claim_alive=True
+    -> recoverable = True
+[PASS] the member is legitimately eligible for the reward again
+[PASS] the role is on the member, or a claim survives that production can restore from
+[PASS] no reversal journal row is left terminal behind a surviving claim
+
+ALL LEASE-EXPIRY ROLE RECOVERY CHECKS PASSED

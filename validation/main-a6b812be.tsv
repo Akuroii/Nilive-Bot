@@ -1,0 +1,17 @@
+item	exit	seconds	last_line
+design-c-purchase-grant-ledger	-1	0	SKIP: test_purchase_grant_ledger.py not present at this ref
+design-c-timed-ownership	-1	0	SKIP: test_timed_ownership.py not present at this ref
+design-c-delivery-safety	-1	0	SKIP: test_delivery_safety.py not present at this ref
+r2-role-retention	-1	0	SKIP: test_role_retention.py not present at this ref
+r1-inventory-ambiguity	-1	0	SKIP: docs/execution-20261030/reproduce_inventory_ambiguity.py not present at this ref
+r2-booster-obligation-gap	-1	0	SKIP: docs/execution-20261030/reproduce_booster_obligation_gap.py not present at this ref
+scripts-level-ops-provenance	0	1	ALL PROVENANCE CHECKS PASSED 
+scripts-level-test-reset	0	2	ALL LEVEL TEST RESET CHECKS PASSED 
+scripts-xp-rollback	0	1	ALL XP ROLLBACK CHECKS PASSED 
+scripts-currency-reversal-consistency	0	1	ALL CURRENCY REVERSAL CONSISTENCY CHECKS PASSED 
+scripts-correction-lease-fence	0	6	ALL CORRECTION-LEASE FENCE CHECKS PASSED 
+scripts-inflight-role-correction	0	7	ALL IN-FLIGHT ROLE CORRECTION CHECKS PASSED 
+scripts-lease-expiry-role-recovery	0	0	ALL LEASE-EXPIRY ROLE RECOVERY CHECKS PASSED 
+scripts-one-shot-xp-durability	0	11	ALL ONE-SHOT XP DURABILITY CHECKS PASSED 
+scripts-xp-safety-audit	0	2	XP SAFETY AUDIT: 121 passed, 0 failed 
+js-harnesses	0	15	18 harness(es) passed. 
