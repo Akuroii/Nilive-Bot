@@ -2804,13 +2804,16 @@ _ROLLBACK_IDENTITY_FIELDS = (
     "boost_source",
     "prior_inventory",
     "delivered_inventory",
+    # The `reward_grants` row a stackable compensation took its unit back by.
+    "grant_id",
 )
 
 # Diagnostic fields. Unlike the identity fields, these describe the LATEST
 # attempt rather than the grant, so the newest observation wins: an operator
 # reading a pending descriptor must see why the most recent retry refused, not
-# the first failure that ever happened.
-_ROLLBACK_DIAGNOSTIC_FIELDS = ("last_error", "last_error_at")
+# the first failure that ever happened. `refusal_code` is the machine-readable
+# half of `last_error` for stackable rollbacks (utils.level_ops.REFUSAL_*).
+_ROLLBACK_DIAGNOSTIC_FIELDS = ("last_error", "last_error_at", "refusal_code")
 
 # Products delivered as a stack of `inventory_items` units (no holding row).
 # Their rollback must be able to identify the unit THIS purchase delivered;
@@ -3744,9 +3747,10 @@ async def compensate_late_delivery(
         if spec.get("delivered_inventory") is not None else None
     )
 
-    from utils.reward_engine import (
-        rollback_item_inventory_grant,
-        rollback_role_inventory_grant,
+    from utils.reward_engine import rollback_role_inventory_grant
+    from utils.level_ops import (
+        reverse_purchase_grant,
+        PURCHASE_REVERSAL_APPLIED, PURCHASE_REVERSAL_ALREADY,
     )
 
     # Tracks a retry marker created by *this* invocation, so a completion that
@@ -4948,16 +4952,19 @@ async def compensate_late_delivery(
 
     # ── Branch 4: Stackable item (`internal_type in (...)`) ─────────────
     elif internal_type in _STACKABLE_ROLLBACK_TYPES:
-        if not spec.get("inventory_rolled_back") and delivered_inv is None:
-            # Validation already refuses this shape; repeating the check here
-            # keeps the guarantee local to the mutation: without the delivered
-            # snapshot there is no way to tell this purchase's unit from an
-            # independently granted one, and `rollback_item_inventory_grant`
-            # would remove a unit by name.
-            return await _persist_incomplete(
-                f"{internal_type} rollback for {item_name!r} has no delivered "
-                f"inventory snapshot; refusing to guess which unit to remove"
-            )
+        # The unit is taken back BY GRANT: the purchase operation id names the
+        # `reward_grants` row its delivery wrote in the same transaction as the
+        # stack increment (utils.level_ops.reverse_purchase_grant). The
+        # `prior_inventory` / `delivered_inventory` snapshots in the descriptor
+        # are kept for diagnosis only - they are NOT evidence of which unit is
+        # this purchase's. A stack is one merged quantity; a snapshot that
+        # still "matches" can describe a newer purchase's unit (an older unit
+        # consumed, a new one bought, timestamps equal), and a snapshot that no
+        # longer matches cannot say whether the surplus is this purchase's or
+        # somebody else's. Both shapes were reproduced removing newer units.
+        # A purchase with no grant (delivered before purchase provenance
+        # existed) therefore stays pending for an operator; nothing is removed
+        # on the strength of a snapshot.
         if not spec.get("inventory_rolled_back"):
             try:
                 async with aiosqlite.connect(DB_PATH) as rb_db:
@@ -5047,46 +5054,39 @@ async def compensate_late_delivery(
                                 already_rolled_back = True
 
                         if not already_rolled_back:
-                            # The snapshot's row id — not the item name —
-                            # identifies the grant. Both rollback helpers select
-                            # the row by name, so a descriptor naming another
-                            # item would decrement (or delete) an unrelated grant
-                            # while leaving this purchase's unit in place. Checked
-                            # here, inside the durable transaction and before the
-                            # mutation, so it can neither act on a forged name nor
-                            # fabricate a descriptor where none is durable.
-                            inv_conflict = await _inventory_identity_conflict(
-                                guild_id, user_id, item_name, delivered_inv,
-                                prior_inv, conn=rb_db,
+                            # Inside the durable transaction, before anything
+                            # moves: the grant check, the stack decrement, the
+                            # grant's reversed_at and the descriptor progress
+                            # all commit together below, or none do. The grant
+                            # row carries the guild/user/item the unit was
+                            # delivered to, so a descriptor naming another
+                            # member or item is refused by identity, not by
+                            # trusting its own fields.
+                            verdict = await reverse_purchase_grant(
+                                rb_db,
+                                operation_id=str(op_id),
+                                guild_id=guild_id,
+                                user_id=user_id,
+                                item_name=item_name,
+                                reversed_by=f"compensate_late_delivery:{op_id}",
                             )
-                            if inv_conflict is not None:
+                            if verdict["status"] not in (
+                                    PURCHASE_REVERSAL_APPLIED,
+                                    PURCHASE_REVERSAL_ALREADY):
                                 await rb_db.execute("ROLLBACK")
                                 in_tx = False
                                 # Persist the refusal, not just return it: this
                                 # descriptor will be retried by every
-                                # reconciliation pass, so the reason has to be
-                                # durable for whoever eventually has to resolve
-                                # it by hand.
+                                # reconciliation pass, so the code and reason
+                                # have to be durable for whoever eventually has
+                                # to resolve it by hand.
+                                spec["refusal_code"] = verdict.get("code")
                                 return await _persist_incomplete(
-                                    "Stackable rollback descriptor does not "
-                                    "describe the delivered inventory grant: "
-                                    f"{inv_conflict}"
+                                    f"Stackable rollback refused "
+                                    f"[{verdict.get('code')}]: {verdict['reason']}"
                                 )
-                            inv_ok = await rollback_item_inventory_grant(
-                                guild_id,
-                                user_id,
-                                item_name,
-                                quantity=1,
-                                prior_inv=prior_inv,
-                                delivered_inv=delivered_inv,
-                                db=rb_db,
-                            )
-                            if not inv_ok:
-                                await rb_db.execute("ROLLBACK")
-                                in_tx = False
-                                return await _persist_incomplete(
-                                    f"Item inventory rollback failed for {item_name!r}"
-                                )
+                            spec.pop("refusal_code", None)
+                            spec["grant_id"] = verdict.get("grant_id")
 
                             spec["inventory_rolled_back"] = True
                             spec["equip_reconciled"] = True
@@ -5712,52 +5712,75 @@ async def rollback_retirement_evidence(op_id: str, *, db=None,
                 "detail",
                 ["role removal requires live Discord state this tool cannot read"])
 
-        # Inventory-backed types: the delivered row is the identity evidence.
-        delivered = spec.get("delivered_inventory")
-        delivered_id = None
-        if isinstance(delivered, (list, tuple)) and delivered:
-            try:
-                delivered_id = int(delivered[0])
-            except (TypeError, ValueError):
-                delivered_id = None
-        if delivered_id is not None:
-            cursor = await conn.execute(
-                "SELECT id, guild_id, user_id, item_name, quantity"
-                " FROM inventory_items WHERE id=?", (delivered_id,))
-            row = await cursor.fetchone()
+        # Inventory-backed types. First the purchase grant ledger
+        # (utils.level_ops, GRANT_SOURCE_PURCHASE): since purchase provenance
+        # exists, the grant row is the identity of the unit, and its state says
+        # exactly what happened to it. Only a purchase with no grant falls
+        # through to the older snapshot-based evidence below.
+        from utils.level_ops import purchase_grant
+        grant = await purchase_grant(str(op_id), db=conn)
+        if grant is not None:
             evidence.append(
-                f"delivered inventory row {delivered_id}: "
-                f"{'present ' + str(row) if row else 'absent'}")
-            if row is not None:
-                return _no("effects_live",
-                           f"delivered inventory row {delivered_id} still "
-                           f"exists; it has not been rolled back")
-        else:
+                f"purchase grant {grant['grant_id']}: remaining="
+                f"{grant['remaining_quantity']} unattributed={grant['unattributed']}"
+                f" reversed_at={grant['reversed_at'] or 'never'}")
+            if (int(grant["guild_id"]), int(grant["user_id"])) != (guild_id, user_id) \
+                    or str(grant["item_name"]) != str(item_name):
+                return _no("identity_mismatch",
+                           "the purchase grant names a different member or item "
+                           "than the descriptor; nothing can be proven from it")
+            if grant["reversed_at"]:
+                return _yes(
+                    f"the unit this purchase granted was taken back by grant "
+                    f"{grant['grant_id']} at {grant['reversed_at']}")
+            if grant["unattributed"]:
+                return _no(
+                    "provenance_invalidated",
+                    f"the purchase grant's provenance was invalidated "
+                    f"({grant['unattributed_reason']}); whether the unit is "
+                    f"still held cannot be shown, so resolve by hand and record "
+                    f"what was done")
+            if int(grant["remaining_quantity"] or 0) >= 1:
+                return _no(
+                    "effects_live",
+                    "the purchase grant still accounts for its unit; the "
+                    "runtime compensation can remove it - run a reconciliation "
+                    "pass instead of retiring")
             return _no(
-                "no_delivered_identity",
-                "the descriptor records no delivered inventory snapshot, so the "
-                "specific grant cannot be identified and its absence cannot be "
-                "proven")
+                "consumed_before_rollback",
+                "the unit this purchase granted was used, traded or dropped "
+                "before the rollback; nothing attributable remains to remove "
+                "and the member keeps any other units; decide the business "
+                "outcome by hand and record it")
 
-        # The unit can also still be present under the name without being the
-        # row this purchase created (a re-add, or a grant this purchase never
-        # made). Either way it cannot be attributed, so it is not absence.
+        # No purchase grant: the purchase predates purchase provenance. The
+        # runtime will never remove anything for it (fail-closed legacy
+        # policy), and the stack merges units from every source, so a
+        # surviving unit under the name cannot be attributed either way. The
+        # `delivered_inventory` snapshot is reported for the operator but is
+        # NOT evidence: a same-second re-grant reproduces it byte for byte.
+        delivered = spec.get("delivered_inventory")
+        if isinstance(delivered, (list, tuple)) and delivered:
+            evidence.append(f"descriptor snapshot (diagnostic only): {list(delivered)}")
         cursor = await conn.execute(
             "SELECT id, quantity, source FROM inventory_items"
-            " WHERE guild_id=? AND user_id=? AND item_name=?",
+            " WHERE guild_id=? AND user_id=? AND item_name=? AND quantity > 0",
             (guild_id, user_id, item_name))
         leftover = list(await cursor.fetchall())
         evidence.append(f"rows still carrying {item_name!r}: {leftover or 'none'}")
         if leftover:
             return _no(
-                "provenance_unprovable",
-                f"{len(leftover)} inventory row(s) still carry {item_name!r} "
-                f"and cannot be attributed to this purchase from the database; "
-                f"compensate the member by hand if needed, then retire",
+                "legacy_no_provenance",
+                f"this purchase has no grant record and {sum(int(r[1]) for r in leftover)} "
+                f"unit(s) of {item_name!r} remain, none attributable to it from "
+                f"the database; the runtime will not remove any - decide by hand "
+                f"(compensate the member or let them keep it) and close with "
+                f"--accept-unprovable and a note",
                 ["inventory rows have no origin operation, so ownership of a "
-                 "surviving row cannot be proven here"])
-        return _yes("no inventory row, holding or boost attributable to this "
-                    "purchase remains, and none is unattributable")
+                 "surviving unit cannot be proven here"])
+        return _yes("no unit of this item remains for the member and no holding "
+                    "or boost is attributable to this purchase, so there is "
+                    "nothing left to compensate")
 
     if db is not None:
         # Inside the caller's `BEGIN IMMEDIATE`: no other writer can change the
@@ -6011,8 +6034,22 @@ async def inspect_purchase_operation(op_id: str) -> dict | None:
     return evidence
 
 
+# Evidence codes an operator may close by hand. Each means "the database cannot
+# prove the unit is gone, and the runtime will never be able to either":
+# the purchase predates provenance, its provenance was invalidated, or its unit
+# was consumed before the rollback. `effects_live` is deliberately NOT here -
+# that one the runtime can still resolve, so it must not be closed by hand.
+_MANUALLY_RESOLVABLE_CODES = frozenset({
+    "legacy_no_provenance",
+    "consumed_before_rollback",
+    "provenance_invalidated",
+})
+
+
 async def retire_pending_rollback(op_id: str, *, confirmed: bool = False,
-                                  note: str | None = None) -> tuple[bool, str]:
+                                  note: str | None = None,
+                                  accept_unprovable: bool = False
+                                  ) -> tuple[bool, str]:
     """Clear a pending rollback ONLY when local evidence proves it is finished.
 
     Refuses when `rollback_retirement_evidence` cannot demonstrate that the
@@ -6021,12 +6058,22 @@ async def retire_pending_rollback(op_id: str, *, confirmed: bool = False,
     note are appended to the operation's `detail`, which is the audit trail a
     later reader needs; the descriptor is then set to the durable-completion
     sentinel so no reconciliation pass re-runs the compensation.
+
+    `accept_unprovable=True` is the one sanctioned exception, for the cases the
+    database can never settle (`_MANUALLY_RESOLVABLE_CODES`): a purchase older
+    than purchase provenance, invalidated provenance, or a unit consumed before
+    the rollback. It records the operator's decision verbatim and closes the
+    descriptor WITHOUT touching inventory; it never fabricates provenance and
+    never removes a unit. It still refuses `effects_live`.
     """
     if not confirmed:
         return False, "Confirmation required (--yes)."
     operator_note = (note or "").strip()
     if not operator_note:
         return False, "An operator note recording what was verified is required."
+    if accept_unprovable and len(operator_note) < 20:
+        return False, ("Accepting an unprovable case requires a note that says "
+                       "what was decided and why (at least 20 characters).")
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -6057,19 +6104,31 @@ async def retire_pending_rollback(op_id: str, *, confirmed: bool = False,
                     "item_id": item_now, "item_name": name_now,
                     "_raw_delivery_rollback": current},
             )
+            manual_close = False
             if not verdict.get("safe"):
-                await db.execute("ROLLBACK")
-                return False, (
-                    f"Refused: {verdict.get('reason')} "
-                    f"(evidence: {'; '.join(verdict.get('evidence') or [])})"
-                )
+                if not (accept_unprovable
+                        and verdict.get("code") in _MANUALLY_RESOLVABLE_CODES):
+                    await db.execute("ROLLBACK")
+                    return False, (
+                        f"Refused: {verdict.get('reason')} "
+                        f"(evidence: {'; '.join(verdict.get('evidence') or [])})"
+                    )
+                manual_close = True
 
             stamp = utcnow().isoformat()
-            audit = (
-                f"[{stamp}] Rollback retired by operator: {operator_note} | "
-                f"evidence: {verdict.get('reason')} | "
-                f"{'; '.join(verdict.get('evidence') or [])}"
-            )
+            if manual_close:
+                audit = (
+                    f"[{stamp}] Rollback closed by operator decision "
+                    f"[{verdict.get('code')}] WITHOUT automatic removal: "
+                    f"{operator_note} | evidence: {verdict.get('reason')} | "
+                    f"{'; '.join(verdict.get('evidence') or [])}"
+                )
+            else:
+                audit = (
+                    f"[{stamp}] Rollback retired by operator: {operator_note} | "
+                    f"evidence: {verdict.get('reason')} | "
+                    f"{'; '.join(verdict.get('evidence') or [])}"
+                )
             existing = (existing_detail or "").strip()
             merged_detail = f"{existing}\n{audit}" if existing else audit
             await db.execute(
@@ -6576,6 +6635,14 @@ async def _cli_async(argv: list[str] | None = None) -> int:
               "from the database. Records the evidence and the operator note in "
               "the operation detail."))
     parser.add_argument(
+        "--accept-unprovable", action="store_true",
+        help=("With --retire-rollback --yes --note: close a pending stackable "
+              "rollback that the database can never prove (purchase older than "
+              "purchase provenance, invalidated provenance, or unit consumed "
+              "before the rollback) on the operator's recorded decision. Removes "
+              "NOTHING from inventory and fabricates no provenance. Still refuses "
+              "a rollback the runtime can complete (effects_live)."))
+    parser.add_argument(
         "--yes", action="store_true",
         help="Confirm and execute the --resolve state transition.")
     parser.add_argument(
@@ -6705,7 +6772,8 @@ async def _cli_async(argv: list[str] | None = None) -> int:
                       if args.json else f"Error: {msg}")
                 return 2
             retired, detail = await retire_pending_rollback(
-                args.op_id, confirmed=True, note=args.note)
+                args.op_id, confirmed=True, note=args.note,
+                accept_unprovable=bool(args.accept_unprovable))
             payload = {"success": retired, "op_id": args.op_id,
                        "reason": verdict["reason"],
                        "evidence": verdict["evidence"], "detail": detail}

@@ -921,7 +921,8 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
             amount=1, item_name=name, item_type=POTION_ITEM_TYPE,
             item_metadata=build_metadata(
                 EFFECT_XP_BOOST, multiplier, duration_hours),
-            reason=f"Shop purchase: {name}", source=source)
+            reason=f"Shop purchase: {name}", source=source,
+            op_id=str(op_id) if op_id else None)
         if not granted.get("success"):
             result.update(
                 error=granted.get("error") or "Potion delivery failed.",
@@ -945,7 +946,8 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
         granted = await give_reward(
             bot, guild_id, user_id, "item",
             amount=1, item_name=name, item_type=TITLE_ITEM_TYPE,
-            reason=f"Shop purchase: {name}", source=source)
+            reason=f"Shop purchase: {name}", source=source,
+            op_id=str(op_id) if op_id else None)
         if not granted.get("success"):
             result.update(
                 error=granted.get("error") or "Title delivery failed.",
@@ -982,7 +984,8 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
         granted = await give_reward(
             bot, guild_id, user_id, "item",
             amount=1, item_name=name, item_type="shop_custom",
-            reason=f"Shop purchase: {name}", source=source)
+            reason=f"Shop purchase: {name}", source=source,
+            op_id=str(op_id) if op_id else None)
         if not granted.get("success"):
             result.update(
                 error=granted.get("error") or "Item delivery failed.",

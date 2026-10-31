@@ -40,7 +40,8 @@ async def give_reward(bot: discord.Client,
                        item_metadata: dict = None,
                        metadata_extra: dict = None,
                        defer_retry_seconds: float | None = None,
-                       idempotency_key: str | None = None) -> dict:
+                       idempotency_key: str | None = None,
+                       op_id: str | None = None) -> dict:
     """...
 
     ``idempotency_key`` marks a ONE-SHOT xp award - a mission, tag mission,
@@ -50,6 +51,13 @@ async def give_reward(bot: discord.Client,
     the caller's wait can defer it but can never delete it. Repeating the same
     key never pays twice. Recurring awards (message/voice XP) must NOT pass it:
     they are dropped on a fence and simply re-earned, which is correct for them.
+
+    ``op_id`` (``reward_type == "item"`` only) is the Shop purchase operation
+    that is delivering. When given, the stack increment and a purchase grant
+    (`utils.level_ops.record_purchase_grant`) commit in ONE transaction, and
+    that grant is the only thing a later compensation may take the unit back
+    by. Non-Shop item grants (missions, minigames) do not pass it and are
+    unchanged: their units stay unattributed, which no reversal may touch.
     """
     if reward_type in ("coins", "diamonds"):
         if amount is None:
@@ -493,27 +501,43 @@ async def give_reward(bot: discord.Client,
 
         prior_inv = None
         delivered_inv = None
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "SELECT id, quantity, item_type, source, metadata, "
-                "created_at, updated_at FROM inventory_items "
-                "WHERE guild_id=? AND user_id=? AND item_name=?",
-                (guild_id, user_id, item_name))
-            prior_inv = await cursor.fetchone()
-
+        grant_id = None
         from utils.inventory import give_item
+        _snapshot_sql = (
+            "SELECT id, quantity, item_type, source, metadata, "
+            "created_at, updated_at FROM inventory_items "
+            "WHERE guild_id=? AND user_id=? AND item_name=?")
+        # One write transaction for: the pre-grant read, the increment, the
+        # purchase grant (Shop only) and the post-grant read. Before this the
+        # two reads and the write used three connections, so the "delivered"
+        # snapshot could include a concurrent writer's units - and for a Shop
+        # purchase there was no grant at all. The grant and the increment now
+        # commit together or not at all: no delivered unit without its grant,
+        # no grant without its unit.
         try:
-            new_qty = await give_item(
-                guild_id, user_id, item_name,
-                quantity=quantity, item_type=item_type,
-                metadata=item_metadata, source=source)
             async with aiosqlite.connect(DB_PATH) as db:
-                cursor = await db.execute(
-                    "SELECT id, quantity, item_type, source, metadata, "
-                    "created_at, updated_at FROM inventory_items "
-                    "WHERE guild_id=? AND user_id=? AND item_name=?",
-                    (guild_id, user_id, item_name))
-                delivered_inv = await cursor.fetchone()
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    cursor = await db.execute(
+                        _snapshot_sql, (guild_id, user_id, item_name))
+                    prior_inv = await cursor.fetchone()
+                    new_qty = await give_item(
+                        guild_id, user_id, item_name,
+                        quantity=quantity, item_type=item_type,
+                        metadata=item_metadata, source=source, db=db)
+                    if op_id is not None and str(op_id).strip():
+                        from utils.level_ops import record_purchase_grant
+                        grant_id = await record_purchase_grant(
+                            db, guild_id=guild_id, user_id=user_id,
+                            operation_id=str(op_id), item_name=item_name,
+                            quantity=quantity)
+                    cursor = await db.execute(
+                        _snapshot_sql, (guild_id, user_id, item_name))
+                    delivered_inv = await cursor.fetchone()
+                    await db.commit()
+                except BaseException:
+                    await db.rollback()
+                    raise
         except Exception as e:
             return {"success": False, "reward_type": "item",
                     "error": f"Inventory error: {e}", "uncertain": False}
@@ -521,7 +545,8 @@ async def give_reward(bot: discord.Client,
         return {"success": True, "reward_type": "item",
                 "item_name": item_name, "quantity": quantity,
                 "new_quantity": new_qty, "prior_inventory": prior_inv,
-                "delivered_inventory": delivered_inv, "uncertain": False}
+                "delivered_inventory": delivered_inv,
+                "grant_id": grant_id, "uncertain": False}
 
     else:
         raise RewardError(f"Unknown reward_type: {reward_type!r}")
@@ -670,127 +695,10 @@ async def rollback_role_inventory_grant(
         return False
 
 
-async def rollback_item_inventory_grant(
-    guild_id: int,
-    user_id: int,
-    item_name: str,
-    *,
-    quantity: int = 1,
-    prior_inv: tuple | None = None,
-    delivered_inv: tuple | None = None,
-    db: aiosqlite.Connection | None = None,
-) -> bool:
-    """Conditionally roll back a stackable item grant (`give_item(..., quantity)`).
-
-    - Preserves any units protected by active `reward_grants` provenance.
-    - Preserves any concurrent independent grants or quantity changes.
-    - Restores `prior_inv` metadata/source/timestamps when the row still matches
-      `delivered_inv`, or deletes the row only when no prior row existed and
-      the remaining unprotected quantity equals the rolled-back grant.
-    - When `db` is provided, joins the caller's open transaction without
-      committing so the inventory rollback and purchase-journal progress record
-      commit or roll back atomically.
-    """
-    qty_to_remove = int(quantity or 1)
-    if qty_to_remove <= 0:
-        return True
-
-    async def _apply(conn: aiosqlite.Connection) -> bool:
-        cursor = await conn.execute(
-            "SELECT id, quantity, item_type, source, metadata, "
-            "created_at, updated_at FROM inventory_items "
-            "WHERE guild_id=? AND user_id=? AND item_name=?",
-            (guild_id, user_id, item_name),
-        )
-        cur_row = await cursor.fetchone()
-        if cur_row is None:
-            return True
-
-        cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_cat, cur_uat = cur_row
-        cur_qty_int = int(cur_qty or 0)
-        if cur_qty_int <= 0:
-            return True
-
-        protected_qty = 0
-        try:
-            prov_cur = await conn.execute(
-                "SELECT COALESCE(SUM(remaining_quantity), 0) "
-                "FROM reward_grants "
-                "WHERE guild_id=? AND user_id=? AND item_name=? "
-                "AND remaining_quantity > 0 AND COALESCE(unattributed, 0) = 0",
-                (guild_id, user_id, item_name),
-            )
-            prov_row = await prov_cur.fetchone()
-            if prov_row and prov_row[0] is not None:
-                protected_qty = int(prov_row[0] or 0)
-        except Exception as exc:
-            if "no such table" not in str(exc).lower():
-                raise
-            protected_qty = 0
-
-        if delivered_inv is not None:
-            matches_delivered = tuple(cur_row) == tuple(delivered_inv)
-            delivered_qty = int(delivered_inv[1] or 0)
-            if not matches_delivered and cur_qty_int <= delivered_qty:
-                # Row was overwritten or already reduced below/at the delivered
-                # snapshot by an independent write; do not touch it.
-                return True
-        else:
-            matches_delivered = False
-
-        removable = max(0, cur_qty_int - protected_qty)
-        deduct = min(qty_to_remove, removable)
-        if deduct <= 0:
-            return True
-
-        new_qty = cur_qty_int - deduct
-        if new_qty <= 0 and prior_inv is None and (delivered_inv is None or matches_delivered):
-            await conn.execute(
-                "DELETE FROM inventory_items "
-                "WHERE id=? AND quantity IS ? AND updated_at IS ?",
-                (cur_id, cur_qty, cur_uat),
-            )
-        elif matches_delivered and prior_inv is not None:
-            p_id, p_qty, p_type, p_src, p_meta, p_cat, p_uat = prior_inv
-            await conn.execute(
-                "UPDATE inventory_items "
-                "SET quantity=?, item_type=?, source=?, metadata=?, "
-                "created_at=?, updated_at=? "
-                "WHERE id=? AND quantity IS ? AND updated_at IS ?",
-                (
-                    new_qty, p_type, p_src, p_meta, p_cat, p_uat,
-                    cur_id, cur_qty, cur_uat,
-                ),
-            )
-        else:
-            await conn.execute(
-                "UPDATE inventory_items "
-                "SET quantity = ?, updated_at = CURRENT_TIMESTAMP "
-                "WHERE id=? AND quantity = ?",
-                (new_qty, cur_id, cur_qty_int),
-            )
-        return True
-
-    if db is not None:
-        return await _apply(db)
-
-    try:
-        async with aiosqlite.connect(DB_PATH) as conn:
-            in_tx = False
-            try:
-                await conn.execute("BEGIN IMMEDIATE")
-                in_tx = True
-                ok = await _apply(conn)
-                await conn.commit()
-                in_tx = False
-                return ok
-            except Exception:
-                if in_tx:
-                    try:
-                        await conn.execute("ROLLBACK")
-                    except Exception:
-                        pass
-                raise
-    except Exception as exc:
-        print(f"[REWARD] Failed to roll back item inventory for {item_name!r}: {exc}")
-        return False
+# NOTE (G fix, 2026-10-30): `rollback_item_inventory_grant` used to live here. It
+# decided how many units to take back by comparing the live stack with the
+# `delivered_inventory` snapshot, which cannot distinguish the purchase's own
+# unit from units granted later (incl. same-second ABA). Stackable
+# compensation now reverses the purchase's own `reward_grants` row via
+# `utils.level_ops.reverse_purchase_grant`; purchases with no such row are
+# refused and stay pending for an operator (`legacy_no_provenance`).

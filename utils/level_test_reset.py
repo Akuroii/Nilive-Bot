@@ -560,12 +560,18 @@ async def inspect_member(guild_id: int, user_id: int, *,
         # provenance, so nothing is claimed as reversible. Crashing here would
         # make an old member uninspectable, which is worse than reporting
         # honestly that their history cannot be proven.
+        # Shop purchase grants share the ledger (utils.level_ops
+        # GRANT_SOURCE_PURCHASE) but are not level rewards: this report, keyed
+        # by (claim_id, kind), describes what the claim engine granted, so they
+        # are excluded here and the level numbers stay what they were.
         try:
             cursor = await db.execute("""
                 SELECT claim_id, kind, grant_id, quantity, remaining_quantity,
                        unattributed, unattributed_reason, item_name, currency,
                        ledger_id, reward_level, track
-                FROM reward_grants WHERE guild_id=? AND user_id=? ORDER BY id
+                FROM reward_grants WHERE guild_id=? AND user_id=?
+                  AND COALESCE(grant_source, 'level_reward') <> 'shop_purchase'
+                ORDER BY id
             """, (guild_id, user_id))
             grant_rows = await cursor.fetchall()
         except aiosqlite.OperationalError:

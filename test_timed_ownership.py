@@ -38,6 +38,23 @@ from utils.shop_validation import shop_input, ShopValidationError
 from cogs.shop import process_purchase
 
 
+async def late_deliver_unit(op_id, name, *, guild=None, user=None,
+                            item_type="potion", source="shop"):
+    """Deliver ONE stackable unit exactly as the Shop does since the purchase
+    grant ledger (G fix): the stack increment and the `reward_grants` row
+    (`grant_source='shop_purchase'`, `operation_id=op_id`) commit in one
+    transaction, and that grant is the only evidence a later compensation may
+    take the unit back by. Returns the `inventory_items` snapshot row."""
+    guild = GUILD if guild is None else guild
+    user = USER if user is None else user
+    res = await give_reward(None, guild, user, "item", amount=1,
+                            item_name=name, item_type=item_type,
+                            source=source, op_id=str(op_id))
+    assert res.get("success"), res
+    assert res.get("grant_id"), res
+    return tuple(res["delivered_inventory"])
+
+
 # ── fixtures ────────────────────────────────────────────────────────────────
 
 def shop_item(kind="custom", price=0, name="Thing", role_id=None,
@@ -4281,13 +4298,17 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                 saved_spec.get("inventory_rolled_back"),
                 "Atomic item rollback must durably persist inventory_rolled_back=True before clear",
             )
-            # Late-delivered unit was rolled back
+            # Late-delivered unit was rolled back. Since the purchase grant
+            # ledger the reversal decrements the stack like `remove_item`
+            # does, so an emptied stack is a `quantity=0` row, not a deleted
+            # one; the readers (`get_inventory`, `has_item`, title/role
+            # entitlement) already treat both the same.
             self.assertEqual(
                 rows(
-                    "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='P1Title'",
+                    "SELECT COALESCE(SUM(quantity),0) FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='P1Title'",
                     (GUILD, USER),
                 ),
-                [],
+                [(0,)],
             )
             balance_after_refund = rows(
                 "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
@@ -4456,11 +4477,23 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 rows(
-                    "SELECT remaining_quantity FROM reward_grants WHERE guild_id=? AND user_id=? AND item_name='P2AtomicPotion'",
+                    "SELECT remaining_quantity FROM reward_grants WHERE guild_id=? AND user_id=?"
+                    " AND item_name='P2AtomicPotion'"
+                    " AND COALESCE(grant_source,'level_reward')='level_reward'",
                     (GUILD, USER),
                 ),
                 [(1,)],
                 "Reward provenance must remain completely intact",
+            )
+            # The unit came back through the purchase grant, not the stack
+            # size: the op's grant is spent and marked reversed exactly once.
+            self.assertEqual(
+                rows(
+                    "SELECT remaining_quantity, reversed_at IS NOT NULL FROM reward_grants"
+                    " WHERE operation_id=? AND grant_source='shop_purchase'",
+                    (op_id,),
+                ),
+                [(0, 1)],
             )
             self.assertFalse(bool((await TO.get_purchase(op_id)).get("delivery_rollback")))
         finally:
@@ -5956,14 +5989,12 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         """
         from utils.inventory import give_item
         name = "P19StalePotion"
-        await give_item(GUILD, USER, name, 3, item_type="potion", source="shop")
-        delivered_snapshot = rows(
-            "SELECT id, quantity, item_type, source, metadata, created_at,"
-            " updated_at FROM inventory_items"
-            " WHERE guild_id=? AND user_id=? AND item_name=?",
-            (GUILD, USER, name))[0]
-        op, stale_spec = await self._refunded_op(
-            name, 9901, extra={"delivered_inventory": list(delivered_snapshot)})
+        # Two independent units, then the late-delivered unit WITH its
+        # purchase grant (the only thing the rollback may take back by).
+        await give_item(GUILD, USER, name, 2, item_type="potion", source="shop")
+        op, stale_spec = await self._refunded_op(name, 9901)
+        delivered_snapshot = await late_deliver_unit(op, name)
+        stale_spec["delivered_inventory"] = list(delivered_snapshot)
         await TO.record_pending_delivery_rollback(op, stale_spec, bot=None)
         TO._PENDING_DELIVERY_ROLLBACKS.clear()
 
@@ -6777,15 +6808,12 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         before_snap = rows(
             "SELECT id,quantity,item_type,source,metadata,created_at,updated_at"
             " FROM inventory_items WHERE item_name='Golden Key'")[0]
-        await give_item(GUILD, USER, "Golden Key", 1, item_type="shop_custom",
-                        source="shop")
-        after_snap = rows(
-            "SELECT id,quantity,item_type,source,metadata,created_at,updated_at"
-            " FROM inventory_items WHERE item_name='Golden Key'")[0]
         op2, spec2 = await self._refunded_op(
-            "Golden Key", 9982, internal_type="shop_custom",
-            extra={"prior_inventory": list(before_snap),
-                   "delivered_inventory": list(after_snap)})
+            "Golden Key", 9982, internal_type="shop_custom")
+        after_snap = await late_deliver_unit(op2, "Golden Key",
+                                             item_type="shop_custom")
+        spec2["prior_inventory"] = list(before_snap)
+        spec2["delivered_inventory"] = list(after_snap)
         await TO.record_pending_delivery_rollback(op2, spec2, bot=None)
         TO._PENDING_DELIVERY_ROLLBACKS.clear()
         res2 = await TO.compensate_late_delivery(op2, dict(spec2), bot=None)
@@ -7509,15 +7537,10 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         from utils.inventory import give_item
         await give_item(GUILD, USER, other_name, 3, item_type="shop_custom",
                         source="level_claim")
-        await give_item(GUILD, USER, own_name, 1, item_type="shop_custom",
-                        source="shop")
-        delivered = rows(
-            "SELECT id, quantity, item_type, source, metadata, created_at,"
-            " updated_at FROM inventory_items WHERE guild_id=? AND user_id=?"
-            " AND item_name=?", (GUILD, USER, own_name))[0]
         op, spec = await self._refunded_op(
-            own_name, 8820, internal_type="shop_custom",
-            extra={"delivered_inventory": list(delivered)})
+            own_name, 8820, internal_type="shop_custom")
+        delivered = await late_deliver_unit(op, own_name, item_type="shop_custom")
+        spec["delivered_inventory"] = list(delivered)
         spec["item_name"] = other_name
         await TO.record_pending_delivery_rollback(op, spec, bot=None)
         TO._PENDING_DELIVERY_ROLLBACKS.clear()
@@ -7528,7 +7551,9 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
 
         self.assertFalse(res["complete"], str(res))
-        self.assertIn("delivered inventory grant", str(res.get("error", "")), str(res))
+        # The purchase grant names `own_name`; a descriptor addressing another
+        # item is an identity mismatch the reversal refuses before any write.
+        self.assertIn("identity_mismatch", str(res.get("error", "")), str(res))
         self.assertEqual(
             rows("SELECT item_name, quantity, source FROM inventory_items"
                  " WHERE guild_id=? AND user_id=? ORDER BY item_name",
@@ -7567,7 +7592,9 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
 
         self.assertFalse(res["complete"], str(res))
-        self.assertIn("no longer exists", str(res.get("error", "")), str(res))
+        # The forged snapshot is never consulted: the purchase has no grant,
+        # so it is refused as legacy_no_provenance and nothing is touched.
+        self.assertIn("legacy_no_provenance", str(res.get("error", "")), str(res))
         self.assertEqual(
             rows("SELECT item_name, quantity FROM inventory_items"
                  " WHERE guild_id=? AND user_id=?", (GUILD, USER)),
@@ -7759,13 +7786,13 @@ class RollbackOwnershipBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_legitimate_stackable_descriptor_still_completes(self):
         op_id = await self._op()
-        mine = await self._row("BoundThing", qty=1)
+        mine = await late_deliver_unit(op_id, "BoundThing", item_type="custom")
         res = await self._compensate(
             op_id, self._spec(delivered_inventory=mine))
         self.assertTrue(res["complete"], str(res))
         self.assertEqual(
-            rows("SELECT COUNT(*) FROM inventory_items WHERE id=?", (mine[0],)),
-            [(0,)], "the delivered row was not rolled back")
+            rows("SELECT quantity FROM inventory_items WHERE id=?", (mine[0],)),
+            [(0,)], "the delivered unit was not rolled back")
         self.assertEqual((await TO.get_purchase(op_id))[
             "_raw_delivery_rollback"], "")
 
@@ -8051,7 +8078,7 @@ class OperatorCliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn(op_id, out)
         self.assertIn("PENDING", out)
-        self.assertIn("does not describe the delivered inventory grant", out)
+        self.assertIn("legacy_no_provenance", out)
         rc, out = self._cli("--pending-rollbacks")
         self.assertEqual(rc, 0, out)
         self.assertIn(op_id, out)
@@ -8078,7 +8105,7 @@ class OperatorCliTests(unittest.IsolatedAsyncioTestCase):
                             "--note", "tried anyway")
         self.assertEqual(rc, 1, out)
         self.assertIn("Refused", out)
-        self.assertIn("cannot be attributed", out)
+        self.assertIn("none attributable", out)
         self.assertEqual(
             [r[0] for r in rows(
                 "SELECT delivery_rollback FROM shop_purchase_operations"
@@ -10617,7 +10644,10 @@ class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
 
         verdict = await TO.rollback_retirement_evidence(op_id)
         self.assertFalse(verdict["safe"], str(verdict))
-        self.assertIn("delivered inventory row", verdict["reason"])
+        # No purchase grant (set_quantity fixture): the legacy policy applies,
+        # the snapshot row is diagnostic only.
+        self.assertEqual(verdict["code"], "legacy_no_provenance", str(verdict))
+        self.assertIn("no grant record", verdict["reason"])
 
         # And the real CLI, with no OWNER_ID, must complete normally.
         rc, out = self._cli("--op-id", op_id, "--check-rollback")

@@ -29,6 +29,12 @@ Potion scope: no new idempotency key. Separate legitimate activations may consum
 
 ### G: old rollback can remove newer purchase units (data loss)
 
+> **Update (purchase grant ledger change, 2026‑10‑30):** resolved by the purchase grant ledger (design C) —
+> see [G-purchase-grant-ledger.md](G-purchase-grant-ledger.md). The reproducer
+> below now exits **0** and additionally covers the provenanced ABA case; the
+> `rollback_item_inventory_grant` helper is removed. The text that follows is
+> the original finding, kept as the record of what was reproduced on f9e413f.
+
 Run:
 
 ```bash

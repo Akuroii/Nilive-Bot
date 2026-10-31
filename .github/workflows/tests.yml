@@ -9,6 +9,10 @@ name: tests
 #     (`pip install -r requirements.txt pytest`, no secrets, no Discord socket).
 #   * `test_delivery_safety.py` — wallet deletion surface, descriptor isolation,
 #     atomic potion activation, required migration and Level/equip race.
+#   * `test_purchase_grant_ledger.py` — purchase provenance in `reward_grants`:
+#     one-transaction delivery, level-then-purchase consume order, grant-bound
+#     compensation (ABA, overlapping purchases, retry, concurrency) and the
+#     fail-closed legacy policy.
 #   * `npm test` — the hand-written Node harnesses for the dashboard JS
 #     (`scripts/run_js_tests.sh`; node only, no npm dependencies).
 #
@@ -54,7 +58,7 @@ jobs:
         # distinguishes "still running a test" from "finished, stuck in
         # interpreter shutdown". This is a diagnostic bound, not a fix: a
         # genuine hang still fails the job (exit 124/134).
-        run: PYTHONFAULTHANDLER=1 timeout -s ABRT 600 python -m pytest -v --tb=short test_timed_ownership.py test_delivery_safety.py
+        run: PYTHONFAULTHANDLER=1 timeout -s ABRT 600 python -m pytest -v --tb=short test_timed_ownership.py test_delivery_safety.py test_purchase_grant_ledger.py
 
   js-harnesses:
     runs-on: ubuntu-latest
