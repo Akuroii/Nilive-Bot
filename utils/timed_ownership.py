@@ -93,6 +93,11 @@ SCHEMA_STATEMENTS = (
     CREATE INDEX IF NOT EXISTS idx_timed_holdings_role
     ON timed_holdings(guild_id, role_id)
     """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_timed_holdings_retention
+    ON timed_holdings(guild_id, user_id, role_id)
+    WHERE item_type='role_retention'
+    """,
 )
 
 
@@ -205,6 +210,287 @@ _HOLDING_COLUMNS = ("id", "guild_id", "user_id", "item_name", "item_type",
                     "role_id", "expires_at", "created_at")
 
 
+# ── Durable role-retention obligations ──────────────────────────────────
+#
+# A Booster reward role is retired when its source ends (the stream goes
+# offline, the boost is lost). Discord does not always expose a per-member
+# boost count, so eligibility can be UNKNOWN: the member is an active
+# booster and already wears the role, but nothing proves they still
+# qualify for it.
+#
+# Keeping the role in that state is correct. What was wrong is that the
+# decision lived only in process memory: a restart lost it, and the role
+# then stayed on the member forever with nothing left to retry. That is the
+# gap `docs/execution-20261030/reproduce_booster_obligation_gap.py`
+# demonstrates, and the reason the obligation is now durable.
+#
+# One `timed_holdings` row per (guild, member, role):
+#
+#   item_type  'role_retention'
+#   source     'booster_retention'
+#   role_id    the role that must stay for now
+#   expires_at far in the future, so the ordinary expiry sweep can never
+#              collect it. The reconciler deletes obligations explicitly;
+#              nothing expires them.
+#
+# A retention row is NOT an entitlement. It records work the bot still owes,
+# not something the member owns or qualifies for. Every reader that answers
+# "does this member hold / own / qualify for this?" must exclude it; the
+# full enumeration lives in `RETENTION_READER_POLICY` below.
+
+RETENTION_ITEM_TYPE = "role_retention"
+RETENTION_SOURCE = "booster_retention"
+# Far enough ahead that `is_expired()` is False for any realistic clock.
+RETENTION_NEVER_EXPIRES = "9999-12-31T23:59:59+00:00"
+# Literal predicate: a parameterised one cannot be used in a partial-index
+# ON CONFLICT clause, and the partial index below needs a literal anyway.
+RETENTION_PREDICATE = f"item_type='{RETENTION_ITEM_TYPE}'"
+
+
+def is_retention_holding(holding) -> bool:
+    """True for a durable role-retention obligation row."""
+    if not isinstance(holding, dict):
+        return False
+    return str(holding.get("item_type") or "") == RETENTION_ITEM_TYPE
+
+
+# Classification of every `timed_holdings` reader in the repository.
+# EXCLUDE  - the reader answers "what does this member own / qualify for?";
+#            an obligation is not ownership, so counting it would let a role
+#            look legitimately held when the bot may still owe it.
+# RECOGNIZE- the reader decides whether a role may be taken away; a pending
+#            obligation means the bot still owes the role, so it must keep it.
+RETENTION_READER_POLICY = (
+    # (location, policy, why)
+    ("utils/timed_ownership.py:get_timed_holdings", "EXCLUDE",
+     "presents the member's holdings; an obligation is not a holding"),
+    ("utils/timed_ownership.py:get_timed_holding", "EXCLUDE",
+     "resolves an h:<id> UI key; an obligation must never be equipped"),
+    ("utils/timed_ownership.py:role_still_entitled", "EXCLUDE",
+     "asks whether a role is still entitled; an obligation is not an entitlement"),
+    ("utils/timed_ownership.py:shop_role_still_owned", "EXCLUDE",
+     "asks whether the Shop still owns the role; an obligation is not a purchase"),
+    ("utils/timed_ownership.py:expired_holdings", "EXCLUDE",
+     "the expiry sweep; an obligation has no expiry and must never be swept"),
+    ("utils/timed_ownership.py:timed_holding_owner", "EXCLUDE",
+     "rollback provenance by id; an obligation is not a purchase"),
+    ("utils/timed_ownership.py:timed_holding_provenance", "EXCLUDE",
+     "rollback provenance by id; an obligation is not a purchase"),
+    ("utils/timed_ownership.py:_assert_retry_marker_owned", "EXCLUDE",
+     "late-rollback marker ownership; a different marker kind"),
+    ("utils/timed_ownership.py:_ensure_role_retry_marker", "EXCLUDE",
+     "already filtered by source='shop_late_rollback'"),
+    ("utils/timed_ownership.py:compensate_late_delivery", "EXCLUDE",
+     "purchase compensation; an obligation is not a purchase"),
+    ("utils/timed_ownership.py:rollback_retirement_evidence", "EXCLUDE",
+     "rollback evidence; an obligation is not a purchase"),
+    ("utils/timed_ownership.py:inspect_purchase_operation", "EXCLUDE",
+     "purchase evidence; an obligation is not a purchase"),
+    ("utils/inventory.py:get_inventory", "EXCLUDE",
+     "unified view built on get_timed_holdings, so it inherits the exclusion"),
+    ("utils/level_claims.py:_role_granted_elsewhere", "RECOGNIZE",
+     "decides whether a role may be taken away; a pending obligation means "
+     "the bot still owes the role, so the role must be kept"),
+    ("utils/level_test_reset.py:role_other_grants", "EXCLUDE",
+     "lists grants that justify keeping a role; an obligation is not a grant"),
+    ("docs/execution-20261030/reproduce_booster_obligation_gap.py", "RECOGNIZE",
+     "the reproducer counts obligations, so it must see them"),
+)
+
+
+async def record_role_retention(guild_id: int, user_id: int, role_id: int, *,
+                                reason: str, member=None, bot=None) -> int | None:
+    """Durably record that `role_id` must stay on this member for now.
+
+    Idempotent: the partial unique index keeps one obligation per
+    (guild, member, role), so re-running it never duplicates work and never
+    resets an obligation's retry counters.
+
+    Returns the obligation row id, or None when the obligation already
+    existed (nothing new was recorded).
+    """
+    meta = {
+        "reason": str(reason),
+        "attempts": 0,
+        "created_reason": str(reason),
+    }
+    payload = json.dumps(meta)
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            f"""
+            INSERT INTO timed_holdings
+                (guild_id, user_id, item_name, item_type, quantity, metadata,
+                 source, product_id, category, role_id, expires_at)
+            VALUES (?, ?, ?, ?, 1, ?, ?, NULL, NULL, ?, ?)
+            ON CONFLICT(guild_id, user_id, role_id)
+                WHERE {RETENTION_PREDICATE}
+                DO NOTHING
+            """,
+            (int(guild_id), int(user_id), "Booster role retention",
+             RETENTION_ITEM_TYPE, payload, RETENTION_SOURCE,
+             int(role_id), RETENTION_NEVER_EXPIRES))
+        new_id = cursor.lastrowid if cursor.rowcount else None
+        await db.commit()
+    return new_id
+
+
+async def role_retention_obligations(*, guild_id: int | None = None,
+                                     limit: int | None = None) -> list[dict]:
+    """Every outstanding role-retention obligation, oldest first."""
+    sql = (f"SELECT {', '.join(_HOLDING_COLUMNS)} FROM timed_holdings "
+           f"WHERE {RETENTION_PREDICATE}")
+    params: list = []
+    if guild_id is not None:
+        sql += " AND guild_id=?"
+        params.append(int(guild_id))
+    sql += " ORDER BY id ASC"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(sql, params)
+        rows = await cursor.fetchall()
+    return [_row_to_holding(row, _HOLDING_COLUMNS) for row in rows]
+
+
+async def clear_role_retention(guild_id: int, user_id: int,
+                               role_id: int) -> bool:
+    """Drop one obligation. True when a row was actually deleted."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            f"DELETE FROM timed_holdings "
+            f"WHERE {RETENTION_PREDICATE} AND guild_id=? AND user_id=? "
+            f"AND role_id=?",
+            (int(guild_id), int(user_id), int(role_id)))
+        deleted = cursor.rowcount or 0
+        await db.commit()
+    return deleted > 0
+
+
+def _retention_meta(holding: dict) -> dict:
+    raw = holding.get("metadata")
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        parsed = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        parsed = {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+async def _bump_retention_attempt(holding: dict, error: str) -> None:
+    """Record a failed retry on the obligation so it survives a restart."""
+    meta = _retention_meta(holding)
+    try:
+        meta["attempts"] = int(meta.get("attempts") or 0) + 1
+    except (TypeError, ValueError):
+        meta["attempts"] = 1
+    meta["last_error"] = str(error)[:500]
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE timed_holdings SET metadata=? WHERE id=?",
+            (json.dumps(meta), holding.get("id")))
+        await db.commit()
+
+
+async def reconcile_role_retentions(bot=None, *, limit: int = 200) -> dict:
+    """One pass over outstanding role-retention obligations.
+
+    For each obligation the question is re-asked now that more time has
+    passed:
+
+      * the member or the role is gone  -> the obligation is satisfied;
+        the row is deleted and NO Discord call is made;
+      * eligibility is now known and the role is NOT entitled -> the role is
+        removed and the obligation is deleted;
+      * eligibility is still unknown -> the obligation is kept, so a later
+        pass asks again;
+      * `remove_roles` fails -> the obligation is KEPT with its attempt
+        counter and last error recorded, so the next pass retries.
+
+    Never raises for a single bad obligation: one failing row must not stop
+    the others from being reconciled.
+    """
+    stats = {"checked": 0, "satisfied": 0, "removed": 0,
+             "kept": 0, "failed": 0, "errors": []}
+    try:
+        obligations = await role_retention_obligations(limit=limit)
+    except Exception as exc:  # pragma: no cover - defensive
+        stats["errors"].append(f"read obligations: {exc}")
+        stats["failed"] = 1
+        return stats
+
+    for holding in obligations:
+        stats["checked"] += 1
+        guild_id = int(holding.get("guild_id") or 0)
+        user_id = int(holding.get("user_id") or 0)
+        role_id = holding.get("role_id")
+        if role_id is None:
+            # Malformed row: nothing to reconcile, drop it.
+            await clear_role_retention(guild_id, user_id, -1)
+            stats["satisfied"] += 1
+            continue
+        role_id = int(role_id)
+        try:
+            guild = bot.get_guild(guild_id) if bot is not None else None
+            member = guild.get_member(user_id) if guild is not None else None
+            role = guild.get_role(role_id) if guild is not None else None
+            if member is None or role is None:
+                # The member left, or the role was deleted: nothing is owed
+                # any more. Delete without touching Discord.
+                await clear_role_retention(guild_id, user_id, role_id)
+                stats["satisfied"] += 1
+                continue
+            held_role_ids: set[int] = set()
+            for r_obj in (getattr(member, "roles", None) or ()):
+                r_id_attr = getattr(r_obj, "id", r_obj)
+                try:
+                    held_role_ids.add(int(r_id_attr))
+                except (TypeError, ValueError):
+                    continue
+            if role_id not in held_role_ids:
+                # The role is already gone; the obligation is met.
+                await clear_role_retention(guild_id, user_id, role_id)
+                stats["satisfied"] += 1
+                continue
+            # Ask the UNKNOWN question first. `booster_role_entitlements`
+            # reports a role as entitled through the very unknown-count
+            # fallback that created this obligation, so consulting it before
+            # this check would clear the obligation while the decision is
+            # still open - the exact bug the tests below caught.
+            unknown = await booster_retention_unknown_roles(
+                guild_id, user_id, bot=bot, member=member)
+            if role_id in unknown:
+                # Eligibility is still undetermined: keep asking later.
+                stats["kept"] += 1
+                continue
+            entitled = await booster_role_entitlements(
+                guild_id, user_id, bot=bot, member=member)
+            if role_id in entitled["reward"] or role_id in entitled["color"]:
+                # Eligibility resolved in the member's favour on evidence,
+                # not on the unknown-count fallback: nothing is owed.
+                await clear_role_retention(guild_id, user_id, role_id)
+                stats["satisfied"] += 1
+                continue
+            try:
+                await member.remove_roles(
+                    role, reason="Booster eligibility resolved: role retired")
+                await clear_role_retention(guild_id, user_id, role_id)
+                stats["removed"] += 1
+            except Exception as exc:
+                # Removal failed. KEEP the obligation so the next pass
+                # retries, and record why.
+                await _bump_retention_attempt(holding, exc)
+                stats["kept"] += 1
+                stats["errors"].append(
+                    f"retention {holding.get('id')}: {exc}")
+        except Exception as exc:
+            stats["failed"] += 1
+            stats["errors"].append(
+                f"retention {holding.get('id')}: {exc}")
+    return stats
+
+
 async def grant_timed_holding(guild_id: int, user_id: int, item_name: str,
                               *, expires_at: str, item_type: str = "custom",
                               quantity: int = 1, metadata: dict | None = None,
@@ -277,7 +563,8 @@ async def get_timed_holdings(guild_id: int, user_id: int, *,
                              category: str | None = None) -> list[dict]:
     """This member's timed holdings, expired ones excluded by default."""
     sql = (f"SELECT {', '.join(_HOLDING_COLUMNS)} FROM timed_holdings "
-           "WHERE guild_id=? AND user_id=?")
+           "WHERE guild_id=? AND user_id=? "
+           f"AND item_type != '{RETENTION_ITEM_TYPE}'")
     params: list = [guild_id, user_id]
     if category is not None:
         sql += " AND category IS ?"
@@ -307,7 +594,8 @@ async def get_timed_holding(entry_key: str) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             f"SELECT {', '.join(_HOLDING_COLUMNS)} FROM timed_holdings "
-            "WHERE id=?", (holding_id,))
+            f"WHERE id=? AND item_type != '{RETENTION_ITEM_TYPE}'",
+            (holding_id,))
         row = await cursor.fetchone()
     return _row_to_holding(row, _HOLDING_COLUMNS) if row else None
 
@@ -320,8 +608,10 @@ async def delete_timed_holding(entry_key_or_id) -> bool:
     except (IndexError, ValueError):
         return False
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("DELETE FROM timed_holdings WHERE id=?",
-                                  (holding_id,))
+        cursor = await db.execute(
+            f"DELETE FROM timed_holdings "
+            f"WHERE id=? AND item_type != '{RETENTION_ITEM_TYPE}'",
+            (holding_id,))
         await db.commit()
         return cursor.rowcount == 1
 
@@ -913,8 +1203,9 @@ async def role_still_entitled(guild_id: int, user_id: int, role_id: int,
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT id, expires_at FROM timed_holdings "
-                "WHERE guild_id=? AND user_id=? AND role_id=?",
+                f"SELECT id, expires_at FROM timed_holdings "
+                f"WHERE guild_id=? AND user_id=? AND role_id=? "
+                f"AND item_type != '{RETENTION_ITEM_TYPE}'",
                 (guild_id, user_id, rid))
             for holding_id, expires_at in await cursor.fetchall():
                 if exclude_entry_key and str(entry_key_id(exclude_entry_key)) == str(holding_id):
@@ -1017,8 +1308,9 @@ async def shop_role_still_owned(guild_id: int, user_id: int,
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                "SELECT expires_at FROM timed_holdings"
-                " WHERE guild_id=? AND user_id=? AND role_id=?",
+                f"SELECT expires_at FROM timed_holdings"
+                f" WHERE guild_id=? AND user_id=? AND role_id=? "
+                f"AND item_type != '{RETENTION_ITEM_TYPE}'",
                 (guild_id, user_id, rid))
             for (expires_at,) in await cursor.fetchall():
                 if not is_expired(expires_at, now=now):
@@ -1227,6 +1519,66 @@ async def other_role_entitlement(guild_id: int, user_id: int, role_id: int, *,
     return None
 
 
+async def booster_retention_unknown_roles(guild_id: int, user_id: int, *,
+                                          bot=None, member=None) -> set[int]:
+    """Booster roles this member keeps ONLY because eligibility is unknown.
+
+    `discord.Member` exposes `premium_since` but no per-member boost count, so
+    for a live member `_booster_level_for` returns `count_known=False`.
+    `booster_role_entitlements` then keeps a boost2 / level-2 colour role the
+    member already wears instead of stripping it on a guess.
+
+    Those are precisely the roles whose retention is a DECISION rather than a
+    FACT: nothing proves the member still qualifies. This returns that set so
+    a caller can record a durable obligation instead of trusting process
+    memory, which is what `reproduce_booster_obligation_gap.py` showed being
+    lost on restart.
+    """
+    member = _resolve_member_from_bot(bot, guild_id, user_id, member)
+    boost_level, boost_count_known = _booster_level_for(member)
+    if boost_level < 1 or boost_count_known:
+        return set()
+    held: set[int] = set()
+    for r_obj in (getattr(member, "roles", None) or ()):
+        r_id_attr = getattr(r_obj, "id", r_obj)
+        try:
+            held.add(int(r_id_attr))
+        except (TypeError, ValueError):
+            continue
+    unknown: set[int] = set()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT enabled, boost1_role_id, boost2_role_id "
+            "FROM boost_config WHERE guild_id=?", (guild_id,))
+        row = await cursor.fetchone()
+        if row:
+            enabled, b1, b2 = row
+            if not (enabled is not None and int(enabled) == 0):
+                if b2 not in (None, ""):
+                    try:
+                        b2_id = int(b2)
+                    except (TypeError, ValueError):
+                        b2_id = None
+                    # Kept only by the unknown-count fallback: boost_level
+                    # alone does not reach 2, so the role is worn, not earned.
+                    if b2_id is not None and b2_id in held and boost_level < 2:
+                        unknown.add(b2_id)
+                cursor = await db.execute(
+                    "SELECT role_id, requires_boost_level "
+                    "FROM boost_color_roles WHERE guild_id=?", (guild_id,))
+                for r_id, req_lvl in await cursor.fetchall():
+                    if r_id in (None, ""):
+                        continue
+                    try:
+                        color_role_id = int(r_id)
+                    except (TypeError, ValueError):
+                        continue
+                    needed = max(1, int(req_lvl or 1))
+                    if color_role_id in held and boost_level < needed:
+                        unknown.add(color_role_id)
+    return unknown
+
+
 async def role_removal_blocked(guild_id: int, user_id: int, role_id: int, *,
                                retiring: str, bot=None,
                                member=None) -> str | None:
@@ -1242,16 +1594,36 @@ async def role_removal_blocked(guild_id: int, user_id: int, role_id: int, *,
 
     A verification failure is returned as a reason to keep (fail closed) so an
     unreadable store can never be read as "nobody else grants this".
+
+    When the role is kept because Booster eligibility is UNKNOWN, a durable
+    obligation is recorded so a restart cannot silently lose the decision.
     """
     exclude = _retiring_tokens(retiring)
     try:
-        return await other_role_entitlement(
+        reason = await other_role_entitlement(
             guild_id, user_id, role_id, exclude=exclude,
             bot=bot, member=member)
     except EntitlementCheckError as exc:
         print(f"[ROLES] Keeping role {role_id} for {user_id} in {guild_id}: "
               f"entitlement could not be verified ({exc})")
         return "another entitlement could not be verified"
+    if reason:
+        # The role stays. If it stays only because Booster eligibility could
+        # not be determined, the decision has to outlive this process.
+        try:
+            unknown = await booster_retention_unknown_roles(
+                guild_id, user_id, bot=bot, member=member)
+            if int(role_id) in unknown:
+                await record_role_retention(
+                    guild_id, user_id, int(role_id), reason=reason,
+                    bot=bot, member=member)
+        except Exception as exc:
+            # Recording is best effort: never turn "keep the role" into a
+            # crash. The role is kept either way; only the retry record is
+            # missing, and the next pass can record it again.
+            print(f"[ROLES] Could not record role-retention obligation for "
+                  f"role {role_id} / user {user_id} in {guild_id}: {exc}")
+    return reason
 
 
 def entry_key_id(entry_key: str) -> int | None:
@@ -1283,7 +1655,8 @@ async def timed_holding_owner(entry_key) -> tuple[int, int] | None:
         return None
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT guild_id, user_id FROM timed_holdings WHERE id=?",
+            f"SELECT guild_id, user_id FROM timed_holdings "
+            f"WHERE id=? AND item_type != '{RETENTION_ITEM_TYPE}'",
             (holding_id,),
         )
         row = await cursor.fetchone()
@@ -1321,8 +1694,8 @@ async def timed_holding_provenance(entry_key) -> dict | None:
         return None
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT guild_id, user_id, metadata, role_id FROM timed_holdings"
-            " WHERE id=?",
+            f"SELECT guild_id, user_id, metadata, role_id FROM timed_holdings"
+            f" WHERE id=? AND item_type != '{RETENTION_ITEM_TYPE}'",
             (holding_id,),
         )
         row = await cursor.fetchone()
@@ -1399,6 +1772,7 @@ async def expired_holdings(limit: int = 200, *,
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             f"SELECT {', '.join(_HOLDING_COLUMNS)} FROM timed_holdings "
+            f"WHERE item_type != '{RETENTION_ITEM_TYPE}' "
             "ORDER BY id ASC")
         rows = await cursor.fetchall()
     expired = []
@@ -1753,8 +2127,9 @@ async def _late_rollback_prereqs_complete(
                     h_row = None
                     if hid is not None and str(entry_key).startswith("h:"):
                         h_cur = await db.execute(
-                            "SELECT guild_id, user_id, item_name, metadata "
-                            "FROM timed_holdings WHERE id=?",
+                            f"SELECT guild_id, user_id, item_name, metadata "
+                            f"FROM timed_holdings WHERE id=? "
+                            f"AND item_type != '{RETENTION_ITEM_TYPE}'",
                             (int(hid),),
                         )
                         h_row = await h_cur.fetchone()
@@ -2002,6 +2377,15 @@ async def cleanup_expired_holdings(bot, *, limit: int = 200) -> dict:
     except Exception as exc:  # pragma: no cover - defensive
         errors.append(f"delivery_rollback: {exc}")
         kept += 1
+
+    # Durable role-retention obligations are reconciled on the same tick. They
+    # are deliberately NOT counted into `removed`/`kept`: this function's
+    # return shape is a published contract (test_timed_ownership.py compares
+    # it exactly), and an obligation is not an expired holding.
+    try:
+        await reconcile_role_retentions(bot=bot, limit=limit)
+    except Exception as exc:  # pragma: no cover - defensive
+        errors.append(f"role_retention: {exc}")
 
     def _is_late_marker(h: dict) -> bool:
         meta = h.get("metadata") if isinstance(h.get("metadata"), dict) else {}
@@ -3431,8 +3815,8 @@ async def _assert_retry_marker_owned(entry_key, guild_id, user_id, *,
         raise RuntimeError(f"invalid retry marker key {entry_key!r}")
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT guild_id, user_id, source, metadata FROM timed_holdings"
-            " WHERE id=?",
+            f"SELECT guild_id, user_id, source, metadata FROM timed_holdings"
+            f" WHERE id=? AND item_type != '{RETENTION_ITEM_TYPE}'",
             (holding_id,),
         )
         row = await cursor.fetchone()
@@ -4043,7 +4427,8 @@ async def compensate_late_delivery(
             try:
                 async with aiosqlite.connect(DB_PATH) as cleanup_db:
                     cur = await cleanup_db.execute(
-                        "SELECT metadata FROM timed_holdings WHERE id=?",
+                        f"SELECT metadata FROM timed_holdings "
+                        f"WHERE id=? AND item_type != '{RETENTION_ITEM_TYPE}'",
                         (holding_id,),
                     )
                     h_row = await cur.fetchone()
@@ -5473,8 +5858,9 @@ async def _holding_facts(conn, holding_id: int) -> dict | None:
     inside the same transaction as the write it justifies.
     """
     cursor = await conn.execute(
-        "SELECT guild_id, user_id, metadata, role_id, item_name"
-        " FROM timed_holdings WHERE id=?",
+        f"SELECT guild_id, user_id, metadata, role_id, item_name"
+        f" FROM timed_holdings WHERE id=? "
+        f"AND item_type != '{RETENTION_ITEM_TYPE}'",
         (int(holding_id),),
     )
     row = await cursor.fetchone()
@@ -5661,7 +6047,9 @@ async def rollback_retirement_evidence(op_id: str, *, db=None,
                                f"holding {entry_key} named by the descriptor "
                                f"still exists; retire it first")
             cursor = await conn.execute(
-                "SELECT id FROM timed_holdings WHERE guild_id=? AND user_id=?"
+                f"SELECT id FROM timed_holdings "
+                f"WHERE guild_id=? AND user_id=? "
+                f"AND item_type != '{RETENTION_ITEM_TYPE}'"
                 " ORDER BY id", (guild_id, user_id))
             remaining, unattributable = [], []
             for (holding_id,) in await cursor.fetchall():
@@ -5975,7 +6363,8 @@ async def inspect_purchase_operation(op_id: str) -> dict | None:
         try:
             cursor = await db.execute(
                 f"SELECT {', '.join(_HOLDING_COLUMNS)} FROM timed_holdings"
-                " WHERE guild_id=? AND user_id=? ORDER BY id ASC",
+                f" WHERE guild_id=? AND user_id=? "
+                f"AND item_type != '{RETENTION_ITEM_TYPE}' ORDER BY id ASC",
                 (guild_id, user_id))
             for r in await cursor.fetchall():
                 h = _row_to_holding(r, _HOLDING_COLUMNS)

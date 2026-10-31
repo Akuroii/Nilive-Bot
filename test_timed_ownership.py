@@ -2104,7 +2104,12 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_execute = aiosqlite.Connection.execute
 
         async def _locked_timed_holdings(conn, sql, *args, **kwargs):
-            if "FROM timed_holdings" in str(sql) and "SELECT id, item_name, expires_at" in str(sql):
+            # Column list tracks utils/level_claims._role_granted_elsewhere,
+            # which now also selects `item_type` so it can recognise a durable
+            # role-retention obligation. The assertions below are unchanged:
+            # a failed entitlement check must still fail CLOSED.
+            if "FROM timed_holdings" in str(sql) and \
+                    "SELECT id, item_type, item_name, expires_at" in str(sql):
                 raise aiosqlite.OperationalError("database is locked")
             return await real_execute(conn, sql, *args, **kwargs)
 

@@ -335,6 +335,7 @@ async def inspect_member(guild_id: int, user_id: int, *,
         "has_level_row": False,
         "vi_activation": None,
         "role_other_grants": {},
+        "role_retention_obligations": [],
         "roles_left_on_member": [],
         "claims": [],
         "claims_by_status": {},
@@ -484,13 +485,31 @@ async def inspect_member(guild_id: int, user_id: int, *,
                 report["role_other_grants"].setdefault(str(role_id), set()).add(
                     f"inventory '{item_name}' ({source})")
         try:
-            from utils.timed_ownership import is_expired as _th_is_expired
+            from utils.timed_ownership import (
+                RETENTION_ITEM_TYPE, is_expired as _th_is_expired)
             cursor = await db.execute("""
-                SELECT id, role_id, item_name, expires_at FROM timed_holdings
+                SELECT id, role_id, item_name, item_type, expires_at
+                FROM timed_holdings
                 WHERE guild_id=? AND user_id=?
             """, (guild_id, user_id))
-            for holding_id, role_id, item_name, expires_at in await cursor.fetchall():
-                if role_id is None or _th_is_expired(expires_at):
+            for (holding_id, role_id, item_name, item_type,
+                 expires_at) in await cursor.fetchall():
+                if role_id is None:
+                    continue
+                if str(item_type or "") == RETENTION_ITEM_TYPE:
+                    # A durable role-retention obligation is NOT a grant: it
+                    # records work the bot still owes, not something the
+                    # member owns. Counting it as `role_other_grants` would
+                    # tell the operator the role is legitimately held by a
+                    # timed holding when the bot may in fact still owe it.
+                    # Report it separately so it stays visible.
+                    report["role_retention_obligations"].append({
+                        "holding_id": int(holding_id),
+                        "role_id": int(role_id),
+                        "item_name": item_name,
+                    })
+                    continue
+                if _th_is_expired(expires_at):
                     continue
                 report["role_other_grants"].setdefault(
                     str(int(role_id)), set()

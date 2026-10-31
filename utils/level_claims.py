@@ -1633,8 +1633,9 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
     # raises `EntitlementCheckError` so a transient lock or DB failure is never
     # mistaken for "no timed holding exists".
     try:
+        from utils.timed_ownership import RETENTION_ITEM_TYPE
         cursor = await db.execute(
-            "SELECT id, item_name, expires_at FROM timed_holdings "
+            "SELECT id, item_type, item_name, expires_at FROM timed_holdings "
             "WHERE guild_id=? AND user_id=? AND role_id=?",
             (guild_id, user_id, int(role_id)))
         holding_rows = await cursor.fetchall()
@@ -1642,7 +1643,12 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
         raise EntitlementCheckError(
             f"Failed to verify timed_holdings entitlement: {exc}"
         ) from exc
-    for holding_id, item_name, expires_at in holding_rows:
+    for holding_id, item_type, item_name, expires_at in holding_rows:
+        if str(item_type or "") == RETENTION_ITEM_TYPE:
+            # A durable role-retention obligation: the bot still owes this
+            # member this role, so no level correction may take it away.
+            # Recognised, not excluded - see RETENTION_READER_POLICY.
+            return f"a pending role-retention obligation (#{holding_id})"
         if _th_is_expired(expires_at):
             continue
         return f"timed holding '{item_name}' (#{holding_id})"
