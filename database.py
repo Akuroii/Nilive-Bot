@@ -1013,6 +1013,7 @@ async def init_db():
                 multiplier REAL NOT NULL,
                 expires_at TIMESTAMP NOT NULL,
                 source     TEXT DEFAULT 'shop',
+                origin_op_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -1024,6 +1025,42 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_lab_expires
             ON leveling_active_boosts(expires_at)
         """)
+        # Shop purchases: a boost's `id` is only unique per row, not per
+        # purchase — one member can hold several boosts at once, so a
+        # compensation descriptor carrying a `boost_id` cannot prove the row
+        # belongs to THIS operation from the row id alone. `origin_op_id`
+        # records the purchase operation that created the boost (NULL for
+        # every non-Shop producer and for rows written before this column
+        # existed, which the rollback treats as unprovable and never deletes).
+        # `source` keeps its existing meaning and is not reused for this.
+        # Additive and idempotent, the same pattern as
+        # `equipped_roles.entry_key` above.
+        cursor = await db.execute("PRAGMA table_info(leveling_active_boosts)")
+        if "origin_op_id" not in {c[1] for c in await cursor.fetchall()}:
+            # This column is required, not optional: every shop boost INSERT
+            # names it, and the late-delivery rollback uses it to prove which
+            # purchase created a boost. Logging the failure and continuing (as
+            # this used to) starts the bot against a schema where every boost
+            # grant raises `no such column: origin_op_id` — a silent, delayed
+            # outage that looks like a grant bug. Refuse to start instead, and
+            # name the fix.
+            try:
+                await db.execute(
+                    "ALTER TABLE leveling_active_boosts"
+                    " ADD COLUMN origin_op_id TEXT")
+            except Exception as exc:
+                print("=" * 60)
+                print("FATAL: could not add leveling_active_boosts.origin_op_id")
+                print(f"  {exc}")
+                print("  -> Shop XP boosts cannot be granted or rolled back")
+                print("     without this column, so startup is aborted rather")
+                print("     than continuing into an inconsistent schema.")
+                print("  -> Check database write permissions / disk space, then")
+                print("     restart. Existing rows keep working once the ALTER")
+                print("     succeeds (it is additive and idempotent).")
+                print("=" * 60)
+                raise
+
         # Level-claim boosts only. Shop and potion rows use other source
         # values, so this index does not limit those inserts.
         await db.execute("""
@@ -1342,6 +1379,16 @@ async def init_db():
         from utils.shop_emoji import ensure_shop_emoji_schema
         await ensure_shop_emoji_schema(db)
 
+        # Timed ownership + the Shop purchase journal. Additive by design:
+        # `inventory_items` keeps its UNIQUE(guild, user, item_name) contract
+        # (trade, reward provenance and reversal all rely on it), so temporary
+        # holdings live beside it rather than re-keying it.
+        from utils.timed_ownership import (
+            ensure_timed_ownership_schema, ensure_purchase_journal_schema,
+        )
+        await ensure_timed_ownership_schema(db)
+        await ensure_purchase_journal_schema(db)
+
         # Publication identity/state only. The live message is always rebuilt
         # from shop_designs + current shop_items; never persist commerce or
         # rendered payload snapshots here. No Design/channel uniqueness:
@@ -1494,10 +1541,49 @@ async def init_db():
                 user_id     INTEGER NOT NULL,
                 item_name   TEXT NOT NULL,
                 role_id     INTEGER NOT NULL,
+                entry_key   TEXT,
                 equipped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
+        # Timed ownership: the single equip slot must be able to say WHICH
+        # ownership record it is wearing. `item_name` cannot — a permanent and
+        # a timed "Ocean Blue" share it. Additive and idempotent; NULL on
+        # pre-existing rows, which `get_equipped()` reads as "legacy permanent
+        # ownership, match by name".
+        cursor = await db.execute("PRAGMA table_info(equipped_roles)")
+        if "entry_key" not in {c[1] for c in await cursor.fetchall()}:
+            try:
+                await db.execute(
+                    "ALTER TABLE equipped_roles ADD COLUMN entry_key TEXT")
+            except Exception as e:
+                # Concurrent init_db(): the bot process and the dashboard
+                # process both run init_db(), and on a first deploy both
+                # reach this migration before either has committed it. Each
+                # one's PRAGMA above therefore sees no entry_key, and each
+                # one issues the ALTER. ALTER TABLE takes a write lock, so
+                # the loser of that race gets
+                # "duplicate column name: entry_key" -- the winner already
+                # added the exact column we were about to add. That is the
+                # migration succeeding, not failing, and aborting startup
+                # there would kill a process at the one moment the schema
+                # most needs to be brought up to date.
+                #
+                # Accept it only after proving the column is really there,
+                # and let every other error abort startup exactly as before.
+                if "duplicate column name" not in str(e).lower():
+                    raise RuntimeError(
+                        "Required migration equipped_roles.entry_key failed; "
+                        "startup aborted to protect ownership identity"
+                    ) from e
+                cursor = await db.execute(
+                    "PRAGMA table_info(equipped_roles)")
+                if "entry_key" not in {c[1] for c in await cursor.fetchall()}:
+                    raise RuntimeError(
+                        "Required migration equipped_roles.entry_key reported "
+                        "a duplicate column, but the column is still absent; "
+                        "startup aborted to protect ownership identity"
+                    ) from e
 
         # Wallet pass: equipped_titles is the Title equip slot. It is a
         # SEPARATE table from equipped_roles on purpose — the locked

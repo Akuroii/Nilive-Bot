@@ -53,7 +53,11 @@ async def equip_title(guild_id: int, user_id: int, item_name: str) -> dict:
     from utils.inventory import get_inventory
 
     items = await get_inventory(guild_id, user_id, include_empty=False)
-    owned = next((it for it in items if it["item_name"] == item_name), None)
+    # Titles have no duration semantics at all (a listing that carries one is
+    # rejected by shop_validation), so only permanent rows are titles.
+    owned = next((it for it in items
+                  if not it.get("timed") and it["item_name"] == item_name),
+                 None)
     if not owned:
         return {"success": False, "error": f"You don't own **{item_name}**."}
     if owned["item_type"] != TITLE_ITEM_TYPE:

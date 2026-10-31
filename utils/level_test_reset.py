@@ -153,6 +153,74 @@ sources. This list is not exhaustive - a role granted by a system that records
 nothing cannot be detected - which is why removal failures are preserved rather
 than assumed away.
 
+Policy: one Discord role ID may be owned by several systems
+------------------------------------------------------------
+That principle is not specific to this tool. A Discord role ID can legitimately be
+configured as a Level reward, a Prestige tier role, a Booster(-only) role, a Twitch
+live role, the MVP role AND a Shop item at the same time. Nothing validates those
+pairs against each other, so the supported, backwards-compatible policy is that the
+sharing is ALLOWED - existing guilds rely on it, and rejecting it would need a
+migration and an operational review of those configurations.
+
+What follows is an obligation on every remover: it may retire only its OWN
+entitlement, and must leave the role on the member while any other source still
+justifies it. Both directions are guarded:
+
+* direction 1 - the system retires its own grant. Before `remove_roles`, these call
+  `utils.timed_ownership.role_removal_blocked(guild_id, user_id, role_id,
+  retiring=...)`: `utils.level_claims.enforce_role_progression` and
+  `strip_booster_roles`, `utils.prestige.sync_prestige_roles`,
+  `cogs.boost._handle_unboost`, the `/boostcolor` switch, `cogs.twitch._go_offline`
+  and the `cogs.mvp` rollover. The helper asks whether ANY other source still grants
+  the role - Shop ownership, a fulfilled Level claim, the effective Prestige tier,
+  an active Booster role, a live Twitch watch, the newest MVP award - and the
+  required `retiring=` argument names the GRANT the caller is itself retiring, so
+  that grant is never counted against itself. One source can grant the same role
+  more than once, so the argument is a grant, not a family: `level:member` /
+  `level:booster` for one progression audience, `prestige:<tier>` for one tier,
+  `booster:color` for the picked colour against the configured `boost1`/`boost2`
+  reward role, and the bare `booster` only where the boost itself ends and every
+  Booster grant really is retired. That exclusion is what keeps the check from
+  retaining a role forever: the Level ledger still shows the claim whose role is
+  being superseded, and the Boost config still names the role a boost loss is
+  retiring. A caller that forgets `retiring=`, or names a grant that does not
+  exist, fails loudly (`ValueError`) rather than silently falling back to "does
+  the Shop own it?";
+
+  Two of the sources need no exclusion, because their retiring grant is already
+  invisible by the time the removal runs: the Twitch poller writes `is_live = 0`
+  before `_go_offline`, and the MVP rollover writes the new winner's `mvp_history`
+  row before cleaning up the previous holders. That is also why a SECOND live
+  configuration of the same source - another live watch awarding the same role -
+  still protects the role, while the grant being retired does not;
+
+* direction 2 - the member unequips the Shop copy while another system still grants
+  the role. That is `utils.timed_ownership.non_slot_role_entitlement`, consulted by
+  `utils.equip_engine.unequip_role`, which clears the equip slot (what the member
+  asked for) but keeps the role worn. It covers fulfilled Level claims, the
+  effective Prestige/Booster tier, `twitch_config` (`is_live`, `give_role_id`,
+  `discord_user_id`) and the MVP award (`mvp_config.mvp_role_id` plus the winner of
+  the most recent `mvp_history` row - the same row the rollover reads to decide a
+  cycle has elapsed).
+
+An unreadable store is reported as a reason to KEEP the role, so a failed query can
+never be read as "nobody else owns this". A table that does not exist yet is the one
+exception: it means the feature has no rows for that guild, which is "not an
+entitlement" rather than an unverifiable one.
+
+Declining a removal never changes the system's own state: the Level claim stays
+fulfilled, the Booster eligibility check stays authoritative, the Prestige tier is
+still the effective one, the stream is still recorded as ended and the MVP award is
+still the newest one. Only the Discord removal is skipped, and it is reported (a
+`preserved` list, a `roles_left_on_member`-style entry, or an explicit log line
+where the API has no report object).
+
+The known limit of direction 2 is state, not intent: a source that records nothing
+about whom it granted a role to cannot be consulted, and the removal-error path is
+then the only evidence. Outside this policy are removals the member themselves asked
+for (`cogs/reactionroles`, `cogs/customcommands`) and the destructive
+`reset_member()` in this module.
+
 Is it a New Game?
 -----------------
 Only if no LEVEL-REWARD trace of the previous run survives. `reset_member()`
@@ -267,6 +335,7 @@ async def inspect_member(guild_id: int, user_id: int, *,
         "has_level_row": False,
         "vi_activation": None,
         "role_other_grants": {},
+        "role_retention_obligations": [],
         "roles_left_on_member": [],
         "claims": [],
         "claims_by_status": {},
@@ -415,6 +484,39 @@ async def inspect_member(guild_id: int, user_id: int, *,
             if str(source) != CLAIM_SOURCE:
                 report["role_other_grants"].setdefault(str(role_id), set()).add(
                     f"inventory '{item_name}' ({source})")
+        try:
+            from utils.timed_ownership import (
+                RETENTION_ITEM_TYPE, is_expired as _th_is_expired)
+            cursor = await db.execute("""
+                SELECT id, role_id, item_name, item_type, expires_at
+                FROM timed_holdings
+                WHERE guild_id=? AND user_id=?
+            """, (guild_id, user_id))
+            for (holding_id, role_id, item_name, item_type,
+                 expires_at) in await cursor.fetchall():
+                if role_id is None:
+                    continue
+                if str(item_type or "") == RETENTION_ITEM_TYPE:
+                    # A durable role-retention obligation is NOT a grant: it
+                    # records work the bot still owes, not something the
+                    # member owns. Counting it as `role_other_grants` would
+                    # tell the operator the role is legitimately held by a
+                    # timed holding when the bot may in fact still owe it.
+                    # Report it separately so it stays visible.
+                    report["role_retention_obligations"].append({
+                        "holding_id": int(holding_id),
+                        "role_id": int(role_id),
+                        "item_name": item_name,
+                    })
+                    continue
+                if _th_is_expired(expires_at):
+                    continue
+                report["role_other_grants"].setdefault(
+                    str(int(role_id)), set()
+                ).add(f"timed holding '{item_name}' (#{holding_id})")
+        except aiosqlite.OperationalError as exc:
+            if "no such table: timed_holdings" not in str(exc).lower():
+                raise
         report["role_other_grants"] = {
             k: sorted(v) for k, v in report["role_other_grants"].items()}
 
@@ -477,12 +579,18 @@ async def inspect_member(guild_id: int, user_id: int, *,
         # provenance, so nothing is claimed as reversible. Crashing here would
         # make an old member uninspectable, which is worse than reporting
         # honestly that their history cannot be proven.
+        # Shop purchase grants share the ledger (utils.level_ops
+        # GRANT_SOURCE_PURCHASE) but are not level rewards: this report, keyed
+        # by (claim_id, kind), describes what the claim engine granted, so they
+        # are excluded here and the level numbers stay what they were.
         try:
             cursor = await db.execute("""
                 SELECT claim_id, kind, grant_id, quantity, remaining_quantity,
                        unattributed, unattributed_reason, item_name, currency,
                        ledger_id, reward_level, track
-                FROM reward_grants WHERE guild_id=? AND user_id=? ORDER BY id
+                FROM reward_grants WHERE guild_id=? AND user_id=?
+                  AND COALESCE(grant_source, 'level_reward') <> 'shop_purchase'
+                ORDER BY id
             """, (guild_id, user_id))
             grant_rows = await cursor.fetchall()
         except aiosqlite.OperationalError:
@@ -913,9 +1021,9 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
             f"another operation is running for this member: {lock['reason']}. "
             f"Nothing was changed - wait for it to finish or for its lease to "
             f"expire, then run the preview again.")
-    await ops.open_operation(operation_id, ops.OP_RESET, guild_id, user_id,
-                             actor_id=reversed_by, reason=reason)
     try:
+        await ops.open_operation(operation_id, ops.OP_RESET, guild_id, user_id,
+                                 actor_id=reversed_by, reason=reason)
         # Re-inspect under the lease: the preview the admin read may predate it.
         report = await inspect_member(guild_id, user_id,
                                       include_prestige=include_prestige)
@@ -1197,8 +1305,11 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
              "traces": report["traces"]})
         return report
     except Exception as exc:
-        await ops.finish_operation(operation_id, "failed",
-                                   {"error": f"{type(exc).__name__}: {exc}"})
+        try:
+            await ops.finish_operation(operation_id, "failed",
+                                       {"error": f"{type(exc).__name__}: {exc}"})
+        except Exception:
+            pass
         raise
     finally:
         await ops.release_lock(guild_id, user_id, operation_id)
@@ -1436,11 +1547,11 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
             f"another operation is running for this member: {lock['reason']}. "
             f"Nothing was changed - wait for it to finish or for its lease to "
             f"expire, then run the preview again.")
-    await ops.open_operation(rollback_operation_id, ops.OP_ROLLBACK, guild_id,
-                             user_id, actor_id=reversed_by,
-                             reason=f"rolls back {operation_id}: {reason or ''}")
     report["operation_id"] = rollback_operation_id
     try:
+        await ops.open_operation(rollback_operation_id, ops.OP_ROLLBACK, guild_id,
+                                 user_id, actor_id=reversed_by,
+                                 reason=f"rolls back {operation_id}: {reason or ''}")
         # Re-read under the lease and rebuild the plan from THAT state, so every
         # decision below is made from the rows this operation is allowed to
         # change. The preview the admin read may predate the lease.
@@ -1747,10 +1858,13 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
                  1 for f in report.get("role_failures") or [] if f.get("open_case"))})
         return report
     except Exception as exc:
-        await ops.finish_operation(
-            rollback_operation_id, "failed",
-            {"error": f"{type(exc).__name__}: {exc}",
-             "rolled_back": operation_id})
+        try:
+            await ops.finish_operation(
+                rollback_operation_id, "failed",
+                {"error": f"{type(exc).__name__}: {exc}",
+                 "rolled_back": operation_id})
+        except Exception:
+            pass
         raise
     finally:
         await ops.release_lock(guild_id, user_id, rollback_operation_id)

@@ -65,7 +65,7 @@ vm.runInContext(script, context);
   // Zero is now the normal Free listing — but it must reach the API as a
   // plain 0 WITHOUT borrowing VI's unmetered normalization.
   element('item-duration').value = '2';   // a real value, so "free keeps it" is proven
-  element('item-type').value = 'title';
+  element('item-type').value = 'custom';
   context.toggleItemTypeFields();
   await context.addItem();
   assert.equal(sent.length, count + 1, 'a typed 0 is a Free non-Prestige listing');
@@ -74,6 +74,18 @@ vm.runInContext(script, context);
   assert.equal(sent.at(-1).data.max_stock, 3, 'free does not drop stock');
   assert.equal(sent.at(-1).data.required_level, 50, 'free does not drop the level gate');
   assert.equal(sent.at(-1).data.duration_hours, 2, 'free does not drop the duration');
+
+  // A Title is always permanent: a non-zero duration is rejected, and 0 sends null.
+  element('item-type').value = 'title';
+  context.toggleItemTypeFields();
+  await context.addItem();
+  assert.equal(sent.length, count + 1, 'a Title with non-zero duration is rejected');
+  assert.match(toasts.at(-1)[0], /Titles are permanent/);
+  element('item-duration').value = '0';
+  await context.addItem();
+  assert.equal(sent.length, count + 2, 'a Free Title with duration 0 submits with duration_hours null');
+  assert.equal(sent.at(-1).data.price, 0);
+  assert.equal(sent.at(-1).data.duration_hours, null);
 
   // An EMPTY price field must never be collapsed into a Free item, and junk
   // must not be silently rounded to 0 either.
@@ -88,7 +100,7 @@ vm.runInContext(script, context);
   assert.equal(element('item-price').min, '0', 'a Free listing may have zero Coin price');
   element('item-price-diamonds').value = '5';
   await context.addItem();
-  assert.equal(sent.length, count + 2);
+  assert.equal(sent.length, count + 3);
   assert.equal(sent.at(-1).data.price, 0);
   assert.equal(sent.at(-1).data.price_diamonds, 5,
     'a blank Coin price is still ignored when a Diamond price is set (existing precedence)');

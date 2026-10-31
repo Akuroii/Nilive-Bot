@@ -154,6 +154,17 @@ class Boost(commands.Cog):
                 continue
             role = guild.get_role(int(role_id))
             if role and role in member.roles:
+                # Losing the boost retires the BOOST entitlement. The same role
+                # ID may also be owned through the Shop, which this must not
+                # revoke.
+                from utils.timed_ownership import role_removal_blocked
+                kept_reason = await role_removal_blocked(
+                    guild.id, member.id, int(role_id), retiring="booster",
+                    member=member)
+                if kept_reason:
+                    print(f"[BOOST] Keeping role {role_id} for {member.id}: "
+                          f"still {kept_reason}")
+                    continue
                 try:
                     await member.remove_roles(role, reason="Boost ended")
                 except Exception as e:
@@ -169,6 +180,14 @@ class Boost(commands.Cog):
         for (role_id,) in booster_roles:
             role = guild.get_role(role_id)
             if role and role in member.roles:
+                from utils.timed_ownership import role_removal_blocked
+                kept_reason = await role_removal_blocked(
+                    guild.id, member.id, int(role_id), retiring="booster",
+                    member=member)
+                if kept_reason:
+                    print(f"[BOOST] Keeping booster-only role {role_id} for "
+                          f"{member.id}: still {kept_reason}")
+                    continue
                 try:
                     await member.remove_roles(role, reason="Boost ended")
                 except Exception:
@@ -182,6 +201,17 @@ class Boost(commands.Cog):
         for cr in color_roles:
             role = guild.get_role(cr["role_id"])
             if role and role in member.roles:
+                # Same rule as the two loops above: losing the boost retires the
+                # BOOST-COLOUR perk, while the same role ID may also be owned
+                # through the Shop, which this must not revoke.
+                from utils.timed_ownership import role_removal_blocked
+                kept_reason = await role_removal_blocked(
+                    guild.id, member.id, int(role.id), retiring="booster",
+                    member=member)
+                if kept_reason:
+                    print(f"[BOOST] Keeping colour role {role.id} for "
+                          f"{member.id}: still {kept_reason}")
+                    continue
                 try:
                     await member.remove_roles(role, reason="Boost ended")
                 except Exception:
@@ -385,6 +415,27 @@ class Boost(commands.Cog):
         # members don't stack multiple color roles at once.
         other_role_ids = {o["role_id"] for o in options if o["role_id"] != target_role_id}
         to_remove = [r for r in interaction.user.roles if r.id in other_role_ids]
+        to_remove_kept = []
+        if to_remove:
+            # Switching colour retires the BOOST-COLOUR perk. A colour role the
+            # member also owns through the Shop is a separate grant and stays;
+            # removing it here would revoke a purchase.
+            from utils.timed_ownership import role_removal_blocked
+            still_owned = []
+            for candidate in to_remove:
+                # Only the self-picked colour is retired here. The configured
+                # `boost1`/`boost2` reward roles are a different Booster grant
+                # and stay effective while the member keeps boosting.
+                kept_reason = await role_removal_blocked(
+                    interaction.guild.id, interaction.user.id,
+                    int(candidate.id), retiring="booster:color",
+                    member=interaction.user)
+                if kept_reason:
+                    still_owned.append(candidate)
+                    print(f"[BOOST] Keeping colour role {candidate.id} for "
+                          f"{interaction.user.id}: still {kept_reason}")
+            to_remove = [r for r in to_remove if r not in still_owned]
+            to_remove_kept = still_owned
         try:
             if to_remove:
                 await interaction.user.remove_roles(*to_remove, reason="Switching boost color")
@@ -394,8 +445,13 @@ class Boost(commands.Cog):
             await interaction.response.send_message(f"Couldn't update your role: {e}", ephemeral=True)
             return
 
+        kept_note = (
+            f" Kept {', '.join(r.mention for r in to_remove_kept)} because you "
+            f"also own {'it' if len(to_remove_kept) == 1 else 'them'}."
+            if to_remove_kept else ""
+        )
         await interaction.response.send_message(
-            f"🎨 You're now wearing {role.mention}.", ephemeral=True)
+            f"🎨 You're now wearing {role.mention}.{kept_note}", ephemeral=True)
 
 
 async def setup(bot):

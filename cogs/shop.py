@@ -3,12 +3,18 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import aiosqlite
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
 from utils.economy_safe import safe_deduct, safe_decrement_stock, InsufficientBalance
 from utils.currency import get_currency_config, for_currency
 from utils.emoji import CHECK_EMOJI
+from utils.timed_ownership import (
+    open_purchase, update_purchase, claim_purchase_transition,
+    refund_purchase, format_remaining, parse_time, CATEGORY_COLOR,
+    PURCHASE_PENDING, PURCHASE_DELIVERED, PURCHASE_UNCERTAIN,
+    PURCHASE_FAILED,
+)
 
 SHOP_COLOR = 0x7c5cbf
 
@@ -316,41 +322,119 @@ async def process_purchase(interaction: discord.Interaction,
         return
     free = pay_amount == 0
 
-    # P1 #11 FIX: previously stock and balance were checked with
-    # plain SELECTs, then both decremented in separate UPDATEs
-    # outside any shared transaction — two people buying the last
-    # unit of a limited item at the same moment could both pass the
-    # check and both succeed, overselling stock and/or letting a
-    # buyer without enough balance still get charged into a negative
-    # number. Now stock is claimed atomically first; if the balance
-    # deduction that follows fails, the stock claim is released.
-    # A Free item claims stock exactly like a paid one — free is not
-    # unmetered, it only removes the charge.
-    stock_ok = await safe_decrement_stock(iid)
+    # ── Purchase saga ───────────────────────────────────────────────────
+    # What used to happen: stock was claimed, money was deducted and a
+    # purchase_history row was written BEFORE delivery, every delivery failure
+    # was swallowed with print(), and the success embed was sent regardless. A
+    # member could be charged for a product they never received and be told the
+    # purchase succeeded.
+    #
+    # Now every purchase is an explicit operation with a journal row written
+    # BEFORE anything moves, and the success message is gated on delivery:
+    #
+    #   pending ──► delivered            (delivery succeeded, history written)
+    #      │
+    #      ├──────► failed ──► refunded  (known failure: money + stock once)
+    #      └──────► uncertain            (outcome unknown: keep state, review)
+    #
+    # The ordering constraint that cannot be swapped: delivery must not happen
+    # before the charge, or a failed payment would hand out free goods. So the
+    # fix is compensation, not reordering.
+    op_id = await open_purchase(
+        guild_id, user_id, item_id=iid, item_name=name,
+        currency=pay_currency, amount=0 if free else pay_amount)
+
+    # P1 #11 FIX (kept): stock is claimed atomically FIRST; if the balance
+    # deduction that follows fails, the stock claim is released. A Free item
+    # claims stock exactly like a paid one.
+    # Stock decrement + `stock_reserved=1` share a single BEGIN IMMEDIATE
+    # transaction so a crash between them never leaks stock without a
+    # journal flag.
+    stock_ok = False
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            try:
+                stock_ok = await safe_decrement_stock(iid, db=db)
+            except TypeError as type_exc:
+                if "db" not in str(type_exc):
+                    raise
+                stock_ok = await safe_decrement_stock(iid)
+            if stock_ok:
+                try:
+                    await update_purchase(op_id, stock_reserved=1, db=db)
+                except TypeError as type_exc:
+                    if "db" not in str(type_exc):
+                        raise
+                    await update_purchase(op_id, stock_reserved=1)
+                await db.commit()
+            else:
+                await db.execute("ROLLBACK")
+        except Exception as exc:
+            try:
+                await db.execute("ROLLBACK")
+            except Exception:
+                pass
+            try:
+                await claim_purchase_transition(
+                    op_id, from_statuses=(PURCHASE_PENDING,),
+                    to_status=PURCHASE_FAILED,
+                    detail=f"stock reservation error: {exc}")
+            except Exception:
+                pass
+            raise
+
     if not stock_ok:
+        await claim_purchase_transition(
+            op_id, from_statuses=(PURCHASE_PENDING,),
+            to_status=PURCHASE_FAILED, detail="out of stock")
         await interaction.response.send_message(
             "This item is out of stock.", ephemeral=True)
         return
 
-    # Only the deduction is skipped for a Free item — the same way the
-    # Prestige VI branch above never reaches it. safe_deduct() keeps its own
-    # "amount must be positive" contract untouched; it is simply not called
-    # when there is nothing to charge. No balance row, ledger entry or
-    # rollback trigger is involved in the Free case, so the stock claim
-    # needs no compensating release here (the release below exists solely
-    # to undo a *failed deduction*, which cannot happen at zero).
+    # Only the deduction is skipped for a Free item — safe_deduct() keeps its
+    # own "amount must be positive" contract untouched; it is simply not called
+    # when there is nothing to charge.
+    # Balance deduction + `charged=1` share a single BEGIN IMMEDIATE
+    # transaction so a crash after the debit rolls back the debit unless
+    # `charged=1` commits with it.
     if not free:
         try:
-            await safe_deduct(guild_id, user_id, pay_amount,
-                               currency=pay_currency,
-                               reason=f"Shop purchase: {name}", source="shop")
-        except InsufficientBalance:
-            if max_stock:
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute(
-                        "UPDATE shop_items SET current_stock = current_stock + 1 WHERE id=?",
-                        (iid,))
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    try:
+                        await safe_deduct(
+                            guild_id, user_id, pay_amount,
+                            currency=pay_currency,
+                            reason=f"Shop purchase: {name}", source="shop",
+                            db=db)
+                    except TypeError as type_exc:
+                        if "db" not in str(type_exc):
+                            raise
+                        await safe_deduct(
+                            guild_id, user_id, pay_amount,
+                            currency=pay_currency,
+                            reason=f"Shop purchase: {name}", source="shop")
+                    try:
+                        await update_purchase(op_id, charged=1, db=db)
+                    except TypeError as type_exc:
+                        if "db" not in str(type_exc):
+                            raise
+                        await update_purchase(op_id, charged=1)
                     await db.commit()
+                except Exception:
+                    try:
+                        await db.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                    raise
+        except InsufficientBalance:
+            # Nothing was charged, so only the stock claim has to be undone.
+            if await claim_purchase_transition(
+                    op_id, from_statuses=(PURCHASE_PENDING,),
+                    to_status=PURCHASE_FAILED, detail="insufficient balance"):
+                await refund_purchase(op_id)
             async with aiosqlite.connect(DB_PATH) as db:
                 cursor = await db.execute(
                     f"SELECT {pay_currency} FROM economy WHERE guild_id=? AND user_id=?",
@@ -363,124 +447,249 @@ async def process_purchase(interaction: discord.Interaction,
                 f"You need {pay_amount:,} {cinfo['emoji']} but only have {bal:,}.",
                 ephemeral=True)
             return
+        except Exception as exc:
+            # The charge transaction rolled back (charged=0), so only any
+            # already-reserved stock needs to be released.
+            try:
+                if await claim_purchase_transition(
+                        op_id, from_statuses=(PURCHASE_PENDING,),
+                        to_status=PURCHASE_FAILED,
+                        detail=f"charge error: {exc}"):
+                    await refund_purchase(op_id)
+            except Exception:
+                pass
+            raise
 
-    snap       = snapshot_user(interaction.user)
-    expires_at = None
-    if duration_hours:
-        expires_at = (
-            datetime.now(timezone.utc) +
-            timedelta(hours=duration_hours)).isoformat()
+    # `color` is a Shop CATEGORY, not a reward type: internally a permanent
+    # Colour is the existing `role` grant and a timed Colour is a timed role
+    # holding. Nothing new is introduced on the delivery side, so every role
+    # path (equip, entitlement checks, boost/prestige role guards) keeps
+    # working unchanged.
+    if itype == "color":
+        internal_type = "temp_role" if duration_hours else "role"
+        category = CATEGORY_COLOR
+    else:
+        internal_type = itype
+        category = None
 
-    # Free items record the normal receipt with a zero value, exactly as the
-    # Prestige VI activation does: price_paid = 0 with the same currency key a
-    # paid purchase of this listing would have used. No ledger row is written
-    # because no ledger movement occurred.
+    delivery = await _deliver_purchase(
+        interaction, guild_id=guild_id, user_id=user_id,
+        itype=internal_type, listing_type=itype, name=name,
+        role_id=role_id, duration_hours=duration_hours,
+        multiplier=xp_boost_multiplier,
+        category=category, product_id=iid, source="shop", op_id=str(op_id))
+
+    if not delivery["success"]:
+        await _compensate_failed_purchase(
+            interaction, op_id=op_id, delivery=delivery, name=name,
+            pay_amount=pay_amount, pay_currency=pay_currency, free=free)
+        return
+
+    # Receipt LAST: purchase_history now records finalized purchases only, and
+    # the receipt insert + `pending -> delivered` transition execute atomically
+    # inside one `BEGIN IMMEDIATE` transaction guarded by `refunded=0 AND
+    # stock_returned=0`. If the operation left `pending` while delivery was in
+    # flight (for example, parked as `uncertain` and refunded by an operator),
+    # the transaction rolls back so no receipt row is persisted and `status` is
+    # never overwritten into `delivered`.
+    snap = snapshot_user(interaction.user)
+    finalized = False
+    history_id = None
+    committed_outside_tx = False
+    was_compensated = False
+    persisted_descriptor = False
+    late_rollback_spec = {
+        "op_id": str(op_id),
+        "guild_id": int(guild_id),
+        "user_id": int(user_id),
+        "item_id": int(item_id) if item_id is not None else None,
+        "item_name": str(delivery.get("item_name") or name),
+        "internal_type": str(internal_type),
+        "category": str(category) if category is not None else None,
+        "role_id": int(role_id) if role_id is not None else None,
+        "entry_key": str(delivery["entry_key"]) if delivery.get("entry_key") else None,
+        "role_added": bool(delivery.get("role_added", True)),
+        "prior_inventory": (
+            list(delivery["prior_inventory"])
+            if delivery.get("prior_inventory") is not None else None
+        ),
+        "delivered_inventory": (
+            list(delivery["delivered_inventory"])
+            if delivery.get("delivered_inventory") is not None else None
+        ),
+        "boost_id": delivery.get("boost_id"),
+        "boost_expires_at": delivery.get("boost_expires_at"),
+        "boost_source": delivery.get("boost_source"),
+        "inventory_rolled_back": False,
+        "equip_reconciled": False,
+        "role_reconciled": False,
+        "retry_entry_key": None,
+    }
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO purchase_history
-                (guild_id, user_id, user_display_name,
-                 item_id, item_name, price_paid, expires_at,
-                 currency_paid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (guild_id, user_id, snap["display_name"],
-              iid, name, pay_amount, expires_at, pay_currency))
-        await db.commit()
-
-    boost_expires_at = None
-    if itype in ("role", "temp_role") and role_id:
-        # Phase 3 / E2: role/temp_role granting now goes through the
-        # shared Reward Engine instead of this cog's own copy of the
-        # bot-role-position check + add_roles + temp_roles insert
-        # (the same logic that used to be duplicated in cogs/events.py
-        # too). Also fixes a small pre-existing inconsistency: this
-        # used to write a temp_roles row whenever the item's
-        # duration_hours happened to be set, regardless of whether the
-        # item's declared type was "role" (permanent) or "temp_role" —
-        # now it's keyed off itype itself, matching what the admin
-        # actually configured in the shop.
-        # Rank Card foundation / Equip system: item_name=name is now
-        # passed through so the inventory row give_reward() writes
-        # (and the single-equipped-slot swap it performs) shows the
-        # shop's own configured item name ("Flame") rather than
-        # falling back to the raw Discord role name.
-        from utils.reward_engine import give_reward
-        result = await give_reward(
-            interaction.client, guild_id, user_id, itype,
-            role_id=role_id,
-            duration_hours=duration_hours if itype == "temp_role" else None,
-            reason=f"Shop purchase: {name}",
-            source="shop",
-            item_name=name,
-        )
-        if not result.get("success"):
-            print(f"[SHOP] Role give error: {result.get('error')}")
-    elif itype == "xp_boost":
-        # Phase 5 / Leveling expansion: grants a temporary XP
-        # multiplier instead of a role or inventory item. Read by
-        # utils.xp_calculator.calculate_message_xp() on every message,
-        # stacking multiplicatively on top of any role-based bonus.
-        from utils.xp_calculator import grant_xp_boost
+        await db.execute("BEGIN IMMEDIATE")
         try:
-            boost_expires_at = await grant_xp_boost(
-                guild_id, user_id, xp_boost_multiplier,
-                duration_hours, source="shop")
-        except Exception as e:
-            print(f"[SHOP] XP boost grant error: {e}")
-    elif itype == "potion":
-        # Wallet pass: delivered into inventory as a consumable rather
-        # than applied now. The effect parameters ride along in the
-        # inventory row's existing `metadata` JSON column (the same
-        # column role items already use for {"role_id":...}), so the
-        # potion stays usable even if the shop listing is later edited
-        # or deleted — matching how inventory_items already references
-        # items purely by name. Routed through the Reward Engine's
-        # 'item' type so it's sourced/logged like every other grant.
-        from utils.reward_engine import give_reward
-        from utils.potion_engine import (
-            POTION_ITEM_TYPE, EFFECT_XP_BOOST, build_metadata,
+            try:
+                history_id = await _write_purchase_history(
+                    guild_id, user_id, snap["display_name"], iid, name,
+                    pay_amount, delivery.get("expires_at"), pay_currency,
+                    db=db)
+            except TypeError as type_exc:
+                if "db" not in str(type_exc):
+                    raise
+                history_id = await _write_purchase_history(
+                    guild_id, user_id, snap["display_name"], iid, name,
+                    pay_amount, delivery.get("expires_at"), pay_currency)
+                committed_outside_tx = True
+
+            finalized = await claim_purchase_transition(
+                op_id,
+                from_statuses=(PURCHASE_PENDING,),
+                to_status=PURCHASE_DELIVERED,
+                detail=delivery.get("detail") or None,
+                history_id=history_id,
+                require_uncompensated=True,
+                db=db,
+            )
+            if finalized:
+                await db.commit()
+            else:
+                await db.execute("ROLLBACK")
+                try:
+                    from utils.timed_ownership import (
+                        PURCHASE_REFUNDED,
+                        record_pending_delivery_rollback,
+                    )
+                    cur = await db.execute(
+                        "SELECT status, refunded, stock_returned "
+                        "FROM shop_purchase_operations WHERE op_id=?",
+                        (op_id,),
+                    )
+                    op_state = await cur.fetchone()
+                    was_compensated = bool(
+                        op_state and (
+                            op_state[0] in (PURCHASE_REFUNDED, PURCHASE_FAILED)
+                            or op_state[1]
+                            or op_state[2]
+                        )
+                    )
+                    if was_compensated:
+                        staged_ok = await record_pending_delivery_rollback(
+                            op_id,
+                            late_rollback_spec,
+                            bot=interaction.client,
+                            db=db,
+                        )
+                        if staged_ok:
+                            await db.commit()
+                            persisted_descriptor = True
+                        else:
+                            await db.execute("ROLLBACK")
+                except Exception as stage_exc:
+                    persisted_descriptor = False
+                    print(
+                        f"[SHOP] Pre-compensation descriptor write failed "
+                        f"for op_id={op_id}: {stage_exc}"
+                    )
+                    try:
+                        await db.execute("ROLLBACK")
+                    except Exception:
+                        pass
+        except Exception:
+            try:
+                await db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
+    if not finalized:
+        if committed_outside_tx and history_id is not None:
+            try:
+                async with aiosqlite.connect(DB_PATH) as cleanup_db:
+                    await cleanup_db.execute(
+                        "DELETE FROM purchase_history WHERE id=?",
+                        (int(history_id),))
+                    await cleanup_db.commit()
+            except Exception:
+                pass
+        comp_res = {
+            "complete": True,
+            "durable_persisted": persisted_descriptor,
+            "error": None,
+        }
+        try:
+            from utils.timed_ownership import (
+                PURCHASE_REFUNDED,
+                compensate_late_delivery,
+                get_purchase,
+                record_pending_delivery_rollback,
+            )
+            if not was_compensated:
+                cur_op = await get_purchase(op_id)
+                was_compensated = bool(
+                    cur_op and (
+                        cur_op.get("status") in (PURCHASE_REFUNDED, PURCHASE_FAILED)
+                        or cur_op.get("refunded")
+                        or cur_op.get("stock_returned")
+                    )
+                )
+            if was_compensated:
+                if not persisted_descriptor:
+                    persisted_descriptor = bool(
+                        await record_pending_delivery_rollback(
+                            op_id, late_rollback_spec, bot=interaction.client
+                        )
+                    )
+                comp_res = await compensate_late_delivery(
+                    op_id,
+                    late_rollback_spec,
+                    bot=interaction.client,
+                    interaction=interaction,
+                )
+        except Exception as cleanup_exc:
+            comp_res = {
+                "complete": False,
+                "durable_persisted": persisted_descriptor,
+                "error": str(cleanup_exc),
+            }
+            print(f"[SHOP] Late delivery cleanup failed for {op_id}: {cleanup_exc}")
+        embed = discord.Embed(
+            title="⚠️ Purchase needs a check",
+            description=(
+                f"The purchase for **{name}** could not be finalized because "
+                f"operation `{op_id}` was already updated or refunded while "
+                f"delivery was in progress."
+            ),
+            color=0xFAA61A,
         )
-        result = await give_reward(
-            interaction.client, guild_id, user_id, "item",
-            amount=1, item_name=name, item_type=POTION_ITEM_TYPE,
-            item_metadata=build_metadata(
-                EFFECT_XP_BOOST, xp_boost_multiplier, duration_hours),
-            reason=f"Shop purchase: {name}", source="shop",
-        )
-        if not result.get("success"):
-            print(f"[SHOP] Potion give error: {result.get('error')}")
-    elif itype == "title":
-        # Wallet pass: a title is a cosmetic, DB-only label — no
-        # Discord role is created or assigned (that's the whole point
-        # of the Title slot being independent from the Role slot).
-        # quantity is left to accumulate naturally like any other item;
-        # owning two copies is harmless since only one can be equipped.
-        from utils.reward_engine import give_reward
-        from utils.title_engine import TITLE_ITEM_TYPE
-        result = await give_reward(
-            interaction.client, guild_id, user_id, "item",
-            amount=1, item_name=name, item_type=TITLE_ITEM_TYPE,
-            reason=f"Shop purchase: {name}", source="shop",
-        )
-        if not result.get("success"):
-            print(f"[SHOP] Title give error: {result.get('error')}")
-    elif itype not in ("role", "temp_role"):
-        # Phase 3 / E4: anything that isn't a role/temp_role/xp_boost
-        # (i.e. the shop's "Custom" item type) is delivered into the
-        # buyer's Inventory instead of silently doing nothing beyond
-        # the purchase_history row above — previously a "custom"
-        # item's only trace after purchase was the receipt, with
-        # nothing a member could actually check or a future feature
-        # (missions, trade) could query against. Routed through the
-        # Reward Engine's 'item' type so it's logged/sourced
-        # consistently with every other grant.
-        from utils.reward_engine import give_reward
-        result = await give_reward(
-            interaction.client, guild_id, user_id, "item",
-            amount=1, item_name=name, item_type="shop_custom",
-            reason=f"Shop purchase: {name}", source="shop",
-        )
-        if not result.get("success"):
-            print(f"[SHOP] Item give error: {result.get('error')}")
+        if was_compensated and not comp_res.get("complete", False):
+            if comp_res.get("durable_persisted", False):
+                embed.add_field(
+                    name="Rollback pending reconciliation",
+                    value=(
+                        f"Late-delivery rollback for `{op_id}` did not complete "
+                        f"immediately and has been queued for automatic reconciliation."
+                    ),
+                    inline=False,
+                )
+            else:
+                print(
+                    f"[SHOP] ERROR: Late-delivery rollback incomplete and durable "
+                    f"recovery state could not be saved for op_id={op_id}: "
+                    f"{comp_res.get('error')}"
+                )
+                embed.add_field(
+                    name="Manual recovery required",
+                    value=(
+                        f"Late-delivery rollback for operation `{op_id}` did not "
+                        f"complete and durable recovery state could not be saved "
+                        f"to the database. Automatic recovery after a restart is "
+                        f"not guaranteed; please contact staff with operation ID "
+                        f"`{op_id}` to inspect and reconcile the remaining delivery state."
+                    ),
+                    inline=False,
+                )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
 
     cur = await get_currency_config(guild_id)
     cinfo = for_currency(cur, pay_currency)
@@ -491,7 +700,7 @@ async def process_purchase(interaction: discord.Interaction,
         title=f"{CHECK_EMOJI} Purchase successful",
         description=f"You bought **{name}** for {price_line}.",
         color=0x57F287)
-    if itype == "xp_boost" and boost_expires_at:
+    if itype == "xp_boost" and delivery.get("boost_expires_at"):
         embed.add_field(
             name="⚡ XP boost active",
             value=f"{xp_boost_multiplier:g}× XP for the next {duration_hours} hours")
@@ -507,9 +716,434 @@ async def process_purchase(interaction: discord.Interaction,
         embed.add_field(
             name="🏷️ Title unlocked",
             value="Equip it from `/wallet` → Inventory → Titles.")
+    elif delivery.get("expires_at"):
+        # The countdown is read back from the ownership record, so what the
+        # buyer sees is exactly what the cleanup loop will act on.
+        embed.add_field(
+            name="⏳ Temporary ownership",
+            value=(f"Remaining: **{format_remaining(delivery['expires_at'])}** "
+                   f"(<t:{_expiry_epoch(delivery['expires_at'])}:R>). "
+                   f"The duration starts at this delivery."))
     elif duration_hours:
-        embed.set_footer(
-            text=f"This role expires in {duration_hours} hours")
+        embed.set_footer(text=f"This role expires in {duration_hours} hours")
+    if delivery.get("warning"):
+        embed.add_field(name="Note", value=delivery["warning"], inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+def _expiry_epoch(expires_at) -> int:
+    """Discord relative-timestamp integer for a stored ISO expiry."""
+    parsed = parse_time(expires_at)
+    return int(parsed.timestamp()) if parsed else 0
+
+
+async def _write_purchase_history(guild_id: int, user_id: int,
+                                 display_name: str, item_id: int,
+                                 item_name: str, price_paid: int,
+                                 expires_at: str | None,
+                                 currency: str | None, *,
+                                 db: aiosqlite.Connection | None = None) -> int:
+    """Insert the receipt row and return its id.
+
+    A Free item records the normal receipt with a zero value, exactly as the
+    Prestige VI activation does: price_paid = 0 with the same currency key a
+    paid purchase of this listing would have used. No ledger row is written
+    because no ledger movement occurred.
+
+    When `db` is supplied, joins the caller's open transaction without
+    committing so the receipt and the journal transition commit atomically.
+    """
+    sql = """
+        INSERT INTO purchase_history
+            (guild_id, user_id, user_display_name,
+             item_id, item_name, price_paid, expires_at,
+             currency_paid)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    params = (guild_id, user_id, display_name,
+              item_id, item_name, price_paid, expires_at, currency)
+    if db is not None:
+        cursor = await db.execute(sql, params)
+        return cursor.lastrowid
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute(sql, params)
+        await conn.commit()
+        return cursor.lastrowid
+
+
+async def _deliver_purchase(interaction: discord.Interaction, *,
+                            guild_id: int, user_id: int,
+                            itype: str, listing_type: str, name: str,
+                            role_id=None, duration_hours=None,
+                            multiplier=None, category: str | None = None,
+                            product_id: int | None = None,
+                            source: str = "shop",
+                            op_id: str | None = None) -> dict:
+    """Deliver one purchased product; returns a result dict, never raises.
+
+    Every branch reports success explicitly. There is no "unknown type"
+    fall-through: a listing whose type cannot be delivered fails, is
+    compensated, and never produces a success message.
+
+    `duration_hours` selects timed ownership for the branches that support it
+    (Colors, Items). Potion/Title/xp_boost keep their dedicated semantics — a
+    potion's duration is its effect once activated, a title has no expiry and
+    an XP boost is applied immediately.
+
+    `op_id` is passed to the timed-holding grants so each holding records the
+    purchase operation that created it. Without that, a late-delivery rollback
+    could only compare the holding's member, and one member's second purchase
+    of the same product is indistinguishable from the first.
+    """
+    result = {"success": False, "expires_at": None, "warning": None,
+              "detail": None, "boost_expires_at": None, "error": None,
+              "uncertain": False, "entry_key": None}
+    timed = bool(duration_hours)
+    bot = interaction.client
+
+    if itype in ("role", "temp_role"):
+        if not role_id:
+            result["error"] = "This listing has no role configured."
+            return result
+        if timed:
+            from utils.timed_ownership import grant_timed_product
+            granted = await grant_timed_product(
+                bot, guild_id, user_id, item_name=name,
+                duration_hours=duration_hours, item_type="temp_role",
+                category=category, product_id=product_id,
+                role_id=role_id, source=source, op_id=op_id,
+                reason=f"Shop purchase: {name}")
+            if not granted["success"]:
+                result.update(error=granted.get("error"),
+                              uncertain=granted.get("uncertain", False))
+                if granted.get("uncertain"):
+                    result["warning"] = (
+                        "The role was applied but the ownership record could "
+                        "not be saved; an admin should check this purchase.")
+                return result
+            result.update(success=True, expires_at=granted.get("expires_at"),
+                          entry_key=granted.get("entry_key"),
+                          role_added=bool(granted.get("role_added")),
+                          detail=f"holding {granted.get('entry_key')}")
+            return result
+
+        from utils.reward_engine import give_reward
+        extra: dict = {}
+        if category:
+            extra["category"] = category
+        if product_id is not None:
+            extra["product_id"] = int(product_id)
+        granted = await give_reward(
+            bot, guild_id, user_id, "role", role_id=role_id,
+            reason=f"Shop purchase: {name}", source=source,
+            item_name=name, metadata_extra=extra or None)
+        if not granted.get("success"):
+            result.update(
+                error=granted.get("error") or "Role delivery failed.",
+                uncertain=bool(granted.get("uncertain", False)),
+            )
+            if granted.get("uncertain"):
+                result["warning"] = (
+                    "The role or ownership state could not be cleanly "
+                    "rolled back; an admin should check this purchase.")
+            return result
+        result.update(
+            success=True,
+            entry_key=granted.get("entry_key"),
+            item_name=granted.get("item_name") or name,
+            role_added=bool(granted.get("role_added")),
+            prior_inventory=granted.get("prior_inventory"),
+            delivered_inventory=granted.get("delivered_inventory"),
+            detail=(f"permanent role ({granted['entry_key']})"
+                    if granted.get("entry_key") else "permanent role"),
+        )
+        return result
+
+    if itype == "xp_boost":
+        # Legacy path kept intact: existing listings still deliver the
+        # immediate, non-inventory boost they always did. New listings cannot
+        # be created with this type (see utils/shop_validation.py).
+        from utils.xp_calculator import grant_xp_boost_details
+        try:
+            boost_grant = await grant_xp_boost_details(
+                guild_id, user_id, multiplier, duration_hours, source=source,
+                op_id=str(op_id) if op_id else None)
+        except Exception as exc:
+            result["error"] = f"XP boost grant failed: {exc}"
+            return result
+        boost_expires_at = (boost_grant or {}).get("expires_at")
+        if not boost_expires_at:
+            result["error"] = "XP boost grant failed."
+            return result
+        # The exact inserted row id, so the late-delivery rollback can remove
+        # this purchase's boost instead of re-selecting by
+        # (source, expires_at), which is not unique.
+        boost_id = (boost_grant or {}).get("boost_id")
+        if boost_id is None:
+            # Fallback only, for a grant path that could not report
+            # `lastrowid`: a hint, not a proven identity.
+            try:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cursor = await db.execute(
+                        "SELECT id FROM leveling_active_boosts "
+                        "WHERE guild_id=? AND user_id=? AND expires_at=? AND source=? "
+                        "AND origin_op_id=? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (guild_id, user_id, boost_expires_at, source,
+                         str(op_id) if op_id else None))
+                    b_row = await cursor.fetchone()
+                    if b_row:
+                        boost_id = int(b_row[0])
+            except Exception:
+                boost_id = None
+        result.update(
+            success=True,
+            boost_expires_at=boost_expires_at,
+            boost_id=boost_id,
+            # The row's `source` is a hint only: the durable link back to THIS
+            # purchase is `leveling_active_boosts.origin_op_id`, written by the
+            # grant above. A `level_claim` or `potion` boost that happens to
+            # share the same expiry is never removed by a Shop rollback.
+            boost_source=source,
+        )
+        return result
+
+    if itype == "potion":
+        # Delivered into inventory as a consumable rather than applied now.
+        # The effect parameters ride along in the row's `metadata` JSON column,
+        # so the potion stays usable even if the listing is edited or deleted.
+        from utils.reward_engine import give_reward
+        from utils.potion_engine import (
+            POTION_ITEM_TYPE, EFFECT_XP_BOOST, build_metadata,
+        )
+        granted = await give_reward(
+            bot, guild_id, user_id, "item",
+            amount=1, item_name=name, item_type=POTION_ITEM_TYPE,
+            item_metadata=build_metadata(
+                EFFECT_XP_BOOST, multiplier, duration_hours),
+            reason=f"Shop purchase: {name}", source=source,
+            op_id=str(op_id) if op_id else None)
+        if not granted.get("success"):
+            result.update(
+                error=granted.get("error") or "Potion delivery failed.",
+                uncertain=bool(granted.get("uncertain", False)),
+            )
+            return result
+        result.update(
+            success=True,
+            item_name=granted.get("item_name") or name,
+            prior_inventory=granted.get("prior_inventory"),
+            delivered_inventory=granted.get("delivered_inventory"),
+        )
+        return result
+
+    if itype == "title":
+        # A title is a cosmetic, DB-only label — no Discord role is created or
+        # assigned (that is the whole point of the Title slot being independent
+        # from the Role slot).
+        from utils.reward_engine import give_reward
+        from utils.title_engine import TITLE_ITEM_TYPE
+        granted = await give_reward(
+            bot, guild_id, user_id, "item",
+            amount=1, item_name=name, item_type=TITLE_ITEM_TYPE,
+            reason=f"Shop purchase: {name}", source=source,
+            op_id=str(op_id) if op_id else None)
+        if not granted.get("success"):
+            result.update(
+                error=granted.get("error") or "Title delivery failed.",
+                uncertain=bool(granted.get("uncertain", False)),
+            )
+            return result
+        result.update(
+            success=True,
+            item_name=granted.get("item_name") or name,
+            prior_inventory=granted.get("prior_inventory"),
+            delivered_inventory=granted.get("delivered_inventory"),
+        )
+        return result
+
+    if itype in ("custom", "shop_custom", "item"):
+        if timed:
+            from utils.timed_ownership import grant_timed_product
+            granted = await grant_timed_product(
+                bot, guild_id, user_id, item_name=name,
+                duration_hours=duration_hours, item_type="shop_custom",
+                category=category, product_id=product_id, source=source,
+                op_id=op_id, reason=f"Shop purchase: {name}")
+            if not granted["success"]:
+                result.update(error=granted.get("error"),
+                              uncertain=granted.get("uncertain", False))
+                return result
+            result.update(success=True, expires_at=granted.get("expires_at"),
+                          entry_key=granted.get("entry_key"),
+                          role_added=bool(granted.get("role_added")),
+                          detail=f"holding {granted.get('entry_key')}")
+            return result
+
+        from utils.reward_engine import give_reward
+        granted = await give_reward(
+            bot, guild_id, user_id, "item",
+            amount=1, item_name=name, item_type="shop_custom",
+            reason=f"Shop purchase: {name}", source=source,
+            op_id=str(op_id) if op_id else None)
+        if not granted.get("success"):
+            result.update(
+                error=granted.get("error") or "Item delivery failed.",
+                uncertain=bool(granted.get("uncertain", False)),
+            )
+            return result
+        result.update(
+            success=True,
+            item_name=granted.get("item_name") or name,
+            prior_inventory=granted.get("prior_inventory"),
+            delivered_inventory=granted.get("delivered_inventory"),
+        )
+        return result
+
+    result["error"] = f"Unsupported listing type: {listing_type}"
+    return result
+
+
+async def _compensate_failed_purchase(interaction: discord.Interaction, *,
+                                      op_id: str, delivery: dict, name: str,
+                                      pay_amount: int, pay_currency: str,
+                                      free: bool) -> None:
+    """React to a failed delivery without ever lying to the buyer.
+
+    Three outcomes, deliberately distinct:
+
+    * certain failure        → journal `failed`, money and stock returned once,
+                               buyer told the purchase did not go through.
+    * uncertain outcome      → journal `uncertain`, nothing returned, buyer told
+                               to contact an admin. Refunding here could hand
+                               out a product for free.
+    * compensation half-done → the journal keeps the outstanding flag and the
+                               reconciliation loop finishes it (only for
+                               `failed`/`refunded` operations; `uncertain`
+                               operations require manual admin review).
+    """
+    reason = delivery.get("error") or "Delivery failed."
+    if delivery.get("uncertain"):
+        await claim_purchase_transition(
+            op_id,
+            from_statuses=(PURCHASE_PENDING, PURCHASE_UNCERTAIN),
+            to_status=PURCHASE_UNCERTAIN,
+            detail=reason,
+            require_uncompensated=True,
+        )
+        embed = discord.Embed(
+            title="⚠️ Purchase needs a check",
+            description=(f"The payment for **{name}** went through, but the "
+                         f"delivery could not be confirmed. Nothing else was "
+                         f"charged. Please contact an admin with this "
+                         f"reference: `{op_id}`."),
+            color=0xFAA61A)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    from utils.timed_ownership import get_purchase, PURCHASE_REFUNDED
+    outcome = {"refunded": False, "stock_returned": False, "complete": False,
+               "error": None}
+    op_status = PURCHASE_FAILED
+    stock_ok = not free
+    if await claim_purchase_transition(
+            op_id, from_statuses=(PURCHASE_PENDING,),
+            to_status=PURCHASE_FAILED, detail=reason):
+        outcome = await refund_purchase(op_id)
+        try:
+            cur_op = await get_purchase(op_id)
+        except Exception:
+            cur_op = None
+        if cur_op is not None:
+            op_status = cur_op.get("status") or PURCHASE_FAILED
+            stock_ok = bool(
+                cur_op.get("stock_returned") or not cur_op.get("stock_reserved")
+            )
+        else:
+            stock_ok = bool(outcome.get("complete") or outcome.get("stock_returned"))
+    else:
+        try:
+            cur_op = await get_purchase(op_id)
+        except Exception as exc:
+            cur_op = None
+            outcome["error"] = str(exc)
+        if cur_op is not None:
+            op_status = cur_op.get("status")
+            refunded_ok = bool(cur_op.get("refunded") or not cur_op.get("charged"))
+            stock_ok = bool(
+                cur_op.get("stock_returned") or not cur_op.get("stock_reserved")
+            )
+            outcome = {
+                "refunded": bool(cur_op.get("refunded")),
+                "stock_returned": bool(cur_op.get("stock_returned")),
+                "complete": (
+                    refunded_ok and stock_ok
+                    and op_status in (PURCHASE_FAILED, PURCHASE_REFUNDED)
+                ),
+                "error": None,
+            }
+        else:
+            op_status = None
+            stock_ok = False
+
+    auto_retried = op_status in (PURCHASE_FAILED, PURCHASE_REFUNDED)
+
+    if free:
+        if outcome.get("complete") and stock_ok:
+            # Nothing was charged and no stock reservation remains held.
+            description = (f"**{name}** could not be delivered, so the purchase "
+                           f"was cancelled. You were not charged.")
+        else:
+            description = (
+                f"**{name}** could not be delivered. You were not charged, "
+                f"but its stock reservation is still held (reference: `{op_id}`).")
+    elif outcome.get("refunded"):
+        description = (
+            f"**{name}** could not be delivered, so the purchase was "
+            f"cancelled and your {pay_amount:,} payment was returned.")
+    else:
+        description = (
+            f"**{name}** could not be delivered, so the purchase was "
+            f"cancelled. Your {pay_amount:,} payment has not been returned yet "
+            f"(reference: `{op_id}`).")
+    embed = discord.Embed(
+        title="❌ Purchase not completed",
+        description=description,
+        color=0xED4245)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    if free:
+        if not (outcome.get("complete") and stock_ok):
+            if auto_retried:
+                embed.add_field(
+                    name="Stock release pending",
+                    value=("The reserved stock could not be released yet. It is "
+                           "retried automatically; keep this reference if you "
+                           f"need support: `{op_id}`"),
+                    inline=False)
+            else:
+                embed.add_field(
+                    name="Manual review required",
+                    value=(f"This purchase is marked `{op_status or PURCHASE_UNCERTAIN}` "
+                           "and requires manual admin review (it will not be "
+                           "released automatically). Please contact an admin with "
+                           f"reference: `{op_id}`"),
+                    inline=False)
+    elif not outcome.get("complete") or not outcome.get("refunded"):
+        if auto_retried:
+            embed.add_field(
+                name="Refund pending",
+                value=("Part of the refund could not be applied yet. It is retried "
+                       "automatically; keep this reference if you need support: "
+                       f"`{op_id}`"),
+                inline=False)
+        else:
+            embed.add_field(
+                name="Manual review required",
+                value=(f"This purchase is marked `{op_status or PURCHASE_UNCERTAIN}` "
+                       "and requires manual admin review (it will not be refunded "
+                       "automatically). Please contact an admin with reference: "
+                       f"`{op_id}`"),
+                inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -522,6 +1156,78 @@ class Shop(commands.Cog):
         self.temp_role_cleanup.cancel()
 
     # ─── TEMP ROLE CLEANUP ──────────────────────────────
+    async def _retire_expired_temp_role(self, entry_id, guild_id, user_id,
+                                        role_id):
+        """Remove one expired legacy temp role and catch its bookkeeping up.
+
+        Called under the member's equip-slot lock by `temp_role_cleanup`. The
+        body is the original sweep step unchanged: only the caller's boundary
+        moved, so a concurrent grant or equip cannot interleave with the
+        presence check, the `remove_roles` call, or the slot cleanup that
+        follows it.
+        """
+        guild = self.bot.get_guild(guild_id)
+        removal_ok = True
+        if guild:
+            member = guild.get_member(user_id)
+            if member is None and hasattr(guild, "fetch_member"):
+                try:
+                    member = await guild.fetch_member(user_id)
+                except discord.NotFound:
+                    member = None
+                except Exception as e:
+                    print(f"[SHOP] Failed to fetch member {user_id} "
+                          f"for expired role {role_id} in {guild_id}: {e}")
+                    removal_ok = False
+            role = guild.get_role(role_id)
+            if removal_ok and member and role and role in member.roles:
+                try:
+                    from utils.timed_ownership import role_still_entitled
+                    still_entitled = await role_still_entitled(
+                        guild_id, user_id, role_id,
+                        bot=self.bot, member=member)
+                except Exception as e:
+                    print(f"[SHOP] Failed to verify role entitlement "
+                          f"for expired role {role_id} on {user_id} in "
+                          f"{guild_id}: {e}")
+                    removal_ok = False
+                else:
+                    if not still_entitled:
+                        try:
+                            await member.remove_roles(
+                                role, reason="Temp role expired")
+                        except Exception as e:
+                            print(f"[SHOP] Failed to remove expired "
+                                  f"role {role_id} from {user_id} in "
+                                  f"{guild_id}: {e}")
+                            removal_ok = False
+        else:
+            # Bot isn't in this guild right now — keep the
+            # row so it's retried once it rejoins.
+            removal_ok = False
+
+        if removal_ok:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "DELETE FROM temp_roles WHERE id = ?",
+                    (entry_id,))
+                await db.commit()
+
+            # Rank Card foundation / Equip system: the role's
+            # inventory row (and equipped_roles entry, if this
+            # was the equipped one) need to catch up now that
+            # the Discord role is actually gone — otherwise
+            # /inventory and the rank card would keep showing
+            # an item the member no longer has.
+            try:
+                from utils.equip_engine import cleanup_expired_role_item
+                await cleanup_expired_role_item(
+                    guild_id, user_id, role_id)
+            except Exception as e:
+                print(f"[SHOP] temp_role inventory cleanup "
+                      f"failed for entry {entry_id} "
+                      f"(user={user_id} role={role_id}): {e}")
+
     @tasks.loop(minutes=10)
     async def temp_role_cleanup(self):
         """
@@ -556,46 +1262,19 @@ class Shop(commands.Cog):
 
         for (entry_id, guild_id, user_id, role_id) in expired:
             try:
-                guild = self.bot.get_guild(guild_id)
-                removal_ok = True
-                if guild:
-                    member = guild.get_member(user_id)
-                    role   = guild.get_role(role_id)
-                    if member and role and role in member.roles:
-                        try:
-                            await member.remove_roles(
-                                role, reason="Temp role expired")
-                        except Exception as e:
-                            print(f"[SHOP] Failed to remove expired "
-                                  f"role {role_id} from {user_id} in "
-                                  f"{guild_id}: {e}")
-                            removal_ok = False
-                else:
-                    # Bot isn't in this guild right now — keep the
-                    # row so it's retried once it rejoins.
-                    removal_ok = False
-
-                if removal_ok:
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute(
-                            "DELETE FROM temp_roles WHERE id = ?",
-                            (entry_id,))
-                        await db.commit()
-
-                    # Rank Card foundation / Equip system: the role's
-                    # inventory row (and equipped_roles entry, if this
-                    # was the equipped one) need to catch up now that
-                    # the Discord role is actually gone — otherwise
-                    # /inventory and the rank card would keep showing
-                    # an item the member no longer has.
-                    try:
-                        from utils.equip_engine import cleanup_expired_role_item
-                        await cleanup_expired_role_item(
-                            guild_id, user_id, role_id)
-                    except Exception as e:
-                        print(f"[SHOP] temp_role inventory cleanup "
-                              f"failed for entry {entry_id} "
-                              f"(user={user_id} role={role_id}): {e}")
+                # One member, one gate. The sweep is the third path that reads
+                # "is this role still needed?", removes the Discord role and then
+                # reconciles the single `equipped_roles` row, so it takes the
+                # same lock as `equip_role`, `unequip_role`, expiry and a
+                # role-bearing grant. Acquiring it HERE - before the member and
+                # entitlement lookups - is what matters: a lock taken only inside
+                # `cleanup_expired_role_item` would be far too late, because by
+                # then `remove_roles` has already run. The lock is per member and
+                # per row, so the guild-wide sweep is not serialised.
+                from utils.equip_engine import slot_lock
+                async with slot_lock(guild_id, user_id):
+                    await self._retire_expired_temp_role(
+                        entry_id, guild_id, user_id, role_id)
             except Exception as e:
                 print(f"[SHOP] temp_role_cleanup error for entry "
                       f"{entry_id}: {e}")
@@ -608,6 +1287,44 @@ class Shop(commands.Cog):
                 await db.commit()
         except Exception as e:
             print(f"[SHOP] xp_boost cleanup error: {e}")
+
+        # ── Timed ownership reconciliation ──────────────────────────
+        # Same 10-minute tick as the legacy temp_roles sweep above, so a
+        # timed Color/Item is retired by one loop instead of a second timer
+        # drifting against it. The legacy sweep stays: it owns the OLD
+        # temp_roles rows, which are still the retry marker for roles granted
+        # before timed_holdings existed. Both are safe to run in either order
+        # — the holding is only deleted after its own role removal succeeded,
+        # and `role_still_entitled()` keeps a role the member is independently
+        # entitled to.
+        #
+        # Real-world delay, stated plainly: Discord only removes the role up to
+        # ~10 minutes after the stored expiry, because this loop runs every
+        # 10 minutes. Reads (/inventory, /rank) already treat the entry as
+        # expired at the exact deadline; only the Discord role lags.
+        try:
+            from utils.timed_ownership import cleanup_expired_holdings
+            stats = await cleanup_expired_holdings(self.bot)
+            if stats.get("removed") or stats.get("retained") or stats.get("errors"):
+                print(f"[SHOP] timed ownership cleanup: {stats}")
+        except Exception as e:
+            print(f"[SHOP] timed ownership cleanup error: {e}")
+
+        # ── Purchase journal reconciliation ─────────────────────────
+        # Finishes any compensation that was interrupted (money back but stock
+        # not yet restored) and parks purchases that died before a delivery
+        # result as `uncertain` for a human. It never auto-refunds an uncertain
+        # purchase: that is the one decision this loop must not guess.
+        try:
+            from utils.timed_ownership import reconcile_purchases
+            try:
+                stats = await reconcile_purchases(bot=self.bot)
+            except TypeError:
+                stats = await reconcile_purchases()
+            if any(stats.values()):
+                print(f"[SHOP] purchase reconciliation: {stats}")
+        except Exception as e:
+            print(f"[SHOP] purchase reconciliation error: {e}")
 
     @temp_role_cleanup.before_loop
     async def before_cleanup(self):
@@ -741,18 +1458,18 @@ class Shop(commands.Cog):
 
     # ─── INVENTORY ──────────────────────────────────────
     @app_commands.command(name="inventory",
-                          description="Open your inventory (inside your wallet)")
+                          description="Open your inventory")
     async def inventory(self, interaction: discord.Interaction):
-        # /inventory now opens the wallet hub with the inventory
-        # ready. The old verbose purchase-history dump is gone —
-        # receipts live under Wallet → Receipts, and inventory is the
-        # clean tabs view from cogs/wallet.py. This keeps one source
-        # of truth for inventory rendering and removes the
-        # "Paid/Bought/Expires" debug-style output entirely.
-        from cogs.wallet import render_hub
-        await render_hub(
+        # /inventory opens the Inventory panel DIRECTLY (Items tab),
+        # not the Wallet hub. It shares one renderer/view with Wallet's
+        # Inventory button — the only difference is `first=True`, which
+        # sends a fresh ephemeral message instead of editing the one
+        # the button was clicked on. One template, one interaction
+        # logic, one ownership guard (WalletBaseView).
+        from cogs.wallet import TAB_ITEMS, open_inventory_panel
+        await open_inventory_panel(
             interaction, interaction.guild.id, interaction.user.id,
-            first=True)
+            TAB_ITEMS, first=True)
 
 
 async def setup(bot):

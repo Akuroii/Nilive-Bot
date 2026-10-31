@@ -1,0 +1,37 @@
+== 1. a mission reward outlives a lease longer than any wait ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] setup: the correction lease is live and fenced
+[PASS] setup: the lease outlives the caller's wait
+[MISSIONS] Reward grant failed for mission 1 (Audit one-shot) guild=8101 user=8201: A setlevel correction (op-one-shot) is in progress for this member until 2026-10-31T16:56:31+00:00; the XP award was deferred and nothing was written - this reward has been recorded and will be applied automatically once the correction finishes; it is not earned again by ordinary play, so it is not dropped
+[PASS] the mission really completed - the work was committed
+[PASS] the XP is NOT written while the fence is live
+[PASS] the award is durably QUEUED, not dropped
+[PASS] the queue row carries the reward amount
+[PASS] re-recording does not complete the mission a second time
+[PASS] re-recording while still fenced pays nothing
+[PASS] the queued award is applied once the correction ends
+[PASS] the queue row is marked applied, not left pending
+[PASS] further activity never duplicates the award
+
+== 2. the award survives a process restart, not just activity ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[MISSIONS] Reward grant failed for mission 1 (Audit quiet member) guild=8101 user=8201: A setlevel correction (op-quiet) is in progress for this member until 2026-10-31T16:56:35+00:00; the XP award was deferred and nothing was written - this reward has been recorded and will be applied automatically once the correction finishes; it is not earned again by ordinary play, so it is not dropped
+[PASS] setup: the award is queued and the member goes quiet
+[PASS] the periodic sweep settles the queued award with no activity
+[PASS] and the member has the XP
+[PASS] a second sweep pays nothing again
+
+== 3. an event winner's award is keyed, so it cannot vanish ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[EVENTS] Reward grant failed: A setlevel correction (op-event) is in progress for this member until 2026-10-31T16:56:38+00:00; the XP award was deferred and nothing was written - this reward has been recorded and will be applied automatically once the correction finishes; it is not earned again by ordinary play, so it is not dropped
+[PASS] the winner row is committed - the member cannot claim twice
+[PASS] the XP is not written while fenced
+[PASS] the event award is queued under its idempotency key
+[PASS] the event award is applied once the correction ends
+[PASS] the member has the event XP exactly once
+[PASS] the event award is never paid twice
+
+ALL ONE-SHOT XP DURABILITY CHECKS PASSED

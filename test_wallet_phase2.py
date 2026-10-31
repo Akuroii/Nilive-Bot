@@ -13,7 +13,7 @@ existing engine tests:
   7. Claim panel embeds match the spec field names.
   8. Receipts format uses relative time and configured currency names.
   9. Inventory embeds do NOT contain "Expires"/"Paid"/"Bought".
- 10. Item detail embed has Equip/Unequip/Drop/Back for equippables.
+ 10. Item detail embed has Equip/Unequip/Back (no Drop) for equippables.
 """
 import os
 import sys
@@ -180,13 +180,14 @@ async def main():
     )
     items = await _gi(GUILD, USER, include_empty=False)
     entries = await _decorate(GUILD, split_by_tab(items)[TAB_ITEMS])
-    iembed = build_inventory_embed(TAB_ITEMS, entries, None, None)
+    iembed = build_inventory_embed(
+        TAB_ITEMS, entries, bot_name="Nero", username="tester")
     ir = (iembed.title or "") + " " + (iembed.description or "")
     for banned in ("Paid:", "Bought:", "Expires", "paid", "bought"):
         check(f"inventory list contains no '{banned}'",
               banned.lower() not in ir.lower(), ir)
 
-    section("7. Item detail includes Equip/Drop/Back; no Expires")
+    section("7. Item detail includes Equip/Back; no Drop; no Expires")
     # We don't have a real Guild to pass, but we can build the View class
     # to confirm button labels.
     from cogs.wallet import ItemPanelView
@@ -199,8 +200,9 @@ async def main():
     view = ItemPanelView(GUILD, USER, TAB_ITEMS, item, equipped=False)
     labels = sorted((c.label or "") for c in view.children)
     check("buttons include Equip", "Equip" in labels, str(labels))
-    check("buttons include Drop", "Drop" in labels, str(labels))
-    check("buttons include Back", "Back" in labels, str(labels))
+    check("buttons never include Drop", "Drop" not in labels, str(labels))
+    check("buttons include a Back action",
+          any(lbl.startswith("Back") for lbl in labels), str(labels))
 
     from cogs.wallet import build_item_embed
     dEmbed = build_item_embed(FakeGuild(), TAB_ITEMS, item, equipped=False)

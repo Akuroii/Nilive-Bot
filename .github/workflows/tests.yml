@@ -1,0 +1,104 @@
+name: tests
+
+# Minimal, deliberately partial CI.
+#
+# It runs ONLY the selected suites that are known-green with the real dependency set
+# from a clean checkout:
+#
+#   * `test_timed_ownership.py` — the ownership / late-delivery-rollback suite
+#     (`pip install -r requirements.txt pytest`, no secrets, no Discord socket).
+#   * `test_delivery_safety.py` — wallet deletion surface, descriptor isolation,
+#     atomic potion activation, required migration and Level/equip race.
+#   * `test_purchase_grant_ledger.py` — purchase provenance in `reward_grants`:
+#     one-transaction delivery, level-then-purchase consume order, grant-bound
+#     compensation (ABA, overlapping purchases, retry, concurrency) and the
+#     fail-closed legacy policy.
+#   * `npm test` — the hand-written Node harnesses for the dashboard JS
+#     (`scripts/run_js_tests.sh`; node only, no npm dependencies).
+#
+# The remaining root and `scripts/` Python suites are script-style harnesses
+# with documented pre-existing failures (4 of 72 `scripts/test_*.py`, 30 of 41
+# root `test_*.py` under pytest — see the audit report). They are NOT gated
+# here: a red build must mean a real regression, not a known-broken file.
+# Widen this workflow only after those files are green.
+
+# Pull requests only: a branch push must not start a build. CI runs when the
+# change is proposed for review, which is the point at which the result is
+# attached to a decision. Run `python -m pytest test_timed_ownership.py` and
+# `npm test` locally before pushing; nothing here does it for you.
+on:
+  pull_request:
+
+# No step needs to write to the repository or read secrets; both jobs only run
+# the checked-out code. Declare that explicitly instead of inheriting the
+# repository default (which can be read/write).
+permissions:
+  contents: read
+
+jobs:
+  python-ownership:
+    runs-on: ubuntu-latest
+    # A suite that never exits must fail the check, not sit "in progress" until
+    # the runner's 6-hour ceiling. The step below is the real bound; this is the
+    # backstop (install + suite, with room to spare).
+    timeout-minutes: 20
+    steps:
+      # Check out the PR's head commit explicitly. Without `ref`, checkout
+      # uses GitHub's temporary merge commit, so the run would describe the
+      # merge result rather than the candidate SHA under review.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify the exact PR head SHA is checked out
+        run: |
+          set -euo pipefail
+          expected="${{ github.event.pull_request.head.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "Expected SHA: $expected"
+          echo "Actual   SHA: $actual"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::checked-out SHA $actual does not match PR head $expected"
+            exit 1
+          fi
+          echo "OK: checked out the exact PR head SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Ownership / rollback / delivery safety
+        # `-v` names each test as it completes, so a hang shows the last test
+        # reached. `timeout -s ABRT` bounds the step and, with faulthandler
+        # enabled, dumps every thread's stack on the way out - that is what
+        # distinguishes "still running a test" from "finished, stuck in
+        # interpreter shutdown". This is a diagnostic bound, not a fix: a
+        # genuine hang still fails the job (exit 124/134).
+        run: PYTHONFAULTHANDLER=1 timeout -s ABRT 600 python -m pytest -v --tb=short test_timed_ownership.py test_delivery_safety.py test_purchase_grant_ledger.py
+
+  js-harnesses:
+    runs-on: ubuntu-latest
+    steps:
+      # Same explicit head SHA as the Python job: the JS result must describe
+      # the candidate SHA under review, not a merge commit.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify the exact PR head SHA is checked out
+        run: |
+          set -euo pipefail
+          expected="${{ github.event.pull_request.head.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "Expected SHA: $expected"
+          echo "Actual   SHA: $actual"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::checked-out SHA $actual does not match PR head $expected"
+            exit 1
+          fi
+          echo "OK: checked out the exact PR head SHA"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Node harnesses
+        run: npm test

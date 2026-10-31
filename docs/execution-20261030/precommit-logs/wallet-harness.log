@@ -1,0 +1,78 @@
+
+[1m1. Migration — new currency columns exist[0m
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+  [92mPASS[0m  coin_emoji_id column exists
+  [92mPASS[0m  diamond_name column exists
+  [92mPASS[0m  diamond_emoji_id column exists
+
+[1m2. Currency config — defaults + customization[0m
+  [92mPASS[0m  default coin name
+  [92mPASS[0m  default coin emoji
+  [92mPASS[0m  default diamond name
+  [92mPASS[0m  default diamond emoji
+  [92mPASS[0m  custom coin name
+  [92mPASS[0m  custom coin emoji
+  [92mPASS[0m  custom diamond name
+  [92mPASS[0m  custom diamond emoji
+
+[1m3. /daily command is removed[0m
+  [92mPASS[0m  wallet registers /wallet and /streak
+  [92mPASS[0m  /daily is not registered anywhere
+
+[1m4. drop_item removes full stack[0m
+  [92mPASS[0m  drop returns success
+  [92mPASS[0m  drop returns quantity 3
+  [92mPASS[0m  item no longer in inventory
+
+[1m5. Streak panel embeds — no UTC / capped / 00:00 / ![0m
+  [92mPASS[0m  streak preview contains no 'UTC'
+  [92mPASS[0m  streak preview contains no '00:00'
+  [92mPASS[0m  streak preview contains no 'capped'
+  [92mPASS[0m  streak preview contains no 'Bonus grows'
+  [92mPASS[0m  streak preview contains no '!'
+  [92mPASS[0m  preview has fields Daily Reward / Streak / Bonus
+  [92mPASS[0m  preview has no Cooldown field (unclaimed state)
+  [92mPASS[0m  claim shows 132 Gold
+  [92mPASS[0m  claim shows Day 7
+  [92mPASS[0m  claim shows +32 bonus
+  [92mPASS[0m  claim shows cooldown 2h 15m
+  [92mPASS[0m  claim receipt contains no 'UTC'
+  [92mPASS[0m  claim receipt contains no '00:00'
+  [92mPASS[0m  claim receipt contains no 'capped'
+  [92mPASS[0m  claim receipt contains no 'Bonus grows'
+  [92mPASS[0m  claim receipt contains no 'Prestige'
+  [92mPASS[0m  already-claimed has Cooldown
+  [92mPASS[0m  already-claimed has no UTC/00:00
+
+[1m6. Inventory embed — no Expires/Paid/Bought debug info[0m
+  [92mPASS[0m  inventory list contains no 'Paid:'
+  [92mPASS[0m  inventory list contains no 'Bought:'
+  [92mPASS[0m  inventory list contains no 'Expires'
+  [92mPASS[0m  inventory list contains no 'paid'
+  [92mPASS[0m  inventory list contains no 'bought'
+
+[1m7. Item detail includes Equip/Back; no Drop; no Expires[0m
+  [92mPASS[0m  buttons include Equip
+  [92mPASS[0m  buttons never include Drop
+  [92mPASS[0m  buttons include a Back action
+  [92mPASS[0m  item detail has no Expires field
+  [92mPASS[0m  item detail has Quantity/Rarity/Status
+
+[1m8. Receipts formatting — relative time, configured names[0m
+  [92mPASS[0m  receipts title uses custom coin name 'Gold'
+  [92mPASS[0m  receipts title uses custom emoji <:gold:123>
+  [92mPASS[0m  receipt line has relative time (just now/ago), not UTC
+  [92mPASS[0m  receipt line has no '!'
+
+[1m9. View timeout raised to 30 minutes[0m
+  [92mPASS[0m  VIEW_TIMEOUT >= 1800 (30 min)
+
+[1m10. No hardcoded 🪙 or 💎 in wallet embed render[0m
+  [92mPASS[0m  hub title is ✦ WALLET ✦
+  [92mPASS[0m  hub uses custom Gold emoji
+  [92mPASS[0m  hub uses custom Gems emoji
+  [92mPASS[0m  hub does not contain default 🪙
+  [92mPASS[0m  hub does not contain default 💎
+
+[1mResults: 54 passed, 0 failed[0m

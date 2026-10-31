@@ -1,0 +1,4 @@
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[TWITCH] Keeping Twitch live role 557 for 8201: still an active Booster reward role
+{'role_preserved_under_unknown': True, 'durable_obligations': [('booster_retention', 557)]}

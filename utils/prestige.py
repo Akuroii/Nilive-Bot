@@ -287,7 +287,14 @@ async def get_effective_prestige(guild_id: int, user_id: int,
         if guild is not None:
             if guild.id != guild_id:
                 return permanent
-            current = guild.get_member(user_id)
+            # A member object that cannot re-resolve itself from its guild is
+            # "unknown context", not an error: return the permanent tier and
+            # leave the VI session alone, exactly like a failed refresh below.
+            # Callers reach this with a snapshot whose guild is a partial stub.
+            get_member = getattr(guild, "get_member", None)
+            if get_member is None:
+                return permanent
+            current = get_member(user_id)
             if current is None:
                 # An event/interaction snapshot may predate a new session.
                 # Without a cache entry, refresh rather than trusting it.
@@ -621,6 +628,17 @@ async def sync_prestige_roles(bot, guild, member, effective_tier=None) -> None:
         if not role or role not in member.roles:
             continue
         if int(tier) != int(effective_tier):
+            # This retires the PREVIOUS tier's entitlement. The same role ID can
+            # also be owned through the Shop, so check the ownership records
+            # before taking it off: a tier change is not a refund.
+            from utils.timed_ownership import role_removal_blocked
+            kept_reason = await role_removal_blocked(
+                guild.id, member.id, int(role_id),
+                retiring=f"prestige:{int(tier)}", member=member)
+            if kept_reason:
+                print(f"[PRESTIGE] Keeping tier {tier} role {role_id} for "
+                      f"{member.id}: still {kept_reason}")
+                continue
             try:
                 await member.remove_roles(role, reason="Prestige tier changed")
             except Exception as e:

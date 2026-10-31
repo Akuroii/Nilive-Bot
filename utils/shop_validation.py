@@ -10,6 +10,29 @@ class ShopValidationError(ValueError):
     pass
 
 
+# Every internal type the backend accepts. The five choices the admin UI
+# offers map onto these; the rest are legacy types that existing listings and
+# existing purchase/level-claim paths still use and must keep working:
+#
+#   Items     -> custom   (duration 0 = permanent, > 0 = timed)
+#   Colors    -> color    (duration 0 = permanent role, > 0 = timed role)
+#   Potion    -> potion   (duration = effect length after activation)
+#   Title     -> title    (permanent cosmetic)
+#   Prestige  -> prestige (progression purchase, never an inventory holding)
+#
+#   role / temp_role / xp_boost  -> legacy, still accepted and still delivered
+#   through their existing paths. `xp_boost` is no longer offered at creation
+#   (Potion is not equivalent: a boost starts on purchase, a potion is held),
+#   but nothing that already exists is broken by hiding the option.
+SHOP_ITEM_TYPES = frozenset({
+    "custom", "color", "potion", "title", "prestige",
+    "role", "temp_role", "xp_boost",
+})
+
+# Public UI choices, in the exact order the admin sees them.
+PUBLIC_SHOP_TYPES = ("custom", "color", "potion", "title", "prestige")
+
+
 def integer(value, field, *, minimum=0, maximum=2**63 - 1):
     if isinstance(value, str) and re.fullmatch(r"[+-]?[0-9]+", value.strip()):
         try:
@@ -69,7 +92,7 @@ def shop_input(data):
         None if option_parent in (None, "")
         else integer(option_parent, "Option parent ID", minimum=1))
     kind = text(data.get("type"), "Item type", required=True)
-    if kind not in {"role", "temp_role", "xp_boost", "prestige", "potion", "title", "custom"}:
+    if kind not in SHOP_ITEM_TYPES:
         raise ShopValidationError("Invalid Shop item type.")
     result["type"] = kind
     vi = kind == "prestige" and integer(data.get("prestige_tier"), "Prestige tier", minimum=1, maximum=6) == 6
@@ -85,6 +108,11 @@ def shop_input(data):
         result[field] = None if value in (None, "") else integer(value, field)
         if result[field] == 0:
             result[field] = None
+    # Prestige is a progression purchase, not a holding: a duration on it has
+    # never had any effect and must not start implying one now that duration
+    # means something for real products. VI already clears the field above.
+    if kind == "prestige" and result["duration_hours"] is not None:
+        raise ShopValidationError("Prestige is permanent and cannot have a duration.")
     result["featured"] = integer(data.get("featured", 0), "Featured", maximum=1)
     result["required_level"] = 0 if vi else integer(data.get("required_level", 0), "Required level")
     tier = data.get("prestige_tier")
@@ -119,8 +147,28 @@ def shop_input(data):
             raise ShopValidationError("Effect multiplier must be greater than 1.")
         if result["duration_hours"] is None:
             raise ShopValidationError("Effect duration must be positive.")
-    if kind in {"role", "temp_role"} and result["role_id"] is None:
+        # A Potion's duration_hours is the effect length AFTER activation, not
+        # the lifetime of the stored item, so a role ID on one is meaningless.
+        if kind == "potion" and result["role_id"] is not None:
+            raise ShopValidationError("A potion cannot have a role ID.")
+    if kind in {"role", "temp_role", "color"} and result["role_id"] is None:
         raise ShopValidationError("A role item requires a role ID.")
     if kind == "temp_role" and result["duration_hours"] is None:
         raise ShopValidationError("A temporary role requires a positive duration.")
+    if kind == "title" and result.get("duration_hours") is not None:
+        # Titles are cosmetic and permanent; generic timed-ownership semantics
+        # are not defined for them, so a duration is refused rather than
+        # silently ignored (which is what used to happen).
+        raise ShopValidationError("Titles are permanent and cannot have a duration.")
+    if kind == "title" and multiplier is not None:
+        raise ShopValidationError("A title cannot have an effect multiplier.")
+    if kind in {"custom", "color"} and multiplier is not None:
+        raise ShopValidationError("Only potions and XP boosts have an effect multiplier.")
+    if kind == "custom" and result["role_id"] is not None:
+        # Item listings carry no Discord role; a role belongs to Colors.
+        raise ShopValidationError("An Item cannot have a role ID — use Colors.")
+    if kind == "color":
+        # Normalized so callers compare one shape: None means permanent, a
+        # positive int means the role entitlement expires.
+        result["duration_hours"] = result["duration_hours"] or None
     return result

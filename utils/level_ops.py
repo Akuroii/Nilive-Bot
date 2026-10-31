@@ -89,6 +89,15 @@ KIND_ROLE = "role"
 # journal kind rather than a wallet movement: the value is elapsed time.
 KIND_BOOST = "boost"
 
+# WHO recorded a `reward_grants` row. `kind` says what value moved (inventory,
+# currency, ...); `grant_source` says which system granted it, because the
+# same stack can hold units from a level reward and from a Shop purchase and
+# each system may only take back units its own grant still accounts for. This
+# is a column of its own, never inferred from `claim_id` (a purchase has none)
+# or from `track`.
+GRANT_SOURCE_LEVEL = "level_reward"
+GRANT_SOURCE_PURCHASE = "shop_purchase"
+
 # How long an operation may hold a member's lock. Long enough to cover several
 # Discord API round-trips, short enough that a crashed process does not wedge the
 # member forever. Sampled inside the write transaction, never before it.
@@ -303,6 +312,44 @@ async def ensure_tables(db: aiosqlite.Connection | None = None) -> None:
             except aiosqlite.OperationalError as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
+        # Purchase provenance shares this ledger. Three additive columns:
+        #   grant_source - which system granted (see GRANT_SOURCE_*). Every row
+        #                  written before the column existed was written by the
+        #                  level claim engine, the only writer at the time, so
+        #                  the backfill is a statement of fact, not a guess.
+        #   reversed_at / reversed_by - set exactly once when a purchase grant is
+        #                  taken back; the guard that makes a repeated
+        #                  compensation a no-op instead of a second deduction.
+        # Quantities and timestamps of existing rows are not touched. The
+        # backfill runs only in the call that adds the column: `ensure_tables`
+        # is also reached lazily from read-only paths (previews, inspections),
+        # which must not write. Every reader treats a NULL `grant_source` as a
+        # level grant anyway (consume order, reset report), so a row that
+        # somehow stays NULL is still accounted for correctly.
+        cursor = await connection.execute("PRAGMA table_info(reward_grants)")
+        grant_columns = {row[1] for row in await cursor.fetchall()}
+        for column, ddl in (("grant_source", "TEXT"),
+                            ("reversed_at", "TEXT"),
+                            ("reversed_by", "TEXT")):
+            if column not in grant_columns:
+                try:
+                    await connection.execute(
+                        f"ALTER TABLE reward_grants ADD COLUMN {column} {ddl}")
+                except aiosqlite.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+                if column == "grant_source":
+                    await connection.execute(
+                        "UPDATE reward_grants SET grant_source=? "
+                        "WHERE grant_source IS NULL", (GRANT_SOURCE_LEVEL,))
+        # One purchase operation delivers one grant. A second INSERT for the
+        # same operation fails here and takes its inventory increment down with
+        # it (same transaction), so a retried delivery cannot hand out a second
+        # unit. Partial index: level grants carry level operation ids that may
+        # legitimately repeat across claims.
+        await connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_rg_purchase_operation "
+            "ON reward_grants(operation_id) WHERE grant_source='shop_purchase'")
 
     if db is not None:
         await create(db)
@@ -1085,7 +1132,8 @@ async def record_grant(db: aiosqlite.Connection, *, guild_id: int, user_id: int,
                        quantity: int, item_name: str | None = None,
                        currency: str | None = None,
                        ledger_id: int | None = None,
-                       operation_id: str | None = None) -> str:
+                       operation_id: str | None = None,
+                       grant_source: str = GRANT_SOURCE_LEVEL) -> str:
     """Record what one level reward granted, inside the caller's transaction.
 
     Called by the claim engine while it delivers, so the grant row commits with
@@ -1098,12 +1146,34 @@ async def record_grant(db: aiosqlite.Connection, *, guild_id: int, user_id: int,
     await db.execute(
         "INSERT INTO reward_grants (grant_id, guild_id, user_id, claim_id, "
         "reward_level, track, kind, item_name, currency, ledger_id, quantity, "
-        "remaining_quantity, operation_id, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "remaining_quantity, operation_id, created_at, grant_source) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (grant_id, guild_id, user_id, claim_id, reward_level, track, kind,
          item_name, currency, ledger_id, int(quantity), int(quantity),
-         operation_id, _now()))
+         operation_id, _now(), grant_source))
     return grant_id
+
+
+async def record_purchase_grant(db: aiosqlite.Connection, *, guild_id: int,
+                                user_id: int, operation_id: str,
+                                item_name: str, quantity: int = 1) -> str:
+    """Record what one Shop purchase put into a stack, inside the caller's
+    transaction - the same transaction as the `inventory_items` increment.
+
+    The purchase operation id is the only identity a later compensation may use
+    (`reverse_purchase_grant`). `idx_rg_purchase_operation` makes a second grant
+    for the same operation an integrity error, which rolls the caller's
+    inventory increment back with it.
+    """
+    if not operation_id or not str(operation_id).strip():
+        raise LevelOpsError("a purchase grant requires the purchase operation id")
+    if int(quantity) <= 0:
+        raise LevelOpsError("a purchase grant must have a positive quantity")
+    return await record_grant(
+        db, guild_id=guild_id, user_id=user_id, claim_id=None,
+        reward_level=None, track="shop", kind=KIND_INVENTORY,
+        quantity=int(quantity), item_name=item_name,
+        operation_id=str(operation_id), grant_source=GRANT_SOURCE_PURCHASE)
 
 
 async def consume_grants(db: aiosqlite.Connection | None, guild_id: int,
@@ -1112,8 +1182,14 @@ async def consume_grants(db: aiosqlite.Connection | None, guild_id: int,
 
     Called by every path that removes units from an inventory stack, so
     `remaining_quantity` keeps meaning "units of this reward that are still
-    there". Returns the number of units attributed to level-reward grants; the
-    rest came from elsewhere and no grant is touched for them.
+    there". Returns the number of units attributed to grants; the rest came
+    from elsewhere and no grant is touched for them.
+
+    Order: level-reward grants first (by id), then Shop purchase grants (by
+    id). Purchase grants joined this ledger later; consuming level grants
+    first, exactly as before they existed, keeps level-reward accounting
+    unchanged. A NULL `grant_source` (a row written by a process that predates
+    the column) sorts with level grants, which is what it is.
     """
     if quantity <= 0:
         return 0
@@ -1126,8 +1202,10 @@ async def consume_grants(db: aiosqlite.Connection | None, guild_id: int,
         cursor = await connection.execute(
             "SELECT grant_id, remaining_quantity FROM reward_grants "
             "WHERE guild_id=? AND user_id=? AND item_name=? AND kind=? "
-            "AND remaining_quantity > 0 AND unattributed=0 ORDER BY id",
-            (guild_id, user_id, item_name, KIND_INVENTORY))
+            "AND remaining_quantity > 0 AND unattributed=0 "
+            "ORDER BY CASE WHEN grant_source = ? THEN 1 ELSE 0 END, id",
+            (guild_id, user_id, item_name, KIND_INVENTORY,
+             GRANT_SOURCE_PURCHASE))
         for grant_id, remaining in await cursor.fetchall():
             if left <= 0:
                 break
@@ -1183,6 +1261,154 @@ async def invalidate_grants(db: aiosqlite.Connection | None, guild_id: int,
             await own.execute("ROLLBACK")
             raise
     return affected
+
+
+async def purchase_grant(operation_id: str, *, db=None) -> dict | None:
+    """The provenance row one Shop purchase wrote, if it exists."""
+    sql = ("SELECT grant_id, guild_id, user_id, item_name, quantity, "
+           "remaining_quantity, unattributed, unattributed_reason, "
+           "reversed_at, reversed_by, created_at FROM reward_grants "
+           "WHERE operation_id=? AND grant_source=?")
+    params = (str(operation_id), GRANT_SOURCE_PURCHASE)
+
+    async def read(connection):
+        cursor = await connection.execute(sql, params)
+        return await cursor.fetchone()
+
+    if db is not None:
+        await ensure_tables(db)
+        row = await read(db)
+    else:
+        await ensure_tables()
+        async with aiosqlite.connect(DB_PATH, timeout=10) as own:
+            row = await read(own)
+    if not row:
+        return None
+    return {"grant_id": row[0], "guild_id": row[1], "user_id": row[2],
+            "item_name": row[3], "quantity": row[4],
+            "remaining_quantity": row[5], "unattributed": bool(row[6]),
+            "unattributed_reason": row[7], "reversed_at": row[8],
+            "reversed_by": row[9], "created_at": row[10]}
+
+
+# Outcomes of `reverse_purchase_grant`. Only `applied` moved a unit.
+PURCHASE_REVERSAL_APPLIED = "applied"
+PURCHASE_REVERSAL_ALREADY = "already_applied"
+PURCHASE_REVERSAL_REFUSED = "refused"
+
+# Refusal codes. Each is a different operator conversation, so they are
+# distinct values rather than one "could not" string.
+REFUSAL_NO_PROVENANCE = "legacy_no_provenance"
+REFUSAL_IDENTITY = "identity_mismatch"
+REFUSAL_INVALIDATED = "provenance_invalidated"
+REFUSAL_CONSUMED = "consumed_before_rollback"
+
+
+async def reverse_purchase_grant(db: aiosqlite.Connection, *, operation_id: str,
+                                 guild_id: int, user_id: int, item_name: str,
+                                 reversed_by: str | None = None) -> dict:
+    """Take back what a Shop purchase granted - at most once, by grant.
+
+    Runs inside the CALLER's open `BEGIN IMMEDIATE` transaction and never
+    commits: the caller owns the purchase descriptor it persists alongside, and
+    both must land together or not at all.
+
+    The purchase operation id names the grant. Nothing else is evidence: not
+    the item name alone, not an inventory snapshot, not the stack quantity. The
+    unit is removed only when the grant still accounts for it
+    (`remaining_quantity = 1`, not invalidated, not already reversed); every
+    other state is reported with a code and NOTHING is written.
+
+    Idempotency: `reversed_at` is set in the same UPDATE that zeroes
+    `remaining_quantity`, guarded by `WHERE remaining_quantity >= 1 AND
+    reversed_at IS NULL`. A retry (this process, another process, or after a
+    crash before the caller committed) finds either `reversed_at` set -
+    `already_applied`, no movement - or a grant still at 1, in which case the
+    earlier attempt never committed and the reversal is applied once now.
+
+    Returns {"status", "code", "grant_id", "reason"}. Raises `LevelOpsError`
+    when the ledger and the stack disagree (the stack would go negative, or the
+    guarded UPDATE touched other than one row): the caller must roll back.
+    """
+    await ensure_tables(db)
+    op = str(operation_id or "").strip()
+    if not op:
+        return {"status": PURCHASE_REVERSAL_REFUSED, "code": REFUSAL_NO_PROVENANCE,
+                "grant_id": None,
+                "reason": "no purchase operation id, so no grant can be named"}
+
+    cursor = await db.execute(
+        "SELECT grant_id, guild_id, user_id, item_name, quantity, "
+        "remaining_quantity, unattributed, unattributed_reason, reversed_at, "
+        "reversed_by FROM reward_grants WHERE operation_id=? AND grant_source=?",
+        (op, GRANT_SOURCE_PURCHASE))
+    row = await cursor.fetchone()
+    if row is None:
+        return {
+            "status": PURCHASE_REVERSAL_REFUSED, "code": REFUSAL_NO_PROVENANCE,
+            "grant_id": None,
+            "reason": (f"purchase {op} has no grant record: it was delivered "
+                       f"before purchase provenance existed, and "
+                       f"inventory_items merges units from every source into "
+                       f"one quantity, so the unit cannot be shown to be this "
+                       f"purchase's; resolve by hand")}
+    (grant_id, g_guild, g_user, g_item, g_qty, remaining, unattributed,
+     why, reversed_at, prior_by) = row
+
+    if (int(g_guild), int(g_user), str(g_item)) != (
+            int(guild_id), int(user_id), str(item_name)):
+        return {
+            "status": PURCHASE_REVERSAL_REFUSED, "code": REFUSAL_IDENTITY,
+            "grant_id": grant_id,
+            "reason": (f"grant {grant_id} for purchase {op} belongs to guild "
+                       f"{g_guild} user {g_user} item {g_item!r}, but the "
+                       f"descriptor names guild {guild_id} user {user_id} item "
+                       f"{item_name!r}; refusing to touch either stack")}
+    if reversed_at:
+        return {"status": PURCHASE_REVERSAL_ALREADY, "code": None,
+                "grant_id": grant_id,
+                "reason": f"already reversed at {reversed_at} by {prior_by}"}
+    if unattributed:
+        return {"status": PURCHASE_REVERSAL_REFUSED, "code": REFUSAL_INVALIDATED,
+                "grant_id": grant_id,
+                "reason": f"provenance was invalidated: {why}"}
+    if int(remaining or 0) < 1:
+        return {
+            "status": PURCHASE_REVERSAL_REFUSED, "code": REFUSAL_CONSUMED,
+            "grant_id": grant_id,
+            "reason": (f"this purchase granted {int(g_qty)} unit(s) and 0 are "
+                       f"still attributable - the unit was used, traded or "
+                       f"dropped before the rollback, so taking one now would "
+                       f"remove a unit from another source")}
+
+    # Only what the grant still accounts for comes back. The Shop grants one
+    # unit per operation, so `take` is 1 there; a larger grant that was partly
+    # consumed gives back its attributable remainder and nothing from anyone
+    # else. Stack first, with its own guard; then the grant, with its own
+    # guard. Both must report exactly one row or the ledger and the stack
+    # disagree, and the caller's ROLLBACK is the only correct response.
+    take = min(int(remaining), int(g_qty))
+    cursor = await db.execute(
+        "UPDATE inventory_items SET quantity = quantity - ?, "
+        "updated_at = CURRENT_TIMESTAMP WHERE guild_id=? AND user_id=? "
+        "AND item_name=? AND quantity >= ?",
+        (take, int(guild_id), int(user_id), str(item_name), take))
+    if cursor.rowcount != 1:
+        raise LevelOpsError(
+            f"inventory guard rejected the purchase reversal for {op}: grant "
+            f"{grant_id} still accounts for {take} unit(s) but the stack holds "
+            f"fewer")
+    cursor = await db.execute(
+        "UPDATE reward_grants SET remaining_quantity = remaining_quantity - ?, "
+        "reversed_at=?, reversed_by=? WHERE grant_id=? "
+        "AND remaining_quantity >= ? AND reversed_at IS NULL",
+        (take, _now(), str(reversed_by or op), grant_id, take))
+    if cursor.rowcount != 1:
+        raise LevelOpsError(
+            f"provenance guard rejected the purchase reversal for {op}")
+    return {"status": PURCHASE_REVERSAL_APPLIED, "code": None,
+            "grant_id": grant_id, "units_removed": take,
+            "reason": f"{take} unit(s) removed"}
 
 
 async def grant_for_claim(guild_id: int, user_id: int, claim_id: int,

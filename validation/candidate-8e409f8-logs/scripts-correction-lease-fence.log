@@ -1,0 +1,157 @@
+
+== A. correction pauses in remove_roles; a message award races it ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] A: the role reward is delivered and worn
+[PASS] A: the sweep is paused after deciding to remove the role
+[PASS] A: the racing award is DEFERRED, not applied
+[PASS] A: the member's XP did not move while the sweep holds the lease
+[PASS] A: the deferral is on the record, so the correction can see it
+[PASS] A: the correction reports the fence it took (nothing had raced it yet; the awarding writer was refused afterwards)
+[PASS] A: the role is off and the claim is deleted, because the award never became part of the member's XP
+[PASS] A: the member is at Level 11, not silently at Level 12
+[PASS] A: no claim row was left behind with a removed role
+[PASS] A: the deferred award applies once after the correction
+[PASS] A: and the retry crossed back to Level 12 exactly once
+[PASS] A: the re-cross reopens a claimable Level 12 row, so the reward is recoverable rather than lost
+
+== B. correction pauses; the dashboard edits the same member ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+Initializing database (dashboard process)...
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+Database ready (dashboard process).
+[PASS] B: the dashboard refuses with a retryable 409
+[PASS] B: the refusal names the correction and says nothing changed
+[PASS] B: the dashboard wrote no XP
+[PASS] B: the dashboard wrote no wallet values
+[PASS] B: the correction completed while the edit was refused
+[PASS] B: the same edit succeeds once the correction is over
+[PASS] B: and it still preserves the diamonds the modal never sent
+
+== C. the member re-crossed the level BEFORE the sweep read it ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] C: the sweep reports that the level had moved up
+[PASS] C: the role stays worn
+[PASS] C: the claim stays, so the reward can never be lost
+[PASS] C: nothing was reversed or journaled
+
+== D. a bypassing writer raises the level after the loop ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] D: the sweep detected the re-cross and kept the claim
+[PASS] D: it reported the claim as kept because the level was reached
+[PASS] D: and it put the role back on the member
+[PASS] D: the member is not left at Level 12 with no role and no claim
+
+== E-award-wins: the award gets in before the fence closes ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] E-award-wins: the injected award committed, it was not deferred
+[PASS] E-award-wins: the fence counted the award that raced it, so the sweep re-runs against the state that includes it
+[PASS] E-award-wins: the member is legitimately at Level 12
+[PASS] E-award-wins: the Level 12 the member holds was NOT deleted
+[PASS] E-award-wins: the member is wearing the role they are entitled to
+[PASS] E-award-wins: a production path can still deliver or restore this reward
+[PASS] E-award-wins: the wallet never paid a reward twice
+
+== E-correction-wins: the award is deferred, then re-earns it ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] E-correction-wins: the fenced award was deferred, not applied
+[PASS] E-correction-wins: the member really is at Level 11
+[PASS] E-correction-wins: the Level 12 the member no longer holds had its claim deleted and its role removed
+[PASS] E-correction-wins: the deferred award was re-earned on the next tick
+[PASS] E-correction-wins: the member is back at Level 12
+[PASS] E-correction-wins: the re-cross opened a claim a production path can still deliver from
+[PASS] E-correction-wins: the wallet never paid a reward twice
+
+== F. interrupted removal, then a clean retry ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] F: the failed removal is journaled, not counted as a reversal
+[PASS] F: the role is still worn and the claim still names it
+[PASS] F: the correction tells the administrator it could not finish
+[PASS] F: the retry removes the role and deletes the claim once
+[PASS] F: the journal has exactly one row and it says applied
+[PASS] F: the retry reports the reversal
+[PASS] F: re-running a completed correction changes nothing
+[PASS] F: the wallet was never touched
+
+== G. the lease is taken over while the sweep is paused ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] G: the correction really holds the lease while it talks to Discord
+[PASS] G: the sweep refuses to continue without authority
+[PASS] G: nothing was deleted
+[PASS] G: the claim is still terminal and still names the role
+[PASS] G: the reward is still accounted for in the ledger
+[PASS] G: a retry with authority finishes the correction
+
+== H. terminal `already_reversed` rows are not open cases ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] H: the terminal row is NOT listed as an open case
+[PASS] H: it cannot be resolved either
+[PASS] H: and its terminal status was not overwritten
+[PASS] H: an open case is still listed and still resolvable
+
+== I. the correction advice tells the truth about legacy rows ==
+[PASS] I: a legacy administrative row is NOT described as ordinary play
+[PASS] I: it is described as pre-operation-id and not reversible
+[PASS] I: an ordinary-play row still says it was crossed by ordinary play
+[PASS] I: a mixed list reports each count separately
+
+== J. a deferred award is applied once, later ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] J: three racing awards are all deferred
+[PASS] J: the retried award applies once
+[PASS] J: no XP was duplicated by the deferred attempts
+[PASS] J: the deferrals were only bookkeeping
+
+== K. an award commits between the XP write and the fence ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] K: the racing award was applied, not refused
+[PASS] K: the fence mechanism exists to record it
+[PASS] K: the correction counted the award and re-ran
+[PASS] K: the already-earned Level 12 reward survived the correction
+[PASS] K: and the sweep is honest that the level had moved up
+
+== L. a one-shot award waits for the correction and then applies ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] L: the one-shot award is waiting, not failed
+[PASS] L: it applied by itself once the correction finished
+[PASS] L: exactly once - the mission reward was not duplicated
+
+== M. the sweep is cancelled inside remove_roles ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] M: setup - the role is worn and the claim is fulfilled
+[PASS] M: the sweep is paused holding the lease
+[PASS] M: the lease is really held while it is paused
+[PASS] M: the task honoured the cancellation
+[PASS] M: the LEASE IS RELEASED, so XP writers are not fenced forever
+[PASS] M: the reward survived - the role is worn or a claim names it
+[PASS] M: ordinary XP writes work again after the cancellation
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] M: a retry afterwards still completes the correction
+
+== N. a lease whose TTL has passed fences nobody ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] N: the lease was taken
+[PASS] N: an expired lease is NOT reported as held
+[PASS] N: an ordinary award is not blocked by an expired lease
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[PASS] N: a sweep whose lease expired DELETES NOTHING
+[PASS] N: and it says its authority is gone
+[PASS] N: the claim and the role are left untouched
+
+ALL CORRECTION-LEASE FENCE CHECKS PASSED

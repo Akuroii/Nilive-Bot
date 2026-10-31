@@ -171,10 +171,21 @@ class FreePurchaseEngineTests(unittest.IsolatedAsyncioTestCase):
                         rows("SELECT item_name, item_type FROM inventory_items"),
                         [(f"Free {kind}", expected_type)], f"{kind}: reward not delivered")
                 elif artefact == "temp":
+                    # A timed role is a separately identifiable holding now:
+                    # it carries its own expiry and never shares a row with a
+                    # permanent copy of the same name.
                     self.assertEqual(
-                        rows("SELECT item_type FROM inventory_items"), [(expected_type,)])
-                    self.assertEqual(rows("SELECT COUNT(*) FROM temp_roles"), [(1,)],
-                                     "temp_role: the normal expiry row must still be written")
+                        rows("SELECT item_type, role_id FROM timed_holdings"),
+                        [(expected_type, 55)],
+                        f"{kind}: the timed ownership record must be written")
+                    self.assertEqual(
+                        rows("SELECT COUNT(*) FROM inventory_items"), [(0,)],
+                        f"{kind}: a timed holding must not be written as a "
+                        f"permanent inventory row")
+                    self.assertEqual(
+                        rows("SELECT COUNT(*) FROM timed_holdings "
+                             "WHERE expires_at IS NULL"), [(0,)],
+                        f"{kind}: expires_at must be set at delivery")
                 else:
                     self.assertEqual(
                         rows("SELECT COUNT(*) FROM leveling_active_boosts"), [(1,)],
@@ -255,7 +266,12 @@ class FreePurchaseEngineTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(2):
             itx, _ = purchase_context(granted_role=role_stub(55, "Cape"))
             await process_purchase(itx, item)
-        self.assertEqual(rows("SELECT COUNT(*) FROM temp_roles"), [(2,)])
+        # Two identical free grants are two independent holdings with their own
+        # expiry, not one merged row (merging would let one expiry destroy the
+        # other's remaining time).
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(2,)])
+        self.assertEqual(
+            rows("SELECT COUNT(DISTINCT expires_at) FROM timed_holdings"), [(2,)])
         self.assertEqual(len(history()), 2)
 
 
