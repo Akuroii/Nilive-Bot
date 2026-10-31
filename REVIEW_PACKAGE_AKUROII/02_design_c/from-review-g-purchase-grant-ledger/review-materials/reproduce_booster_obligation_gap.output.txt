@@ -1,0 +1,22 @@
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+[TWITCH] Keeping Twitch live role 557 for 8201: still an active Booster reward role
+{'role_preserved_under_unknown': True, 'durable_obligations': []}
+Traceback (most recent call last):
+  File "/home/user/nilive-clean/docs/execution-20261030/reproduce_booster_obligation_gap.py", line 35, in <module>
+    asyncio.run(main())
+    ~~~~~~~~~~~^^^^^^^^
+  File "/usr/local/lib/python3.13/asyncio/runners.py", line 196, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/usr/local/lib/python3.13/asyncio/runners.py", line 119, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/usr/local/lib/python3.13/asyncio/base_events.py", line 726, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/home/user/nilive-clean/docs/execution-20261030/reproduce_booster_obligation_gap.py", line 32, in main
+    assert obligations, "BLOCKER: source ended under unknown Booster eligibility without a durable retry obligation"
+           ^^^^^^^^^^^
+AssertionError: BLOCKER: source ended under unknown Booster eligibility without a durable retry obligation
+reproduce_booster_obligation_gap exit=1 (F out of scope, expected 1)

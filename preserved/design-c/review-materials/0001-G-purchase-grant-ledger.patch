@@ -1,0 +1,2142 @@
+From 3768d96f80c83aef008e665df132f04450ee77fa Mon Sep 17 00:00:00 2001
+From: local-review <review@local>
+Date: Fri, 30 Oct 2026 15:47:47 +0000
+Subject: [PATCH] =?UTF-8?q?G:=20purchase=20grant=20ledger=20=E2=80=94=20re?=
+ =?UTF-8?q?verse=20stackable=20rollbacks=20by=20grant,=20never=20by=20snap?=
+ =?UTF-8?q?shot?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Design C (owner-approved): Shop stackable deliveries (potion/title/custom)
+record a reward_grants row (grant_source='shop_purchase', operation_id=op_id)
+in the SAME transaction as the inventory increment. Late compensation takes a
+unit back ONLY through that grant (reverse_purchase_grant), after checking
+guild/user/item, remaining quantity, invalidation and reversed_at. Purchases
+with no grant (delivered before the ledger) stay pending as
+legacy_no_provenance; the runtime never removes a unit for them and never
+fabricates provenance. Operator closes them with
+--retire-rollback --yes --accept-unprovable --note (removes nothing).
+
+utils/level_ops.py
+  - grant_source / reversed_at / reversed_by columns (ALTER, one-shot backfill
+    NULL->level_reward in the call that adds the column; re-runs read-only)
+  - partial UNIQUE index idx_rg_purchase_operation (one op -> one grant)
+  - record_purchase_grant, purchase_grant, reverse_purchase_grant,
+    PURCHASE_REVERSAL_* / REFUSAL_* constants
+  - consume_grants: level grants first (by id), then purchase grants (by id)
+utils/reward_engine.py
+  - give_reward(op_id=): snapshot -> give_item(db=) -> grant -> snapshot in one
+    BEGIN IMMEDIATE; result carries grant_id
+  - rollback_item_inventory_grant REMOVED (unsafe snapshot comparator)
+utils/timed_ownership.py
+  - Branch 4 (stackables) uses reverse_purchase_grant; refused -> ROLLBACK,
+    descriptor pending with refusal_code; grant_id kept as identity field
+  - rollback_retirement_evidence reads the grant first; legacy ops report
+    legacy_no_provenance (snapshot is diagnostic only)
+  - retire_pending_rollback(accept_unprovable=) + CLI --accept-unprovable;
+    effects_live can never be closed by hand
+utils/level_test_reset.py: reset report excludes shop_purchase grants
+cogs/shop.py: op_id passed for potion/title/custom deliveries
+
+Tests
+  - test_purchase_grant_ledger.py (new, 29) added to CI
+  - test_timed_ownership.py: 8 tests that encoded snapshot semantics updated
+    (fixtures deliver through the ledger / new refusal codes); 241 pass
+  - reproduce_inventory_ambiguity.py: now covers legacy + provenanced ABA,
+    exits 0; helper absence asserted
+  - docs/execution-20261030/G-purchase-grant-ledger.md: design, policy,
+    runbook, behaviour changes
+---
+ .github/workflows/tests.yml                   |   6 +-
+ cogs/shop.py                                  |   9 +-
+ .../G-purchase-grant-ledger.md                | 103 +++
+ docs/execution-20261030/README.md             |   6 +
+ .../reproduce_inventory_ambiguity.py          |  97 ++-
+ test_purchase_grant_ledger.py                 | 624 ++++++++++++++++++
+ test_timed_ownership.py                       | 102 ++-
+ utils/level_ops.py                            | 242 ++++++-
+ utils/level_test_reset.py                     |   8 +-
+ utils/reward_engine.py                        | 196 ++----
+ utils/timed_ownership.py                      | 260 +++++---
+ 11 files changed, 1340 insertions(+), 313 deletions(-)
+ create mode 100644 docs/execution-20261030/G-purchase-grant-ledger.md
+ create mode 100644 test_purchase_grant_ledger.py
+
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index e8eb1ba..4466b90 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -9,6 +9,10 @@ name: tests
+ #     (`pip install -r requirements.txt pytest`, no secrets, no Discord socket).
+ #   * `test_delivery_safety.py` — wallet deletion surface, descriptor isolation,
+ #     atomic potion activation, required migration and Level/equip race.
++#   * `test_purchase_grant_ledger.py` — purchase provenance in `reward_grants`:
++#     one-transaction delivery, level-then-purchase consume order, grant-bound
++#     compensation (ABA, overlapping purchases, retry, concurrency) and the
++#     fail-closed legacy policy.
+ #   * `npm test` — the hand-written Node harnesses for the dashboard JS
+ #     (`scripts/run_js_tests.sh`; node only, no npm dependencies).
+ #
+@@ -54,7 +58,7 @@ jobs:
+         # distinguishes "still running a test" from "finished, stuck in
+         # interpreter shutdown". This is a diagnostic bound, not a fix: a
+         # genuine hang still fails the job (exit 124/134).
+-        run: PYTHONFAULTHANDLER=1 timeout -s ABRT 600 python -m pytest -v --tb=short test_timed_ownership.py test_delivery_safety.py
++        run: PYTHONFAULTHANDLER=1 timeout -s ABRT 600 python -m pytest -v --tb=short test_timed_ownership.py test_delivery_safety.py test_purchase_grant_ledger.py
+ 
+   js-harnesses:
+     runs-on: ubuntu-latest
+diff --git a/cogs/shop.py b/cogs/shop.py
+index 8bf82fd..4283608 100644
+--- a/cogs/shop.py
++++ b/cogs/shop.py
+@@ -921,7 +921,8 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
+             amount=1, item_name=name, item_type=POTION_ITEM_TYPE,
+             item_metadata=build_metadata(
+                 EFFECT_XP_BOOST, multiplier, duration_hours),
+-            reason=f"Shop purchase: {name}", source=source)
++            reason=f"Shop purchase: {name}", source=source,
++            op_id=str(op_id) if op_id else None)
+         if not granted.get("success"):
+             result.update(
+                 error=granted.get("error") or "Potion delivery failed.",
+@@ -945,7 +946,8 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
+         granted = await give_reward(
+             bot, guild_id, user_id, "item",
+             amount=1, item_name=name, item_type=TITLE_ITEM_TYPE,
+-            reason=f"Shop purchase: {name}", source=source)
++            reason=f"Shop purchase: {name}", source=source,
++            op_id=str(op_id) if op_id else None)
+         if not granted.get("success"):
+             result.update(
+                 error=granted.get("error") or "Title delivery failed.",
+@@ -982,7 +984,8 @@ async def _deliver_purchase(interaction: discord.Interaction, *,
+         granted = await give_reward(
+             bot, guild_id, user_id, "item",
+             amount=1, item_name=name, item_type="shop_custom",
+-            reason=f"Shop purchase: {name}", source=source)
++            reason=f"Shop purchase: {name}", source=source,
++            op_id=str(op_id) if op_id else None)
+         if not granted.get("success"):
+             result.update(
+                 error=granted.get("error") or "Item delivery failed.",
+diff --git a/docs/execution-20261030/G-purchase-grant-ledger.md b/docs/execution-20261030/G-purchase-grant-ledger.md
+new file mode 100644
+index 0000000..df4080d
+--- /dev/null
++++ b/docs/execution-20261030/G-purchase-grant-ledger.md
+@@ -0,0 +1,103 @@
++# G — purchase grant ledger (design C, as implemented on PR‑3)
++
++Status: implemented LOCALLY on `arena/pr3-delivery-fixes`, not pushed, not merged.
++Owner review pending. Replaces the snapshot-comparison rollback that
++`reproduce_inventory_ambiguity.py` proved unsafe (newer units removed; ABA).
++
++## The rule
++
++A stackable Shop unit (potion / title / custom) may be taken back by a late
++compensation **only through the `reward_grants` row that the purchase itself
++wrote, in the same transaction as the inventory increment.** Nothing else is
++evidence: not the item name, not the stack quantity, not the
++`delivered_inventory` snapshot (it is kept in the descriptor for diagnostics
++only — a same‑second re‑grant reproduces it byte for byte).
++
++## Schema (additive, `utils/level_ops.py` → `ensure_tables`)
++
++| change | detail |
++|---|---|
++| `reward_grants.grant_source TEXT` | `level_reward` \| `shop_purchase`. Added by `ALTER`; the **same call that adds the column** backfills `NULL → 'level_reward'` (every pre‑existing row was written by the level claim engine, the only writer at the time). Quantities/timestamps untouched. Re‑running `ensure_tables` later is read‑only (it is reached lazily from previews). Every reader treats `NULL` as a level grant. |
++| `reward_grants.reversed_at / reversed_by TEXT` | set exactly once when a purchase grant is taken back — the idempotency guard. |
++| `idx_rg_purchase_operation` | `UNIQUE (operation_id) WHERE grant_source='shop_purchase'`. One operation ⇒ one grant; a retried delivery fails the INSERT and its increment rolls back with it. Level operation ids may repeat, hence partial. |
++
++`reward_reversals` is **not** written for purchases (it is keyed by `claim_id`,
++which a purchase does not have; no fake claim ids). The purchase descriptor
++plus the grant row are the journal.
++
++## Write path (`utils/reward_engine.give_reward(..., op_id=)`)
++
++`BEGIN IMMEDIATE` → snapshot → `give_item(db=)` → `record_purchase_grant`
++(only when `op_id` given) → snapshot → `COMMIT`; rollback on any error or
++cancellation. `cogs/shop.py` passes `op_id` for potion, title and custom
++deliveries. Missions/minigames pass no `op_id`: no grant, unattributed, never
++reversible by anyone.
++
++## Consume order (`utils/level_ops.consume_grants`)
++
++`ORDER BY (grant_source='shop_purchase'), id` — level grants first (by id),
++then purchase grants (by id). No time‑FIFO across the two groups. Level‑reward
++accounting is exactly as before purchase grants existed. Consumption and the
++`remaining_quantity` update stay in one transaction (`_consume_provenance`).
++
++## Reversal (`utils/level_ops.reverse_purchase_grant`, inside the caller's tx)
++
++| state of the grant | result | writes |
++|---|---|---|
++| no row for `operation_id` | `refused` `legacy_no_provenance` | none |
++| guild/user/item ≠ descriptor | `refused` `identity_mismatch` | none |
++| `reversed_at` set | `already_applied` | none |
++| `unattributed=1` (after `set_quantity`/admin edit) | `refused` `provenance_invalidated` | none |
++| `remaining_quantity < 1` (used/traded/dropped) | `refused` `consumed_before_rollback` | none |
++| otherwise | `applied` | `inventory_items.quantity -= take WHERE quantity>=take` (rowcount must be 1) and `reward_grants.remaining -= take, reversed_at, reversed_by WHERE remaining>=take AND reversed_at IS NULL` (rowcount must be 1); otherwise `LevelOpsError` → caller `ROLLBACK` |
++
++`compensate_late_delivery` Branch 4 (stackables) now does only this. `applied`
++/ `already_applied` → `inventory_rolled_back=True`, descriptor progress and the
++movement commit together. `refused` → `ROLLBACK`, descriptor stays pending with
++`refusal_code` + `last_error`; reconciliation replays never change the answer.
++
++`utils/reward_engine.rollback_item_inventory_grant` is **deleted** (it was the
++unsafe snapshot comparator; no remaining caller).
++
++## Legacy policy (owner decision, fail‑closed)
++
++A purchase delivered before the ledger has no grant → it stays pending as
++`legacy_no_provenance`; the runtime never removes a unit for it and never
++fabricates provenance. Operator path:
++
++```
++python -m utils.timed_ownership --op-id <op> --check-rollback
++python -m utils.timed_ownership --op-id <op> --retire-rollback --yes --accept-unprovable \
++    --note "<what was decided and why, ≥20 chars>"
++```
++
++`--accept-unprovable` closes only `legacy_no_provenance`,
++`consumed_before_rollback`, `provenance_invalidated`; it still refuses
++`effects_live` (the runtime can finish that one — run a reconciliation pass).
++It removes nothing and writes an audit line `Rollback closed by operator
++decision [...] WITHOUT automatic removal` into `detail`.
++`rollback_retirement_evidence` now reads the grant first; a legacy op whose
++item has **no units left** is trivially retirable.
++
++Prod count (document only; a low number does not license snapshot rollback):
++
++```sql
++SELECT count(*) FROM shop_purchase_operations
++ WHERE delivery_rollback IS NOT NULL AND delivery_rollback <> ''
++   AND json_extract(delivery_rollback,'$.internal_type') IN ('potion','title','custom','shop_custom','item');
++```
++
++## Behaviour changes to be aware of
++
++1. An emptied stack is left as a `quantity=0` row (like `remove_item`), not deleted; the old path deleted the row when no prior row existed. All readers already filter `quantity>0`.
++2. The old restore of `prior_inventory` metadata/source/timestamps on rollback is gone; a reversal only decrements.
++3. Pending stackable rollbacks on prod that were recorded **before** this change have no grant and will become `legacy_no_provenance` on the next reconciliation pass instead of being rolled back by snapshot. This is the approved policy.
++4. `reward_grants` now contains rows with `claim_id NULL`, `track='shop'`. Level readers filter by `claim_id`/`kind` (`reverse_inventory`, `grant_for_claim`, `_role_granted_elsewhere`) or by `grant_source` (reset report), so they are unaffected.
++
++## Tests (all on the dirty PR‑3 worktree; commands and exit codes recorded in the PR body)
++
++- `test_purchase_grant_ledger.py` (new, 29): one‑tx delivery incl. exception / cancellation / `os._exit` between increment and grant; unique op; concurrent purchases; the six consume‑order cases incl. NULL `grant_source`; group isolation both directions (`reverse_inventory` vs purchase compensation); overlapping purchases; ABA; partial consumption; retry after success (durable + stale spec + direct ledger); concurrent consume vs compensate (exactly one unit moves); identity mismatch (runtime + ledger); invalidated provenance; descriptor+ledger atomicity; legacy pending + replay; retire refusals; `--accept-unprovable` closes without removal; `effects_live` cannot be forced; migration from a pre‑ledger table (idempotent, quantities intact, index present, level op ids may repeat); the reproducer exits 0.
++- `test_timed_ownership.py` (241): 8 tests encoded the snapshot semantics and were updated — P1 (`quantity=0` row), P2 (level provenance filter + purchase grant reversed once), P19/P33‑control/P48/legit‑stackable (fixtures now deliver through the ledger), P33/P49/CLI/D1 (message → `legacy_no_provenance` / `identity_mismatch`). No guard was weakened; the protected invariants are asserted unchanged.
++- `test_delivery_safety.py` (15) unchanged.
++- `scripts/test_level_ops_provenance.py`, `test_level_test_reset.py`, `test_xp_rollback.py`, `test_currency_reversal_consistency.py`, `test_correction_lease_fence.py`, `test_inflight_role_correction.py`, `test_lease_expiry_role_recovery.py`, `test_one_shot_xp_durability.py`, `test_xp_safety_audit.py`: exit 0 (needs `flask` installed for two of them).
++- `reproduce_inventory_ambiguity.py`: exit 0 (legacy + provenance paths, 2 newer units and ABA each). `reproduce_booster_obligation_gap.py`: still exit 1 — F is not in this change.
+diff --git a/docs/execution-20261030/README.md b/docs/execution-20261030/README.md
+index 0ade36a..e68b4a3 100644
+--- a/docs/execution-20261030/README.md
++++ b/docs/execution-20261030/README.md
+@@ -29,6 +29,12 @@ Potion scope: no new idempotency key. Separate legitimate activations may consum
+ 
+ ### G: old rollback can remove newer purchase units (data loss)
+ 
++> **Update (PR‑3, 2026‑10‑30):** resolved by the purchase grant ledger (design C) —
++> see [G-purchase-grant-ledger.md](G-purchase-grant-ledger.md). The reproducer
++> below now exits **0** and additionally covers the provenanced ABA case; the
++> `rollback_item_inventory_grant` helper is removed. The text that follows is
++> the original finding, kept as the record of what was reproduced on f9e413f.
++
+ Run:
+ 
+ ```bash
+diff --git a/docs/execution-20261030/reproduce_inventory_ambiguity.py b/docs/execution-20261030/reproduce_inventory_ambiguity.py
+index 3f5e15b..eefcc35 100644
+--- a/docs/execution-20261030/reproduce_inventory_ambiguity.py
++++ b/docs/execution-20261030/reproduce_inventory_ambiguity.py
+@@ -1,53 +1,102 @@
+-"""Known-red diagnostics: an old rollback must not remove later units.
++"""Diagnostics: an old rollback must never remove units it cannot prove it gave.
+ 
+-Run with PYTHONPATH=. python docs/execution-20261030/reproduce_inventory_ambiguity.py
++Run with OWNER_ID=1 PYTHONPATH=.:scripts python docs/execution-20261030/reproduce_inventory_ambiguity.py
+ Real SQLite and production inventory/compensation functions; scratch data only.
+ Purchases are journal fixtures, not end-to-end Discord purchase interactions.
+ Exit 1 is a delivery blocker, NOT an expected passing test or a skip.
++
++History: on f9e413f both the `rollback_item_inventory_grant` helper and the
++durable compensation path removed NEWER units (and in the same-second ABA case
++the snapshot comparison could not even tell anything had changed). Since the
++purchase grant ledger (G fix) the helper no longer exists and compensation
++reverses only the purchase's own `reward_grants` row, so this script covers:
++
++  * legacy     - the old purchase has no grant row (delivered before the ledger):
++                 compensation must refuse (`legacy_no_provenance`), stay
++                 pending, and leave every unit in place.
++  * provenance - both purchases delivered through the ledger; the OLD unit was
++                 consumed before the rollback, the NEWER one(s) remain. The
++                 old purchase's grant is spent, so compensation must refuse
++                 (`consumed_before_rollback`) and leave the newer units alone,
++                 even in the same-second ABA shape where the live row is
++                 byte-identical to the old snapshot.
+ """
+ import asyncio
+ from phase1_support import GUILD, USER, rows, reset_database, execute
+ from utils import inventory, timed_ownership as TO
+-from utils.reward_engine import rollback_item_inventory_grant
++from utils.reward_engine import give_reward
++from utils.level_ops import REFUSAL_NO_PROVENANCE, REFUSAL_CONSUMED
++
++try:  # the snapshot-comparing helper must be gone, not merely unused
++    from utils.reward_engine import rollback_item_inventory_grant  # noqa: F401
++except ImportError:
++    HELPER_REMOVED = True
++else:
++    HELPER_REMOVED = False
++
++
++async def _deliver(op_id, qty, *, with_grant):
++    if with_grant:
++        for _ in range(qty):
++            res = await give_reward(None, GUILD, USER, "item", amount=1,
++                                    item_name="Same", item_type="custom",
++                                    source="shop", op_id=str(op_id))
++            assert res.get("success") and res.get("grant_id"), res
++    else:
++        await inventory.give_item(GUILD, USER, "Same", qty,
++                                  item_type="custom", source="shop")
+ 
+ 
+ async def main():
+     failures = []
+-    for path in ("inventory_helper", "durable_compensation"):
++    if not HELPER_REMOVED:
++        failures.append(("helper_still_exists", None))
++    for path in ("legacy", "provenance"):
+         for newer_qty in (2, 1):
+             await reset_database()
++            with_grant = path == "provenance"
+             old_op = await TO.open_purchase(GUILD, USER, item_id=1, item_name="Same",
+                                             currency="balance", amount=100)
+-            await inventory.give_item(GUILD, USER, "Same", item_type="custom", source="shop")
++            await _deliver(old_op, 1, with_grant=with_grant)
+             snapshot = rows("SELECT id,quantity,item_type,source,metadata,created_at,updated_at "
+                             "FROM inventory_items WHERE item_name='Same'")[0]
+             await inventory.remove_item(GUILD, USER, "Same")
+-            newer_op = await TO.open_purchase(GUILD, USER, item_id=1, item_name="Same",
+-                                              currency="balance", amount=100)
+-            await inventory.give_item(GUILD, USER, "Same", newer_qty,
+-                                      item_type="custom", source="shop")
++            # One purchase operation delivers one unit (the ledger enforces one
++            # grant per operation), so `newer_qty` units are `newer_qty` ops.
++            newer_ops = []
++            for _ in range(newer_qty):
++                newer_op = await TO.open_purchase(GUILD, USER, item_id=1, item_name="Same",
++                                                  currency="balance", amount=100)
++                await _deliver(newer_op, 1, with_grant=with_grant)
++                newer_ops.append(newer_op)
+             if newer_qty == 1:
+                 # Same-second ABA: timestamps are not monotonic revisions.
+                 execute("UPDATE inventory_items SET updated_at=? WHERE item_name='Same'",
+                         (snapshot[6],))
+                 assert rows("SELECT id,quantity,item_type,source,metadata,created_at,updated_at "
+                             "FROM inventory_items WHERE item_name='Same'")[0] == snapshot
+-            if path == "inventory_helper":
+-                result = await rollback_item_inventory_grant(
+-                    GUILD, USER, "Same", delivered_inv=snapshot)
+-            else:
+-                spec = {"guild_id":GUILD,"user_id":USER,"item_id":1,"item_name":"Same",
+-                        "internal_type":"custom","delivered_inventory":snapshot}
+-                await TO.update_purchase(old_op, status="refunded")
+-                assert await TO.record_pending_delivery_rollback(old_op, spec)
+-                result = await TO.compensate_late_delivery(old_op, spec)
++            spec = {"guild_id": GUILD, "user_id": USER, "item_id": 1, "item_name": "Same",
++                    "internal_type": "custom", "delivered_inventory": snapshot}
++            await TO.update_purchase(old_op, status="refunded")
++            assert await TO.record_pending_delivery_rollback(old_op, spec)
++            result = await TO.compensate_late_delivery(old_op, spec)
+             left = rows("SELECT quantity FROM inventory_items WHERE item_name='Same'")
+-            print({"path":path,"old_operation":old_op,"newer_operation":newer_op,
+-                   "newer_units":newer_qty,"rollback_result":result,
+-                   "remaining":left,"safe":left==[(newer_qty,)]}, flush=True)
+-            if left != [(newer_qty,)]:
+-                failures.append((path,newer_qty))
+-    assert not failures, f"BLOCKER: old rollback removed newer units: {failures}"
++            pending = rows("SELECT delivery_rollback FROM shop_purchase_operations"
++                           " WHERE op_id=?", (old_op,))[0][0]
++            expected_code = REFUSAL_CONSUMED if with_grant else REFUSAL_NO_PROVENANCE
++            safe = (left == [(newer_qty,)]
++                    and not result.get("complete")
++                    and not result.get("inventory_rolled_back")
++                    and pending not in ("", None)
++                    and expected_code in str(result.get("error")))
++            print({"path": path, "old_operation": old_op, "newer_operations": newer_ops,
++                   "newer_units": newer_qty, "rollback_result": result,
++                   "remaining": left, "still_pending": pending not in ("", None),
++                   "safe": safe}, flush=True)
++            if not safe:
++                failures.append((path, newer_qty))
++    assert not failures, f"BLOCKER: old rollback removed newer units or misreported: {failures}"
++    print("OK: no unprovable deduction on any path", flush=True)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/test_purchase_grant_ledger.py b/test_purchase_grant_ledger.py
+new file mode 100644
+index 0000000..d2fdf39
+--- /dev/null
++++ b/test_purchase_grant_ledger.py
+@@ -0,0 +1,624 @@
++"""Purchase grant ledger (G fix) regressions. Real SQLite; scratch databases only.
++
++Run with: OWNER_ID=1 PYTHONPATH=.:scripts python -m pytest -q test_purchase_grant_ledger.py
++
++What is under test:
++  * `utils.reward_engine.give_reward(..., op_id=)` writes the stack increment and
++    the `reward_grants` row (`grant_source='shop_purchase'`) in ONE transaction.
++  * `utils.level_ops.consume_grants` consumes level grants first (by id), then
++    purchase grants (by id); never a pure time-FIFO across the two groups.
++  * `utils.level_ops.reverse_purchase_grant` takes back only the purchase's own
++    grant, once, after checking guild/user/item and the returnable quantity.
++  * `utils.timed_ownership.compensate_late_delivery` (stackable branch) uses that
++    and nothing else: no snapshot comparison, no name-addressed deduction.
++  * Legacy policy: a purchase with no grant row stays pending
++    (`legacy_no_provenance`); only an operator can close it, with a note, and
++    closing never removes a unit.
++"""
++import asyncio
++import json
++import os
++import subprocess
++import sys
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++from phase1_support import GUILD, USER, DB_PATH, execute, rows, reset_database
++import aiosqlite
++from utils import inventory
++from utils import level_ops as LO
++from utils import reward_engine as RE
++from utils import timed_ownership as TO
++from utils.reward_engine import give_reward
++
++OTHER_USER = USER + 1
++ITEM = "LedgerPotion"
++
++
++async def open_op(name=ITEM, user=USER):
++    return await TO.open_purchase(GUILD, user, item_id=1, item_name=name,
++                                  currency="balance", amount=100)
++
++
++async def deliver(op_id, name=ITEM, *, user=USER, item_type="potion"):
++    """One unit, the way the Shop delivers since the ledger: with its grant."""
++    res = await give_reward(None, GUILD, user, "item", amount=1, item_name=name,
++                            item_type=item_type, source="shop", op_id=str(op_id))
++    assert res.get("success") and res.get("grant_id"), res
++    return res
++
++
++def level_grant(name=ITEM, qty=1, *, claim_id, user=USER):
++    """A level-reward grant exactly as the claim engine records it."""
++    gid = f"lvl-{claim_id}"
++    execute("INSERT INTO reward_grants (grant_id,guild_id,user_id,claim_id,"
++            "reward_level,track,kind,item_name,quantity,remaining_quantity,"
++            "operation_id,created_at,grant_source) VALUES "
++            "(?,?,?,?,5,'level','inventory',?,?,?,?,'scratch','level_reward')",
++            (gid, GUILD, user, claim_id, name, qty, qty, f"lvl-op-{claim_id}"))
++    return gid
++
++
++def stack(name=ITEM, user=USER):
++    return rows("SELECT quantity FROM inventory_items WHERE guild_id=? AND"
++                " user_id=? AND item_name=?", (GUILD, user, name))
++
++
++def grants(name=ITEM, user=USER):
++    return rows("SELECT grant_id, grant_source, remaining_quantity,"
++                " reversed_at IS NOT NULL FROM reward_grants WHERE guild_id=?"
++                " AND user_id=? AND item_name=? ORDER BY id", (GUILD, user, name))
++
++
++def spec_for(op_id, name=ITEM, *, user=USER, internal_type="potion",
++             delivered=None, **extra):
++    spec = {"guild_id": GUILD, "user_id": user, "item_id": 1, "item_name": name,
++            "internal_type": internal_type, "inventory_rolled_back": False,
++            "equip_reconciled": False, "role_reconciled": False}
++    if delivered is not None:
++        spec["delivered_inventory"] = list(delivered)
++    spec.update(extra)
++    return spec
++
++
++async def refund_and_compensate(op_id, spec):
++    await TO.update_purchase(op_id, status=TO.PURCHASE_REFUNDED, refunded=1)
++    assert await TO.record_pending_delivery_rollback(op_id, spec, bot=None)
++    TO._PENDING_DELIVERY_ROLLBACKS.clear()
++    return await TO.compensate_late_delivery(op_id, dict(spec), bot=None)
++
++
++def descriptor(op_id):
++    return rows("SELECT delivery_rollback FROM shop_purchase_operations"
++                " WHERE op_id=?", (op_id,))[0][0]
++
++
++class LedgerBase(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        await reset_database()
++        TO._PENDING_DELIVERY_ROLLBACKS.clear()
++
++
++# ── 1. Delivery: increment + grant in one transaction ─────────────────────
++
++class DeliveryTransactionTests(LedgerBase):
++    async def test_purchase_writes_unit_and_grant_together(self):
++        op = await open_op()
++        res = await deliver(op)
++        self.assertEqual(stack(), [(1,)])
++        self.assertEqual(grants(), [(res["grant_id"], "shop_purchase", 1, 0)])
++        g = rows("SELECT claim_id, reward_level, track, kind, operation_id,"
++                 " quantity FROM reward_grants WHERE grant_id=?",
++                 (res["grant_id"],))[0]
++        self.assertEqual(g, (None, None, "shop", "inventory", op, 1))
++
++    async def test_failure_between_increment_and_grant_leaves_no_unit(self):
++        """Crash window: the increment ran, the grant did not. The transaction
++        is one, so the stack must not keep a unit without its grant."""
++        op = await open_op()
++        async def boom(*a, **k):
++            raise RuntimeError("simulated failure after give_item, before grant")
++        with patch.object(LO, "record_purchase_grant", boom):
++            res = await give_reward(None, GUILD, USER, "item", amount=1,
++                                    item_name=ITEM, item_type="potion",
++                                    source="shop", op_id=str(op))
++        self.assertFalse(res["success"], res)
++        self.assertEqual(stack(), [])
++        self.assertEqual(grants(), [])
++
++    async def test_cancellation_between_increment_and_grant_leaves_no_unit(self):
++        op = await open_op()
++        async def cancel(*a, **k):
++            raise asyncio.CancelledError()
++        with patch.object(LO, "record_purchase_grant", cancel):
++            with self.assertRaises(asyncio.CancelledError):
++                await give_reward(None, GUILD, USER, "item", amount=1,
++                                  item_name=ITEM, item_type="potion",
++                                  source="shop", op_id=str(op))
++        self.assertEqual(stack(), [])
++        self.assertEqual(grants(), [])
++
++    async def test_process_exit_before_commit_leaves_no_unit_and_no_grant(self):
++        """A real process death between the two writes: nothing committed."""
++        op = await open_op()
++        # The child inherits DATABASE_PATH (set by phase1_support), so it
++        # writes the same scratch file; it dies after the increment ran and
++        # before the grant/commit.
++        code = f'''
++import asyncio, os
++from utils import level_ops as LO
++from utils.reward_engine import give_reward
++async def main():
++    async def die(*a, **k):
++        os._exit(17)
++    LO.record_purchase_grant = die
++    await give_reward(None, {GUILD}, {USER}, "item", amount=1, item_name="{ITEM}",
++                      item_type="potion", source="shop", op_id="{op}")
++asyncio.run(main())
++'''
++        proc = await asyncio.to_thread(
++            subprocess.run, [sys.executable, "-c", code], env=dict(os.environ),
++            capture_output=True, text=True, timeout=60)
++        self.assertEqual(proc.returncode, 17, proc.stdout + proc.stderr)
++        self.assertEqual(stack(), [])
++        self.assertEqual(grants(), [])
++
++    async def test_one_operation_cannot_deliver_twice(self):
++        op = await open_op()
++        await deliver(op)
++        res = await give_reward(None, GUILD, USER, "item", amount=1,
++                                item_name=ITEM, item_type="potion",
++                                source="shop", op_id=str(op))
++        self.assertFalse(res["success"], res)
++        self.assertIn("UNIQUE", str(res["error"]))
++        self.assertEqual(stack(), [(1,)])
++        self.assertEqual(len(grants()), 1)
++
++    async def test_concurrent_purchases_each_get_their_own_grant(self):
++        ops = [await open_op() for _ in range(2)]
++        results = await asyncio.gather(*(deliver(op) for op in ops))
++        self.assertEqual(stack(), [(2,)])
++        self.assertEqual(sorted(r["grant_id"] for r in results),
++                         sorted(g[0] for g in grants()))
++        self.assertEqual([g[2] for g in grants()], [1, 1])
++
++    async def test_non_shop_item_grant_records_no_purchase_grant(self):
++        res = await give_reward(None, GUILD, USER, "item", amount=1,
++                                item_name=ITEM, item_type="potion",
++                                source="mission")
++        self.assertTrue(res["success"], res)
++        self.assertIsNone(res["grant_id"])
++        self.assertEqual(stack(), [(1,)])
++        self.assertEqual(grants(), [])
++
++
++# ── 2. Consume order: level first (by id), then purchase (by id) ──────────
++
++class ConsumeOrderTests(LedgerBase):
++    async def test_level_grant_consumed_first_even_when_purchase_is_older(self):
++        op = await open_op()
++        purchase = (await deliver(op))["grant_id"]          # older (lower id)
++        lvl = level_grant(claim_id=1)                       # newer
++        await inventory.give_item(GUILD, USER, ITEM, 1, item_type="potion",
++                                  source="level_claim")
++        self.assertEqual(stack(), [(2,)])
++        await inventory.remove_item(GUILD, USER, ITEM, 1)
++        self.assertEqual(grants(), [(purchase, "shop_purchase", 1, 0),
++                                    (lvl, "level_reward", 0, 0)])
++
++    async def test_multiple_level_grants_consumed_by_id(self):
++        a = level_grant(claim_id=1, qty=2)
++        b = level_grant(claim_id=2, qty=2)
++        await inventory.give_item(GUILD, USER, ITEM, 4, item_type="potion",
++                                  source="level_claim")
++        await inventory.remove_item(GUILD, USER, ITEM, 3)
++        self.assertEqual(grants(), [(a, "level_reward", 0, 0),
++                                    (b, "level_reward", 1, 0)])
++
++    async def test_multiple_purchase_grants_consumed_by_id_after_level(self):
++        lvl = level_grant(claim_id=1, qty=1)
++        await inventory.give_item(GUILD, USER, ITEM, 1, item_type="potion",
++                                  source="level_claim")
++        p1 = (await deliver(await open_op()))["grant_id"]
++        p2 = (await deliver(await open_op()))["grant_id"]
++        self.assertEqual(stack(), [(3,)])
++        await inventory.remove_item(GUILD, USER, ITEM, 2)
++        self.assertEqual(grants(), [(lvl, "level_reward", 0, 0),
++                                    (p1, "shop_purchase", 0, 0),
++                                    (p2, "shop_purchase", 1, 0)])
++
++    async def test_partial_consumption_crosses_from_level_to_purchase(self):
++        p1 = (await deliver(await open_op()))["grant_id"]
++        lvl = level_grant(claim_id=1, qty=2)
++        await inventory.give_item(GUILD, USER, ITEM, 2, item_type="potion",
++                                  source="level_claim")
++        p2 = (await deliver(await open_op()))["grant_id"]
++        # stack 4: level 2 + purchase 2. Take 3: both level units, then p1.
++        await inventory.remove_item(GUILD, USER, ITEM, 3)
++        self.assertEqual(grants(), [(p1, "shop_purchase", 0, 0),
++                                    (lvl, "level_reward", 0, 0),
++                                    (p2, "shop_purchase", 1, 0)])
++        self.assertEqual(stack(), [(1,)])
++
++    async def test_null_grant_source_rows_sort_with_level_grants(self):
++        """A row that still has a NULL `grant_source` counts as a level grant
++        (that is what it is); only the migration that adds the column
++        backfills, see MigrationTests."""
++        p1 = (await deliver(await open_op()))["grant_id"]
++        execute("INSERT INTO reward_grants (grant_id,guild_id,user_id,claim_id,"
++                "track,kind,item_name,quantity,remaining_quantity,created_at,"
++                "grant_source) VALUES ('old-row',?,?,9,'level','inventory',?,1,1,"
++                "'scratch',NULL)", (GUILD, USER, ITEM))
++        await inventory.give_item(GUILD, USER, ITEM, 1, item_type="potion",
++                                  source="level_claim")
++        await inventory.remove_item(GUILD, USER, ITEM, 1)
++        self.assertEqual(rows("SELECT remaining_quantity FROM reward_grants"
++                              " WHERE grant_id IN ('old-row',?) ORDER BY id",
++                              (p1,)), [(1,), (0,)])
++        # Re-running the schema check on an already-migrated table is a
++        # read-only no-op: it does not rewrite rows (previews reach it too).
++        LO.invalidate_tables_cache()
++        await LO.ensure_tables()
++        self.assertEqual(rows("SELECT grant_source FROM reward_grants"
++                              " WHERE grant_id='old-row'"), [(None,)])
++
++
++# ── 3. Group isolation: neither reversal reaches the other group ──────────
++
++class GroupIsolationTests(LedgerBase):
++    async def test_level_reversal_cannot_take_a_purchase_unit(self):
++        lvl = level_grant(claim_id=1)
++        await inventory.give_item(GUILD, USER, ITEM, 1, item_type="potion",
++                                  source="level_claim")
++        p = (await deliver(await open_op()))["grant_id"]
++        await inventory.remove_item(GUILD, USER, ITEM, 1)   # consumes lvl
++        self.assertEqual(grants(), [(lvl, "level_reward", 0, 0),
++                                    (p, "shop_purchase", 1, 0)])
++        res = await LO.reverse_inventory(
++            guild_id=GUILD, user_id=USER, claim_id=1, item_name=ITEM,
++            quantity=1, operation_id="lvl-reverse-1", reason="test")
++        self.assertNotEqual(res["status"], LO.STATUS_APPLIED, res)
++        self.assertEqual(stack(), [(1,)], "the purchase unit was taken by a level reversal")
++        self.assertEqual(grants()[1], (p, "shop_purchase", 1, 0))
++
++    async def test_purchase_compensation_cannot_take_a_level_unit(self):
++        lvl = level_grant(claim_id=1)
++        await inventory.give_item(GUILD, USER, ITEM, 1, item_type="potion",
++                                  source="level_claim")
++        op = await open_op()
++        res = await deliver(op)
++        # Hand-consume the PURCHASE grant only (simulating a trade of that unit
++        # recorded against it), leaving the level unit in the stack.
++        execute("UPDATE reward_grants SET remaining_quantity=0 WHERE grant_id=?",
++                (res["grant_id"],))
++        execute("UPDATE inventory_items SET quantity=1 WHERE guild_id=? AND"
++                " user_id=? AND item_name=?", (GUILD, USER, ITEM))
++        out = await refund_and_compensate(
++            op, spec_for(op, delivered=res["delivered_inventory"]))
++        self.assertFalse(out["complete"], out)
++        self.assertIn(LO.REFUSAL_CONSUMED, out["error"])
++        self.assertEqual(stack(), [(1,)], "the level unit was taken by a purchase rollback")
++        self.assertEqual(grants()[0], (lvl, "level_reward", 1, 0))
++
++
++# ── 4. Compensation: only the purchase's own grant, once ──────────────────
++
++class CompensationTests(LedgerBase):
++    async def test_overlapping_purchases_compensating_the_first_keeps_the_second(self):
++        op1 = await open_op(); r1 = await deliver(op1)
++        op2 = await open_op(); r2 = await deliver(op2)
++        self.assertEqual(stack(), [(2,)])
++        out = await refund_and_compensate(
++            op1, spec_for(op1, delivered=r1["delivered_inventory"]))
++        self.assertTrue(out["complete"], out)
++        self.assertTrue(out["inventory_rolled_back"])
++        self.assertEqual(stack(), [(1,)])
++        self.assertEqual(grants(), [(r1["grant_id"], "shop_purchase", 0, 1),
++                                    (r2["grant_id"], "shop_purchase", 1, 0)])
++        self.assertEqual(descriptor(op1), "")
++
++    async def test_aba_same_second_identical_row_is_not_evidence(self):
++        """The reproducer shape: old unit consumed, newer unit delivered, live
++        row byte-identical to the old snapshot. The old grant is spent, so the
++        rollback refuses and the newer unit stays."""
++        op_old = await open_op(); r_old = await deliver(op_old)
++        snapshot = tuple(r_old["delivered_inventory"])
++        await inventory.remove_item(GUILD, USER, ITEM, 1)
++        op_new = await open_op(); r_new = await deliver(op_new)
++        execute("UPDATE inventory_items SET updated_at=? WHERE item_name=?",
++                (snapshot[6], ITEM))
++        live = rows("SELECT id,quantity,item_type,source,metadata,created_at,"
++                    "updated_at FROM inventory_items WHERE item_name=?", (ITEM,))[0]
++        self.assertEqual(live, snapshot, "fixture must reproduce the ABA shape")
++        out = await refund_and_compensate(op_old, spec_for(op_old, delivered=snapshot))
++        self.assertFalse(out["complete"], out)
++        self.assertFalse(out["inventory_rolled_back"])
++        self.assertIn(LO.REFUSAL_CONSUMED, out["error"])
++        self.assertEqual(stack(), [(1,)])
++        self.assertEqual(grants(), [(r_old["grant_id"], "shop_purchase", 0, 0),
++                                    (r_new["grant_id"], "shop_purchase", 1, 0)])
++        self.assertNotEqual(descriptor(op_old), "")
++
++    async def test_partial_consumption_before_compensation_refuses(self):
++        op = await open_op(); r = await deliver(op)
++        await inventory.remove_item(GUILD, USER, ITEM, 1)
++        await inventory.give_item(GUILD, USER, ITEM, 1, item_type="potion",
++                                  source="mission")
++        out = await refund_and_compensate(op, spec_for(op, delivered=r["delivered_inventory"]))
++        self.assertFalse(out["complete"], out)
++        self.assertIn(LO.REFUSAL_CONSUMED, out["error"])
++        self.assertEqual(stack(), [(1,)], "a mission unit was taken for a consumed purchase")
++        self.assertEqual(json.loads(descriptor(op)).get("refusal_code"),
++                         LO.REFUSAL_CONSUMED)
++
++    async def test_retry_after_successful_compensation_does_not_deduct_again(self):
++        op = await open_op(); r = await deliver(op)
++        await inventory.give_item(GUILD, USER, ITEM, 1, item_type="potion",
++                                  source="mission")
++        spec = spec_for(op, delivered=r["delivered_inventory"])
++        await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
++        assert await TO.record_pending_delivery_rollback(op, spec, bot=None)
++        real_update = TO.update_purchase
++        async def clear_fails(oid, **kwargs):
++            if kwargs.get("delivery_rollback") == "":
++                raise RuntimeError("simulated crash before the completion sentinel")
++            return await real_update(oid, **kwargs)
++        with patch.object(TO, "update_purchase", clear_fails):
++            first = await TO.compensate_late_delivery(op, dict(spec), bot=None)
++        self.assertFalse(first["complete"], first)
++        self.assertTrue(first["inventory_rolled_back"])
++        self.assertEqual(stack(), [(1,)])
++        # Restart-equivalent retries from the durable descriptor, and from the
++        # stale in-memory spec: neither may move a second unit.
++        TO._PENDING_DELIVERY_ROLLBACKS.clear()
++        second = await TO.compensate_late_delivery(op, dict(spec), bot=None)
++        self.assertTrue(second["complete"], second)
++        self.assertEqual(stack(), [(1,)], "a second unit was deducted on retry")
++        self.assertEqual(grants(), [(r["grant_id"], "shop_purchase", 0, 1)])
++        self.assertEqual(descriptor(op), "")
++        # And straight at the ledger: already applied, no movement.
++        async with aiosqlite.connect(DB_PATH) as db:
++            await db.execute("BEGIN IMMEDIATE")
++            res = await LO.reverse_purchase_grant(
++                db, operation_id=op, guild_id=GUILD, user_id=USER,
++                item_name=ITEM, reversed_by="test")
++            await db.commit()
++        self.assertEqual(res["status"], LO.PURCHASE_REVERSAL_ALREADY, res)
++        self.assertEqual(stack(), [(1,)])
++
++    async def test_concurrent_consumption_and_compensation_move_exactly_one_unit(self):
++        op = await open_op(); r = await deliver(op)
++        spec = spec_for(op, delivered=r["delivered_inventory"])
++        await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
++        assert await TO.record_pending_delivery_rollback(op, spec, bot=None)
++        TO._PENDING_DELIVERY_ROLLBACKS.clear()
++
++        async def consume():
++            try:
++                await inventory.remove_item(GUILD, USER, ITEM, 1)
++                return "consumed"
++            except Exception as exc:  # insufficient quantity
++                return f"refused:{type(exc).__name__}"
++
++        consumed, out = await asyncio.gather(
++            consume(), TO.compensate_late_delivery(op, dict(spec), bot=None))
++        self.assertEqual(stack(), [(0,)], "stack must end at exactly zero")
++        g = grants()[0]
++        self.assertEqual(g[2], 0, "the grant must be spent exactly once")
++        if out["complete"]:
++            self.assertEqual(consumed[:7], "refused", (consumed, out))
++            self.assertEqual(g[3], 1)
++        else:
++            self.assertEqual(consumed, "consumed", (consumed, out))
++            self.assertIn(LO.REFUSAL_CONSUMED, out["error"])
++            self.assertEqual(g[3], 0)
++
++    async def test_identity_mismatch_user_refuses_without_writes(self):
++        op = await open_op(); r = await deliver(op)
++        await inventory.give_item(GUILD, OTHER_USER, ITEM, 1, item_type="potion",
++                                  source="shop")
++        # Runtime: the descriptor-vs-operation binding refuses first.
++        out = await refund_and_compensate(
++            op, spec_for(op, user=OTHER_USER, delivered=r["delivered_inventory"]))
++        self.assertFalse(out["complete"], out)
++        self.assertFalse(out["inventory_rolled_back"])
++        self.assertEqual(stack(), [(1,)])
++        self.assertEqual(stack(user=OTHER_USER), [(1,)])
++        # Ledger: the grant's own identity check refuses too, and writes nothing.
++        async with aiosqlite.connect(DB_PATH) as db:
++            await db.execute("BEGIN IMMEDIATE")
++            res = await LO.reverse_purchase_grant(
++                db, operation_id=op, guild_id=GUILD, user_id=OTHER_USER,
++                item_name=ITEM, reversed_by="test")
++            await db.commit()
++        self.assertEqual((res["status"], res["code"]),
++                         (LO.PURCHASE_REVERSAL_REFUSED, LO.REFUSAL_IDENTITY), res)
++        self.assertEqual(stack(), [(1,)])
++        self.assertEqual(stack(user=OTHER_USER), [(1,)])
++        self.assertEqual(grants(), [(r["grant_id"], "shop_purchase", 1, 0)])
++
++    async def test_invalidated_provenance_refuses(self):
++        op = await open_op(); r = await deliver(op)
++        await inventory.set_quantity(GUILD, USER, ITEM, 3, item_type="potion",
++                                     source="admin")
++        self.assertEqual(rows("SELECT unattributed FROM reward_grants"
++                              " WHERE grant_id=?", (r["grant_id"],)), [(1,)])
++        out = await refund_and_compensate(op, spec_for(op, delivered=r["delivered_inventory"]))
++        self.assertFalse(out["complete"], out)
++        self.assertIn(LO.REFUSAL_INVALIDATED, out["error"])
++        self.assertEqual(stack(), [(3,)])
++
++    async def test_descriptor_and_ledger_commit_together(self):
++        """The progress write inside the shared transaction fails: the unit
++        must come back and the grant must not be marked reversed."""
++        op = await open_op(); r = await deliver(op)
++        spec = spec_for(op, delivered=r["delivered_inventory"])
++        await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
++        assert await TO.record_pending_delivery_rollback(op, spec, bot=None)
++        TO._PENDING_DELIVERY_ROLLBACKS.clear()
++        real_update = TO.update_purchase
++        async def tx_progress_fails(oid, **kwargs):
++            raw = kwargs.get("delivery_rollback")
++            if kwargs.get("db") is not None and raw and \
++                    json.loads(raw).get("inventory_rolled_back"):
++                raise RuntimeError("simulated progress write failure inside tx")
++            return await real_update(oid, **kwargs)
++        with patch.object(TO, "update_purchase", tx_progress_fails):
++            out = await TO.compensate_late_delivery(op, dict(spec), bot=None)
++        self.assertFalse(out["complete"], out)
++        self.assertEqual(stack(), [(1,)])
++        self.assertEqual(grants(), [(r["grant_id"], "shop_purchase", 1, 0)])
++        self.assertFalse(json.loads(descriptor(op)).get("inventory_rolled_back"))
++
++
++# ── 5. Legacy policy: no grant -> pending; operator closes with a note ─────
++
++class LegacyPolicyTests(LedgerBase):
++    async def _legacy_op(self, extra_units=1):
++        op = await open_op()
++        await inventory.give_item(GUILD, USER, ITEM, 1, item_type="potion",
++                                  source="shop")               # no grant
++        snapshot = rows("SELECT id,quantity,item_type,source,metadata,created_at,"
++                        "updated_at FROM inventory_items WHERE item_name=?",
++                        (ITEM,))[0]
++        if extra_units:
++            await inventory.give_item(GUILD, USER, ITEM, extra_units,
++                                      item_type="potion", source="mission")
++        return op, snapshot
++
++    async def test_legacy_purchase_stays_pending_and_removes_nothing(self):
++        op, snap = await self._legacy_op()
++        out = await refund_and_compensate(op, spec_for(op, delivered=snap))
++        self.assertFalse(out["complete"], out)
++        self.assertFalse(out["inventory_rolled_back"])
++        self.assertIn(LO.REFUSAL_NO_PROVENANCE, out["error"])
++        self.assertEqual(stack(), [(2,)])
++        saved = json.loads(descriptor(op))
++        self.assertEqual(saved.get("refusal_code"), LO.REFUSAL_NO_PROVENANCE)
++        # Replays never change their mind.
++        for _ in range(2):
++            TO._PENDING_DELIVERY_ROLLBACKS.clear()
++            rec = await TO.reconcile_purchases(bot=None)
++            self.assertEqual(rec.get("completed", 0), 0, rec)
++        self.assertEqual(stack(), [(2,)])
++        self.assertNotEqual(descriptor(op), "")
++
++    async def test_legacy_pending_refuses_retire_without_explicit_acceptance(self):
++        op, snap = await self._legacy_op()
++        await refund_and_compensate(op, spec_for(op, delivered=snap))
++        ok, msg = await TO.retire_pending_rollback(
++            op, confirmed=True, note="checked on Discord, nothing to do here")
++        self.assertFalse(ok, msg)
++        self.assertNotEqual(descriptor(op), "")
++        self.assertEqual(stack(), [(2,)])
++
++    async def test_legacy_pending_closed_by_operator_note_removes_nothing(self):
++        op, snap = await self._legacy_op()
++        await refund_and_compensate(op, spec_for(op, delivered=snap))
++        ok, msg = await TO.retire_pending_rollback(
++            op, confirmed=True, accept_unprovable=True, note="short")
++        self.assertFalse(ok, msg)
++        ok, msg = await TO.retire_pending_rollback(
++            op, confirmed=True, accept_unprovable=True,
++            note="member keeps the unit; purchase predates provenance (ticket 42)")
++        self.assertTrue(ok, msg)
++        self.assertEqual(descriptor(op), "")
++        self.assertEqual(stack(), [(2,)], "closing a legacy case removed a unit")
++        detail = rows("SELECT detail FROM shop_purchase_operations WHERE op_id=?",
++                      (op,))[0][0]
++        self.assertIn("WITHOUT automatic removal", detail)
++        self.assertIn("ticket 42", detail)
++        self.assertEqual(grants(), [], "closing fabricated provenance")
++
++    async def test_live_grant_cannot_be_closed_by_hand(self):
++        """`effects_live` is the runtime's to finish; the override must refuse."""
++        op = await open_op(); r = await deliver(op)
++        await TO.update_purchase(op, status=TO.PURCHASE_REFUNDED, refunded=1)
++        assert await TO.record_pending_delivery_rollback(
++            op, spec_for(op, delivered=r["delivered_inventory"]), bot=None)
++        verdict = await TO.rollback_retirement_evidence(op)
++        self.assertFalse(verdict["safe"], verdict)
++        self.assertEqual(verdict["code"], "effects_live")
++        ok, msg = await TO.retire_pending_rollback(
++            op, confirmed=True, accept_unprovable=True,
++            note="trying to force-close a rollback the runtime can finish")
++        self.assertFalse(ok, msg)
++        self.assertEqual(stack(), [(1,)])
++
++    async def test_retirement_evidence_reads_the_grant(self):
++        op = await open_op(); r = await deliver(op)
++        spec = spec_for(op, delivered=r["delivered_inventory"])
++        out = await refund_and_compensate(op, spec)
++        self.assertTrue(out["complete"], out)
++        # Evidence for a descriptor that (hypothetically) survived a correct
++        # rollback: the ledger says the unit came back, so it is retirable.
++        verdict = await TO.rollback_retirement_evidence(
++            op, op={"op_id": op, "status": TO.PURCHASE_REFUNDED,
++                    "guild_id": GUILD, "user_id": USER, "item_id": 1,
++                    "item_name": ITEM, "_raw_delivery_rollback": json.dumps(spec)})
++        self.assertTrue(verdict["safe"], verdict)
++        self.assertIn("taken back by grant", verdict["reason"])
++        # And a legacy op whose item has no units left is trivially retirable.
++        op2 = await open_op()
++        await inventory.give_item(GUILD, USER, "Gone", 1, item_type="potion", source="shop")
++        snap = rows("SELECT id,quantity,item_type,source,metadata,created_at,"
++                    "updated_at FROM inventory_items WHERE item_name='Gone'")[0]
++        await inventory.remove_item(GUILD, USER, "Gone", 1)
++        out2 = await refund_and_compensate(op2, spec_for(op2, "Gone", delivered=snap))
++        self.assertFalse(out2["complete"], out2)
++        verdict2 = await TO.rollback_retirement_evidence(op2)
++        self.assertTrue(verdict2["safe"], verdict2)
++        ok, msg = await TO.retire_pending_rollback(
++            op2, confirmed=True, note="no unit left; nothing to compensate")
++        self.assertTrue(ok, msg)
++        self.assertEqual(descriptor(op2), "")
++
++
++# ── 6. Migration ──────────────────────────────────────────────────────────
++
++class MigrationTests(LedgerBase):
++    async def test_pre_ledger_table_is_migrated_without_touching_quantities(self):
++        execute("DROP INDEX IF EXISTS idx_rg_purchase_operation")
++        for col in ("grant_source", "reversed_at", "reversed_by"):
++            execute(f"ALTER TABLE reward_grants DROP COLUMN {col}")
++        execute("INSERT INTO reward_grants (grant_id,guild_id,user_id,claim_id,"
++                "track,kind,item_name,quantity,remaining_quantity,operation_id,"
++                "created_at) VALUES ('legacy-1',?,?,3,'level','inventory',?,3,2,"
++                "'lvl-op-3','2026-01-01T00:00:00')", (GUILD, USER, ITEM))
++        before = rows("SELECT grant_id,quantity,remaining_quantity,created_at,"
++                      "operation_id FROM reward_grants")
++        for _ in range(2):                      # idempotent
++            LO.invalidate_tables_cache()
++            await LO.ensure_tables()
++        self.assertEqual(rows("SELECT grant_id,quantity,remaining_quantity,"
++                              "created_at,operation_id FROM reward_grants"), before)
++        self.assertEqual(rows("SELECT grant_source, reversed_at, reversed_by"
++                              " FROM reward_grants"), [("level_reward", None, None)])
++        self.assertEqual(rows("SELECT name FROM sqlite_master WHERE name="
++                              "'idx_rg_purchase_operation'"),
++                         [("idx_rg_purchase_operation",)])
++        # Level operation ids may repeat; only purchase operation ids are unique.
++        execute("INSERT INTO reward_grants (grant_id,guild_id,user_id,claim_id,"
++                "track,kind,item_name,quantity,remaining_quantity,operation_id,"
++                "created_at,grant_source) VALUES ('legacy-2',?,?,4,'level',"
++                "'inventory',?,1,1,'lvl-op-3','2026-01-01T00:00:00','level_reward')",
++                (GUILD, USER, ITEM))
++        self.assertEqual(rows("SELECT count(*) FROM reward_grants"), [(2,)])
++
++
++# ── 7. The reproducer stays green ────────────────────────────────────────
++
++class ReproducerTests(unittest.TestCase):
++    def test_reproduce_inventory_ambiguity_exits_zero(self):
++        script = Path.cwd() / "docs/execution-20261030/reproduce_inventory_ambiguity.py"
++        env = dict(os.environ, OWNER_ID="1",
++                   PYTHONPATH=f"{Path.cwd()}:{Path.cwd() / 'scripts'}")
++        proc = subprocess.run([sys.executable, str(script)], env=env,
++                              capture_output=True, text=True, timeout=180)
++        self.assertEqual(proc.returncode, 0, proc.stdout[-2000:] + proc.stderr[-2000:])
++        self.assertIn("OK: no unprovable deduction", proc.stdout)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test_timed_ownership.py b/test_timed_ownership.py
+index 27f227c..8ecad8c 100644
+--- a/test_timed_ownership.py
++++ b/test_timed_ownership.py
+@@ -38,6 +38,23 @@ from utils.shop_validation import shop_input, ShopValidationError
+ from cogs.shop import process_purchase
+ 
+ 
++async def late_deliver_unit(op_id, name, *, guild=None, user=None,
++                            item_type="potion", source="shop"):
++    """Deliver ONE stackable unit exactly as the Shop does since the purchase
++    grant ledger (G fix): the stack increment and the `reward_grants` row
++    (`grant_source='shop_purchase'`, `operation_id=op_id`) commit in one
++    transaction, and that grant is the only evidence a later compensation may
++    take the unit back by. Returns the `inventory_items` snapshot row."""
++    guild = GUILD if guild is None else guild
++    user = USER if user is None else user
++    res = await give_reward(None, guild, user, "item", amount=1,
++                            item_name=name, item_type=item_type,
++                            source=source, op_id=str(op_id))
++    assert res.get("success"), res
++    assert res.get("grant_id"), res
++    return tuple(res["delivered_inventory"])
++
++
+ # ── fixtures ────────────────────────────────────────────────────────────────
+ 
+ def shop_item(kind="custom", price=0, name="Thing", role_id=None,
+@@ -4281,13 +4298,17 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+                 saved_spec.get("inventory_rolled_back"),
+                 "Atomic item rollback must durably persist inventory_rolled_back=True before clear",
+             )
+-            # Late-delivered unit was rolled back
++            # Late-delivered unit was rolled back. Since the purchase grant
++            # ledger the reversal decrements the stack like `remove_item`
++            # does, so an emptied stack is a `quantity=0` row, not a deleted
++            # one; the readers (`get_inventory`, `has_item`, title/role
++            # entitlement) already treat both the same.
+             self.assertEqual(
+                 rows(
+-                    "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='P1Title'",
++                    "SELECT COALESCE(SUM(quantity),0) FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='P1Title'",
+                     (GUILD, USER),
+                 ),
+-                [],
++                [(0,)],
+             )
+             balance_after_refund = rows(
+                 "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+@@ -4456,12 +4477,24 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             )
+             self.assertEqual(
+                 rows(
+-                    "SELECT remaining_quantity FROM reward_grants WHERE guild_id=? AND user_id=? AND item_name='P2AtomicPotion'",
++                    "SELECT remaining_quantity FROM reward_grants WHERE guild_id=? AND user_id=?"
++                    " AND item_name='P2AtomicPotion'"
++                    " AND COALESCE(grant_source,'level_reward')='level_reward'",
+                     (GUILD, USER),
+                 ),
+                 [(1,)],
+                 "Reward provenance must remain completely intact",
+             )
++            # The unit came back through the purchase grant, not the stack
++            # size: the op's grant is spent and marked reversed exactly once.
++            self.assertEqual(
++                rows(
++                    "SELECT remaining_quantity, reversed_at IS NOT NULL FROM reward_grants"
++                    " WHERE operation_id=? AND grant_source='shop_purchase'",
++                    (op_id,),
++                ),
++                [(0, 1)],
++            )
+             self.assertFalse(bool((await TO.get_purchase(op_id)).get("delivery_rollback")))
+         finally:
+             shop_mod._deliver_purchase = real_deliver
+@@ -5956,14 +5989,12 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+         """
+         from utils.inventory import give_item
+         name = "P19StalePotion"
+-        await give_item(GUILD, USER, name, 3, item_type="potion", source="shop")
+-        delivered_snapshot = rows(
+-            "SELECT id, quantity, item_type, source, metadata, created_at,"
+-            " updated_at FROM inventory_items"
+-            " WHERE guild_id=? AND user_id=? AND item_name=?",
+-            (GUILD, USER, name))[0]
+-        op, stale_spec = await self._refunded_op(
+-            name, 9901, extra={"delivered_inventory": list(delivered_snapshot)})
++        # Two independent units, then the late-delivered unit WITH its
++        # purchase grant (the only thing the rollback may take back by).
++        await give_item(GUILD, USER, name, 2, item_type="potion", source="shop")
++        op, stale_spec = await self._refunded_op(name, 9901)
++        delivered_snapshot = await late_deliver_unit(op, name)
++        stale_spec["delivered_inventory"] = list(delivered_snapshot)
+         await TO.record_pending_delivery_rollback(op, stale_spec, bot=None)
+         TO._PENDING_DELIVERY_ROLLBACKS.clear()
+ 
+@@ -6777,15 +6808,12 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+         before_snap = rows(
+             "SELECT id,quantity,item_type,source,metadata,created_at,updated_at"
+             " FROM inventory_items WHERE item_name='Golden Key'")[0]
+-        await give_item(GUILD, USER, "Golden Key", 1, item_type="shop_custom",
+-                        source="shop")
+-        after_snap = rows(
+-            "SELECT id,quantity,item_type,source,metadata,created_at,updated_at"
+-            " FROM inventory_items WHERE item_name='Golden Key'")[0]
+         op2, spec2 = await self._refunded_op(
+-            "Golden Key", 9982, internal_type="shop_custom",
+-            extra={"prior_inventory": list(before_snap),
+-                   "delivered_inventory": list(after_snap)})
++            "Golden Key", 9982, internal_type="shop_custom")
++        after_snap = await late_deliver_unit(op2, "Golden Key",
++                                             item_type="shop_custom")
++        spec2["prior_inventory"] = list(before_snap)
++        spec2["delivered_inventory"] = list(after_snap)
+         await TO.record_pending_delivery_rollback(op2, spec2, bot=None)
+         TO._PENDING_DELIVERY_ROLLBACKS.clear()
+         res2 = await TO.compensate_late_delivery(op2, dict(spec2), bot=None)
+@@ -7509,15 +7537,10 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+         from utils.inventory import give_item
+         await give_item(GUILD, USER, other_name, 3, item_type="shop_custom",
+                         source="level_claim")
+-        await give_item(GUILD, USER, own_name, 1, item_type="shop_custom",
+-                        source="shop")
+-        delivered = rows(
+-            "SELECT id, quantity, item_type, source, metadata, created_at,"
+-            " updated_at FROM inventory_items WHERE guild_id=? AND user_id=?"
+-            " AND item_name=?", (GUILD, USER, own_name))[0]
+         op, spec = await self._refunded_op(
+-            own_name, 8820, internal_type="shop_custom",
+-            extra={"delivered_inventory": list(delivered)})
++            own_name, 8820, internal_type="shop_custom")
++        delivered = await late_deliver_unit(op, own_name, item_type="shop_custom")
++        spec["delivered_inventory"] = list(delivered)
+         spec["item_name"] = other_name
+         await TO.record_pending_delivery_rollback(op, spec, bot=None)
+         TO._PENDING_DELIVERY_ROLLBACKS.clear()
+@@ -7528,7 +7551,9 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+         res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
+ 
+         self.assertFalse(res["complete"], str(res))
+-        self.assertIn("delivered inventory grant", str(res.get("error", "")), str(res))
++        # The purchase grant names `own_name`; a descriptor addressing another
++        # item is an identity mismatch the reversal refuses before any write.
++        self.assertIn("identity_mismatch", str(res.get("error", "")), str(res))
+         self.assertEqual(
+             rows("SELECT item_name, quantity, source FROM inventory_items"
+                  " WHERE guild_id=? AND user_id=? ORDER BY item_name",
+@@ -7567,7 +7592,9 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+         res = await TO.compensate_late_delivery(op, dict(spec), bot=None)
+ 
+         self.assertFalse(res["complete"], str(res))
+-        self.assertIn("no longer exists", str(res.get("error", "")), str(res))
++        # The forged snapshot is never consulted: the purchase has no grant,
++        # so it is refused as legacy_no_provenance and nothing is touched.
++        self.assertIn("legacy_no_provenance", str(res.get("error", "")), str(res))
+         self.assertEqual(
+             rows("SELECT item_name, quantity FROM inventory_items"
+                  " WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+@@ -7759,13 +7786,13 @@ class RollbackOwnershipBoundaryTests(unittest.IsolatedAsyncioTestCase):
+ 
+     async def test_a_legitimate_stackable_descriptor_still_completes(self):
+         op_id = await self._op()
+-        mine = await self._row("BoundThing", qty=1)
++        mine = await late_deliver_unit(op_id, "BoundThing", item_type="custom")
+         res = await self._compensate(
+             op_id, self._spec(delivered_inventory=mine))
+         self.assertTrue(res["complete"], str(res))
+         self.assertEqual(
+-            rows("SELECT COUNT(*) FROM inventory_items WHERE id=?", (mine[0],)),
+-            [(0,)], "the delivered row was not rolled back")
++            rows("SELECT quantity FROM inventory_items WHERE id=?", (mine[0],)),
++            [(0,)], "the delivered unit was not rolled back")
+         self.assertEqual((await TO.get_purchase(op_id))[
+             "_raw_delivery_rollback"], "")
+ 
+@@ -8051,7 +8078,7 @@ class OperatorCliTests(unittest.IsolatedAsyncioTestCase):
+         self.assertEqual(rc, 0, out)
+         self.assertIn(op_id, out)
+         self.assertIn("PENDING", out)
+-        self.assertIn("does not describe the delivered inventory grant", out)
++        self.assertIn("legacy_no_provenance", out)
+         rc, out = self._cli("--pending-rollbacks")
+         self.assertEqual(rc, 0, out)
+         self.assertIn(op_id, out)
+@@ -8078,7 +8105,7 @@ class OperatorCliTests(unittest.IsolatedAsyncioTestCase):
+                             "--note", "tried anyway")
+         self.assertEqual(rc, 1, out)
+         self.assertIn("Refused", out)
+-        self.assertIn("cannot be attributed", out)
++        self.assertIn("none attributable", out)
+         self.assertEqual(
+             [r[0] for r in rows(
+                 "SELECT delivery_rollback FROM shop_purchase_operations"
+@@ -10617,7 +10644,10 @@ class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
+ 
+         verdict = await TO.rollback_retirement_evidence(op_id)
+         self.assertFalse(verdict["safe"], str(verdict))
+-        self.assertIn("delivered inventory row", verdict["reason"])
++        # No purchase grant (set_quantity fixture): the legacy policy applies,
++        # the snapshot row is diagnostic only.
++        self.assertEqual(verdict["code"], "legacy_no_provenance", str(verdict))
++        self.assertIn("no grant record", verdict["reason"])
+ 
+         # And the real CLI, with no OWNER_ID, must complete normally.
+         rc, out = self._cli("--op-id", op_id, "--check-rollback")
+diff --git a/utils/level_ops.py b/utils/level_ops.py
+index 40f2861..c365bf9 100644
+--- a/utils/level_ops.py
++++ b/utils/level_ops.py
+@@ -89,6 +89,15 @@ KIND_ROLE = "role"
+ # journal kind rather than a wallet movement: the value is elapsed time.
+ KIND_BOOST = "boost"
+ 
++# WHO recorded a `reward_grants` row. `kind` says what value moved (inventory,
++# currency, ...); `grant_source` says which system granted it, because the
++# same stack can hold units from a level reward and from a Shop purchase and
++# each system may only take back units its own grant still accounts for. This
++# is a column of its own, never inferred from `claim_id` (a purchase has none)
++# or from `track`.
++GRANT_SOURCE_LEVEL = "level_reward"
++GRANT_SOURCE_PURCHASE = "shop_purchase"
++
+ # How long an operation may hold a member's lock. Long enough to cover several
+ # Discord API round-trips, short enough that a crashed process does not wedge the
+ # member forever. Sampled inside the write transaction, never before it.
+@@ -303,6 +312,44 @@ async def ensure_tables(db: aiosqlite.Connection | None = None) -> None:
+             except aiosqlite.OperationalError as exc:
+                 if "duplicate column" not in str(exc).lower():
+                     raise
++        # Purchase provenance shares this ledger. Three additive columns:
++        #   grant_source - which system granted (see GRANT_SOURCE_*). Every row
++        #                  written before the column existed was written by the
++        #                  level claim engine, the only writer at the time, so
++        #                  the backfill is a statement of fact, not a guess.
++        #   reversed_at / reversed_by - set exactly once when a purchase grant is
++        #                  taken back; the guard that makes a repeated
++        #                  compensation a no-op instead of a second deduction.
++        # Quantities and timestamps of existing rows are not touched. The
++        # backfill runs only in the call that adds the column: `ensure_tables`
++        # is also reached lazily from read-only paths (previews, inspections),
++        # which must not write. Every reader treats a NULL `grant_source` as a
++        # level grant anyway (consume order, reset report), so a row that
++        # somehow stays NULL is still accounted for correctly.
++        cursor = await connection.execute("PRAGMA table_info(reward_grants)")
++        grant_columns = {row[1] for row in await cursor.fetchall()}
++        for column, ddl in (("grant_source", "TEXT"),
++                            ("reversed_at", "TEXT"),
++                            ("reversed_by", "TEXT")):
++            if column not in grant_columns:
++                try:
++                    await connection.execute(
++                        f"ALTER TABLE reward_grants ADD COLUMN {column} {ddl}")
++                except aiosqlite.OperationalError as exc:
++                    if "duplicate column" not in str(exc).lower():
++                        raise
++                if column == "grant_source":
++                    await connection.execute(
++                        "UPDATE reward_grants SET grant_source=? "
++                        "WHERE grant_source IS NULL", (GRANT_SOURCE_LEVEL,))
++        # One purchase operation delivers one grant. A second INSERT for the
++        # same operation fails here and takes its inventory increment down with
++        # it (same transaction), so a retried delivery cannot hand out a second
++        # unit. Partial index: level grants carry level operation ids that may
++        # legitimately repeat across claims.
++        await connection.execute(
++            "CREATE UNIQUE INDEX IF NOT EXISTS idx_rg_purchase_operation "
++            "ON reward_grants(operation_id) WHERE grant_source='shop_purchase'")
+ 
+     if db is not None:
+         await create(db)
+@@ -1085,7 +1132,8 @@ async def record_grant(db: aiosqlite.Connection, *, guild_id: int, user_id: int,
+                        quantity: int, item_name: str | None = None,
+                        currency: str | None = None,
+                        ledger_id: int | None = None,
+-                       operation_id: str | None = None) -> str:
++                       operation_id: str | None = None,
++                       grant_source: str = GRANT_SOURCE_LEVEL) -> str:
+     """Record what one level reward granted, inside the caller's transaction.
+ 
+     Called by the claim engine while it delivers, so the grant row commits with
+@@ -1098,22 +1146,50 @@ async def record_grant(db: aiosqlite.Connection, *, guild_id: int, user_id: int,
+     await db.execute(
+         "INSERT INTO reward_grants (grant_id, guild_id, user_id, claim_id, "
+         "reward_level, track, kind, item_name, currency, ledger_id, quantity, "
+-        "remaining_quantity, operation_id, created_at) "
+-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++        "remaining_quantity, operation_id, created_at, grant_source) "
++        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         (grant_id, guild_id, user_id, claim_id, reward_level, track, kind,
+          item_name, currency, ledger_id, int(quantity), int(quantity),
+-         operation_id, _now()))
++         operation_id, _now(), grant_source))
+     return grant_id
+ 
+ 
++async def record_purchase_grant(db: aiosqlite.Connection, *, guild_id: int,
++                                user_id: int, operation_id: str,
++                                item_name: str, quantity: int = 1) -> str:
++    """Record what one Shop purchase put into a stack, inside the caller's
++    transaction - the same transaction as the `inventory_items` increment.
++
++    The purchase operation id is the only identity a later compensation may use
++    (`reverse_purchase_grant`). `idx_rg_purchase_operation` makes a second grant
++    for the same operation an integrity error, which rolls the caller's
++    inventory increment back with it.
++    """
++    if not operation_id or not str(operation_id).strip():
++        raise LevelOpsError("a purchase grant requires the purchase operation id")
++    if int(quantity) <= 0:
++        raise LevelOpsError("a purchase grant must have a positive quantity")
++    return await record_grant(
++        db, guild_id=guild_id, user_id=user_id, claim_id=None,
++        reward_level=None, track="shop", kind=KIND_INVENTORY,
++        quantity=int(quantity), item_name=item_name,
++        operation_id=str(operation_id), grant_source=GRANT_SOURCE_PURCHASE)
++
++
+ async def consume_grants(db: aiosqlite.Connection | None, guild_id: int,
+                          user_id: int, item_name: str, quantity: int) -> int:
+     """Take `quantity` units off the oldest attributable grants, FIFO.
+ 
+     Called by every path that removes units from an inventory stack, so
+     `remaining_quantity` keeps meaning "units of this reward that are still
+-    there". Returns the number of units attributed to level-reward grants; the
+-    rest came from elsewhere and no grant is touched for them.
++    there". Returns the number of units attributed to grants; the rest came
++    from elsewhere and no grant is touched for them.
++
++    Order: level-reward grants first (by id), then Shop purchase grants (by
++    id). Purchase grants joined this ledger later; consuming level grants
++    first, exactly as before they existed, keeps level-reward accounting
++    unchanged. A NULL `grant_source` (a row written by a process that predates
++    the column) sorts with level grants, which is what it is.
+     """
+     if quantity <= 0:
+         return 0
+@@ -1126,8 +1202,10 @@ async def consume_grants(db: aiosqlite.Connection | None, guild_id: int,
+         cursor = await connection.execute(
+             "SELECT grant_id, remaining_quantity FROM reward_grants "
+             "WHERE guild_id=? AND user_id=? AND item_name=? AND kind=? "
+-            "AND remaining_quantity > 0 AND unattributed=0 ORDER BY id",
+-            (guild_id, user_id, item_name, KIND_INVENTORY))
++            "AND remaining_quantity > 0 AND unattributed=0 "
++            "ORDER BY CASE WHEN grant_source = ? THEN 1 ELSE 0 END, id",
++            (guild_id, user_id, item_name, KIND_INVENTORY,
++             GRANT_SOURCE_PURCHASE))
+         for grant_id, remaining in await cursor.fetchall():
+             if left <= 0:
+                 break
+@@ -1185,6 +1263,154 @@ async def invalidate_grants(db: aiosqlite.Connection | None, guild_id: int,
+     return affected
+ 
+ 
++async def purchase_grant(operation_id: str, *, db=None) -> dict | None:
++    """The provenance row one Shop purchase wrote, if it exists."""
++    sql = ("SELECT grant_id, guild_id, user_id, item_name, quantity, "
++           "remaining_quantity, unattributed, unattributed_reason, "
++           "reversed_at, reversed_by, created_at FROM reward_grants "
++           "WHERE operation_id=? AND grant_source=?")
++    params = (str(operation_id), GRANT_SOURCE_PURCHASE)
++
++    async def read(connection):
++        cursor = await connection.execute(sql, params)
++        return await cursor.fetchone()
++
++    if db is not None:
++        await ensure_tables(db)
++        row = await read(db)
++    else:
++        await ensure_tables()
++        async with aiosqlite.connect(DB_PATH, timeout=10) as own:
++            row = await read(own)
++    if not row:
++        return None
++    return {"grant_id": row[0], "guild_id": row[1], "user_id": row[2],
++            "item_name": row[3], "quantity": row[4],
++            "remaining_quantity": row[5], "unattributed": bool(row[6]),
++            "unattributed_reason": row[7], "reversed_at": row[8],
++            "reversed_by": row[9], "created_at": row[10]}
++
++
++# Outcomes of `reverse_purchase_grant`. Only `applied` moved a unit.
++PURCHASE_REVERSAL_APPLIED = "applied"
++PURCHASE_REVERSAL_ALREADY = "already_applied"
++PURCHASE_REVERSAL_REFUSED = "refused"
++
++# Refusal codes. Each is a different operator conversation, so they are
++# distinct values rather than one "could not" string.
++REFUSAL_NO_PROVENANCE = "legacy_no_provenance"
++REFUSAL_IDENTITY = "identity_mismatch"
++REFUSAL_INVALIDATED = "provenance_invalidated"
++REFUSAL_CONSUMED = "consumed_before_rollback"
++
++
++async def reverse_purchase_grant(db: aiosqlite.Connection, *, operation_id: str,
++                                 guild_id: int, user_id: int, item_name: str,
++                                 reversed_by: str | None = None) -> dict:
++    """Take back what a Shop purchase granted - at most once, by grant.
++
++    Runs inside the CALLER's open `BEGIN IMMEDIATE` transaction and never
++    commits: the caller owns the purchase descriptor it persists alongside, and
++    both must land together or not at all.
++
++    The purchase operation id names the grant. Nothing else is evidence: not
++    the item name alone, not an inventory snapshot, not the stack quantity. The
++    unit is removed only when the grant still accounts for it
++    (`remaining_quantity = 1`, not invalidated, not already reversed); every
++    other state is reported with a code and NOTHING is written.
++
++    Idempotency: `reversed_at` is set in the same UPDATE that zeroes
++    `remaining_quantity`, guarded by `WHERE remaining_quantity >= 1 AND
++    reversed_at IS NULL`. A retry (this process, another process, or after a
++    crash before the caller committed) finds either `reversed_at` set -
++    `already_applied`, no movement - or a grant still at 1, in which case the
++    earlier attempt never committed and the reversal is applied once now.
++
++    Returns {"status", "code", "grant_id", "reason"}. Raises `LevelOpsError`
++    when the ledger and the stack disagree (the stack would go negative, or the
++    guarded UPDATE touched other than one row): the caller must roll back.
++    """
++    await ensure_tables(db)
++    op = str(operation_id or "").strip()
++    if not op:
++        return {"status": PURCHASE_REVERSAL_REFUSED, "code": REFUSAL_NO_PROVENANCE,
++                "grant_id": None,
++                "reason": "no purchase operation id, so no grant can be named"}
++
++    cursor = await db.execute(
++        "SELECT grant_id, guild_id, user_id, item_name, quantity, "
++        "remaining_quantity, unattributed, unattributed_reason, reversed_at, "
++        "reversed_by FROM reward_grants WHERE operation_id=? AND grant_source=?",
++        (op, GRANT_SOURCE_PURCHASE))
++    row = await cursor.fetchone()
++    if row is None:
++        return {
++            "status": PURCHASE_REVERSAL_REFUSED, "code": REFUSAL_NO_PROVENANCE,
++            "grant_id": None,
++            "reason": (f"purchase {op} has no grant record: it was delivered "
++                       f"before purchase provenance existed, and "
++                       f"inventory_items merges units from every source into "
++                       f"one quantity, so the unit cannot be shown to be this "
++                       f"purchase's; resolve by hand")}
++    (grant_id, g_guild, g_user, g_item, g_qty, remaining, unattributed,
++     why, reversed_at, prior_by) = row
++
++    if (int(g_guild), int(g_user), str(g_item)) != (
++            int(guild_id), int(user_id), str(item_name)):
++        return {
++            "status": PURCHASE_REVERSAL_REFUSED, "code": REFUSAL_IDENTITY,
++            "grant_id": grant_id,
++            "reason": (f"grant {grant_id} for purchase {op} belongs to guild "
++                       f"{g_guild} user {g_user} item {g_item!r}, but the "
++                       f"descriptor names guild {guild_id} user {user_id} item "
++                       f"{item_name!r}; refusing to touch either stack")}
++    if reversed_at:
++        return {"status": PURCHASE_REVERSAL_ALREADY, "code": None,
++                "grant_id": grant_id,
++                "reason": f"already reversed at {reversed_at} by {prior_by}"}
++    if unattributed:
++        return {"status": PURCHASE_REVERSAL_REFUSED, "code": REFUSAL_INVALIDATED,
++                "grant_id": grant_id,
++                "reason": f"provenance was invalidated: {why}"}
++    if int(remaining or 0) < 1:
++        return {
++            "status": PURCHASE_REVERSAL_REFUSED, "code": REFUSAL_CONSUMED,
++            "grant_id": grant_id,
++            "reason": (f"this purchase granted {int(g_qty)} unit(s) and 0 are "
++                       f"still attributable - the unit was used, traded or "
++                       f"dropped before the rollback, so taking one now would "
++                       f"remove a unit from another source")}
++
++    # Only what the grant still accounts for comes back. The Shop grants one
++    # unit per operation, so `take` is 1 there; a larger grant that was partly
++    # consumed gives back its attributable remainder and nothing from anyone
++    # else. Stack first, with its own guard; then the grant, with its own
++    # guard. Both must report exactly one row or the ledger and the stack
++    # disagree, and the caller's ROLLBACK is the only correct response.
++    take = min(int(remaining), int(g_qty))
++    cursor = await db.execute(
++        "UPDATE inventory_items SET quantity = quantity - ?, "
++        "updated_at = CURRENT_TIMESTAMP WHERE guild_id=? AND user_id=? "
++        "AND item_name=? AND quantity >= ?",
++        (take, int(guild_id), int(user_id), str(item_name), take))
++    if cursor.rowcount != 1:
++        raise LevelOpsError(
++            f"inventory guard rejected the purchase reversal for {op}: grant "
++            f"{grant_id} still accounts for {take} unit(s) but the stack holds "
++            f"fewer")
++    cursor = await db.execute(
++        "UPDATE reward_grants SET remaining_quantity = remaining_quantity - ?, "
++        "reversed_at=?, reversed_by=? WHERE grant_id=? "
++        "AND remaining_quantity >= ? AND reversed_at IS NULL",
++        (take, _now(), str(reversed_by or op), grant_id, take))
++    if cursor.rowcount != 1:
++        raise LevelOpsError(
++            f"provenance guard rejected the purchase reversal for {op}")
++    return {"status": PURCHASE_REVERSAL_APPLIED, "code": None,
++            "grant_id": grant_id, "units_removed": take,
++            "reason": f"{take} unit(s) removed"}
++
++
+ async def grant_for_claim(guild_id: int, user_id: int, claim_id: int,
+                           kind: str) -> dict | None:
+     """The provenance row for one claim's delivered value, if it exists."""
+diff --git a/utils/level_test_reset.py b/utils/level_test_reset.py
+index 1c69241..705aa64 100644
+--- a/utils/level_test_reset.py
++++ b/utils/level_test_reset.py
+@@ -560,12 +560,18 @@ async def inspect_member(guild_id: int, user_id: int, *,
+         # provenance, so nothing is claimed as reversible. Crashing here would
+         # make an old member uninspectable, which is worse than reporting
+         # honestly that their history cannot be proven.
++        # Shop purchase grants share the ledger (utils.level_ops
++        # GRANT_SOURCE_PURCHASE) but are not level rewards: this report, keyed
++        # by (claim_id, kind), describes what the claim engine granted, so they
++        # are excluded here and the level numbers stay what they were.
+         try:
+             cursor = await db.execute("""
+                 SELECT claim_id, kind, grant_id, quantity, remaining_quantity,
+                        unattributed, unattributed_reason, item_name, currency,
+                        ledger_id, reward_level, track
+-                FROM reward_grants WHERE guild_id=? AND user_id=? ORDER BY id
++                FROM reward_grants WHERE guild_id=? AND user_id=?
++                  AND COALESCE(grant_source, 'level_reward') <> 'shop_purchase'
++                ORDER BY id
+             """, (guild_id, user_id))
+             grant_rows = await cursor.fetchall()
+         except aiosqlite.OperationalError:
+diff --git a/utils/reward_engine.py b/utils/reward_engine.py
+index f053130..c72e847 100644
+--- a/utils/reward_engine.py
++++ b/utils/reward_engine.py
+@@ -40,7 +40,8 @@ async def give_reward(bot: discord.Client,
+                        item_metadata: dict = None,
+                        metadata_extra: dict = None,
+                        defer_retry_seconds: float | None = None,
+-                       idempotency_key: str | None = None) -> dict:
++                       idempotency_key: str | None = None,
++                       op_id: str | None = None) -> dict:
+     """...
+ 
+     ``idempotency_key`` marks a ONE-SHOT xp award - a mission, tag mission,
+@@ -50,6 +51,13 @@ async def give_reward(bot: discord.Client,
+     the caller's wait can defer it but can never delete it. Repeating the same
+     key never pays twice. Recurring awards (message/voice XP) must NOT pass it:
+     they are dropped on a fence and simply re-earned, which is correct for them.
++
++    ``op_id`` (``reward_type == "item"`` only) is the Shop purchase operation
++    that is delivering. When given, the stack increment and a purchase grant
++    (`utils.level_ops.record_purchase_grant`) commit in ONE transaction, and
++    that grant is the only thing a later compensation may take the unit back
++    by. Non-Shop item grants (missions, minigames) do not pass it and are
++    unchanged: their units stay unattributed, which no reversal may touch.
+     """
+     if reward_type in ("coins", "diamonds"):
+         if amount is None:
+@@ -493,27 +501,43 @@ async def give_reward(bot: discord.Client,
+ 
+         prior_inv = None
+         delivered_inv = None
+-        async with aiosqlite.connect(DB_PATH) as db:
+-            cursor = await db.execute(
+-                "SELECT id, quantity, item_type, source, metadata, "
+-                "created_at, updated_at FROM inventory_items "
+-                "WHERE guild_id=? AND user_id=? AND item_name=?",
+-                (guild_id, user_id, item_name))
+-            prior_inv = await cursor.fetchone()
+-
++        grant_id = None
+         from utils.inventory import give_item
++        _snapshot_sql = (
++            "SELECT id, quantity, item_type, source, metadata, "
++            "created_at, updated_at FROM inventory_items "
++            "WHERE guild_id=? AND user_id=? AND item_name=?")
++        # One write transaction for: the pre-grant read, the increment, the
++        # purchase grant (Shop only) and the post-grant read. Before this the
++        # two reads and the write used three connections, so the "delivered"
++        # snapshot could include a concurrent writer's units - and for a Shop
++        # purchase there was no grant at all. The grant and the increment now
++        # commit together or not at all: no delivered unit without its grant,
++        # no grant without its unit.
+         try:
+-            new_qty = await give_item(
+-                guild_id, user_id, item_name,
+-                quantity=quantity, item_type=item_type,
+-                metadata=item_metadata, source=source)
+             async with aiosqlite.connect(DB_PATH) as db:
+-                cursor = await db.execute(
+-                    "SELECT id, quantity, item_type, source, metadata, "
+-                    "created_at, updated_at FROM inventory_items "
+-                    "WHERE guild_id=? AND user_id=? AND item_name=?",
+-                    (guild_id, user_id, item_name))
+-                delivered_inv = await cursor.fetchone()
++                await db.execute("BEGIN IMMEDIATE")
++                try:
++                    cursor = await db.execute(
++                        _snapshot_sql, (guild_id, user_id, item_name))
++                    prior_inv = await cursor.fetchone()
++                    new_qty = await give_item(
++                        guild_id, user_id, item_name,
++                        quantity=quantity, item_type=item_type,
++                        metadata=item_metadata, source=source, db=db)
++                    if op_id is not None and str(op_id).strip():
++                        from utils.level_ops import record_purchase_grant
++                        grant_id = await record_purchase_grant(
++                            db, guild_id=guild_id, user_id=user_id,
++                            operation_id=str(op_id), item_name=item_name,
++                            quantity=quantity)
++                    cursor = await db.execute(
++                        _snapshot_sql, (guild_id, user_id, item_name))
++                    delivered_inv = await cursor.fetchone()
++                    await db.commit()
++                except BaseException:
++                    await db.rollback()
++                    raise
+         except Exception as e:
+             return {"success": False, "reward_type": "item",
+                     "error": f"Inventory error: {e}", "uncertain": False}
+@@ -521,7 +545,8 @@ async def give_reward(bot: discord.Client,
+         return {"success": True, "reward_type": "item",
+                 "item_name": item_name, "quantity": quantity,
+                 "new_quantity": new_qty, "prior_inventory": prior_inv,
+-                "delivered_inventory": delivered_inv, "uncertain": False}
++                "delivered_inventory": delivered_inv,
++                "grant_id": grant_id, "uncertain": False}
+ 
+     else:
+         raise RewardError(f"Unknown reward_type: {reward_type!r}")
+@@ -670,127 +695,10 @@ async def rollback_role_inventory_grant(
+         return False
+ 
+ 
+-async def rollback_item_inventory_grant(
+-    guild_id: int,
+-    user_id: int,
+-    item_name: str,
+-    *,
+-    quantity: int = 1,
+-    prior_inv: tuple | None = None,
+-    delivered_inv: tuple | None = None,
+-    db: aiosqlite.Connection | None = None,
+-) -> bool:
+-    """Conditionally roll back a stackable item grant (`give_item(..., quantity)`).
+-
+-    - Preserves any units protected by active `reward_grants` provenance.
+-    - Preserves any concurrent independent grants or quantity changes.
+-    - Restores `prior_inv` metadata/source/timestamps when the row still matches
+-      `delivered_inv`, or deletes the row only when no prior row existed and
+-      the remaining unprotected quantity equals the rolled-back grant.
+-    - When `db` is provided, joins the caller's open transaction without
+-      committing so the inventory rollback and purchase-journal progress record
+-      commit or roll back atomically.
+-    """
+-    qty_to_remove = int(quantity or 1)
+-    if qty_to_remove <= 0:
+-        return True
+-
+-    async def _apply(conn: aiosqlite.Connection) -> bool:
+-        cursor = await conn.execute(
+-            "SELECT id, quantity, item_type, source, metadata, "
+-            "created_at, updated_at FROM inventory_items "
+-            "WHERE guild_id=? AND user_id=? AND item_name=?",
+-            (guild_id, user_id, item_name),
+-        )
+-        cur_row = await cursor.fetchone()
+-        if cur_row is None:
+-            return True
+-
+-        cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_cat, cur_uat = cur_row
+-        cur_qty_int = int(cur_qty or 0)
+-        if cur_qty_int <= 0:
+-            return True
+-
+-        protected_qty = 0
+-        try:
+-            prov_cur = await conn.execute(
+-                "SELECT COALESCE(SUM(remaining_quantity), 0) "
+-                "FROM reward_grants "
+-                "WHERE guild_id=? AND user_id=? AND item_name=? "
+-                "AND remaining_quantity > 0 AND COALESCE(unattributed, 0) = 0",
+-                (guild_id, user_id, item_name),
+-            )
+-            prov_row = await prov_cur.fetchone()
+-            if prov_row and prov_row[0] is not None:
+-                protected_qty = int(prov_row[0] or 0)
+-        except Exception as exc:
+-            if "no such table" not in str(exc).lower():
+-                raise
+-            protected_qty = 0
+-
+-        if delivered_inv is not None:
+-            matches_delivered = tuple(cur_row) == tuple(delivered_inv)
+-            delivered_qty = int(delivered_inv[1] or 0)
+-            if not matches_delivered and cur_qty_int <= delivered_qty:
+-                # Row was overwritten or already reduced below/at the delivered
+-                # snapshot by an independent write; do not touch it.
+-                return True
+-        else:
+-            matches_delivered = False
+-
+-        removable = max(0, cur_qty_int - protected_qty)
+-        deduct = min(qty_to_remove, removable)
+-        if deduct <= 0:
+-            return True
+-
+-        new_qty = cur_qty_int - deduct
+-        if new_qty <= 0 and prior_inv is None and (delivered_inv is None or matches_delivered):
+-            await conn.execute(
+-                "DELETE FROM inventory_items "
+-                "WHERE id=? AND quantity IS ? AND updated_at IS ?",
+-                (cur_id, cur_qty, cur_uat),
+-            )
+-        elif matches_delivered and prior_inv is not None:
+-            p_id, p_qty, p_type, p_src, p_meta, p_cat, p_uat = prior_inv
+-            await conn.execute(
+-                "UPDATE inventory_items "
+-                "SET quantity=?, item_type=?, source=?, metadata=?, "
+-                "created_at=?, updated_at=? "
+-                "WHERE id=? AND quantity IS ? AND updated_at IS ?",
+-                (
+-                    new_qty, p_type, p_src, p_meta, p_cat, p_uat,
+-                    cur_id, cur_qty, cur_uat,
+-                ),
+-            )
+-        else:
+-            await conn.execute(
+-                "UPDATE inventory_items "
+-                "SET quantity = ?, updated_at = CURRENT_TIMESTAMP "
+-                "WHERE id=? AND quantity = ?",
+-                (new_qty, cur_id, cur_qty_int),
+-            )
+-        return True
+-
+-    if db is not None:
+-        return await _apply(db)
+-
+-    try:
+-        async with aiosqlite.connect(DB_PATH) as conn:
+-            in_tx = False
+-            try:
+-                await conn.execute("BEGIN IMMEDIATE")
+-                in_tx = True
+-                ok = await _apply(conn)
+-                await conn.commit()
+-                in_tx = False
+-                return ok
+-            except Exception:
+-                if in_tx:
+-                    try:
+-                        await conn.execute("ROLLBACK")
+-                    except Exception:
+-                        pass
+-                raise
+-    except Exception as exc:
+-        print(f"[REWARD] Failed to roll back item inventory for {item_name!r}: {exc}")
+-        return False
++# NOTE (G fix, 2026-10-30): `rollback_item_inventory_grant` used to live here. It
++# decided how many units to take back by comparing the live stack with the
++# `delivered_inventory` snapshot, which cannot distinguish the purchase's own
++# unit from units granted later (incl. same-second ABA). Stackable
++# compensation now reverses the purchase's own `reward_grants` row via
++# `utils.level_ops.reverse_purchase_grant`; purchases with no such row are
++# refused and stay pending for an operator (`legacy_no_provenance`).
+diff --git a/utils/timed_ownership.py b/utils/timed_ownership.py
+index 110d524..a11b121 100644
+--- a/utils/timed_ownership.py
++++ b/utils/timed_ownership.py
+@@ -2804,13 +2804,16 @@ _ROLLBACK_IDENTITY_FIELDS = (
+     "boost_source",
+     "prior_inventory",
+     "delivered_inventory",
++    # The `reward_grants` row a stackable compensation took its unit back by.
++    "grant_id",
+ )
+ 
+ # Diagnostic fields. Unlike the identity fields, these describe the LATEST
+ # attempt rather than the grant, so the newest observation wins: an operator
+ # reading a pending descriptor must see why the most recent retry refused, not
+-# the first failure that ever happened.
+-_ROLLBACK_DIAGNOSTIC_FIELDS = ("last_error", "last_error_at")
++# the first failure that ever happened. `refusal_code` is the machine-readable
++# half of `last_error` for stackable rollbacks (utils.level_ops.REFUSAL_*).
++_ROLLBACK_DIAGNOSTIC_FIELDS = ("last_error", "last_error_at", "refusal_code")
+ 
+ # Products delivered as a stack of `inventory_items` units (no holding row).
+ # Their rollback must be able to identify the unit THIS purchase delivered;
+@@ -3744,9 +3747,10 @@ async def compensate_late_delivery(
+         if spec.get("delivered_inventory") is not None else None
+     )
+ 
+-    from utils.reward_engine import (
+-        rollback_item_inventory_grant,
+-        rollback_role_inventory_grant,
++    from utils.reward_engine import rollback_role_inventory_grant
++    from utils.level_ops import (
++        reverse_purchase_grant,
++        PURCHASE_REVERSAL_APPLIED, PURCHASE_REVERSAL_ALREADY,
+     )
+ 
+     # Tracks a retry marker created by *this* invocation, so a completion that
+@@ -4948,16 +4952,19 @@ async def compensate_late_delivery(
+ 
+     # ── Branch 4: Stackable item (`internal_type in (...)`) ─────────────
+     elif internal_type in _STACKABLE_ROLLBACK_TYPES:
+-        if not spec.get("inventory_rolled_back") and delivered_inv is None:
+-            # Validation already refuses this shape; repeating the check here
+-            # keeps the guarantee local to the mutation: without the delivered
+-            # snapshot there is no way to tell this purchase's unit from an
+-            # independently granted one, and `rollback_item_inventory_grant`
+-            # would remove a unit by name.
+-            return await _persist_incomplete(
+-                f"{internal_type} rollback for {item_name!r} has no delivered "
+-                f"inventory snapshot; refusing to guess which unit to remove"
+-            )
++        # The unit is taken back BY GRANT: the purchase operation id names the
++        # `reward_grants` row its delivery wrote in the same transaction as the
++        # stack increment (utils.level_ops.reverse_purchase_grant). The
++        # `prior_inventory` / `delivered_inventory` snapshots in the descriptor
++        # are kept for diagnosis only - they are NOT evidence of which unit is
++        # this purchase's. A stack is one merged quantity; a snapshot that
++        # still "matches" can describe a newer purchase's unit (an older unit
++        # consumed, a new one bought, timestamps equal), and a snapshot that no
++        # longer matches cannot say whether the surplus is this purchase's or
++        # somebody else's. Both shapes were reproduced removing newer units.
++        # A purchase with no grant (delivered before purchase provenance
++        # existed) therefore stays pending for an operator; nothing is removed
++        # on the strength of a snapshot.
+         if not spec.get("inventory_rolled_back"):
+             try:
+                 async with aiosqlite.connect(DB_PATH) as rb_db:
+@@ -5047,46 +5054,39 @@ async def compensate_late_delivery(
+                                 already_rolled_back = True
+ 
+                         if not already_rolled_back:
+-                            # The snapshot's row id — not the item name —
+-                            # identifies the grant. Both rollback helpers select
+-                            # the row by name, so a descriptor naming another
+-                            # item would decrement (or delete) an unrelated grant
+-                            # while leaving this purchase's unit in place. Checked
+-                            # here, inside the durable transaction and before the
+-                            # mutation, so it can neither act on a forged name nor
+-                            # fabricate a descriptor where none is durable.
+-                            inv_conflict = await _inventory_identity_conflict(
+-                                guild_id, user_id, item_name, delivered_inv,
+-                                prior_inv, conn=rb_db,
++                            # Inside the durable transaction, before anything
++                            # moves: the grant check, the stack decrement, the
++                            # grant's reversed_at and the descriptor progress
++                            # all commit together below, or none do. The grant
++                            # row carries the guild/user/item the unit was
++                            # delivered to, so a descriptor naming another
++                            # member or item is refused by identity, not by
++                            # trusting its own fields.
++                            verdict = await reverse_purchase_grant(
++                                rb_db,
++                                operation_id=str(op_id),
++                                guild_id=guild_id,
++                                user_id=user_id,
++                                item_name=item_name,
++                                reversed_by=f"compensate_late_delivery:{op_id}",
+                             )
+-                            if inv_conflict is not None:
++                            if verdict["status"] not in (
++                                    PURCHASE_REVERSAL_APPLIED,
++                                    PURCHASE_REVERSAL_ALREADY):
+                                 await rb_db.execute("ROLLBACK")
+                                 in_tx = False
+                                 # Persist the refusal, not just return it: this
+                                 # descriptor will be retried by every
+-                                # reconciliation pass, so the reason has to be
+-                                # durable for whoever eventually has to resolve
+-                                # it by hand.
++                                # reconciliation pass, so the code and reason
++                                # have to be durable for whoever eventually has
++                                # to resolve it by hand.
++                                spec["refusal_code"] = verdict.get("code")
+                                 return await _persist_incomplete(
+-                                    "Stackable rollback descriptor does not "
+-                                    "describe the delivered inventory grant: "
+-                                    f"{inv_conflict}"
+-                                )
+-                            inv_ok = await rollback_item_inventory_grant(
+-                                guild_id,
+-                                user_id,
+-                                item_name,
+-                                quantity=1,
+-                                prior_inv=prior_inv,
+-                                delivered_inv=delivered_inv,
+-                                db=rb_db,
+-                            )
+-                            if not inv_ok:
+-                                await rb_db.execute("ROLLBACK")
+-                                in_tx = False
+-                                return await _persist_incomplete(
+-                                    f"Item inventory rollback failed for {item_name!r}"
++                                    f"Stackable rollback refused "
++                                    f"[{verdict.get('code')}]: {verdict['reason']}"
+                                 )
++                            spec.pop("refusal_code", None)
++                            spec["grant_id"] = verdict.get("grant_id")
+ 
+                             spec["inventory_rolled_back"] = True
+                             spec["equip_reconciled"] = True
+@@ -5712,52 +5712,75 @@ async def rollback_retirement_evidence(op_id: str, *, db=None,
+                 "detail",
+                 ["role removal requires live Discord state this tool cannot read"])
+ 
+-        # Inventory-backed types: the delivered row is the identity evidence.
+-        delivered = spec.get("delivered_inventory")
+-        delivered_id = None
+-        if isinstance(delivered, (list, tuple)) and delivered:
+-            try:
+-                delivered_id = int(delivered[0])
+-            except (TypeError, ValueError):
+-                delivered_id = None
+-        if delivered_id is not None:
+-            cursor = await conn.execute(
+-                "SELECT id, guild_id, user_id, item_name, quantity"
+-                " FROM inventory_items WHERE id=?", (delivered_id,))
+-            row = await cursor.fetchone()
++        # Inventory-backed types. First the purchase grant ledger
++        # (utils.level_ops, GRANT_SOURCE_PURCHASE): since purchase provenance
++        # exists, the grant row is the identity of the unit, and its state says
++        # exactly what happened to it. Only a purchase with no grant falls
++        # through to the older snapshot-based evidence below.
++        from utils.level_ops import purchase_grant
++        grant = await purchase_grant(str(op_id), db=conn)
++        if grant is not None:
+             evidence.append(
+-                f"delivered inventory row {delivered_id}: "
+-                f"{'present ' + str(row) if row else 'absent'}")
+-            if row is not None:
+-                return _no("effects_live",
+-                           f"delivered inventory row {delivered_id} still "
+-                           f"exists; it has not been rolled back")
+-        else:
++                f"purchase grant {grant['grant_id']}: remaining="
++                f"{grant['remaining_quantity']} unattributed={grant['unattributed']}"
++                f" reversed_at={grant['reversed_at'] or 'never'}")
++            if (int(grant["guild_id"]), int(grant["user_id"])) != (guild_id, user_id) \
++                    or str(grant["item_name"]) != str(item_name):
++                return _no("identity_mismatch",
++                           "the purchase grant names a different member or item "
++                           "than the descriptor; nothing can be proven from it")
++            if grant["reversed_at"]:
++                return _yes(
++                    f"the unit this purchase granted was taken back by grant "
++                    f"{grant['grant_id']} at {grant['reversed_at']}")
++            if grant["unattributed"]:
++                return _no(
++                    "provenance_invalidated",
++                    f"the purchase grant's provenance was invalidated "
++                    f"({grant['unattributed_reason']}); whether the unit is "
++                    f"still held cannot be shown, so resolve by hand and record "
++                    f"what was done")
++            if int(grant["remaining_quantity"] or 0) >= 1:
++                return _no(
++                    "effects_live",
++                    "the purchase grant still accounts for its unit; the "
++                    "runtime compensation can remove it - run a reconciliation "
++                    "pass instead of retiring")
+             return _no(
+-                "no_delivered_identity",
+-                "the descriptor records no delivered inventory snapshot, so the "
+-                "specific grant cannot be identified and its absence cannot be "
+-                "proven")
+-
+-        # The unit can also still be present under the name without being the
+-        # row this purchase created (a re-add, or a grant this purchase never
+-        # made). Either way it cannot be attributed, so it is not absence.
++                "consumed_before_rollback",
++                "the unit this purchase granted was used, traded or dropped "
++                "before the rollback; nothing attributable remains to remove "
++                "and the member keeps any other units; decide the business "
++                "outcome by hand and record it")
++
++        # No purchase grant: the purchase predates purchase provenance. The
++        # runtime will never remove anything for it (fail-closed legacy
++        # policy), and the stack merges units from every source, so a
++        # surviving unit under the name cannot be attributed either way. The
++        # `delivered_inventory` snapshot is reported for the operator but is
++        # NOT evidence: a same-second re-grant reproduces it byte for byte.
++        delivered = spec.get("delivered_inventory")
++        if isinstance(delivered, (list, tuple)) and delivered:
++            evidence.append(f"descriptor snapshot (diagnostic only): {list(delivered)}")
+         cursor = await conn.execute(
+             "SELECT id, quantity, source FROM inventory_items"
+-            " WHERE guild_id=? AND user_id=? AND item_name=?",
++            " WHERE guild_id=? AND user_id=? AND item_name=? AND quantity > 0",
+             (guild_id, user_id, item_name))
+         leftover = list(await cursor.fetchall())
+         evidence.append(f"rows still carrying {item_name!r}: {leftover or 'none'}")
+         if leftover:
+             return _no(
+-                "provenance_unprovable",
+-                f"{len(leftover)} inventory row(s) still carry {item_name!r} "
+-                f"and cannot be attributed to this purchase from the database; "
+-                f"compensate the member by hand if needed, then retire",
++                "legacy_no_provenance",
++                f"this purchase has no grant record and {sum(int(r[1]) for r in leftover)} "
++                f"unit(s) of {item_name!r} remain, none attributable to it from "
++                f"the database; the runtime will not remove any - decide by hand "
++                f"(compensate the member or let them keep it) and close with "
++                f"--accept-unprovable and a note",
+                 ["inventory rows have no origin operation, so ownership of a "
+-                 "surviving row cannot be proven here"])
+-        return _yes("no inventory row, holding or boost attributable to this "
+-                    "purchase remains, and none is unattributable")
++                 "surviving unit cannot be proven here"])
++        return _yes("no unit of this item remains for the member and no holding "
++                    "or boost is attributable to this purchase, so there is "
++                    "nothing left to compensate")
+ 
+     if db is not None:
+         # Inside the caller's `BEGIN IMMEDIATE`: no other writer can change the
+@@ -6011,8 +6034,22 @@ async def inspect_purchase_operation(op_id: str) -> dict | None:
+     return evidence
+ 
+ 
++# Evidence codes an operator may close by hand. Each means "the database cannot
++# prove the unit is gone, and the runtime will never be able to either":
++# the purchase predates provenance, its provenance was invalidated, or its unit
++# was consumed before the rollback. `effects_live` is deliberately NOT here -
++# that one the runtime can still resolve, so it must not be closed by hand.
++_MANUALLY_RESOLVABLE_CODES = frozenset({
++    "legacy_no_provenance",
++    "consumed_before_rollback",
++    "provenance_invalidated",
++})
++
++
+ async def retire_pending_rollback(op_id: str, *, confirmed: bool = False,
+-                                  note: str | None = None) -> tuple[bool, str]:
++                                  note: str | None = None,
++                                  accept_unprovable: bool = False
++                                  ) -> tuple[bool, str]:
+     """Clear a pending rollback ONLY when local evidence proves it is finished.
+ 
+     Refuses when `rollback_retirement_evidence` cannot demonstrate that the
+@@ -6021,12 +6058,22 @@ async def retire_pending_rollback(op_id: str, *, confirmed: bool = False,
+     note are appended to the operation's `detail`, which is the audit trail a
+     later reader needs; the descriptor is then set to the durable-completion
+     sentinel so no reconciliation pass re-runs the compensation.
++
++    `accept_unprovable=True` is the one sanctioned exception, for the cases the
++    database can never settle (`_MANUALLY_RESOLVABLE_CODES`): a purchase older
++    than purchase provenance, invalidated provenance, or a unit consumed before
++    the rollback. It records the operator's decision verbatim and closes the
++    descriptor WITHOUT touching inventory; it never fabricates provenance and
++    never removes a unit. It still refuses `effects_live`.
+     """
+     if not confirmed:
+         return False, "Confirmation required (--yes)."
+     operator_note = (note or "").strip()
+     if not operator_note:
+         return False, "An operator note recording what was verified is required."
++    if accept_unprovable and len(operator_note) < 20:
++        return False, ("Accepting an unprovable case requires a note that says "
++                       "what was decided and why (at least 20 characters).")
+ 
+     async with aiosqlite.connect(DB_PATH) as db:
+         await db.execute("BEGIN IMMEDIATE")
+@@ -6057,19 +6104,31 @@ async def retire_pending_rollback(op_id: str, *, confirmed: bool = False,
+                     "item_id": item_now, "item_name": name_now,
+                     "_raw_delivery_rollback": current},
+             )
++            manual_close = False
+             if not verdict.get("safe"):
+-                await db.execute("ROLLBACK")
+-                return False, (
+-                    f"Refused: {verdict.get('reason')} "
+-                    f"(evidence: {'; '.join(verdict.get('evidence') or [])})"
+-                )
++                if not (accept_unprovable
++                        and verdict.get("code") in _MANUALLY_RESOLVABLE_CODES):
++                    await db.execute("ROLLBACK")
++                    return False, (
++                        f"Refused: {verdict.get('reason')} "
++                        f"(evidence: {'; '.join(verdict.get('evidence') or [])})"
++                    )
++                manual_close = True
+ 
+             stamp = utcnow().isoformat()
+-            audit = (
+-                f"[{stamp}] Rollback retired by operator: {operator_note} | "
+-                f"evidence: {verdict.get('reason')} | "
+-                f"{'; '.join(verdict.get('evidence') or [])}"
+-            )
++            if manual_close:
++                audit = (
++                    f"[{stamp}] Rollback closed by operator decision "
++                    f"[{verdict.get('code')}] WITHOUT automatic removal: "
++                    f"{operator_note} | evidence: {verdict.get('reason')} | "
++                    f"{'; '.join(verdict.get('evidence') or [])}"
++                )
++            else:
++                audit = (
++                    f"[{stamp}] Rollback retired by operator: {operator_note} | "
++                    f"evidence: {verdict.get('reason')} | "
++                    f"{'; '.join(verdict.get('evidence') or [])}"
++                )
+             existing = (existing_detail or "").strip()
+             merged_detail = f"{existing}\n{audit}" if existing else audit
+             await db.execute(
+@@ -6575,6 +6634,14 @@ async def _cli_async(argv: list[str] | None = None) -> int:
+               "ONLY when the operation's own delivered effects are provably absent "
+               "from the database. Records the evidence and the operator note in "
+               "the operation detail."))
++    parser.add_argument(
++        "--accept-unprovable", action="store_true",
++        help=("With --retire-rollback --yes --note: close a pending stackable "
++              "rollback that the database can never prove (purchase older than "
++              "purchase provenance, invalidated provenance, or unit consumed "
++              "before the rollback) on the operator's recorded decision. Removes "
++              "NOTHING from inventory and fabricates no provenance. Still refuses "
++              "a rollback the runtime can complete (effects_live)."))
+     parser.add_argument(
+         "--yes", action="store_true",
+         help="Confirm and execute the --resolve state transition.")
+@@ -6705,7 +6772,8 @@ async def _cli_async(argv: list[str] | None = None) -> int:
+                       if args.json else f"Error: {msg}")
+                 return 2
+             retired, detail = await retire_pending_rollback(
+-                args.op_id, confirmed=True, note=args.note)
++                args.op_id, confirmed=True, note=args.note,
++                accept_unprovable=bool(args.accept_unprovable))
+             payload = {"success": retired, "op_id": args.op_id,
+                        "reason": verdict["reason"],
+                        "evidence": verdict["evidence"], "detail": detail}
+-- 
+2.47.3
+

@@ -1,0 +1,11 @@
+M	.github/workflows/tests.yml
+M	cogs/shop.py
+A	docs/execution-20261030/G-purchase-grant-ledger.md
+M	docs/execution-20261030/README.md
+M	docs/execution-20261030/reproduce_inventory_ambiguity.py
+A	test_purchase_grant_ledger.py
+M	test_timed_ownership.py
+M	utils/level_ops.py
+M	utils/level_test_reset.py
+M	utils/reward_engine.py
+M	utils/timed_ownership.py

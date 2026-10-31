@@ -1,0 +1,15 @@
+{
+  "head": "6c04021ef5b422998a80bddcf5d4635a8b529039",
+  "dirty_status": " M cogs/wallet.py\n M database.py\n M scripts/test_booster_rewards.py\n M scripts/test_inventory_ui.py\n M test_inventory_ui.py\n M utils/inventory.py\n M utils/potion_engine.py\n M wallet.py\n?? AGENTS.md\n?? CLAUDE.md\n?? test_delivery_safety.py\n",
+  "command": [
+    "/home/user/nilive-test-env/bin/python",
+    "-m",
+    "unittest",
+    "-v",
+    "test_delivery_safety.LevelRemovalSynchronizationTests"
+  ],
+  "exit_code": 1,
+  "seconds": 3.74,
+  "python": "Python 3.11.2",
+  "output_sha256": "d9e0987e3a974233ad552c02739fdfc32b70d46fd1b15b9c94351addb48b8056"
+}

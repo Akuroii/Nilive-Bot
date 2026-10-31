@@ -1,0 +1,15 @@
+{
+  "head": "6c04021ef5b422998a80bddcf5d4635a8b529039",
+  "dirty_status": "?? AGENTS.md\n?? CLAUDE.md\n",
+  "command": [
+    "/home/user/nilive-test-env/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "test_timed_ownership.py"
+  ],
+  "exit_code": 0,
+  "seconds": 128.76,
+  "python": "Python 3.11.2",
+  "output_sha256": "2517d08838a781e8d852eb436bc0aa7e6d01a1e15a4dc616db65a63ea8ed1f7d"
+}

@@ -1,0 +1,11 @@
+OK   4466b90cc41c8d1de5f2472852bd7be850c9893f  .github/workflows/tests.yml
+OK   4283608427e9aee7d7cf44d9af5b904b205617cb  cogs/shop.py
+OK   df4080d0bfa76963e1309d4ce922991f98ad4224  docs/execution-20261030/G-purchase-grant-ledger.md
+OK   e68b4a3d1e68ce0b26dcd64aa7dc0cac33180827  docs/execution-20261030/README.md
+OK   eefcc35a0617003fa102e72eadce00674cf5d684  docs/execution-20261030/reproduce_inventory_ambiguity.py
+OK   d2fdf39f11e96f92f5c94b185b28560889d78e6e  test_purchase_grant_ledger.py
+OK   8ecad8cda4b803a129d650f4852d4d97418f1b9e  test_timed_ownership.py
+OK   c365bf977124d12dfc0fa1e0b16d95ad276963e3  utils/level_ops.py
+OK   705aa640d956638a29c0256c175a1abcc5cf8bff  utils/level_test_reset.py
+OK   c72e8475c82c61216d18449345cb5bc0b520d93a  utils/reward_engine.py
+OK   a11b121514a0ebdb07e03d77d7fe88c2017c6b84  utils/timed_ownership.py

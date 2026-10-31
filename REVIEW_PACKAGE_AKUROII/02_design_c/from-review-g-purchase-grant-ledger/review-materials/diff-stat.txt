@@ -1,0 +1,12 @@
+ .github/workflows/tests.yml                        |   6 +-
+ cogs/shop.py                                       |   9 +-
+ docs/execution-20261030/G-purchase-grant-ledger.md | 103 ++++
+ docs/execution-20261030/README.md                  |   6 +
+ .../reproduce_inventory_ambiguity.py               |  97 +++-
+ test_purchase_grant_ledger.py                      | 624 +++++++++++++++++++++
+ test_timed_ownership.py                            | 102 ++--
+ utils/level_ops.py                                 | 242 +++++++-
+ utils/level_test_reset.py                          |   8 +-
+ utils/reward_engine.py                             | 196 ++-----
+ utils/timed_ownership.py                           | 260 +++++----
+ 11 files changed, 1340 insertions(+), 313 deletions(-)

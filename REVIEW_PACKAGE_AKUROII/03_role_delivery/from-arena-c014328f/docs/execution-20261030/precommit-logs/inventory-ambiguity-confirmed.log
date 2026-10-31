@@ -1,0 +1,27 @@
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+{'path': 'inventory_helper', 'old_operation': '3364ff47369e4613b6e88cfa6c03f113', 'newer_operation': 'bc261811c0494b629f686d070130c20b', 'newer_units': 2, 'rollback_result': True, 'remaining': [(1,)], 'safe': False}
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+{'path': 'inventory_helper', 'old_operation': '1539820d9b344040858729c6db991963', 'newer_operation': 'fce873b269884eb3bb2f0e892161f736', 'newer_units': 1, 'rollback_result': True, 'remaining': [], 'safe': False}
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+{'path': 'durable_compensation', 'old_operation': 'a0841cf353e04121b8c407d9a0283c61', 'newer_operation': '8c4ad177bec742aab28b56b65522ecb1', 'newer_units': 2, 'rollback_result': {'complete': True, 'durable_persisted': True, 'inventory_rolled_back': True, 'equip_reconciled': True, 'role_reconciled': True, 'error': None}, 'remaining': [(1,)], 'safe': False}
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+{'path': 'durable_compensation', 'old_operation': '63efa088e8c542aea41605d31ec1e382', 'newer_operation': 'f32555f0e25e4e0eab688f8ca4c40798', 'newer_units': 1, 'rollback_result': {'complete': True, 'durable_persisted': True, 'inventory_rolled_back': True, 'equip_reconciled': True, 'role_reconciled': True, 'error': None}, 'remaining': [], 'safe': False}
+Traceback (most recent call last):
+  File "/home/user/Nilive-execution/docs/execution-20261030/reproduce_inventory_ambiguity.py", line 54, in <module>
+    asyncio.run(main())
+  File "/usr/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/asyncio/base_events.py", line 653, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/user/Nilive-execution/docs/execution-20261030/reproduce_inventory_ambiguity.py", line 50, in main
+    assert not failures, f"BLOCKER: old rollback removed newer units: {failures}"
+AssertionError: BLOCKER: old rollback removed newer units: [('inventory_helper', 2), ('inventory_helper', 1), ('durable_compensation', 2), ('durable_compensation', 1)]
