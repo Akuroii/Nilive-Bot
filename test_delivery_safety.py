@@ -2,7 +2,9 @@
 import asyncio
 import ast
 import os
+from contextlib import closing
 from pathlib import Path
+import sqlite3
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -150,6 +152,81 @@ class EntryKeyMigrationTests(unittest.IsolatedAsyncioTestCase):
                 await database.init_db()
         self.assertNotIn("entry_key", {r[1] for r in rows("PRAGMA table_info(equipped_roles)")})
         self.assertEqual(rows("SELECT item_name,role_id FROM equipped_roles"), [("Legacy", 55)])
+
+    async def test_concurrent_duplicate_column_is_treated_as_success(self):
+        """The real first-deploy race: another process commits the column
+        between our PRAGMA and our ALTER, so our ALTER fails with
+        'duplicate column name'. That is the migration succeeding."""
+        self.legacy_table()
+        original = aiosqlite.Connection.execute
+        state = {"raced": False}
+
+        def racy(connection, sql, *args, **kwargs):
+            if ("ALTER TABLE equipped_roles ADD COLUMN entry_key" in sql
+                    and not state["raced"]):
+                state["raced"] = True
+                # The winner: a second connection adds and COMMITS the column,
+                # exactly as the other init_db() process would have. This runs
+                # before our own ALTER reaches SQLite, so our ALTER then fails
+                # the way SQLite reports a column another connection committed.
+                with closing(sqlite3.connect(DB_PATH)) as winner:
+                    winner.execute(
+                        "ALTER TABLE equipped_roles ADD COLUMN entry_key TEXT")
+                    winner.commit()
+                raise sqlite3.OperationalError(
+                    "duplicate column name: entry_key")
+            return original(connection, sql, *args, **kwargs)
+
+        with patch.object(aiosqlite.Connection, "execute", racy):
+            # Must NOT raise: the migration's goal was achieved.
+            await database.init_db()
+
+        self.assertTrue(state["raced"], "the race path was never exercised")
+        self.assertIn("entry_key",
+                      {r[1] for r in rows("PRAGMA table_info(equipped_roles)")})
+        self.assertEqual(rows("SELECT item_name,role_id,entry_key FROM equipped_roles"),
+                         [("Legacy", 55, None)])
+
+    async def test_duplicate_column_without_the_column_still_aborts(self):
+        """A duplicate-column error is only trusted after the column is
+        confirmed present. If it is not, startup must still abort -- the fix
+        must not swallow migration failures."""
+        self.legacy_table()
+        original = aiosqlite.Connection.execute
+
+        def lying(connection, sql, *args, **kwargs):
+            if "ALTER TABLE equipped_roles ADD COLUMN entry_key" in sql:
+                raise sqlite3.OperationalError(
+                    "duplicate column name: entry_key")
+            return original(connection, sql, *args, **kwargs)
+
+        with patch.object(aiosqlite.Connection, "execute", lying):
+            with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Required migration equipped_roles.entry_key"):
+                await database.init_db()
+        self.assertNotIn("entry_key",
+                         {r[1] for r in rows("PRAGMA table_info(equipped_roles)")})
+        self.assertEqual(rows("SELECT item_name,role_id FROM equipped_roles"),
+                         [("Legacy", 55)])
+
+    async def test_unrelated_migration_failure_still_aborts(self):
+        """Any error that is not a duplicate-column error must abort startup,
+        unchanged from the previous behaviour."""
+        self.legacy_table()
+        original = aiosqlite.Connection.execute
+
+        def locked(connection, sql, *args, **kwargs):
+            if "ALTER TABLE equipped_roles ADD COLUMN entry_key" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return original(connection, sql, *args, **kwargs)
+
+        with patch.object(aiosqlite.Connection, "execute", locked):
+            with self.assertRaisesRegex(
+                    RuntimeError, "Required migration equipped_roles.entry_key"):
+                await database.init_db()
+        self.assertNotIn("entry_key",
+                         {r[1] for r in rows("PRAGMA table_info(equipped_roles)")})
 
 
 class WalletDeletionSurfaceTests(unittest.IsolatedAsyncioTestCase):

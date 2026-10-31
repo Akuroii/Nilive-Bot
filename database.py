@@ -1557,10 +1557,33 @@ async def init_db():
                 await db.execute(
                     "ALTER TABLE equipped_roles ADD COLUMN entry_key TEXT")
             except Exception as e:
-                raise RuntimeError(
-                    "Required migration equipped_roles.entry_key failed; "
-                    "startup aborted to protect ownership identity"
-                ) from e
+                # Concurrent init_db(): the bot process and the dashboard
+                # process both run init_db(), and on a first deploy both
+                # reach this migration before either has committed it. Each
+                # one's PRAGMA above therefore sees no entry_key, and each
+                # one issues the ALTER. ALTER TABLE takes a write lock, so
+                # the loser of that race gets
+                # "duplicate column name: entry_key" -- the winner already
+                # added the exact column we were about to add. That is the
+                # migration succeeding, not failing, and aborting startup
+                # there would kill a process at the one moment the schema
+                # most needs to be brought up to date.
+                #
+                # Accept it only after proving the column is really there,
+                # and let every other error abort startup exactly as before.
+                if "duplicate column name" not in str(e).lower():
+                    raise RuntimeError(
+                        "Required migration equipped_roles.entry_key failed; "
+                        "startup aborted to protect ownership identity"
+                    ) from e
+                cursor = await db.execute(
+                    "PRAGMA table_info(equipped_roles)")
+                if "entry_key" not in {c[1] for c in await cursor.fetchall()}:
+                    raise RuntimeError(
+                        "Required migration equipped_roles.entry_key reported "
+                        "a duplicate column, but the column is still absent; "
+                        "startup aborted to protect ownership identity"
+                    ) from e
 
         # Wallet pass: equipped_titles is the Title equip slot. It is a
         # SEPARATE table from equipped_roles on purpose — the locked
