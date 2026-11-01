@@ -2516,12 +2516,10 @@ _PURCHASE_EXTRA_COLUMNS = (
 async def ensure_purchase_journal_schema(db) -> None:
     for statement in PURCHASE_SCHEMA:
         await db.execute(statement)
-    cursor = await db.execute("PRAGMA table_info(shop_purchase_operations)")
-    present = {row[1] for row in await cursor.fetchall()}
+    # Local import avoids a module cycle when database.init_db imports us.
+    from database import add_column_if_missing
     for name, ddl in _PURCHASE_EXTRA_COLUMNS:
-        if name not in present:
-            await db.execute(
-                f"ALTER TABLE shop_purchase_operations ADD COLUMN {name} {ddl}")
+        await add_column_if_missing(db, "shop_purchase_operations", name, ddl)
     await db.commit()
 
 
