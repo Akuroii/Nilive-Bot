@@ -354,19 +354,9 @@ async def process_purchase(interaction: discord.Interaction,
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
-            try:
-                stock_ok = await safe_decrement_stock(iid, db=db)
-            except TypeError as type_exc:
-                if "db" not in str(type_exc):
-                    raise
-                stock_ok = await safe_decrement_stock(iid)
+            stock_ok = await safe_decrement_stock(iid, db=db)
             if stock_ok:
-                try:
-                    await update_purchase(op_id, stock_reserved=1, db=db)
-                except TypeError as type_exc:
-                    if "db" not in str(type_exc):
-                        raise
-                    await update_purchase(op_id, stock_reserved=1)
+                await update_purchase(op_id, stock_reserved=1, db=db)
                 await db.commit()
             else:
                 await db.execute("ROLLBACK")
@@ -403,25 +393,12 @@ async def process_purchase(interaction: discord.Interaction,
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("BEGIN IMMEDIATE")
                 try:
-                    try:
-                        await safe_deduct(
-                            guild_id, user_id, pay_amount,
-                            currency=pay_currency,
-                            reason=f"Shop purchase: {name}", source="shop",
-                            db=db)
-                    except TypeError as type_exc:
-                        if "db" not in str(type_exc):
-                            raise
-                        await safe_deduct(
-                            guild_id, user_id, pay_amount,
-                            currency=pay_currency,
-                            reason=f"Shop purchase: {name}", source="shop")
-                    try:
-                        await update_purchase(op_id, charged=1, db=db)
-                    except TypeError as type_exc:
-                        if "db" not in str(type_exc):
-                            raise
-                        await update_purchase(op_id, charged=1)
+                    await safe_deduct(
+                        guild_id, user_id, pay_amount,
+                        currency=pay_currency,
+                        reason=f"Shop purchase: {name}", source="shop",
+                        db=db)
+                    await update_purchase(op_id, charged=1, db=db)
                     await db.commit()
                 except Exception:
                     try:
@@ -495,7 +472,6 @@ async def process_purchase(interaction: discord.Interaction,
     snap = snapshot_user(interaction.user)
     finalized = False
     history_id = None
-    committed_outside_tx = False
     was_compensated = False
     persisted_descriptor = False
     late_rollback_spec = {
@@ -528,18 +504,10 @@ async def process_purchase(interaction: discord.Interaction,
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
-            try:
-                history_id = await _write_purchase_history(
-                    guild_id, user_id, snap["display_name"], iid, name,
-                    pay_amount, delivery.get("expires_at"), pay_currency,
-                    db=db)
-            except TypeError as type_exc:
-                if "db" not in str(type_exc):
-                    raise
-                history_id = await _write_purchase_history(
-                    guild_id, user_id, snap["display_name"], iid, name,
-                    pay_amount, delivery.get("expires_at"), pay_currency)
-                committed_outside_tx = True
+            history_id = await _write_purchase_history(
+                guild_id, user_id, snap["display_name"], iid, name,
+                pay_amount, delivery.get("expires_at"), pay_currency,
+                db=db)
 
             finalized = await claim_purchase_transition(
                 op_id,
@@ -602,15 +570,6 @@ async def process_purchase(interaction: discord.Interaction,
             raise
 
     if not finalized:
-        if committed_outside_tx and history_id is not None:
-            try:
-                async with aiosqlite.connect(DB_PATH) as cleanup_db:
-                    await cleanup_db.execute(
-                        "DELETE FROM purchase_history WHERE id=?",
-                        (int(history_id),))
-                    await cleanup_db.commit()
-            except Exception:
-                pass
         comp_res = {
             "complete": True,
             "durable_persisted": persisted_descriptor,

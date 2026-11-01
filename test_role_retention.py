@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import aiosqlite
+import discord
 
 from phase1_support import GUILD, USER, DB_PATH, reset_database, execute, rows
 from test_timed_ownership import purchase_ctx, role_stub
@@ -147,8 +148,11 @@ class ReconcilerTests(RetentionTestBase):
     async def test_member_gone_satisfies_without_any_discord_call(self):
         person, bot, guild = await self._obligation()
         guild.get_member = lambda uid: None
+        guild.fetch_member = AsyncMock(side_effect=discord.NotFound(
+            SimpleNamespace(status=404, reason="Not Found"), "not found"))
         stats = await TO.reconcile_role_retentions(bot=bot)
         person.remove_roles.assert_not_awaited()
+        guild.fetch_member.assert_awaited_once_with(USER)
         self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
         self.assertEqual(stats["satisfied"], 1)
 

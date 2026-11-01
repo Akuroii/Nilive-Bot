@@ -50,6 +50,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
+import discord
 
 from database import DB_PATH
 
@@ -433,11 +434,26 @@ async def reconcile_role_retentions(bot=None, *, limit: int = 200) -> dict:
         role_id = int(role_id)
         try:
             guild = bot.get_guild(guild_id) if bot is not None else None
-            member = guild.get_member(user_id) if guild is not None else None
-            role = guild.get_role(role_id) if guild is not None else None
-            if member is None or role is None:
-                # The member left, or the role was deleted: nothing is owed
-                # any more. Delete without touching Discord.
+            if guild is None:
+                stats["kept"] += 1
+                stats["errors"].append(f"retention {holding.get('id')}: guild unavailable")
+                continue
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except discord.NotFound:
+                    await clear_role_retention(guild_id, user_id, role_id)
+                    stats["satisfied"] += 1
+                    continue
+                except Exception as exc:
+                    await _bump_retention_attempt(holding, exc)
+                    stats["kept"] += 1
+                    stats["errors"].append(f"retention {holding.get('id')}: member fetch failed: {exc}")
+                    continue
+            role = guild.get_role(role_id)
+            if role is None:
+                # The role has been deleted from the guild.
                 await clear_role_retention(guild_id, user_id, role_id)
                 stats["satisfied"] += 1
                 continue
@@ -1551,31 +1567,28 @@ async def booster_retention_unknown_roles(guild_id: int, user_id: int, *,
             "SELECT enabled, boost1_role_id, boost2_role_id "
             "FROM boost_config WHERE guild_id=?", (guild_id,))
         row = await cursor.fetchone()
-        if row:
-            enabled, b1, b2 = row
-            if not (enabled is not None and int(enabled) == 0):
-                if b2 not in (None, ""):
-                    try:
-                        b2_id = int(b2)
-                    except (TypeError, ValueError):
-                        b2_id = None
-                    # Kept only by the unknown-count fallback: boost_level
-                    # alone does not reach 2, so the role is worn, not earned.
-                    if b2_id is not None and b2_id in held and boost_level < 2:
-                        unknown.add(b2_id)
-                cursor = await db.execute(
-                    "SELECT role_id, requires_boost_level "
-                    "FROM boost_color_roles WHERE guild_id=?", (guild_id,))
-                for r_id, req_lvl in await cursor.fetchall():
-                    if r_id in (None, ""):
-                        continue
-                    try:
-                        color_role_id = int(r_id)
-                    except (TypeError, ValueError):
-                        continue
-                    needed = max(1, int(req_lvl or 1))
-                    if color_role_id in held and boost_level < needed:
-                        unknown.add(color_role_id)
+        enabled, _b1, b2 = row if row else (1, None, None)
+        if not (enabled is not None and int(enabled) == 0):
+            if b2 not in (None, ""):
+                try:
+                    b2_id = int(b2)
+                except (TypeError, ValueError):
+                    b2_id = None
+                if b2_id is not None and b2_id in held and boost_level < 2:
+                    unknown.add(b2_id)
+            cursor = await db.execute(
+                "SELECT role_id, requires_boost_level "
+                "FROM boost_color_roles WHERE guild_id=?", (guild_id,))
+            for r_id, req_lvl in await cursor.fetchall():
+                if r_id in (None, ""):
+                    continue
+                try:
+                    color_role_id = int(r_id)
+                except (TypeError, ValueError):
+                    continue
+                needed = max(1, int(req_lvl or 1))
+                if color_role_id in held and boost_level < needed:
+                    unknown.add(color_role_id)
     return unknown
 
 
