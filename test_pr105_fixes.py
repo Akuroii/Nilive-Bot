@@ -121,3 +121,34 @@ class ShopNegativeValidationTests(unittest.TestCase):
                 response = self.post(dict(name='invalid', price=10, **case))
                 self.assertEqual(response.status_code, 400, response.get_json())
                 self.assertEqual(mutation_snapshot(), before)
+
+class StuckRefundTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        await reset_database()
+        seed_member(balance=90)
+
+    async def test_failed_refund_is_visible_and_records_error(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from phase1_support import DB_PATH
+        import json
+        op = await TO.open_purchase(GUILD, USER, item_id=None,
+                                    item_name='test refund', currency='balance', amount=10)
+        await TO.update_purchase(op, status=TO.PURCHASE_FAILED, charged=1)
+        with patch('utils.economy_safe.safe_credit', new=AsyncMock(side_effect=RuntimeError('credit outage'))):
+            stats = await TO.reconcile_purchases()
+        self.assertGreater(stats['errors'], 0)
+        journal = await TO.get_purchase(op)
+        self.assertIn('credit outage', journal['detail'] or '')
+        out = StringIO()
+        with redirect_stdout(out):
+            rc = await TO._cli_async(['--db', str(DB_PATH), '--json'])
+        self.assertEqual(rc, 0)
+        self.assertIn(op, [r['op_id'] for r in json.loads(out.getvalue())['operations']])
+        for filters in (['--status', 'failed'], ['--all-statuses']):
+            out = StringIO()
+            with redirect_stdout(out):
+                rc = await TO._cli_async(['--db', str(DB_PATH), '--json', *filters])
+            self.assertEqual(rc, 0)
+            self.assertIn(op, [r['op_id'] for r in json.loads(out.getvalue())['operations']])
+        self.assertEqual(rows('SELECT balance FROM economy'), [(90,)])

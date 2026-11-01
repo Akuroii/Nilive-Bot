@@ -5776,13 +5776,22 @@ async def reconcile_purchases(*, older_than_minutes: int = 15,
         try:
             result = await refund_purchase(op_id)
         except Exception as exc:  # pragma: no cover - defensive
-            print(f"[SHOP] Compensation failed for {op_id}: {exc}")
-            stats["errors"] += 1
-            continue
+            result = {"complete": False, "error": f"{type(exc).__name__}: {exc}"}
         if result["complete"]:
             stats["completed"] += 1
         else:
             stats["errors"] += 1
+            error = str(result.get("error") or "compensation incomplete")[:500]
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE shop_purchase_operations SET detail="
+                    "substr(COALESCE(detail, ''), 1, 2000) || ?, "
+                    "updated_at=CURRENT_TIMESTAMP WHERE op_id=? "
+                    "AND status IN (?, ?) AND (charged=1 AND refunded=0 "
+                    "OR stock_reserved=1 AND stock_returned=0)",
+                    (f" | Last compensation error: {error}", op_id,
+                     PURCHASE_FAILED, PURCHASE_REFUNDED))
+                await db.commit()
 
     try:
         rb = await reconcile_delivery_rollbacks(bot=bot, limit=limit)
@@ -5818,10 +5827,9 @@ async def list_purchase_operations(*, status: str | None = PURCHASE_UNCERTAIN,
     """List purchase operations filtered by status, guild, and/or user.
 
     `include_pending_rollbacks` widens the listing to operations whose
-    `delivery_rollback` descriptor is still present. Those are the operations an
-    operator most needs to find, and they are usually in status `refunded` /
-    `failed` — not `uncertain` — so a status-filtered listing silently hides
-    exactly the stuck work this tool exists to surface.
+    `delivery_rollback` descriptor is still present or whose settled operation
+    has an incomplete refund or stock return. These may be in status `refunded`
+    or `failed`, rather than `uncertain`.
     `pending_rollbacks_only` narrows it to just those.
     """
     clauses: list[str] = []
@@ -5833,8 +5841,11 @@ async def list_purchase_operations(*, status: str | None = PURCHASE_UNCERTAIN,
         if status is not None:
             params.append(status)
         clauses.append(
-            f"({status_clause}delivery_rollback IS NOT NULL"
-            f" AND delivery_rollback != '')"
+            f"({status_clause}(delivery_rollback IS NOT NULL"
+            " AND delivery_rollback != '') OR "
+            "(status IN ('failed', 'refunded') AND "
+            "((charged=1 AND refunded=0) OR "
+            "(stock_reserved=1 AND stock_returned=0))))"
         )
     elif status is not None:
         clauses.append("status=?")
@@ -7004,8 +7015,9 @@ async def _cli_async(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--status", default=None,
         help=("Filter operations by status when listing. By default the listing "
-              "shows uncertain operations AND any operation whose late-delivery "
-              "rollback is still pending. Use 'any' for no status filter."))
+              "shows uncertain operations, pending delivery rollbacks, and "
+              "failed/refunded operations with incomplete compensation. "
+              "Use 'any' for no status filter."))
     parser.add_argument(
         "--pending-rollbacks", action="store_true",
         help=("List only operations whose delivery_rollback descriptor is still "

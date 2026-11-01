@@ -15,9 +15,9 @@ Exit codes (stable, so this can be scripted):
 
 Read-only by default:
   * `python scripts/recover_shop_purchases.py --db /path/to/nilive.db`
-      Lists `uncertain` purchase operations AND every operation whose
-      late-delivery rollback is still pending, each with its durably recorded
-      refusal reason. `--pending-rollbacks` lists only the latter;
+      Lists `uncertain` purchases, pending late-delivery rollbacks, and
+      failed/refunded operations with incomplete refund or stock compensation.
+      `--pending-rollbacks` lists only pending delivery rollbacks;
       `--all-statuses` lists everything; `--status <s>` filters to one status.
   * `python scripts/recover_shop_purchases.py --db /path/to/nilive.db --op-id <op_id>`
       Displays full SQLite diagnostic evidence (operation journal, shop listing,
