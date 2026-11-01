@@ -1,0 +1,12 @@
+{
+  "head": "6c04021ef5b422998a80bddcf5d4635a8b529039",
+  "dirty_status": " M cogs/wallet.py\n M database.py\n M scripts/test_booster_rewards.py\n M scripts/test_inventory_ui.py\n M scripts/test_wallet_phase2.py\n M test_inventory_ui.py\n M test_wallet_phase2.py\n M utils/inventory.py\n M utils/level_claims.py\n M utils/potion_engine.py\n M wallet.py\n?? AGENTS.md\n?? CLAUDE.md\n?? docs/\n?? test_delivery_safety.py\n",
+  "command": [
+    "/home/user/nilive-test-env/bin/python",
+    "scripts/test_wallet_phase2.py"
+  ],
+  "exit_code": 0,
+  "seconds": 0.67,
+  "python": "Python 3.11.2",
+  "output_sha256": "d0766233365b31aa00f55c86771d42189156da3ab13072886c5e0640291ce40f"
+}

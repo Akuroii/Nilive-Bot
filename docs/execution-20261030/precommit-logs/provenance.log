@@ -1,0 +1,83 @@
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+== 1. the operation lease ==
+  PASS the first acquire takes the lease
+  PASS and it is a row another process can read
+  PASS a second acquire is refused while the lease is live
+  PASS the refused acquire did not steal or shorten the lease
+  PASS lock_held names the live holder
+  PASS another member is not blocked by this member's lease
+  PASS a lease can only be released by the operation that holds it
+  PASS Claim All during a correction is blocked and pays nothing (defect F)
+  PASS and the claim row is still pending, so nothing was reserved or lost
+  PASS the block message tells the member what is happening
+  PASS the holder can renew its own lease
+  PASS a stranger cannot renew it
+  PASS the holder releases its lease
+  PASS releasing twice is a no-op, not an error
+  PASS and the row is gone
+  PASS Claim All after the correction pays the reward once
+  PASS the delivery recorded what it granted, in the claim's own transaction (defect G)
+  PASS an expired lease is not reported as held
+  PASS an expired lease is replaced, so a crashed run cannot wedge the member
+  PASS two concurrent Claim All passes pay the reward once between them
+  PASS and wrote exactly one grant row for it
+== 2. provenance through inventory mutations ==
+  PASS a grant starts fully attributable
+  PASS two rewards of the same item keep separate grants (defect C)
+  PASS using the item consumes the OLDEST grant first, FIFO
+  PASS dropping the stack consumes every remaining attributable unit
+  PASS an absolute set_quantity write invalidates provenance instead of guessing
+  PASS and a later reversal of that grant is REFUSED, moving nothing
+  PASS a trade consumes the sender's attributable units (defect B)
+  PASS and gives the receiver no provenance it did not earn
+== 3. reversal primitives ==
+  PASS a proven currency reversal moves the wallet once
+  PASS and appends exactly ONE compensating row (defect E)
+  PASS the original row is marked reversed and kept (append-only)
+  PASS the journal row committed with the movement it describes
+  PASS a second attempt is already_reversed and moves nothing (defect D)
+  PASS and it names the operation that got there first
+  PASS currency that has been spent is outstanding, and the wallet is never forced negative
+  PASS the original row stays UNreversed, so the case is still actionable
+  PASS and the case is on the queue with its reason
+  PASS a ledger row that does not exist is refused, not invented
+  PASS outstanding_reversals lists the open cases only
+  PASS an administrator can close a case, on the record
+  PASS closing it never rewrites the row to 'applied' and never deletes it
+  PASS and an applied reversal cannot be 'resolved' away
+  PASS an item reversal with no grant row is refused and removes nothing (defect B)
+  PASS asking for more than the attributable remainder is outstanding, and removes nothing (defect C)
+  PASS and the message names what was granted, what is left and what was asked
+  PASS a refusal does not permanently block a later provable reversal
+  PASS the later attempt UPDATED the one journal row, keeping the earlier refusal as history
+  PASS and a retry after value moved removes nothing a second time (defect A)
+  PASS a role removal is journaled without moving any value
+  PASS and journaling it twice adds no second row
+== 4. the shared ledger reversal ==
+  PASS the shared reversal debits the wallet and reports the new balance
+  PASS it appends exactly ONE compensating row (defect E)
+  PASS a second reversal of the same row is refused and moves nothing (defect D)
+  PASS two processes reversing one row: exactly one wins (defect F)
+  PASS and the winner wrote exactly one compensating row
+  PASS reversing a deduct credits the money back, in one row
+  PASS a spent credit cannot be reversed, and the row stays actionable
+  PASS the ledger total moved by exactly the reversals, never twice
+== 5. XP mutation provenance ==
+  PASS OTHER has no lease before the XP-write section
+  PASS /setlevel's XP write records an immutable operation row
+  PASS and records the reward levels it newly entitled
+  PASS the entitlements it created carry its operation id
+  PASS the member's changes are listed newest first
+  PASS marking it rolled back is visible to the next reader
+Initializing database (dashboard process)...
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+Database ready (dashboard process).
+  PASS the dashboard member edit succeeds
+  PASS and writes an operation record naming the logged-in administrator (defect G)
+  PASS the dashboard's entitlements carry its operation id too
+  PASS the wallet overwrite is captured in the record, not left to inference
+  PASS no XP change anywhere is left unrecorded
+
+ALL PROVENANCE CHECKS PASSED

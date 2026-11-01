@@ -1,0 +1,11 @@
+........................................................................ [ 29%]
+........................................................................ [ 59%]
+................................................................... [ 87%]
+..............................                                           [100%]
+=============================== warnings summary ===============================
+../nilive-test-env/lib/python3.11/site-packages/discord/player.py:30
+  /home/user/nilive-test-env/lib/python3.11/site-packages/discord/player.py:30: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13
+    import audioop
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+241 passed, 1 warning, 5 subtests passed in 131.96s (0:02:11)

@@ -1,6 +1,8 @@
 import aiosqlite
 import asyncio
 import os
+import re
+import sqlite3
 import sys
 
 # STAGING / PRODUCTION SEPARATION: set NERO_ENVIRONMENT=staging on a
@@ -119,9 +121,7 @@ async def migrate_leveling_config(db):
             columns.remove("enabled")
             columns.add("message_xp_enabled")
         elif "message_xp_enabled" not in columns:
-            await db.execute(
-                "ALTER TABLE leveling_config ADD COLUMN message_xp_enabled "
-                "INTEGER NOT NULL DEFAULT 1")
+            await add_column_if_missing(db, 'leveling_config', 'message_xp_enabled', 'INTEGER NOT NULL DEFAULT 1')
             columns.add("message_xp_enabled")
         elif "enabled" in columns:
             # Defensive support for a partial rollout that briefly stored both.
@@ -139,22 +139,16 @@ async def migrate_leveling_config(db):
             "WHERE message_xp_enabled IS NULL")
 
         if "spam_window_seconds" not in columns:
-            await db.execute(
-                "ALTER TABLE leveling_config ADD COLUMN spam_window_seconds "
-                "INTEGER DEFAULT 20")
+            await add_column_if_missing(db, 'leveling_config', 'spam_window_seconds', 'INTEGER DEFAULT 20')
             columns.add("spam_window_seconds")
         if "spam_xp_penalty_divisor" not in columns:
-            await db.execute(
-                "ALTER TABLE leveling_config ADD COLUMN spam_xp_penalty_divisor "
-                "INTEGER DEFAULT 1000")
+            await add_column_if_missing(db, 'leveling_config', 'spam_xp_penalty_divisor', 'INTEGER DEFAULT 1000')
             columns.add("spam_xp_penalty_divisor")
         # Voice-farming guard (alone / deafened / AFK). Additive: existing
         # rows get 1 (ON) from the column default, i.e. the pre-existing
         # always-blocked behaviour, so an upgrade changes nothing by itself.
         if "voice_farming_guard" not in columns:
-            await db.execute(
-                "ALTER TABLE leveling_config ADD COLUMN voice_farming_guard "
-                "INTEGER DEFAULT 1")
+            await add_column_if_missing(db, 'leveling_config', 'voice_farming_guard', 'INTEGER DEFAULT 1')
             columns.add("voice_farming_guard")
         # Keep the old fixed-penalty column as inert compatibility storage.
         # Its value has no safe/arbitrary mapping to the new incident divisor;
@@ -234,6 +228,30 @@ async def migrate_leveling_config(db):
     except Exception:
         await db.rollback()
         raise
+
+
+async def add_column_if_missing(db, table, column, ddl):
+    """Add an additive column, tolerating only a verified concurrent winner.
+
+    Identifiers and definitions are internal schema constants, not user input.
+    A duplicate-column error is accepted only after the schema confirms the
+    intended column exists; all other database errors are propagated.
+    """
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table) or not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*", column):
+        raise ValueError("invalid schema identifier")
+    async def present():
+        cursor = await db.execute(f'PRAGMA table_info("{table}")')
+        return column in {row[1] for row in await cursor.fetchall()}
+    if await present():
+        return False
+    try:
+        await db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
+        return True
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower() or not await present():
+            raise
+        return False
 
 
 async def init_db():
@@ -333,11 +351,11 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(levels)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "prestige" not in cols:
-                await db.execute(
-                    "ALTER TABLE levels ADD COLUMN prestige INTEGER DEFAULT 0")
+                await add_column_if_missing(db, 'levels', 'prestige', 'INTEGER DEFAULT 0')
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] levels.prestige: {e}")
+            raise
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS economy (
@@ -352,11 +370,11 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(economy)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "diamonds" not in cols:
-                await db.execute(
-                    "ALTER TABLE economy ADD COLUMN diamonds INTEGER DEFAULT 0")
+                await add_column_if_missing(db, 'economy', 'diamonds', 'INTEGER DEFAULT 0')
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] economy.diamonds: {e}")
+            raise
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS warnings (
@@ -390,11 +408,11 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(tickets)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "staff_role_id" not in cols:
-                await db.execute(
-                    "ALTER TABLE tickets ADD COLUMN staff_role_id INTEGER")
+                await add_column_if_missing(db, 'tickets', 'staff_role_id', 'INTEGER')
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] tickets.staff_role_id: {e}")
+            raise
 
         # CLEANUP (dark-fixes pass #2): ticket_config dropped from
         # schema — confirmed zero read/write references anywhere (only
@@ -456,10 +474,21 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id, role_id, message_id)
             )
         """)
+        # Serialize the schema check and rebuild across startup processes.
+        await db.commit()
+        await db.execute("BEGIN IMMEDIATE")
         try:
             cursor = await db.execute("PRAGMA table_info(reaction_role_expiry)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "message_id" not in cols:
+                # Preserve explicit indexes and triggers that would otherwise
+                # be dropped along with the renamed legacy table. Autoindexes
+                # are recreated by the new PRIMARY KEY, so have no SQL here.
+                cursor = await db.execute(
+                    "SELECT sql FROM sqlite_master WHERE tbl_name=? "
+                    "AND type IN ('index', 'trigger') AND sql IS NOT NULL "
+                    "ORDER BY type, name", ("reaction_role_expiry",))
+                dependent_schema = [row[0] for row in await cursor.fetchall()]
                 # Table predates message_id being part of the primary
                 # key — SQLite can't ALTER a PK in place, so rebuild.
                 # Legacy rows get message_id=0 (best we can do — the
@@ -488,11 +517,16 @@ async def init_db():
                     FROM reaction_role_expiry_old
                 """)
                 await db.execute("DROP TABLE reaction_role_expiry_old")
+                for statement in dependent_schema:
+                    await db.execute(statement)
                 await db.commit()
                 print("[MIGRATION] reaction_role_expiry rebuilt with "
                       "message_id in primary key")
-        except Exception as e:
-            print(f"[MIGRATION] reaction_role_expiry.message_id: {e}")
+            else:
+                await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS rr_panels (
@@ -554,14 +588,13 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(triggers)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "fuzzy_threshold" not in cols:
-                await db.execute(
-                    "ALTER TABLE triggers ADD COLUMN fuzzy_threshold INTEGER DEFAULT 80")
+                await add_column_if_missing(db, 'triggers', 'fuzzy_threshold', 'INTEGER DEFAULT 80')
             if "cooldown_seconds" not in cols:
-                await db.execute(
-                    "ALTER TABLE triggers ADD COLUMN cooldown_seconds INTEGER DEFAULT 0")
+                await add_column_if_missing(db, 'triggers', 'cooldown_seconds', 'INTEGER DEFAULT 0')
             await db.commit()
         except Exception as e:
             print(f"[MIGRATION] triggers.fuzzy_threshold/cooldown_seconds: {e}")
+            raise
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bot_settings (
@@ -680,9 +713,7 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(guild_settings)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "diamond_exchange_rate" not in cols:
-                await db.execute(
-                    "ALTER TABLE guild_settings ADD COLUMN "
-                    "diamond_exchange_rate INTEGER DEFAULT 500")
+                await add_column_if_missing(db, 'guild_settings', 'diamond_exchange_rate', 'INTEGER DEFAULT 500')
             # Wallet pass (Streak/Inventory phase): currency display
             # metadata is fully configurable (names + emoji icons), so
             # no coin/diamond label or emoji is hardcoded in the UI.
@@ -705,21 +736,13 @@ async def init_db():
             # other three already did.
             added_coin_emoji = "coin_emoji_id" not in cols
             if "currency_name" not in cols:
-                await db.execute(
-                    "ALTER TABLE guild_settings ADD COLUMN "
-                    "currency_name TEXT")
+                await add_column_if_missing(db, 'guild_settings', 'currency_name', 'TEXT')
             if added_coin_emoji:
-                await db.execute(
-                    "ALTER TABLE guild_settings ADD COLUMN "
-                    "coin_emoji_id TEXT")
+                added_coin_emoji = await add_column_if_missing(db, 'guild_settings', 'coin_emoji_id', 'TEXT')
             if "diamond_name" not in cols:
-                await db.execute(
-                    "ALTER TABLE guild_settings ADD COLUMN "
-                    "diamond_name TEXT")
+                await add_column_if_missing(db, 'guild_settings', 'diamond_name', 'TEXT')
             if "diamond_emoji_id" not in cols:
-                await db.execute(
-                    "ALTER TABLE guild_settings ADD COLUMN "
-                    "diamond_emoji_id TEXT")
+                await add_column_if_missing(db, 'guild_settings', 'diamond_emoji_id', 'TEXT')
             await db.commit()
 
             # One-time carry-over for guilds that configured a primary
@@ -756,6 +779,7 @@ async def init_db():
                           f"(currency_emoji_id -> coin_emoji_id)")
         except Exception as e:
             print(f"[MIGRATION] guild_settings currency columns: {e}")
+            raise
 
         # Cairo canonical: normalize legacy UTC / Asia/Cairo to Africa/Cairo
         try:
@@ -795,14 +819,13 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(guild_bot_profile)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "banner_url" not in cols:
-                await db.execute(
-                    "ALTER TABLE guild_bot_profile ADD COLUMN banner_url TEXT")
+                await add_column_if_missing(db, 'guild_bot_profile', 'banner_url', 'TEXT')
             if "bio" not in cols:
-                await db.execute(
-                    "ALTER TABLE guild_bot_profile ADD COLUMN bio TEXT")
+                await add_column_if_missing(db, 'guild_bot_profile', 'bio', 'TEXT')
             await db.commit()
         except Exception as e:
             print(f"[MIGRATION] guild_bot_profile.banner_url/bio: {e}")
+            raise
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS status_messages (
@@ -895,9 +918,7 @@ async def init_db():
             "PRAGMA table_info(leveling_spam_penalty_events)")
         penalty_columns = {row[1] for row in await cursor.fetchall()}
         if "incident_id" not in penalty_columns:
-            await db.execute(
-                "ALTER TABLE leveling_spam_penalty_events "
-                "ADD COLUMN incident_id TEXT")
+            await add_column_if_missing(db, 'leveling_spam_penalty_events', 'incident_id', 'TEXT')
         await db.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS
                 idx_leveling_spam_penalties_incident
@@ -974,9 +995,7 @@ async def init_db():
             cursor = await db.execute(f"PRAGMA table_info({_reward_table})")
             _reward_columns = {row[1] for row in await cursor.fetchall()}
             if "audience" not in _reward_columns:
-                await db.execute(
-                    f"ALTER TABLE {_reward_table} "
-                    "ADD COLUMN audience TEXT NOT NULL DEFAULT 'everyone'")
+                await add_column_if_missing(db, _reward_table, 'audience', "TEXT NOT NULL DEFAULT 'everyone'")
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_reset_config (
@@ -1013,6 +1032,7 @@ async def init_db():
                 multiplier REAL NOT NULL,
                 expires_at TIMESTAMP NOT NULL,
                 source     TEXT DEFAULT 'shop',
+                origin_op_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -1024,6 +1044,40 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_lab_expires
             ON leveling_active_boosts(expires_at)
         """)
+        # Shop purchases: a boost's `id` is only unique per row, not per
+        # purchase — one member can hold several boosts at once, so a
+        # compensation descriptor carrying a `boost_id` cannot prove the row
+        # belongs to THIS operation from the row id alone. `origin_op_id`
+        # records the purchase operation that created the boost (NULL for
+        # every non-Shop producer and for rows written before this column
+        # existed, which the rollback treats as unprovable and never deletes).
+        # `source` keeps its existing meaning and is not reused for this.
+        # Additive and idempotent, the same pattern as
+        # `equipped_roles.entry_key` above.
+        cursor = await db.execute("PRAGMA table_info(leveling_active_boosts)")
+        if "origin_op_id" not in {c[1] for c in await cursor.fetchall()}:
+            # This column is required, not optional: every shop boost INSERT
+            # names it, and the late-delivery rollback uses it to prove which
+            # purchase created a boost. Logging the failure and continuing (as
+            # this used to) starts the bot against a schema where every boost
+            # grant raises `no such column: origin_op_id` — a silent, delayed
+            # outage that looks like a grant bug. Refuse to start instead, and
+            # name the fix.
+            try:
+                await add_column_if_missing(db, 'leveling_active_boosts', 'origin_op_id', 'TEXT')
+            except Exception as exc:
+                print("=" * 60)
+                print("FATAL: could not add leveling_active_boosts.origin_op_id")
+                print(f"  {exc}")
+                print("  -> Shop XP boosts cannot be granted or rolled back")
+                print("     without this column, so startup is aborted rather")
+                print("     than continuing into an inconsistent schema.")
+                print("  -> Check database write permissions / disk space, then")
+                print("     restart. Existing rows keep working once the ALTER")
+                print("     succeeds (it is additive and idempotent).")
+                print("=" * 60)
+                raise
+
         # Level-claim boosts only. Shop and potion rows use other source
         # values, so this index does not limit those inserts.
         await db.execute("""
@@ -1227,23 +1281,21 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(shop_items)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "price_diamonds" not in cols:
-                await db.execute(
-                    "ALTER TABLE shop_items ADD COLUMN "
-                    "price_diamonds INTEGER DEFAULT NULL")
+                await add_column_if_missing(db, 'shop_items', 'price_diamonds', 'INTEGER DEFAULT NULL')
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] shop_items.price_diamonds: {e}")
+            raise
 
         try:
             cursor = await db.execute("PRAGMA table_info(shop_items)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "xp_boost_multiplier" not in cols:
-                await db.execute(
-                    "ALTER TABLE shop_items ADD COLUMN "
-                    "xp_boost_multiplier REAL DEFAULT NULL")
+                await add_column_if_missing(db, 'shop_items', 'xp_boost_multiplier', 'REAL DEFAULT NULL')
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] shop_items.xp_boost_multiplier: {e}")
+            raise
 
         # Finalized Prestige system: shop items of type='prestige' carry
         # the permanent tier (1..5) they grant. NULL for every other item
@@ -1253,12 +1305,11 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(shop_items)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "prestige_tier" not in cols:
-                await db.execute(
-                    "ALTER TABLE shop_items ADD COLUMN "
-                    "prestige_tier INTEGER DEFAULT NULL")
+                await add_column_if_missing(db, 'shop_items', 'prestige_tier', 'INTEGER DEFAULT NULL')
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] shop_items.prestige_tier: {e}")
+            raise
 
         # Rank Card foundation (item catalog / rarity / equip system,
         # pass 1 — schema + backend). shop_items gets two new,
@@ -1277,15 +1328,13 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(shop_items)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "icon_url" not in cols:
-                await db.execute(
-                    "ALTER TABLE shop_items ADD COLUMN icon_url TEXT")
+                await add_column_if_missing(db, 'shop_items', 'icon_url', 'TEXT')
             if "rarity" not in cols:
-                await db.execute(
-                    "ALTER TABLE shop_items ADD COLUMN "
-                    "rarity TEXT DEFAULT 'common'")
+                await add_column_if_missing(db, 'shop_items', 'rarity', "TEXT DEFAULT 'common'")
             await db.commit()
         except Exception as e:
             print(f"[MIGRATION] shop_items.icon_url/rarity: {e}")
+            raise
 
         # Shop Publisher Step 1 (Slice 1): flat, guild-scoped presentation
         # categories. shop_categories holds NO commerce data (no price/
@@ -1342,6 +1391,16 @@ async def init_db():
         from utils.shop_emoji import ensure_shop_emoji_schema
         await ensure_shop_emoji_schema(db)
 
+        # Timed ownership + the Shop purchase journal. Additive by design:
+        # `inventory_items` keeps its UNIQUE(guild, user, item_name) contract
+        # (trade, reward provenance and reversal all rely on it), so temporary
+        # holdings live beside it rather than re-keying it.
+        from utils.timed_ownership import (
+            ensure_timed_ownership_schema, ensure_purchase_journal_schema,
+        )
+        await ensure_timed_ownership_schema(db)
+        await ensure_purchase_journal_schema(db)
+
         # Publication identity/state only. The live message is always rebuilt
         # from shop_designs + current shop_items; never persist commerce or
         # rendered payload snapshots here. No Design/channel uniqueness:
@@ -1373,12 +1432,11 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(shop_items)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "category_id" not in cols:
-                await db.execute(
-                    "ALTER TABLE shop_items ADD COLUMN "
-                    "category_id INTEGER")
+                await add_column_if_missing(db, 'shop_items', 'category_id', 'INTEGER')
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] shop_items.category_id: {e}")
+            raise
 
         # Shop Designer Step 1: explicit one-level product family. Existing
         # rows remain roots (NULL); names are never used to infer options.
@@ -1388,9 +1446,7 @@ async def init_db():
         cursor = await db.execute("PRAGMA table_info(shop_items)")
         cols = [c[1] for c in await cursor.fetchall()]
         if "option_of_id" not in cols:
-            await db.execute(
-                "ALTER TABLE shop_items ADD COLUMN "
-                "option_of_id INTEGER DEFAULT NULL")
+            await add_column_if_missing(db, 'shop_items', 'option_of_id', 'INTEGER DEFAULT NULL')
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_si_guild_option
             ON shop_items(guild_id, option_of_id)
@@ -1494,10 +1550,48 @@ async def init_db():
                 user_id     INTEGER NOT NULL,
                 item_name   TEXT NOT NULL,
                 role_id     INTEGER NOT NULL,
+                entry_key   TEXT,
                 equipped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
+        # Timed ownership: the single equip slot must be able to say WHICH
+        # ownership record it is wearing. `item_name` cannot — a permanent and
+        # a timed "Ocean Blue" share it. Additive and idempotent; NULL on
+        # pre-existing rows, which `get_equipped()` reads as "legacy permanent
+        # ownership, match by name".
+        cursor = await db.execute("PRAGMA table_info(equipped_roles)")
+        if "entry_key" not in {c[1] for c in await cursor.fetchall()}:
+            try:
+                await add_column_if_missing(db, 'equipped_roles', 'entry_key', 'TEXT')
+            except Exception as e:
+                # Concurrent init_db(): the bot process and the dashboard
+                # process both run init_db(), and on a first deploy both
+                # reach this migration before either has committed it. Each
+                # one's PRAGMA above therefore sees no entry_key, and each
+                # one issues the ALTER. ALTER TABLE takes a write lock, so
+                # the loser of that race gets
+                # "duplicate column name: entry_key" -- the winner already
+                # added the exact column we were about to add. That is the
+                # migration succeeding, not failing, and aborting startup
+                # there would kill a process at the one moment the schema
+                # most needs to be brought up to date.
+                #
+                # Accept it only after proving the column is really there,
+                # and let every other error abort startup exactly as before.
+                if "duplicate column name" not in str(e).lower():
+                    raise RuntimeError(
+                        "Required migration equipped_roles.entry_key failed; "
+                        "startup aborted to protect ownership identity"
+                    ) from e
+                cursor = await db.execute(
+                    "PRAGMA table_info(equipped_roles)")
+                if "entry_key" not in {c[1] for c in await cursor.fetchall()}:
+                    raise RuntimeError(
+                        "Required migration equipped_roles.entry_key reported "
+                        "a duplicate column, but the column is still absent; "
+                        "startup aborted to protect ownership identity"
+                    ) from e
 
         # Wallet pass: equipped_titles is the Title equip slot. It is a
         # SEPARATE table from equipped_roles on purpose — the locked
@@ -1558,12 +1652,11 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(purchase_history)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "currency_paid" not in cols:
-                await db.execute(
-                    "ALTER TABLE purchase_history ADD COLUMN "
-                    "currency_paid TEXT DEFAULT 'balance'")
+                await add_column_if_missing(db, 'purchase_history', 'currency_paid', "TEXT DEFAULT 'balance'")
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] purchase_history.currency_paid: {e}")
+            raise
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS temp_roles (
@@ -1588,11 +1681,9 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(temp_roles)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "claim_id" not in cols:
-                await db.execute(
-                    "ALTER TABLE temp_roles ADD COLUMN claim_id INTEGER")
+                await add_column_if_missing(db, 'temp_roles', 'claim_id', 'INTEGER')
             if "unit_index" not in cols:
-                await db.execute(
-                    "ALTER TABLE temp_roles ADD COLUMN unit_index INTEGER")
+                await add_column_if_missing(db, 'temp_roles', 'unit_index', 'INTEGER')
             await db.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_temp_roles_claim_unit
                 ON temp_roles(claim_id, unit_index)
@@ -1601,6 +1692,7 @@ async def init_db():
             await db.commit()
         except Exception as e:
             print(f"[MIGRATION] temp_roles.claim_id: {e}")
+            raise
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS transaction_ledger (
@@ -1797,11 +1889,11 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(ticket_categories)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "required_role_id" not in cols:
-                await db.execute(
-                    "ALTER TABLE ticket_categories ADD COLUMN required_role_id INTEGER")
+                await add_column_if_missing(db, 'ticket_categories', 'required_role_id', 'INTEGER')
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] ticket_categories.required_role_id: {e}")
+            raise
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ticket_panels (
@@ -1878,15 +1970,14 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(reports)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "resolved_by_id" not in cols:
-                await db.execute(
-                    "ALTER TABLE reports ADD COLUMN resolved_by_id INTEGER")
+                await add_column_if_missing(db, 'reports', 'resolved_by_id', 'INTEGER')
                 await db.commit()
             if "resolved_by_name" not in cols:
-                await db.execute(
-                    "ALTER TABLE reports ADD COLUMN resolved_by_name TEXT")
+                await add_column_if_missing(db, 'reports', 'resolved_by_name', 'TEXT')
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] reports.resolved_by: {e}")
+            raise
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bot_status (
@@ -2206,11 +2297,11 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(twitch_config)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "discord_user_id" not in cols:
-                await db.execute(
-                    "ALTER TABLE twitch_config ADD COLUMN discord_user_id INTEGER")
+                await add_column_if_missing(db, 'twitch_config', 'discord_user_id', 'INTEGER')
                 await db.commit()
         except Exception as e:
             print(f"[MIGRATION] twitch_config.discord_user_id: {e}")
+            raise
 
         await db.commit()
 

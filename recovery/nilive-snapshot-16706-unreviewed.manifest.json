@@ -1,0 +1,288 @@
+{
+  "format_version": 1,
+  "purpose": "Unreviewed reference snapshot; not Phase 2.2 and not approved for merge",
+  "created_at_utc": "2026-10-30T01:45:46.384076+00:00",
+  "source_root": "/home/user/Nilive-Bot",
+  "base_sha": "a6b812be26d35f3048db39d0425374d23cd804ea",
+  "local_branch": "arena/c014328f-nilive-bot",
+  "tracked_modified_count": 23,
+  "untracked_count": 5,
+  "total_file_count": 28,
+  "total_additions": 16706,
+  "total_deletions": 523,
+  "archive": {
+    "filename": "nilive-snapshot-16706-unreviewed.tar.gz",
+    "size_bytes": 305454,
+    "sha256": "2945ea62a55130bfc5419213886a72ca7e2a4281ce5ae74a668ff660087e7d34",
+    "members": "Exactly the 28 project files; manifest is supplied separately"
+  },
+  "security_scan": {
+    "files_scanned": 28,
+    "sensitive_path_or_pattern_findings": 0,
+    "limitation": "Heuristic filename/content scan, not a comprehensive guarantee that no secret exists"
+  },
+  "verification": {
+    "tar_tzf_exit_code": 0,
+    "trial_extraction_directory": "/home/user/nilive-snapshot-16706-verify-ld_o5hh4",
+    "extracted_file_count": 28,
+    "all_sha256_match_source": true,
+    "file_modes_match_source": true,
+    "source_files_unchanged": true,
+    "git_status_and_refs_unchanged": true
+  },
+  "restore_guidance": "Use a separate disposable checkout of base_sha. Overlay these files at their relative paths only after verifying the manifest; the five untracked files are additions. Do not overlay an existing dirty checkout. Archive excludes .git and does not contain the whole repository.",
+  "files": [
+    {
+      "path": "cogs/shop.py",
+      "status": "tracked modified",
+      "size_bytes": 66994,
+      "sha256": "62bda73b78c4662720593b796dcf65a0ab81ddf05c3d9767b2f246934b8c136a",
+      "mode_octal": "0o644",
+      "additions": 848,
+      "deletions": 161
+    },
+    {
+      "path": "cogs/trade.py",
+      "status": "tracked modified",
+      "size_bytes": 21695,
+      "sha256": "21f3fcf4f08c932ad792b1cc402fce5d8521fbfd9d3fe6159c0b2032da1a9861",
+      "mode_octal": "0o644",
+      "additions": 6,
+      "deletions": 1
+    },
+    {
+      "path": "cogs/wallet.py",
+      "status": "tracked modified",
+      "size_bytes": 64523,
+      "sha256": "76b25431fa48395ca52469e5e445262892ea6fe6c0123fc25cb93cba8390072b",
+      "mode_octal": "0o644",
+      "additions": 566,
+      "deletions": 126
+    },
+    {
+      "path": "dashboard/templates/systems/shop.html",
+      "status": "tracked modified",
+      "size_bytes": 22914,
+      "sha256": "4f65a4417343cf0df5eb81c24630ca67192e3f21bb52c4fab4f15297d721cfce",
+      "mode_octal": "0o644",
+      "additions": 38,
+      "deletions": 11
+    },
+    {
+      "path": "database.py",
+      "status": "tracked modified",
+      "size_bytes": 106581,
+      "sha256": "0ced9c67584b0b66f32fdd591a2e0fd4eb71371444f5f6d8e4dde079dfe6c8db",
+      "mode_octal": "0o644",
+      "additions": 23,
+      "deletions": 0
+    },
+    {
+      "path": "scripts/test_free_shop_items.py",
+      "status": "tracked modified",
+      "size_bytes": 26896,
+      "sha256": "b5468276d5696004d0d38352993d9d3c4b7ec4cc1426edf84b17665d8075a92c",
+      "mode_octal": "0o644",
+      "additions": 20,
+      "deletions": 4
+    },
+    {
+      "path": "scripts/test_vi_shop_api.py",
+      "status": "tracked modified",
+      "size_bytes": 5399,
+      "sha256": "1996d4e702d0bc7408f262a216e3848a03edb6f476003b2802731476624bb337",
+      "mode_octal": "0o644",
+      "additions": 20,
+      "deletions": 11
+    },
+    {
+      "path": "scripts/test_vi_shop_form.js",
+      "status": "tracked modified",
+      "size_bytes": 5377,
+      "sha256": "0ebafed2aa06afb3f33f44296ae3d1387a5c51e8a04ad598c5ece005ae822494",
+      "mode_octal": "0o644",
+      "additions": 14,
+      "deletions": 2
+    },
+    {
+      "path": "scripts/test_wallet_phase2.py",
+      "status": "tracked modified",
+      "size_bytes": 12049,
+      "sha256": "81c56ffde16b8915640c81e16c6171e221e736224ea46dcbdb533d9db3a5d5a5",
+      "mode_octal": "0o644",
+      "additions": 4,
+      "deletions": 2
+    },
+    {
+      "path": "test_free_shop_items.py",
+      "status": "tracked modified",
+      "size_bytes": 26896,
+      "sha256": "b5468276d5696004d0d38352993d9d3c4b7ec4cc1426edf84b17665d8075a92c",
+      "mode_octal": "0o644",
+      "additions": 20,
+      "deletions": 4
+    },
+    {
+      "path": "test_vi_shop_api.py",
+      "status": "tracked modified",
+      "size_bytes": 5399,
+      "sha256": "1996d4e702d0bc7408f262a216e3848a03edb6f476003b2802731476624bb337",
+      "mode_octal": "0o644",
+      "additions": 20,
+      "deletions": 11
+    },
+    {
+      "path": "test_wallet_phase2.py",
+      "status": "tracked modified",
+      "size_bytes": 12049,
+      "sha256": "81c56ffde16b8915640c81e16c6171e221e736224ea46dcbdb533d9db3a5d5a5",
+      "mode_octal": "0o644",
+      "additions": 4,
+      "deletions": 2
+    },
+    {
+      "path": "utils/economy_safe.py",
+      "status": "tracked modified",
+      "size_bytes": 14403,
+      "sha256": "7b86c56e20afd29032b89faae673f36d2181b25e54a1884110482ebe18658679",
+      "mode_octal": "0o644",
+      "additions": 61,
+      "deletions": 38
+    },
+    {
+      "path": "utils/equip_engine.py",
+      "status": "tracked modified",
+      "size_bytes": 16320,
+      "sha256": "667c47e8be5f293eb7b54abb08eaa3a5a5646568957e08a1a5edab6c80649d68",
+      "mode_octal": "0o644",
+      "additions": 194,
+      "deletions": 54
+    },
+    {
+      "path": "utils/inventory.py",
+      "status": "tracked modified",
+      "size_bytes": 14719,
+      "sha256": "2771fa7a5771152e73c389ea57daccd5b26767a11a30fb2dd20a51c2bd3370f4",
+      "mode_octal": "0o644",
+      "additions": 69,
+      "deletions": 1
+    },
+    {
+      "path": "utils/level_claims.py",
+      "status": "tracked modified",
+      "size_bytes": 126815,
+      "sha256": "03c3ddcc0009654277ae27bdf5df78eafb0c2d3fa2a38bbfed5e503ecfea498c",
+      "mode_octal": "0o644",
+      "additions": 115,
+      "deletions": 38
+    },
+    {
+      "path": "utils/level_test_reset.py",
+      "status": "tracked modified",
+      "size_bytes": 107374,
+      "sha256": "79b563353c45f43146dd46f42ff519ba364b0d922825e63aeb7cbe2341de6a93",
+      "mode_octal": "0o644",
+      "additions": 32,
+      "deletions": 11
+    },
+    {
+      "path": "utils/potion_engine.py",
+      "status": "tracked modified",
+      "size_bytes": 7507,
+      "sha256": "c81a09ce0674300dd03c91c1fdfbf1bbae004a83081af363f7365ddd78fcfdcf",
+      "mode_octal": "0o644",
+      "additions": 7,
+      "deletions": 1
+    },
+    {
+      "path": "utils/rank_card_data.py",
+      "status": "tracked modified",
+      "size_bytes": 9563,
+      "sha256": "d7b1592577a76c3a51ad4d36f8e77ca3a0b692c0b1aa2cae5ea828d2b3d6da65",
+      "mode_octal": "0o644",
+      "additions": 26,
+      "deletions": 1
+    },
+    {
+      "path": "utils/reward_engine.py",
+      "status": "tracked modified",
+      "size_bytes": 38611,
+      "sha256": "b8ff9275570e094217bef1386f2a4174990ff53a42aedd47621ef9dff0729131",
+      "mode_octal": "0o644",
+      "additions": 387,
+      "deletions": 17
+    },
+    {
+      "path": "utils/shop_validation.py",
+      "status": "tracked modified",
+      "size_bytes": 8973,
+      "sha256": "2a731eb5764199b8d8acb358ea97706fe9611208328056b9d3b328d02a2a1d2f",
+      "mode_octal": "0o644",
+      "additions": 50,
+      "deletions": 2
+    },
+    {
+      "path": "utils/title_engine.py",
+      "status": "tracked modified",
+      "size_bytes": 5445,
+      "sha256": "d28017bafe429a3a2f7d410ffd087b293dd1a17cca77fba97f4df68e77619f90",
+      "mode_octal": "0o644",
+      "additions": 5,
+      "deletions": 1
+    },
+    {
+      "path": "utils/xp_calculator.py",
+      "status": "tracked modified",
+      "size_bytes": 31527,
+      "sha256": "b0034b4fc591ea95f54db68a42b674b2a98e1d001c533f0439e993de0791fe3c",
+      "mode_octal": "0o644",
+      "additions": 53,
+      "deletions": 24
+    },
+    {
+      "path": "scripts/recover_shop_purchases.py",
+      "status": "untracked",
+      "size_bytes": 1931,
+      "sha256": "63ec1d2eaf8bb679366d768d5f9eddc0df710ad392a208982067620d618fdc13",
+      "mode_octal": "0o755",
+      "additions": 43,
+      "deletions": 0
+    },
+    {
+      "path": "scripts/test_inventory_ui.py",
+      "status": "untracked",
+      "size_bytes": 54226,
+      "sha256": "2b70c7b13d37e0f21eb5d42b183c1723f5fc711ebe2ca5edd1e002473471fb56",
+      "mode_octal": "0o644",
+      "additions": 1094,
+      "deletions": 0
+    },
+    {
+      "path": "test_inventory_ui.py",
+      "status": "untracked",
+      "size_bytes": 54226,
+      "sha256": "2b70c7b13d37e0f21eb5d42b183c1723f5fc711ebe2ca5edd1e002473471fb56",
+      "mode_octal": "0o644",
+      "additions": 1094,
+      "deletions": 0
+    },
+    {
+      "path": "test_timed_ownership.py",
+      "status": "untracked",
+      "size_bytes": 347079,
+      "sha256": "075da18c5fdd5dd83eee6b65731247b3867d2c0a890162db0c639c8c4d8a3c17",
+      "mode_octal": "0o644",
+      "additions": 7023,
+      "deletions": 0
+    },
+    {
+      "path": "utils/timed_ownership.py",
+      "status": "untracked",
+      "size_bytes": 215208,
+      "sha256": "2e92a1f3bce95353dd7449b650eaec05685f2882eeaeb352dc6c795dcd58f92e",
+      "mode_octal": "0o644",
+      "additions": 4870,
+      "deletions": 0
+    }
+  ]
+}

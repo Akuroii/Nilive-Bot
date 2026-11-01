@@ -123,11 +123,36 @@ async def get_rank_card_data(guild_id: int, user_id: int,
     from utils.title_engine import get_equipped_title
     equipped_title = await get_equipped_title(guild_id, user_id)
 
+    # get_inventory() returns one entry per ownership record (a permanent stack
+    # and N timed holdings can share a name) and has already filtered out
+    # anything expired, so an expired item can never reach the card even if the
+    # cleanup loop has not run yet.
     items = await get_inventory(guild_id, user_id, include_empty=False)
-    grid_candidates = []
+
+    # The grid has exactly 12 slots, so same-name entries are aggregated into
+    # ONE slot: permanent + timed copies of "Golden Key" read as a single owned
+    # item with the summed quantity, not as several look-alike tiles. Roles and
+    # Colors are excluded by type, exactly as before.
+    grouped: dict[str, dict] = {}
     for it in items:
         if it["item_type"] in ("role", "temp_role"):
             continue
+        name = it["item_name"]
+        entry = grouped.get(name)
+        if entry is None:
+            grouped[name] = {**it, "quantity": int(it.get("quantity") or 0)}
+            continue
+        entry["quantity"] += int(it.get("quantity") or 0)
+        # Earliest deadline among the timed copies; a permanent copy does not
+        # clear it. Nothing renders this as a countdown — it is context only.
+        expiry = it.get("expires_at")
+        if expiry and (not entry.get("expires_at")
+                       or str(expiry) < str(entry["expires_at"])):
+            entry["expires_at"] = expiry
+        entry["timed"] = bool(entry.get("timed")) and bool(it.get("timed"))
+
+    grid_candidates = []
+    for it in grouped.values():
         catalog = await get_catalog_entry(guild_id, it["item_name"])
         grid_candidates.append({
             **it,

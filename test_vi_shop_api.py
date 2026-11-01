@@ -29,21 +29,30 @@ class FreeVIShopApiTests(unittest.TestCase):
         # Superseded rule: this used to assert zero was rejected for every
         # non-Prestige kind. Zero (with no Diamond price) is now the normal Free
         # listing for those kinds — but it must NOT inherit anything VI-specific:
-        # stock/level/role/duration stay exactly as submitted.
-        for kind in ("title", "custom", "role", "temp_role", "potion", "xp_boost"):
+        # stock/level/role/duration stay exactly as submitted for the kind.
+        cases = (
+            ("title", {}, None),
+            ("custom", {"duration_hours": 2}, 2),
+            ("role", {"role_id": 77}, None),
+            ("temp_role", {"role_id": 77, "duration_hours": 2}, 2),
+            ("potion", {"xp_boost_multiplier": 2, "duration_hours": 2}, 2),
+            ("xp_boost", {"xp_boost_multiplier": 2, "duration_hours": 2}, 2),
+        )
+        for kind, extra, expected_dur in cases:
             with self.subTest(kind=kind):
                 before = len(rows("SELECT id FROM shop_items"))
-                response = self.post(dict(name=f"Free {kind}", type=kind, price=0, role_id=77,
-                                           duration_hours=2, xp_boost_multiplier=2,
-                                           max_stock=4, required_level=5,
-                                           required_role_id=88))
+                response = self.post(dict(
+                    name=f"Free {kind}", type=kind, price=0,
+                    max_stock=4, required_level=5, required_role_id=88,
+                    **extra))
                 self.assertEqual(response.status_code, 200, response.get_json())
                 self.assertEqual(len(rows("SELECT id FROM shop_items")), before + 1)
-        self.assertEqual(
-            rows("SELECT price,max_stock,current_stock,required_level,required_role_id,"
-                 "duration_hours,price_diamonds FROM shop_items"),
-            [(0, 4, 4, 5, 88, 2, None)] * 6,
-            "a normal Free listing keeps its own restrictions — no VI normalization")
+                self.assertEqual(
+                    rows("SELECT price,max_stock,current_stock,required_level,"
+                         "required_role_id,duration_hours,price_diamonds "
+                         "FROM shop_items WHERE name=?", (f"Free {kind}",)),
+                    [(0, 4, 4, 5, 88, expected_dur, None)],
+                    "a normal Free listing keeps its own restrictions — no VI normalization")
         # A positive diamond price is still a normal paid item, not a free item.
         response = self.post(dict(name="Paid diamonds", type="title", price=0, price_diamonds=5))
         self.assertEqual(response.status_code, 200)

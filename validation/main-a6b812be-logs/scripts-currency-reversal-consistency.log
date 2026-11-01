@@ -1,0 +1,21 @@
+========================================================================
+REPRO 3: currency reversed, then the member re-crosses the level
+========================================================================
+  setup: level=12 claim=fulfilled wallet=(500, 0)
+  reverse_currency -> status=applied wallet now=(0, 0)
+  re-cross award -> True new_level=12
+
+  final level     = 12
+  wallet          = (500, 0)   (expected (500, 0) if kept)
+  claim 1      = fulfilled
+  journal         = [(1, 'currency', 'resolved:level_reached', None)]
+  kept_reached    = True
+  deleted_claims  = []
+  reversed        = {'currency': [{'currency': 'balance', 'amount': 500, 'quantity': 500, 'claim_id': 1, 'reward_level': 12, 'ledger_id': 1, 'status': 'applied'}], 'inventory': [], 'role': [], 'boost': []}
+[PASS] the member re-crossed the level, so the reward is earned
+[PASS] the claim the member re-earned was kept
+[PASS] a KEPT reward leaves the wallet credited, not debited
+[PASS] the reversal journal is closed as an administrative fact, not left as a standing reversal
+[PASS] the restore is not a double credit
+
+ALL CURRENCY REVERSAL CONSISTENCY CHECKS PASSED

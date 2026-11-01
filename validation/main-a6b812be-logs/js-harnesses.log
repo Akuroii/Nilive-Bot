@@ -1,0 +1,1115 @@
+
+> nilive-dashboard-tests@0.0.0 test
+> bash scripts/run_js_tests.sh
+
+▶ node --check (dashboard static JS)
+  ok   dashboard/static/js/dashboard.js
+  ok   dashboard/static/js/embed-composer.js
+  ok   dashboard/static/js/nav-lifecycle.js
+  ok   dashboard/static/js/nero-alias-input.js
+  ok   dashboard/static/js/nero-select.js
+  ok   dashboard/static/js/shop-designer.js
+  ok   dashboard/static/js/shop-publications.js
+  ok   dashboard/static/js/shop-publisher.js
+
+▶ scripts/test_currency_icon.js
+
+
+== 1. currencyEmojiHtml() — unicode / static / animated ==
+  PASS unicode 🪙 -> passes through as escaped text
+  PASS unicode 🪙 -> a browser does not swallow it as a tag
+  PASS unicode 🪙 -> no visible token text
+  PASS unicode 🌙 -> passes through as escaped text
+  PASS unicode 🌙 -> a browser does not swallow it as a tag
+  PASS unicode 🌙 -> no visible token text
+  PASS arabic text -> passes through as escaped text
+  PASS arabic text -> a browser does not swallow it as a tag
+  PASS arabic text -> no visible token text
+  PASS static custom -> a CDN <img> on the .png asset
+  PASS static custom -> no raw markup in the output
+  PASS static custom -> a browser does not swallow it as a tag
+  PASS static custom -> no visible token text
+  PASS animated custom -> a CDN <img> on the .gif asset
+  PASS animated custom -> no raw markup in the output
+  PASS animated custom -> a browser does not swallow it as a tag
+  PASS animated custom -> no visible token text
+  PASS empty -> empty string
+  PASS literal text is escaped, not treated as markup
+  PASS an ID-only emoji still renders an image
+  PASS a unicode emoji never becomes an image
+
+== 2. currencyEmojiText() — the <option> twin ==
+  PASS unicode passes through
+  PASS static custom -> its NAME, never the token
+  PASS animated custom -> its NAME, never the token
+  PASS the `_` placeholder name reads as "no icon"
+  PASS empty -> empty
+  PASS no markup leaks from <:moon:15498…
+  PASS no markup leaks from <a:moon:1549…
+
+== 3. currencyLabel() / currencyAmount() — the HTML sinks ==
+  PASS [defaults] currencyLabel('coins') is not swallowed as a tag
+  PASS [defaults] currencyLabel('coins') shows no raw token text
+  PASS [defaults] currencyLabel('coins') keeps the configured name
+  PASS [defaults] currencyAmount('coins') is not swallowed as a tag
+  PASS [defaults] currencyAmount('coins') shows no raw token text
+  PASS [defaults] currencyAmount('coins') keeps amount + name formatting
+  PASS [defaults] currencyLabel('coins') renders the unicode emoji
+  PASS [defaults] currencyLabel('diamonds') is not swallowed as a tag
+  PASS [defaults] currencyLabel('diamonds') shows no raw token text
+  PASS [defaults] currencyLabel('diamonds') keeps the configured name
+  PASS [defaults] currencyAmount('diamonds') is not swallowed as a tag
+  PASS [defaults] currencyAmount('diamonds') shows no raw token text
+  PASS [defaults] currencyAmount('diamonds') keeps amount + name formatting
+  PASS [defaults] currencyLabel('diamonds') renders the unicode emoji
+  PASS [defaults] labelFirst keeps 'Name 1,250' with no icon
+  PASS [defaults] 'xp' falls through
+  PASS [defaults] currencyNameFor('role') falls through
+  PASS [defaults] the stored key 'balance' resolves like 'coins'
+  PASS [unicode] currencyLabel('coins') is not swallowed as a tag
+  PASS [unicode] currencyLabel('coins') shows no raw token text
+  PASS [unicode] currencyLabel('coins') keeps the configured name
+  PASS [unicode] currencyAmount('coins') is not swallowed as a tag
+  PASS [unicode] currencyAmount('coins') shows no raw token text
+  PASS [unicode] currencyAmount('coins') keeps amount + name formatting
+  PASS [unicode] currencyLabel('coins') renders the unicode emoji
+  PASS [unicode] currencyLabel('diamonds') is not swallowed as a tag
+  PASS [unicode] currencyLabel('diamonds') shows no raw token text
+  PASS [unicode] currencyLabel('diamonds') keeps the configured name
+  PASS [unicode] currencyAmount('diamonds') is not swallowed as a tag
+  PASS [unicode] currencyAmount('diamonds') shows no raw token text
+  PASS [unicode] currencyAmount('diamonds') keeps amount + name formatting
+  PASS [unicode] currencyLabel('diamonds') renders the unicode emoji
+  PASS [unicode] labelFirst keeps 'Name 1,250' with no icon
+  PASS [unicode] 'xp' falls through
+  PASS [unicode] currencyNameFor('role') falls through
+  PASS [unicode] the stored key 'balance' resolves like 'coins'
+  PASS [static custom] currencyLabel('coins') is not swallowed as a tag
+  PASS [static custom] currencyLabel('coins') shows no raw token text
+  PASS [static custom] currencyLabel('coins') keeps the configured name
+  PASS [static custom] currencyAmount('coins') is not swallowed as a tag
+  PASS [static custom] currencyAmount('coins') shows no raw token text
+  PASS [static custom] currencyAmount('coins') keeps amount + name formatting
+  PASS [static custom] currencyLabel('coins') icon is a CDN image
+  PASS [static custom] currencyAmount('coins') icon is a CDN image
+  PASS [static custom] currencyLabel('diamonds') is not swallowed as a tag
+  PASS [static custom] currencyLabel('diamonds') shows no raw token text
+  PASS [static custom] currencyLabel('diamonds') keeps the configured name
+  PASS [static custom] currencyAmount('diamonds') is not swallowed as a tag
+  PASS [static custom] currencyAmount('diamonds') shows no raw token text
+  PASS [static custom] currencyAmount('diamonds') keeps amount + name formatting
+  PASS [static custom] currencyLabel('diamonds') icon is a CDN image
+  PASS [static custom] currencyAmount('diamonds') icon is a CDN image
+  PASS [static custom] labelFirst keeps 'Name 1,250' with no icon
+  PASS [static custom] 'xp' falls through
+  PASS [static custom] currencyNameFor('role') falls through
+  PASS [static custom] the stored key 'balance' resolves like 'coins'
+  PASS [animated custom] currencyLabel('coins') is not swallowed as a tag
+  PASS [animated custom] currencyLabel('coins') shows no raw token text
+  PASS [animated custom] currencyLabel('coins') keeps the configured name
+  PASS [animated custom] currencyAmount('coins') is not swallowed as a tag
+  PASS [animated custom] currencyAmount('coins') shows no raw token text
+  PASS [animated custom] currencyAmount('coins') keeps amount + name formatting
+  PASS [animated custom] currencyLabel('coins') icon is a CDN image
+  PASS [animated custom] currencyAmount('coins') icon is a CDN image
+  PASS [animated custom] currencyLabel('diamonds') is not swallowed as a tag
+  PASS [animated custom] currencyLabel('diamonds') shows no raw token text
+  PASS [animated custom] currencyLabel('diamonds') keeps the configured name
+  PASS [animated custom] currencyAmount('diamonds') is not swallowed as a tag
+  PASS [animated custom] currencyAmount('diamonds') shows no raw token text
+  PASS [animated custom] currencyAmount('diamonds') keeps amount + name formatting
+  PASS [animated custom] currencyLabel('diamonds') icon is a CDN image
+  PASS [animated custom] currencyAmount('diamonds') icon is a CDN image
+  PASS [animated custom] labelFirst keeps 'Name 1,250' with no icon
+  PASS [animated custom] 'xp' falls through
+  PASS [animated custom] currencyNameFor('role') falls through
+  PASS [animated custom] the stored key 'balance' resolves like 'coins'
+
+== 4. currencyLabelText() — what the <option> pickers get ==
+  PASS [defaults] currencyLabelText('coins') has no <img>
+  PASS [defaults] currencyLabelText('coins') is plain text
+  PASS [defaults] currencyLabelText('coins') keeps the name
+  PASS [defaults] currencyLabelText('diamonds') has no <img>
+  PASS [defaults] currencyLabelText('diamonds') is plain text
+  PASS [defaults] currencyLabelText('diamonds') keeps the name
+  PASS [defaults] a unicode icon is kept as-is
+  PASS [unicode] currencyLabelText('coins') has no <img>
+  PASS [unicode] currencyLabelText('coins') is plain text
+  PASS [unicode] currencyLabelText('coins') keeps the name
+  PASS [unicode] currencyLabelText('diamonds') has no <img>
+  PASS [unicode] currencyLabelText('diamonds') is plain text
+  PASS [unicode] currencyLabelText('diamonds') keeps the name
+  PASS [unicode] a unicode icon is kept as-is
+  PASS [static custom] currencyLabelText('coins') has no <img>
+  PASS [static custom] currencyLabelText('coins') is plain text
+  PASS [static custom] currencyLabelText('coins') keeps the name
+  PASS [static custom] currencyLabelText('diamonds') has no <img>
+  PASS [static custom] currencyLabelText('diamonds') is plain text
+  PASS [static custom] currencyLabelText('diamonds') keeps the name
+  PASS [static custom] the custom icon degrades to its emoji name
+  PASS [animated custom] currencyLabelText('coins') has no <img>
+  PASS [animated custom] currencyLabelText('coins') is plain text
+  PASS [animated custom] currencyLabelText('coins') keeps the name
+  PASS [animated custom] currencyLabelText('diamonds') has no <img>
+  PASS [animated custom] currencyLabelText('diamonds') is plain text
+  PASS [animated custom] currencyLabelText('diamonds') keeps the name
+  PASS [animated custom] the custom icon degrades to its emoji name
+
+== 5. minigame reward pickers use the TEXT variant ==
+  PASS minigames.html: coins label comes from currencyLabelText()
+  PASS minigames.html: diamonds label comes from currencyLabelText()
+  PASS minigames.html: it does not use the HTML variant in a picker
+  PASS minigame_builder.html: coins label comes from currencyLabelText()
+  PASS minigame_builder.html: diamonds label comes from currencyLabelText()
+  PASS minigame_builder.html: it does not use the HTML variant in a picker
+  PASS leveling.html: the rewards table cell still uses currencyLabel()
+  PASS trade.html: the offer summary still uses currencyAmount()
+
+== 6. the JS and Python renderers agree ==
+  PASS python side resolves a CDN url
+  PASS js side resolves the same CDN host
+  PASS js picks .gif for animated and .png for static
+  PASS python picks the same extension, via emoji_cdn_url
+  PASS both treat the `_` placeholder name as "no icon"
+  PASS both tag the image with the same class the CSS sizes
+
+currency-icon-js: 146 passed, 0 failed
+ALL CURRENCY-ICON JS TESTS PASSED
+✓ scripts/test_currency_icon.js
+
+▶ scripts/test_embed_attachments.js
+
+
+== blob: probe — detect "src is set but nothing paints" ==
+  PASS renders blob: when the probe image loads
+[embed-composer] blob: URLs are not renderable in this document (blocked by CSP img-src, or createObjectURL unavailable). Local attachment previews fall back to data: URIs — previews may use more memory and are skipped above 5MB.
+  PASS reports blob: as unrenderable when it never loads (CSP)
+  PASS _resetBlobProbe is callable (test seam)
+  PASS probe can be re-armed
+
+== previewUrlFor — resolution tiers ==
+  PASS prefers a blob: URL (zero-copy)
+  PASS blob URL is cached on the attachment for revoke
+  PASS FileReader is never touched when blob: works
+  PASS cached URL is reused, not re-minted
+[embed-composer] blob: URLs are not renderable in this document (blocked by CSP img-src, or createObjectURL unavailable). Local attachment previews fall back to data: URIs — previews may use more memory and are skipped above 5MB.
+  PASS falls back to a data: URI when blob: is blocked
+  PASS data: URI is cached on the attachment
+  PASS FileReader used exactly once (no re-read per render)
+[embed-composer] blob: URLs are not renderable in this document (blocked by CSP img-src, or createObjectURL unavailable). Local attachment previews fall back to data: URIs — previews may use more memory and are skipped above 5MB.
+  PASS oversized file: honest reason instead of a blank tile
+  PASS oversized file is never base64-inlined (memory blowup guard)
+  PASS the size cap only applies to the data: tier — a big image still previews via blob:
+[embed-composer] blob: URLs are not renderable in this document (blocked by CSP img-src, or createObjectURL unavailable). Local attachment previews fall back to data: URIs — previews may use more memory and are skipped above 5MB.
+[embed-composer] data: preview failed for pic.png Error: FileReader failed
+    at fr.onerror (evalmachine.<anonymous>:196:55)
+    at Timeout._onTimeout (/tmp/nilive-val-YFeOGb/tree/scripts/test_embed_attachments.js:51:71)
+    at listOnTimeout (node:internal/timers:585:17)
+    at process.processTimers (node:internal/timers:521:7)
+  PASS unreadable file degrades to a stated reason, no throw
+  PASS remote attachments pass through untouched
+  PASS remote without a url says so
+  PASS previewUrlFor(null) never throws
+  PASS allowBlob:false skips the blob attempt entirely
+
+== in-flight de-dupe — two renders must not mint twice ==
+  PASS concurrent calls share one resolution
+  PASS de-dupe promise is released after settling (retry stays possible)
+
+== renderPreview — a slot for every state, never a vanishing file ==
+  PASS pending attachment keeps a named slot
+  PASS no-preview state names its reason and says the file still sends
+  PASS the hint text comes from the shared table (page and composer cannot disagree)
+  PASS resolved preview renders an <img> that decodes off the critical path
+  PASS preview image is labelled with the file name
+  PASS non-image attachments stay a plain badge
+  PASS pages without a resolver still preview via the module cache
+  PASS and still only once per attachment
+[embed-composer] createObjectURL failed for v.png Error: quota
+    at Object.createObjectURL (/tmp/nilive-val-YFeOGb/tree/scripts/test_embed_attachments.js:189:55)
+    at resolveAttachmentPreviewUrl (evalmachine.<anonymous>:88:23)
+    at evalmachine.<anonymous>:691:27
+    at Array.map (<anonymous>)
+    at Object.renderPreview (evalmachine.<anonymous>:685:92)
+    at /tmp/nilive-val-YFeOGb/tree/scripts/test_embed_attachments.js:190:11
+  PASS a throwing createObjectURL degrades one item, not the whole preview
+
+== shared state — composer must not fight the page ==
+  PASS no module-side mint while the page resolver is authoritative
+
+embed-attachments: 31 passed, 0 failed
+ALL EMBED-ATTACHMENT TESTS PASSED
+✓ scripts/test_embed_attachments.js
+
+▶ scripts/test_embed_composer.js
+
+
+== escaping matrix ==
+  PASS esc all five specials
+  PASS esc null/undefined → empty
+  PASS esc number → string
+  PASS attr escapes quotes
+
+== blankEmbed / embedHasContent ==
+  PASS blankEmbed defaults
+  PASS blank embed is empty
+  PASS description counts
+  PASS fields count
+
+== cleanEmbedForPayload / cleanEmbedsForPayload ==
+  PASS color hex → int
+  PASS author/footer wrapped
+  PASS image/thumbnail wrapped
+  PASS empty field dropped, inline kept
+  PASS empty embeds filtered out
+  PASS non-empty kept
+  PASS no color key when color empty
+
+== embedFromApi normalization ==
+  PASS int color → hex string
+  PASS dict author/footer → strings
+  PASS dict urls → strings
+  PASS inline coerced to bool
+  PASS missing fields → defaults
+  PASS empty API list → one blank embed
+
+== renderDiscordMarkup — equivalence with the old implementation ==
+  PASS markup identical to old impl on 14 inputs
+  PASS bold
+  PASS emoji-only detection
+  PASS emoji + text is NOT emoji-only
+  PASS channel mention resolved
+
+== componentRowsHtml — engine component JSON → action rows ==
+  PASS two buttons
+  PASS secondary class mapped
+  PASS disabled state rendered
+  PASS empty → no HTML
+  PASS style 1/3/4 mapped
+  PASS emoji rendered
+  PASS labels escaped
+  PASS animated token → gif url
+  PASS static token → png url
+
+== renderPreview — full message chrome ==
+  PASS bot chrome
+  PASS mention resolved in preview
+  PASS embed desc markdown
+  PASS component rows in preview
+  PASS fields rendered
+  PASS empty placeholder shown
+
+== renderPreview — attachment slots are never silently dropped ==
+  PASS image attachment uses a blob url in the preview
+  PASS non-image attachment falls back to a badge
+  PASS fallback cache mints ONE url across two renders (no per-keystroke leak)
+  PASS attachmentPreviewUrl resolver is used
+  PASS resolver path bypasses the module cache entirely
+  PASS pending attachment keeps a visible slot instead of vanishing
+
+embed-composer: 47 passed, 0 failed
+ALL EMBED-COMPOSER TESTS PASSED
+✓ scripts/test_embed_composer.js
+
+▶ scripts/test_embedbuilder_attachment_logic.js
+
+
+== type sniffing — an image with no File.type is still an image ==
+  PASS image/png → image
+  PASS text/plain → not an image
+  PASS empty type + .heic → image (was: invisible forever)
+  PASS empty type + .mp4 → not an image
+  PASS a real non-image MIME wins over the extension
+  PASS extension → MIME map is case-insensitive
+  PASS apng recognised
+
+== blob: tier (normal case) ==
+  PASS first call: no cached URL yet, renderers get null
+  PASS first call marks the slot pending, not missing
+  PASS blob URL is resolved asynchronously
+  PASS resolver then serves the cached URL
+  PASS resolution re-renders both the grid and the preview
+  PASS 25 further renders mint and read nothing (the per-keystroke leak stays fixed)
+  PASS revoke clears every transient field
+
+== data: tier (CSP blocks blob:) — preview still appears ==
+  PASS no URL on the first pass
+[embed-composer] blob: URLs are not renderable in this document (blocked by CSP img-src, or createObjectURL unavailable). Local attachment previews fall back to data: URIs — previews may use more memory and are skipped above 5MB.
+  PASS falls back to a data: URI and the preview appears anyway
+  PASS transient flags are cleared on success
+  PASS the data: URI is then served to both renderers
+
+== oversized file — an honest reason, and no re-decode loop ==
+  PASS no preview URL
+[embed-composer] blob: URLs are not renderable in this document (blocked by CSP img-src, or createObjectURL unavailable). Local attachment previews fall back to data: URIs — previews may use more memory and are skipped above 5MB.
+  PASS a reason is recorded
+  PASS reason is too-large-for-preview
+  PASS the hint tells the admin the file WILL still be sent
+  PASS a terminal no-preview state is not retried on every keystroke
+
+== CSP img-src must allow blob: (the origin of this bug) ==
+  PASS blob: is allowed, so createObjectURL previews paint
+  PASS data: is allowed, so the fallback tier works too
+  PASS https: stays allowed (pasted image URLs / Discord CDN)
+
+embedbuilder-attachments: 26 passed, 0 failed
+ALL EMBED-BUILDER ATTACHMENT TESTS PASSED
+✓ scripts/test_embedbuilder_attachment_logic.js
+
+▶ scripts/test_message_builder_layout.js
+
+
+== A. the template declares the shell (ids, roles, nesting) ==
+  PASS the page root #mb2-root exists
+  PASS #mb2-root declares data-page-module="message-builder"
+  PASS the draft namespace guild comes from the server-rendered session, not a query string
+  PASS #mb2-strip is declared
+  PASS #mb2-strip is a <p>
+  PASS #mb2-rail is declared
+  PASS #mb2-rail is a <nav>
+  PASS #mb2-rail-title is declared
+  PASS #mb2-rail-title is a <h2>
+  PASS #mb2-rail-body is declared
+  PASS #mb2-rail-body is a <div>
+  PASS #mb2-inspector is declared
+  PASS #mb2-inspector is a <section>
+  PASS #mb2-inspector-title is declared
+  PASS #mb2-inspector-title is a <h2>
+  PASS #mb2-inspector-body is declared
+  PASS #mb2-inspector-body is a <div>
+  PASS #mb2-preview-region is declared
+  PASS #mb2-preview-region is a <aside>
+  PASS #mb2-preview-title is declared
+  PASS #mb2-preview-title is a <h2>
+  PASS #mb2-mount is declared
+  PASS #mb2-mount is a <div>
+  PASS #mb2-bar is declared
+  PASS #mb2-bar is a <div>
+  PASS #mb2-bar-status is declared
+  PASS #mb2-bar-status is a <p>
+  PASS #mb2-bar-actions is declared
+  PASS #mb2-bar-actions is a <div>
+  PASS the validation strip is a polite live region
+  PASS the validation strip starts hidden (a blank document is clean, so step 6a has nothing to say)
+  PASS and it starts with exactly its base class (no tone class before the page has spoken)
+  PASS the page root carries the served limits, escaped so the attribute cannot break
+  PASS and the expression is the documented tojson|forceescape pipe
+  PASS the bar status is a polite live region
+  PASS the rail is a labelled <nav>
+  PASS the inspector is a labelled <section>
+  PASS the inspector is focusable without becoming a tab stop (focus moves here after structural changes)
+  PASS the preview is a labelled <aside>
+  PASS #mb2-mount is nested inside the preview region
+  PASS the preview mount is empty in the markup (preview.js owns everything inside it)
+  PASS document order is rail → inspector → preview → bar
+  PASS the action container is empty in the MARKUP (actionbar.js renders the buttons at runtime)
+  PASS no on* attributes anywhere in the template
+  PASS no <script> in the fragment (an inline script inside a swapped fragment never re-executes)
+  PASS no inline style attributes
+  PASS no v1 (eb-*) or minigame (mb-*) classes leak into the v2 markup
+  PASS every id in the v2 template is namespaced mb2-
+  PASS the template loads exactly one stylesheet: message-builder.css
+  PASS the stylesheet link sits at the top level of the content block (arrives and leaves with the fragment)
+  PASS base.html does not reference v2 CSS (untouched by step 5a)
+  PASS the template declares no {% block scripts %} (the v1 double-execution bug stays fixed)
+  PASS the page title is set through the existing data-page-title hook
+
+== B. the module and the markup agree ==
+  PASS the page module registers NERO.embed.messageBuilderPage
+  PASS every id the page module resolves is declared by the template
+  PASS the module declares the full region surface
+  PASS data-page-script loads the foundations before the page, in dependency order
+  PASS listed script exists: js/embed/model.js
+  PASS listed script exists: js/embed/assets.js
+  PASS listed script exists: js/embed/asset-store.js
+  PASS listed script exists: js/embed/store.js
+  PASS listed script exists: js/embed/validate.js
+  PASS listed script exists: js/embed/discord-markdown.js
+  PASS listed script exists: js/embed/preview.js
+  PASS listed script exists: js/embed/drafts.js
+  PASS listed script exists: js/embed/views/statusbar.js
+  PASS listed script exists: js/embed/views/rail.js
+  PASS listed script exists: js/embed/views/inspector.js
+  PASS listed script exists: js/embed/views/actionbar.js
+  PASS listed script exists: js/embed/message-builder-page.js
+  PASS embed/validate.js publishes NERO.embed.validate
+  PASS and the page is loaded after it
+  PASS loading the page module without nav-lifecycle.js fails loudly
+  PASS the v2 page module references no v1 module
+  PASS the statusbar view publishes NERO.embed.views.statusbar
+  PASS the rail rows are styled in the page stylesheet
+  PASS the inspector controls and labels are styled
+  PASS its groups and the field list are styled
+  PASS controls keep a touch-target minimum height
+  PASS inputs fill their column instead of overflowing it
+  PASS no inspector rule clips content (long field names wrap instead)
+  PASS no validation tone leaks into the inspector (danger)
+  PASS no validation tone leaks into the inspector (warning)
+  PASS no validation tone leaks into the inspector (success)
+  PASS and no validation classes exist yet
+  PASS the statusbar is TOLD the dirty state (view.dirty) and never reaches into the store itself
+  PASS no page/view module opens storage on its own (persistence belongs to drafts.js)
+  PASS the strip has a warning and a danger tone, drawn from the shared tone variables
+  PASS and a long issue message wraps instead of overflowing the shell
+  PASS the strip never overrides the [hidden] rule with a display of its own
+  PASS the action bar module exists
+  PASS the action bar view publishes NERO.embed.views.actionbar
+  PASS the bar buttons are styled, including their real disabled state
+  PASS a dialog is fixed to the viewport (it never joins the bar's flex row)
+  PASS the dialog panel is bounded by a max-width, never a fixed width
+  PASS dialog controls keep the touch-target floor
+  PASS the action bar opens no storage of its own
+  PASS and never reaches for the renderer or the draft session
+  PASS and declares no second live region (the page owns the only one)
+
+== C. the route ==
+  PASS /embed-builder/v2 exists and is guarded by require_page("embedbuilder")
+  PASS the v2 route renders manage/message_builder.html
+  PASS the v2 route passes the guild bot identity (no Discord call from the browser)
+  PASS the v2 route renders the served limits table into the page (transport L1)
+  PASS and the route imports that table from utils/discord_limits (one authority)
+  PASS the Shop Designer route renders manage/shopdesigner.html
+  PASS Shop Designer reuses the canonical V2 limits payload for its shared validator
+  PASS the v1 /embed-builder route still renders manage/embedbuilder.html
+  PASS the v2 route is declared exactly once
+  PASS no template links to /embed-builder/v2 (no nav entry in step 5a)
+  PASS the frozen v1 template contains no v2 markup
+
+== D. the stylesheet stays in v2 ==
+  PASS no .eb-* selector (that namespace is v1 s)
+  PASS no .mb-* selector (that namespace is the minigame builder s)
+  PASS the grid is styled
+  PASS the sticky preview offset is a single variable
+  PASS the preview (or bar) is sticky
+  PASS the flexible grid track cannot overflow (minmax(0, 1fr))
+  PASS grid children opt out of the auto minimum that causes sideways scroll
+  PASS no overflow:hidden on the sticky preview or any of its ancestors
+  PASS the only overflow:hidden rules are the rail label s ellipsis (by design)
+  PASS no fixed shell width that cannot shrink
+  PASS long unbroken values wrap instead of widening the column
+
+== D2. the 6b classes: counters, caps and badges ==
+  PASS counters use tabular figures (the number cannot jitter while typing)
+  PASS the over-state is the danger tone, not a colour invented here
+  PASS the fields counter sits beside the add button instead of under it
+  PASS a disabled inspector button looks disabled and does not react to hover
+  PASS the badge exists and its [hidden] state is not overridden by its own display
+  PASS badge tones are the shared warning/danger variables (one vocabulary with the strip)
+  PASS the embeds fact never breaks in half
+  PASS the badge carries a visually-hidden name for assistive tech
+  PASS and it hides without overflow:hidden, so the overflow invariant above stays meaningful
+  PASS it is hidden visually, never from the accessibility tree
+  PASS no counter or badge is positioned against the viewport
+  PASS breakpoint 1360px is defined
+  PASS breakpoint 768px is defined
+  PASS breakpoint 480px is defined
+  PASS reduced-motion is respected
+  PASS the sticky preview is height-bounded (never taller than the viewport)
+  PASS the preview is never switched off at narrow widths (it stays a top pane)
+
+message-builder layout: 138 passed, 0 failed
+ALL MESSAGE-BUILDER LAYOUT CHECKS PASSED
+✓ scripts/test_message_builder_layout.js
+
+▶ scripts/test_shop_designer_actions.js
+
+  PASS Buttons action editor is mounted
+  PASS editor exposes roster mapping and explicit existing-pipeline validation
+  PASS Buttons, Product Select, and separate Option Select kinds are exposed
+  PASS button style remains fixed green
+  PASS Region A adds root products only; option rows cannot enter products[]
+  PASS option rows are absent from the roster add controls
+  PASS action mapping choices are derived only from rostered roots
+  PASS adding action entries maps products without changing roster order
+  PASS already-mapped root products cannot be duplicated as action entries
+  PASS optional custom label and emoji are editable
+  PASS action entries reorder independently of products[]
+  PASS reordering action entries leaves Region A products[] unchanged
+  PASS validation calls only the existing complete-design preview endpoint
+  PASS validation and preview receive the unchanged root-only Region A roster
+  PASS existing pipeline receives only a buttons action with mapped entries
+  PASS validation body preserves the independent action-entry order
+  PASS custom label and emoji pass through the existing action contract
+  PASS blank optional fields remain blank so the existing builder supplies its defaults
+  PASS action edits leave Region B presentation state unchanged
+  PASS the in-memory entry shape contains only product_id, label, and emoji
+  PASS Buttons do not gain Product Select style/description configuration
+  PASS existing pipeline result reports validated green button construction
+  PASS removing an action entry changes only the action mapping
+  PASS add/edit/remove/reorder action controls never mutate, reorder, or duplicate products[]
+  PASS a rostered product has no orphan badge
+  PASS removing a roster product does not cascade into the action entries
+  PASS an action entry whose product left the roster shows a display-only badge
+  PASS re-adding the product clears the badge and the original roster order is restored
+  PASS Product Select choices exclude option rows and remain limited to rostered roots
+  PASS Product Select enforces its two-entry minimum before preview
+  PASS Product Select preview request carries the selected action kind and entries
+  PASS Product Select entry ordering follows action.entries
+  PASS label, description, and emoji are wired into the preview request
+  PASS placeholder is wired into the preview request
+  PASS Product Select validation status uses select wording
+  PASS Option Select anchor choices are only roots already in products[]
+  PASS the selected roster root loads its direct family through the existing read endpoint
+  PASS only direct options of the selected family are offered; root, other-family option, and chained option are excluded
+  PASS Option Select enforces its minimum before Preview
+  PASS Option Select entry order follows the user-added action.entries order
+  PASS Option Select Preview uses option entries under the selected roster root without adding a root entry
+  PASS Option Select Preview preserves entry ordering
+  PASS Option Select Preview request includes label, description, emoji, and placeholder
+  PASS no purchase execution, publication, or unexpected API request was made
+  PASS Designer performs only its startup saved-design list read; no write, publication, or purchase endpoint is called
+
+45/45 checks passed.
+✓ scripts/test_shop_designer_actions.js
+
+▶ scripts/test_shop_designer_catalog.js
+
+  PASS uses only existing saved-design, catalog, and category GET APIs
+  PASS loads the saved-design list and both live catalog sources
+  PASS only root products are initially browsable in the roster catalog
+  PASS option rows are not offered as independently addable roster products
+  PASS catalog count reports only root products
+  PASS the roster handler rejects an option ID even if an add event is constructed directly
+  PASS metadata is displayed live and read-only
+  PASS filter has All, each existing category, and Uncategorized
+  PASS category filter shows only linked products
+  PASS uncategorized filter includes null and stale category links
+  PASS selection appends root product IDs in ordered roster order
+  PASS already-rostered products are visibly disabled to prevent duplicates
+  PASS category filtering is view-only and does not change the roster
+  PASS Move up reorders only the product ID roster
+  PASS Move down restores the ordered roster
+  PASS Remove deletes the selected ID from the roster
+  PASS duplicate add cannot create a duplicate product ID
+  PASS roster count reflects its current IDs
+  PASS clicking a catalog row selects exactly that row
+  PASS the context inspector shows the selected product
+  PASS clicking a roster row moves the selection and highlights the same product in both lists
+  PASS the inspector follows the newly selected roster row
+  PASS row selection never changes the roster, dirty state, or preview status
+  PASS a non-product inspector context clears the row highlight
+  PASS Region A makes no persistence writes, preview requests, or category mutations
+  PASS Region C action controls remain separate from the existing complete-design preview renderer
+  PASS Region B presentation controls are separate from the Region A roster
+
+27/27 checks passed.
+✓ scripts/test_shop_designer_catalog.js
+
+▶ scripts/test_shop_designer_emoji.js
+
+  PASS startup and roster loading never prepare, reconcile, or delete emojis
+  PASS adding/selecting a roster product enables explicit selected preparation
+  PASS selected preparation sends only the selected product ID
+  PASS ordinary preparation does not acknowledge or retry uncertain creation
+  PASS browser preparation sends no source URL target
+  PASS ready result updates the roster preparation badge
+  PASS roster preparation uses the current roster IDs
+  PASS uncertain retry requires the owner checkbox and confirmation
+  PASS reconciliation sends product IDs only and no retry acknowledgement
+  PASS a reported duplicate gets a specific, non-automatic deletion control
+  PASS an incorrect exact confirmation sends no deletion
+  PASS an unconfirmed 2xx deletion envelope is not reported as successful
+  PASS only the exactly confirmed duplicate ID is sent for deletion
+  PASS deletion targets the confirmed asset hash and emoji ID, not an arbitrary URL or product mutation
+  PASS successful duplicate deletion is followed by read-only reconciliation
+  PASS emoji operations never disguise themselves as preview requests
+
+16/16 checks passed.
+✓ scripts/test_shop_designer_emoji.js
+
+▶ scripts/test_shop_designer_persistence.js
+
+  PASS saved-design list loading state is shown before the request resolves
+  PASS successful empty list has a distinct empty state
+  PASS list failure is surfaced separately from the empty state
+  PASS list error does not falsely claim that there are no designs
+  PASS Load rejects a legacy snapshot that contains an option row in products[]
+  PASS first content/name edits transition a new design to dirty
+  PASS Save creates through the existing designs POST without an id
+  PASS saved snapshot carries only the existing template provenance field
+  PASS POST contains exactly the complete existing design contract
+  PASS root products persist as the ordered product-ID array
+  PASS presentation persists as the full normalized content/embed/mode snapshot
+  PASS Buttons round-trip ordered IDs, label, and emoji without adding Select-only fields
+  PASS successful create clears dirty state and selects the saved record
+  PASS Load restores the saved presentation through the existing Embed Builder inspector
+  PASS Load restores the saved Buttons mapping by product ID
+  PASS Load restores the root-only products[] roster without adding option rows
+  PASS loading a saved snapshot establishes a clean baseline
+  PASS editing a loaded record marks it dirty
+  PASS Save failure is visible and does not clear dirty state
+  PASS failed full overwrite leaves the stored record unchanged
+  PASS Save of a loaded record uses the existing id for full overwrite
+  PASS Product Select full-overwrite persists placeholder and ordered entry presentation fields
+  PASS successful full overwrite returns to clean state
+  PASS Option Select keeps root products separate from its action choices
+  PASS Option Select persists only the ordered direct-option IDs
+  PASS Option Select preserves its placeholder, descriptions, labels, and emoji
+  PASS Option Select root context is restored via option_of_id despite duplicate product names
+  PASS Option Select Load retains direct-option entry IDs and ordering
+  PASS Option Select Load keeps its direct options in action.entries, not products[]
+  PASS Option Select load is clean after direct-family restoration
+  PASS dirty draft activates the browser beforeunload guard
+  PASS declining HTMX navigation cancels the swap before nav-lifecycle teardown
+  PASS declined navigation preserves the unsaved draft
+  PASS declining destructive Load keeps the current draft
+  PASS confirmed Load discards draft edits and restores the saved record
+  PASS declining Delete leaves the stored design intact
+  PASS Delete mutation failure is surfaced without dropping the saved record
+  PASS a Publication-blocked Delete shows the server reason and keeps the saved record
+  PASS the blocked Design stays selected and Delete is re-enabled for a retry
+  PASS a non-JSON server failure is reported by status and keeps the saved record
+  PASS while DELETE is in flight the saved record stays and Delete stays disabled
+  PASS confirmed Delete removes the record through the existing ID endpoint
+  PASS deleting the active record returns the shell to a clean new design
+  PASS confirmed HTMX navigation is allowed
+  PASS Delete uses only the existing saved-design ID endpoint
+  PASS persistence integration adds no Publication or purchase calls
+
+Delete while a DELETE is pending
+  PASS the first DELETE is pending and Delete is disabled
+  PASS a second Delete while the first is pending sends no second DELETE
+  PASS a second Delete while the first is pending does not ask for confirmation again
+  PASS the confirmed DELETE removes Alpha once
+  PASS after the delete, Delete stays disabled with nothing selected
+  PASS Load is disabled for the Design whose DELETE is pending
+  PASS choosing another Design does not re-enable Delete while a DELETE is pending
+  PASS Load stays available for the other Design
+  PASS loading another Design does not re-enable Delete while a DELETE is pending
+  PASS saving does not re-enable Delete while a DELETE is pending
+  PASS the held DELETE still removes only Alpha after those interactions
+  PASS the confirmed DELETE removes only the Design it named
+  PASS the list drops Alpha and keeps the Design the user chose meanwhile
+  PASS Delete is re-enabled for the Design that is still selected
+  PASS a refused DELETE keeps Alpha selected and shows the server reason
+  PASS a refused DELETE re-enables Delete and Load for a retry
+  PASS a rejected DELETE keeps Alpha, says the outcome is unconfirmed, and re-enables Delete
+  PASS a 200 reply without the success envelope is not treated as deleted
+  PASS a request that throws before it is sent is reported as unconfirmed and restores the controls
+  PASS Alpha is deleted while its Save reply is still held
+  PASS the late Save reply does not put Alpha back into the list
+  PASS the late Save reply does not reopen Alpha in the editor
+  PASS Save is re-enabled once its reply has settled
+  PASS a Save that fails after the delete leaves the delete outcome in place
+  PASS the failed late Save changes nothing on the server and re-enables Save
+  PASS no promise rejection escaped the page during the Delete checks
+
+72/72 checks passed.
+✓ scripts/test_shop_designer_persistence.js
+
+▶ scripts/test_shop_designer_presentation.js
+
+  PASS mode selector exposes exactly the two Shop modes with per_product default
+  PASS existing server limits payload is present for V2 validation
+  PASS template names are populated from the existing catalog response
+  PASS Region A roster starts with its own root-product ID
+  PASS V2 import, normalization, and wire conversion retain presentation data
+  PASS selecting a template uses only the existing template GET
+  PASS template content is normalized into the existing V2 inspector
+  PASS V2 inspector is mounted for template embed editing
+  PASS V2 validator reports against the served limits
+  PASS existing V2 inspector owns message-content editing
+  PASS content and mode controls accept in-memory edits
+  PASS existing V2 rail controls the embed list
+  PASS only catalog/category/template GETs occur; no persistence, preview, commerce write, or publication request is issued
+  PASS Region C action state remains separate from the existing complete-design preview renderer
+  PASS presentation editor cannot contain or address products[] roster controls
+  PASS presentation template/content/embed/mode edits leave Region A products[] unchanged
+  PASS the Designer loads the existing message-builder.css before its own stylesheet
+  PASS message-builder.css is still loaded from the page, not globally from base.html
+  PASS the Designer shell provides the --mb2-radius value the shared styles read
+  PASS message-builder.css rules are not duplicated (only the disabled-cursor override references the rail)
+  PASS every sd-/sp- class the Designer emits has a stylesheet rule
+  PASS sticky side panels are height-bounded and scroll instead of being clipped
+  PASS the three-column layout collapses before its 1072px content minimum plus the 324px shell chrome
+
+23/23 checks passed.
+✓ scripts/test_shop_designer_presentation.js
+
+▶ scripts/test_shop_designer_preview.js
+
+  PASS explicit validation requests the existing complete-design preview once
+  PASS preview loading state is visible
+  PASS request carries products[], presentation, and Buttons action from current in-memory state
+  PASS editing while a response is pending invalidates and clears that preview
+  PASS a newer preview request reflects the newer action state
+  PASS existing V2 renderer displays the complete returned message content and embed
+  PASS purchase action is rendered by the reused Shop Publisher helper
+  PASS existing warning helper renders returned warning code and text
+  PASS existing token helper renders returned token resolution
+  PASS successful complete-design preview status is visible
+  PASS a stale response cannot overwrite newer message or purchase-action output
+  PASS only existing read routes and the existing preview POST are called
+  PASS the only POST is the read-only complete-design preview; no persistence, purchase, or publication call occurs
+  PASS option rows cannot be added to the Design roster
+  PASS Product Select choices remain roots from the root-only roster
+  PASS Product Select validation makes one request to the existing Preview endpoint
+  PASS Product Select Preview request carries ordered root IDs
+  PASS Product Select Preview request carries placeholder and entry presentation overrides
+  PASS existing Preview renderer displays Product Select placeholder, component ID, and selected-root values
+  PASS existing Preview renderer displays Product Select labels, descriptions, and emoji
+  PASS Option Select roots are anchored only to root products in the roster
+  PASS Option Select excludes the root, cross-family option, and chained option
+  PASS Option Select entries are direct options in their configured order
+  PASS Option Select validation uses the existing Preview endpoint
+  PASS Option Select Preview request keeps the root roster separate from direct-option entries
+  PASS existing Preview renderer displays the Option Select descriptor, ordered values, labels, descriptions, and emoji
+  PASS V2 preview renderer is released on page teardown
+
+27/27 checks passed.
+✓ scripts/test_shop_designer_preview.js
+
+▶ scripts/test_shop_designer_preview_save_publications.js
+
+A. Preview shows the server's reason
+  PASS a 400 with problems[] shows the first problem, not "HTTP 400"
+  PASS the action validation line shows it too
+  PASS a 400 with only error shows the error text
+  PASS a non-JSON error body falls back to the status code
+  PASS a 200 with an unreadable body is an error, never "Preview ready"
+  PASS success:false with 200 still shows its error
+  PASS a transport failure shows its message and is not a preview
+  PASS every failed preview leaves no stale result behind
+B. Save shows the server's reason
+  PASS a 409 shows the server reason, not "HTTP 409"
+  PASS a failed save selects nothing and announces nothing
+  PASS an unreadable error body falls back to the status code
+  PASS Save is re-enabled after a failure
+C. Save → Publications selection
+  PASS Save selects the saved design
+  PASS Save announces exactly one change, carrying the new design id
+  PASS the Publications panel loads exactly that design's publications
+  PASS its records are listed
+  PASS Publish becomes available once that design's publication list has loaded
+  PASS saving the same design again reloads nothing (selection did not change)
+D. Delete clears the Publications context
+  PASS delete succeeds
+  PASS deleting the selected design announces an empty selection
+  PASS the deleted design's publication rows are gone from the panel
+  PASS Publish is disabled with no design selected
+  PASS a blocked delete keeps the selection and announces nothing
+
+23/23 checks passed.
+✓ scripts/test_shop_designer_preview_save_publications.js
+
+▶ scripts/test_shop_designer_token_catalog.js
+
+A. template
+  PASS panel is a <details> inside the Designer template
+  PASS panel is collapsed by default
+  PASS usage example uses entities so Jinja cannot evaluate it
+B. renders the real catalog exactly
+  PASS real catalog loaded from the server code
+  PASS one entry per catalog token
+  PASS canonical token names and server order preserved
+  PASS groups appear in the server order: Product, Price
+  PASS every description is rendered verbatim (no rewording)
+  PASS grouped-price example "1,500" preserved
+  PASS the exact 𝐅𝐫𝐞𝐞 convention preserved
+  PASS aliases shown for every token that has them
+  PASS status reports the count
+C. search
+  PASS case-insensitive search narrows the list
+  PASS status shows N of M
+  PASS searching an alias finds its canonical token
+  PASS no match shows a clear message
+  PASS clearing the search restores everything
+D. copy
+  PASS Copy writes the exact canonical token
+  PASS status confirms the copy
+  PASS a denied clipboard is reported honestly, not as success
+  PASS no clipboard API is reported honestly
+E. robustness
+  PASS a failed catalog load shows "unavailable" and does not throw
+  PASS a malformed tokens field is handled safely
+  PASS malformed entries are skipped, valid ones kept
+  PASS descriptions are inserted as text, never as HTML
+
+25/25 checks passed.
+✓ scripts/test_shop_designer_token_catalog.js
+
+▶ scripts/test_shop_failed_publication_ui.js
+
+PASS all five rows render
+PASS failed + no message ID offers exactly Unpublish (no Update)
+PASS pending row offers no Update/Unpublish (only the explicit record-only removal), clear explanation
+PASS failed row that carries a message ID stays locked
+PASS published row still offers Update and Unpublish
+PASS message-less attention row offers no Update/Unpublish (only the explicit record-only removal)
+PASS declined confirmation sends no request
+PASS failed-row confirmation says no Discord message exists (not "Delete this Discord message")
+PASS Unpublish issues DELETE /api/shop-publisher/publications/1
+PASS list reloads after the failed row is cleared
+PASS cleared row disappears from the list
+All failed-publication UI checks passed.
+✓ scripts/test_shop_failed_publication_ui.js
+
+▶ scripts/test_shop_publication_recovery_ui.js
+
+PASS Re-check is disabled while the publication list is loading
+PASS Re-check is enabled once the list for the selected design has loaded
+PASS pending: only Remove record only
+PASS attention with message: Update, Unpublish, Remove record only
+PASS published: NO record-only removal (Unpublish must be used)
+PASS uncertain replacement: authorize + record-only
+PASS failed orphan: Unpublish only
+PASS in-flight row: no actions at all
+PASS declining the record-only confirmation sends no request
+PASS confirmation says database-only, Discord not contacted, message may need manual deletion
+PASS POST /publications/1/forget with {confirm:true}
+PASS button disables while the request runs
+PASS status states Discord was not contacted
+PASS list reloads after removal
+PASS server refusal is shown, not swallowed
+PASS button re-enables after a refusal
+PASS POST /designs/7/publications/recheck
+PASS Re-check disables itself and shows progress
+PASS a second click while running sends nothing
+PASS summary reports cleared / present / unverified honestly
+PASS Re-check re-enables after completion
+PASS a stale Re-check result cannot overwrite another design's status
+PASS Re-check is usable again for the newly selected design
+PASS a blocked Update shows the first problem and the remaining ones
+PASS after a blocked Update the row is untouched and Unpublish stays available
+PASS Re-check is disabled with no design selected
+All publication recovery UI checks passed.
+✓ scripts/test_shop_publication_recovery_ui.js
+
+▶ scripts/test_shop_publications_ui.js
+
+PASS Publish disabled while initial Publication list loads
+PASS Publish remains disabled while newly selected Design loads
+PASS Publish becomes available after successful list load
+PASS stale Design A response ignored after switching to B
+PASS Publish disabled during subsequent Design list load
+PASS Publish remains disabled after Publication-list failure
+PASS successful list load restores Publish
+PASS Publication statuses are rendered as separate rows
+PASS in-flight state 2 has a clear non-actionable explanation and no actions
+PASS in-flight state 3 has a clear non-actionable explanation and no actions
+PASS in-flight state 4 has a clear non-actionable explanation and no actions
+PASS message-less state 0 keeps its explanation and offers only Remove record only
+PASS message-less state 5 keeps its explanation and offers only Remove record only
+PASS a failed, message-less row offers only Unpublish (no Update)
+PASS published offers Update and Unpublish; attention adds the explicit record-only removal
+PASS replacement retry authorization permits only its deliberate Update
+PASS uncertain replacement keeps explicit authorization and adds the record-only removal
+PASS starting Update disables both Update and Unpublish for that Publication
+PASS the disabled sibling cannot send a conflicting Unpublish request
+PASS a stale Update completion cannot overwrite the newly selected Design status
+PASS a stale Update completion cannot replace the newly selected Design list
+PASS starting Unpublish disables both Unpublish and Update for that Publication
+PASS the disabled sibling cannot send a conflicting Update request
+PASS a stale Unpublish completion cannot overwrite the newly selected Design status
+PASS a stale Unpublish completion cannot replace the newly selected Design list
+PASS concurrent Publish click is locked while request is in flight
+PASS Publish is restored after confirmed response and successful list refresh
+PASS uncertain Publish completion for U does not write status into selected Design V
+PASS U uncertainty does not trigger a duplicate warning for Design V
+PASS the uncertain Publish warning remains scoped to Design U and its channel
+PASS fixture is a realistic snowflake beyond JS Number precision
+PASS a 19-digit snowflake channel ID reaches the publish request
+PASS the snowflake publish request is the one now in flight
+PASS the exact snowflake string is sent as channel_id, unchanged
+PASS channel_id travels as a digit string, never a Number/BigInt coercion
+PASS the literal snowflake digits appear in the raw request body
+PASS invalid channel input "" never reaches the publish request
+PASS invalid channel input "" keeps the existing validation message
+PASS invalid channel input "500" never reaches the publish request
+PASS invalid channel input "500" keeps the existing validation message
+PASS invalid channel input "<#1088248319982006322>" never reaches the publish request
+PASS invalid channel input "<#1088248319982006322>" keeps the existing validation message
+PASS invalid channel input "1088248319982006322x" never reaches the publish request
+PASS invalid channel input "1088248319982006322x" keeps the existing validation message
+PASS invalid channel input "108824831998200632201" never reaches the publish request
+PASS invalid channel input "108824831998200632201" keeps the existing validation message
+PASS the pending-duplication warning still fires for a snowflake channel
+All Publication UI regression checks passed.
+✓ scripts/test_shop_publications_ui.js
+
+▶ scripts/test_shop_publisher_form.js
+
+
+== A. Boot: category picker, category grouping, type badge ==
+  PASS the catalog is fetched exactly once per visit
+  PASS the Slice 1 category list is fetched exactly once per visit
+  PASS the template picker lists every saved presentation
+  PASS the category picker offers All / categories / the uncategorized bucket
+  PASS category options carry emoji + name + derived counts
+  PASS the assignment select offers Uncategorized + every category
+  PASS products group by category with an Uncategorized bucket
+  PASS each product appears exactly once, inside its category group
+  PASS the category link is the grouping mechanism
+  PASS products without a category land in the Uncategorized bucket
+  PASS a disabled product is visible but marked, so its preview warning is reachable
+  PASS the product type survives as display metadata, not the grouping
+  PASS option values are the root product ids in category order
+  PASS an Option row never appears as a standalone/root product choice
+  PASS the type badge stays hidden until a product is chosen
+  PASS the fixed token catalog reference renders
+  PASS the status line asks for a selection
+  PASS no purchase action before a preview
+  PASS warnings start in the placeholder state (authored in the template)
+
+== A2. Category assignment posts to the Slice 1 endpoint ==
+  PASS the assignment select shows the product's current category
+  PASS the type badge shows display metadata for the selected product
+  PASS assignment POSTs exactly once per change
+  PASS assignment is a POST
+  PASS unassign posts category_id: null
+  PASS a successful assignment reports success
+  PASS the picker regroups after the assignment
+  PASS the unassigned product left its category group
+  PASS the unassigned product landed in the Uncategorized bucket
+  PASS category counts follow the assignment
+  PASS assigning posts the parsed category id
+  PASS the product moved into its new category group
+  PASS the assignment select holds the new value
+  PASS a failed assignment reports through the status line
+  PASS the selection reverts to the previous category on failure
+  PASS the original mapping is restored
+  PASS the picker groups match the boot state again
+
+== A3. The category filter narrows the product picker ==
+  PASS the Cosmetics filter keeps only its member
+  PASS empty groups hide in the filtered view
+  PASS the uncategorized filter keeps only uncategorized products
+  PASS the uncategorized filter shows only its bucket
+  PASS a category filter keeps exactly its linked products
+  PASS All products restores every product in category order
+  PASS a filtered-out root remains visibly selected
+  PASS the outside-filter selection is explicitly labeled
+  PASS the assignment control and type badge continue to describe the selected root
+  PASS a selection still inside the filter survives the change
+  PASS the shared env ends this section in the boot shape
+
+== B/C/D. Preview: design draft, resolved presentation, purchase action ==
+  PASS a half-selection makes no preview request
+  PASS the half-selection is explained in the status line
+  PASS selecting both sides makes exactly one preview request
+  PASS the preview request is a JSON POST
+  PASS the template document is read from the Embed Builder's existing route (intentional Step 0 transitional source)
+  PASS the request carries a design draft: root-product roster + button action
+  PASS the presentation snapshot comes from the loaded template document
+  PASS the resolved content renders in the preview mount
+  PASS the resolved embed description renders
+  PASS the purchase action row is shown with the preview
+  PASS the published button is rendered
+  PASS the button carries the published label and emoji
+  PASS the exact custom_id of the existing purchase mechanism is shown
+  PASS the meta names the published style and the existing mechanism
+  PASS every warning renders
+  PASS warnings carry their code, path and message
+  PASS resolved-payload validation warnings render
+  PASS one row per token occurrence
+  PASS a resolved occurrence shows token, path and value
+  PASS an unknown occurrence is visibly marked
+  PASS an empty resolution is visibly marked
+  PASS the status line reports the warning count
+
+== C2. A select purchase action renders its options and values ==
+  PASS the select control is rendered
+  PASS one row per select option
+  PASS the options carry their resolved labels
+  PASS the options carry their resolved descriptions
+  PASS the meta shows the component custom_id and the option VALUES
+  PASS select options route to the same existing mechanism
+
+== E. Stale responses never overwrite a newer preview ==
+  PASS the newer preview (product 5) is on screen
+  PASS a stale preview response cannot overwrite the newer one
+  PASS no selection hides the purchase action
+  PASS warnings return to the placeholder
+  PASS tokens return to the placeholder
+  PASS a rejected draft is reported on the status line
+  PASS a failed request is reported on the status line
+
+== F. Teardown releases everything; a second visit works ==
+  PASS the picker listeners were released on unmount
+  PASS one mount, one clean destroy
+  PASS a second visit refetches the catalog
+  PASS the second visit renders the fresh catalog
+  PASS the second mount registered
+  PASS the second destroy was clean too
+
+== G. A failing catalog call is a status error ==
+  PASS the status line reports the catalog failure
+  PASS the catalog panel degrades visibly
+
+== H. Design drafts: Save/Load/Delete over the in-memory draft ==
+  PASS the saved-design list is fetched exactly once per visit
+  PASS the saved-design picker lists every design
+  PASS the dirty marker starts hidden
+  PASS a beforeunload guard is registered
+  PASS the guard is inert while the draft is clean
+  PASS template/presentation + roster changes set dirty
+  PASS preview/loading/status transitions never change dirty
+  PASS the design name is persisted state — changing it sets dirty
+  PASS Save POSTs exactly once
+  PASS a first save creates — name goes along, no id
+  PASS provenance (source_template_name) is stored, never dereferenced
+  PASS the body is the full Step 0 draft ({presentation, products, action})
+  PASS save success is reported
+  PASS a successful Save clears dirty
+  PASS the saved design becomes the current one
+  PASS saves after the first overwrite the current design
+  PASS the overwrite carries the whole draft, not a patch
+  PASS save failure is a status error
+  PASS a failed Save leaves dirty as it was
+  PASS Load never re-fetches the source template (provenance only)
+  PASS the preview runs over the design's OWN presentation snapshot
+  PASS the loaded roster previews as stored
+  PASS a successful Load clears dirty
+  PASS Load restores the saved design name
+  PASS a roster change after Load sets dirty
+  PASS the snapshot survives roster edits (no refetch, no mutation)
+  PASS roster edits never touch the template source
+  PASS a template change loads the document again
+  PASS the new template document becomes the draft presentation
+  PASS Delete targets the selected design
+  PASS delete success is reported
+  PASS a successful Delete clears the current draft state
+  PASS a successful Delete clears dirty
+  PASS the deleted design leaves the picker
+  PASS the preview resets with the cleared draft
+  PASS delete failure is a status error
+  PASS a failed Delete leaves the state untouched
+  PASS the guard blocks silent loss only while dirty
+
+== K. Active Design Delete preserves edits made in flight ==
+  PASS the active Design is clean before Delete begins
+  PASS Delete starts for the active clean Design
+  PASS the draft can be edited while Delete is in flight
+  PASS successful Delete keeps the newer draft intact and dirty
+  PASS the active edited Design is retained as an unsaved draft
+  PASS the deleted Design is absent from the saved-design list
+  PASS the preserved draft saves as new state, not by restoring the deleted Design id
+
+== J. Legacy Publisher filtered selection stays aligned with Preview and Save ==
+  PASS the active root remains visibly selected outside its category filter
+  PASS Preview still uses the root visibly retained by the filter
+  PASS Save preserves the same visible and previewed root
+
+== I. Legacy Publisher dirty-draft protection ==
+  PASS active saved draft becomes dirty after an edit
+  PASS deleting a different saved design preserves the active draft
+  PASS deleting a different design does not clear active dirty state
+  PASS the preserved active draft still saves over its own Design
+  PASS the preservation test starts without earlier saves
+  PASS Load asks before discarding unsaved changes
+  PASS declining Load preserves the dirty draft and existing preview
+  PASS an in-app HTMX navigation guard is registered
+  PASS declining in-app navigation cancels the swap before teardown
+  PASS declining deletion of the active dirty Design preserves it
+
+============================================================
+148/148 checks passed.
+✓ scripts/test_shop_publisher_form.js
+
+▶ scripts/test_vi_shop_form.js
+
+PASS: actual Shop form — paid values preserved; VI Free/unmetered; explicit 0 = Free; blank/junk rejected; paid zero rejected
+✓ scripts/test_vi_shop_form.js
+
+════════════════════════════════════════════════════════════
+18 harness(es) passed.

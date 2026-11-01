@@ -1,0 +1,113 @@
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+== 1. preview ==
+  PASS preview changed no table at all
+  PASS the preview reports the member, the guild and the resolved db file
+  PASS every claim row is listed with its status and its role
+  PASS a temp-role shop reward's role id is collected as well (defect H)
+  PASS the plan names the provenance tables it may write
+  PASS prestige is reported and NOT reset by default
+  PASS the preview's notes mention prestige and unrelated inventory
+== 2. attribution comes from provenance ==
+  PASS a currency reward is reversible from its grant's ledger row
+  PASS an item reward is reversible only from its grant's remaining units
+  PASS a legacy backfill row is recognised as never delivered
+  PASS with no grant row an item reversal is REFUSED, not inferred from the stack
+  PASS and the historical member's stack is not in the plan to reverse
+  PASS its claim row is KEPT so the reward cannot be paid twice
+  PASS currency stays reversible historically: every credit has its own ledger row
+  PASS two claims over one stack: only the attributable units are promised (defect C)
+  PASS the stack total is reported for context and trusted for nothing
+== 3. environment gate ==
+        a properly configured staging deploy                 -> staging     no key: ALLOWED  with key: ALLOWED
+        the staging LABEL with the production file open      -> ambiguous   no key: refused  with key: refused
+        staging and production pointed at ONE file           -> ambiguous   no key: refused  with key: refused
+        the staging label with a file matching neither path  -> ambiguous   no key: refused  with key: refused
+        production, with the production file open            -> production  no key: refused  with key: ALLOWED
+        the 'prod' alias                                     -> production  no key: refused  with key: ALLOWED
+        NERO_ENVIRONMENT set to an empty string              -> production  no key: refused  with key: ALLOWED
+        NERO_ENVIRONMENT absent                              -> production  no key: refused  with key: ALLOWED
+        the 'dev' alias                                      -> ambiguous   no key: refused  with key: refused
+        the 'development' alias                              -> ambiguous   no key: refused  with key: refused
+        the 'test' alias                                     -> ambiguous   no key: refused  with key: refused
+        a typo'd 'stagin'                                    -> ambiguous   no key: refused  with key: refused
+        the production label with the staging file open      -> ambiguous   no key: refused  with key: refused
+  PASS a properly configured staging database needs no key
+  PASS the production file is refused without the key and allowed with it
+  PASS 'prod', an empty value and an absent variable all mean production
+  PASS every bypass the old string comparison allowed now fails closed
+  PASS a label that contradicts the open file fails closed too
+  PASS the harness' production file refuses to apply without the second key
+  PASS the refusal is a LevelResetError, so the command reports a refusal rather than a partway failure
+  PASS the refusal wrote nothing
+  PASS an ambiguous environment is refused even WITH the production key
+  PASS and that refusal wrote nothing either
+== 4. scope guard ==
+  PASS a non-positive/non-integer scope is refused (guild=0 user=8201)
+  PASS a non-positive/non-integer scope is refused (guild=8101 user=0)
+  PASS a non-positive/non-integer scope is refused (guild=-1 user=8201)
+  PASS a non-positive/non-integer scope is refused (guild=8101 user=-1)
+  PASS a non-positive/non-integer scope is refused (guild=None user=8201)
+  PASS a non-positive/non-integer scope is refused (guild=8101 user='abc')
+  PASS the scope guard wrote nothing
+== 5. apply ==
+  PASS apply reports what it did
+  PASS the member's XP/level is zeroed, prestige preserved, claims empty
+  PASS every proven delivery was reversed, so this IS a clean New Game
+  PASS the reward role was taken off the member
+  PASS the wallet was debited exactly the amount the reward paid
+  PASS the stack lost exactly the reward's units and kept the mission's
+  PASS the grant's attributable remainder went to zero
+  PASS exactly one compensating ledger row was appended (defect E)
+  PASS the original credit is marked reversed and still there (append-only)
+  PASS summing the ledger counts the reversal exactly once (defect E)
+  PASS the journal holds one row per kind, written by this operation
+  PASS the operation itself is recorded with its actor and reason
+  PASS the member's lease was released
+  PASS only this member's level-reward state changed
+  PASS no other member, guild or reward definition moved
+  PASS the unrelated shop boost and the shop temp-role unit survived
+  PASS the historical member was untouched by this member's reset
+== 6. retries ==
+  PASS a second apply is a no-op: nothing reversed again
+  PASS the wallet, the stack and the ledger did not move on the retry
+  PASS and the retry still reports a clean New Game
+  PASS a mid-operation failure surfaces instead of being swallowed
+  PASS the failed operation is recorded as failed and stays traceable
+  PASS its lease was released, so the member is not wedged
+== 7. /level_test_reset command ==
+  PASS without confirm the command only previews
+  PASS the preview names the member, the guild and the database file
+  PASS the preview states what would be reversed and what would not
+  PASS the removed flag is not offered to administrators anywhere
+  PASS confirm without a reason is refused and nothing is deferred
+  PASS and that refusal changed nothing
+  PASS with confirm and a reason the command applies
+  PASS the applied embed reports a clean New Game for a member with no rewards
+  PASS the reason reached the operation record
+  PASS on the production file the command refuses and says nothing was changed
+  PASS the refusal is answered as a refusal, not as a partway failure
+  PASS an unexpected error answers the deferred interaction (no spinner)
+  PASS and it does not claim that nothing changed
+== 8. role safety, prestige and New Game honesty ==
+  PASS a role held through another grant is reported as left on the member
+  PASS a failed role removal is reported per role with its error
+  PASS its claim row and temp-role unit are KEPT, so the role stays documented
+  PASS and the result is NOT reported as a clean New Game
+  PASS the kept claim stays terminal, so it cannot be claimed a second time
+  PASS prestige and the VI activation survive by default
+  PASS include_prestige clears the tier and the VI activation, and says so
+  PASS the historical member's unrelated stack was NOT reduced (defect B)
+  PASS the unprovable delivery is reported as not reversed, and its claim KEPT
+  PASS the case is queued for /level_reconcile, not silently dropped
+  PASS and the report refuses to call it a clean New Game
+  PASS its currency reward WAS reversed, from its own ledger row
+  PASS the legacy backfill row was deleted and reported as never paid
+== 9. migration from an older database ==
+  PASS an unmigrated database can still be inspected
+  PASS and every claim is read even without the operation_id column
+  PASS with no provenance anywhere, nothing is promised as reversible
+  PASS the reset still runs on an old database and recreates what it needs
+  PASS and it reports honestly what it could not establish
+
+ALL LEVEL TEST RESET CHECKS PASSED

@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 *.db
 .venv/
+
+# Rank-card preview renders: diagnostic output written to a temp dir
+# (see test_rank_integration.py). Never commit them.
+preview_p4_*.png

@@ -355,14 +355,22 @@ async def main():
     view = leveling_cog.LevelRewardView(bot, GUILD, PLAIN)
     interaction = SimpleNamespace(
         user=plain, guild=guild,
+        followup=SimpleNamespace(send=AsyncMock()),
         response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
         edit_original_response=AsyncMock())
     await view.claim_all.callback(interaction)
-    sent = interaction.edit_original_response.await_args.kwargs
+    interaction.followup.send.assert_awaited_once()
+    sent = interaction.followup.send.await_args.kwargs
+    text = sent["embed"].footer.text or sent["embed"].description or ""
     check("Claim All callback reports locked, not failed, for a non-booster",
-          AR_LOCKED in sent["embed"].footer.text
-          and AR_RETRY + "0." in sent["embed"].footer.text
-          and view.claim_all.disabled, sent["embed"].footer.text)
+          AR_LOCKED in text and AR_RETRY + "0." in text
+          and view.claim_all.disabled, text)
+    check("Claim All uses an ephemeral followup and leaves the original card unchanged",
+          sent.get("ephemeral") is True
+          and interaction.edit_original_response.await_count == 0
+          and interaction.response.defer.await_args.kwargs == {
+              "thinking": True, "ephemeral": True})
+
 
     # ── 8. Migration: idempotent, legacy rows default to Everyone ──
     from database import init_db

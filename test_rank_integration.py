@@ -25,6 +25,7 @@ Usage:
 import asyncio
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -103,6 +104,19 @@ async def seed():
         await db.commit()
 
 
+# Preview renders are diagnostic artifacts, not fixtures: writing them into the
+# repository makes every run dirty the worktree (and they used to be committed by
+# accident). They go to a temp directory unless NILIVE_PREVIEW_DIR asks for a
+# specific location.
+PREVIEW_DIR = (os.environ.get("NILIVE_PREVIEW_DIR")
+               or os.path.join(tempfile.gettempdir(), "nilive_rank_previews"))
+os.makedirs(PREVIEW_DIR, exist_ok=True)
+
+
+def _preview_path(name):
+    return os.path.join(PREVIEW_DIR, name)
+
+
 async def render_case(tag, member, out):
     data = await get_rank_card_data(GUILD, USER, member=member)
     buf = await render_rank_card(data)
@@ -116,7 +130,7 @@ async def main():
 
     # 1) normal
     data = await render_case("normal", StubMember(),
-                             "preview_p4_integration_normal.png")
+                             _preview_path("preview_p4_integration_normal.png"))
     assert data["rank"] == 2, data["rank"]
     assert data["level"] > 0 and data["effective_prestige"] == 4
     assert data["is_booster"] is False
@@ -136,7 +150,7 @@ async def main():
     data = await get_rank_card_data(GUILD, USER, member=StubMember(booster=True))
     assert data["is_booster"] and data["effective_prestige"] == 4, data
     buf = await render_rank_card(data)
-    open("preview_p4_integration_booster_noact.png", "wb").write(buf.read())
+    open(_preview_path("preview_p4_integration_booster_noact.png"), "wb").write(buf.read())
     print("case 2 (booster w/o activation -> permanent IV, no VI tag) OK")
 
     # 2b) booster WITH the VI shop activation -> VI pips + tag
@@ -146,7 +160,7 @@ async def main():
             "VALUES (?, ?)", (GUILD, USER))
         await db.commit()
     data = await render_case("booster", StubMember(booster=True),
-                             "preview_p4_integration_booster.png")
+                             _preview_path("preview_p4_integration_booster.png"))
     assert data["is_booster"] and data["effective_prestige"] == 6
     print("case 2b (booster + VI activation -> Prestige VI) OK")
 
@@ -158,7 +172,7 @@ async def main():
     data = await get_rank_card_data(GUILD, USER, member=StubMember())
     assert data["equipped_title"] is None
     buf = await render_rank_card(data)
-    open("preview_p4_integration_notitle.png", "wb").write(buf.read())
+    open(_preview_path("preview_p4_integration_notitle.png"), "wb").write(buf.read())
     print("case 3 (no title -> no pill) OK")
 
     # 4) fully dynamic currencies: custom names AND emoji
@@ -173,8 +187,9 @@ async def main():
     assert data["currency"]["coins"]["emoji"] == "⭐"
     assert data["currency"]["diamonds"]["name"] == "Gems"
     buf = await render_rank_card(data)
-    open("preview_p4_custom_currency.png", "wb").write(buf.read())
+    open(_preview_path("preview_p4_custom_currency.png"), "wb").write(buf.read())
     print("case 4 (custom currency names+emoji flow through) OK")
+    print(f"previews written to {PREVIEW_DIR}")
     print("ALL INTEGRATION CASES PASSED")
 
 

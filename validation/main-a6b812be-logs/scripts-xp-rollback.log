@@ -1,0 +1,74 @@
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+  PASS the member's own L3 reward was delivered before any admin change
+== 1. an erroneous grant is recorded ==
+[LEVEL CLAIM] multiplier lookup failed; snapshotting raw (guild=8101 user=8201): 'types.SimpleNamespace' object has no attribute 'get_member'
+  PASS /setlevel recorded the change with its actor, reason and delta
+  PASS and named the reward levels it newly entitled
+  PASS every entitlement it created carries its operation id (defect G)
+  PASS the member's own earlier claim carries no operation id
+  PASS the member claimed one of the granted rewards, so it is delivered
+  PASS and then earned more XP by playing
+== 2. /xp_rollback preview ==
+  PASS with no operation id it lists this member's recorded changes
+  PASS listing wrote nothing
+  PASS the preview says nothing changed
+  PASS the preview really wrote nothing
+  PASS the target is CURRENT XP minus the change's own delta, not its old snapshot
+  PASS the 300 XP earned since is reported as kept
+  PASS the preview names the entitlements it would cancel
+  PASS and the delivered value it would take back
+  PASS the member's own L3 reward is listed as left alone
+== 3. confirmation ==
+  PASS confirm without a reason is refused BEFORE deferring
+  PASS and nothing was written
+== 4. apply ==
+  PASS the applied embed says so
+  PASS XP is now the current value minus the delta - later progress survived
+  PASS the member's own L3 reward is untouched and still delivered
+  PASS the entitlements above the new level created by the change are gone
+  PASS the delivered L4 currency was taken back, and only that
+  PASS and the reversal wrote exactly one compensating ledger row (defect E)
+  PASS the journal holds one applied row for the one reversed claim
+  PASS the original change is marked rolled back
+  PASS and the rollback is itself a recorded operation naming what it undid
+  PASS the rollback's operation row is in level_ops too
+  PASS the lease was released
+  PASS no other member moved
+== 5. refusals ==
+  PASS rolling the same change back twice is refused and says nothing was changed
+  PASS rolling back the rollback itself is refused and says nothing was changed
+  PASS an operation id that does not exist is refused and says nothing was changed
+  PASS and none of those refusals moved XP or claims
+[LEVEL CLAIM] multiplier lookup failed; snapshotting raw (guild=8101 user=8201): 'types.SimpleNamespace' object has no attribute 'get_member'
+  PASS rolling back a reduction is refused: that would GRANT XP
+  PASS and the reduction stands
+  PASS another member's operation is refused: a rollback is scoped to one member
+  PASS and the other member's XP is untouched
+== 6. unattributable entitlements ==
+[LEVEL CLAIM] multiplier lookup failed; snapshotting raw (guild=8101 user=8201): 'types.SimpleNamespace' object has no attribute 'get_member'
+  PASS a change whose rows cannot be matched says so instead of guessing
+  PASS and the preview cancels nothing
+  PASS applying it reduces XP but deletes no claim row it cannot attribute
+  PASS and the applied report lists the rows for /level_reconcile
+== 7. /level_reconcile ==
+  PASS with no case id it lists this member's open cases with their evidence
+  PASS and it tells the administrator how to resolve one
+  PASS a resolution without a note is refused before deferring
+  PASS a resolution without a case id is refused
+  PASS another case id cannot be resolved through this member
+  PASS and the real case is still open
+  PASS drop_claim is refused while the value is still in the member's hands
+  PASS the claim row survived, so the reward cannot be claimed twice
+  PASS and the case is recorded as resolved by that administrator
+  PASS the journal row itself was never deleted
+  PASS with effect_gone the claim row is deleted and the decision recorded
+  PASS the resolution names the administrator and the note
+  PASS and an operation row records the deletion
+== 8. coordination ==
+  PASS a rollback can take the member's lease
+  PASS Claim All is frozen while a rollback holds the lease (defect F)
+  PASS and a reset for the same member is refused while the lease is held
+  PASS after the lease is released the claim path works again
+
+ALL XP ROLLBACK CHECKS PASSED

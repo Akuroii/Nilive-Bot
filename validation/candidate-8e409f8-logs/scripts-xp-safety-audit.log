@@ -1,0 +1,139 @@
+== 1. inventory: every `levels` write is a known entry point ==
+  PASS cogs/leveling.py::_apply_admin_xp() is classified
+  PASS cogs/leveling.py::perform_leaderboard_reset() is classified
+  PASS cogs/leveling.py::resetxp() is classified
+  PASS dashboard/app.py::api_edit_member() is classified
+  PASS utils/level_ops.py::drain_xp_grants() is classified
+  PASS utils/level_test_reset.py::reset_member() is classified
+  PASS utils/level_test_reset.py::rollback_xp_operation() is classified
+  PASS utils/prestige.py::purchase_prestige() is classified
+  PASS utils/reward_engine.py::give_reward() is classified
+  PASS utils/xp_calculator.py::_apply_spam_penalty_in_transaction() is classified
+  PASS inventory still lists cogs/leveling.py::_apply_admin_xp()
+  PASS inventory still lists cogs/leveling.py::perform_leaderboard_reset()
+  PASS inventory still lists cogs/leveling.py::resetxp()
+  PASS inventory still lists dashboard/app.py::api_edit_member()
+  PASS inventory still lists utils/level_ops.py::drain_xp_grants()
+  PASS inventory still lists utils/level_test_reset.py::reset_member()
+  PASS inventory still lists utils/level_test_reset.py::rollback_xp_operation()
+  PASS inventory still lists utils/prestige.py::purchase_prestige()
+  PASS inventory still lists utils/reward_engine.py::give_reward()
+  PASS inventory still lists utils/xp_calculator.py::_apply_spam_penalty_in_transaction()
+  PASS no production code deletes a member's levels row
+== 2. no path can make XP negative ==
+  PASS the XP grant clamps at zero
+  PASS the anti-spam deduction clamps at zero, at 1% per incident and to rolling budget
+  PASS incident identity, penalty, and budget use the same immediate transaction
+  PASS the shared penalty writer leaves commit/rollback to its caller
+  PASS the shared admin XP writer clamps at zero
+  PASS the dashboard member edit clamps at zero
+  PASS both reset paths write zero, not a negative
+  PASS the prestige purchase never rewrites xp/level
+== 3. XP and level cannot become inconsistent ==
+  PASS the grant recomputes level from the new XP
+  PASS the deduction recomputes level from the new XP
+  PASS the shared admin XP writer recomputes level from the new XP
+  PASS /setlevel derives its XP from the bot's own curve, not a second formula
+  PASS neither admin command writes `levels` itself any more
+  PASS the dashboard edit recomputes level from the new XP
+  PASS utils/reward_engine.py::give_reward() recomputes the level next to its XP write
+  PASS utils/level_ops.py::drain_xp_grants() recomputes the level next to its XP write
+  PASS utils/xp_calculator.py::_apply_spam_penalty_in_transaction() recomputes the level next to its XP write
+  PASS cogs/leveling.py::_apply_admin_xp() recomputes the level next to its XP write
+  PASS dashboard/app.py::api_edit_member() recomputes the level next to its XP write
+  PASS utils/level_test_reset.py::rollback_xp_operation() recomputes the level next to its XP write
+  PASS the reset path writes xp and level together
+  PASS the level recompute happens before the entitlement snapshot
+== 4. positive grants all go through the reward engine ==
+  PASS utils/mission_engine.py grants XP through give_reward()
+  PASS utils/minigame_engine.py grants XP through give_reward()
+  PASS cogs/events.py grants XP through give_reward()
+  PASS cogs/shop.py grants XP through give_reward()
+  PASS cogs/tagpartners.py grants XP through give_reward()
+  PASS cogs/tagmissions.py grants XP through give_reward()
+  PASS the missions cog only displays rewards, it never writes XP
+== 5. incident detection precedes Message XP cooldown/grant ==
+  PASS spam detection is live and separate from Message XP
+  PASS incident detection runs before the 10s cooldown
+  PASS incident detection runs before the XP grant
+  PASS one incident-claim warning branch precedes any XP grant
+  PASS the penalty helper has one implementation
+  PASS apply_spam_penalty has exactly one production caller module
+  PASS there is more than one message listener in the bot (context)
+  PASS cogs/activity_engine.py does not grant XP from its message listener
+  PASS cogs/afk.py does not grant XP from its message listener
+  PASS cogs/command_aliases.py does not grant XP from its message listener
+  PASS cogs/customcommands.py does not grant XP from its message listener
+  PASS cogs/sticky.py does not grant XP from its message listener
+  PASS cogs/triggers.py does not grant XP from its message listener
+  PASS exactly one module grants Message XP
+  PASS the activity engine only dispatches, it never pays
+== 6. the penalty cannot create, revoke or duplicate a claim ==
+  PASS the penalty never touches the claim ledger
+  PASS the penalty never records a crossing
+  PASS the penalty never delivers or removes a role
+  PASS record_crossing only fires on an increase
+  PASS the ledger refuses a second row for the same entitlement
+== 7. Claim All cannot duplicate a payout ==
+  PASS the reserve step only ever takes unfulfilled rows
+  PASS a claim is marked only by its lease owner
+  PASS the delivery pass only processes rows it reserved
+== 8. demotion cannot re-trigger a fulfilled reward ==
+  PASS fulfilled claims are invisible to the normal pass
+  PASS re-crossing inserts are ignored, not duplicated
+  PASS the exclusivity setting defaults to OFF in code and in the schema
+  PASS the config API validates the toggle as 0/1
+  PASS role replacement is deferred until the full role-delivery pass
+== 9. D2 reconciliation cannot restore the wrong thing ==
+  PASS the reconciler inspects all role claim statuses
+  PASS the reconciler targets the highest FULFILLED role claim group
+  PASS fulfilled highest roles are restored even when a sibling is unresolved, but replacement is blocked
+  PASS OFF restores every fulfilled role; ON restores only the highest group
+  PASS the reconciler never writes to the claim ledger
+  PASS the reconciler never records a crossing
+  PASS the reconciler never invents role ids from live config
+  PASS a partial/unfulfilled highest-role delivery blocks lower-role removal
+  PASS reconciliation reads the persisted remove-old setting for role restoration
+  PASS reconciliation has one claim/retry implementation plus the join callback
+  PASS Claim All path requires a member, full pass and replacement enabled
+  PASS join callback reconciles automatically without requiring Claim All
+  PASS no background task calls it
+  PASS no guild-wide/member-list sweep is introduced by the join callback
+== 10. no retroactive sweep, no rejoin reset ==
+  PASS the reconciler has only the Claim All and join callback callers
+  PASS the claim-pass call is member-initiated, full-pass only
+  PASS nothing loops over guilds or members to reconcile in bulk
+  PASS unrelated lifecycle cogs do not mutate level state
+== 11. unrelated roles are preserved ==
+  PASS removals come only from the superseded-claim helper
+  PASS roles the member does not hold are skipped, never guessed
+== 12. the dashboard harness cannot degrade silently ==
+  PASS the harness warns when node is missing
+  PASS the harness warns when acorn is missing
+  PASS the harness has a repo-local acorn fallback
+  PASS the harness keeps its real invariants
+  PASS the harness still covers every nav route
+== 13. systems this work was not allowed to change ==
+  PASS cogs/activity_engine.py does not reference this slice's new behaviour
+  PASS cogs/missions.py does not reference this slice's new behaviour
+  PASS cogs/mvp.py does not reference this slice's new behaviour
+  PASS utils/minigame_engine.py does not reference this slice's new behaviour
+  PASS utils/mission_engine.py does not reference this slice's new behaviour
+  PASS voice XP keeps its own gates and still goes through the engine
+  PASS voice XP is not run through the message spam penalty
+  PASS the frozen setting xp_per_word is still 1
+  PASS the frozen setting xp_min_per_message is still 5
+  PASS the frozen setting xp_max_per_message is still 50
+  PASS the frozen setting xp_cooldown_seconds is still 10
+  PASS the frozen setting spam_threshold is still 10
+  PASS the frozen setting spam_xp_penalty_divisor is still 1000
+  PASS the frozen setting spam_window_seconds is still 20
+  PASS the XP curve is unchanged
+  PASS every production file still parses
+== 14. dynamic spot-check: the floor holds on the live database ==
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+  PASS five rounded penalties on 7 XP leave 7 XP, level 0 — no debt
+  PASS the last penalty deducted nothing (no debt to carry)
+
+XP SAFETY AUDIT: 121 passed, 0 failed

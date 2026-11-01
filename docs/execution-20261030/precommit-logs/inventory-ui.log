@@ -1,0 +1,189 @@
+✅ Database initialized — all tables ready
+✅ Developer bypass active for user ID: 999999999 (guild-blind, never written to dashboard_users)
+
+[1m1. Embed template (all three tabs)[0m
+  [92mPASS[0m  [items] author line
+  [92mPASS[0m  [items] author icon URL
+  [92mPASS[0m  [items] color 15000312
+  [92mPASS[0m  [items] footer text
+  [92mPASS[0m  [items] footer icon URL
+  [92mPASS[0m  [items] no embed title
+  [92mPASS[0m  [items] no extra fields
+  [92mPASS[0m  [potions] author line
+  [92mPASS[0m  [potions] author icon URL
+  [92mPASS[0m  [potions] color 15000312
+  [92mPASS[0m  [potions] footer text
+  [92mPASS[0m  [potions] footer icon URL
+  [92mPASS[0m  [potions] no embed title
+  [92mPASS[0m  [potions] no extra fields
+  [92mPASS[0m  [titles] author line
+  [92mPASS[0m  [titles] author icon URL
+  [92mPASS[0m  [titles] color 15000312
+  [92mPASS[0m  [titles] footer text
+  [92mPASS[0m  [titles] footer icon URL
+  [92mPASS[0m  [titles] no embed title
+  [92mPASS[0m  [titles] no extra fields
+
+[1m2. Description line format[0m
+  [92mPASS[0m  currency line matches the exact template
+  [92mPASS[0m  second currency line uses the configured diamond name
+  [92mPASS[0m  every line starts with '> -'
+  [92mPASS[0m  quantity 1 is still shown
+  [92mPASS[0m  no rarity / Equipped / Setup needed tags
+  [92mPASS[0m  no raw http URL in the description
+  [92mPASS[0m  no raw image URL rendered for any entry
+  [92mPASS[0m  backticks/newlines in a name are neutralised
+
+[1m3. Currency balances come from the economy tables[0m
+  [92mPASS[0m  currency rows use configured names
+  [92mPASS[0m  balances are real (11024 / 399)
+  [92mPASS[0m  currency is not an inventory row
+  [92mPASS[0m  Potions tab shows no currency balances
+  [92mPASS[0m  Titles tab shows no currency balances
+  [92mPASS[0m  URL-valued currency icon falls back to the module default
+  [92mPASS[0m  no raw URL reaches the currency line
+
+[1m4. Prepared Shop emoji (read-only enrichment)[0m
+  [92mPASS[0m  app_emoji resolved from the stored alias
+  [92mPASS[0m  description uses the prepared emoji inline
+  [92mPASS[0m  description never shows the source URL
+  [92mPASS[0m  potion lines use their own prepared emoji
+  [92mPASS[0m  title lines use their own prepared emoji
+  [92mPASS[0m  Select option reuses the prepared emoji
+  [92mPASS[0m  Select value maps back to the entry_key
+  [92mPASS[0m  that entry_key resolves back to the real item
+  [92mPASS[0m  fallback to a legacy custom emoji
+  [92mPASS[0m  fallback to the rarity glyph when nothing is prepared
+  [92mPASS[0m  non-ready asset falls back safely (empty app_emoji)
+  [92mPASS[0m  failed asset still renders an inline glyph, not a URL
+
+[1m4b. Prepared emoji with NO item_catalog row[0m
+  [92mPASS[0m  catalog has no row for this item
+  [92mPASS[0m  Shop listing icon resolves the prepared emoji
+  [92mPASS[0m  the resolved emoji is used inline
+  [92mPASS[0m  the Shop URL is not written back as a catalog icon
+  [92mPASS[0m  an ambiguous Shop name never borrows another listing's emoji
+  [92mPASS[0m  ambiguous item keeps the rarity fallback
+  [92mPASS[0m  no Shop listing means no emoji (safe fallback)
+  [92mPASS[0m  another guild's listing is never used
+  [92mPASS[0m  a Shop URL with no prepared asset stays empty
+  [92mPASS[0m  Shop fallback writes nothing
+
+[1m5. Navigation never mutates emoji state[0m
+  [92mPASS[0m  rendering succeeded with all preparation paths booby-trapped
+  [92mPASS[0m  no emoji asset rows created/dropped
+
+[1m6. Temporary-role duration from persisted expires_at[0m
+  [92mPASS[0m  computes H:MM from expires_at
+  [92mPASS[0m  missing expires_at yields no suffix
+  [92mPASS[0m  invalid expires_at yields no suffix
+  [92mPASS[0m  already-expired yields no negative countdown
+  [92mPASS[0m  temp role line ends with the time suffix
+  [92mPASS[0m  non-temp-role line has no time suffix
+  [92mPASS[0m  expired temp role shows no (negative) time
+
+[1m7. Pagination boundaries[0m
+  [92mPASS[0m  n=0: page count 1
+  [92mPASS[0m  n=0: every entry appears exactly once
+  [92mPASS[0m  n=0: arrows appear only when usable
+  [92mPASS[0m  n=0: rows 0/1/3 layout
+  [92mPASS[0m  n=0: currency lines excluded from page size
+  [92mPASS[0m  n=1: page count 1
+  [92mPASS[0m  n=1: every entry appears exactly once
+  [92mPASS[0m  n=1: arrows appear only when usable
+  [92mPASS[0m  n=1: rows 0/1/3 layout
+  [92mPASS[0m  n=1: currency lines excluded from page size
+  [92mPASS[0m  n=15: page count 1
+  [92mPASS[0m  n=15: every entry appears exactly once
+  [92mPASS[0m  n=15: arrows appear only when usable
+  [92mPASS[0m  n=15: rows 0/1/3 layout
+  [92mPASS[0m  n=15: currency lines excluded from page size
+  [92mPASS[0m  n=16: page count 2
+  [92mPASS[0m  n=16: every entry appears exactly once
+  [92mPASS[0m  n=16: arrows appear only when usable
+  [92mPASS[0m  n=16: rows 0/1/3 layout
+  [92mPASS[0m  n=16: currency lines excluded from page size
+  [92mPASS[0m  n=17: page count 2
+  [92mPASS[0m  n=17: every entry appears exactly once
+  [92mPASS[0m  n=17: arrows appear only when usable
+  [92mPASS[0m  n=17: rows 0/1/3 layout
+  [92mPASS[0m  n=17: currency lines excluded from page size
+  [92mPASS[0m  n=30: page count 2
+  [92mPASS[0m  n=30: every entry appears exactly once
+  [92mPASS[0m  n=30: arrows appear only when usable
+  [92mPASS[0m  n=30: rows 0/1/3 layout
+  [92mPASS[0m  n=30: currency lines excluded from page size
+  [92mPASS[0m  n=31: page count 3
+  [92mPASS[0m  n=31: every entry appears exactly once
+  [92mPASS[0m  n=31: arrows appear only when usable
+  [92mPASS[0m  n=31: rows 0/1/3 layout
+  [92mPASS[0m  n=31: currency lines excluded from page size
+  [92mPASS[0m  n=34: page count 3
+  [92mPASS[0m  n=34: every entry appears exactly once
+  [92mPASS[0m  n=34: arrows appear only when usable
+  [92mPASS[0m  n=34: rows 0/1/3 layout
+  [92mPASS[0m  n=34: currency lines excluded from page size
+  [92mPASS[0m  17 items: overflow page holds exactly 2
+  [92mPASS[0m  out-of-range page clamps to the last valid page
+  [92mPASS[0m  empty tab clamps to page 0
+
+[1m8. Potions are deferred-use[0m
+  [92mPASS[0m  purchase delivered the potion into inventory
+  [92mPASS[0m  potion metadata carries the configured effect
+  [92mPASS[0m  purchase did NOT grant an active boost
+  [92mPASS[0m  purchase embed says it was added to the bag
+  [92mPASS[0m  Selecting a potion does not consume it
+  [92mPASS[0m  Selecting a potion does not activate it
+  [92mPASS[0m  Selecting opens the detail panel on the same page
+  [92mPASS[0m  Activate consumes exactly one copy
+  [92mPASS[0m  Activate grants exactly one active boost
+  [92mPASS[0m  effect uses stored metadata (2x, 1h), not the name
+  [92mPASS[0m  name text never overrides stored duration
+  [92mPASS[0m  failed effect returns success=False
+  [92mPASS[0m  failed effect refunds the consumed copy
+  [92mPASS[0m  xp_boost does not enter inventory
+  [92mPASS[0m  xp_boost still activates at purchase
+  [92mPASS[0m  misconfigured potion is refused without charging
+
+[1m9. Title slot independence[0m
+  [92mPASS[0m  title equips from inventory
+  [92mPASS[0m  equipped title is recorded
+  [92mPASS[0m  equipping a title does not touch the role slot
+  [92mPASS[0m  titles are never Discord roles
+  [92mPASS[0m  title quantity is the real owned count
+
+[1m10. Command routing and ownership[0m
+  [92mPASS[0m  /inventory sends a NEW ephemeral message
+  [92mPASS[0m  /inventory opens the Items tab directly
+  [92mPASS[0m  /inventory is not the Wallet hub
+  [92mPASS[0m  Wallet Inventory button EDITS the current message
+  [92mPASS[0m  Wallet button reaches the same Items renderer
+  [92mPASS[0m  Wallet hub still has its own buttons
+  [92mPASS[0m  tab switch edits the same message
+  [92mPASS[0m  tab switch resets to page 1 of that tab
+  [92mPASS[0m  Back to Wallet edits back to the hub
+  [92mPASS[0m  Back button is visually separate from the page arrows
+  [92mPASS[0m  another member is rejected by the owner guard
+  [92mPASS[0m  view timeout is still 30 minutes
+  [92mPASS[0m  wallet hub renderer unchanged
+
+[1m11. Colors tab[0m
+  [92mPASS[0m  Colors tab holds only category-tagged entries
+  [92mPASS[0m  a plain role reward stays in the Items tab
+  [92mPASS[0m  is_color_entry reads provenance, not the item type
+  [92mPASS[0m  Colors tab has its own author word and empty text
+  [92mPASS[0m  permanent Color is rendered as a role mention
+  [92mPASS[0m  timed Color is rendered as a role mention too
+  [92mPASS[0m  no role mention is swallowed by backticks
+  [92mPASS[0m  permanent Color has no countdown
+  [92mPASS[0m  timed Color shows its remaining time
+  [92mPASS[0m  every Colors line keeps the shared template
+  [92mPASS[0m  duplicate names get distinct entry_keys in the select
+  [92mPASS[0m  each option resolves to exactly its own entry
+  [92mPASS[0m  a timed Color offers Equip but no Drop
+  [92mPASS[0m  the item panel keeps the entry_key it was opened with
+  [92mPASS[0m  a permanent Color never offers Drop
+  [92mPASS[0m  Colors detail shows the role and the remaining time
+  [92mPASS[0m  permanent Colors detail shows no countdown
+
+[1mResults: 161 passed, 0 failed[0m

@@ -1,0 +1,17 @@
+item	exit	seconds	last_line
+design-c-purchase-grant-ledger	0	13	29 passed, 1 warning in 12.80s 
+design-c-timed-ownership	0	138	241 passed, 1 warning, 5 subtests passed in 137.80s (0:02:17) 
+design-c-delivery-safety	0	8	18 passed, 1 warning, 14 subtests passed in 7.90s 
+r2-role-retention	0	11	25 passed, 1 warning in 10.79s 
+r1-inventory-ambiguity	0	2	OK: no unprovable deduction on any path 
+r2-booster-obligation-gap	0	1	{'role_preserved_under_unknown': True, 'durable_obligations': [('booster_retention', 557)]} 
+scripts-level-ops-provenance	0	2	ALL PROVENANCE CHECKS PASSED 
+scripts-level-test-reset	0	2	ALL LEVEL TEST RESET CHECKS PASSED 
+scripts-xp-rollback	0	2	ALL XP ROLLBACK CHECKS PASSED 
+scripts-currency-reversal-consistency	0	1	ALL CURRENCY REVERSAL CONSISTENCY CHECKS PASSED 
+scripts-correction-lease-fence	0	7	ALL CORRECTION-LEASE FENCE CHECKS PASSED 
+scripts-inflight-role-correction	0	8	ALL IN-FLIGHT ROLE CORRECTION CHECKS PASSED 
+scripts-lease-expiry-role-recovery	0	1	ALL LEASE-EXPIRY ROLE RECOVERY CHECKS PASSED 
+scripts-one-shot-xp-durability	0	11	ALL ONE-SHOT XP DURABILITY CHECKS PASSED 
+scripts-xp-safety-audit	0	3	XP SAFETY AUDIT: 121 passed, 0 failed 
+js-harnesses	0	14	npm notice 

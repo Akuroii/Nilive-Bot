@@ -1,0 +1,88 @@
+# Role writer synchronization inventory
+
+78 concrete production call sites found, including legacy root duplicates. This is a call-site inventory, not a claim that every reachable path is synchronized.
+
+The reproduced Level progression/equip race is fixed. Level delivery/Claim All, Booster, Prestige, Reset/rollback, Twitch, MVP, legacy level-award helpers and explicit reaction/custom/moderation role writers still need a lock-order and caller audit before universal serialization can be claimed.
+
+Existing Level operation leases protect a different boundary; they are not automatically the same lock as equip. Do not wrap the whole call graph blindly: slot_lock is not reentrant.
+
+| File | Function | Line | Action | Lock/limit |
+|---|---|---:|---|---|
+| boost.py | _handle_unboost | 158 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| boost.py | _handle_unboost | 173 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| boost.py | _handle_unboost | 186 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| boost.py | _give_role | 203 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| boost.py | boostcolor | 390 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| boost.py | boostcolor | 392 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| cogs/boost.py | _handle_unboost | 169 | remove_roles | NO shared slot lock verified |
+| cogs/boost.py | _handle_unboost | 192 | remove_roles | NO shared slot lock verified |
+| cogs/boost.py | _handle_unboost | 216 | remove_roles | NO shared slot lock verified |
+| cogs/boost.py | _give_role | 233 | add_roles | NO shared slot lock verified |
+| cogs/boost.py | boostcolor | 441 | remove_roles | NO shared slot lock verified |
+| cogs/boost.py | boostcolor | 443 | add_roles | NO shared slot lock verified |
+| cogs/customcommands.py | on_message | 179 | remove_roles | NO shared slot lock verified |
+| cogs/customcommands.py | on_message | 208 | add_roles | NO shared slot lock verified |
+| cogs/customcommands.py | on_message | 229 | remove_roles | NO shared slot lock verified |
+| cogs/moderation.py | check_warning_thresholds | 141 | add_roles | NO shared slot lock verified |
+| cogs/mvp.py | mvp_cycle_task | 199 | remove_roles | NO shared slot lock verified |
+| cogs/mvp.py | mvp_cycle_task | 206 | add_roles | NO shared slot lock verified |
+| cogs/reactionroles.py | on_member_update | 92 | remove_roles | NO shared slot lock verified |
+| cogs/reactionroles.py | expiry_check | 219 | remove_roles | NO shared slot lock verified |
+| cogs/reactionroles.py | callback | 466 | remove_roles | NO shared slot lock verified |
+| cogs/reactionroles.py | callback | 488 | remove_roles | NO shared slot lock verified |
+| cogs/reactionroles.py | callback | 490 | add_roles | NO shared slot lock verified |
+| cogs/reactionroles.py | confirm | 532 | remove_roles | NO shared slot lock verified |
+| cogs/reactionroles.py | confirm | 538 | remove_roles | NO shared slot lock verified |
+| cogs/reactionroles.py | confirm | 539 | add_roles | NO shared slot lock verified |
+| cogs/shop.py | _retire_expired_temp_role | 1194 | remove_roles | slot_lock held by temp_role_cleanup caller |
+| cogs/tickets.py | create_ticket | 303 | add_roles | NO shared slot lock verified |
+| cogs/twitch.py | _go_live | 288 | add_roles | NO shared slot lock verified |
+| cogs/twitch.py | _go_offline | 329 | remove_roles | NO shared slot lock verified |
+| cogs/welcome.py | accept | 129 | add_roles | NO shared slot lock verified |
+| cogs/welcome.py | on_member_join | 156 | add_roles | NO shared slot lock verified |
+| customcommands.py | on_message | 179 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| customcommands.py | on_message | 208 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| customcommands.py | on_message | 229 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| equip_engine.py | equip_role | 94 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| equip_engine.py | equip_role | 103 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| equip_engine.py | unequip_role | 153 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| level_claims.py | deliver_role | 428 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| level_claims.py | enforce_role_progression | 506 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| moderation.py | check_warning_thresholds | 141 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| mvp.py | mvp_cycle_task | 187 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| mvp.py | mvp_cycle_task | 194 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| prestige.py | sync_prestige_roles | 625 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| prestige.py | sync_prestige_roles | 636 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| reactionroles.py | on_member_update | 92 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| reactionroles.py | expiry_check | 219 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| reactionroles.py | callback | 466 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| reactionroles.py | callback | 488 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| reactionroles.py | callback | 490 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| reactionroles.py | confirm | 532 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| reactionroles.py | confirm | 538 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| reactionroles.py | confirm | 539 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| shop.py | temp_role_cleanup | 566 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| tickets.py | create_ticket | 303 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| twitch.py | _go_live | 288 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| twitch.py | _go_offline | 318 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| utils/equip_engine.py | swap_and_record_equipped | 184 | remove_roles | CALLER-DEPENDENT; reward callers need audit |
+| utils/equip_engine.py | equip_role | 254 | add_roles | slot_lock via _serialised_per_member |
+| utils/equip_engine.py | unequip_role | 344 | remove_roles | slot_lock via _serialised_per_member |
+| utils/level_claims.py | deliver_role | 584 | add_roles | NO shared slot lock verified |
+| utils/level_claims.py | _enforce_role_progression_locked | 770 | remove_roles | slot_lock via enforce_role_progression (this patch) |
+| utils/level_claims.py | strip_booster_roles | 1112 | remove_roles | NO shared slot lock verified |
+| utils/level_claims.py | _reverse_correction_role | 2419 | remove_roles | NO shared slot lock verified |
+| utils/level_test_reset.py | reset_member | 1064 | remove_roles | NO shared slot lock verified |
+| utils/level_test_reset.py | rollback_xp_operation | 1571 | remove_roles | NO shared slot lock verified |
+| utils/prestige.py | sync_prestige_roles | 643 | remove_roles | NO shared slot lock verified |
+| utils/prestige.py | sync_prestige_roles | 654 | add_roles | NO shared slot lock verified |
+| utils/timed_ownership.py | expire_one | 1956 | remove_roles | slot_lock via _serialised_expiry |
+| utils/timed_ownership.py | grant_timed_product | 2415 | add_roles | slot_lock via _serialised_role_grant |
+| utils/timed_ownership.py | compensate_late_delivery | 4181 | remove_roles | slot_lock in role branches; not a blanket function lock |
+| utils/timed_ownership.py | compensate_late_delivery | 4628 | remove_roles | slot_lock in role branches; not a blanket function lock |
+| utils/xp_calculator.py | check_and_award_level_rewards | 623 | add_roles | NO shared slot lock verified |
+| utils/xp_calculator.py | check_and_award_level_rewards | 639 | remove_roles | NO shared slot lock verified |
+| welcome.py | accept | 129 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| welcome.py | on_member_join | 156 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| xp_calculator.py | check_and_award_level_rewards | 277 | add_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |
+| xp_calculator.py | check_and_award_level_rewards | 293 | remove_roles | LEGACY ROOT DUPLICATE; no shared slot lock verified; main loads cogs.* |

@@ -207,6 +207,9 @@ async def ensure_tables(db: aiosqlite.Connection | None = None) -> None:
         # rather than failing mid-claim with "no such table".
         from utils.level_ops import ensure_tables as ensure_ops_tables
         await ensure_ops_tables(connection)
+        from utils.timed_ownership import SCHEMA_STATEMENTS
+        for stmt in SCHEMA_STATEMENTS:
+            await connection.execute(stmt)
 
     if db is not None:
         await apply(db)
@@ -707,7 +710,25 @@ async def member_reward_role_ids(guild_id: int, user_id: int) -> set[int]:
 async def enforce_role_progression(member, guild_id: int, user_id: int,
                                    level: int, role_id: int,
                                    failures: list | None = None, *,
-                                   booster: bool = False) -> list[int]:
+                                   booster: bool = False,
+                                   preserved: list | None = None) -> list[int]:
+    """Serialize entitlement checks and removals against member slot changes.
+
+    The lock must precede the ownership read, not just the Discord removal.
+    This public entry point must not be called while holding slot_lock already.
+    """
+    from utils.equip_engine import slot_lock
+    async with slot_lock(guild_id, user_id):
+        return await _enforce_role_progression_locked(
+            member, guild_id, user_id, level, role_id, failures,
+            booster=booster, preserved=preserved)
+
+
+async def _enforce_role_progression_locked(member, guild_id: int, user_id: int,
+                                   level: int, role_id: int,
+                                   failures: list | None = None, *,
+                                   booster: bool = False,
+                                   preserved: list | None = None) -> list[int]:
     """Drop superseded Level-reward roles; return IDs actually removed.
 
     Call only after every required role at the highest Level is fulfilled and
@@ -724,9 +745,26 @@ async def enforce_role_progression(member, guild_id: int, user_id: int,
     guild = getattr(member, "guild", None)
     held = set(getattr(member, "roles", None) or [])
     removed = []
+    preserved = preserved if preserved is not None else []
     for stale_id in stale:
         role = guild.get_role(stale_id) if guild is not None else None
         if role is None or role not in held:
+            continue
+        # A superseded Level role may also be a role the member OWNS through the
+        # Shop (the same role ID configured in both is supported). This system
+        # retires only its own claim; another recorded grant keeps the role.
+        from utils.timed_ownership import role_removal_blocked
+        # This pass retires the SUPERSEDED claims of one audience only. A claim
+        # for the same role in the other audience is a separate, still-valid
+        # grant (a member who keeps boosting keeps the Booster-only role).
+        kept_reason = await role_removal_blocked(
+            guild_id, user_id, stale_id,
+            retiring="level:booster" if booster else "level:member",
+            member=member)
+        if kept_reason:
+            preserved.append(stale_id)
+            print(f"[LEVEL] Keeping superseded role {stale_id} for {user_id} "
+                  f"in {guild_id}: still {kept_reason}")
             continue
         try:
             await member.remove_roles(
@@ -896,11 +934,16 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
                              .get(role_id) or set())
                 open_claimants = claimants & open_role_claims
                 if claimants and open_claimants == claimants:
-                    async with aiosqlite.connect(DB_PATH, timeout=10) as grant_db:
-                        shared = await _role_granted_elsewhere(
-                            grant_db, guild_id, user_id, role_id,
-                            exclude_claim_id=min(open_claimants),
-                            exclude_claim_ids=open_claimants)
+                    try:
+                        async with aiosqlite.connect(DB_PATH, timeout=10) as grant_db:
+                            shared = await _role_granted_elsewhere(
+                                grant_db, guild_id, user_id, role_id,
+                                exclude_claim_id=min(open_claimants),
+                                exclude_claim_ids=open_claimants)
+                    except Exception as exc:
+                        result["failed"].append(
+                            (role_id, f"Entitlement check failed: {exc}"))
+                        continue
                     if shared is None:
                         result["withheld"].append({
                             "role_id": role_id,
@@ -996,11 +1039,16 @@ async def strip_booster_roles(member, guild_id: int, user_id: int) -> dict:
     create an entitlement and are therefore never granted retroactively.
 
     Returns ``{"removed": [...], "failed": [...], "not_held": [...],
-    "unverified": bool, "still_boosting": bool}``; failures are
-    ``(role_id, reason)`` pairs and never raise into the Discord event.
+    "preserved": [...], "unverified": bool, "still_boosting": bool}``; failures
+    are ``(role_id, reason)`` pairs and never raise into the Discord event.
+    ``preserved`` holds ``(role_id, reason)`` pairs for role ids left on the
+    member because the member still owns them independently (a Shop holding, an
+    unexpired ``temp_roles`` grant, or an owned role item): losing a boost retires
+    the Booster-only claim, not somebody's purchase.
     """
     result: dict = {"removed": [], "failed": [], "not_held": [],
-                    "unverified": False, "still_boosting": False}
+                    "preserved": [], "unverified": False,
+                    "still_boosting": False}
     if member is None or not hasattr(member, "premium_since"):
         result["unverified"] = True
         return result
@@ -1050,6 +1098,15 @@ async def strip_booster_roles(member, guild_id: int, user_id: int) -> dict:
         role = guild.get_role(role_id) if guild is not None else None
         if role is None:
             result["failed"].append((role_id, "Role is not resolvable in the guild"))
+            continue
+        # The member may own this role through the Shop as well; losing a boost
+        # retires the Booster-only claim, not somebody's purchase.
+        from utils.timed_ownership import role_removal_blocked
+        kept_reason = await role_removal_blocked(
+            guild_id, user_id, role_id,
+            retiring="booster", member=member)
+        if kept_reason:
+            result["preserved"].append((role_id, kept_reason))
             continue
         try:
             await member.remove_roles(role, reason="Server boost ended")
@@ -1462,13 +1519,23 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
     # whether a role is still justified must exclude ALL claims whose reversal
     # is unresolved, otherwise an open case would look like an independent
     # entitlement to itself.
+    from utils.timed_ownership import (
+        EntitlementCheckError,
+        is_expired as _th_is_expired,
+    )
     excluded = {int(exclude_claim_id)} | {int(c) for c in
                                           (exclude_claim_ids or ())}
-    cursor = await db.execute(
-        "SELECT id, track, payload_json FROM level_reward_claims "
-        "WHERE guild_id=? AND user_id=? AND status='fulfilled' AND id != ?",
-        (guild_id, user_id, int(exclude_claim_id)))
-    for claim_id, track, payload in await cursor.fetchall():
+    try:
+        cursor = await db.execute(
+            "SELECT id, track, payload_json FROM level_reward_claims "
+            "WHERE guild_id=? AND user_id=? AND status='fulfilled' AND id != ?",
+            (guild_id, user_id, int(exclude_claim_id)))
+        claim_rows = await cursor.fetchall()
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify level_reward_claims entitlement: {exc}"
+        ) from exc
+    for claim_id, track, payload in claim_rows:
         if int(claim_id) in excluded:
             continue
         try:
@@ -1476,23 +1543,43 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
                 return f"fulfilled {track} claim {claim_id}"
         except (TypeError, ValueError):
             continue
+
     try:
-        cursor = await db.execute(
-            "SELECT claim_id, source FROM temp_roles "
-            "WHERE guild_id=? AND user_id=? AND role_id=?",
-            (guild_id, user_id, int(role_id)))
-        for claim_id, source in await cursor.fetchall():
+        try:
+            cursor = await db.execute(
+                "SELECT claim_id, source FROM temp_roles "
+                "WHERE guild_id=? AND user_id=? AND role_id=?",
+                (guild_id, user_id, int(role_id)))
+            tr_rows = await cursor.fetchall()
+        except aiosqlite.OperationalError as col_exc:
+            if "no such column: claim_id" not in str(col_exc).lower():
+                raise
+            cursor = await db.execute(
+                "SELECT NULL, source FROM temp_roles "
+                "WHERE guild_id=? AND user_id=? AND role_id=?",
+                (guild_id, user_id, int(role_id)))
+            tr_rows = await cursor.fetchall()
+        for claim_id, source in tr_rows:
             # A NULL claim_id is an older/manual temp-role unit: it belongs to
             # no claim, so it is always an independent grant.
             if claim_id is None or int(claim_id) not in excluded:
                 return f"temp_roles grant ({source}, claim {claim_id})"
-    except aiosqlite.Error:
-        pass
-    cursor = await db.execute(
-        "SELECT item_name, source, metadata, quantity FROM inventory_items "
-        "WHERE guild_id=? AND user_id=? AND item_type IN ('role','temp_role')",
-        (guild_id, user_id))
-    for item_name, source, metadata, quantity in await cursor.fetchall():
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify temp_roles entitlement: {exc}"
+        ) from exc
+
+    try:
+        cursor = await db.execute(
+            "SELECT item_name, source, metadata, quantity FROM inventory_items "
+            "WHERE guild_id=? AND user_id=? AND item_type IN ('role','temp_role')",
+            (guild_id, user_id))
+        inv_rows = await cursor.fetchall()
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify inventory_items entitlement: {exc}"
+        ) from exc
+    for item_name, source, metadata, quantity in inv_rows:
         try:
             if int((json.loads(metadata) or {}).get("role_id")) != int(role_id):
                 continue
@@ -1520,8 +1607,10 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
                 "item_name=? AND kind='inventory'",
                 (guild_id, user_id, str(item_name)))
             grants = await cursor.fetchall()
-        except aiosqlite.Error:
-            grants = []
+        except Exception as exc:
+            raise EntitlementCheckError(
+                f"Failed to verify reward_grants entitlement: {exc}"
+            ) from exc
         attributable = independent = 0
         for grant_claim, remaining, unattributed in grants:
             if unattributed:
@@ -1536,6 +1625,33 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
         if own_item and independent == 0 and not grants:
             continue            # the claim's own marker, provenance unavailable
         return f"inventory '{item_name}' ({source})"
+
+    # Timed Shop ownership (a Color or a timed Item) grants its Discord role from
+    # `timed_holdings`, never from `inventory_items`, so none of the scans above
+    # can see it. An unexpired holding is an independent entitlement and must
+    # keep the role: no level correction buys that role back. Any query error
+    # raises `EntitlementCheckError` so a transient lock or DB failure is never
+    # mistaken for "no timed holding exists".
+    try:
+        from utils.timed_ownership import RETENTION_ITEM_TYPE
+        cursor = await db.execute(
+            "SELECT id, item_type, item_name, expires_at FROM timed_holdings "
+            "WHERE guild_id=? AND user_id=? AND role_id=?",
+            (guild_id, user_id, int(role_id)))
+        holding_rows = await cursor.fetchall()
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify timed_holdings entitlement: {exc}"
+        ) from exc
+    for holding_id, item_type, item_name, expires_at in holding_rows:
+        if str(item_type or "") == RETENTION_ITEM_TYPE:
+            # A durable role-retention obligation: the bot still owes this
+            # member this role, so no level correction may take it away.
+            # Recognised, not excluded - see RETENTION_READER_POLICY.
+            return f"a pending role-retention obligation (#{holding_id})"
+        if _th_is_expired(expires_at):
+            continue
+        return f"timed holding '{item_name}' (#{holding_id})"
     return None
 
 
@@ -2234,20 +2350,36 @@ async def _reverse_correction_role(claim: dict, report: dict, *,
         # The journal and the member agree: there is no live effect to undo.
         return True
 
-    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-        shared = await _role_granted_elsewhere(
-            db, guild_id, user_id, role_id, exclude_claim_id=claim_id,
-            # No claim this correction pass is reversing is a separate
-            # entitlement - neither one it has already decided to delete nor one
-            # it has not reached yet. Counting either as one lets two claims for
-            # one role cite each other, so no removal is attempted and neither
-            # row is ever deleted. Genuinely independent grants (a claim at or
-            # below the corrected level, a temp-role unit, an inventory marker)
-            # are not in this set and still keep the role.
-            exclude_claim_ids=({int(c["claim_id"])
-                                for c in report.get("deleted_claims") or []}
-                               | {int(c) for c in exclude_claim_ids or ()}),
-            exclude_item=exclude_item)
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            shared = await _role_granted_elsewhere(
+                db, guild_id, user_id, role_id, exclude_claim_id=claim_id,
+                # No claim this correction pass is reversing is a separate
+                # entitlement - neither one it has already decided to delete nor one
+                # it has not reached yet. Counting either as one lets two claims for
+                # one role cite each other, so no removal is attempted and neither
+                # row is ever deleted. Genuinely independent grants (a claim at or
+                # below the corrected level, a temp-role unit, an inventory marker)
+                # are not in this set and still keep the role.
+                exclude_claim_ids=({int(c["claim_id"])
+                                    for c in report.get("deleted_claims") or []}
+                                   | {int(c) for c in exclude_claim_ids or ()}),
+                exclude_item=exclude_item)
+    except Exception as exc:
+        report["role_failures"].append({"claim_id": claim_id,
+                                        "role_id": role_id,
+                                        "error": str(exc)})
+        await ops.note_reversal(
+            guild_id=guild_id, user_id=user_id, claim_id=claim_id,
+            kind=ops.KIND_ROLE, quantity=1, operation_id=operation_id,
+            status=ops.STATUS_OUTSTANDING, role_id=role_id,
+            reason=f"could not verify whether another entitlement still grants "
+                   f"the role ({exc}); the role is retained and the reversal "
+                   f"remains open for retry")
+        report["kept_unresolved"].append(dict(
+            _claim_brief(claim), kind=ops.KIND_ROLE,
+            reason=f"could not verify other role entitlements: {exc}"))
+        return False
     if shared:
         if settled:
             # The journal says this claim's reversal was applied AND another
