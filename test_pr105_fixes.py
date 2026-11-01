@@ -289,6 +289,25 @@ class ManualRefundSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows('SELECT balance FROM economy'),[(90,)])
         self.assertEqual(rows('SELECT count(*) FROM leveling_active_boosts'),[(1,)])
 
+    async def test_legacy_unattributed_shop_boost_blocks_refund(self):
+        from utils.xp_calculator import grant_xp_boost_details
+        item = shop_item('xp_boost',price=10,name='Old Boost',multiplier=2,duration_hours=2)
+        op = await TO.open_purchase(GUILD,USER,item_id=item,item_name='Old Boost',currency='balance',amount=10)
+        await TO.update_purchase(op,status=TO.PURCHASE_UNCERTAIN,charged=1)
+        await grant_xp_boost_details(GUILD,USER,2.0,2,source='shop')
+        result = await TO.resolve_purchase_operation(op,action='refund',confirmed=True)
+        self.assertFalse(result['success'],result)
+        self.assertEqual(rows('SELECT balance FROM economy'),[(90,)])
+        self.assertEqual(rows('SELECT count(*) FROM leveling_active_boosts'),[(1,)])
+
+    async def test_same_name_legacy_holding_has_unprovable_provenance(self):
+        op = await self.op()
+        await TO.grant_timed_holding(GUILD,USER,'F3',expires_at='2035-01-01T00:00:00+00:00',source='shop')
+        result = await TO.resolve_purchase_operation(op,action='refund',confirmed=True)
+        self.assertFalse(result['success'],result)
+        self.assertEqual(rows('SELECT balance FROM economy'),[(90,)])
+        self.assertEqual(rows('SELECT count(*) FROM timed_holdings'),[(1,)])
+
     async def test_no_goods_refund_still_succeeds(self):
         op = await self.op()
         result = await TO.resolve_purchase_operation(op,action='refund',confirmed=True)

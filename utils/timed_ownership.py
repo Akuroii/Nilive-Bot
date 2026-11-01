@@ -2990,6 +2990,17 @@ async def _manual_refund_goods_problem(db, op):
         return "Purchase grant has not been reversed"
     if await _boosts_for_origin(db, op["guild_id"], op["user_id"], op["op_id"]):
         return "Purchase-linked XP boost still exists"
+    if op.get("item_id") is not None:
+        cursor = await db.execute("SELECT type FROM shop_items WHERE id=? AND guild_id=?",
+                                  (op["item_id"], op["guild_id"]))
+        listing = await cursor.fetchone()
+        if listing and listing[0] == "xp_boost":
+            cursor = await db.execute(
+                "SELECT id FROM leveling_active_boosts WHERE guild_id=? AND user_id=? "
+                "AND source='shop' AND origin_op_id IS NULL LIMIT 1",
+                (op["guild_id"], op["user_id"]))
+            if await cursor.fetchone():
+                return "Legacy Shop boost has unprovable purchase provenance"
     cursor = await db.execute(
         "SELECT id, metadata, item_name FROM timed_holdings WHERE guild_id=? "
         "AND user_id=? AND item_type != ?", (op["guild_id"], op["user_id"], RETENTION_ITEM_TYPE))
@@ -3002,8 +3013,11 @@ async def _manual_refund_goods_problem(db, op):
             if item_name == op["item_name"]:
                 return f"Holding {holding_id} has unreadable provenance"
             continue
-        if str(metadata.get("origin_op_id") or "") == str(op["op_id"]):
+        origin = metadata.get("origin_op_id")
+        if str(origin or "") == str(op["op_id"]):
             return f"Purchase-linked holding {holding_id} still exists"
+        if origin is None and item_name == op["item_name"]:
+            return f"Holding {holding_id} has unprovable purchase provenance"
     return None
 
 
