@@ -150,25 +150,9 @@ class Boost(commands.Cog):
             return
 
         for role_id in [boost1_id, boost2_id]:
-            if not role_id:
-                continue
-            role = guild.get_role(int(role_id))
-            if role and role in member.roles:
-                # Losing the boost retires the BOOST entitlement. The same role
-                # ID may also be owned through the Shop, which this must not
-                # revoke.
-                from utils.timed_ownership import role_removal_blocked
-                kept_reason = await role_removal_blocked(
-                    guild.id, member.id, int(role_id), retiring="booster",
-                    member=member)
-                if kept_reason:
-                    print(f"[BOOST] Keeping role {role_id} for {member.id}: "
-                          f"still {kept_reason}")
-                    continue
-                try:
-                    await member.remove_roles(role, reason="Boost ended")
-                except Exception as e:
-                    print(f"[BOOST] Failed to remove role: {e}")
+            if role_id:
+                await Boost._retire_booster_role(
+                    guild, member, guild.get_role(int(role_id)), "role", log_failure=True)
 
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
@@ -178,20 +162,8 @@ class Boost(commands.Cog):
             booster_roles = await cursor.fetchall()
 
         for (role_id,) in booster_roles:
-            role = guild.get_role(role_id)
-            if role and role in member.roles:
-                from utils.timed_ownership import role_removal_blocked
-                kept_reason = await role_removal_blocked(
-                    guild.id, member.id, int(role_id), retiring="booster",
-                    member=member)
-                if kept_reason:
-                    print(f"[BOOST] Keeping booster-only role {role_id} for "
-                          f"{member.id}: still {kept_reason}")
-                    continue
-                try:
-                    await member.remove_roles(role, reason="Boost ended")
-                except Exception:
-                    pass
+            await Boost._retire_booster_role(
+                guild, member, guild.get_role(role_id), "booster-only role")
 
         # FEATURE (dark-fixes pass #2, boost_color_roles): a self-picked
         # color role is a boost perk too, so it comes off on unboost
@@ -199,23 +171,34 @@ class Boost(commands.Cog):
         # (this function already returned early if that's disabled).
         color_roles = await get_boost_color_roles(guild.id)
         for cr in color_roles:
-            role = guild.get_role(cr["role_id"])
-            if role and role in member.roles:
-                # Same rule as the two loops above: losing the boost retires the
-                # BOOST-COLOUR perk, while the same role ID may also be owned
-                # through the Shop, which this must not revoke.
-                from utils.timed_ownership import role_removal_blocked
-                kept_reason = await role_removal_blocked(
-                    guild.id, member.id, int(role.id), retiring="booster",
-                    member=member)
-                if kept_reason:
-                    print(f"[BOOST] Keeping colour role {role.id} for "
-                          f"{member.id}: still {kept_reason}")
-                    continue
+            await Boost._retire_booster_role(
+                guild, member, guild.get_role(cr["role_id"]), "colour role")
+
+    @staticmethod
+    async def _retire_booster_role(guild, member, role, label, *, log_failure=False):
+        if role is None:
+            return
+        from utils.equip_engine import slot_lock
+        from utils.timed_ownership import role_removal_blocked
+
+        kept_reason = None
+        error = None
+        async with slot_lock(guild.id, member.id):
+            # Presence and entitlements must both be re-read after acquiring
+            # the lock shared with the equip and Shop delivery paths.
+            if role not in member.roles:
+                return
+            kept_reason = await role_removal_blocked(
+                guild.id, member.id, int(role.id), retiring="booster", member=member)
+            if not kept_reason:
                 try:
                     await member.remove_roles(role, reason="Boost ended")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    error = exc
+        if kept_reason:
+            print(f"[BOOST] Keeping {label} {role.id} for {member.id}: still {kept_reason}")
+        elif error and log_failure:
+            print(f"[BOOST] Failed to remove role: {error}")
 
     async def _give_role(self, guild, member, role_id):
         if not role_id:
@@ -414,35 +397,32 @@ class Boost(commands.Cog):
         # member currently holds before assigning the new one, so
         # members don't stack multiple color roles at once.
         other_role_ids = {o["role_id"] for o in options if o["role_id"] != target_role_id}
-        to_remove = [r for r in interaction.user.roles if r.id in other_role_ids]
+        from utils.equip_engine import slot_lock
+        from utils.timed_ownership import role_removal_blocked
         to_remove_kept = []
-        if to_remove:
-            # Switching colour retires the BOOST-COLOUR perk. A colour role the
-            # member also owns through the Shop is a separate grant and stays;
-            # removing it here would revoke a purchase.
-            from utils.timed_ownership import role_removal_blocked
-            still_owned = []
+        error = None
+        async with slot_lock(interaction.guild.id, interaction.user.id):
+            to_remove = [r for r in interaction.user.roles if r.id in other_role_ids]
             for candidate in to_remove:
-                # Only the self-picked colour is retired here. The configured
-                # `boost1`/`boost2` reward roles are a different Booster grant
-                # and stay effective while the member keeps boosting.
                 kept_reason = await role_removal_blocked(
                     interaction.guild.id, interaction.user.id,
                     int(candidate.id), retiring="booster:color",
                     member=interaction.user)
                 if kept_reason:
-                    still_owned.append(candidate)
+                    to_remove_kept.append(candidate)
                     print(f"[BOOST] Keeping colour role {candidate.id} for "
                           f"{interaction.user.id}: still {kept_reason}")
-            to_remove = [r for r in to_remove if r not in still_owned]
-            to_remove_kept = still_owned
-        try:
-            if to_remove:
-                await interaction.user.remove_roles(*to_remove, reason="Switching boost color")
-            if role not in interaction.user.roles:
-                await interaction.user.add_roles(role, reason="Boost color pick")
-        except Exception as e:
-            await interaction.response.send_message(f"Couldn't update your role: {e}", ephemeral=True)
+            to_remove = [r for r in to_remove if r not in to_remove_kept]
+            try:
+                if to_remove:
+                    await interaction.user.remove_roles(*to_remove, reason="Switching boost color")
+                if role not in interaction.user.roles:
+                    await interaction.user.add_roles(role, reason="Boost color pick")
+            except Exception as exc:
+                error = exc
+        # Respond only after releasing the non-reentrant slot lock.
+        if error:
+            await interaction.response.send_message(f"Couldn't update your role: {error}", ephemeral=True)
             return
 
         kept_note = (

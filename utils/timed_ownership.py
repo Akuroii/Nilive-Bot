@@ -50,6 +50,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
+import discord
 
 from database import DB_PATH
 
@@ -433,57 +434,96 @@ async def reconcile_role_retentions(bot=None, *, limit: int = 200) -> dict:
         role_id = int(role_id)
         try:
             guild = bot.get_guild(guild_id) if bot is not None else None
-            member = guild.get_member(user_id) if guild is not None else None
-            role = guild.get_role(role_id) if guild is not None else None
-            if member is None or role is None:
-                # The member left, or the role was deleted: nothing is owed
-                # any more. Delete without touching Discord.
-                await clear_role_retention(guild_id, user_id, role_id)
-                stats["satisfied"] += 1
+            if guild is None:
+                stats["kept"] += 1
+                stats["errors"].append(f"retention {holding.get('id')}: guild unavailable")
                 continue
-            held_role_ids: set[int] = set()
-            for r_obj in (getattr(member, "roles", None) or ()):
-                r_id_attr = getattr(r_obj, "id", r_obj)
+            member = guild.get_member(user_id)
+            if member is None:
                 try:
-                    held_role_ids.add(int(r_id_attr))
-                except (TypeError, ValueError):
+                    member = await guild.fetch_member(user_id)
+                except discord.NotFound as exc:
+                    if getattr(exc, "code", None) == 10007:  # Unknown Member
+                        await clear_role_retention(guild_id, user_id, role_id)
+                        stats["satisfied"] += 1
+                    else:
+                        await _bump_retention_attempt(holding, exc)
+                        stats["kept"] += 1
+                        stats["errors"].append(f"retention {holding.get('id')}: member fetch failed: {exc}")
                     continue
-            if role_id not in held_role_ids:
-                # The role is already gone; the obligation is met.
-                await clear_role_retention(guild_id, user_id, role_id)
-                stats["satisfied"] += 1
-                continue
-            # Ask the UNKNOWN question first. `booster_role_entitlements`
-            # reports a role as entitled through the very unknown-count
-            # fallback that created this obligation, so consulting it before
-            # this check would clear the obligation while the decision is
-            # still open - the exact bug the tests below caught.
-            unknown = await booster_retention_unknown_roles(
-                guild_id, user_id, bot=bot, member=member)
-            if role_id in unknown:
-                # Eligibility is still undetermined: keep asking later.
-                stats["kept"] += 1
-                continue
-            entitled = await booster_role_entitlements(
-                guild_id, user_id, bot=bot, member=member)
-            if role_id in entitled["reward"] or role_id in entitled["color"]:
-                # Eligibility resolved in the member's favour on evidence,
-                # not on the unknown-count fallback: nothing is owed.
-                await clear_role_retention(guild_id, user_id, role_id)
-                stats["satisfied"] += 1
-                continue
-            try:
-                await member.remove_roles(
-                    role, reason="Booster eligibility resolved: role retired")
-                await clear_role_retention(guild_id, user_id, role_id)
-                stats["removed"] += 1
-            except Exception as exc:
-                # Removal failed. KEEP the obligation so the next pass
-                # retries, and record why.
-                await _bump_retention_attempt(holding, exc)
-                stats["kept"] += 1
-                stats["errors"].append(
-                    f"retention {holding.get('id')}: {exc}")
+                except Exception as exc:
+                    await _bump_retention_attempt(holding, exc)
+                    stats["kept"] += 1
+                    stats["errors"].append(f"retention {holding.get('id')}: member fetch failed: {exc}")
+                    continue
+            role = guild.get_role(role_id)
+            if role is None:
+                # A cache miss is not proof of deletion. Only a successful
+                # authoritative role-list fetch can establish absence.
+                try:
+                    fetched_roles = await guild.fetch_roles()
+                except Exception as exc:
+                    await _bump_retention_attempt(holding, exc)
+                    stats["kept"] += 1
+                    stats["errors"].append(f"retention {holding.get('id')}: role fetch failed: {exc}")
+                    continue
+                role = next((r for r in fetched_roles if int(r.id) == role_id), None)
+                if role is None:
+                    await clear_role_retention(guild_id, user_id, role_id)
+                    stats["satisfied"] += 1
+                    continue
+            from utils.equip_engine import slot_lock
+            async with slot_lock(guild_id, user_id):
+                held_role_ids: set[int] = set()
+                for r_obj in (getattr(member, "roles", None) or ()):
+                    r_id_attr = getattr(r_obj, "id", r_obj)
+                    try:
+                        held_role_ids.add(int(r_id_attr))
+                    except (TypeError, ValueError):
+                        continue
+                if role_id not in held_role_ids:
+                    # The role is already gone; the obligation is met.
+                    await clear_role_retention(guild_id, user_id, role_id)
+                    stats["satisfied"] += 1
+                    continue
+                # Ask the UNKNOWN question first. `booster_role_entitlements`
+                # reports a role as entitled through the very unknown-count
+                # fallback that created this obligation, so consulting it before
+                # this check would clear the obligation while the decision is
+                # still open - the exact bug the tests below caught.
+                unknown = await booster_retention_unknown_roles(
+                    guild_id, user_id, bot=bot, member=member)
+                if role_id in unknown:
+                    # Eligibility is still undetermined: keep asking later.
+                    stats["kept"] += 1
+                    continue
+                entitled = await booster_role_entitlements(
+                    guild_id, user_id, bot=bot, member=member)
+                if role_id in entitled["reward"] or role_id in entitled["color"]:
+                    # Eligibility resolved in the member's favour on evidence,
+                    # not on the unknown-count fallback: nothing is owed.
+                    await clear_role_retention(guild_id, user_id, role_id)
+                    stats["satisfied"] += 1
+                    continue
+                independent = await other_role_entitlement(
+                    guild_id, user_id, role_id, exclude=_retiring_tokens("booster"),
+                    bot=bot, member=member)
+                if independent:
+                    await clear_role_retention(guild_id, user_id, role_id)
+                    stats["satisfied"] += 1
+                    continue
+                try:
+                    await member.remove_roles(
+                        role, reason="Booster eligibility resolved: role retired")
+                    await clear_role_retention(guild_id, user_id, role_id)
+                    stats["removed"] += 1
+                except Exception as exc:
+                    # Removal failed. KEEP the obligation so the next pass
+                    # retries, and record why.
+                    await _bump_retention_attempt(holding, exc)
+                    stats["kept"] += 1
+                    stats["errors"].append(
+                        f"retention {holding.get('id')}: {exc}")
         except Exception as exc:
             stats["failed"] += 1
             stats["errors"].append(
@@ -1551,31 +1591,28 @@ async def booster_retention_unknown_roles(guild_id: int, user_id: int, *,
             "SELECT enabled, boost1_role_id, boost2_role_id "
             "FROM boost_config WHERE guild_id=?", (guild_id,))
         row = await cursor.fetchone()
-        if row:
-            enabled, b1, b2 = row
-            if not (enabled is not None and int(enabled) == 0):
-                if b2 not in (None, ""):
-                    try:
-                        b2_id = int(b2)
-                    except (TypeError, ValueError):
-                        b2_id = None
-                    # Kept only by the unknown-count fallback: boost_level
-                    # alone does not reach 2, so the role is worn, not earned.
-                    if b2_id is not None and b2_id in held and boost_level < 2:
-                        unknown.add(b2_id)
-                cursor = await db.execute(
-                    "SELECT role_id, requires_boost_level "
-                    "FROM boost_color_roles WHERE guild_id=?", (guild_id,))
-                for r_id, req_lvl in await cursor.fetchall():
-                    if r_id in (None, ""):
-                        continue
-                    try:
-                        color_role_id = int(r_id)
-                    except (TypeError, ValueError):
-                        continue
-                    needed = max(1, int(req_lvl or 1))
-                    if color_role_id in held and boost_level < needed:
-                        unknown.add(color_role_id)
+        enabled, _b1, b2 = row if row else (1, None, None)
+        if not (enabled is not None and int(enabled) == 0):
+            if b2 not in (None, ""):
+                try:
+                    b2_id = int(b2)
+                except (TypeError, ValueError):
+                    b2_id = None
+                if b2_id is not None and b2_id in held and boost_level < 2:
+                    unknown.add(b2_id)
+            cursor = await db.execute(
+                "SELECT role_id, requires_boost_level "
+                "FROM boost_color_roles WHERE guild_id=?", (guild_id,))
+            for r_id, req_lvl in await cursor.fetchall():
+                if r_id in (None, ""):
+                    continue
+                try:
+                    color_role_id = int(r_id)
+                except (TypeError, ValueError):
+                    continue
+                needed = max(1, int(req_lvl or 1))
+                if color_role_id in held and boost_level < needed:
+                    unknown.add(color_role_id)
     return unknown
 
 
@@ -2360,6 +2397,11 @@ async def expire_one(bot, holding: dict) -> dict:
     }
 
 
+# Process-local fairness: a failed expiration must not monopolize a bounded
+# sweep. Entries are pruned when they disappear and failures remain retryable.
+_EXPIRY_SCAN_ATTEMPTS: dict[int, int] = {}
+
+
 async def cleanup_expired_holdings(bot, *, limit: int = 200) -> dict:
     """One cleanup pass. Safe to re-run at any time."""
     global _LAST_BOT
@@ -2391,10 +2433,17 @@ async def cleanup_expired_holdings(bot, *, limit: int = 200) -> dict:
         meta = h.get("metadata") if isinstance(h.get("metadata"), dict) else {}
         return bool(meta.get("late_rollback") or h.get("source") == "shop_late_rollback")
 
-    batch = await expired_holdings(limit=limit)
+    expired = await expired_holdings(limit=None)
+    live_ids = {h["id"] for h in expired}
+    for stale_id in set(_EXPIRY_SCAN_ATTEMPTS) - live_ids:
+        _EXPIRY_SCAN_ATTEMPTS.pop(stale_id, None)
+    # Stable sorting retains expiry order among equally attempted holdings.
+    expired.sort(key=lambda h: _EXPIRY_SCAN_ATTEMPTS.get(h["id"], 0))
+    batch = expired[:int(limit)] if limit is not None and int(limit) >= 0 else expired
     seen_ids = {h.get("id") for h in batch}
     late_kept = 0
     for holding in batch:
+        _EXPIRY_SCAN_ATTEMPTS[holding["id"]] = _EXPIRY_SCAN_ATTEMPTS.get(holding["id"], 0) + 1
         try:
             result = await expire_one(bot, holding)
         except Exception as exc:  # pragma: no cover - defensive
@@ -2422,6 +2471,7 @@ async def cleanup_expired_holdings(bot, *, limit: int = 200) -> dict:
                 if h.get("id") not in seen_ids and not _is_late_marker(h)
             ][:needed_ordinary]
             for holding in extra_ordinary:
+                _EXPIRY_SCAN_ATTEMPTS[holding["id"]] = _EXPIRY_SCAN_ATTEMPTS.get(holding["id"], 0) + 1
                 try:
                     result = await expire_one(bot, holding)
                 except Exception as exc:  # pragma: no cover - defensive
@@ -2503,12 +2553,10 @@ _PURCHASE_EXTRA_COLUMNS = (
 async def ensure_purchase_journal_schema(db) -> None:
     for statement in PURCHASE_SCHEMA:
         await db.execute(statement)
-    cursor = await db.execute("PRAGMA table_info(shop_purchase_operations)")
-    present = {row[1] for row in await cursor.fetchall()}
+    # Local import avoids a module cycle when database.init_db imports us.
+    from database import add_column_if_missing
     for name, ddl in _PURCHASE_EXTRA_COLUMNS:
-        if name not in present:
-            await db.execute(
-                f"ALTER TABLE shop_purchase_operations ADD COLUMN {name} {ddl}")
+        await add_column_if_missing(db, "shop_purchase_operations", name, ddl)
     await db.commit()
 
 
@@ -2916,9 +2964,13 @@ async def restore_stock(item_id, *,
         row = await cursor.fetchone()
         if not row or not row[0]:
             return False
+        # An administrator may have lowered the limit or reset stock after
+        # reservation. Do not push the current counter past the new limit (or
+        # reduce an already inconsistent counter while trying to refund).
         await conn.execute(
-            "UPDATE shop_items SET current_stock = current_stock + 1 WHERE id=?",
-            (item_id,))
+            "UPDATE shop_items SET current_stock = CASE "
+            "WHEN current_stock < max_stock THEN current_stock + 1 "
+            "ELSE current_stock END WHERE id=?", (item_id,))
         return True
 
     if db is not None:
@@ -2928,6 +2980,45 @@ async def restore_stock(item_id, *,
         if applied:
             await conn.commit()
         return applied
+
+
+async def _manual_refund_goods_problem(db, op):
+    """Check operation-linked goods while holding the caller's SQLite write lock."""
+    from utils.level_ops import purchase_grant
+    grant = await purchase_grant(str(op["op_id"]), db=db)
+    if grant and not grant.get("reversed_at"):
+        return "Purchase grant has not been reversed"
+    if await _boosts_for_origin(db, op["guild_id"], op["user_id"], op["op_id"]):
+        return "Purchase-linked XP boost still exists"
+    if op.get("item_id") is not None:
+        cursor = await db.execute("SELECT type FROM shop_items WHERE id=? AND guild_id=?",
+                                  (op["item_id"], op["guild_id"]))
+        listing = await cursor.fetchone()
+        if listing and listing[0] == "xp_boost":
+            cursor = await db.execute(
+                "SELECT id FROM leveling_active_boosts WHERE guild_id=? AND user_id=? "
+                "AND source='shop' AND origin_op_id IS NULL LIMIT 1",
+                (op["guild_id"], op["user_id"]))
+            if await cursor.fetchone():
+                return "Legacy Shop boost has unprovable purchase provenance"
+    cursor = await db.execute(
+        "SELECT id, metadata, item_name FROM timed_holdings WHERE guild_id=? "
+        "AND user_id=? AND item_type != ?", (op["guild_id"], op["user_id"], RETENTION_ITEM_TYPE))
+    for holding_id, raw, item_name in await cursor.fetchall():
+        try:
+            metadata = json.loads(raw) if raw else {}
+        except (ValueError, TypeError):
+            metadata = None
+        if not isinstance(metadata, dict):
+            if item_name == op["item_name"]:
+                return f"Holding {holding_id} has unreadable provenance"
+            continue
+        origin = metadata.get("origin_op_id")
+        if str(origin or "") == str(op["op_id"]):
+            return f"Purchase-linked holding {holding_id} still exists"
+        if origin is None and item_name == op["item_name"]:
+            return f"Holding {holding_id} has unprovable purchase provenance"
+    return None
 
 
 async def refund_purchase(op_id: str) -> dict:
@@ -2959,6 +3050,9 @@ async def refund_purchase(op_id: str) -> dict:
         async with aiosqlite.connect(DB_PATH) as db:
             try:
                 await db.execute("BEGIN IMMEDIATE")
+                problem = await _manual_refund_goods_problem(db, op)
+                if problem:
+                    raise RuntimeError(problem)
                 cursor = await db.execute(
                     "SELECT status, charged, refunded "
                     "FROM shop_purchase_operations WHERE op_id=?",
@@ -2976,31 +3070,16 @@ async def refund_purchase(op_id: str) -> dict:
                             "complete": False,
                             "error": "Cannot refund a delivered purchase operation"}
                 if cur_charged and not cur_refunded:
-                    try:
-                        credit_res = await safe_credit(
-                            op["guild_id"], op["user_id"],
-                            int(op["amount"] or 0),
-                            currency=op["currency"] or "balance",
-                            reason=f"Refund: {op['item_name']}",
-                            source="shop_refund", db=db)
-                    except TypeError as type_exc:
-                        if "db" not in str(type_exc):
-                            raise
-                        credit_res = await safe_credit(
-                            op["guild_id"], op["user_id"],
-                            int(op["amount"] or 0),
-                            currency=op["currency"] or "balance",
-                            reason=f"Refund: {op['item_name']}",
-                            source="shop_refund")
+                    credit_res = await safe_credit(
+                        op["guild_id"], op["user_id"],
+                        int(op["amount"] or 0),
+                        currency=op["currency"] or "balance",
+                        reason=f"Refund: {op['item_name']}",
+                        source="shop_refund", db=db)
                     if isinstance(credit_res, dict) and not credit_res.get("success", True):
                         raise RuntimeError(
                             credit_res.get("error") or "safe_credit failed")
-                    try:
-                        await update_purchase(op_id, refunded=1, db=db)
-                    except TypeError as type_exc:
-                        if "db" not in str(type_exc):
-                            raise
-                        await update_purchase(op_id, refunded=1)
+                    await update_purchase(op_id, refunded=1, db=db)
                     await db.commit()
                     op["refunded"] = 1
                 else:
@@ -3017,6 +3096,9 @@ async def refund_purchase(op_id: str) -> dict:
         async with aiosqlite.connect(DB_PATH) as db:
             try:
                 await db.execute("BEGIN IMMEDIATE")
+                problem = await _manual_refund_goods_problem(db, op)
+                if problem:
+                    raise RuntimeError(problem)
                 cursor = await db.execute(
                     "SELECT status, stock_reserved, stock_returned "
                     "FROM shop_purchase_operations WHERE op_id=?",
@@ -3036,18 +3118,8 @@ async def refund_purchase(op_id: str) -> dict:
                             "complete": False,
                             "error": "Cannot refund a delivered purchase operation"}
                 if cur_reserved and not cur_returned:
-                    try:
-                        await restore_stock(op["item_id"], db=db)
-                    except TypeError as type_exc:
-                        if "db" not in str(type_exc):
-                            raise
-                        await restore_stock(op["item_id"])
-                    try:
-                        await update_purchase(op_id, stock_returned=1, db=db)
-                    except TypeError as type_exc:
-                        if "db" not in str(type_exc):
-                            raise
-                        await update_purchase(op_id, stock_returned=1)
+                    await restore_stock(op["item_id"], db=db)
+                    await update_purchase(op_id, stock_returned=1, db=db)
                     await db.commit()
                     op["stock_returned"] = 1
                 else:
@@ -5470,6 +5542,17 @@ async def compensate_late_delivery(
                                     f"Stackable rollback refused "
                                     f"[{verdict.get('code')}]: {verdict['reason']}"
                                 )
+                            if internal_type == "title":
+                                # Reconcile the slot in the same transaction as
+                                # the grant reversal. Keep a same-name title if
+                                # another source still owns a unit.
+                                await rb_db.execute(
+                                    "DELETE FROM equipped_titles WHERE guild_id=? "
+                                    "AND user_id=? AND item_name=? AND NOT EXISTS "
+                                    "(SELECT 1 FROM inventory_items WHERE guild_id=? "
+                                    "AND user_id=? AND item_name=? AND quantity>0)",
+                                    (guild_id, user_id, item_name,
+                                     guild_id, user_id, item_name))
                             spec.pop("refusal_code", None)
                             spec["grant_id"] = verdict.get("grant_id")
 
@@ -5496,7 +5579,20 @@ async def compensate_late_delivery(
                                 merged_p or clean_spec
                             )
                         else:
-                            await rb_db.execute("ROLLBACK")
+                            if internal_type == "title":
+                                # Older persisted descriptors may already mark
+                                # inventory rolled back but predate title-slot
+                                # reconciliation. Repair that state on retry.
+                                await rb_db.execute(
+                                    "DELETE FROM equipped_titles WHERE guild_id=? "
+                                    "AND user_id=? AND item_name=? AND NOT EXISTS "
+                                    "(SELECT 1 FROM inventory_items WHERE guild_id=? "
+                                    "AND user_id=? AND item_name=? AND quantity>0)",
+                                    (guild_id, user_id, item_name,
+                                     guild_id, user_id, item_name))
+                                await rb_db.commit()
+                            else:
+                                await rb_db.execute("ROLLBACK")
                             in_tx = False
                             spec["inventory_rolled_back"] = True
                             spec["equip_reconciled"] = True
@@ -5763,13 +5859,22 @@ async def reconcile_purchases(*, older_than_minutes: int = 15,
         try:
             result = await refund_purchase(op_id)
         except Exception as exc:  # pragma: no cover - defensive
-            print(f"[SHOP] Compensation failed for {op_id}: {exc}")
-            stats["errors"] += 1
-            continue
+            result = {"complete": False, "error": f"{type(exc).__name__}: {exc}"}
         if result["complete"]:
             stats["completed"] += 1
         else:
             stats["errors"] += 1
+            error = str(result.get("error") or "compensation incomplete")[:500]
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE shop_purchase_operations SET detail="
+                    "substr(COALESCE(detail, ''), 1, 2000) || ?, "
+                    "updated_at=CURRENT_TIMESTAMP WHERE op_id=? "
+                    "AND status IN (?, ?) AND (charged=1 AND refunded=0 "
+                    "OR stock_reserved=1 AND stock_returned=0)",
+                    (f" | Last compensation error: {error}", op_id,
+                     PURCHASE_FAILED, PURCHASE_REFUNDED))
+                await db.commit()
 
     try:
         rb = await reconcile_delivery_rollbacks(bot=bot, limit=limit)
@@ -5805,10 +5910,9 @@ async def list_purchase_operations(*, status: str | None = PURCHASE_UNCERTAIN,
     """List purchase operations filtered by status, guild, and/or user.
 
     `include_pending_rollbacks` widens the listing to operations whose
-    `delivery_rollback` descriptor is still present. Those are the operations an
-    operator most needs to find, and they are usually in status `refunded` /
-    `failed` — not `uncertain` — so a status-filtered listing silently hides
-    exactly the stuck work this tool exists to surface.
+    `delivery_rollback` descriptor is still present or whose settled operation
+    has an incomplete refund or stock return. These may be in status `refunded`
+    or `failed`, rather than `uncertain`.
     `pending_rollbacks_only` narrows it to just those.
     """
     clauses: list[str] = []
@@ -5820,8 +5924,11 @@ async def list_purchase_operations(*, status: str | None = PURCHASE_UNCERTAIN,
         if status is not None:
             params.append(status)
         clauses.append(
-            f"({status_clause}delivery_rollback IS NOT NULL"
-            f" AND delivery_rollback != '')"
+            f"({status_clause}(delivery_rollback IS NOT NULL"
+            " AND delivery_rollback != '') OR "
+            "(status IN ('failed', 'refunded') AND "
+            "((charged=1 AND refunded=0) OR "
+            "(stock_reserved=1 AND stock_returned=0))))"
         )
     elif status is not None:
         clauses.append("status=?")
@@ -6271,6 +6378,8 @@ async def inspect_purchase_operation(op_id: str) -> dict | None:
         "recent_ledger_entries": [],
     }
 
+    from utils.level_ops import purchase_grant
+    evidence["purchase_grant"] = await purchase_grant(str(op_id))
     role_id_candidate: int | None = None
     async with aiosqlite.connect(DB_PATH) as db:
         if item_id is not None:
@@ -6734,6 +6843,18 @@ async def resolve_purchase_operation(op_id: str, *, action: str,
             "error": None,
         }
 
+    # Check even operations with no remaining refund effects; the per-effect
+    # transactions recheck under their own write locks before any mutation.
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            problem = await _manual_refund_goods_problem(db, op)
+        finally:
+            await db.rollback()
+    if problem:
+        return {"success": False, "op_id": op_id, "action": normalized,
+                "status": current_status, "error": problem}
+
     # normalized == "refund"
     comp = await refund_purchase(op_id)
     if not comp["complete"]:
@@ -6991,8 +7112,9 @@ async def _cli_async(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--status", default=None,
         help=("Filter operations by status when listing. By default the listing "
-              "shows uncertain operations AND any operation whose late-delivery "
-              "rollback is still pending. Use 'any' for no status filter."))
+              "shows uncertain operations, pending delivery rollbacks, and "
+              "failed/refunded operations with incomplete compensation. "
+              "Use 'any' for no status filter."))
     parser.add_argument(
         "--pending-rollbacks", action="store_true",
         help=("List only operations whose delivery_rollback descriptor is still "
