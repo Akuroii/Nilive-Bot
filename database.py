@@ -481,6 +481,14 @@ async def init_db():
             cursor = await db.execute("PRAGMA table_info(reaction_role_expiry)")
             cols = [c[1] for c in await cursor.fetchall()]
             if "message_id" not in cols:
+                # Preserve explicit indexes and triggers that would otherwise
+                # be dropped along with the renamed legacy table. Autoindexes
+                # are recreated by the new PRIMARY KEY, so have no SQL here.
+                cursor = await db.execute(
+                    "SELECT sql FROM sqlite_master WHERE tbl_name=? "
+                    "AND type IN ('index', 'trigger') AND sql IS NOT NULL "
+                    "ORDER BY type, name", ("reaction_role_expiry",))
+                dependent_schema = [row[0] for row in await cursor.fetchall()]
                 # Table predates message_id being part of the primary
                 # key — SQLite can't ALTER a PK in place, so rebuild.
                 # Legacy rows get message_id=0 (best we can do — the
@@ -509,6 +517,8 @@ async def init_db():
                     FROM reaction_role_expiry_old
                 """)
                 await db.execute("DROP TABLE reaction_role_expiry_old")
+                for statement in dependent_schema:
+                    await db.execute(statement)
                 await db.commit()
                 print("[MIGRATION] reaction_role_expiry rebuilt with "
                       "message_id in primary key")

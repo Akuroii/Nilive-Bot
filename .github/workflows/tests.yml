@@ -77,7 +77,7 @@ jobs:
         # distinguishes "still running a test" from "finished, stuck in
         # interpreter shutdown". This is a diagnostic bound, not a fix: a
         # genuine hang still fails the job (exit 124/134).
-        run: PYTHONFAULTHANDLER=1 timeout -s ABRT 600 python -m pytest -v --tb=short test_timed_ownership.py test_delivery_safety.py test_purchase_grant_ledger.py test_role_retention.py test_pr105_fixes.py test_db_migration_concurrency.py
+        run: PYTHONFAULTHANDLER=1 timeout -s ABRT 600 python -m pytest -v --tb=short test_timed_ownership.py test_delivery_safety.py test_purchase_grant_ledger.py test_role_retention.py test_pr105_fixes.py test_db_migration_concurrency.py test_boost_role_race.py
 
   js-harnesses:
     runs-on: ubuntu-latest
