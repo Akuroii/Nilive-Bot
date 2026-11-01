@@ -1544,7 +1544,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
 
         real_refund_purchase = TO.refund_purchase
 
-        async def _interleaved_refund(oid):
+        async def _interleaved_refund(oid, **kwargs):
             # Run money refund step by temporarily failing stock restore, then
             # run concurrent delivered attempts while refunded=1 & status='uncertain',
             # then finish stock restore.
@@ -1557,7 +1557,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                 return await real_restore(item_id, db=db)
 
             with patch.object(TO, "restore_stock", side_effect=_fail_once):
-                partial = await real_refund_purchase(oid)
+                partial = await real_refund_purchase(oid, **kwargs)
             self.assertFalse(partial["complete"])
             mid_op = await TO.get_purchase(oid)
             self.assertEqual(mid_op["status"], TO.PURCHASE_UNCERTAIN)
@@ -1577,7 +1577,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                 detail="stale snapshot bypass attempt",
             )
             # Now complete the remaining half of refund_purchase:
-            return await real_refund_purchase(oid)
+            return await real_refund_purchase(oid, **kwargs)
 
         with patch.object(TO, "refund_purchase", side_effect=_interleaved_refund):
             res_refund = await TO.resolve_purchase_operation(
@@ -1631,13 +1631,13 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             op2, charged=1, stock_reserved=1, status=TO.PURCHASE_UNCERTAIN,
             detail="race subcase C")
 
-        async def _refund_after_delivered_wins(oid):
+        async def _refund_after_delivered_wins(oid, **kwargs):
             # Delivered wins right before refund_purchase enters its BEGIN IMMEDIATE
             deliv_win = await TO.resolve_purchase_operation(
                 oid, action="delivered", confirmed=True,
                 note="delivered won first")
             self.assertTrue(deliv_win["success"])
-            return await real_refund_purchase(oid)
+            return await real_refund_purchase(oid, **kwargs)
 
         with patch.object(TO, "refund_purchase",
                           side_effect=_refund_after_delivered_wins):
@@ -2402,7 +2402,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_deliver = shop_mod._deliver_purchase
 
         async def _deliver_then_operator_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             op_row = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0]
@@ -2413,6 +2412,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await TO.resolve_purchase_operation(
                 op_id, action="refund", confirmed=True,
                 note="refunded before late delivery returned")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         shop_mod._deliver_purchase = _deliver_then_operator_refund
@@ -2864,7 +2864,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_deliver = shop_mod._deliver_purchase
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             op_id = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -2874,6 +2873,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await TO.resolve_purchase_operation(
                 op_id, action="refund", confirmed=True,
                 note="operator refunded before late delivery finalized")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         shop_mod._deliver_purchase = _deliver_then_refund
@@ -2988,7 +2988,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_deliver = shop_mod._deliver_purchase
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             op_id = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -2997,6 +2996,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                 to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
             await TO.resolve_purchase_operation(
                 op_id, action="refund", confirmed=True, note="refunded")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         shop_mod._deliver_purchase = _deliver_then_refund
@@ -3018,16 +3018,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                 (GUILD, USER))
 
         async def _deliver_then_concurrent_admin_grant_and_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
-            # Simulate concurrent independent admin grant arriving right after shop delivery
-            await set_quantity(
-                GUILD, USER, "SolarCrown", 1,
-                item_type="role", source="admin_grant",
-                metadata={"role_id": 712, "granted_by": "admin"})
-            execute(
-                "UPDATE inventory_items SET source='admin_grant', updated_at='2026-06-01 12:00:00' "
-                "WHERE guild_id=? AND user_id=? AND item_name='SolarCrown'",
-                (GUILD, USER))
             op_id = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -3036,6 +3026,16 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                 to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
             await TO.resolve_purchase_operation(
                 op_id, action="refund", confirmed=True, note="refunded")
+            res = await real_deliver(*args, **kwargs)
+            # Independent admin grant arrives after the delayed Shop delivery.
+            await set_quantity(
+                GUILD, USER, "SolarCrown", 1,
+                item_type="role", source="admin_grant",
+                metadata={"role_id": 712, "granted_by": "admin"})
+            execute(
+                "UPDATE inventory_items SET source='admin_grant', updated_at='2026-06-01 12:00:00' "
+                "WHERE guild_id=? AND user_id=? AND item_name='SolarCrown'",
+                (GUILD, USER))
             return res
 
         itx2, person2, bot2, server2 = purchase_ctx(granted_role=r_role)
@@ -3070,9 +3070,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         title_id = shop_item("title", price=100, name="StarVoyager", stock=5)
 
         async def _deliver_item_then_concurrent_grant_and_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
-            # Concurrent quest grant adds +2 StarVoyager after the shop's +1
-            await give_item(GUILD, USER, "StarVoyager", 2, item_type="title", source="quest")
             op_id = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -3081,6 +3078,9 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                 to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
             await TO.resolve_purchase_operation(
                 op_id, action="refund", confirmed=True, note="refunded")
+            res = await real_deliver(*args, **kwargs)
+            # Quest grants two independent units after the Shop unit.
+            await give_item(GUILD, USER, "StarVoyager", 2, item_type="title", source="quest")
             return res
 
         itx3, _, _, _ = purchase_ctx()
@@ -3127,7 +3127,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_deliver = shop_mod._deliver_purchase
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             op_id = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -3136,6 +3135,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                 to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
             await TO.resolve_purchase_operation(
                 op_id, action="refund", confirmed=True, note="refunded")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         shop_mod._deliver_purchase = _deliver_then_refund
@@ -3250,7 +3250,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_deliver = shop_mod._deliver_purchase
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             op_id = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -3259,6 +3258,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                 to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
             await TO.resolve_purchase_operation(
                 op_id, action="refund", confirmed=True, note="refunded")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         shop_mod._deliver_purchase = _deliver_then_refund
@@ -3406,7 +3406,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_deliver = shop_mod._deliver_purchase
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             last_op = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -3416,6 +3415,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await TO.resolve_purchase_operation(
                 last_op, action="refund", confirmed=True,
                 note="late refund with separate interaction.user vs guild.get_member")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         def _make_split_member_ctx(granted_role):
@@ -3631,7 +3631,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_deliver = shop_mod._deliver_purchase
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             last_op = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -3641,6 +3640,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await TO.resolve_purchase_operation(
                 last_op, action="refund", confirmed=True,
                 note="refund before finalize")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         real_rollback_role = re_mod.rollback_role_inventory_grant
@@ -3805,7 +3805,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_deliver = shop_mod._deliver_purchase
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             last_op = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -3815,6 +3814,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await TO.resolve_purchase_operation(
                 last_op, action="refund", confirmed=True,
                 note="late refund of permanent Color re-buy")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         shop_mod._deliver_purchase = _deliver_then_refund
@@ -4020,8 +4020,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         active_flag = {"ref": flag_lt}
 
         async def _deliver_then_depart_and_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
-            active_flag["ref"]["left"] = True
             last_op = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -4031,6 +4029,8 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await TO.resolve_purchase_operation(
                 last_op, action="refund", confirmed=True,
                 note="refunded after member left guild")
+            res = await real_deliver(*args, **kwargs)
+            active_flag["ref"]["left"] = True
             return res
 
         shop_mod._deliver_purchase = _deliver_then_depart_and_refund
@@ -4110,7 +4110,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_rollback_role = re_mod.rollback_role_inventory_grant
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             last_op = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -4120,6 +4119,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await TO.resolve_purchase_operation(
                 last_op, action="refund", confirmed=True,
                 note="late refund for N2 test")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         async def _failing_update_delivery_rollback(op_id, **kwargs):
@@ -4258,7 +4258,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_update_purchase = TO.update_purchase
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             last_op = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -4268,6 +4267,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await TO.resolve_purchase_operation(
                 last_op, action="refund", confirmed=True,
                 note="simulated timeout before finalization")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         clear_attempts = {"count": 0}
@@ -4405,7 +4405,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_update_purchase = TO.update_purchase
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             last_op = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -4415,6 +4414,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await TO.resolve_purchase_operation(
                 last_op, action="refund", confirmed=True,
                 note="simulated timeout before finalization")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         tx_progress_fail_once = {"failed": False}
@@ -4523,7 +4523,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_deliver = shop_mod._deliver_purchase
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             last_op = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -4533,6 +4532,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await TO.resolve_purchase_operation(
                 last_op, action="refund", confirmed=True,
                 note="simulated timeout before finalization")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         shop_mod._deliver_purchase = _deliver_then_refund
@@ -4561,17 +4561,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(spec["role_reconciled"])
         marker_key = spec["retry_entry_key"]
         self.assertTrue(marker_key.startswith("h:"))
-
-        # Add a second normal expired holding behind the 1970 late-rollback marker
-        person.roles.append(r_next)
-        h2_id = await TO.grant_timed_holding(
-            GUILD,
-            USER,
-            "NextExpiredRole",
-            expires_at="2000-01-01T00:00:00+00:00",
-            role_id=r_next.id,
-            category="Color",
-        )
 
         # 1) Cache miss (`get_role` returns None) WITHOUT usable HTTP confirmation:
         # late-rollback marker MUST remain (`removed == 0, kept == 1`).
@@ -4672,6 +4661,17 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(bool((await TO.get_purchase(op_id)).get("delivery_rollback")))
         self.assertNotIn(r_del, person.roles)
 
+        # Add a second normal expired holding behind the 1970 late-rollback marker
+        person.roles.append(r_next)
+        h2_id = await TO.grant_timed_holding(
+            GUILD,
+            USER,
+            "NextExpiredRole",
+            expires_at="2000-01-01T00:00:00+00:00",
+            role_id=r_next.id,
+            category="Color",
+        )
+
         # 6) Next `cleanup_expired_holdings(bot, limit=1)` is no longer blocked and retires h2_id!
         async def _rem_next(r, reason=None):
             person.roles = [x for x in person.roles if x.id != r.id]
@@ -4712,7 +4712,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         real_compensate = TO.compensate_late_delivery
 
         async def _deliver_then_refund(*args, **kwargs):
-            res = await real_deliver(*args, **kwargs)
             last_op = rows(
                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
             )[0][0]
@@ -4722,6 +4721,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
             await TO.resolve_purchase_operation(
                 last_op, action="refund", confirmed=True,
                 note="simulated timeout before finalization")
+            res = await real_deliver(*args, **kwargs)
             return res
 
         async def _defer_initial_compensation(op_id, spec=None, **kwargs):

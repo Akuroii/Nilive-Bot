@@ -149,7 +149,7 @@ class ReconcilerTests(RetentionTestBase):
         person, bot, guild = await self._obligation()
         guild.get_member = lambda uid: None
         guild.fetch_member = AsyncMock(side_effect=discord.NotFound(
-            SimpleNamespace(status=404, reason="Not Found"), "not found"))
+            SimpleNamespace(status=404, reason="Not Found"), {"code": 10007, "message": "Unknown Member"}))
         stats = await TO.reconcile_role_retentions(bot=bot)
         person.remove_roles.assert_not_awaited()
         guild.fetch_member.assert_awaited_once_with(USER)
@@ -159,6 +159,7 @@ class ReconcilerTests(RetentionTestBase):
     async def test_role_gone_satisfies_without_any_discord_call(self):
         person, bot, guild = await self._obligation()
         guild.get_role = lambda rid: None
+        guild.fetch_roles = AsyncMock(return_value=[])
         stats = await TO.reconcile_role_retentions(bot=bot)
         person.remove_roles.assert_not_awaited()
         self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
