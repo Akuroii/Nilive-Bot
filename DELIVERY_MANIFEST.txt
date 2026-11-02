@@ -1,0 +1,121 @@
+NILIVE-BOT  DELIVERY MANIFEST  -  version v1
+=============================================================
+Repository : https://github.com/Akuroii/Nilive-Bot
+Base       : PR #106 HEAD  975bb63f364fbebce96440a35817fb6ebc8ac940
+             (PR branch arena/3792b762-nilive-bot, based on
+              candidate/2026-10-31-chain-design-c @ af4d51b)
+Not committed / pushed / merged / deployed. No production DB touched.
+
+HOW TO USE
+  A) Overlay:  copy files/<path> over the same path in a checkout of 975bb63
+  B) Patch:    git checkout 975bb63 && git apply nilive-bot-pr106-fixes-v1.patch
+  Both were verified to produce byte-identical files (git apply on a clean
+  worktree of 975bb63, then cmp against files/).
+
+FILES  (8 modified, 0 added, 0 deleted relative to 975bb63)   +added/-removed
+  cogs/shop.py                      +179/-91
+      Group B (the Agent's local WIP): purchase claim in ONE write transaction
+      (stock reservation + charge + ledger + pending->delivering); only the
+      delivery owner may leave `delivering`.
+      Continuation: live-delivery scope wrapper; write-ahead Discord role intent
+      (_deliver_purchase wrapper around _deliver_purchase_effects);
+      provenance_tracked marker set in the claim transaction.
+  utils/timed_ownership.py          +570/-28
+      Group B: PURCHASE_DELIVERING; refund/rollback paths refuse `delivering`;
+      generic update_purchase cannot overwrite it; ledger table must exist.
+      Continuation: columns delivery_intent + provenance_tracked; DB trigger
+      blocking refunded/stock_returned changes while `delivering`; intent
+      begin/settle; refund guard split into operation-linked evidence vs
+      legacy-unprovable rules (provenance-narrowed); stranded-delivery
+      reconciler (parks as `uncertain`, NEVER refunds); intent observation
+      reconciler (observation only: never grants/removes a role, never moves
+      money); inspection/CLI output.
+  database.py                       +27/-7
+      reaction_role_expiry rebuild: build _new, count-check, drop original,
+      rename under legacy_alter_table (no dangling views/triggers on other
+      tables).
+  cogs/boost.py                     +9/-0
+      Skip retiring a Booster role if the member is boosting again once the
+      slot lock is held (unboost -> re-boost race).
+  test_timed_ownership.py           +105/-117
+      Group B test changes kept (atomic-tx assertion (failed,0,0,0); rewritten
+      P1 live-delivery test). Continuation: legacy-worker stubs now call
+      _deliver_purchase_effects and clear intent/provenance (faithful old
+      worker model); section_4 test now requires OBSERVED role absence before
+      refund (deliberate contract change, see RISKS #1).
+  test_pr105_fixes.py               +651/-0
+      Group B tests + new classes: RoleIntentTests, StrandedDeliveryTests,
+      TriggerBackstopTests, ProvenanceNarrowingTests, LiveDeliveryP1Tests
+      (incl. restored legacy-worker refund-during-delivery scenario).
+  test_db_migration_concurrency.py  +30/-4
+      External view+trigger preservation test; failure injection moved to the
+      worst point (after the original table is dropped).
+  test_boost_role_race.py           +32/-0
+      Re-boost-while-retirement-waits test + control.
+Unchanged and preserved: every other file of 975bb63 (incl. scripts/
+  recover_shop_purchases.py, .github/workflows/tests.yml, boost/shop UI,
+  level/prestige/equip engines, all other tests).
+
+TEST RESULTS (final state, run after the last edit)
+  CI selection (7 files): test_timed_ownership.py test_delivery_safety.py
+    test_purchase_grant_ledger.py test_role_retention.py test_pr105_fixes.py
+    test_db_migration_concurrency.py test_boost_role_race.py
+  * Python 3.11.15 (CI version), SQLite 3.50.4, discord.py 2.7.1,
+    aiosqlite 0.19.0, deps from requirements.txt in a clean venv:
+      406 passed, 42 subtests passed, 0 failed  (196 s)
+  * Python 3.12.3, SQLite 3.45.1 (earlier run, before a one-line whitespace
+    cleanup in test_pr105_fixes.py; that file re-run afterwards: 74 passed):
+      406 passed, 42 subtests passed, 0 failed
+  * npm test: 18 harnesses passed (148/148 checks in the Publication UI one)
+  * git diff --check: clean
+  Reference points: pristine 975bb63 = 367 passed (3.12); Group B WIP alone =
+    380 passed / 1 failed (the B2 test) - intermediate, superseded.
+  Mutation evidence (tests are not vacuous): disabling the intent block fails
+    6 of 9 intent tests; ignoring provenance_tracked fails 2 of 4 provenance
+    tests; B5 test fails on the old rebuild (view rewritten to ..._old); B6
+    test fails without the premium_since recheck.
+
+PROVEN BY EXECUTION vs NOT
+  Proven (simulated Discord, real SQLite): intent blocks refund after timeout,
+    cancellation, lookup failure; certain 403 refunds; present role is never
+    removed/attributed; stranded rows parked, never refunded; trigger rejects
+    direct SQL; tracked vs untracked provenance; external view/trigger survive
+    rebuild; re-boost race; live-delivery and legacy-worker P1 scenarios.
+  NOT proven: live Discord/staging; production-database migration; real
+    gateway cache lag; multi-process (bot + dashboard) timing beyond the
+    existing subprocess init test; behavior of older code versions running
+    against the new schema (only the trigger backstop is tested, via SQL).
+
+RISKS / OPEN DECISIONS (left explicit, not guessed)
+  1. CONTRACT CHANGE: an unresolved role grant (intent `started`/`present`)
+     now blocks refund until Discord shows the role absent after the 10-min
+     settle window. An operator note alone no longer authorizes it.
+  2. Role observed PRESENT: stays blocked; code neither removes it nor
+     records a holding. Operator policy needed: remove role then refund, or
+     record the holding then mark delivered.
+  3. "Absent after the settle window" narrows but cannot prove that an earlier
+     request will never be applied (SQLite and Discord cannot be atomic).
+  4. Legacy operations (provenance_tracked=0) with same-name unlabelled goods
+     remain fail-closed; no override added.
+  5. `never_started` stranded rows are parked as `uncertain`, not auto-refunded
+     (a slow worker in another process could still write goods).
+  6. Mixed-version deployment: an OLD worker can still write `delivering`-
+     unaware paths; only the DB trigger protects refund flags. Deploy bot and
+     dashboard together.
+  7. init_db now fails fatally on a lock/other migration error (PR behavior);
+     no retry added (no failing path demonstrated).
+  8. Booster: cached member state can lag the API; _give_role is not under the
+     slot lock. Not changed (out of scope).
+  9. The stranded lease (30 min) and settle window (10 min) are constants, not
+     validated against production latencies.
+
+SHA-256 (of every file in this package except this manifest)
+7f9faa8d08829806966094ea7bab532a7bb3cfe535c608792e8f4e05773655e2  nilive-bot-pr106-fixes-v1.patch
+18433ae9c223998cb6cb0ef9d7667a388d40e11d51f7546a112244449ea336d9  files/cogs/boost.py
+9110abc4438c0252d6948652522e798bbaa8313b2a6f4a0fbcfdac6980805a31  files/cogs/shop.py
+b47805b4b565aa3edd33e939b7fb7a334fe49977a5168c556cd53dd4186c1475  files/database.py
+689ebca35d04b1d05c276c2ae5d6d9030525c1a4d71e5b7cbbde225e99022fa2  files/test_boost_role_race.py
+7d5d9bbbdd29da796e9865245ffef615124009fa5ed3186bb54a7bcdfeafe7c3  files/test_db_migration_concurrency.py
+aa51c3873e79acb6b300a79a226414f067de03c59db07a042f6337af8fec11dd  files/test_pr105_fixes.py
+8204dfd1790debf39457399550d7892d4646d80a68127ecbef6e116952a66063  files/test_timed_ownership.py
+b89414a5d10597d256c03786273e059ec3ae069cdf0a09cd43e9b168b4b807c5  files/utils/timed_ownership.py
