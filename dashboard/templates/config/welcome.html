@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Welcome & Leave{% endblock %}
+{% block content %}
+<span data-page-title="Welcome & Leave"></span>
+
+{% if saved %}
+<div class="save-banner">{{ check_icon }} Settings saved!</div>
+{% endif %}
+{% if error %}
+<div class="card" style="border-color:var(--danger);background:rgba(239,68,68,0.1);margin-bottom:16px;padding:12px 16px;">
+    <div style="color:var(--danger);font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px;">
+        <svg class="card-title-icon" viewBox="0 0 24 24" style="color:var(--danger);" aria-hidden="true"><use href="#nero-i-alert"></use></svg> {{ error }}
+    </div>
+</div>
+{% endif %}
+
+<form id="welcome-form" data-ux-track-dirty method="POST">
+    <input type="hidden" name="guild_id" value="{{ guild_id }}">
+    <input type="hidden" name="csrf_token" value="{{ session.get('csrf_token', '') }}">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+
+        <div class="card">
+            <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-users"></use></svg> Join Settings</div>
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                <label class="toggle">
+                    <input type="checkbox" name="join_enabled" id="join-enabled"
+                        {% if config.get('join_enabled') %}checked{% endif %}>
+                    <span class="toggle-slider"></span>
+                </label>
+                <label for="join-enabled" style="font-size:13px;color:var(--text2);">Enable welcome messages</label>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="join-channel">Welcome channel</label>
+                <select class="nero-channel-picker form-input" id="join-channel"
+                        name="join_channel_id"
+                        data-value="{{ config.get('join_channel_id', '') }}"></select>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="join-auto-role">Auto-role (given on join)</label>
+                <select class="nero-role-picker form-input" id="join-auto-role"
+                        name="auto_role_id"
+                        data-assignable-only="true"
+                        data-value="{{ config.get('auto_role_id', '') }}"></select>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="join-message-mode">Message mode</label>
+                <select class="form-input" id="join-message-mode" name="join_message_mode">
+                    <option value="random" {% if config.get('join_message_mode') == 'random' %}selected{% endif %}>Random</option>
+                    <option value="all"    {% if config.get('join_message_mode') == 'all'    %}selected{% endif %}>Send All</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-door"></use></svg> Leave Settings</div>
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                <label class="toggle">
+                    <input type="checkbox" name="leave_enabled" id="leave-enabled"
+                        {% if config.get('leave_enabled') %}checked{% endif %}>
+                    <span class="toggle-slider"></span>
+                </label>
+                <label for="leave-enabled" style="font-size:13px;color:var(--text2);">Enable leave messages</label>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="leave-channel">Leave channel</label>
+                <select class="nero-channel-picker form-input" id="leave-channel"
+                        name="leave_channel_id"
+                        data-value="{{ config.get('leave_channel_id', '') }}"></select>
+            </div>
+        </div>
+
+        <div class="card" style="grid-column:1/-1;">
+            <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-file"></use></svg> Rules Gate</div>
+            <p class="text-muted text-sm" style="margin-bottom:16px;">
+                Member must click a button in the rules channel to receive a role.
+            </p>
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                <label class="toggle">
+                    <input type="checkbox" id="rules-enabled" name="rules_enabled"
+                        {% if config.get('rules_enabled') %}checked{% endif %}>
+                    <span class="toggle-slider"></span>
+                </label>
+                <label for="rules-enabled" style="font-size:13px;color:var(--text2);">Enable rules gate</label>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label class="form-label" for="rules-channel">Rules channel</label>
+                    <select class="nero-channel-picker form-input" id="rules-channel"
+                            name="rules_channel_id"
+                            data-value="{{ config.get('rules_channel_id', '') }}"></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="rules-role">Role to give on accept</label>
+                    <select class="nero-role-picker form-input" id="rules-role"
+                            name="rules_role_id"
+                            data-assignable-only="true"
+                            data-value="{{ config.get('rules_role_id', '') }}"></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="rules-button-text">Accept button text</label>
+                    <input class="form-input" id="rules-button-text" name="rules_button_text"
+                           value="{{ config.get('rules_button_text', '✅ I Accept') }}"
+                           placeholder="✅ I Accept">
+                </div>
+            </div>
+        </div>
+
+    </div>
+    <button type="button" class="btn btn-primary" id="save-btn" onclick="saveWelcome(this)">
+        Save Settings
+    </button>
+    <span class="form-save-state" data-ux-save-state aria-live="polite"></span>
+</form>
+
+<script>
+(function () {
+// Re-published for the markup's inline handlers (onclick/onchange) and for
+// script-level harnesses that call page functions directly: this script is
+// evaluated inside a function scope and re-evaluated on every htmx
+// navigation, so the page API is put back on the global object each time.
+// Function declarations are hoisted, so these exist before the statements
+// below can fail.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.getSelect2Val = getSelect2Val;
+__neroGlobal.saveWelcome = saveWelcome;
+
+function getSelect2Val(name) {
+    const el = document.querySelector('[name="' + name + '"]');
+    return el ? ($(el).val() || '') : '';
+}
+
+async function saveWelcome(btn) {
+    const form = document.getElementById('welcome-form');
+    const cb   = n => form.querySelector('[name=' + n + ']')?.checked ? 1 : 0;
+    const payload = {
+        join_enabled:       cb('join_enabled'),
+        join_channel_id:    getSelect2Val('join_channel_id'),
+        auto_role_id:       getSelect2Val('auto_role_id'),
+        join_message_mode:  form.querySelector('[name=join_message_mode]')?.value,
+        leave_enabled:      cb('leave_enabled'),
+        leave_channel_id:   getSelect2Val('leave_channel_id'),
+        rules_enabled:      cb('rules_enabled'),
+        rules_channel_id:   getSelect2Val('rules_channel_id'),
+        rules_role_id:      getSelect2Val('rules_role_id'),
+        rules_button_text:  form.querySelector('[name=rules_button_text]')?.value,
+    };
+    await ajaxSave('/api/settings/welcome', payload, btn, 'Welcome settings saved!');
+}
+
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Active Server Mismatch{% endblock %}
+{% block content %}
+<div style="max-width:540px;margin:40px auto 0;">
+    <div class="card" style="border-color:var(--border);">
+        <div class="card-title" style="display:flex;align-items:center;gap:8px;">
+            <svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-alert"></use></svg> Active Server Mismatch
+        </div>
+        <p style="color:var(--text2);font-size:13px;line-height:1.6;margin-bottom:16px;">
+            You followed a link to configure <strong>{{ target_guild_name or target_guild_id }}</strong>,
+            but your active dashboard session is currently set to <strong>{{ current_guild_name or current_guild_id }}</strong>.
+        </p>
+        <p style="color:var(--text3);font-size:12px;line-height:1.5;margin-bottom:24px;">
+            To prevent accidental changes to the wrong server, your session was not switched automatically.
+            Choose how you would like to proceed:
+        </p>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+            <form method="POST" action="{{ url_for('select_guild', guild_id=target_guild_id) }}">
+                <input type="hidden" name="csrf_token" value="{{ session.get('csrf_token', '') }}">
+                <input type="hidden" name="next" value="{{ next_url }}">
+                <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;">
+                    Switch Session to {{ target_guild_name or target_guild_id }} & Continue ›
+                </button>
+            </form>
+            <a href="{{ url_for('index') }}" class="btn" style="text-align:center;justify-content:center;background:var(--bg3);border:1px solid var(--border);color:var(--text);">
+                Stay on {{ current_guild_name or current_guild_id }}
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}
