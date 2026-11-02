@@ -107,15 +107,30 @@ _CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 def _enforce_csrf_app_level():
     if not request.path.startswith("/api/"):
         return
-    if request.method in _CSRF_SAFE_METHODS:
+    if request.method not in _CSRF_SAFE_METHODS:
+        session_token = session.get("csrf_token")
+        header_token = request.headers.get("X-CSRF-Token", "")
+        if not session_token or not header_token or header_token != session_token:
+            return jsonify({
+                "success": False,
+                "error": "CSRF validation failed. Refresh the page and try again.",
+            }), 403
+    # A stale dashboard tab may submit a valid session cookie for a different
+    # server. The optional header is sent by the current dashboard frontend;
+    # requests without it keep the pre-existing API contract.
+    if request.endpoint in {"api_user_servers", "api_invite_bot"}:
         return
-    session_token = session.get("csrf_token")
-    header_token = request.headers.get("X-CSRF-Token", "")
-    if not session_token or not header_token or header_token != session_token:
-        return jsonify({
-            "success": False,
-            "error": "CSRF validation failed. Refresh the page and try again.",
-        }), 403
+    client_gid = request.headers.get("X-Guild-ID")
+    if client_gid is not None:
+        client_gid = client_gid.strip()
+        if (not client_gid.isascii() or not client_gid.isdigit() or len(client_gid) > 19
+                or not 0 < int(client_gid) <= 2**63 - 1):
+            return jsonify({"success": False, "error": "Malformed guild context header",
+                            "code": "MALFORMED_GUILD_CONTEXT"}), 400
+        active_gid = session.get("guild_id")
+        if active_gid is not None and str(active_gid) != str(int(client_gid)):
+            return jsonify({"success": False, "error": "Active server changed in another window.",
+                            "code": "GUILD_CONTEXT_MISMATCH"}), 409
 
 
 def render(template, **ctx):
@@ -423,9 +438,17 @@ def server_select():
                            user=current_user(), guilds=accessible)
 
 
-@app.route("/select-guild/<int:guild_id>")
+@app.route("/select-guild/<int:guild_id>", methods=["GET", "POST"])
 @login_required
 def select_guild(guild_id: int):
+    if not 0 < guild_id <= 2**63 - 1:
+        abort(400)
+    if request.method == "POST":
+        import secrets
+        token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token", "")
+        expected = session.get("csrf_token", "")
+        if not token or not expected or not secrets.compare_digest(token.encode(), expected.encode()):
+            abort(403)
     user_id = current_user_id()
 
     async def check():
@@ -451,6 +474,14 @@ def select_guild(guild_id: int):
     if not level:
         abort(403)
 
+    # Preserve old links, but never change the selected guild on a safe
+    # request: an explicit CSRF-protected POST is required to switch.
+    if request.method in ("GET", "HEAD"):
+        return render_template(
+            "context_switch.html", target_guild_id=guild_id,
+            current_guild_id=session.get("guild_id"), next_url="",
+            switch_confirmation=True, **get_current_user_context())
+
     set_session_guild(guild_id)
     session["user_level"] = level
 
@@ -460,6 +491,10 @@ def select_guild(guild_id: int):
         gdata  = next((g for g in guilds if int(g["id"]) == guild_id), None)
         session["guild_name"] = gdata["name"] if gdata else ""
 
+    next_url = request.form.get("next", "") if request.method == "POST" else ""
+    if (next_url.startswith("/") and not next_url.startswith("//")
+            and "\\" not in next_url and not any(ord(c) < 32 or ord(c) == 127 for c in next_url)):
+        return redirect(next_url)
     return redirect(url_for("index"))
 
 
@@ -469,7 +504,7 @@ def select_guild(guild_id: int):
 @login_required
 def api_user_servers():
     from dashboard.auth import (
-        guild_permissions_include_admin, fetch_bot_guilds_full,
+        guild_permissions_can_manage_server, fetch_bot_guilds_full,
     )
 
     access_token = session.get("access_token", "")
@@ -492,12 +527,14 @@ def api_user_servers():
 
     servers = []
     for g in guilds:
-        if not guild_permissions_include_admin(g.get("permissions")):
+        if not guild_permissions_can_manage_server(g.get("permissions")):
             continue
         gid      = int(g["id"])
         bot_data = bot_guilds.get(gid)
         servers.append({
             "id":            gid,
+            # Discord snowflakes exceed JavaScript's exact integer range.
+            "id_str":        str(gid),
             "name":          (bot_data or g).get("name", "Unknown Server"),
             "icon":          (bot_data or g).get("icon"),
             "is_bot_member": bot_data is not None,

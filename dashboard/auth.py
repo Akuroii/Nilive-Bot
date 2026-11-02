@@ -17,6 +17,8 @@ SESSION_DURATION_REMEMBER = 60 * 60 * 24 * 7
 
 # Phase 0 Extension — Server Permission Gating (Sapphire-style)
 DISCORD_PERMISSION_ADMINISTRATOR = 0x8
+DISCORD_PERMISSION_MANAGE_GUILD = 0x20
+
 # SECURITY HARDENING: default narrowed from Administrator (8) to the
 # specific permissions the bot actually uses (manage roles/channels,
 # kick/ban/timeout, manage nicknames, manage messages, send/embed/
@@ -113,6 +115,16 @@ def fetch_discord_guilds(access_token: str) -> list:
         timeout=10,
     )
     return r.json() if r.status_code == 200 else []
+
+
+def guild_permissions_can_manage_server(permissions) -> bool:
+    """Discovery/invitation eligibility, not dashboard access authorization."""
+    try:
+        value = int(permissions)
+        return value >= 0 and bool(value & (DISCORD_PERMISSION_ADMINISTRATOR |
+                                           DISCORD_PERMISSION_MANAGE_GUILD))
+    except (TypeError, ValueError):
+        return False
 
 
 def guild_permissions_include_admin(permissions) -> bool:

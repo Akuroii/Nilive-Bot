@@ -1,0 +1,620 @@
+/* Nero Command Manager — local, route-scoped visual refresh. */
+#command-manager-page {
+    --cmd-rail-bg: linear-gradient(160deg, rgba(17, 25, 43, .96), rgba(10, 16, 29, .98));
+    --cmd-row-bg: linear-gradient(145deg, rgba(19, 29, 49, .96), rgba(13, 20, 35, .98));
+    --cmd-panel-border: rgba(153, 171, 208, .15);
+    min-width: 0;
+}
+
+#command-manager-page .cmd-header-wrap {
+    align-items: flex-end;
+    margin-bottom: 17px;
+    padding: 5px 0 17px;
+    border-bottom: 1px solid var(--border-soft, var(--border));
+}
+#command-manager-page .cmd-page-title { gap: 12px; margin-bottom: 5px; }
+#command-manager-page .cmd-page-title h2 {
+    font-size: clamp(22px, 2vw, 27px);
+    letter-spacing: -.035em;
+    font-weight: 700;
+}
+#command-manager-page .cmd-title-mark {
+    width: 38px;
+    height: 38px;
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(186, 155, 255, .28);
+    border-radius: 12px;
+    color: #e6dcff;
+    background: linear-gradient(145deg, rgba(152, 102, 245, .36), rgba(87, 49, 166, .24));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.1), 0 7px 20px rgba(87,49,166,.12);
+    font-size: 19px;
+}
+#command-manager-page .cmd-header-wrap .text-muted { max-width: 650px; }
+#command-manager-page .cmd-header-actions { gap: 8px; }
+#command-manager-page .cmd-header-actions .btn { min-height: 38px; padding: 7px 12px; border-radius: 9px; }
+
+#command-manager-page .cmd-stats-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 13px;
+}
+#command-manager-page .cmd-stats-grid .stat-card {
+    position: relative;
+    min-height: 86px;
+    padding: 13px 16px;
+    overflow: hidden;
+    border-radius: 12px;
+}
+#command-manager-page .cmd-stats-grid .stat-card::after {
+    content: "";
+    position: absolute;
+    top: -34px;
+    right: -28px;
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    background: var(--accent-glow, rgba(139,92,246,.18));
+    filter: blur(10px);
+    pointer-events: none;
+}
+#command-manager-page .cmd-stats-grid .stat-value { font-size: 23px; letter-spacing: -.03em; }
+#command-manager-page .cmd-stats-grid .stat-sub { margin-top: 2px; }
+
+#command-manager-page .cmd-filter-card {
+    padding: 11px 13px;
+    margin-bottom: 14px;
+    border-radius: 12px;
+    background: var(--cmd-rail-bg);
+}
+#command-manager-page .cmd-filter-bar {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+}
+#command-manager-page .cmd-filter-group { display: none; }
+#command-manager-page .cmd-search-box {
+    position: relative;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+}
+#command-manager-page .cmd-search-icon {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text3);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    pointer-events: none;
+    z-index: 2;
+}
+#command-manager-page .cmd-search-icon svg {
+    width: 15px;
+    height: 15px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    display: block;
+}
+#command-manager-page .cmd-search-box .form-input {
+    height: 40px;
+    width: 100%;
+    padding-left: 36px;
+    padding-right: 32px;
+    border-radius: 9px;
+    background: rgba(4, 9, 19, .46);
+    font-size: 12px;
+}
+#command-manager-page .cmd-status-filters {
+    max-width: 100%;
+    gap: 3px;
+    padding: 3px;
+    border: 1px solid var(--cmd-panel-border);
+    border-radius: 10px;
+    background: rgba(4, 9, 19, .34);
+}
+#command-manager-page .cmd-status-filters .filter-pill {
+    min-height: 32px;
+    padding: 4px 11px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text3);
+}
+#command-manager-page .cmd-status-filters .filter-pill:hover { color: var(--text); background: rgba(255,255,255,.04); }
+#command-manager-page .cmd-status-filters .filter-pill.active {
+    color: #f5f1ff;
+    background: linear-gradient(135deg, rgba(139,92,246,.32), rgba(124,58,237,.2));
+    border-color: rgba(165,132,255,.24);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+}
+#command-manager-page .cmd-filter-summary { margin: 7px 4px 0; color: var(--text2); }
+
+#command-manager-page .cmd-workspace {
+    display: grid;
+    grid-template-columns: 192px minmax(0, 1fr);
+    align-items: start;
+    gap: 14px;
+    min-width: 0;
+}
+#command-manager-page .cmd-category-rail {
+    position: sticky;
+    top: 88px;
+    max-height: calc(100vh - 108px);
+    overflow-y: auto;
+    padding: 12px 10px;
+    border: 1px solid var(--cmd-panel-border);
+    border-radius: 14px;
+    background: var(--cmd-rail-bg);
+    box-shadow: 0 12px 28px rgba(0,0,0,.14);
+    scrollbar-width: thin;
+}
+#command-manager-page .cmd-category-rail-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 8px 11px;
+    margin-bottom: 5px;
+    border-bottom: 1px solid var(--cmd-panel-border);
+    color: var(--text3);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+}
+#command-manager-page .cmd-category-rail-shortcut {
+    display: inline-grid;
+    place-items: center;
+    width: 21px;
+    height: 21px;
+    border: 1px solid var(--cmd-panel-border);
+    border-radius: 6px;
+    color: var(--text2);
+    font-size: 12px;
+}
+#command-manager-page .cmd-category-nav-list { display: grid; gap: 3px; }
+#command-manager-page .cmd-category-nav {
+    display: grid;
+    grid-template-columns: 26px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 40px;
+    padding: 6px 8px;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--text2);
+    text-align: left;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease;
+}
+#command-manager-page .cmd-category-nav:hover {
+    color: var(--text);
+    background: rgba(255,255,255,.035);
+    border-color: rgba(155,170,205,.1);
+}
+#command-manager-page .cmd-category-nav.active {
+    color: #f5f1ff;
+    background: linear-gradient(100deg, rgba(139,92,246,.24), rgba(124,58,237,.11));
+    border-color: rgba(165,132,255,.2);
+    box-shadow: inset 2px 0 0 var(--accent);
+}
+#command-manager-page .cmd-category-nav-icon {
+    display: grid;
+    place-items: center;
+    width: 25px;
+    height: 25px;
+    border: 1px solid rgba(151,123,214,.14);
+    border-radius: 7px;
+    color: #b99bff;
+    background: rgba(139,92,246,.09);
+    font-size: 13px;
+}
+#command-manager-page .cmd-category-nav-icon svg {
+    width: 14px;
+    height: 14px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+#command-manager-page .cmd-category-nav.active .cmd-category-nav-icon {
+    color: #eee6ff;
+    background: rgba(139,92,246,.24);
+    border-color: rgba(174,144,255,.26);
+}
+#command-manager-page .cmd-category-nav-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#command-manager-page .cmd-category-nav-count {
+    min-width: 24px;
+    padding: 2px 6px;
+    border: 1px solid rgba(145,160,192,.1);
+    border-radius: 6px;
+    color: var(--text3);
+    background: rgba(255,255,255,.025);
+    text-align: center;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+}
+#command-manager-page .cmd-category-rail-footnote {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    margin: 13px 4px 1px;
+    padding: 11px 7px 0;
+    border-top: 1px solid var(--cmd-panel-border);
+    color: var(--text3);
+    font-size: 10px;
+    line-height: 1.5;
+}
+#command-manager-page .cmd-footnote-icon { color: #b99bff; }
+
+#command-manager-page .cmd-workspace-main { min-width: 0; }
+#command-manager-page .cmd-workspace-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 2px 2px 10px;
+}
+#command-manager-page .cmd-eyebrow {
+    margin-bottom: 2px;
+    color: var(--text3);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .14em;
+}
+#command-manager-page .cmd-workspace-heading h3 {
+    margin: 0;
+    color: var(--text);
+    font-size: 16px;
+    font-weight: 650;
+    letter-spacing: -.015em;
+}
+#command-manager-page .cmd-total-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 9px;
+    border: 1px solid var(--cmd-panel-border);
+    border-radius: 999px;
+    color: var(--text2);
+    background: rgba(255,255,255,.025);
+    font-size: 10px;
+    white-space: nowrap;
+}
+#command-manager-page .cmd-live-dot {
+    width: 7px;
+    height: 7px;
+    display: inline-block;
+    flex: 0 0 7px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 9px rgba(56,217,150,.45);
+}
+#command-manager-page .cmd-category-card {
+    padding: 14px;
+    margin-bottom: 12px;
+    border-radius: 13px;
+    background: var(--cmd-rail-bg);
+}
+#command-manager-page .cmd-category-header {
+    margin-bottom: 10px;
+    padding: 0 1px 10px;
+    border-bottom-color: var(--cmd-panel-border);
+}
+#command-manager-page .cmd-category-title { font-size: 14px; letter-spacing: -.01em; }
+#command-manager-page .cmd-category-actions { gap: 5px; }
+#command-manager-page .cmd-category-actions .btn { min-height: 32px; padding: 5px 9px; border-radius: 7px; }
+#command-manager-page .cmd-category-actions .cmd-inline-icon { width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.cmd-restrict-modal .cmd-restrict-title-icon { width: 17px; height: 17px; margin-right: 5px; vertical-align: -3px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+#command-manager-page .cmd-list { gap: 7px; }
+#command-manager-page .cmd-row {
+    border: 1px solid var(--cmd-panel-border);
+    border-radius: 10px;
+    background: var(--cmd-row-bg);
+    box-shadow: 0 5px 14px rgba(0,0,0,.1);
+    transition: border-color .16s ease, background .16s ease, transform .16s ease, box-shadow .16s ease;
+}
+#command-manager-page .cmd-row:hover {
+    border-color: rgba(165,132,255,.35);
+    box-shadow: 0 8px 20px rgba(0,0,0,.16);
+}
+#command-manager-page .cmd-row.cmd-disabled-state { opacity: .66; }
+#command-manager-page .cmd-row-header { min-height: 74px; padding: 12px 13px; gap: 12px; }
+#command-manager-page .cmd-row-main { align-items: flex-start; gap: 10px; }
+#command-manager-page .cmd-status-dot { width: 8px; height: 8px; margin-top: 6px; }
+#command-manager-page .cmd-status-on { box-shadow: 0 0 10px rgba(56,217,150,.56); }
+#command-manager-page .cmd-name-line { gap: 6px; margin-bottom: 3px; }
+#command-manager-page .cmd-row-name { color: #f3efff; font-size: 14px; }
+#command-manager-page .cmd-description { color: var(--text2); font-size: 11px; }
+#command-manager-page .cmd-usage { color: var(--text3); font-size: 10px; }
+#command-manager-page .cmd-usage code { border-color: rgba(148,164,199,.12); background: rgba(255,255,255,.035); }
+#command-manager-page .cmd-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border-color: rgba(148,164,199,.12);
+    color: #91a0b9;
+    background: rgba(255,255,255,.035);
+    font-size: 9px;
+}
+#command-manager-page .cmd-chip-icon {
+    width: 11px;
+    height: 11px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    flex-shrink: 0;
+}
+#command-manager-page .cmd-chip-accent { color: #c4adff; border-color: rgba(155,119,245,.22); background: rgba(139,92,246,.1); }
+#command-manager-page .cmd-row-actions { gap: 9px; }
+#command-manager-page .cmd-edit-toggle {
+    min-height: 34px;
+    padding: 5px 9px;
+    border-color: rgba(153,127,224,.2);
+    border-radius: 8px;
+    color: #d7c9ff;
+    background: rgba(139,92,246,.08);
+}
+#command-manager-page .cmd-edit-toggle:hover { color: #fff; background: rgba(139,92,246,.2); }
+#command-manager-page .cmd-edit-chevron { font-size: 14px; }
+
+/* Focused right-side inspector drawer */
+#command-manager-page .cmd-editor-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1190;
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: rgba(3, 6, 14, .68);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    cursor: default;
+    animation: cmd-backdrop-in .16s ease-out both;
+}
+#command-manager-page .cmd-editor-backdrop[hidden] { display: none !important; }
+#command-manager-page .cmd-edit-panel {
+    position: fixed;
+    top: 14px;
+    right: 14px;
+    bottom: 14px;
+    z-index: 1191;
+    display: none;
+    width: min(470px, calc(100vw - 28px));
+    max-height: calc(100vh - 28px);
+    overflow: hidden;
+    border: 1px solid rgba(174,153,224,.24);
+    border-radius: 16px;
+    background: linear-gradient(160deg, #10182a, #0b1120 65%);
+    box-shadow: 0 28px 80px rgba(0,0,0,.58), 0 0 0 1px rgba(255,255,255,.025) inset;
+    opacity: 0;
+    transform: translateX(18px);
+    visibility: hidden;
+    transition: opacity .18s ease, transform .18s ease, visibility .18s ease;
+}
+#command-manager-page .cmd-row.cmd-row-expanded .cmd-edit-panel {
+    display: flex;
+    flex-direction: column;
+    grid-template-rows: 1fr;
+    border-top: 0;
+    opacity: 1;
+    transform: translateX(0);
+    visibility: visible;
+}
+#command-manager-page .cmd-edit-panel-inner {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    width: 100%;
+    min-height: 0;
+    overflow: hidden;
+}
+#command-manager-page .cmd-editor-topbar {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 19px 20px 15px;
+    border-bottom: 1px solid var(--cmd-panel-border);
+    background: rgba(255,255,255,.015);
+}
+#command-manager-page .cmd-editor-heading { min-width: 0; }
+#command-manager-page .cmd-editor-eyebrow {
+    margin-bottom: 8px;
+    color: #a58bd8;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .15em;
+}
+#command-manager-page .cmd-editor-title-line { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+#command-manager-page .cmd-editor-title-line h3 {
+    margin: 0;
+    color: var(--text);
+    font-size: 21px;
+    line-height: 1.2;
+    letter-spacing: -.03em;
+}
+#command-manager-page .cmd-editor-heading p { margin: 7px 0 0; color: var(--text2); font-size: 11px; line-height: 1.5; }
+#command-manager-page .cmd-editor-enabled {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 7px;
+    border: 1px solid rgba(56,217,150,.18);
+    border-radius: 999px;
+    color: #77e5b3;
+    background: rgba(56,217,150,.08);
+    font-size: 9px;
+    font-weight: 650;
+}
+#command-manager-page .cmd-editor-enabled.is-off {
+    border-color: rgba(251,113,133,.2);
+    color: #ff9cab;
+    background: rgba(251,113,133,.08);
+}
+#command-manager-page .cmd-editor-enabled.is-off .cmd-live-dot { background: var(--danger); box-shadow: none; }
+#command-manager-page .cmd-editor-close {
+    display: grid;
+    place-items: center;
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--cmd-panel-border);
+    border-radius: 8px;
+    color: var(--text2);
+    background: rgba(255,255,255,.035);
+    font: inherit;
+    font-size: 21px;
+    line-height: 1;
+    cursor: pointer;
+}
+#command-manager-page .cmd-editor-close:hover { color: #fff; border-color: rgba(174,153,224,.4); background: rgba(139,92,246,.14); }
+#command-manager-page .cmd-edit-panel-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 18px 20px 16px;
+    background: transparent;
+}
+#command-manager-page .cmd-edit-loading { min-height: 100px; color: var(--text2); }
+#command-manager-page .cmd-edit-grid-top { grid-template-columns: 140px minmax(0, 1fr); gap: 13px; }
+#command-manager-page .cmd-edit-picker-grid { grid-template-columns: 1fr; gap: 13px; }
+#command-manager-page .cmd-edit-picker-grid > div {
+    padding: 12px;
+    border: 1px solid var(--cmd-panel-border);
+    border-radius: 10px;
+    background: rgba(255,255,255,.018);
+}
+#command-manager-page .cmd-edit-picker-grid .form-label { margin-bottom: 8px; }
+#command-manager-page .cmd-edit-actions {
+    position: sticky;
+    bottom: -16px;
+    z-index: 2;
+    margin: 17px -20px -16px;
+    padding: 13px 20px max(13px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--cmd-panel-border);
+    background: rgba(10, 16, 29, .96);
+    backdrop-filter: blur(12px);
+}
+#command-manager-page .cmd-edit-actions .btn { min-height: 38px; border-radius: 8px; }
+#command-manager-page .cmd-edit-status { margin-right: auto; }
+
+#command-manager-page .cmd-empty-state {
+    border-color: var(--cmd-panel-border);
+    border-radius: 13px;
+    background: var(--cmd-rail-bg);
+}
+#command-manager-page .cmd-restrict-modal { border: 1px solid var(--cmd-panel-border); border-radius: 15px; }
+
+:root[data-theme="light"] #command-manager-page {
+    --cmd-rail-bg: linear-gradient(155deg, #fff, #f7f8fc);
+    --cmd-row-bg: linear-gradient(145deg, #fff, #f7f8fc);
+    --cmd-panel-border: rgba(48, 63, 93, .13);
+}
+:root[data-theme="light"] #command-manager-page .cmd-title-mark { color: #fff; }
+:root[data-theme="light"] #command-manager-page .cmd-row-name { color: var(--text); }
+:root[data-theme="light"] #command-manager-page .cmd-filter-card { border-color: #e1e4ec; }
+:root[data-theme="light"] #command-manager-page .cmd-search-box .form-input { color: var(--text); background: #fff; border-color: #dce1eb; }
+:root[data-theme="light"] #command-manager-page .cmd-search-icon { color: #758097; }
+:root[data-theme="light"] #command-manager-page .cmd-status-filters { background: #f2f4f8; border-color: #dfe3ec; }
+:root[data-theme="light"] #command-manager-page .cmd-status-filters .filter-pill { color: #606b80; }
+:root[data-theme="light"] #command-manager-page .cmd-status-filters .filter-pill:hover { color: #33264f; background: #e9e5f4; }
+:root[data-theme="light"] #command-manager-page .cmd-status-filters .filter-pill.active { color: #382565; background: #e8e0fb; border-color: #d3c4f2; box-shadow: none; }
+:root[data-theme="light"] #command-manager-page .cmd-category-nav:hover { background: #f6f4fb; border-color: #e7e2f0; }
+:root[data-theme="light"] #command-manager-page .cmd-category-nav.active { color: #35245a; background: linear-gradient(100deg, #eee8ff, #f5f1ff); border-color: #d8caf2; }
+:root[data-theme="light"] #command-manager-page .cmd-category-nav-icon { color: #7655b5; background: #f4f0ff; border-color: #e5dcf8; }
+:root[data-theme="light"] #command-manager-page .cmd-category-nav.active .cmd-category-nav-icon { color: #65449f; background: #e9e0fb; border-color: #d5c6f0; }
+:root[data-theme="light"] #command-manager-page .cmd-category-nav-count { color: #69758a; background: #f8f9fc; border-color: #e3e7ef; }
+:root[data-theme="light"] #command-manager-page .cmd-total-pill { background: #fff; }
+:root[data-theme="light"] #command-manager-page .cmd-chip { color: #68748a; background: #f3f5f9; border-color: #e2e6ee; }
+:root[data-theme="light"] #command-manager-page .cmd-chip-accent { color: #6849a6; background: #f3edff; border-color: #dfd2f7; }
+:root[data-theme="light"] #command-manager-page .cmd-edit-toggle { color: #5a3b98; background: #f4f0ff; border-color: #ddd1f5; }
+:root[data-theme="light"] #command-manager-page .cmd-edit-toggle:hover { color: #45277f; background: #ebe3ff; }
+:root[data-theme="light"] #command-manager-page .cmd-edit-panel { background: linear-gradient(155deg, #fff, #f7f8fc); }
+:root[data-theme="light"] #command-manager-page .cmd-editor-topbar { background: #f7f7fb; }
+:root[data-theme="light"] #command-manager-page .cmd-editor-eyebrow { color: #7353a9; }
+:root[data-theme="light"] #command-manager-page .cmd-editor-heading p { color: #606b80; }
+:root[data-theme="light"] #command-manager-page .cmd-editor-close { color: #667085; border-color: #dfe3ec; background: #fff; }
+:root[data-theme="light"] #command-manager-page .cmd-editor-close:hover { color: #4b3080; border-color: #d8c9f2; background: #f0eaff; }
+:root[data-theme="light"] #command-manager-page .cmd-editor-enabled { color: #287251; border-color: #cee9dc; background: #edf8f2; }
+:root[data-theme="light"] #command-manager-page .cmd-editor-enabled.is-off { color: #a13b50; border-color: #f0d3d9; background: #fff0f2; }
+:root[data-theme="light"] #command-manager-page .cmd-edit-picker-grid > div { background: #f9fafd; }
+:root[data-theme="light"] #command-manager-page .cmd-edit-actions { background: rgba(255,255,255,.96); }
+:root[data-theme="light"] #command-manager-page .cmd-editor-backdrop { background: rgba(20, 25, 38, .4); }
+
+@keyframes cmd-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+
+@media (max-width: 1100px) {
+    #command-manager-page .cmd-workspace { grid-template-columns: 1fr; }
+    #command-manager-page .cmd-category-rail { position: static; max-height: none; padding: 10px; overflow: hidden; }
+    #command-manager-page .cmd-category-rail-heading { padding-bottom: 7px; }
+    #command-manager-page .cmd-category-nav-list {
+        display: flex;
+        gap: 6px;
+        max-width: 100%;
+        padding: 2px 1px 4px;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        scrollbar-width: thin;
+    }
+    #command-manager-page .cmd-category-nav { flex: 0 0 auto; width: auto; min-width: 142px; }
+    #command-manager-page .cmd-category-rail-footnote { display: none; }
+}
+
+@media (max-width: 768px) {
+    #command-manager-page .cmd-header-wrap { align-items: flex-start; }
+    #command-manager-page .cmd-header-actions { width: 100%; flex-wrap: wrap; }
+    #command-manager-page .cmd-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    #command-manager-page .cmd-filter-bar { grid-template-columns: 1fr; }
+    #command-manager-page .cmd-status-filters { width: 100%; overflow-x: auto; }
+    #command-manager-page .cmd-status-filters .filter-pill { flex: 1 0 auto; }
+    #command-manager-page .cmd-category-card { padding: 12px; }
+    #command-manager-page .cmd-category-header { align-items: flex-start; }
+    #command-manager-page .cmd-category-actions { width: 100%; }
+    #command-manager-page .cmd-category-actions .btn { min-height: 36px; }
+    #command-manager-page .cmd-row-header { align-items: flex-start; flex-wrap: wrap; }
+    #command-manager-page .cmd-row-actions { width: 100%; justify-content: flex-end; }
+    #command-manager-page .cmd-edit-toggle { min-height: 38px; }
+    #command-manager-page .cmd-edit-panel { top: 0; right: 0; bottom: 0; width: 100vw; max-height: 100dvh; border-radius: 0; }
+    #command-manager-page .cmd-editor-topbar { padding: 16px; }
+    #command-manager-page .cmd-edit-panel-content { padding: 15px 16px 14px; }
+    #command-manager-page .cmd-edit-actions { bottom: -14px; margin: 16px -16px -14px; padding-inline: 16px; }
+}
+
+@media (max-width: 480px) {
+    #command-manager-page .cmd-stats-grid .stat-card { min-height: 78px; padding: 11px 12px; }
+    #command-manager-page .cmd-stats-grid .stat-value { font-size: 20px; }
+    #command-manager-page .cmd-page-title { flex-wrap: wrap; }
+    #command-manager-page .cmd-page-title .badge { margin-left: 50px; }
+    #command-manager-page .cmd-category-nav { min-width: 132px; }
+    #command-manager-page .cmd-category-actions .btn { font-size: 10px; padding-inline: 7px; }
+    #command-manager-page .cmd-edit-grid-top { grid-template-columns: 1fr; }
+    #command-manager-page .cmd-edit-picker-grid > div { padding: 10px; }
+    #command-manager-page .cmd-edit-actions { flex-wrap: wrap; }
+    #command-manager-page .cmd-edit-actions .btn { flex: 1 1 auto; justify-content: center; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #command-manager-page .cmd-row,
+    #command-manager-page .cmd-category-nav,
+    #command-manager-page .cmd-edit-panel,
+    #command-manager-page .cmd-editor-backdrop { transition: none !important; animation: none !important; transform: none !important; }
+}

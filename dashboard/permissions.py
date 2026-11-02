@@ -4,7 +4,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import aiosqlite
 from functools import wraps
-from flask import session, redirect, url_for, abort, jsonify
+from flask import session, redirect, url_for, abort, jsonify, request, render_template
+from urllib.parse import urlencode
 from database import DB_PATH, OWNER_DISCORD_ID
 from dashboard.utils.async_utils import run_async
 from utils.permissions import (
@@ -81,6 +82,27 @@ def require_page(page_name: str):
             if not user_can_access_page(user_level, page_name):
                 abort(403)
             session["user_level"] = user_level
+
+            # A link from a stale tab must not silently operate on the current
+            # server. Check target permissions before displaying a switch UI.
+            targets = request.args.getlist("g")
+            if targets:
+                if (len(targets) != 1 or not targets[0].isascii() or not targets[0].isdigit()
+                        or len(targets[0]) > 19 or not 0 < int(targets[0]) <= 2**63 - 1):
+                    abort(400)
+                target = int(targets[0])
+                if target != int(guild_id):
+                    target_level = run_async(_get_permission_level(target, user_id))
+                    if not target_level or not user_can_access_page(target_level, page_name):
+                        abort(403)
+                    pairs = [(key, value) for key, value in request.args.items(multi=True)
+                             if key != "g"]
+                    query = urlencode(pairs)
+                    next_url = request.path + ("?" + query if query else "")
+                    return render_template(
+                        "context_switch.html", target_guild_id=target,
+                        current_guild_id=guild_id, next_url=next_url,
+                        **get_current_user_context())
             return f(*args, **kwargs)
         return decorated
     return decorator

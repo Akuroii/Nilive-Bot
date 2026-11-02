@@ -1,60 +1,209 @@
 {% extends "base.html" %}
 {% block title %}Overview{% endblock %}
 {% block content %}
-
-<div class="stats-grid">
-    <div class="stat-card stat-accent">
-        <div class="stat-label">Members Tracked</div>
-        <div class="stat-value">{{ stats.member_count }}</div>
-        <div class="stat-sub">in leveling system</div>
-    </div>
-    <div class="stat-card stat-warning">
-        <div class="stat-label">Open Tickets</div>
-        <div class="stat-value">{{ stats.open_tickets }}</div>
-        <div class="stat-sub">awaiting response</div>
-    </div>
-    <div class="stat-card stat-danger">
-        <div class="stat-label">Total Warnings</div>
-        <div class="stat-value">{{ stats.warn_count }}</div>
-        <div class="stat-sub">all time</div>
-    </div>
-    <div class="stat-card {% if is_online %}stat-success{% else %}stat-danger{% endif %}">
-        <div class="stat-label">Bot Status</div>
-        <div class="stat-value" style="font-size:18px;color:{% if is_online %}var(--success){% else %}var(--danger){% endif %}">
-            {% if is_online %}● Online{% else %}● Offline{% endif %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/overview.css', v='20261026') }}">
+<div class="overview-page">
+    <header class="overview-hero">
+        <div class="overview-hero-copy">
+            <div class="overview-kicker"><span class="overview-kicker-dot"></span> NERO CONTROL CENTER</div>
+            <h1>Server overview</h1>
+            <p>A clear snapshot of your community and direct access to Nero's core tools.</p>
         </div>
-        <div class="stat-sub">{% if is_online %}Nero is running{% else %}no recent heartbeat{% endif %}</div>
-    </div>
-</div>
+        <div class="overview-hero-actions" aria-label="Primary actions">
+            <a class="overview-button overview-button-primary" href="/commands">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 4 3 10l4 6M13 4l4 6-4 6M11.5 3 8.5 17"/></svg>
+                Manage commands
+            </a>
+            <a class="overview-button overview-button-secondary" href="/audit-log">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.5h7l3 3V18H5zM12 2.5V6h3M8 9h4M8 12h4M8 15h2"/></svg>
+                View audit log
+            </a>
+        </div>
+    </header>
 
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
-    <div class="card">
-        <div class="card-title">🚀 Quick Actions</div>
-        <div style="display:flex;flex-direction:column;gap:8px;">
-            <a href="{{ url_for('mvp') }}" class="btn btn-secondary">🏆 View MVP Scores</a>
-            <a href="{{ url_for('moderation') }}" class="btn btn-secondary">🛡️ Moderation Logs</a>
-            <a href="{{ url_for('tickets') }}" class="btn btn-secondary">🎫 View Tickets</a>
-            <a href="{{ url_for('members') }}" class="btn btn-secondary">👥 Manage Members</a>
+    {% if not is_online or stats.open_tickets > 0 %}
+    <div class="overview-alerts" aria-label="System notices">
+        {% if not is_online %}
+        <div class="overview-alert-banner alert-danger" role="status">
+            <span class="overview-alert-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M10 2.5v2M4.7 5.1 3.3 3.7M15.3 5.1l1.4-1.4M4 8h12v8H4z"/><path d="M7 11h.1M13 11h.1M7 14h6"/></svg></span>
+            <div class="overview-alert-content">
+                <strong>Bot runner offline</strong>
+                <span>Nero has not sent a heartbeat recently. Commands may not respond in Discord.</span>
+            </div>
+            <a href="/health" class="overview-alert-action">Inspect health →</a>
+        </div>
+        {% elif stats.open_tickets > 0 %}
+        <div class="overview-alert-banner alert-warning" role="status">
+            <span class="overview-alert-icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M3 4.5h14v10H9l-4 3v-3H3z"/><path d="M6.5 8h7M6.5 11h4"/></svg></span>
+            <div class="overview-alert-content">
+                <strong>{{ stats.open_tickets }} open ticket{{ 's' if stats.open_tickets != 1 else '' }} awaiting response</strong>
+                <span>Members have opened support requests that require staff attention.</span>
+            </div>
+            <a href="{{ url_for('tickets') }}" class="overview-alert-action">Open queue →</a>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <section class="stats-grid overview-stats" aria-label="Server summary">
+        <a class="overview-stat-link" href="{{ url_for('members') }}" aria-label="View {{ stats.member_count }} members tracked in the leveling system">
+        <div class="stat-card stat-accent overview-stat">
+            <div class="overview-stat-top">
+                <span class="stat-label">Members tracked</span>
+                <span class="overview-stat-icon overview-icon-purple" aria-hidden="true">
+                    <svg viewBox="0 0 20 20"><circle cx="8" cy="7" r="3"/><path d="M2.5 17c.4-3 2.2-4.5 5.5-4.5s5.1 1.5 5.5 4.5M14 4.5a2.6 2.6 0 0 1 0 5M15 13c1.5.4 2.3 1.7 2.5 4"/></svg>
+                </span>
+            </div>
+            <div class="stat-value">{{ stats.member_count }}</div>
+            <div class="stat-sub">in leveling system</div>
+        </div>
+        </a>
+        <a class="overview-stat-link" href="{{ url_for('tickets') }}" aria-label="View {{ stats.open_tickets }} open tickets">
+        <div class="stat-card stat-warning overview-stat">
+            <div class="overview-stat-top">
+                <span class="stat-label">Open tickets</span>
+                <span class="overview-stat-icon overview-icon-amber" aria-hidden="true">
+                    <svg viewBox="0 0 20 20"><path d="M3 4.5h14v10H9l-4 3v-3H3z"/><path d="M6.5 8h7M6.5 11h4"/></svg>
+                </span>
+            </div>
+            <div class="stat-value">{{ stats.open_tickets }}</div>
+            <div class="stat-sub">awaiting response</div>
+        </div>
+        </a>
+        <a class="overview-stat-link" href="{{ url_for('moderation') }}" aria-label="Review {{ stats.warn_count }} total warnings in Moderation">
+        <div class="stat-card stat-danger overview-stat">
+            <div class="overview-stat-top">
+                <span class="stat-label">Total warnings</span>
+                <span class="overview-stat-icon overview-icon-rose" aria-hidden="true">
+                    <svg viewBox="0 0 20 20"><path d="M10 2.8 18 17H2z"/><path d="M10 7v4.5M10 14.2v.1"/></svg>
+                </span>
+            </div>
+            <div class="stat-value">{{ stats.warn_count }}</div>
+            <div class="stat-sub">all time</div>
+        </div>
+        </a>
+        <a class="overview-stat-link" href="/health" aria-label="Open system health; Nero is {% if is_online %}online{% else %}offline{% endif %}">
+        <div class="stat-card {% if is_online %}stat-success{% else %}stat-danger{% endif %} overview-stat">
+            <div class="overview-stat-top">
+                <span class="stat-label">Bot Status</span>
+                <span class="overview-stat-icon {% if is_online %}overview-icon-green{% else %}overview-icon-rose{% endif %}" aria-hidden="true">
+                    <svg viewBox="0 0 20 20"><path d="M10 2.5v2M4.7 5.1 3.3 3.7M15.3 5.1l1.4-1.4M4 8h12v8H4z"/><path d="M7 11h.1M13 11h.1M7 14h6"/></svg>
+                </span>
+            </div>
+            <div class="stat-value overview-status-value">
+                <span class="overview-status-dot {% if is_online %}is-online{% else %}is-offline{% endif %}"></span>
+                {% if is_online %}Online{% else %}Offline{% endif %}
+            </div>
+            <div class="stat-sub">{% if is_online %}Nero is running{% else %}no recent heartbeat{% endif %}</div>
+        </div>
+        </a>
+    </section>
+
+    <section class="overview-quick-section" aria-labelledby="overview-quick-title">
+        <div class="overview-section-heading overview-quick-heading">
+            <div>
+                <span class="overview-section-kicker">SHORTCUTS</span>
+                <h2 id="overview-quick-title">Quick actions</h2>
+            </div>
+            <p>Jump straight into the tasks you use most.</p>
+        </div>
+        <div class="overview-action-row">
+            <a href="{{ url_for('mvp') }}" class="overview-action">
+                <span class="overview-action-icon action-purple" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="m10 2.5 2.3 4.7 5.2.8-3.8 3.7.9 5.3-4.6-2.5-4.6 2.5.9-5.3-3.8-3.7 5.2-.8z"/></svg></span>
+                <span><strong>View MVP scores</strong><small>Community leaders</small></span>
+                <span class="overview-action-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a href="{{ url_for('moderation') }}" class="overview-action">
+                <span class="overview-action-icon action-rose" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M10 2.5 17 5v5c0 3.5-2.6 6.2-7 8-4.4-1.8-7-4.5-7-8V5z"/><path d="m7 10 2 2 4-4"/></svg></span>
+                <span><strong>Moderation logs</strong><small>Review recent actions</small></span>
+                <span class="overview-action-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a href="{{ url_for('tickets') }}" class="overview-action">
+                <span class="overview-action-icon action-amber" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M3 4.5h14v10H9l-4 3v-3H3z"/><path d="M6.5 8h7M6.5 11h4"/></svg></span>
+                <span><strong>View tickets</strong><small>Support queue</small></span>
+                <span class="overview-action-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a href="{{ url_for('members') }}" class="overview-action">
+                <span class="overview-action-icon action-blue" aria-hidden="true"><svg viewBox="0 0 20 20"><circle cx="8" cy="7" r="3"/><path d="M2.5 17c.4-3 2.2-4.5 5.5-4.5s5.1 1.5 5.5 4.5M14 4.5a2.6 2.6 0 0 1 0 5M15 13c1.5.4 2.3 1.7 2.5 4"/></svg></span>
+                <span><strong>Manage members</strong><small>Search and review</small></span>
+                <span class="overview-action-arrow" aria-hidden="true">↗</span>
+            </a>
             {% if is_owner %}
-            <a href="{{ url_for('config_access') }}" class="btn btn-secondary">🔐 Dashboard Access</a>
+            <a href="{{ url_for('config_access') }}" class="overview-action">
+                <span class="overview-action-icon action-slate" aria-hidden="true"><svg viewBox="0 0 20 20"><rect x="4" y="8.5" width="12" height="9" rx="2"/><path d="M6.5 8.5V6a3.5 3.5 0 0 1 7 0v2.5M10 12v2"/></svg></span>
+                <span><strong>Dashboard access</strong><small>Owner permissions</small></span>
+                <span class="overview-action-arrow" aria-hidden="true">↗</span>
+            </a>
             {% endif %}
         </div>
-    </div>
+    </section>
 
-    <div class="card">
-        <div class="card-title">📋 Active Features</div>
-        <table class="table">
-            <tbody>
-                <tr><td>MVP System</td><td><span class="badge badge-success">Active</span></td></tr>
-                <tr><td>Moderation</td><td><span class="badge badge-success">Active</span></td></tr>
-                <tr><td>Leveling</td><td><span class="badge badge-success">Active</span></td></tr>
-                <tr><td>Economy</td><td><span class="badge badge-success">Active</span></td></tr>
-                <tr><td>Boost Roles</td><td><span class="badge badge-success">Active</span></td></tr>
-                <tr><td>Reaction Roles</td><td><span class="badge badge-success">Active</span></td></tr>
-                <tr><td>Tickets</td><td><span class="badge badge-success">Active</span></td></tr>
-                <tr><td>Triggers</td><td><span class="badge badge-success">Active</span></td></tr>
-            </tbody>
-        </table>
-    </div>
+    <section class="overview-modules-section" aria-labelledby="overview-modules-title">
+        <div class="overview-section-heading">
+            <div>
+                <span class="overview-section-kicker">YOUR WORKSPACE</span>
+                <h2 id="overview-modules-title">Core modules</h2>
+            </div>
+            <p>Tools for managing your server, all in one place.</p>
+        </div>
+        <div class="overview-module-grid">
+            <a class="overview-module-card module-mvp" href="/mvp">
+                <span class="overview-module-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></svg></span>
+                <span class="overview-module-arrow" aria-hidden="true">↗</span>
+                <strong>MVP System</strong>
+                <span class="overview-module-description">Recognize contributions and keep track of community standouts.</span>
+                <span class="overview-module-link">Open module <span aria-hidden="true">→</span></span>
+            </a>
+            <a class="overview-module-card module-moderation" href="/moderation">
+                <span class="overview-module-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 20 6v5.4c0 4-3 7.2-8 9.6-5-2.4-8-5.6-8-9.6V6z"/><path d="m8.5 12 2.2 2.2 4.8-4.8"/></svg></span>
+                <span class="overview-module-arrow" aria-hidden="true">↗</span>
+                <strong>Moderation</strong>
+                <span class="overview-module-description">Review warnings, moderation records, and server safety tools.</span>
+                <span class="overview-module-link">Open module <span aria-hidden="true">→</span></span>
+            </a>
+            <a class="overview-module-card module-leveling" href="/leveling">
+                <span class="overview-module-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h17"/><path d="m7 15 4-4 3 2 6-7"/><path d="M16 6h4v4"/></svg></span>
+                <span class="overview-module-arrow" aria-hidden="true">↗</span>
+                <strong>Leveling</strong>
+                <span class="overview-module-description">Configure XP, rewards, and the path members take as they grow.</span>
+                <span class="overview-module-link">Open module <span aria-hidden="true">→</span></span>
+            </a>
+            <a class="overview-module-card module-economy" href="/economy">
+                <span class="overview-module-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M15 8.5c-.6-.6-1.4-.9-2.7-.9-1.5 0-2.5.8-2.5 1.8 0 2.9 5.4 1 5.4 4 0 1.2-1.1 2-2.8 2-1.2 0-2.3-.4-3.1-1.1M12 6v12"/></svg></span>
+                <span class="overview-module-arrow" aria-hidden="true">↗</span>
+                <strong>Economy</strong>
+                <span class="overview-module-description">Manage currency, rewards, and the server's economy settings.</span>
+                <span class="overview-module-link">Open module <span aria-hidden="true">→</span></span>
+            </a>
+            <a class="overview-module-card module-boost" href="/config/boost">
+                <span class="overview-module-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3 4.5 13h5L8.5 21l11-12h-5z"/></svg></span>
+                <span class="overview-module-arrow" aria-hidden="true">↗</span>
+                <strong>Boost roles</strong>
+                <span class="overview-module-description">Set up recognition and roles for server boosters.</span>
+                <span class="overview-module-link">Open module <span aria-hidden="true">→</span></span>
+            </a>
+            <a class="overview-module-card module-reactions" href="/reaction-roles">
+                <span class="overview-module-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/><circle cx="12" cy="12" r="8.5"/></svg></span>
+                <span class="overview-module-arrow" aria-hidden="true">↗</span>
+                <strong>Reaction roles</strong>
+                <span class="overview-module-description">Let members choose roles with simple, self-serve controls.</span>
+                <span class="overview-module-link">Open module <span aria-hidden="true">→</span></span>
+            </a>
+            <a class="overview-module-card module-tickets" href="/tickets">
+                <span class="overview-module-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H9l-5 4z"/><path d="M8 9h8M8 13h5"/></svg></span>
+                <span class="overview-module-arrow" aria-hidden="true">↗</span>
+                <strong>Tickets</strong>
+                <span class="overview-module-description">Open the support queue and ticket management tools.</span>
+                <span class="overview-module-link">Open module <span aria-hidden="true">→</span></span>
+            </a>
+            <a class="overview-module-card module-triggers" href="/triggers">
+                <span class="overview-module-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M13.5 2.8 5 13h6l-.5 8.2L19 11h-6z"/></svg></span>
+                <span class="overview-module-arrow" aria-hidden="true">↗</span>
+                <strong>Triggers &amp; sticky</strong>
+                <span class="overview-module-description">Manage automated responses and persistent server messages.</span>
+                <span class="overview-module-link">Open module <span aria-hidden="true">→</span></span>
+            </a>
+        </div>
+    </section>
 </div>
 {% endblock %}

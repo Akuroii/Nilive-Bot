@@ -1,64 +1,71 @@
 {% extends "base.html" %}
 {% block title %}Moderation{% endblock %}
 {% block content %}
+{% set tab = tab if tab in ['logs', 'punishments', 'warnings', 'thresholds'] else 'logs' %}
 <span data-page-title="Moderation"></span>
 
 <!-- Stats row -->
 <div class="stats-grid">
     <div class="stat-card stat-danger">
         <div class="stat-label">Total Logs</div>
-        <div class="stat-value">{{ total }}</div>
+        <div class="stat-value" id="stat-total-logs">{{ total }}</div>
         <div class="stat-sub">moderation actions</div>
     </div>
     <div class="stat-card stat-warning">
         <div class="stat-label">Active Punishments</div>
-        <div class="stat-value">{{ active_punishments | length }}</div>
+        <div class="stat-value" id="stat-active-punishments">{{ active_punishments | length }}</div>
         <div class="stat-sub">timeouts &amp; temp bans</div>
     </div>
     <div class="stat-card stat-accent">
         <div class="stat-label">Warned Users</div>
-        <div class="stat-value">{{ active_warnings | length }}</div>
+        <div class="stat-value" id="stat-warned-users">{{ active_warnings | length }}</div>
         <div class="stat-sub">with active warnings</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Auto-Escalation</div>
-        <div class="stat-value" style="font-size:18px;color:{% if auto_escalation == '1' %}var(--success){% else %}var(--danger){% endif %}">
+        <div class="stat-value" id="stat-auto-escalation" style="font-size:18px;color:{% if auto_escalation == '1' %}var(--success){% else %}var(--danger){% endif %}">
             {% if auto_escalation == '1' %}On{% else %}Off{% endif %}
         </div>
         <div class="stat-sub">warning thresholds</div>
     </div>
 </div>
 
-<!-- Tabs -->
-<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
-    <a href="/moderation?tab=logs"
-       class="btn {% if tab == 'logs' %}btn-primary{% else %}btn-secondary{% endif %}">
-        📋 Mod Logs
-    </a>
-    <a href="/moderation?tab=punishments"
-       class="btn {% if tab == 'punishments' %}btn-primary{% else %}btn-secondary{% endif %}">
-        ⚠️ Active Punishments
-    </a>
-    <a href="/moderation?tab=warnings"
-       class="btn {% if tab == 'warnings' %}btn-primary{% else %}btn-secondary{% endif %}">
-        🔔 Warnings
-    </a>
-    <a href="/moderation?tab=thresholds"
-       class="btn {% if tab == 'thresholds' %}btn-primary{% else %}btn-secondary{% endif %}">
-        📐 Thresholds
-    </a>
+<!-- Tabs (Smooth, in-place navigation synced with ?tab= and history) -->
+<div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--border);padding-bottom:0;" role="tablist" aria-label="Moderation sections">
+    {% for tab_id, tab_icon, tab_label in [
+        ('logs', 'file', 'Mod Logs'),
+        ('punishments', 'alert', 'Active Punishments'),
+        ('warnings', 'bell', 'Warnings'),
+        ('thresholds', 'sliders', 'Thresholds')
+    ] %}
+    <button type="button"
+        onclick="switchTab('{{ tab_id }}')"
+        id="tab-{{ tab_id }}"
+        data-tab="{{ tab_id }}"
+        style="padding:10px 18px;border:none;background:transparent;color:var(--text2);
+               font-size:13px;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;
+               transition:all .15s;margin-bottom:-1px;min-height:44px;"
+        class="tab-btn"><svg class="tab-icon" aria-hidden="true"><use href="#nero-i-{{ tab_icon }}"></use></svg> {{ tab_label }}</button>
+    {% endfor %}
 </div>
 
 <!-- ── TAB: Mod Logs ───────────────────────────────────────────────────── -->
-{% if tab == 'logs' %}
+<div id="tab-content-logs" class="tab-content" style="{% if tab and tab != 'logs' %}display:none;{% endif %}">
 <div class="card">
     <div class="card-header">
-        <div class="card-title" style="margin:0">📋 Moderation Logs</div>
+        <div class="card-title" style="margin:0"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-file"></use></svg> Moderation Logs</div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            <form method="get" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <form method="get"
+                  action="/moderation"
+                  hx-get="/moderation"
+                  hx-target="#content-area"
+                  hx-select="#content-area"
+                  hx-swap="outerHTML"
+                  hx-push-url="true"
+                  style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                 <input type="hidden" name="tab" value="logs">
                 <select name="action" class="form-input" style="width:130px;"
-                        onchange="this.form.submit()">
+                        onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()">
                     <option value="">All Actions</option>
                     {% for a in distinct_actions %}
                     <option value="{{ a }}" {% if request.args.get('action') == a %}selected{% endif %}>
@@ -116,32 +123,22 @@
                             {{ log[6] }}
                         </span>
                     </td>
-                    <td class="text-muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                    <td class="text-muted log-reason-cell" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
                         {{ log[7] or '—' }}
                     </td>
                     <td><span class="badge">{{ log[8] or '—' }}</span></td>
                     <td class="text-muted">{{ log[10][:10] if log[10] else '—' }}</td>
                     {% if is_admin %}
                     <td>
-                        <!-- SECURITY FIX (Critical XSS): this used to inline the raw
-                             moderation reason into an onclick="...`{{ reason }}`..."
-                             JS template literal, only stripping backticks. A reason
-                             containing "${...}" would be evaluated as a live JS
-                             template-literal expression (arbitrary JS execution),
-                             and backslashes/other characters could still break out
-                             of the literal. Reason now travels via a data-* attribute,
-                             which Jinja's autoescaping HTML-encodes, and is read off
-                             the DOM node (never string-interpolated into JS) at click
-                             time. -->
                         <button class="btn btn-sm btn-secondary"
                                 data-log-id="{{ log[0] }}"
                                 data-log-reason="{{ log[7] or '' }}"
                                 onclick="editReason(this.dataset.logId, this.dataset.logReason)"
-                                title="Edit reason">✏️</button>
+                                title="Edit reason"><svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:13px;height:13px;" aria-hidden="true"><use href="#nero-i-pencil"></use></svg></button>
                         {% if is_owner %}
                         <button class="btn btn-sm btn-danger"
                                 onclick="deleteLog({{ log[0] }})"
-                                title="Delete log">🗑️</button>
+                                title="Delete log"><svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:13px;height:13px;" aria-hidden="true"><use href="#nero-i-trash"></use></svg></button>
                         {% endif %}
                     </td>
                     {% endif %}
@@ -158,6 +155,11 @@
     <div style="display:flex;gap:8px;justify-content:center;padding:16px;flex-wrap:wrap;">
         {% for p in range(1, total_pages + 1) %}
         <a href="/moderation?tab=logs&page={{ p }}&action={{ request.args.get('action','') }}&search={{ request.args.get('search','') }}"
+           hx-get="/moderation?tab=logs&page={{ p }}&action={{ request.args.get('action','') }}&search={{ request.args.get('search','') }}"
+           hx-target="#content-area"
+           hx-select="#content-area"
+           hx-swap="outerHTML"
+           hx-push-url="true"
            class="btn {% if p == page %}btn-primary{% else %}btn-secondary{% endif %}"
            style="min-width:36px;">{{ p }}</a>
         {% endfor %}
@@ -167,8 +169,8 @@
 
 <!-- Quick Action Panel -->
 {% if is_moderator %}
-<div class="card">
-    <div class="card-title">⚡ Quick Action</div>
+<div class="card" style="margin-top:16px;">
+    <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-zap"></use></svg> Quick Action</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;">
         <div class="form-group">
             <label class="form-label">User ID</label>
@@ -194,7 +196,7 @@
             <input class="form-input" id="qa-reason" type="text" placeholder="Reason…">
         </div>
     </div>
-    <button class="btn btn-danger" onclick="submitQuickAction()">Execute Action</button>
+    <button class="btn btn-danger" id="qa-submit-btn" onclick="submitQuickAction()">Execute Action</button>
 </div>
 {% endif %}
 
@@ -213,17 +215,18 @@
         </div>
     </div>
 </div>
+</div>
 
 <!-- ── TAB: Active Punishments ─────────────────────────────────────────── -->
-{% elif tab == 'punishments' %}
+<div id="tab-content-punishments" class="tab-content" style="{% if tab != 'punishments' %}display:none;{% endif %}">
 <div class="card">
-    <div class="card-title">⚠️ Active Punishments</div>
+    <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" style="color:var(--warning);" aria-hidden="true"><use href="#nero-i-alert"></use></svg> Active Punishments</div>
     <div class="table-wrap">
         <table class="table">
             <thead>
                 <tr><th>User</th><th>Action</th><th>Reason</th><th>Moderator</th><th>Expires</th></tr>
             </thead>
-            <tbody>
+            <tbody id="active-punishments-tbody">
                 {% for p in active_punishments %}
                 <tr>
                     <td>
@@ -242,19 +245,20 @@
         </table>
     </div>
 </div>
+</div>
 
 <!-- ── TAB: Warnings ───────────────────────────────────────────────────── -->
-{% elif tab == 'warnings' %}
+<div id="tab-content-warnings" class="tab-content" style="{% if tab != 'warnings' %}display:none;{% endif %}">
 <div class="card">
-    <div class="card-title">🔔 Warned Users</div>
+    <div class="card-title"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-bell"></use></svg> Warned Users</div>
     <div class="table-wrap">
         <table class="table">
             <thead>
                 <tr><th>User</th><th>Warnings</th><th>Last Reason</th><th>Last Warn</th><th></th></tr>
             </thead>
-            <tbody>
+            <tbody id="warnings-tbody">
                 {% for w in active_warnings %}
-                <tr>
+                <tr id="warn-row-{{ w[0] }}">
                     <td>
                         <div style="font-weight:500;">{{ w[1] or '—' }}</div>
                         <div style="font-size:11px;color:var(--text3);">{{ w[0] }}</div>
@@ -275,18 +279,19 @@
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5" class="empty">No warnings on record</td></tr>
+                <tr id="warn-empty-row"><td colspan="5" class="empty">No warnings on record</td></tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
 </div>
+</div>
 
 <!-- ── TAB: Thresholds ─────────────────────────────────────────────────── -->
-{% elif tab == 'thresholds' %}
+<div id="tab-content-thresholds" class="tab-content" style="{% if tab != 'thresholds' %}display:none;{% endif %}">
 <div class="card">
     <div class="card-header">
-        <div class="card-title" style="margin:0">📐 Warning Thresholds</div>
+        <div class="card-title" style="margin:0"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-sliders"></use></svg> Warning Thresholds</div>
         <div style="display:flex;align-items:center;gap:12px;">
             {% if is_admin %}
             <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);">
@@ -308,9 +313,9 @@
             <thead>
                 <tr><th>Warnings</th><th>Action</th><th>Duration (min)</th><th>Enabled</th><th></th></tr>
             </thead>
-            <tbody>
+            <tbody id="thresholds-tbody">
                 {% for t in thresholds %}
-                <tr>
+                <tr id="thresh-row-{{ t[0] }}">
                     <td><strong>{{ t[1] }}</strong></td>
                     <td><span class="badge badge-warning">{{ t[2] }}</span></td>
                     <td class="text-muted">{{ t[3] or '—' }}</td>
@@ -327,7 +332,7 @@
                     </td>
                 </tr>
                 {% else %}
-                <tr><td colspan="5" class="empty">No thresholds configured</td></tr>
+                <tr id="thresh-empty-row"><td colspan="5" class="empty">No thresholds configured</td></tr>
                 {% endfor %}
             </tbody>
         </table>
@@ -355,13 +360,42 @@
                 <input class="form-input" id="th-duration" type="number" placeholder="optional">
             </div>
         </div>
-        <button class="btn btn-primary" onclick="addThreshold()">Add Threshold</button>
+        <button class="btn btn-primary" id="th-add-btn" onclick="addThreshold()">Add Threshold</button>
     </div>
     {% endif %}
 </div>
-{% endif %}
+</div>
 
 <script>
+// ── Tab Switching ─────────────────────────────────────────────────────────────
+function switchTab(name) {
+    const validTabs = ['logs', 'punishments', 'warnings', 'thresholds'];
+    if (!validTabs.includes(name)) name = 'logs';
+
+    document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+    const targetContent = document.getElementById('tab-content-' + name);
+    if (targetContent) targetContent.style.display = 'block';
+
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.style.color = 'var(--text2)';
+        btn.style.borderBottomColor = 'transparent';
+        btn.style.fontWeight = '500';
+    });
+    const active = document.getElementById('tab-' + name);
+    if (active) {
+        active.style.color = 'var(--accent)';
+        active.style.borderBottomColor = 'var(--accent)';
+        active.style.fontWeight = '600';
+    }
+}
+window.switchTab = switchTab;
+if (window.__neroGlobal) window.__neroGlobal.switchTab = switchTab;
+
+(function() {
+    const initTab = {{ tab|tojson }} || 'logs';
+    switchTab(initTab);
+})();
+
 // ── Quick Action ──────────────────────────────────────────────────────────────
 document.getElementById('qa-action') && document.getElementById('qa-action').addEventListener('change', function() {
     const wrap = document.getElementById('qa-duration-wrap');
@@ -369,29 +403,47 @@ document.getElementById('qa-action') && document.getElementById('qa-action').add
 });
 
 async function submitQuickAction() {
-    const userId = document.getElementById('qa-user').value.trim();
-    const action = document.getElementById('qa-action').value;
-    const reason = document.getElementById('qa-reason').value.trim() || 'No reason provided';
-    const duration = document.getElementById('qa-duration').value;
+    const userEl = document.getElementById('qa-user');
+    const actionEl = document.getElementById('qa-action');
+    const reasonEl = document.getElementById('qa-reason');
+    const durEl = document.getElementById('qa-duration');
+    const btn = document.getElementById('qa-submit-btn');
+
+    const userId = userEl ? userEl.value.trim() : '';
+    const action = actionEl ? actionEl.value : 'warn';
+    const reason = (reasonEl && reasonEl.value.trim()) || 'No reason provided';
+    const duration = durEl ? durEl.value : '';
+
     if (!userId) { showToast('Enter a user ID', 'error'); return; }
     const payload = { user_id: userId, action, reason };
-    if (duration) payload.duration_seconds = parseInt(duration);
-    const res = await fetch('/api/moderation/quick-action', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (data.success) { showToast(data.message || 'Done', 'success'); }
-    else { showToast(data.error || 'Failed', 'error'); }
+    if (duration) payload.duration_seconds = parseInt(duration, 10);
+
+    if (btn) btn.disabled = true;
+    try {
+        const res = await fetch('/api/moderation/quick-action', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast(data.message || 'Action executed successfully', 'success');
+            if (userEl) userEl.value = '';
+            if (reasonEl) reasonEl.value = '';
+            if (durEl) durEl.value = '';
+            const totalEl = document.getElementById('stat-total-logs');
+            if (totalEl) totalEl.textContent = String((parseInt(totalEl.textContent, 10) || 0) + 1);
+        } else {
+            showToast(data.error || 'Failed', 'error');
+        }
+    } catch (e) {
+        showToast('Connection error', 'error');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
 }
 
 // ── Edit Reason ───────────────────────────────────────────────────────────────
-// SECURITY: logId/currentReason arrive here as plain strings read from
-// data-* attributes (see template above) — never string-interpolated
-// into an onclick handler. Assignment below uses .value (a DOM
-// property), not innerHTML, so this stays safe even if the reason
-// contains HTML/JS-looking text.
 function editReason(logId, currentReason) {
     document.getElementById('edit-log-id').value = logId;
     document.getElementById('edit-reason-text').value = currentReason;
@@ -409,8 +461,18 @@ async function saveReason() {
     });
     const data = await res.json();
     document.getElementById('edit-reason-modal').style.display = 'none';
-    if (data.success) showToast('Reason updated', 'success');
-    else showToast(data.error || 'Failed', 'error');
+    if (data.success) {
+        const row = document.getElementById(`log-${logId}`);
+        if (row) {
+            const reasonCell = row.querySelector('.log-reason-cell');
+            if (reasonCell) reasonCell.textContent = reason;
+            const editBtn = row.querySelector('button[data-log-reason]');
+            if (editBtn) editBtn.setAttribute('data-log-reason', reason);
+        }
+        showToast('Reason updated', 'success');
+    } else {
+        showToast(data.error || 'Failed', 'error');
+    }
 }
 
 // ── Delete Log ────────────────────────────────────────────────────────────────
@@ -421,6 +483,11 @@ async function deleteLog(logId) {
     if (data.success) {
         const row = document.getElementById(`log-${logId}`);
         if (row) row.remove();
+        const totalEl = document.getElementById('stat-total-logs');
+        if (totalEl) {
+            const current = parseInt(totalEl.textContent, 10) || 0;
+            totalEl.textContent = String(Math.max(0, current - 1));
+        }
         showToast('Log deleted', 'success');
     } else {
         showToast(data.error || 'Failed', 'error');
@@ -436,8 +503,22 @@ async function clearWarnings(userId) {
         body: JSON.stringify({user_id: userId})
     });
     const data = await res.json();
-    if (data.success) { showToast('Warnings cleared', 'success'); setTimeout(() => location.reload(), 800); }
-    else showToast(data.error || 'Failed', 'error');
+    if (data.success) {
+        const row = document.getElementById(`warn-row-${userId}`);
+        if (row) row.remove();
+        const tbody = document.getElementById('warnings-tbody');
+        if (tbody && !tbody.querySelector('tr[id^="warn-row-"]')) {
+            tbody.innerHTML = '<tr id="warn-empty-row"><td colspan="5" class="empty">No warnings on record</td></tr>';
+        }
+        const statWarn = document.getElementById('stat-warned-users');
+        if (statWarn) {
+            const count = parseInt(statWarn.textContent, 10) || 0;
+            statWarn.textContent = String(Math.max(0, count - 1));
+        }
+        showToast('Warnings cleared', 'success');
+    } else {
+        showToast(data.error || 'Failed', 'error');
+    }
 }
 
 // ── Thresholds ────────────────────────────────────────────────────────────────
@@ -461,8 +542,17 @@ async function deleteThreshold(id) {
     if (!confirm('Delete this threshold?')) return;
     const res = await fetch(`/api/moderation/warning-thresholds/${id}`, {method: 'DELETE'});
     const data = await res.json();
-    if (data.success) { showToast('Deleted', 'success'); setTimeout(() => location.reload(), 600); }
-    else showToast(data.error || 'Failed', 'error');
+    if (data.success) {
+        const row = document.getElementById(`thresh-row-${id}`);
+        if (row) row.remove();
+        const tbody = document.getElementById('thresholds-tbody');
+        if (tbody && !tbody.querySelector('tr[id^="thresh-row-"]')) {
+            tbody.innerHTML = '<tr id="thresh-empty-row"><td colspan="5" class="empty">No thresholds configured</td></tr>';
+        }
+        showToast('Threshold deleted', 'success');
+    } else {
+        showToast(data.error || 'Failed', 'error');
+    }
 }
 
 async function toggleAutoEscalation(enabled) {
@@ -472,8 +562,16 @@ async function toggleAutoEscalation(enabled) {
         body: JSON.stringify({enabled})
     });
     const data = await res.json();
-    showToast(enabled ? 'Auto-escalation enabled' : 'Auto-escalation disabled',
-              data.success ? 'success' : 'error');
+    if (data.success) {
+        const statEl = document.getElementById('stat-auto-escalation');
+        if (statEl) {
+            statEl.textContent = enabled ? 'On' : 'Off';
+            statEl.style.color = enabled ? 'var(--success)' : 'var(--danger)';
+        }
+        showToast(enabled ? 'Auto-escalation enabled' : 'Auto-escalation disabled', 'success');
+    } else {
+        showToast(data.error || 'Failed to update auto-escalation', 'error');
+    }
 }
 
 // Close edit reason modal on overlay click

@@ -1,12 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Commands{% endblock %}
+{% block title %}Command Manager{% endblock %}
 {% block content %}
-<span data-page-title="Commands"></span>
+<span data-page-title="Command Manager"></span>
+{% set initial_category = (categories.keys()|list|first) if categories else '' %}
+<div id="command-manager-page" class="cmd-page"
+     data-default-category="{{ initial_category|e }}">
 
 <div class="cmd-header-wrap">
     <div>
         <div class="cmd-page-title">
-            <h2>🎮 Commands Manager</h2>
+            <span class="cmd-title-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20" style="width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2;"><use href="#nero-i-terminal"></use></svg></span>
+            <h2>Command Manager</h2>
             <span class="badge badge-source">{{ stats.total }} commands</span>
         </div>
         <div class="text-muted text-sm">Configure slash commands, custom cooldowns, and role/channel permissions.</div>
@@ -46,8 +50,8 @@
 <div class="card cmd-filter-card">
     <div class="cmd-filter-bar">
         <div class="cmd-search-box">
-            <span class="cmd-search-icon">🔍</span>
-            <input type="text" id="cmd-search-input" class="form-input"
+            <span class="cmd-search-icon" aria-hidden="true"><svg viewBox="0 0 20 20" width="15" height="15"><circle cx="8.8" cy="8.8" r="5.9"/><path d="m13.2 13.2 4.1 4.1"/></svg></span>
+            <input type="text" id="cmd-search-input" class="form-input" aria-label="Search commands"
                    placeholder="Search commands, descriptions, or parameters (e.g. /ban, timeout, xp)..."
                    oninput="filterCommands()">
             <button type="button" id="cmd-search-clear" class="cmd-search-clear" onclick="clearSearch()" style="display:none;">✕</button>
@@ -55,34 +59,89 @@
         <div class="cmd-filter-group">
             <label class="form-label" style="margin:0 4px 0 0;font-size:12px;">Category:</label>
             <select id="cmd-category-filter" class="form-select cmd-category-select" onchange="filterCommands()">
-                <option value="">All Categories ({{ stats.total }})</option>
+                <option value="" {{ 'selected' if not initial_category else '' }}>All Categories ({{ stats.total }})</option>
                 {% for category, cmds in categories.items() %}
-                <option value="{{ category }}">{{ category }} ({{ cmds|length }})</option>
+                <option value="{{ category }}" {{ 'selected' if category == initial_category else '' }}>{{ category }} ({{ cmds|length }})</option>
                 {% endfor %}
             </select>
         </div>
         <div class="cmd-status-filters">
-            <button type="button" class="btn btn-sm btn-secondary filter-pill active" data-filter="all" onclick="setStatusFilter('all')">All</button>
-            <button type="button" class="btn btn-sm btn-secondary filter-pill" data-filter="enabled" onclick="setStatusFilter('enabled')">Enabled</button>
-            <button type="button" class="btn btn-sm btn-secondary filter-pill" data-filter="disabled" onclick="setStatusFilter('disabled')">Disabled</button>
-            <button type="button" class="btn btn-sm btn-secondary filter-pill" data-filter="restricted" onclick="setStatusFilter('restricted')">Restricted</button>
+            <button type="button" class="btn btn-sm btn-secondary filter-pill active" data-filter="all" aria-pressed="true" onclick="setStatusFilter('all')">All</button>
+            <button type="button" class="btn btn-sm btn-secondary filter-pill" data-filter="enabled" aria-pressed="false" onclick="setStatusFilter('enabled')">Enabled</button>
+            <button type="button" class="btn btn-sm btn-secondary filter-pill" data-filter="disabled" aria-pressed="false" onclick="setStatusFilter('disabled')">Disabled</button>
+            <button type="button" class="btn btn-sm btn-secondary filter-pill" data-filter="restricted" aria-pressed="false" onclick="setStatusFilter('restricted')">Restricted</button>
         </div>
     </div>
-    <div id="cmd-active-filter-summary" class="cmd-filter-summary" style="display:none;"></div>
+    <div id="cmd-active-filter-summary" class="cmd-filter-summary" style="display:none;" role="status" aria-live="polite"></div>
 </div>
 
 <!-- Empty search state -->
 <div id="cmd-empty-state" class="card cmd-empty-state" style="display:none;">
-    <div class="cmd-empty-icon">🔍</div>
+    <div class="cmd-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="23" height="23"><circle cx="10.5" cy="10.5" r="7"/><path d="m16 16 4 4M8 10h5"/></svg></div>
     <div class="cmd-empty-title">No commands found</div>
     <div class="cmd-empty-desc text-muted">No commands match your current search or status filter.</div>
     <button type="button" class="btn btn-sm btn-secondary" onclick="resetFilters()">Reset All Filters</button>
 </div>
 
-<!-- Categories & Command Rows -->
-<div id="cmd-categories-container">
+<!-- Category navigation and command library -->
+<div class="cmd-workspace">
+    <aside class="cmd-category-rail" aria-label="Command categories">
+        <div class="cmd-category-rail-heading">
+            <span>Command library</span>
+            <span class="cmd-category-rail-shortcut" aria-hidden="true"><svg viewBox="0 0 24 24" width="13" height="13" style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;"><use href="#nero-i-terminal"></use></svg></span>
+        </div>
+        <nav class="cmd-category-nav-list" aria-label="Filter by category">
+            <button type="button" class="cmd-category-nav{{ ' active' if not initial_category else '' }}" data-category=""
+                    aria-pressed="{{ 'true' if not initial_category else 'false' }}" onclick="selectCommandCategory('', this)">
+                <span class="cmd-category-nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-terminal"></use></svg></span>
+                <span class="cmd-category-nav-name">All Commands</span>
+                <span class="cmd-category-nav-count">{{ stats.total }}</span>
+            </button>
+            {% for category, cmds in categories.items() %}
+            {% set category_lower = category|lower %}
+            <button type="button" class="cmd-category-nav{{ ' active' if category == initial_category else '' }}" data-category="{{ category|e }}"
+                    aria-pressed="{{ 'true' if category == initial_category else 'false' }}" onclick="selectCommandCategory(this.dataset.category, this)">
+                <span class="cmd-category-nav-icon" aria-hidden="true">
+                    {% if 'moderation' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-shield"></use></svg>
+                    {% elif 'economy' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-coins"></use></svg>
+                    {% elif 'level' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-star"></use></svg>
+                    {% elif 'shop' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-bag"></use></svg>
+                    {% elif 'ticket' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-ticket"></use></svg>
+                    {% elif 'welcome' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-users"></use></svg>
+                    {% elif 'minigame' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-gamepad"></use></svg>
+                    {% elif 'mission' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-map"></use></svg>
+                    {% elif 'event' in category_lower or 'mvp' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-trophy"></use></svg>
+                    {% elif 'creator' in category_lower or 'alert' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-video"></use></svg>
+                    {% elif 'server' in category_lower or 'config' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-settings"></use></svg>
+                    {% elif 'trigger' in category_lower or 'sticky' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-zap"></use></svg>
+                    {% elif 'trade' in category_lower or 'util' in category_lower %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-arrows"></use></svg>
+                    {% else %}<svg viewBox="0 0 24 24" width="14" height="14"><use href="#nero-i-terminal"></use></svg>{% endif %}
+                </span>
+                <span class="cmd-category-nav-name">{{ category }}</span>
+                <span class="cmd-category-nav-count">{{ cmds|length }}</span>
+            </button>
+            {% endfor %}
+        </nav>
+        <div class="cmd-category-rail-footnote">
+            <span class="cmd-footnote-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="12" height="12" style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;"><use href="#nero-i-search"></use></svg></span>
+            <span>Search names, descriptions, or parameters to find a command.</span>
+        </div>
+    </aside>
+
+    <main class="cmd-workspace-main">
+        <div class="cmd-workspace-heading">
+            <div>
+                <div class="cmd-eyebrow">COMMAND LIBRARY</div>
+                <h3 id="cmd-selection-label">{{ initial_category if initial_category else 'All Commands' }}</h3>
+            </div>
+            <span class="cmd-total-pill"><span class="cmd-live-dot"></span><span id="cmd-enabled-count">{{ stats.enabled }} enabled total</span></span>
+        </div>
+        <button type="button" id="cmd-editor-backdrop" class="cmd-editor-backdrop"
+                aria-label="Close command settings" tabindex="-1" hidden
+                onclick="closeActiveCommandPanel()"></button>
+        <div id="cmd-categories-container">
 {% for category, cmds in categories.items() %}
-<div class="card cmd-category-card" id="cat-card-{{ category|replace(' ', '-')|replace('&', 'and') }}" data-category="{{ category }}">
+<div class="card cmd-category-card" id="cat-card-{{ category|replace(' ', '-')|replace('&', 'and') }}" data-category="{{ category }}" style="{{ '' if category == initial_category else 'display:none;' }}">
     <div class="card-header cmd-category-header">
         <div class="cmd-category-title-wrap">
             <h3 class="cmd-category-title">{{ category }}</h3>
@@ -94,7 +153,7 @@
             <button type="button" class="btn btn-sm btn-secondary"
                     onclick="openCategoryRestrictModal('{{ category }}')"
                     title="Apply role/channel restrictions to all commands in {{ category }}">
-                🔐 Restrict Category
+                <svg class="cmd-inline-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><use href="#nero-i-lock"></use></svg> Restrict Category
             </button>
         </div>
     </div>
@@ -131,11 +190,13 @@
                             {% endif %}
                             <span class="cmd-chip cmd-chip-cooldown" id="chip-cooldown-{{ cmd }}"
                                   style="{{ '' if cooldown_val else 'display:none;' }}">
-                                ⏱ <span class="cooldown-num">{{ cooldown_val or 0 }}</span>s
+                                <svg class="cmd-chip-icon" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 5v3.5l2 1.5"/></svg>
+                                <span class="cooldown-num">{{ cooldown_val or 0 }}</span>s
                             </span>
                             <span class="cmd-chip cmd-chip-accent cmd-chip-restricted" id="chip-restricted-{{ cmd }}"
                                   style="{{ '' if has_restrictions else 'display:none;' }}">
-                                🔐 restricted
+                                <svg class="cmd-chip-icon" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><rect x="3.5" y="7" width="9" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>
+                                restricted
                             </span>
                         </div>
                         {% if meta.desc %}
@@ -158,8 +219,11 @@
 
                 <div class="cmd-row-actions">
                     <button type="button" class="btn btn-sm btn-secondary cmd-edit-toggle"
-                            id="edit-btn-{{ cmd }}" onclick="toggleEditPanel('{{ cmd }}')">
-                        <span class="cmd-edit-chevron">›</span> Edit
+                            id="edit-btn-{{ cmd }}" aria-expanded="false"
+                            aria-controls="edit-panel-{{ cmd }}"
+                            aria-label="Configure {{ '!' if meta.prefix else '/' }}{{ cmd }}"
+                            onclick="toggleEditPanel('{{ cmd }}')">
+                        <span class="cmd-edit-chevron" aria-hidden="true">›</span> Configure
                     </button>
                     <label class="toggle" title="{{ 'Disable' if enabled else 'Enable' }} {{ '!' if meta.prefix else '/' }}{{ cmd }}">
                         <input type="checkbox" id="toggle-input-{{ cmd }}" {% if enabled %}checked{% endif %}
@@ -169,9 +233,24 @@
                 </div>
             </div>
 
-            <!-- Edit Panel -->
-            <div class="cmd-edit-panel" id="edit-panel-{{ cmd }}">
+            <!-- Command settings drawer; existing fields/actions keep their API handlers. -->
+            <div class="cmd-edit-panel" id="edit-panel-{{ cmd }}" role="dialog" aria-modal="true"
+                 aria-hidden="true" aria-labelledby="cmd-editor-title-{{ cmd }}">
                 <div class="cmd-edit-panel-inner">
+                    <div class="cmd-editor-topbar">
+                        <div class="cmd-editor-heading">
+                            <div class="cmd-editor-eyebrow">COMMAND SETTINGS</div>
+                            <div class="cmd-editor-title-line">
+                                <h3 id="cmd-editor-title-{{ cmd }}">{{ '!' if meta.prefix else '/' }}{{ cmd }}</h3>
+                                <span class="cmd-editor-enabled {{ 'is-on' if enabled else 'is-off' }}">
+                                    <span class="cmd-live-dot"></span>{{ 'Enabled' if enabled else 'Disabled' }}
+                                </span>
+                            </div>
+                            <p>{{ meta.desc|default('Configure access and behavior for this command.', true) }}</p>
+                        </div>
+                        <button type="button" class="cmd-editor-close" aria-label="Close command settings"
+                                onclick="toggleEditPanel('{{ cmd }}')">×</button>
+                    </div>
                     <div class="cmd-edit-panel-content">
                         <div class="cmd-edit-loading" id="edit-loading-{{ cmd }}">
                             <span class="ns-spinner"></span> Loading settings…
@@ -263,12 +342,14 @@
     </div>
 </div>
 {% endfor %}
+        </div>
+    </main>
 </div>
 
 <!-- Category-level bulk restriction modal -->
 <div id="cat-restrict-modal" class="modal-overlay" style="display:none;" onclick="handleModalOverlayClick(event)">
     <div class="modal cmd-restrict-modal">
-        <div class="modal-title">🔐 Restrict Category — <span id="cat-restrict-name" style="color:var(--accent);"></span></div>
+        <div class="modal-title"><svg class="cmd-restrict-title-icon" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><use href="#nero-i-lock"></use></svg> Restrict Category — <span id="cat-restrict-name" style="color:var(--accent);"></span></div>
         <div class="modal-body">
             Apply role and channel permissions to all commands in this category at once.
             Leave a section empty to leave those restrictions unchanged.
@@ -311,355 +392,6 @@
     </div>
 </div>
 
-<style>
-/* ── Page Header & Layout ────────────────────────────────────────── */
-.cmd-header-wrap {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 20px;
-    flex-wrap: wrap;
-    gap: 12px;
-}
-.cmd-page-title {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 4px;
-}
-.cmd-page-title h2 { margin: 0; font-size: 20px; font-weight: 700; color: var(--text); }
-.cmd-header-actions { display: flex; gap: 8px; align-items: center; }
-
-/* ── Stats Grid ─────────────────────────────────────────────────── */
-.cmd-stats-grid { margin-bottom: 20px; }
-.cmd-stats-grid .stat-card { padding: 14px 16px; }
-.cmd-stats-grid .stat-value { font-size: 22px; font-weight: 700; line-height: 1.2; }
-
-/* ── Filter Bar ─────────────────────────────────────────────────── */
-.cmd-filter-card {
-    padding: 14px 18px;
-    margin-bottom: 20px;
-}
-.cmd-filter-bar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-}
-.cmd-search-box {
-    position: relative;
-    flex: 1;
-    min-width: 240px;
-}
-.cmd-search-icon {
-    position: absolute;
-    left: 11px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 13px;
-    color: var(--text3);
-    pointer-events: none;
-}
-.cmd-search-box .form-input {
-    padding-left: 32px;
-    padding-right: 28px;
-    font-size: 13px;
-    height: 38px;
-}
-.cmd-search-clear {
-    position: absolute;
-    right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
-    background: transparent;
-    border: none;
-    color: var(--text3);
-    cursor: pointer;
-    font-size: 12px;
-    padding: 4px;
-}
-.cmd-search-clear:hover { color: var(--text); }
-
-.cmd-filter-group { display: flex; align-items: center; gap: 6px; }
-.cmd-category-select { height: 38px; min-width: 170px; font-size: 13px; }
-
-.cmd-status-filters {
-    display: flex;
-    gap: 4px;
-    align-items: center;
-}
-.filter-pill {
-    min-height: 32px;
-    padding: 4px 12px;
-    font-size: 12px;
-    border-radius: 6px;
-}
-.filter-pill.active {
-    background: var(--accent);
-    color: #ffffff;
-    border-color: var(--accent);
-}
-
-.cmd-filter-summary {
-    margin-top: 10px;
-    font-size: 12px;
-    color: var(--text3);
-}
-
-/* ── Category Cards & Headers ────────────────────────────────────── */
-.cmd-category-card {
-    padding: 18px 20px;
-    margin-bottom: 20px;
-}
-.cmd-category-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 14px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
-    gap: 8px;
-}
-.cmd-category-title-wrap {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.cmd-category-title {
-    margin: 0;
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--text);
-}
-.cmd-category-actions {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    flex-wrap: wrap;
-}
-
-/* ── Command Rows ───────────────────────────────────────────────── */
-.cmd-list { display: flex; flex-direction: column; gap: 8px; }
-
-.cmd-row {
-    background: var(--bg3);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    overflow: hidden;
-    transition: border-color .15s, background .15s;
-}
-.cmd-row:hover { border-color: rgba(124, 92, 191, 0.4); }
-.cmd-row.cmd-disabled-state {
-    opacity: 0.72;
-    background: var(--bg2);
-}
-
-.cmd-row-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 12px 16px;
-}
-
-.cmd-row-main {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    min-width: 0;
-    flex: 1;
-}
-
-.cmd-status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    margin-top: 5px;
-}
-.cmd-status-on  { background: var(--success); box-shadow: 0 0 6px rgba(87,242,135,.4); }
-.cmd-status-off { background: var(--danger); }
-
-.cmd-meta-wrap { min-width: 0; flex: 1; }
-
-.cmd-name-line {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-bottom: 2px;
-}
-.cmd-row-name {
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-weight: 700;
-    font-size: 14px;
-    color: var(--text);
-}
-
-.cmd-param-tag {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px;
-    color: var(--text3);
-    background: var(--bg4);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 1px 5px;
-}
-
-.cmd-description {
-    font-size: 12px;
-    line-height: 1.4;
-    color: var(--text2);
-    margin-top: 2px;
-}
-.cmd-usage {
-    font-size: 11px;
-    line-height: 1.4;
-}
-.cmd-usage code {
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 11px;
-    background: var(--bg4);
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    padding: 1px 4px;
-}
-.cmd-usage-label {
-    font-weight: 600;
-    color: var(--text3);
-    margin-right: 2px;
-}
-.cmd-usage-alias-hint {
-    color: var(--accent);
-}
-
-.cmd-alias-status {
-    margin-top: 6px;
-    font-size: 12px;
-    color: var(--text3);
-}
-.cmd-alias-status.is-warn { color: var(--warning); }
-
-.cmd-chip {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text3);
-    background: var(--bg4);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 2px 8px;
-    white-space: nowrap;
-}
-.cmd-chip-accent {
-    color: var(--accent);
-    border-color: rgba(124,92,191,.4);
-    background: rgba(124,92,191,.12);
-}
-
-.cmd-row-actions {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-shrink: 0;
-}
-.cmd-edit-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    min-height: 32px;
-    padding: 4px 10px;
-    font-size: 12px;
-}
-.cmd-edit-chevron {
-    display: inline-block;
-    font-size: 13px;
-    transition: transform 200ms ease;
-}
-.cmd-row.cmd-row-expanded .cmd-edit-chevron {
-    transform: rotate(90deg);
-}
-
-/* ── Edit Panel ─────────────────────────────────────────────────── */
-.cmd-edit-panel {
-    display: grid;
-    grid-template-rows: 0fr;
-    transition: grid-template-rows 220ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.cmd-row.cmd-row-expanded .cmd-edit-panel {
-    grid-template-rows: 1fr;
-    border-top: 1px solid var(--border);
-}
-.cmd-edit-panel-inner { overflow: hidden; min-height: 0; }
-.cmd-edit-panel-content {
-    padding: 16px 18px;
-    background: rgba(0, 0, 0, 0.08);
-}
-
-.cmd-edit-loading {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: var(--text3);
-    padding: 8px 0;
-}
-
-.cmd-edit-grid-top {
-    display: grid;
-    grid-template-columns: 180px 1fr;
-    gap: 14px;
-    margin-bottom: 14px;
-}
-@media (max-width: 640px) {
-    .cmd-edit-grid-top { grid-template-columns: 1fr; }
-}
-
-.cmd-edit-picker-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 14px;
-}
-.badge-role-rule {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 2px 6px;
-    border-radius: 4px;
-}
-.allowed-pill { background: rgba(87,242,135,.15); color: var(--success); }
-.blocked-pill { background: rgba(237,66,69,.15); color: var(--danger); }
-
-.cmd-edit-actions {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-top: 14px;
-    padding-top: 14px;
-    border-top: 1px solid var(--border);
-}
-.cmd-edit-status { font-size: 12px; font-weight: 600; margin-left: 4px; }
-.cmd-edit-status.ok    { color: var(--success); }
-.cmd-edit-status.error { color: var(--danger); }
-
-/* ── Modals & Empty State ────────────────────────────────────────── */
-.cmd-restrict-modal { max-width: 620px; width: 90%; }
-.cmd-empty-state {
-    text-align: center;
-    padding: 40px 20px;
-    margin-bottom: 20px;
-}
-.cmd-empty-icon { font-size: 32px; margin-bottom: 8px; }
-.cmd-empty-title { font-size: 16px; font-weight: 700; margin-bottom: 4px; color: var(--text); }
-.cmd-empty-desc { margin-bottom: 16px; }
-
-@media (prefers-reduced-motion: reduce) {
-    .cmd-edit-panel { transition: none !important; }
-    .cmd-edit-chevron { transition: none !important; }
-}
-</style>
-
 <script>
 (function () {
 // Re-published for the markup's inline handlers (onclick/onchange) and for
@@ -673,6 +405,8 @@ __neroGlobal.toggleCmd = toggleCmd;
 __neroGlobal.bulkToggle = bulkToggle;
 __neroGlobal.bulkCategory = bulkCategory;
 __neroGlobal.toggleEditPanel = toggleEditPanel;
+__neroGlobal.closeActiveCommandPanel = closeActiveCommandPanel;
+__neroGlobal.selectCommandCategory = selectCommandCategory;
 __neroGlobal.loadCommandSettings = loadCommandSettings;
 __neroGlobal.saveCommandSettings = saveCommandSettings;
 __neroGlobal.refreshAliasStatus = refreshAliasStatus;
@@ -808,18 +542,99 @@ function toggleEditPanel(cmd) {
     const row = document.getElementById(`cmd-${cmd}`);
     if (!row) return;
     const opening = !row.classList.contains('cmd-row-expanded');
-    row.classList.toggle('cmd-row-expanded', opening);
 
-    const btn = document.getElementById(`edit-btn-${cmd}`);
-    if (btn) {
-        btn.innerHTML = `<span class="cmd-edit-chevron">›</span> ${opening ? 'Close' : 'Edit'}`;
+    // Keep a single inspector open, matching the compact master/detail layout.
+    if (opening) {
+        document.querySelectorAll('.cmd-row.cmd-row-expanded').forEach(other => {
+            if (other === row) return;
+            other.classList.remove('cmd-row-expanded');
+            const otherCmd = other.dataset.command;
+            const otherBtn = document.getElementById(`edit-btn-${otherCmd}`);
+            const otherPanel = other.querySelector('.cmd-edit-panel');
+            const otherLabel = other.querySelector('.cmd-row-name')?.textContent.trim() || `/${otherCmd}`;
+            if (otherBtn) {
+                otherBtn.innerHTML = '<span class="cmd-edit-chevron" aria-hidden="true">›</span> Configure';
+                otherBtn.setAttribute('aria-expanded', 'false');
+                otherBtn.setAttribute('aria-label', `Configure ${otherLabel}`);
+            }
+            if (otherPanel) otherPanel.setAttribute('aria-hidden', 'true');
+        });
     }
+
+    row.classList.toggle('cmd-row-expanded', opening);
+    const btn = document.getElementById(`edit-btn-${cmd}`);
+    const panel = row.querySelector('.cmd-edit-panel');
+    const commandLabel = row.querySelector('.cmd-row-name')?.textContent.trim() || `/${cmd}`;
+    if (btn) {
+        btn.innerHTML = `<span class="cmd-edit-chevron" aria-hidden="true">›</span> ${opening ? 'Close' : 'Configure'}`;
+        btn.setAttribute('aria-expanded', String(opening));
+        btn.setAttribute('aria-label', `${opening ? 'Close settings for' : 'Configure'} ${commandLabel}`);
+    }
+    if (panel) panel.setAttribute('aria-hidden', String(!opening));
+
+    const backdrop = document.getElementById('cmd-editor-backdrop');
+    const activeRow = document.querySelector('.cmd-row.cmd-row-expanded');
+    if (backdrop) backdrop.hidden = !activeRow;
 
     if (opening && !_cmdPanelLoaded.has(cmd)) {
         _cmdPanelLoaded.add(cmd);
         loadCommandSettings(cmd);
     }
+    if (opening) {
+        requestAnimationFrame(() => row.querySelector('.cmd-editor-close')?.focus({preventScroll: true}));
+    } else {
+        btn?.focus({preventScroll: true});
+    }
 }
+
+function closeActiveCommandPanel() {
+    const row = document.querySelector('.cmd-row.cmd-row-expanded');
+    if (row && row.dataset.command) toggleEditPanel(row.dataset.command);
+}
+
+function selectCommandCategory(category, button) {
+    const select = document.getElementById('cmd-category-filter');
+    if (select) select.value = category || '';
+    if (button) {
+        document.querySelectorAll('.cmd-category-nav').forEach(item => {
+            const active = item === button;
+            item.classList.toggle('active', active);
+            item.setAttribute('aria-pressed', String(active));
+        });
+    }
+    filterCommands();
+}
+
+// The inspector is a modal-like drawer: Escape closes it and keyboard focus
+// stays inside while it is open. The listener belongs to the page fragment so
+// it is naturally discarded when HTMX replaces this route.
+(function bindCommandDrawerKeys() {
+    const root = document.getElementById('command-manager-page');
+    if (!root || root.dataset.drawerKeysBound) return;
+    root.dataset.drawerKeysBound = 'true';
+    root.addEventListener('keydown', function(event) {
+        const row = root.querySelector('.cmd-row.cmd-row-expanded');
+        if (!row) return;
+        const panel = row.querySelector('.cmd-edit-panel');
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closeActiveCommandPanel();
+            return;
+        }
+        if (event.key !== 'Tab' || !panel) return;
+        const focusable = Array.from(panel.querySelectorAll(
+            'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )).filter(el => !el.hidden && el.getClientRects().length > 0);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && (document.activeElement === first || !panel.contains(document.activeElement))) {
+            event.preventDefault(); last.focus();
+        } else if (!event.shiftKey && (document.activeElement === last || !panel.contains(document.activeElement))) {
+            event.preventDefault(); first.focus();
+        }
+    });
+})();
 
 async function loadCommandSettings(cmd) {
     const loadingEl = document.getElementById(`edit-loading-${cmd}`);
@@ -1191,6 +1006,13 @@ function filterCommands() {
     const catVal = (document.getElementById('cmd-category-filter').value || '').trim();
     const clearBtn = document.getElementById('cmd-search-clear');
     if (clearBtn) clearBtn.style.display = searchVal ? 'block' : 'none';
+    document.querySelectorAll('.cmd-category-nav').forEach(button => {
+        const active = (button.dataset.category || '') === catVal;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+    });
+    const selectionLabel = document.getElementById('cmd-selection-label');
+    if (selectionLabel) selectionLabel.textContent = catVal || 'All Commands';
 
     let visibleCommands = 0;
     const catCards = document.querySelectorAll('.cmd-category-card');
@@ -1243,12 +1065,20 @@ function filterCommands() {
             summaryEl.style.display = 'none';
         }
     }
+    const resultsCount = document.getElementById('cmd-results-count');
+    if (resultsCount) {
+        resultsCount.textContent = (searchVal || catVal || _currentStatusFilter !== 'all')
+            ? `${visibleCommands} matching`
+            : `${visibleCommands} total`;
+    }
 }
 
 function setStatusFilter(status) {
     _currentStatusFilter = status;
     document.querySelectorAll('.filter-pill').forEach(pill => {
-        pill.classList.toggle('active', pill.dataset.filter === status);
+        const active = pill.dataset.filter === status;
+        pill.classList.toggle('active', active);
+        pill.setAttribute('aria-pressed', String(active));
     });
     filterCommands();
 }
@@ -1288,8 +1118,22 @@ function updateStatsCounts() {
     if (elEnabled) elEnabled.textContent = enabled;
     if (elDisabled) elDisabled.textContent = disabled;
     if (elRestricted) elRestricted.textContent = restricted;
+    const enabledLabel = document.getElementById('cmd-enabled-count');
+    if (enabledLabel) enabledLabel.textContent = `${enabled} enabled total`;
+}
+
+// Synchronize initial state: the server-rendered DOM is already pre-filtered
+// to defaultCategory. Only run filterCommands() if an active search or non-default
+// filter is restored from history/bfcache.
+const searchInput = document.getElementById('cmd-search-input');
+const catFilter = document.getElementById('cmd-category-filter');
+const commandRoot = document.getElementById('command-manager-page');
+const defaultCategory = (commandRoot && commandRoot.dataset.defaultCategory) || '';
+if ((searchInput && searchInput.value) || (catFilter && catFilter.value !== defaultCategory) || _currentStatusFilter !== 'all') {
+    filterCommands();
 }
 
 })();
 </script>
+</div>
 {% endblock %}

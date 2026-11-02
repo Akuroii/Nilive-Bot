@@ -1,206 +1,298 @@
 {% extends "base.html" %}
 {% block title %}Select Server{% endblock %}
 {% block content %}
-<div style="max-width:600px;margin:0 auto;padding-top:20px;">
-    <div class="card">
-        <div class="card-title">🖥️ Select a Server</div>
-        <p style="color:var(--text2);font-size:13px;margin-bottom:20px;">
-            Choose which server you want to manage.
-            Only servers where you have dashboard access are shown.
+<div style="max-width:680px;margin:0 auto;padding-top:20px;">
+    <div class="card" style="margin-bottom:20px;">
+        <div class="card-title" style="display:flex;align-items:center;gap:8px;">
+            <svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-server"></use></svg> Select a Server
+        </div>
+        <p style="color:var(--text2);font-size:13px;margin-bottom:0;">
+            Choose an active server to manage or invite Nero to a Discord server you administer.
         </p>
-        {% if guilds %}
-        <div style="display:flex;flex-direction:column;gap:10px;">
-            {% for g in guilds %}
-            <a href="{{ url_for('select_guild', guild_id=g.id) }}"
-               style="display:flex;align-items:center;gap:14px;padding:14px 16px;
-                      background:var(--bg3);border:1px solid var(--border);
-                      border-radius:10px;text-decoration:none;color:var(--text);
-                      transition:all .15s;"
-               onmouseover="this.style.borderColor='var(--accent)';this.style.background='var(--bg4)'"
-               onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--bg3)'">
-                <!-- Phase 0 fix: onerror fallback in case the icon hash is
-                     stale/broken (e.g. icon changed/removed on Discord's
-                     side after this row was cached), plus correct .gif
-                     extension for animated (a_-prefixed) icon hashes —
-                     previously always requested .png, which 404s for
-                     animated icons. -->
-                <div style="width:44px;height:44px;flex-shrink:0;position:relative;">
-                    {% if g.icon %}
-                    <img src="https://cdn.discordapp.com/icons/{{ g.id }}/{{ g.icon }}.{{ 'gif' if g.icon.startswith('a_') else 'png' }}"
-                         style="width:44px;height:44px;border-radius:50%;object-fit:cover;display:block;"
-                         onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
-                    {% endif %}
-                    <div style="width:44px;height:44px;border-radius:50%;background:var(--accent);
-                                display:{{ 'none' if g.icon else 'flex' }};align-items:center;justify-content:center;
-                                font-weight:700;font-size:18px;color:#fff;">
-                        {{ g.name[0].upper() }}
-                    </div>
-                </div>
-                <div>
-                    <div style="font-weight:600;font-size:14px;">{{ g.name }}</div>
-                    <div style="font-size:11px;color:var(--text3);text-transform:capitalize;margin-top:2px;">
-                        {{ g.level }}
-                    </div>
-                </div>
-                <div style="margin-left:auto;color:var(--text3);font-size:18px;">›</div>
-            </a>
-            {% endfor %}
-        </div>
-        {% else %}
-        <div class="empty-state">
-            <div class="empty-icon">🔐</div>
-            <div class="empty-text">
-                You don't have access to any servers yet.<br>
-                Ask your server owner to add you in Dashboard Access.
-            </div>
-        </div>
-        {% endif %}
     </div>
 
-    <!-- Phase 0 Extension — Server Permission Gating (Sapphire-style) -->
-    <div class="card" id="manage-servers-card">
-        <div class="card-title">➕ Manage Servers</div>
-        <p style="color:var(--text2);font-size:13px;margin-bottom:20px;">
-            Every Discord server where you have Manage Server / Administrator.
-            Servers with the bot already installed are active — servers without
-            it are grayed out until you invite the bot.
-        </p>
-        <div id="manage-servers-list">
-            <div class="empty-state">
-                <div class="empty-icon">⏳</div>
-                <div class="empty-text">Loading your servers…</div>
-            </div>
+    <div id="unified-servers-mount">
+        <div class="card" style="text-align:center;padding:32px 16px;">
+            <div style="margin-bottom:8px;"><svg class="card-title-icon" viewBox="0 0 24 24" style="width:28px;height:28px;color:var(--accent);display:inline-block;" aria-hidden="true"><use href="#nero-i-clock"></use></svg></div>
+            <div style="color:var(--text2);font-size:13px;">Loading your servers…</div>
         </div>
     </div>
 </div>
 
+<noscript>
+    <div class="card"><div class="card-title">Your dashboard access</div>
+    {% for g in guilds %}<p><a href="{{ url_for('select_guild', guild_id=g.id) }}">{{ g.name }}</a></p>
+    {% else %}<p>No dashboard servers available.</p>{% endfor %}
+    </div>
+</noscript>
+<script id="accessible-server-data" type="application/json">[
+{% for g in guilds %}{{ {'id': g.id|string, 'name': g.name, 'icon': g.icon, 'level': g.level}|tojson }}{{ ',' if not loop.last else '' }}{% endfor %}
+]</script>
 <script>
 (function () {
-// Re-published for the markup's inline handlers (onclick/onchange) and for
-// script-level harnesses that call page functions directly: this script is
-// evaluated inside a function scope and re-evaluated on every htmx
-// navigation, so the page API is put back on the global object each time.
-// Function declarations are hoisted, so these exist before the statements
-// below can fail.
 var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
 __neroGlobal.iconUrl = iconUrl;
 __neroGlobal.serverIconHtml = serverIconHtml;
-__neroGlobal.loadManageServers = loadManageServers;
+__neroGlobal.loadUnifiedServers = loadUnifiedServers;
+__neroGlobal.selectServerPost = selectServerPost;
 __neroGlobal.inviteBot = inviteBot;
 
-// Phase 0 fix: correct file extension for animated icon hashes
-// (a_-prefixed hashes are GIFs on Discord's CDN, everything else is
-// PNG — requesting .png for an animated hash 404s and breaks the img).
 function iconUrl(guildId, icon) {
-    if (!icon) return null;
+    if (!/^\d{1,19}$/.test(String(guildId)) || !/^(?:a_)?[a-f0-9]+$/i.test(String(icon || ''))) return null;
     const ext = icon.startsWith('a_') ? 'gif' : 'png';
     return `https://cdn.discordapp.com/icons/${guildId}/${icon}.${ext}`;
 }
 
 function serverIconHtml(s) {
     const url = iconUrl(s.id, s.icon);
-    const fallback = `<div style="width:40px;height:40px;border-radius:50%;background:var(--accent);
+    const fallback = `<div style="width:42px;height:42px;border-radius:50%;background:var(--accent);
                           display:flex;align-items:center;justify-content:center;
                           font-weight:700;font-size:16px;color:#fff;flex-shrink:0;">
-                      ${s.name.charAt(0).toUpperCase()}
+                      ${escapeHtml(String(s.name || '?').charAt(0).toUpperCase())}
                    </div>`;
     if (!url) return fallback;
-    // onerror swaps a broken/stale icon URL for the letter-avatar
-    // fallback instead of showing a broken image icon.
-    return `<div style="width:40px;height:40px;flex-shrink:0;position:relative;">
-                <img src="${url}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;display:block;"
+    return `<div style="width:42px;height:42px;flex-shrink:0;position:relative;">
+                <img src="${url}" style="width:42px;height:42px;border-radius:50%;object-fit:cover;display:block;"
                      onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
-                <div style="width:40px;height:40px;border-radius:50%;background:var(--accent);
+                <div style="width:42px;height:42px;border-radius:50%;background:var(--accent);
                             display:none;align-items:center;justify-content:center;
                             font-weight:700;font-size:16px;color:#fff;">
-                    ${s.name.charAt(0).toUpperCase()}
+                    ${escapeHtml(String(s.name || '?').charAt(0).toUpperCase())}
                 </div>
             </div>`;
 }
 
-async function loadManageServers() {
-    const list = document.getElementById('manage-servers-list');
+function selectServerPost(guildId) {
+    if (!/^\d{1,19}$/.test(String(guildId))) return;
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = `/select-guild/${guildId}`;
+    const csrfInput = document.createElement('input');
+    csrfInput.type = 'hidden';
+    csrfInput.name = 'csrf_token';
+    csrfInput.value = window.__CSRF_TOKEN__ || '';
+    form.appendChild(csrfInput);
+    document.body.appendChild(form);
+    form.submit();
+}
+
+async function loadUnifiedServers() {
+    const container = document.getElementById('unified-servers-mount');
+    if (!container) return;
+
     try {
-        const res  = await fetch('/api/user/servers');
-        const data = await res.json();
-        const servers = data.servers || [];
+        // The existing server-rendered grants remain authoritative for access,
+        // including members without Manage Server and the trusted developer.
+        const granted = JSON.parse(document.getElementById('accessible-server-data').textContent);
+        let discovered = [], discoveryFailed = false;
+        try {
+            const res = await fetch('/api/user/servers');
+            if (!res.ok) throw new Error('Server discovery failed');
+            const data = await res.json();
+            discovered = Array.isArray(data.servers) ? data.servers : [];
+        } catch (e) { discoveryFailed = true; }
+        const serversById = new Map();
+        for (const g of granted) {
+            const id = String(g.id);
+            if (!/^\d{1,19}$/.test(id)) continue;
+            serversById.set(id, {id, name: g.name, icon: g.icon,
+                permission_level: g.level, category: 'active'});
+        }
+        for (const g of discovered) {
+            // id_str avoids JavaScript rounding Discord snowflakes.
+            const id = String(g.id_str || '');
+            if (!/^\d{1,19}$/.test(id)) continue;
+            const existing = serversById.get(id);
+            if (existing) {
+                existing.name = g.name || existing.name;
+                existing.icon = g.icon || existing.icon;
+            } else {
+                serversById.set(id, {id, name: g.name, icon: g.icon,
+                    category: g.is_bot_member ? 'access_required' : 'invite'});
+            }
+        }
+        const servers = Array.from(serversById.values());
+        if (discoveryFailed && !servers.length) throw new Error('Server discovery failed');
 
         if (!servers.length) {
-            list.innerHTML = `
-                <div class="empty-state">
-                    <div class="empty-icon">🔍</div>
-                    <div class="empty-text">
-                        No servers found where you have Manage Server / Administrator.
+            container.innerHTML = `
+                <div class="card">
+                    <div class="empty-state" style="padding:28px 16px;text-align:center;">
+                        <div class="empty-icon" style="font-size:28px;margin-bottom:10px;"><svg class="card-title-icon" viewBox="0 0 24 24" style="width:36px;height:36px;color:var(--text3);display:inline-block;" aria-hidden="true"><use href="#nero-i-lock"></use></svg></div>
+                        <div style="font-weight:600;font-size:14px;color:var(--text);margin-bottom:6px;">No Accessible Servers Found</div>
+                        <div class="empty-text" style="color:var(--text2);font-size:13px;max-width:420px;margin:0 auto 16px;">
+                            You don't currently have dashboard access or Discord server management permissions for any server.
+                        </div>
+                        <button type="button" class="btn btn-primary" onclick="loadUnifiedServers()">Refresh List</button>
                     </div>
                 </div>`;
             return;
         }
 
-        list.innerHTML = servers.map(s => {
-            const icon = serverIconHtml(s);
+        const activeServers = servers.filter(s => s.category === 'active');
+        const inviteServers = servers.filter(s => s.category === 'invite');
+        const accessReqServers = servers.filter(s => s.category === 'access_required');
+        const danglingServers = servers.filter(s => s.category === 'dangling');
 
-            if (s.is_bot_member) {
-                // Phase 0 fix (highest priority): this card used to be a
-                // dead end — bot installed, "Active" badge shown, but no
-                // link and no click handler at all, so there was no way
-                // to actually enter a server here even though it was
-                // live. It's now a real link into /select-guild/<id>,
-                // same destination as the "Select a Server" list above.
-                //
-                // Server access is still gated server-side by
-                // dashboard_users — clicking this does NOT bypass that.
-                // For most admins without an existing access row it'll
-                // land on the 403 page (same message as elsewhere:
-                // "ask your server owner to get access"). The one
-                // exception is the developer's own trusted bypass ID
-                // (dashboard/permissions.py's is_trusted_super_admin) —
-                // /select-guild grants access for that account without
-                // ever writing a dashboard_users row, so it never shows
-                // up in Current Access either. See select_guild() in
-                // dashboard/app.py.
-                return `
-                <a href="/select-guild/${s.id}"
-                   style="display:flex;align-items:center;gap:12px;padding:12px 14px;
-                          background:var(--bg3);border:1px solid var(--border);
-                          border-radius:10px;text-decoration:none;color:var(--text);
-                          transition:all .15s;"
-                   onmouseover="this.style.borderColor='var(--accent)';this.style.background='var(--bg4)'"
-                   onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--bg3)'">
-                    ${icon}
-                    <div style="flex:1;min-width:0;">
-                        <div style="font-weight:600;font-size:13px;overflow:hidden;
-                                    text-overflow:ellipsis;white-space:nowrap;">${s.name}</div>
-                        <div><span class="badge badge-success" style="margin-top:2px;">Bot installed</span></div>
-                    </div>
-                    <div style="color:var(--text3);font-size:16px;">›</div>
-                </a>`;
-            }
+        let html = discoveryFailed ? `<div class="card" role="alert">Couldn't load server discovery. Your dashboard grants are still available. <button type="button" class="btn btn-sm btn-secondary" onclick="loadUnifiedServers()">Retry</button></div>` : '';
 
-            return `
-            <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;
-                        background:var(--bg3);border:1px solid var(--border);
-                        border-radius:10px;opacity:.55;">
-                ${icon}
-                <div style="flex:1;min-width:0;">
-                    <div style="font-weight:600;font-size:13px;overflow:hidden;
-                                text-overflow:ellipsis;white-space:nowrap;">${s.name}</div>
-                    <div><span class="badge badge-danger" style="margin-top:2px;">Not installed</span></div>
+        // 1. Active Servers
+        if (activeServers.length > 0) {
+            html += `
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-title" style="font-size:14px;margin-bottom:12px;color:var(--text);display:flex;align-items:center;gap:6px;">
+                    <svg class="card-title-icon" viewBox="0 0 24 24" style="color:var(--success);" aria-hidden="true"><use href="#nero-i-check-circle"></use></svg> Active Servers (${activeServers.length})
                 </div>
-                <button class="btn btn-sm btn-primary" style="opacity:1;flex-shrink:0;"
-                        onclick="inviteBot(${s.id}, this)">Invite Bot</button>
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                    ${activeServers.map(s => `
+                    <div onclick="selectServerPost('${s.id}')" onkeydown="if(event.key === 'Enter' || event.key === ' '){event.preventDefault();selectServerPost('${s.id}')}"
+                       style="display:flex;align-items:center;gap:12px;padding:12px 14px;
+                              background:var(--bg3);border:1px solid var(--border);
+                              border-radius:10px;text-decoration:none;color:var(--text);
+                              cursor:pointer;transition:all .15s;"
+                       onmouseover="this.style.borderColor='var(--accent)';this.style.background='var(--bg4)'"
+                       onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--bg3)'"
+                       role="button" tabindex="0">
+                        ${serverIconHtml(s)}
+                        <div style="flex:1;min-width:0;">
+                            <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                ${escapeHtml(s.name)}
+                            </div>
+                            <div style="font-size:11px;color:var(--text3);margin-top:2px;">
+                                Role: <span style="text-transform:capitalize;color:var(--text2);font-weight:500;">${escapeHtml(s.permission_level || 'Member')}</span>
+                                ${s.is_owner ? ' • Server Owner' : ''}
+                            </div>
+                        </div>
+                        <span class="btn btn-sm btn-primary" style="pointer-events:none;">Open Dashboard ›</span>
+                    </div>`).join('')}
+                </div>
             </div>`;
-        }).join('');
+        }
+
+        // 2. Available to Setup & Invite
+        if (inviteServers.length > 0) {
+            html += `
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-title" style="font-size:14px;margin-bottom:6px;color:var(--text);display:flex;align-items:center;gap:6px;">
+                    <svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> Available to Setup & Invite (${inviteServers.length})
+                </div>
+                <p style="color:var(--text3);font-size:12px;margin-bottom:14px;line-height:1.4;">
+                    Discord servers where you have Manage Server / Administrator permissions.
+                </p>
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                    ${inviteServers.map(s => `
+                    <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;
+                                background:var(--bg3);border:1px solid var(--border);
+                                border-radius:10px;">
+                        ${serverIconHtml(s)}
+                        <div style="flex:1;min-width:0;">
+                            <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                ${escapeHtml(s.name)}
+                            </div>
+                            <div style="font-size:11px;color:var(--text3);margin-top:2px;">
+                                <span class="badge badge-warning" style="font-size:10px;">Bot not installed</span>
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-primary" style="flex-shrink:0;"
+                                onclick="inviteBot('${s.id}', this)">Invite Nero <svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:12px;height:12px;vertical-align:-1px;display:inline-block;" aria-hidden="true"><use href="#nero-i-external"></use></svg></button>
+                    </div>`).join('')}
+                </div>
+                <div style="margin-top:12px;padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:8px;font-size:11px;color:var(--text3);line-height:1.5;">
+                    <svg class="info-icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="#nero-i-info"></use></svg><strong>Note:</strong> Inviting Nero adds the bot to your Discord server.
+                    If you are not the Discord server owner, the server owner must grant your dashboard permissions under <em>Settings &gt; Dashboard Access</em> after Nero joins.
+                </div>
+            </div>`;
+        }
+
+        // 3. Access Required (Bot is present, user has Discord perms, but no DB access)
+        if (accessReqServers.length > 0) {
+            html += `
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-title" style="font-size:14px;margin-bottom:6px;color:var(--text);display:flex;align-items:center;gap:6px;">
+                    <svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-lock"></use></svg> Access Required (${accessReqServers.length})
+                </div>
+                <p style="color:var(--text3);font-size:12px;margin-bottom:14px;line-height:1.4;">
+                    Nero is installed, but your Discord account has not been assigned a Dashboard Access role in these servers.
+                </p>
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                    ${accessReqServers.map(s => `
+                    <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;
+                                background:var(--bg3);border:1px solid var(--border);
+                                border-radius:10px;opacity:0.75;">
+                        ${serverIconHtml(s)}
+                        <div style="flex:1;min-width:0;">
+                            <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                ${escapeHtml(s.name)}
+                            </div>
+                            <div style="font-size:11px;color:var(--text3);margin-top:2px;">
+                                <span class="badge badge-danger" style="font-size:10px;">No Dashboard Grant</span>
+                            </div>
+                        </div>
+                        <span class="btn btn-sm btn-secondary" style="opacity:0.6;cursor:not-allowed;" title="Ask the server owner to add your Discord ID under Dashboard Access">
+                            <svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:12px;height:12px;vertical-align:-1px;display:inline-block;" aria-hidden="true"><use href="#nero-i-lock"></use></svg> Access Required
+                        </span>
+                    </div>`).join('')}
+                </div>
+                <div style="margin-top:10px;font-size:11px;color:var(--text3);line-height:1.4;">
+                    Ask the Discord server owner to add your Discord ID in <strong>Dashboard Access</strong> (` + `/config/access` + `).
+                </div>
+            </div>`;
+        }
+
+        // 4. Dangling Grants (Bot is absent/unreachable, but grant exists)
+        if (danglingServers.length > 0) {
+            html += `
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-title" style="font-size:14px;margin-bottom:6px;color:var(--text);display:flex;align-items:center;gap:6px;">
+                    <svg class="card-title-icon" viewBox="0 0 24 24" style="color:var(--warning);" aria-hidden="true"><use href="#nero-i-alert"></use></svg> Setup Needed (${danglingServers.length})
+                </div>
+                <p style="color:var(--text3);font-size:12px;margin-bottom:14px;line-height:1.4;">
+                    You have dashboard access, but Nero is not currently active in these servers.
+                </p>
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                    ${danglingServers.map(s => `
+                    <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;
+                                background:var(--bg3);border:1px solid var(--border);
+                                border-radius:10px;">
+                        ${serverIconHtml(s)}
+                        <div style="flex:1;min-width:0;">
+                            <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                ${escapeHtml(s.name)}
+                            </div>
+                            <div style="font-size:11px;color:var(--text3);margin-top:2px;">
+                                <span class="badge badge-warning" style="font-size:10px;">Bot Offline / Setup Needed</span>
+                            </div>
+                        </div>
+                        <div style="display:flex;gap:6px;">
+                            ${s.can_manage ? `<button type="button" class="btn btn-sm btn-primary" onclick="inviteBot('${s.id}', this)">Re-invite <svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:12px;height:12px;vertical-align:-1px;display:inline-block;" aria-hidden="true"><use href="#nero-i-external"></use></svg></button>` : ''}
+                            <button type="button" class="btn btn-sm btn-secondary" onclick="selectServerPost('${s.id}')">Review Logs ›</button>
+                        </div>
+                    </div>`).join('')}
+                </div>
+            </div>`;
+        }
+
+        container.innerHTML = html;
     } catch (err) {
-        list.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-icon">⚠️</div>
-                <div class="empty-text">Couldn't load your servers. Try refreshing.</div>
+        container.innerHTML = `
+            <div class="card">
+                <div class="empty-state" style="padding:24px 16px;text-align:center;">
+                    <div class="empty-icon"><svg class="card-title-icon" viewBox="0 0 24 24" style="width:36px;height:36px;color:var(--warning);display:inline-block;" aria-hidden="true"><use href="#nero-i-alert"></use></svg></div>
+                    <div class="empty-text" style="color:var(--text2);margin-bottom:12px;">Couldn't load your servers. Please try again.</div>
+                    <button type="button" class="btn btn-primary" onclick="loadUnifiedServers()">Retry</button>
+                </div>
             </div>`;
     }
 }
 
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 async function inviteBot(guildId, btn) {
     btn.disabled = true;
+    const orig = btn.textContent;
     btn.textContent = '...';
     try {
         const res  = await fetch(`/api/invite-bot/${guildId}`);
@@ -210,11 +302,11 @@ async function inviteBot(guildId, btn) {
         }
     } finally {
         btn.disabled = false;
-        btn.textContent = 'Invite Bot';
+        btn.textContent = orig;
     }
 }
 
-loadManageServers();
+loadUnifiedServers();
 
 })();
 </script>
