@@ -4,13 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nero Dashboard</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css', v='20261026') }}">
 <!-- Shared embed composer styles (per-embed editor card + Discord
      preview chrome + engine component rows) — used by both
      manage/embedbuilder.html and systems/minigame_builder.html. -->
 <link rel="stylesheet" href="{{ url_for('static', filename='css/embed-composer.css') }}">
+<!-- Command Manager styles — strictly scoped to #command-manager-page and .cmd-restrict-modal -->
+<link rel="stylesheet" href="{{ url_for('static', filename='css/command-manager.css', v='20261026') }}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <!-- SECURITY FIX (dark-fixes pass #2, CDN SRI): pins this CSS to the
      exact bytes of select2@4.1.0-rc.0 (hash computed from the real
      published npm package, not guessed). If jsDelivr's CDN is ever
@@ -48,13 +50,105 @@
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 </style>
+{{ check_icon_css }}
+{{ currency_icon_css }}
+<style>
+.sidebar {
+    width: var(--sidebar-w);
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    height: 100vh;
+    z-index: 100;
+    overflow: hidden;
+}
+.nero-logo-mark {
+    width: 40px;
+    height: 40px;
+    flex: 0 0 40px;
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(210, 190, 255, .26);
+    border-radius: 12px;
+    color: #e8ddff;
+    background: linear-gradient(145deg, #9a68f5, #6332b9);
+    box-shadow: 0 6px 18px rgba(112, 65, 206, .32), inset 0 1px 0 rgba(255,255,255,.22);
+}
+.nav-section-title {
+    padding: 12px 10px 6px;
+    color: var(--text3);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+}
+.nav-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 44px;
+    padding: 9px 10px;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    text-decoration: none;
+    color: var(--text2);
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 2px;
+    transition: background .16s, color .16s, border-color .16s, transform .16s;
+}
+.nav-link:hover { background: var(--bg4); color: var(--text); border-color: var(--border-soft, var(--border)); }
+.nav-link.active {
+    background: linear-gradient(100deg, rgba(139,92,246,.28), rgba(124,58,237,.12));
+    border-color: rgba(158,126,255,.24);
+    color: #fff;
+    box-shadow: inset 2px 0 0 var(--accent), 0 6px 18px rgba(74, 41, 145, .12);
+}
+:root[data-theme="dark"] .sidebar {
+    background: linear-gradient(180deg, rgba(13, 19, 34, .99), rgba(8, 13, 25, .99));
+    border-right-color: var(--border-soft);
+    box-shadow: 8px 0 30px rgba(0, 0, 0, .18);
+}
+:root[data-theme="light"] .nav-link.active {
+    color: #392861;
+    background: linear-gradient(100deg, rgba(139,92,246,.16), rgba(124,58,237,.07));
+    border-color: rgba(124,92,237,.2);
+    box-shadow: inset 2px 0 0 var(--accent), 0 5px 14px rgba(89,57,143,.07);
+}
+:root[data-theme="light"] .nav-link.active .nav-icon { color: #6949a9; }
+.nav-link-legacy { opacity: .62; }
+.nero-icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
+.nav-icon { display: grid; width: 18px; height: 18px; flex: 0 0 18px; place-items: center; color: var(--text3); transition: color .16s ease; }
+.nav-icon svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+.nav-link:hover .nav-icon, .nav-link.active .nav-icon { color: currentColor; }
+.server-icon { display: block; width: 16px; height: 16px; flex: 0 0 16px; fill: none; stroke: var(--accent); stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+.staging-banner {
+    background: var(--warning);
+    color: #000;
+    font-size: 12px;
+    font-weight: 700;
+    text-align: center;
+    padding: 6px 12px;
+    letter-spacing: .02em;
+}
+@media (max-width: 768px) {
+    /* This later shell rule must yield a usable drawer width on phones. */
+    .sidebar { width: 260px; }
+}
+</style>
+{% block extra_head %}{% endblock %}
 </head>
 <body>
 <!-- SECURITY (CSRF hardening, this pass): token is minted server-side per
      session (see dashboard/auth.py create_session) and exposed here so
      dashboard.js's fetch()/htmx patch can attach it to every state-changing
      request automatically. Never write this into a URL or log it. -->
-<script>window.__CSRF_TOKEN__ = {{ session.get('csrf_token', '') | tojson }};</script>
+<script>
+window.__CSRF_TOKEN__ = {{ session.get('csrf_token', '') | tojson }};
+window.__GUILD_ID__ = {{ (session.get('guild_id')|string if session.get('guild_id') is not none else '') | tojson }};
+</script>
 <!-- Currency display config (name + icon) for client-side rendering, from
      the same server-side resolver every Jinja block uses — see
      dashboard/utils/currency_ctx.py. JS that builds currency labels for
@@ -78,13 +172,68 @@
      visible to every member of the server. -->
 <script>window.__BOT_IDENTITY__ = {{ bot_identity | tojson }};</script>
 {% endif %}
-{{ check_icon_css }}
-<!-- Baseline alignment for configured currency icons rendered as CDN
-     images (dashboard/utils/currency_ctx.py:icon_css). A browser cannot
-     render `<:name:id>` / `<a:name:id>` markup, so a custom currency icon
-     is an <img> exactly like the check icon above. -->
-{{ currency_icon_css }}
-<button class="hamburger" onclick="toggleSidebar()"
+<!-- Local SVG icon set keeps the shell sharp without a remote icon font or CDN. -->
+<svg class="nero-icon-sprite" style="display: none !important; position: absolute; width: 0; height: 0; overflow: hidden;" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+    <symbol id="nero-i-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7M5 9v12h14V9M9 21v-8h6v8"/></symbol>
+    <symbol id="nero-i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c.4-3.5 2.4-5.3 6-5.3s5.6 1.8 6 5.3M16 5.2a3 3 0 0 1 0 5.6M17 14.8c2.4.6 3.7 2.3 4 5.2"/></symbol>
+    <symbol id="nero-i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6"/></symbol>
+    <symbol id="nero-i-chart" viewBox="0 0 24 24"><path d="M4 20V5M4 20h17M7 16l4-4 3 2 6-7M16 7h4v4"/></symbol>
+    <symbol id="nero-i-shield" viewBox="0 0 24 24"><path d="M12 3 20 6v5.4c0 4-3 7.2-8 9.6-5-2.4-8-5.6-8-9.6V6zM8.5 12l2.2 2.2 4.8-4.8"/></symbol>
+    <symbol id="nero-i-ticket" viewBox="0 0 24 24"><path d="M4 5h16v5a2 2 0 0 0 0 4v5H4v-5a2 2 0 0 0 0-4zM9 8v2M9 14v2"/></symbol>
+    <symbol id="nero-i-box" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5zM3 8v9l9 5 9-5V8M12 13v9M7.5 5.5l9 5"/></symbol>
+    <symbol id="nero-i-roles" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8 10a.8.8 0 1 0 0 .1M16 10a.8.8 0 1 0 0 .1M8.5 14c1 1.4 2.2 2 3.5 2s2.5-.6 3.5-2"/></symbol>
+    <symbol id="nero-i-zap" viewBox="0 0 24 24"><path d="M13.5 2.8 5 13h6l-.5 8.2L19 11h-6z"/></symbol>
+    <symbol id="nero-i-message" viewBox="0 0 24 24"><path d="M4 5h16v12H9l-5 4zM8 9h8M8 13h5"/></symbol>
+    <symbol id="nero-i-trophy" viewBox="0 0 24 24"><path d="M8 4h8v5a4 4 0 0 1-8 0zM8 6H4v2a4 4 0 0 0 4 4M16 6h4v2a4 4 0 0 1-4 4M12 13v5M8 21h8M9 18h6"/></symbol>
+    <symbol id="nero-i-star" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z"/></symbol>
+    <symbol id="nero-i-coins" viewBox="0 0 24 24"><ellipse cx="10" cy="7" rx="7" ry="3"/><path d="M3 7v5c0 1.7 3.1 3 7 3M17 7v2M3 12v5c0 1.7 3.1 3 7 3M17 12.5c2.2 0 4 1 4 2.3v5c0 1.3-1.8 2.2-4 2.2s-4-1-4-2.2v-5c0-1.3 1.8-2.3 4-2.3zM13 15c0 1.2 1.8 2.2 4 2.2s4-1 4-2.2"/></symbol>
+    <symbol id="nero-i-bag" viewBox="0 0 24 24"><path d="M5 8h14l1 13H4zM9 9V6a3 3 0 0 1 6 0v3"/></symbol>
+    <symbol id="nero-i-shop" viewBox="0 0 24 24"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4zM3 6h18M16 10a4 4 0 0 1-8 0"/></symbol>
+    <symbol id="nero-i-speaker" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/></symbol>
+    <symbol id="nero-i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></symbol>
+    <symbol id="nero-i-sliders" viewBox="0 0 24 24"><path d="M4 6h6M14 6h6M4 12h2M10 12h10M4 18h8M16 18h4"/><circle cx="12" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="14" cy="18" r="2"/></symbol>
+    <symbol id="nero-i-megaphone" viewBox="0 0 24 24"><path d="M4 13V9h4l10-4v12L8 13zM8 13l2 7h4l-2-6M18 8l3-2M18 16l3 2"/></symbol>
+    <symbol id="nero-i-calendar" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 3v4M16 3v4M4 10h16M8 14h2M14 14h2M8 17h2"/></symbol>
+    <symbol id="nero-i-gamepad" viewBox="0 0 24 24"><path d="M7 8h10a4 4 0 0 1 3.8 5l-1 3.4a2.5 2.5 0 0 1-4.2 1L13.5 15h-3l-2.1 2.4a2.5 2.5 0 0 1-4.2-1L3.2 13A4 4 0 0 1 7 8zM7 11v4M5 13h4M16.5 12h.1M18.5 14h.1"/></symbol>
+    <symbol id="nero-i-map" viewBox="0 0 24 24"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3zM9 3v15M15 6v15M12 9a2.2 2.2 0 1 0 0 .1M12 9c0 2-2.2 3.4-2.2 5.1h4.4C14.2 12.4 12 11 12 9"/></symbol>
+    <symbol id="nero-i-tag" viewBox="0 0 24 24"><path d="M20 13 13 20 4 11V4h7z"/><circle cx="8" cy="8" r="1"/></symbol>
+    <symbol id="nero-i-handshake" viewBox="0 0 24 24"><path d="m3 9 4-4 5 1 2-1 7 4-2 7-4 4-4-2-3 1-4-4zM7 6l4 4 3-2 5 4M8 15l3 3M11 13l4 4M14 11l4 3"/></symbol>
+    <symbol id="nero-i-book" viewBox="0 0 24 24"><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H20v18H7.5A3.5 3.5 0 0 0 4 23zM4 5.5v14A3.5 3.5 0 0 1 7.5 16H20M8 6h7M8 10h7"/></symbol>
+    <symbol id="nero-i-backpack" viewBox="0 0 24 24"><path d="M7 7V5a5 5 0 0 1 10 0v2M5 8a3 3 0 0 1 3-3h8a3 3 0 0 1 3 3v12H5zM5 12h14M9 12v3h6v-3M9 8h6"/></symbol>
+    <symbol id="nero-i-arrows" viewBox="0 0 24 24"><path d="M7 7h13l-3-3M17 17H4l3 3M20 7l-3 3M4 17l3-3"/></symbol>
+    <symbol id="nero-i-hand" viewBox="0 0 24 24"><path d="M8 12V6a1.5 1.5 0 0 1 3 0v5-7a1.5 1.5 0 0 1 3 0v7-5a1.5 1.5 0 0 1 3 0v7-3a1.5 1.5 0 0 1 3 0v5c0 4-2.5 7-7 7h-1c-2.5 0-4.2-1.2-5.4-3L4 15a1.7 1.7 0 0 1 2.5-2.2L8 14"/></symbol>
+    <symbol id="nero-i-id" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="2.3"/><path d="M5.5 16c.4-1.7 1.5-2.5 3.5-2.5s3.1.8 3.5 2.5M15 10h3M15 14h3"/></symbol>
+    <symbol id="nero-i-video" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3zM8 10l4 2-4 2z"/></symbol>
+    <symbol id="nero-i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></symbol>
+    <symbol id="nero-i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></symbol>
+    <symbol id="nero-i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/></symbol>
+    <symbol id="nero-i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></symbol>
+    <symbol id="nero-i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.1M7 16.5h.1M11 7.5h6M11 16.5h6"/></symbol>
+    <symbol id="nero-i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+    <symbol id="nero-i-refresh" viewBox="0 0 24 24"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3L21.5 8M22 12.5a10 10 0 0 1-18.8 4.2L2.5 16"/></symbol>
+    <symbol id="nero-i-bell" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></symbol>
+    <symbol id="nero-i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M10 11v6M14 11v6"/></symbol>
+    <symbol id="nero-i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></symbol>
+    <symbol id="nero-i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="nero-i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/></symbol>
+    <symbol id="nero-i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="nero-i-cross" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="nero-i-save" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h8"/></symbol>
+    <symbol id="nero-i-folder" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+    <symbol id="nero-i-pencil" viewBox="0 0 24 24"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></symbol>
+    <symbol id="nero-i-mic" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/></symbol>
+    <symbol id="nero-i-gift" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="13" rx="2"/><path d="M12 8v13M3 12h18M12 8H7.5a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8zm0 0h4.5a2.5 2.5 0 0 0 0-5C13 3 12 8 12 8z"/></symbol>
+    <symbol id="nero-i-sparkles" viewBox="0 0 24 24"><path d="m12 3-1.9 4.8L5.3 9.7l3.8 3.7-.9 5.3 4.8-2.5 4.8 2.5-.9-5.3 3.8-3.7-4.8-1.9zM19 3l-.9 2.2L16 6l1.9.9.9 2.2.9-2.2L22 6l-2.2-.9zM5 16l-.9 2.2L2 19l2.1.9.9 2.1.9-2.1L8 19l-2.1-.9z"/></symbol>
+    <symbol id="nero-i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
+    <symbol id="nero-i-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="nero-i-door" viewBox="0 0 24 24"><path d="M18 20V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16M2 20h20M14 12v.01"/></symbol>
+    <symbol id="nero-i-external" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3"/></symbol>
+    <symbol id="nero-i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+    <symbol id="nero-i-slash" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 14.14 14.14"/></symbol>
+    <symbol id="nero-i-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></symbol>
+</svg>
+<button class="hamburger" id="sidebar-toggle" type="button" onclick="toggleSidebar()"
+    aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"
     style="display:none;position:fixed;top:14px;left:14px;z-index:200;
            background:var(--bg2);border:1px solid var(--border);
            border-radius:8px;padding:8px;cursor:pointer;flex-direction:column;gap:4px;">
@@ -92,33 +241,38 @@
     <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
     <span style="display:block;width:18px;height:2px;background:var(--text2)"></span>
 </button>
-<div class="sidebar">
+<button class="sidebar-overlay" id="sidebar-overlay" type="button" aria-label="Close navigation"
+        aria-hidden="true" tabindex="-1" onclick="closeSidebar()"></button>
+<div class="sidebar" id="sidebar">
     <div style="padding:20px 18px 16px;border-bottom:1px solid var(--border);
                 display:flex;align-items:center;gap:12px;">
-        <div style="width:38px;height:38px;border-radius:50%;background:var(--accent);
-                    display:flex;align-items:center;justify-content:center;
-                    font-weight:700;font-size:16px;color:#fff;flex-shrink:0;">N</div>
+        <div class="nero-logo-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true">
+                <path d="m4 7 8-4 8 4-8 4-8-4Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                <path d="m4 11 8 4 8-4M4 15l8 4 8-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+        </div>
         <div>
             <div style="font-weight:700;font-size:16px;color:var(--text)">Nero</div>
             <div style="font-size:11px;color:var(--text3)">Dashboard</div>
         </div>
     </div>
-    {% if guild_id %}
+    {% if guild_id and request.endpoint != 'server_select' %}
     <div style="padding:10px 12px;border-bottom:1px solid var(--border);">
         <a href="{{ url_for('server_select') }}"
            style="display:flex;align-items:center;gap:8px;padding:8px 10px;
                   border-radius:8px;background:var(--bg3);border:1px solid var(--border);
                   text-decoration:none;color:var(--text2);font-size:12px;
                   transition:all .15s;">
-            <span style="font-size:14px;">🖥️</span>
+            <svg class="server-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-server"></use></svg>
             <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
                 Server: {{ guild_name or guild_id }}
             </span>
-            <span style="color:var(--text3);font-size:11px;">↗</span>
+            <svg class="server-ext-icon" viewBox="0 0 24 24" style="width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2;" aria-hidden="true"><use href="#nero-i-external"></use></svg>
         </a>
     </div>
-    {% endif %}
-    <nav style="flex:1;padding:12px 10px;overflow-y:auto;">
+    <nav aria-label="Dashboard navigation" hx-indicator="#global-spinner"
+         style="flex:1;padding:12px 10px;overflow-y:auto;">
 <div class="nav-section">
     <div class="nav-section-title">General</div>
     <a href="/"
@@ -128,7 +282,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🏠</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-home"></use></svg></span>
         <span class="nav-text">Overview</span>
     </a>
     <a href="/members"
@@ -138,7 +292,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">👥</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-users"></use></svg></span>
         <span class="nav-text">Members</span>
     </a>
     <a href="/audit-log"
@@ -148,7 +302,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">📝</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-file"></use></svg></span>
         <span class="nav-text">Audit Log</span>
     </a>
     <a href="/reports"
@@ -158,7 +312,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🚩</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-chart"></use></svg></span>
         <span class="nav-text">Reports</span>
     </a>
 </div>
@@ -171,7 +325,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🛡️</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-shield"></use></svg></span>
         <span class="nav-text">Moderation</span>
     </a>
     <a href="/tickets"
@@ -181,7 +335,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🎫</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-ticket"></use></svg></span>
         <span class="nav-text">Tickets</span>
     </a>
     <a href="/embed-builder"
@@ -191,7 +345,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">📦</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-box"></use></svg></span>
         <span class="nav-text">Embed Builder</span>
     </a>
     <a href="/reaction-roles"
@@ -201,7 +355,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🎭</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-roles"></use></svg></span>
         <span class="nav-text">Reaction Roles</span>
     </a>
     <a href="/triggers"
@@ -211,7 +365,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">⚡</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-zap"></use></svg></span>
         <span class="nav-text">Triggers</span>
     </a>
     <a href="/custom-commands"
@@ -221,7 +375,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">💬</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-message"></use></svg></span>
         <span class="nav-text">Custom Commands</span>
     </a>
 </div>
@@ -234,7 +388,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🏆</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-trophy"></use></svg></span>
         <span class="nav-text">MVP System</span>
     </a>
     <a href="/leveling"
@@ -244,7 +398,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">⭐</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-star"></use></svg></span>
         <span class="nav-text">Leveling</span>
     </a>
     <a href="/economy"
@@ -254,7 +408,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">💰</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-coins"></use></svg></span>
         <span class="nav-text">Economy</span>
     </a>
     <a href="/shop"
@@ -264,7 +418,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🛒</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-bag"></use></svg></span>
         <span class="nav-text">Shop</span>
     </a>
     <a href="/shop-designer"
@@ -274,7 +428,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🧩</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-sliders"></use></svg></span>
         <span class="nav-text">Shop Designer</span>
     </a>
     <a href="/shop-publisher"
@@ -285,7 +439,7 @@
        hx-push-url="true"
        class="nav-link nav-link-legacy"
        aria-label="Legacy Shop Publisher — compatibility page">
-        <span class="nav-icon">📣</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-megaphone"></use></svg></span>
         <span class="nav-text">Shop Publisher · Legacy</span>
     </a>
     <a href="/events"
@@ -295,7 +449,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🎯</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-calendar"></use></svg></span>
         <span class="nav-text">Events</span>
     </a>
     <a href="/minigames"
@@ -305,7 +459,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🎲</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-gamepad"></use></svg></span>
         <span class="nav-text">Minigames</span>
     </a>
     <a href="/missions"
@@ -315,7 +469,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🗺️</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-map"></use></svg></span>
         <span class="nav-text">Missions</span>
     </a>
     <a href="/tag-missions"
@@ -325,7 +479,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🏷️</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-tag"></use></svg></span>
         <span class="nav-text">Tag Missions</span>
     </a>
     <a href="/tag-partners"
@@ -335,7 +489,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🤝</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-handshake"></use></svg></span>
         <span class="nav-text">Tag Partners</span>
     </a>
     <a href="/ledger"
@@ -345,7 +499,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">📒</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-book"></use></svg></span>
         <span class="nav-text">Ledger</span>
     </a>
     <a href="/inventory"
@@ -355,7 +509,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🎒</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-backpack"></use></svg></span>
         <span class="nav-text">Inventory</span>
     </a>
     <a href="/trade"
@@ -365,7 +519,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🤝</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-arrows"></use></svg></span>
         <span class="nav-text">Trade History</span>
     </a>
 </div>
@@ -378,7 +532,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">⚙️</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-sliders"></use></svg></span>
         <span class="nav-text">General Settings</span>
     </a>
     <a href="/config/welcome"
@@ -388,7 +542,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">👋</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-hand"></use></svg></span>
         <span class="nav-text">Welcome & Leave</span>
     </a>
     <a href="/config/boost"
@@ -398,7 +552,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🔰</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-zap"></use></svg></span>
         <span class="nav-text">Boost Roles</span>
     </a>
     <a href="/config/botprofile"
@@ -408,7 +562,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🪪</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-id"></use></svg></span>
         <span class="nav-text">Bot Profile</span>
     </a>
     <a href="/creator"
@@ -418,7 +572,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🎬</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-video"></use></svg></span>
         <span class="nav-text">Creator Hub</span>
     </a>
     <a href="/commands"
@@ -428,8 +582,8 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🎮</span>
-        <span class="nav-text">Commands</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-terminal"></use></svg></span>
+        <span class="nav-text">Command Manager</span>
     </a>
     <a href="/config/access"
        hx-get="/config/access"
@@ -438,7 +592,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🔐</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-lock"></use></svg></span>
         <span class="nav-text">Dashboard Access</span>
     </a>
     <a href="/backups"
@@ -448,7 +602,7 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">💾</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-database"></use></svg></span>
         <span class="nav-text">Backups</span>
     </a>
     <a href="/health"
@@ -458,11 +612,21 @@
        hx-select="#content-area"
        hx-push-url="true"
        class="nav-link">
-        <span class="nav-icon">🩺</span>
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-pulse"></use></svg></span>
         <span class="nav-text">System Health</span>
     </a>
 </div>
     </nav>
+    {% else %}
+    <div style="flex:1;padding:24px 16px;color:var(--text3);font-size:12px;text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;">
+        <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" style="opacity:0.4;">
+            <rect x="3" y="4" width="18" height="7" rx="2"></rect>
+            <rect x="3" y="13" width="18" height="7" rx="2"></rect>
+            <path d="M7 7.5h.1M7 16.5h.1M11 7.5h6M11 16.5h6"></path>
+        </svg>
+        <div>Select a server to view navigation and settings.</div>
+    </div>
+    {% endif %}
     <div style="padding:12px;border-top:1px solid var(--border);
                 display:flex;align-items:center;gap:10px;">
         {% if user and user.avatar %}
@@ -496,21 +660,52 @@
 </div>
 <div class="main-content">
     {% if is_staging %}
-    <div class="staging-banner">🧪 STAGING ENVIRONMENT — changes here do not affect production data</div>
+    <div class="staging-banner"><svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:6px;" aria-hidden="true"><use href="#nero-i-pulse"></use></svg>STAGING ENVIRONMENT — changes here do not affect production data</div>
     {% endif %}
     <div class="topbar">
         <div style="display:flex;align-items:center;gap:12px;">
-            <div class="topbar-title" id="page-title">{% block title %}Dashboard{% endblock %}</div>
-            <div class="htmx-indicator" id="global-spinner"></div>
-        </div>
-        <div class="topbar-actions">
-            <div class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
-                <div class="theme-toggle-thumb"></div>
+            <div class="topbar-title" id="page-title" tabindex="-1">{% block title %}Dashboard{% endblock %}</div>
+            <div class="htmx-indicator" id="global-spinner" role="status" aria-live="polite" aria-label="Loading page">
+                <span class="sr-only">Loading page…</span>
             </div>
         </div>
+        <div class="topbar-actions">
+            <button class="topbar-search-btn" id="global-search-trigger" type="button" onclick="openCommandPalette()"
+                    aria-label="Quick search (Ctrl+K or /)" title="Quick search (Ctrl+K or /)">
+                <svg class="topbar-search-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-search"></use></svg>
+                <span class="topbar-search-placeholder">Quick search…</span>
+                <kbd class="topbar-search-kbd"><abbr title="Command or Control">⌘</abbr>K</kbd>
+            </button>
+            <button class="theme-toggle" id="theme-toggle" type="button" onclick="toggleTheme()"
+                    title="Toggle theme" aria-label="Toggle color theme" aria-pressed="false">
+                <span class="theme-toggle-thumb" aria-hidden="true"></span>
+            </button>
+        </div>
     </div>
-    <div class="page-content" id="content-area">
+    <div class="page-content" id="content-area" hx-history-elt data-page-title="{{ self.title() | striptags | trim }}">
         {% block content %}{% endblock %}
+        <span hidden data-page-title="{{ self.title() | striptags | trim }}"></span>
+    </div>
+</div>
+
+<!-- Global Command Palette (Ctrl+K) -->
+<div id="command-palette-modal" class="modal-overlay cmd-palette-overlay" style="display:none;" role="dialog" aria-modal="true" aria-label="Command palette" onclick="handlePaletteOverlayClick(event)">
+    <div class="cmd-palette-box" role="document">
+        <div class="cmd-palette-header">
+            <svg class="cmd-palette-search-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-search"></use></svg>
+            <label for="cmd-palette-input" class="sr-only">Search pages, tools, and commands</label>
+            <input type="search" id="cmd-palette-input" class="cmd-palette-input" placeholder="Type a page, command, or action…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="cmd-palette-results" aria-autocomplete="list" oninput="filterPalette(this.value)" onkeydown="handlePaletteKeydown(event)">
+            <button type="button" class="cmd-palette-close-btn" onclick="closeCommandPalette()" aria-label="Close command palette">ESC</button>
+        </div>
+        <div class="cmd-palette-body" id="cmd-palette-results" role="listbox" aria-label="Search results"></div>
+        <div class="cmd-palette-footer">
+            <div class="cmd-palette-hint">
+                <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
+                <span><kbd>↵</kbd> Select</span>
+                <span><kbd>ESC</kbd> Close</span>
+            </div>
+            <div class="cmd-palette-brand">Nero Quick Action</div>
+        </div>
     </div>
 </div>
 <div id="edit-modal" class="modal-overlay" style="display:none;">
@@ -546,6 +741,7 @@
 <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 <script src="{{ url_for('static', filename='js/nero-select.js') }}"></script>
 <script src="{{ url_for('static', filename='js/nero-alias-input.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard-tabs.js') }}"></script>
 <!-- Page-module registry (init/destroy per page). Pages opt in with
      data-page-module + data-page-script on their own root element; without
      that marker this file does nothing at all. It is loaded AFTER
@@ -554,81 +750,87 @@
      NeroSelect/NeroAlias widgets already being initialised. -->
 <script src="{{ url_for('static', filename='js/nav-lifecycle.js') }}"></script>
 <script>
-    htmx.config.globalViewTransitions = false;
-    htmx.config.defaultSwapStyle = 'innerHTML';
+    if (window.htmx) {
+        htmx.config.globalViewTransitions = false;
+        htmx.config.defaultSwapStyle = 'innerHTML';
+    }
+
+    function syncActiveNavigation() {
+        const path = window.location.pathname;
+        document.querySelectorAll('.nav-link').forEach(function(link) {
+            const href = link.getAttribute('href');
+            const active = href === path || (href !== '/' && path.startsWith(href + '/'));
+            link.classList.toggle('active', active);
+            if (active) link.setAttribute('aria-current', 'page');
+            else link.removeAttribute('aria-current');
+        });
+    }
+
+    function liveSwapTarget(reportedTarget) {
+        if (!reportedTarget) return null;
+        return reportedTarget.id
+            ? (document.getElementById(reportedTarget.id) || reportedTarget)
+            : reportedTarget;
+    }
+    function clearSwapBusy(event) {
+        const target = liveSwapTarget(event && event.detail && event.detail.target);
+        if (target) target.removeAttribute('aria-busy');
+    }
+    document.body.addEventListener('htmx:beforeSend', function(evt) {
+        const target = liveSwapTarget(evt.detail && evt.detail.target);
+        if (target) target.setAttribute('aria-busy', 'true');
+    });
+    document.body.addEventListener('htmx:afterRequest', clearSwapBusy);
+    ['htmx:sendError', 'htmx:timeout'].forEach(function(type) {
+        document.body.addEventListener(type, clearSwapBusy);
+    });
+
     document.body.addEventListener('htmx:afterSwap', function(evt) {
+        const target = liveSwapTarget(evt.detail && evt.detail.target);
+        if (!target) return;
+        const isPageSwap = target.id === 'content-area';
+        const drawerWasOpen = isPageSwap && window.matchMedia &&
+            window.matchMedia('(max-width: 768px)').matches &&
+            document.getElementById('sidebar')?.classList.contains('open');
+
         if (window.$ && $.fn.select2) {
-            $(evt.detail.target).find('.select2-widget').select2({
-                theme: 'default',
-                width: '100%'
-            });
+            $(target).find('.select2-widget').select2({ theme: 'default', width: '100%' });
         }
-        evt.detail.target.querySelectorAll('script').forEach(function(oldScript) {
-            const newScript = document.createElement('script');
-            [...oldScript.attributes].forEach(a => newScript.setAttribute(a.name, a.value));
-            newScript.textContent = oldScript.textContent;
-            oldScript.parentNode.replaceChild(newScript, oldScript);
-        });
-        const path = window.location.pathname;
-        document.querySelectorAll('.nav-link').forEach(function(a) {
-            const href = a.getAttribute('href');
-            a.classList.toggle('active', href === path || (href === '/' && path === '/'));
-        });
-    });
-    document.querySelectorAll('.nav-link').forEach(function(a) {
-        a.addEventListener('click', function() {
-            document.querySelectorAll('.nav-link').forEach(n => n.classList.remove('active'));
-            a.classList.add('active');
-        });
-    });
-    (function() {
-        const path = window.location.pathname;
-        document.querySelectorAll('.nav-link').forEach(function(a) {
-            if (a.getAttribute('href') === path) {
-                a.classList.add('active');
+        target.removeAttribute('aria-busy');
+        syncActiveNavigation();
+
+        if (drawerWasOpen) {
+            if (typeof window.closeSidebar === 'function') {
+                window.closeSidebar({ restoreFocus: false });
             }
-        });
-    })();
+            document.getElementById('page-title')?.focus({ preventScroll: true });
+        }
+    });
+
+    function syncPageTitleFromContent() {
+        const content = document.getElementById('content-area');
+        const title = content && (content.querySelector('[data-page-title]')?.getAttribute('data-page-title') ||
+            content.getAttribute('data-page-title'));
+        const titleElement = document.getElementById('page-title');
+        if (title && titleElement) titleElement.textContent = title;
+    }
+    function syncRestoredPageShell() {
+        syncActiveNavigation();
+        syncPageTitleFromContent();
+        if (typeof window.closeSidebar === 'function') {
+            window.closeSidebar({ restoreFocus: false });
+        }
+    }
+
+    document.addEventListener('htmx:pushedIntoHistory', syncActiveNavigation);
+    document.addEventListener('htmx:historyRestore', syncRestoredPageShell);
+    window.addEventListener('popstate', function() {
+        // htmx restores cached content during the popstate turn; run after it
+        // so the shell title and active nav reflect the restored fragment.
+        window.setTimeout(syncRestoredPageShell, 0);
+    });
+    syncActiveNavigation();
 </script>
 {% block scripts %}{% endblock %}
-<style>
-.sidebar {
-    width: var(--sidebar-w);
-    background: var(--bg2);
-    border-right: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    position: fixed;
-    height: 100vh;
-    z-index: 100;
-    overflow: hidden;
-}
-.nav-link {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 9px 10px;
-    border-radius: 8px;
-    text-decoration: none;
-    color: var(--text2);
-    font-size: 13px;
-    font-weight: 500;
-    margin-bottom: 1px;
-    transition: all .12s;
-}
-.nav-link:hover { background: var(--bg4); color: var(--text); }
-.nav-link.active { background: var(--accent); color: #fff; }
-.nav-link-legacy { opacity: .62; }
-.nav-icon { font-size: 15px; width: 18px; text-align: center; flex-shrink: 0; }
-.staging-banner {
-    background: var(--warning);
-    color: #000;
-    font-size: 12px;
-    font-weight: 700;
-    text-align: center;
-    padding: 6px 12px;
-    letter-spacing: .02em;
-}
-</style>
 </body>
 </html>

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Confirm Server Selection' if switch_confirmation else 'Active Server Mismatch' }}{% endblock %}
+{% block content %}
+<div class="card" style="max-width:540px;margin:40px auto;">
+    {% if switch_confirmation %}
+    <div class="card-title">Confirm Server Selection</div>
+    <p>Confirm that you want to select server <strong>{{ target_guild_id }}</strong>. Your session has not been switched yet.</p>
+    {% else %}
+    <div class="card-title">Active Server Mismatch</div>
+    <p>This link is for server <strong>{{ target_guild_id }}</strong>, but your active server is <strong>{{ current_guild_id }}</strong>. Your session was not switched automatically.</p>
+    {% endif %}
+    <form method="POST" action="{{ url_for('select_guild', guild_id=target_guild_id) }}">
+        <input type="hidden" name="csrf_token" value="{{ session.get('csrf_token', '') }}">
+        <input type="hidden" name="next" value="{{ next_url }}">
+        <button type="submit" class="btn btn-primary">Switch server and continue</button>
+    </form>
+    <a href="{{ url_for('index') }}">Stay on the current server</a>
+</div>
+{% endblock %}
