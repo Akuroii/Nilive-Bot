@@ -1,0 +1,2402 @@
+diff --git a/cogs/boost.py b/cogs/boost.py
+index 731926c..c102123 100644
+--- a/cogs/boost.py
++++ b/cogs/boost.py
+@@ -188,6 +188,15 @@ class Boost(commands.Cog):
+             # the lock shared with the equip and Shop delivery paths.
+             if role not in member.roles:
+                 return
++            # The unboost event that scheduled this retirement may be stale by
++            # the time the lock is free: a re-boost can arrive while it waits.
++            # `role_removal_blocked(retiring="booster")` deliberately ignores
++            # the Booster entitlement, so it cannot notice that. `member` is the
++            # live cached object, so this reads the CURRENT boost state.
++            if getattr(member, "premium_since", None) is not None:
++                print(f"[BOOST] Not retiring {label} {role.id} for {member.id}: "
++                      f"member is boosting again")
++                return
+             kept_reason = await role_removal_blocked(
+                 guild.id, member.id, int(role.id), retiring="booster", member=member)
+             if not kept_reason:
+diff --git a/cogs/shop.py b/cogs/shop.py
+index 95dfb9b..db73774 100644
+--- a/cogs/shop.py
++++ b/cogs/shop.py
+@@ -12,8 +12,10 @@ from utils.emoji import CHECK_EMOJI
+ from utils.timed_ownership import (
+     open_purchase, update_purchase, claim_purchase_transition,
+     refund_purchase, format_remaining, parse_time, CATEGORY_COLOR,
+-    PURCHASE_PENDING, PURCHASE_DELIVERED, PURCHASE_UNCERTAIN,
++    PURCHASE_PENDING, PURCHASE_DELIVERING, PURCHASE_DELIVERED, PURCHASE_UNCERTAIN,
+     PURCHASE_FAILED,
++    live_purchase_scope, begin_delivery_intent, settle_delivery_intent,
++    mark_provenance_tracked, INTENT_KIND_DISCORD_ROLE, INTENT_ABSENT, INTENT_RECORDED,
+ )
+ 
+ SHOP_COLOR = 0x7c5cbf
+@@ -89,6 +91,17 @@ class InventoryEquipView(discord.ui.View):
+ 
+ async def process_purchase(interaction: discord.Interaction,
+                             item_id: int):
++    """Run one purchase. Operations opened inside are live in this process.
++
++    The reconciler never parks a live delivery as stranded, however slow it is;
++    the scope releases them on every exit path, including cancellation.
++    """
++    with live_purchase_scope():
++        return await _process_purchase(interaction, item_id)
++
++
++async def _process_purchase(interaction: discord.Interaction,
++                            item_id: int):
+     guild_id = interaction.guild.id
+     user_id  = interaction.user.id
+ 
+@@ -332,10 +345,15 @@ async def process_purchase(interaction: discord.Interaction,
+     # Now every purchase is an explicit operation with a journal row written
+     # BEFORE anything moves, and the success message is gated on delivery:
+     #
+-    #   pending ──► delivered            (delivery succeeded, history written)
+-    #      │
+-    #      ├──────► failed ──► refunded  (known failure: money + stock once)
+-    #      └──────► uncertain            (outcome unknown: keep state, review)
++    #   pending ──► delivering ──► delivered   (delivery succeeded, history written)
++    #                   │
++    #                   ├──────► failed ──► refunded  (known failure: money + stock once)
++    #                   └──────► uncertain            (outcome unknown: keep state, review)
++    #
++    # `pending -> delivering` is ONE transaction with the stock reservation and
++    # the charge, so a refund can never race a live delivery. A `delivering` row
++    # whose worker died is parked as `uncertain` by the reconciler - never
++    # refunded because it is old.
+     #
+     # The ordering constraint that cannot be swapped: delivery must not happen
+     # before the charge, or a failed payment would hand out free goods. So the
+@@ -344,99 +362,115 @@ async def process_purchase(interaction: discord.Interaction,
+         guild_id, user_id, item_id=iid, item_name=name,
+         currency=pay_currency, amount=0 if free else pay_amount)
+ 
+-    # P1 #11 FIX (kept): stock is claimed atomically FIRST; if the balance
+-    # deduction that follows fails, the stock claim is released. A Free item
+-    # claims stock exactly like a paid one.
+-    # Stock decrement + `stock_reserved=1` share a single BEGIN IMMEDIATE
+-    # transaction so a crash between them never leaks stock without a
+-    # journal flag.
++    # The journal row already exists. One write transaction claims the
++    # operation, reserves stock, charges (unless free), and records delivery
++    # ownership. Other processes must not refund a delivering operation.
+     stock_ok = False
+-    async with aiosqlite.connect(DB_PATH) as db:
+-        await db.execute("BEGIN IMMEDIATE")
+-        try:
+-            stock_ok = await safe_decrement_stock(iid, db=db)
+-            if stock_ok:
+-                await update_purchase(op_id, stock_reserved=1, db=db)
+-                await db.commit()
+-            else:
+-                await db.execute("ROLLBACK")
+-        except Exception as exc:
+-            try:
+-                await db.execute("ROLLBACK")
+-            except Exception:
+-                pass
++    commit_started = False
++    rollback_confirmed = False
++    try:
++        async with aiosqlite.connect(DB_PATH) as db:
++            await db.execute("BEGIN IMMEDIATE")
+             try:
+-                await claim_purchase_transition(
+-                    op_id, from_statuses=(PURCHASE_PENDING,),
+-                    to_status=PURCHASE_FAILED,
+-                    detail=f"stock reservation error: {exc}")
++                cursor = await db.execute(
++                    "SELECT status, stock_reserved, charged, refunded, stock_returned, "
++                    "delivery_rollback FROM shop_purchase_operations WHERE op_id=?", (op_id,))
++                state = await cursor.fetchone()
++                if not state or state != (PURCHASE_PENDING, 0, 0, 0, 0, None):
++                    await db.rollback()
++                    await interaction.response.send_message(
++                        f"Purchase needs a check; reference: `{op_id}`.", ephemeral=True)
++                    return
++                stock_ok = await safe_decrement_stock(iid, db=db)
++                if not stock_ok:
++                    await db.rollback()
++                    rollback_confirmed = True
++                else:
++                    if not await update_purchase(op_id, stock_reserved=1, db=db):
++                        raise RuntimeError("Could not record stock reservation")
++                    if not free:
++                        # safe_deduct permits a missing legacy ledger table.
++                        # Shop payments require the ledger in the same tx.
++                        await db.execute("SELECT id FROM transaction_ledger LIMIT 0")
++                        await safe_deduct(
++                            guild_id, user_id, pay_amount, currency=pay_currency,
++                            reason=f"Shop purchase: {name}", source="shop", db=db)
++                        if not await update_purchase(op_id, charged=1, db=db):
++                            raise RuntimeError("Could not record charge")
++                    # From here on every good this delivery creates carries
++                    # `op_id`; recorded in the same transaction as the claim.
++                    if not await mark_provenance_tracked(op_id, db=db):
++                        raise RuntimeError("Could not record delivery protocol")
++                    if not await claim_purchase_transition(
++                            op_id, from_statuses=(PURCHASE_PENDING,),
++                            to_status=PURCHASE_DELIVERING,
++                            require_uncompensated=True, db=db):
++                        raise RuntimeError("Purchase lost delivery ownership")
++                    commit_started = True
++                    await db.commit()
+             except Exception:
+-                pass
++                try:
++                    await db.rollback()
++                    rollback_confirmed = not commit_started
++                except Exception:
++                    pass
++                raise
++    except InsufficientBalance:
++        if not rollback_confirmed:
+             raise
++        await claim_purchase_transition(
++            op_id, from_statuses=(PURCHASE_PENDING,),
++            to_status=PURCHASE_FAILED, detail="insufficient balance")
++        async with aiosqlite.connect(DB_PATH) as db:
++            cursor = await db.execute(
++                f"SELECT {pay_currency} FROM economy WHERE guild_id=? AND user_id=?",
++                (guild_id, user_id))
++            row = await cursor.fetchone()
++        bal = row[0] if row else 0
++        cur = await get_currency_config(guild_id)
++        cinfo = for_currency(cur, pay_currency)
++        await interaction.response.send_message(
++            f"You need {pay_amount:,} {cinfo['emoji']} but only have {bal:,}.",
++            ephemeral=True)
++        return
++    except Exception as exc:
++        if rollback_confirmed:
++            await claim_purchase_transition(
++                op_id, from_statuses=(PURCHASE_PENDING,),
++                to_status=PURCHASE_FAILED, detail=f"payment error: {exc}")
++        else:
++            # A commit error can be raised after the commit. Read the durable
++            # journal on a fresh connection; never retry or begin delivery.
++            # A committed delivering row stays quarantined. If still pending,
++            # move it to uncertain so no new payment/delivery can begin.
++            try:
++                async with aiosqlite.connect(DB_PATH) as check:
++                    await check.execute("BEGIN IMMEDIATE")
++                    row = await (await check.execute(
++                        "SELECT status, stock_reserved, charged, refunded, stock_returned "
++                        "FROM shop_purchase_operations WHERE op_id=?", (op_id,))).fetchone()
++                    await (await check.execute(
++                        "SELECT current_stock FROM shop_items WHERE id=?", (iid,))).fetchone()
++                    await (await check.execute(
++                        f"SELECT {pay_currency} FROM economy WHERE guild_id=? AND user_id=?",
++                        (guild_id, user_id))).fetchone()
++                    if row and row[0] == PURCHASE_PENDING:
++                        await claim_purchase_transition(
++                            op_id, from_statuses=(PURCHASE_PENDING,),
++                            to_status=PURCHASE_UNCERTAIN,
++                            detail="payment commit outcome needs review", db=check)
++                    await check.commit()
++            except Exception as check_exc:
++                print(f"[SHOP] Could not inspect uncertain payment {op_id}: {check_exc}")
++        raise
+ 
+     if not stock_ok:
+         await claim_purchase_transition(
+             op_id, from_statuses=(PURCHASE_PENDING,),
+             to_status=PURCHASE_FAILED, detail="out of stock")
+-        await interaction.response.send_message(
+-            "This item is out of stock.", ephemeral=True)
++        await interaction.response.send_message("This item is out of stock.", ephemeral=True)
+         return
+ 
+-    # Only the deduction is skipped for a Free item — safe_deduct() keeps its
+-    # own "amount must be positive" contract untouched; it is simply not called
+-    # when there is nothing to charge.
+-    # Balance deduction + `charged=1` share a single BEGIN IMMEDIATE
+-    # transaction so a crash after the debit rolls back the debit unless
+-    # `charged=1` commits with it.
+-    if not free:
+-        try:
+-            async with aiosqlite.connect(DB_PATH) as db:
+-                await db.execute("BEGIN IMMEDIATE")
+-                try:
+-                    await safe_deduct(
+-                        guild_id, user_id, pay_amount,
+-                        currency=pay_currency,
+-                        reason=f"Shop purchase: {name}", source="shop",
+-                        db=db)
+-                    await update_purchase(op_id, charged=1, db=db)
+-                    await db.commit()
+-                except Exception:
+-                    try:
+-                        await db.execute("ROLLBACK")
+-                    except Exception:
+-                        pass
+-                    raise
+-        except InsufficientBalance:
+-            # Nothing was charged, so only the stock claim has to be undone.
+-            if await claim_purchase_transition(
+-                    op_id, from_statuses=(PURCHASE_PENDING,),
+-                    to_status=PURCHASE_FAILED, detail="insufficient balance"):
+-                await refund_purchase(op_id)
+-            async with aiosqlite.connect(DB_PATH) as db:
+-                cursor = await db.execute(
+-                    f"SELECT {pay_currency} FROM economy WHERE guild_id=? AND user_id=?",
+-                    (guild_id, user_id))
+-                row = await cursor.fetchone()
+-            bal = row[0] if row else 0
+-            cur = await get_currency_config(guild_id)
+-            cinfo = for_currency(cur, pay_currency)
+-            await interaction.response.send_message(
+-                f"You need {pay_amount:,} {cinfo['emoji']} but only have {bal:,}.",
+-                ephemeral=True)
+-            return
+-        except Exception as exc:
+-            # The charge transaction rolled back (charged=0), so only any
+-            # already-reserved stock needs to be released.
+-            try:
+-                if await claim_purchase_transition(
+-                        op_id, from_statuses=(PURCHASE_PENDING,),
+-                        to_status=PURCHASE_FAILED,
+-                        detail=f"charge error: {exc}"):
+-                    await refund_purchase(op_id)
+-            except Exception:
+-                pass
+-            raise
+-
+     # `color` is a Shop CATEGORY, not a reward type: internally a permanent
+     # Colour is the existing `role` grant and a timed Colour is a timed role
+     # holding. Nothing new is introduced on the delivery side, so every role
+@@ -511,7 +545,7 @@ async def process_purchase(interaction: discord.Interaction,
+ 
+             finalized = await claim_purchase_transition(
+                 op_id,
+-                from_statuses=(PURCHASE_PENDING,),
++                from_statuses=(PURCHASE_DELIVERING,),
+                 to_status=PURCHASE_DELIVERED,
+                 detail=delivery.get("detail") or None,
+                 history_id=history_id,
+@@ -730,7 +764,61 @@ async def _write_purchase_history(guild_id: int, user_id: int,
+         return cursor.lastrowid
+ 
+ 
+-async def _deliver_purchase(interaction: discord.Interaction, *,
++async def _deliver_purchase(interaction: discord.Interaction, **kwargs) -> dict:
++    """Journal a Discord role grant BEFORE sending it, then deliver.
++
++    A role request that times out, is cancelled, or loses its process may have
++    been applied by Discord anyway. The write-ahead intent is what lets the
++    refund guard and the reconciler treat that as unresolved instead of absent.
++    Only a delivery that reports a CERTAIN failure marks the intent absent.
++    """
++    itype = kwargs.get("itype")
++    role_id = kwargs.get("role_id")
++    op_id = kwargs.get("op_id")
++    wrote = False
++    if itype in ("role", "temp_role") and role_id and op_id:
++        present_before = None
++        try:
++            guild = interaction.guild
++            member = guild.get_member(int(kwargs["user_id"])) if guild else None
++            role = guild.get_role(int(role_id)) if guild else None
++            if member is not None and role is not None:
++                present_before = role in member.roles
++        except Exception:
++            present_before = None
++        try:
++            outcome = await begin_delivery_intent(
++                str(op_id), kind=INTENT_KIND_DISCORD_ROLE,
++                guild_id=int(kwargs["guild_id"]), user_id=int(kwargs["user_id"]),
++                role_id=int(role_id), role_present_before=present_before)
++        except Exception as exc:
++            # Nothing was sent to Discord: a certain, compensable failure.
++            return {"success": False, "expires_at": None, "warning": None,
++                    "detail": None, "boost_expires_at": None, "uncertain": False,
++                    "entry_key": None,
++                    "error": f"Could not journal the role grant: {exc}"}
++        if outcome == "refused":
++            return {"success": False, "expires_at": None, "warning": None,
++                    "detail": None, "boost_expires_at": None, "uncertain": False,
++                    "entry_key": None,
++                    "error": "Purchase is no longer deliverable."}
++        wrote = outcome == "written"
++    result = await _deliver_purchase_effects(interaction, **kwargs)
++    if wrote:
++        # Best effort: if this write is lost the intent stays `started`, which
++        # only ever makes a later refund more conservative.
++        try:
++            if result.get("success"):
++                await settle_delivery_intent(str(op_id), INTENT_RECORDED)
++            elif not result.get("uncertain"):
++                await settle_delivery_intent(
++                    str(op_id), INTENT_ABSENT, note="certain delivery failure")
++        except Exception as exc:
++            print(f"[SHOP] Could not settle delivery intent for {op_id}: {exc}")
++    return result
++
++
++async def _deliver_purchase_effects(interaction: discord.Interaction, *,
+                             guild_id: int, user_id: int,
+                             itype: str, listing_type: str, name: str,
+                             role_id=None, duration_hours=None,
+@@ -985,7 +1073,7 @@ async def _compensate_failed_purchase(interaction: discord.Interaction, *,
+     if delivery.get("uncertain"):
+         await claim_purchase_transition(
+             op_id,
+-            from_statuses=(PURCHASE_PENDING, PURCHASE_UNCERTAIN),
++            from_statuses=(PURCHASE_DELIVERING,),
+             to_status=PURCHASE_UNCERTAIN,
+             detail=reason,
+             require_uncompensated=True,
+@@ -1006,7 +1094,7 @@ async def _compensate_failed_purchase(interaction: discord.Interaction, *,
+     op_status = PURCHASE_FAILED
+     stock_ok = not free
+     if await claim_purchase_transition(
+-            op_id, from_statuses=(PURCHASE_PENDING,),
++            op_id, from_statuses=(PURCHASE_DELIVERING,),
+             to_status=PURCHASE_FAILED, detail=reason):
+         outcome = await refund_purchase(op_id)
+         try:
+diff --git a/database.py b/database.py
+index 38994fc..5bb6989 100644
+--- a/database.py
++++ b/database.py
+@@ -497,11 +497,16 @@ async def init_db():
+                 # before this fix shipped, and worst case is one
+                 # already-in-flight expiry falling back to "no known
+                 # panel" instead of being lost.
+-                await db.execute(
+-                    "ALTER TABLE reaction_role_expiry "
+-                    "RENAME TO reaction_role_expiry_old")
++                # Build the replacement under a temporary name, then drop the
++                # original and rename the replacement into place. Renaming the
++                # LIVE table away first makes SQLite rewrite every view and
++                # trigger on OTHER tables that mention it to the `_old` name,
++                # which is then dropped, leaving them permanently dangling.
++                # legacy_alter_table stops the rename from re-parsing (and
++                # rejecting) those objects while the name is briefly absent.
++                await db.execute("DROP TABLE IF EXISTS reaction_role_expiry_new")
+                 await db.execute("""
+-                    CREATE TABLE reaction_role_expiry (
++                    CREATE TABLE reaction_role_expiry_new (
+                         guild_id   INTEGER,
+                         user_id    INTEGER,
+                         role_id    INTEGER,
+@@ -511,12 +516,27 @@ async def init_db():
+                     )
+                 """)
+                 await db.execute("""
+-                    INSERT INTO reaction_role_expiry
++                    INSERT INTO reaction_role_expiry_new
+                         (guild_id, user_id, role_id, message_id, expires_at)
+                     SELECT guild_id, user_id, role_id, 0, expires_at
+-                    FROM reaction_role_expiry_old
++                    FROM reaction_role_expiry
+                 """)
+-                await db.execute("DROP TABLE reaction_role_expiry_old")
++                old_count = (await (await db.execute(
++                    "SELECT COUNT(*) FROM reaction_role_expiry")).fetchone())[0]
++                new_count = (await (await db.execute(
++                    "SELECT COUNT(*) FROM reaction_role_expiry_new")).fetchone())[0]
++                if old_count != new_count:
++                    raise RuntimeError(
++                        f"reaction_role_expiry rebuild would lose rows "
++                        f"({old_count} -> {new_count}); aborted")
++                await db.execute("DROP TABLE reaction_role_expiry")
++                await db.execute("PRAGMA legacy_alter_table=ON")
++                try:
++                    await db.execute(
++                        "ALTER TABLE reaction_role_expiry_new "
++                        "RENAME TO reaction_role_expiry")
++                finally:
++                    await db.execute("PRAGMA legacy_alter_table=OFF")
+                 for statement in dependent_schema:
+                     await db.execute(statement)
+                 await db.commit()
+diff --git a/test_boost_role_race.py b/test_boost_role_race.py
+index 7e43c24..979097a 100644
+--- a/test_boost_role_race.py
++++ b/test_boost_role_race.py
+@@ -82,6 +82,38 @@ class BoostRaceTests(unittest.IsolatedAsyncioTestCase):
+     async def test_race_colour(self): await self.race('colour')
+     async def test_race_switch(self): await self.race('switch')
+ 
++    async def test_reboost_while_retirement_waits_for_slot_lock_keeps_role(self):
++        """Unboost event queued behind the slot lock; the member re-boosts before
++        the lock is free. The stale retirement must not take the role away."""
++        from utils.equip_engine import slot_lock
++        self.release.set()
++        gate = slot_lock(GUILD, USER)
++        await gate.acquire()  # e.g. a Shop delivery / equip holding the slot
++        try:
++            retire = asyncio.create_task(self.remove('reward'))
++            await asyncio.sleep(0.05)
++            self.assertFalse(retire.done(), 'retirement did not wait for the lock')
++            self.person.premium_since = datetime(2026, 11, 2, tzinfo=timezone.utc)  # re-boost
++        finally:
++            gate.release()
++        await asyncio.wait_for(retire, 5)
++        self.person.remove_roles.assert_not_awaited()
++        self.assertIn(self.old, self.person.roles)
++
++    async def test_still_unboosted_after_lock_wait_is_retired(self):
++        """Control: with no re-boost the same queued retirement still removes it."""
++        from utils.equip_engine import slot_lock
++        self.release.set()
++        gate = slot_lock(GUILD, USER)
++        await gate.acquire()
++        try:
++            retire = asyncio.create_task(self.remove('reward'))
++            await asyncio.sleep(0.05)
++        finally:
++            gate.release()
++        await asyncio.wait_for(retire, 5)
++        self.assertNotIn(self.old, self.person.roles)
++
+     async def test_unboost_removes_without_other_owner(self):
+         self.release.set()
+         await self.remove('reward')
+diff --git a/test_db_migration_concurrency.py b/test_db_migration_concurrency.py
+index 728b09a..f437125 100644
+--- a/test_db_migration_concurrency.py
++++ b/test_db_migration_concurrency.py
+@@ -114,18 +114,44 @@ class InitMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
+         execute("INSERT INTO reaction_role_expiry(guild_id,user_id,role_id,message_id) VALUES (1,2,4,8)")
+         self.assertEqual(rows('SELECT role_id FROM legacy_reaction_audit'), [(4,)])
+ 
++    async def test_rebuild_keeps_external_view_and_trigger_valid(self):
++        """Objects on OTHER tables that reference the rebuilt table must keep
++        referencing it, not a dropped `_old` table (SQLite rewrites references
++        on RENAME, so the rebuild must never rename the live table away)."""
++        self._legacy_reaction_table()
++        execute('CREATE TABLE ext_events (id INTEGER)')
++        execute('CREATE TABLE ext_log (n INTEGER)')
++        execute('CREATE VIEW ext_expiry_view AS SELECT guild_id, user_id, role_id FROM reaction_role_expiry')
++        execute('CREATE TRIGGER ext_touch AFTER INSERT ON ext_events BEGIN '
++                'INSERT INTO ext_log SELECT COUNT(*) FROM reaction_role_expiry; END')
++        await database.init_db()
++        schema = ' '.join(r[0] or '' for r in rows(
++            "SELECT sql FROM sqlite_master WHERE name IN ('ext_expiry_view','ext_touch')"))
++        self.assertNotIn('_old', schema)
++        self.assertNotIn('_new', schema)
++        self.assertEqual(rows('SELECT * FROM ext_expiry_view'), [(1, 2, 3)])
++        execute('INSERT INTO ext_events VALUES (1)')
++        self.assertEqual(rows('SELECT n FROM ext_log'), [(1,)])
++        # A dangling reference would also poison later, unrelated ALTERs.
++        execute('ALTER TABLE ext_log ADD COLUMN extra INTEGER')
++        self.assertEqual(rows('PRAGMA integrity_check'), [('ok',)])
++        self.assertEqual(rows(
++            "SELECT name FROM sqlite_master WHERE name LIKE 'reaction_role_expiry_%' "
++            "AND type='table'"), [])
++
+     async def test_rebuild_failure_rolls_back_rename(self):
+         self._legacy_reaction_table()
+         original = aiosqlite.Connection.execute
+-        def fail_create(conn, sql, *args, **kwargs):
+-            if 'CREATE TABLE reaction_role_expiry (' in sql:
++        def fail_rename(conn, sql, *args, **kwargs):
++            # The worst moment: the original has already been dropped.
++            if 'RENAME TO reaction_role_expiry' in sql and 'reaction_role_expiry_new' in sql:
+                 raise sqlite3.OperationalError('injected rebuild failure')
+             return original(conn, sql, *args, **kwargs)
+-        with patch.object(aiosqlite.Connection, 'execute', fail_create):
++        with patch.object(aiosqlite.Connection, 'execute', fail_rename):
+             with self.assertRaisesRegex(sqlite3.OperationalError, 'injected rebuild failure'):
+                 await database.init_db()
+         self.assertEqual(rows('SELECT guild_id,user_id,role_id FROM reaction_role_expiry'), [(1,2,3)])
+-        self.assertEqual(rows("SELECT name FROM sqlite_master WHERE name='reaction_role_expiry_old'"), [])
++        self.assertEqual(rows("SELECT name FROM sqlite_master WHERE name IN ('reaction_role_expiry_old','reaction_role_expiry_new')"), [])
+         self.assertEqual(rows("SELECT name FROM sqlite_master WHERE type='index' AND name='legacy_reaction_expiry_idx'"), [('legacy_reaction_expiry_idx',)])
+ 
+     async def test_all_additive_migrations_from_old_columns(self):
+diff --git a/test_pr105_fixes.py b/test_pr105_fixes.py
+index 6449ef4..41fc1c3 100644
+--- a/test_pr105_fixes.py
++++ b/test_pr105_fixes.py
+@@ -440,3 +440,654 @@ class LegacyRoleDeliveryTests(unittest.IsolatedAsyncioTestCase):
+         self.assertEqual(rows('SELECT balance FROM economy'),[(90,)])
+         self.assertEqual(rows('SELECT current_stock FROM shop_items WHERE id=?',(item,)),[(0,)])
+         person.add_roles.assert_awaited_once()
++
++class PreDeliveryStockRollbackTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        await reset_database()
++        seed_member(balance=0)
++
++    async def test_insufficient_balance_with_legacy_holding_leaves_stock_unreserved(self):
++        for timestamp in ('2020-01-01 00:00:00', None):
++            with self.subTest(created_at=timestamp):
++                await reset_database()
++                seed_member(balance=0)
++                item = shop_item('temp_role', price=10, name='Gold VIP', role_id=55,
++                                 duration_hours=2, stock=1)
++                hid = await TO.grant_timed_holding(
++                    GUILD, USER, 'Gold VIP', item_type='role', source='shop',
++                    expires_at='2035-01-01T00:00:00+00:00', role_id=55)
++                execute('UPDATE timed_holdings SET metadata=?, created_at=? WHERE id=?',
++                        ('{}', timestamp, hid))
++                itx, _ = purchase_context()
++                delivery = AsyncMock()
++                with patch('cogs.shop._deliver_purchase', delivery), \
++                     patch('cogs.shop.refund_purchase', new=AsyncMock(wraps=TO.refund_purchase)) as refund:
++                    await process_purchase(itx, item)
++                delivery.assert_not_awaited()
++                self.assertEqual(rows('SELECT balance FROM economy'), [(0,)])
++                self.assertEqual(rows('SELECT current_stock FROM shop_items'), [(1,)])
++                refund.assert_not_awaited()
++                self.assertEqual(rows('SELECT status,stock_reserved,charged,stock_returned FROM shop_purchase_operations'),
++                                 [(TO.PURCHASE_FAILED,0,0,0)])
++                self.assertEqual(rows('SELECT metadata, created_at FROM timed_holdings WHERE id=?', (hid,)), [('{}', timestamp)])
++
++    async def test_uncertain_before_payment_does_not_reserve_charge_or_deliver(self):
++        import cogs.shop as shop
++        execute('UPDATE economy SET balance=100 WHERE guild_id=? AND user_id=?', (GUILD, USER))
++        item = shop_item('title', price=10, name='Uncertain Before Pay', stock=1)
++        itx, _ = purchase_context()
++        async def open_then_quarantine(*args, **kwargs):
++            op = await TO.open_purchase(*args, **kwargs)
++            await TO.update_purchase(op, status=TO.PURCHASE_UNCERTAIN)
++            return op
++        delivery = AsyncMock(return_value={'success': False, 'error': 'fake failure', 'uncertain': True})
++        with patch.object(shop, 'open_purchase', side_effect=open_then_quarantine), \
++             patch.object(shop, '_deliver_purchase', delivery):
++            await process_purchase(itx, item)
++        delivery.assert_not_awaited()
++        self.assertEqual(rows('SELECT balance FROM economy'), [(100,)])
++        self.assertEqual(rows('SELECT current_stock FROM shop_items'), [(1,)])
++        self.assertEqual(rows('SELECT status,stock_reserved,charged FROM shop_purchase_operations'),
++                         [(TO.PURCHASE_UNCERTAIN,0,0)])
++
++    async def test_uncertain_after_payment_commit_does_not_start_delivery(self):
++        """A stale pending-only quarantine cannot steal a committed delivery."""
++        import aiosqlite
++        import sqlite3
++        import cogs.shop as shop
++        from database import DB_PATH
++        execute('UPDATE economy SET balance=100 WHERE guild_id=? AND user_id=?', (GUILD, USER))
++        item = shop_item('title', price=10, name='Quarantined After Pay', stock=1)
++        itx, _ = purchase_context()
++        original = aiosqlite.Connection.commit
++        attempts = []
++        async def commit_then_quarantine(conn):
++            await original(conn)
++            if attempts:
++                return
++            with sqlite3.connect(DB_PATH) as other:
++                row = other.execute("SELECT op_id,status FROM shop_purchase_operations WHERE charged=1 AND stock_reserved=1").fetchone()
++                if row:
++                    won = other.execute("UPDATE shop_purchase_operations SET status='uncertain' WHERE op_id=? AND status='pending'", (row[0],)).rowcount
++                    other.commit()
++                    attempts.append((row[1], won))
++        delivery = AsyncMock(return_value={'success': False, 'error': 'fake failure', 'uncertain': True})
++        with patch.object(aiosqlite.Connection, 'commit', commit_then_quarantine), \
++             patch.object(shop, '_deliver_purchase', delivery):
++            await process_purchase(itx, item)
++        self.assertEqual(attempts, [(TO.PURCHASE_DELIVERING, 0)])
++        delivery.assert_awaited_once()
++        self.assertEqual(rows('SELECT status FROM shop_purchase_operations'), [('uncertain',)])
++
++    async def test_delivering_blocks_all_refunds_and_timeout(self):
++        op = await TO.open_purchase(GUILD, USER, item_id=None, item_name='inflight', currency='balance', amount=10)
++        await TO.update_purchase(op, charged=1, stock_reserved=1)
++        self.assertTrue(await TO.claim_purchase_transition(op, from_statuses=(TO.PURCHASE_PENDING,), to_status=TO.PURCHASE_DELIVERING))
++        self.assertFalse(await TO.claim_purchase_transition(op, from_statuses=(TO.PURCHASE_PENDING,), to_status=TO.PURCHASE_DELIVERING))
++        execute("UPDATE shop_purchase_operations SET created_at=datetime('now','-1 day') WHERE op_id=?", (op,))
++        result = await TO.refund_purchase(op)
++        self.assertFalse(result['complete'], result)
++        self.assertFalse((await TO.resolve_purchase_operation(op, action='refund', confirmed=True))['success'])
++        await TO.reconcile_purchases(older_than_minutes=1)
++        self.assertEqual((await TO.get_purchase(op))['status'], TO.PURCHASE_DELIVERING)
++        self.assertEqual(rows('SELECT balance FROM economy'), [(0,)])
++
++    async def test_journal_flag_failure_rolls_back_all_effects(self):
++        import cogs.shop as shop
++        for field in ('stock_reserved', 'charged'):
++            with self.subTest(field=field):
++                await reset_database(); seed_member(balance=100)
++                item = shop_item('title', price=10, name='Flag failure', stock=1)
++                itx, _ = purchase_context()
++                real = shop.update_purchase
++                async def fail_flag(*args, **kwargs):
++                    if kwargs.get(field) == 1:
++                        return False
++                    return await real(*args, **kwargs)
++                with patch.object(shop, 'update_purchase', side_effect=fail_flag), \
++                     patch.object(shop, '_deliver_purchase', new=AsyncMock()) as deliver:
++                    with self.assertRaisesRegex(RuntimeError, 'Could not record'):
++                        await process_purchase(itx, item)
++                deliver.assert_not_awaited()
++                self.assertEqual(rows('SELECT balance FROM economy'), [(100,)])
++                self.assertEqual(rows('SELECT current_stock FROM shop_items'), [(1,)])
++                self.assertEqual(rows('SELECT status,stock_reserved,charged FROM shop_purchase_operations'), [('failed',0,0)])
++                self.assertEqual(rows('SELECT COUNT(*) FROM transaction_ledger'), [(0,)])
++
++    async def test_commit_error_before_and_after_durable_commit_never_delivers(self):
++        import aiosqlite
++        import cogs.shop as shop
++        original = aiosqlite.Connection.commit
++        for after in (False, True):
++            with self.subTest(committed=after):
++                await reset_database(); seed_member(balance=100)
++                item = shop_item('title', price=10, name='Commit failure', stock=1)
++                itx, _ = purchase_context()
++                injected = []
++                async def bad_commit(conn):
++                    cursor = await conn.execute("SELECT status FROM shop_purchase_operations WHERE status='delivering'")
++                    selected = await cursor.fetchone()
++                    if selected and not injected:
++                        injected.append(True)
++                        if after:
++                            await original(conn)
++                        raise OSError('injected commit error')
++                    await original(conn)
++                with patch.object(aiosqlite.Connection, 'commit', bad_commit), \
++                     patch.object(shop, '_deliver_purchase', new=AsyncMock()) as deliver:
++                    with self.assertRaisesRegex(OSError, 'injected commit error'):
++                        await process_purchase(itx, item)
++                self.assertEqual(injected, [True])
++                deliver.assert_not_awaited()
++                self.assertEqual(rows('SELECT balance FROM economy'), [(90 if after else 100,)])
++                self.assertEqual(rows('SELECT current_stock FROM shop_items'), [(0 if after else 1,)])
++                self.assertEqual(rows('SELECT status,stock_reserved,charged FROM shop_purchase_operations'),
++                                 [('delivering',1,1)] if after else [('uncertain',0,0)])
++
++    async def test_retry_same_operation_cannot_charge_reserve_or_deliver_twice(self):
++        import cogs.shop as shop
++        execute('UPDATE economy SET balance=100 WHERE guild_id=? AND user_id=?', (GUILD, USER))
++        item = shop_item('title', price=10, name='Duplicate op', stock=2)
++        op = await TO.open_purchase(GUILD, USER, item_id=item, item_name='Duplicate op', currency='balance', amount=10)
++        first, _ = purchase_context()
++        second, _ = purchase_context()
++        deliver = AsyncMock(return_value={'success': False, 'uncertain': True, 'error': 'unknown'})
++        with patch.object(shop, 'open_purchase', new=AsyncMock(return_value=op)), \
++             patch.object(shop, '_deliver_purchase', deliver):
++            await process_purchase(first, item)
++            await process_purchase(second, item)
++        deliver.assert_awaited_once()
++        self.assertEqual(rows('SELECT balance FROM economy'), [(90,)])
++        self.assertEqual(rows('SELECT current_stock FROM shop_items'), [(1,)])
++        self.assertEqual(rows('SELECT status,charged,stock_reserved FROM shop_purchase_operations'), [('uncertain',1,1)])
++        self.assertEqual(rows('SELECT COUNT(*) FROM transaction_ledger'), [(1,)])
++
++    async def test_failure_after_deduct_rolls_back_stock_charge_and_ledger(self):
++        import cogs.shop as shop
++        execute('UPDATE economy SET balance=100 WHERE guild_id=? AND user_id=?', (GUILD, USER))
++        item = shop_item('title', price=10, name='After deduction', stock=1)
++        itx, _ = purchase_context()
++        real = shop.safe_deduct
++        async def deduct_then_fail(*args, **kwargs):
++            await real(*args, **kwargs)
++            raise RuntimeError('failure after deduct')
++        with patch.object(shop, 'safe_deduct', side_effect=deduct_then_fail), \
++             patch.object(shop, '_deliver_purchase', new=AsyncMock()) as delivery:
++            with self.assertRaisesRegex(RuntimeError, 'failure after deduct'):
++                await process_purchase(itx, item)
++        delivery.assert_not_awaited()
++        self.assertEqual(rows('SELECT balance FROM economy'), [(100,)])
++        self.assertEqual(rows('SELECT current_stock FROM shop_items'), [(1,)])
++        self.assertEqual(rows('SELECT COUNT(*) FROM transaction_ledger'), [(0,)])
++        self.assertEqual(rows('SELECT status,charged,stock_reserved FROM shop_purchase_operations'), [('failed',0,0)])
++
++    async def test_delivering_blocks_late_compensation_and_preserves_holding(self):
++        op = await TO.open_purchase(GUILD, USER, item_id=None, item_name='protect', currency='balance', amount=10)
++        holding = await TO.grant_timed_holding(GUILD, USER, 'protect', item_type='role',
++                                               source='shop', expires_at='2035-01-01T00:00:00+00:00', op_id=op)
++        self.assertTrue(await TO.claim_purchase_transition(op, from_statuses=(TO.PURCHASE_PENDING,), to_status=TO.PURCHASE_DELIVERING))
++        result = await TO.compensate_late_delivery(op, {'guild_id': GUILD, 'user_id': USER,
++                                                       'item_name': 'protect', 'internal_type': 'temp_role',
++                                                       'entry_key': f'h:{holding}'})
++        self.assertFalse(result['complete'], result)
++        self.assertIn('delivering', result['error'])
++        self.assertEqual(rows('SELECT COUNT(*) FROM timed_holdings WHERE id=?', (holding,)), [(1,)])
++
++    async def test_concurrent_purchases_obey_stock_and_balance_limits(self):
++        import asyncio
++        import cogs.shop as shop
++        for stock, balance, expected_stock in ((1, 100, 0), (2, 10, 1)):
++            with self.subTest(stock=stock, balance=balance):
++                await reset_database(); seed_member(balance=balance)
++                item = shop_item('title', price=10, name='Contended', stock=stock)
++                one, _ = purchase_context(); two, _ = purchase_context()
++                deliver = AsyncMock(return_value={'success': False, 'uncertain': True, 'error': 'unknown'})
++                with patch.object(shop, '_deliver_purchase', deliver):
++                    await asyncio.gather(process_purchase(one, item), process_purchase(two, item))
++                deliver.assert_awaited_once()
++                self.assertEqual(rows('SELECT balance FROM economy'), [(balance-10,)])
++                self.assertEqual(rows('SELECT current_stock FROM shop_items'), [(expected_stock,)])
++                self.assertEqual(rows('SELECT COUNT(*) FROM transaction_ledger'), [(1,)])
++                self.assertEqual(rows("SELECT COUNT(*) FROM shop_purchase_operations WHERE charged=1 AND stock_reserved=1"), [(1,)])
++
++    async def test_generic_status_update_cannot_release_live_delivery_for_refund(self):
++        op = await TO.open_purchase(GUILD, USER, item_id=None, item_name='live', currency='balance', amount=10)
++        await TO.update_purchase(op, charged=1)
++        self.assertTrue(await TO.claim_purchase_transition(op, from_statuses=(TO.PURCHASE_PENDING,), to_status=TO.PURCHASE_DELIVERING))
++        won = await TO.update_purchase(op, status=TO.PURCHASE_FAILED)
++        refund = await TO.refund_purchase(op)
++        self.assertFalse(refund['complete'], f'generic update={won}, refund={refund}')
++        self.assertFalse(won, 'generic update must not steal delivery ownership')
++        self.assertEqual((await TO.get_purchase(op))['status'], TO.PURCHASE_DELIVERING)
++        self.assertEqual(rows('SELECT balance FROM economy'), [(0,)])
++
++    async def test_missing_ledger_cannot_commit_purchase_payment(self):
++        import cogs.shop as shop
++        execute('UPDATE economy SET balance=100 WHERE guild_id=? AND user_id=?', (GUILD, USER))
++        item = shop_item('title', price=10, name='Missing ledger', stock=1)
++        execute('DROP TABLE transaction_ledger')
++        itx, _ = purchase_context()
++        delivery = AsyncMock(return_value={'success': False, 'uncertain': True, 'error': 'unknown'})
++        import sqlite3
++        with patch.object(shop, '_deliver_purchase', delivery):
++            with self.assertRaisesRegex(sqlite3.OperationalError, 'transaction_ledger'):
++                await process_purchase(itx, item)
++        self.assertEqual(rows('SELECT balance FROM economy'), [(100,)])
++        self.assertEqual(rows('SELECT current_stock FROM shop_items'), [(1,)])
++        delivery.assert_not_awaited()
++
++    async def test_missing_ledger_cannot_commit_refund_credit(self):
++        op = await TO.open_purchase(GUILD, USER, item_id=None, item_name='Refund needs ledger', currency='balance', amount=10)
++        await TO.update_purchase(op, status=TO.PURCHASE_FAILED, charged=1)
++        execute('DROP TABLE transaction_ledger')
++        result = await TO.refund_purchase(op)
++        self.assertFalse(result['complete'], result)
++        self.assertEqual(rows('SELECT balance FROM economy'), [(0,)])
++        self.assertFalse((await TO.get_purchase(op))['refunded'])
++
++    async def test_uncertain_discord_role_side_effect_must_not_be_refunded_as_absent(self):
++        import asyncio
++        role = role_stub(9123, 'Ambiguous role')
++        itx, person, bot, guild = purchase_ctx(granted_role=role)
++        execute('UPDATE economy SET balance=100 WHERE guild_id=? AND user_id=?', (GUILD, USER))
++        item = shop_item('temp_role', price=10, name='Ambiguous role', role_id=role.id, duration_hours=2, stock=1)
++        async def discord_applied_then_timed_out(role_arg, **kwargs):
++            person.roles.append(role_arg)
++            raise asyncio.TimeoutError('Discord result unknown after external application')
++        person.add_roles = AsyncMock(side_effect=discord_applied_then_timed_out)
++        await process_purchase(itx, item)
++        op = rows('SELECT op_id,status FROM shop_purchase_operations')[0]
++        self.assertEqual(op[1], TO.PURCHASE_UNCERTAIN)
++        self.assertIn(role, person.roles)
++        self.assertEqual(rows('SELECT COUNT(*) FROM timed_holdings'), [(0,)])
++        result = await TO.resolve_purchase_operation(op[0], action='refund', confirmed=True, note='assumed absent')
++        self.assertFalse(result['success'], f'role still present but refund was allowed: {result}')
++
++
++# ── Continuation: write-ahead intent, stranded deliveries, provenance, trigger ──
++import asyncio
++import sqlite3
++from test_timed_ownership import reply_text
++
++
++def _forbidden():
++    return discord.Forbidden(SimpleNamespace(status=403, reason='Forbidden'), 'missing permissions')
++
++
++def _op(**cols):
++    sets = ','.join(f'{k}=?' for k in cols)
++    return execute(f'UPDATE shop_purchase_operations SET {sets}', tuple(cols.values()))
++
++
++class RoleIntentTests(unittest.IsolatedAsyncioTestCase):
++    """A timeout, cancellation or crash is NOT proof that Discord did nothing."""
++
++    async def asyncSetUp(self):
++        await reset_database()
++        seed_member(balance=100)
++        self.role = role_stub(9201, 'Intent role')
++        self.itx, self.person, self.bot, self.guild = purchase_ctx(granted_role=self.role)
++        self.item = shop_item('temp_role', price=10, name='Intent role', role_id=self.role.id,
++                              duration_hours=2, stock=1)
++        self.guild.fetch_member = AsyncMock(return_value=self.person)
++
++    def op(self):
++        return rows('SELECT op_id,status FROM shop_purchase_operations')[0]
++
++    async def intent(self):
++        import json
++        raw = rows('SELECT delivery_intent FROM shop_purchase_operations')[0][0]
++        return json.loads(raw) if raw else None
++
++    async def refund_blocked(self, op_id):
++        res = await TO.resolve_purchase_operation(op_id, action='refund', confirmed=True, note='x')
++        self.assertFalse(res['success'], res)
++        self.assertEqual(rows('SELECT balance FROM economy'), [(90,)])
++        return res
++
++    async def test_timeout_leaves_intent_started_and_blocks_refund(self):
++        self.person.add_roles = AsyncMock(side_effect=asyncio.TimeoutError('lost'))
++        await process_purchase(self.itx, self.item)
++        op_id, status = self.op()
++        self.assertEqual(status, TO.PURCHASE_UNCERTAIN)
++        self.assertEqual((await self.intent())['state'], TO.INTENT_STARTED)
++        res = await self.refund_blocked(op_id)
++        self.assertIn('unresolved', res['error'])
++
++    async def test_lookup_failure_and_wrong_guild_keep_intent_started(self):
++        self.person.add_roles = AsyncMock(side_effect=asyncio.TimeoutError('lost'))
++        await process_purchase(self.itx, self.item)
++        op_id, _ = self.op()
++        for failure in (OSError('network'),
++                        discord.NotFound(SimpleNamespace(status=404, reason='NF'),
++                                         {'code': 10004, 'message': 'Unknown Guild'})):
++            self.guild.fetch_member = AsyncMock(side_effect=failure)
++            stats = await TO.reconcile_delivery_intents(self.bot, settle_seconds=0)
++            self.assertEqual(stats['settled'], 0, stats)
++            self.assertEqual((await self.intent())['state'], TO.INTENT_STARTED)
++            await self.refund_blocked(op_id)
++        # A fresh request is also never declared absent inside the settle window.
++        self.guild.fetch_member = AsyncMock(return_value=self.person)
++        stats = await TO.reconcile_delivery_intents(self.bot, settle_seconds=3600)
++        self.assertEqual(stats['settled'], 0)
++        self.assertEqual((await self.intent())['state'], TO.INTENT_STARTED)
++
++    async def test_cancellation_mid_request_is_stranded_then_resolved_by_observation(self):
++        entered = asyncio.Event()
++        async def hang(role, **kwargs):
++            entered.set()
++            await asyncio.Event().wait()
++        self.person.add_roles = AsyncMock(side_effect=hang)
++        task = asyncio.create_task(process_purchase(self.itx, self.item))
++        await asyncio.wait_for(entered.wait(), 5)
++        task.cancel()
++        with self.assertRaises(asyncio.CancelledError):
++            await task
++        op_id, status = self.op()
++        self.assertEqual(status, TO.PURCHASE_DELIVERING)
++        self.assertFalse(TO.is_live_delivery(op_id), 'scope must release on cancellation')
++        self.assertEqual((await self.intent())['state'], TO.INTENT_STARTED)
++        # Stranded: parked, never refunded.
++        stats = await TO.reconcile_stranded_deliveries(lease_minutes=0)
++        self.assertEqual(stats['parked'], 1, stats)
++        self.assertEqual(stats['by_class'], {'external_unresolved': 1})
++        self.assertEqual(self.op()[1], TO.PURCHASE_UNCERTAIN)
++        self.assertEqual(rows('SELECT refunded,stock_returned FROM shop_purchase_operations'), [(0, 0)])
++        await self.refund_blocked(op_id)
++        # Role really is absent: an authoritative fetch settles the intent.
++        stats = await TO.reconcile_delivery_intents(self.bot, settle_seconds=0)
++        self.assertEqual(stats['settled'], 1, stats)
++        res = await TO.resolve_purchase_operation(op_id, action='refund', confirmed=True, note='observed absent')
++        self.assertTrue(res['success'], res)
++        self.assertEqual(rows('SELECT balance FROM economy'), [(100,)])
++
++    async def test_present_role_is_neither_removed_nor_attributed(self):
++        self.person.add_roles = AsyncMock(side_effect=asyncio.TimeoutError('applied then lost'))
++        await process_purchase(self.itx, self.item)
++        op_id, _ = self.op()
++        self.person.roles.append(self.role)
++        stats = await TO.reconcile_delivery_intents(self.bot, settle_seconds=0)
++        self.assertEqual(stats['present'], 1, stats)
++        self.assertEqual((await self.intent())['state'], TO.INTENT_PRESENT)
++        self.person.remove_roles.assert_not_awaited()
++        self.assertEqual(rows('SELECT COUNT(*) FROM timed_holdings'), [(0,)])
++        self.assertEqual(rows('SELECT COUNT(*) FROM inventory_items'), [(0,)])
++        await self.refund_blocked(op_id)
++        self.assertIn(self.role, self.person.roles)
++
++    async def test_member_left_guild_is_confirmed_absence(self):
++        self.person.add_roles = AsyncMock(side_effect=asyncio.TimeoutError('lost'))
++        await process_purchase(self.itx, self.item)
++        self.guild.fetch_member = AsyncMock(side_effect=discord.NotFound(
++            SimpleNamespace(status=404, reason='NF'), {'code': 10007, 'message': 'Unknown Member'}))
++        stats = await TO.reconcile_delivery_intents(self.bot, settle_seconds=0)
++        self.assertEqual(stats['settled'], 1, stats)
++        self.assertEqual((await self.intent())['state'], TO.INTENT_ABSENT)
++
++    async def test_certain_rejection_is_confirmed_absent_and_refunds(self):
++        self.person.add_roles = AsyncMock(side_effect=_forbidden())
++        await process_purchase(self.itx, self.item)
++        op_id, status = self.op()
++        self.assertEqual(status, TO.PURCHASE_REFUNDED if False else TO.PURCHASE_FAILED)
++        self.assertEqual((await self.intent())['state'], TO.INTENT_ABSENT)
++        self.assertEqual(rows('SELECT balance FROM economy'), [(100,)])
++        self.assertEqual(rows('SELECT refunded,stock_returned FROM shop_purchase_operations'), [(1, 1)])
++
++    async def test_permanent_role_ambiguity_blocks_refund(self):
++        """give_reward('role') carries no op id; only the intent protects it."""
++        perm = shop_item('color', price=10, name='Perm intent', role_id=self.role.id, stock=1)
++        self.person.add_roles = AsyncMock(side_effect=asyncio.TimeoutError('applied then lost'))
++        await process_purchase(self.itx, perm)
++        op_id, status = rows('SELECT op_id,status FROM shop_purchase_operations ORDER BY rowid DESC')[0]
++        self.assertEqual(status, TO.PURCHASE_UNCERTAIN)
++        res = await TO.resolve_purchase_operation(op_id, action='refund', confirmed=True, note='x')
++        self.assertFalse(res['success'], res)
++        self.assertEqual(rows('SELECT balance FROM economy'), [(90,)])
++
++    async def test_refund_before_delivery_refuses_to_send_the_role(self):
++        op = await TO.open_purchase(GUILD, USER, item_id=None, item_name='x', currency='balance', amount=1)
++        _op(status='refunded', refunded=1)
++        outcome = await TO.begin_delivery_intent(op, kind=TO.INTENT_KIND_DISCORD_ROLE, guild_id=GUILD,
++                                                 user_id=USER, role_id=1)
++        self.assertEqual(outcome, 'refused')
++        self.assertEqual(await TO.begin_delivery_intent('no-such-op', kind=TO.INTENT_KIND_DISCORD_ROLE,
++                                                        guild_id=GUILD, user_id=USER, role_id=1),
++                         'not_applicable')
++
++
++class StrandedDeliveryTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        await reset_database()
++        seed_member(balance=0)
++
++    async def delivering(self, name='stranded', age='-2 hours'):
++        op = await TO.open_purchase(GUILD, USER, item_id=None, item_name=name, currency='balance', amount=10)
++        await TO.update_purchase(op, charged=1)
++        self.assertTrue(await TO.claim_purchase_transition(
++            op, from_statuses=(TO.PURCHASE_PENDING,), to_status=TO.PURCHASE_DELIVERING))
++        execute("UPDATE shop_purchase_operations SET updated_at=datetime('now', ?) WHERE op_id=?", (age, op))
++        return op
++
++    async def classify(self, op):
++        stats = await TO.reconcile_stranded_deliveries(lease_minutes=30)
++        op_row = await TO.get_purchase(op)
++        return stats, op_row
++
++    async def test_never_started_is_parked_not_refunded(self):
++        op = await self.delivering()
++        stats, row = await self.classify(op)
++        self.assertEqual(stats['by_class'], {'never_started': 1})
++        self.assertEqual(row['status'], TO.PURCHASE_UNCERTAIN)
++        self.assertIn('never_started', row['detail'])
++        self.assertEqual((row['refunded'], row['stock_returned']), (0, 0))
++        self.assertEqual(rows('SELECT balance FROM economy'), [(0,)])
++
++    async def test_goods_present_blocks_even_a_manual_refund(self):
++        op = await self.delivering()
++        await TO.grant_timed_holding(GUILD, USER, 'stranded', item_type='role', source='shop',
++                                     expires_at='2035-01-01T00:00:00+00:00', op_id=op)
++        stats, row = await self.classify(op)
++        self.assertEqual(stats['by_class'], {'goods_present': 1})
++        res = await TO.resolve_purchase_operation(op, action='refund', confirmed=True, note='x')
++        self.assertFalse(res['success'], res)
++        self.assertEqual(rows('SELECT balance FROM economy'), [(0,)])
++
++    async def test_unreadable_intent_is_undeterminable_and_blocks(self):
++        op = await self.delivering()
++        execute("UPDATE shop_purchase_operations SET delivery_intent='{not json' WHERE op_id=?", (op,))
++        stats, row = await self.classify(op)
++        self.assertEqual(stats['by_class'], {'undeterminable': 1})
++        res = await TO.resolve_purchase_operation(op, action='refund', confirmed=True, note='x')
++        self.assertFalse(res['success'], res)
++
++    async def test_live_and_recent_deliveries_are_never_touched(self):
++        with TO.live_purchase_scope():
++            live = await TO.open_purchase(GUILD, USER, item_id=None, item_name='live',
++                                          currency='balance', amount=10)
++            await TO.update_purchase(live, charged=1)
++            await TO.claim_purchase_transition(live, from_statuses=(TO.PURCHASE_PENDING,),
++                                               to_status=TO.PURCHASE_DELIVERING)
++            execute("UPDATE shop_purchase_operations SET updated_at=datetime('now','-5 hours') WHERE op_id=?", (live,))
++            stats = await TO.reconcile_stranded_deliveries(lease_minutes=30)
++            self.assertEqual((stats['parked'], stats['skipped_live']), (0, 1))
++            self.assertEqual((await TO.get_purchase(live))['status'], TO.PURCHASE_DELIVERING)
++            recent = await self.delivering('recent', age='-1 minutes')
++            stats = await TO.reconcile_stranded_deliveries(lease_minutes=30)
++            self.assertEqual(stats['parked'], 0)
++            self.assertEqual((await TO.get_purchase(recent))['status'], TO.PURCHASE_DELIVERING)
++        # Once its worker is gone the old row is no longer live and is parked.
++        stats = await TO.reconcile_stranded_deliveries(lease_minutes=30)
++        self.assertEqual(stats['parked'], 1)
++        self.assertEqual((await TO.get_purchase(live))['status'], TO.PURCHASE_UNCERTAIN)
++        self.assertEqual((await TO.get_purchase(recent))['status'], TO.PURCHASE_DELIVERING)
++
++    async def test_reconcile_purchases_parks_but_never_refunds(self):
++        op = await self.delivering()
++        stats = await TO.reconcile_purchases()
++        self.assertEqual(stats['stranded'], 1, stats)
++        self.assertEqual(rows('SELECT balance FROM economy'), [(0,)])
++        self.assertEqual((await TO.get_purchase(op))['refunded'], 0)
++
++    async def test_inspection_reports_classification(self):
++        op = await self.delivering()
++        evidence = await TO.inspect_purchase_operation(op)
++        self.assertEqual(evidence['delivery_classification']['class'], 'never_started')
++        self.assertIn('Delivery Class : never_started', TO.format_purchase_inspection(evidence))
++
++
++class TriggerBackstopTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        await reset_database()
++        seed_member()
++        self.op = await TO.open_purchase(GUILD, USER, item_id=None, item_name='t', currency='balance', amount=10)
++        await TO.update_purchase(self.op, charged=1, stock_reserved=1)
++        await TO.claim_purchase_transition(self.op, from_statuses=(TO.PURCHASE_PENDING,),
++                                           to_status=TO.PURCHASE_DELIVERING)
++
++    async def test_direct_sql_cannot_compensate_a_delivering_operation(self):
++        for stmt in ("UPDATE shop_purchase_operations SET refunded=1",
++                     "UPDATE shop_purchase_operations SET stock_returned=1",
++                     "UPDATE shop_purchase_operations SET status='failed', refunded=1, stock_returned=1"):
++            with self.subTest(stmt=stmt):
++                with self.assertRaises(sqlite3.IntegrityError):
++                    execute(stmt)
++        self.assertEqual(rows('SELECT status,refunded,stock_returned FROM shop_purchase_operations'),
++                         [('delivering', 0, 0)])
++
++    async def test_owner_transition_then_compensation_is_still_allowed(self):
++        self.assertTrue(await TO.claim_purchase_transition(
++            self.op, from_statuses=(TO.PURCHASE_DELIVERING,), to_status=TO.PURCHASE_FAILED))
++        self.assertTrue((await TO.refund_purchase(self.op))['complete'])
++        self.assertEqual(rows('SELECT balance FROM economy'), [(9010,)])
++
++
++class ProvenanceNarrowingTests(unittest.IsolatedAsyncioTestCase):
++    """An unlabelled holding is only independent of a purchase that labels everything."""
++
++    async def asyncSetUp(self):
++        await reset_database()
++        seed_member(balance=100)
++        self.role = role_stub(9301, 'Legacy twin')
++        self.itx, self.person, self.bot, self.guild = purchase_ctx(granted_role=self.role)
++        self.item = shop_item('temp_role', price=10, name='Legacy twin', role_id=self.role.id,
++                              duration_hours=2, stock=2)
++        # An older, independent holding of the same product with no origin id.
++        execute("INSERT INTO timed_holdings (guild_id,user_id,item_name,item_type,quantity,metadata,"
++                "source,role_id,expires_at) VALUES (?,?,?,?,1,NULL,'shop',?,'2035-01-01T00:00:00+00:00')",
++                (GUILD, USER, 'Legacy twin', 'temp_role', self.role.id))
++
++    async def test_new_protocol_certain_failure_refunds_despite_legacy_holding(self):
++        self.person.add_roles = AsyncMock(side_effect=_forbidden())
++        await process_purchase(self.itx, self.item)
++        self.assertEqual(rows('SELECT status,provenance_tracked,refunded,stock_returned '
++                              'FROM shop_purchase_operations'), [('failed', 1, 1, 1)])
++        self.assertEqual(rows('SELECT balance FROM economy'), [(100,)])
++        self.assertEqual(rows('SELECT COUNT(*) FROM timed_holdings'), [(1,)], 'legacy holding untouched')
++
++    async def test_untracked_operation_stays_fail_closed(self):
++        op = await TO.open_purchase(GUILD, USER, item_id=self.item, item_name='Legacy twin',
++                                    currency='balance', amount=10)
++        await TO.update_purchase(op, charged=1, status=TO.PURCHASE_FAILED)
++        self.assertEqual(rows('SELECT provenance_tracked FROM shop_purchase_operations'), [(0,)])
++        result = await TO.refund_purchase(op)
++        self.assertFalse(result['complete'], result)
++        self.assertIn('unprovable', result['error'])
++        self.assertEqual(rows('SELECT balance FROM economy'), [(100,)])  # nothing returned
++
++    async def test_tracked_operation_still_blocked_by_linked_or_unreadable_holdings(self):
++        op = await TO.open_purchase(GUILD, USER, item_id=self.item, item_name='Legacy twin',
++                                    currency='balance', amount=10)
++        await TO.update_purchase(op, charged=1, status=TO.PURCHASE_FAILED)
++        execute('UPDATE shop_purchase_operations SET provenance_tracked=1')
++        execute("DELETE FROM timed_holdings")
++        await TO.grant_timed_holding(GUILD, USER, 'Legacy twin', item_type='temp_role', source='shop',
++                                     expires_at='2035-01-01T00:00:00+00:00', op_id=op)
++        self.assertFalse((await TO.refund_purchase(op))['complete'])  # its own goods exist
++        execute("DELETE FROM timed_holdings")
++        execute("INSERT INTO timed_holdings (guild_id,user_id,item_name,item_type,quantity,metadata,"
++                "source,expires_at) VALUES (?,?,?,?,1,'{broken','shop','2035-01-01T00:00:00+00:00')",
++                (GUILD, USER, 'Legacy twin', 'temp_role'))
++        self.assertFalse((await TO.refund_purchase(op))['complete'])  # unreadable: not provably independent
++        self.assertEqual(rows('SELECT balance FROM economy'), [(100,)])  # nothing returned
++
++    async def test_legacy_xp_boost_blocks_untracked_but_not_tracked(self):
++        listing = shop_item('xp_boost', price=10, name='Boost', multiplier=2.0, duration_hours=1)
++        execute("INSERT INTO leveling_active_boosts (guild_id,user_id,multiplier,expires_at,source,origin_op_id) "
++                "VALUES (?,?,2.0,'2035-01-01T00:00:00+00:00','shop',NULL)", (GUILD, USER))
++        op = await TO.open_purchase(GUILD, USER, item_id=listing, item_name='Boost',
++                                    currency='balance', amount=10)
++        await TO.update_purchase(op, charged=1, status=TO.PURCHASE_FAILED)
++        self.assertFalse((await TO.refund_purchase(op))['complete'])
++        execute('UPDATE shop_purchase_operations SET provenance_tracked=1')
++        self.assertTrue((await TO.refund_purchase(op))['complete'])
++        self.assertEqual(rows('SELECT COUNT(*) FROM leveling_active_boosts'), [(1,)])
++
++
++class LiveDeliveryP1Tests(unittest.IsolatedAsyncioTestCase):
++    """The operator-vs-live-delivery race, for BOTH protocols."""
++
++    async def asyncSetUp(self):
++        await reset_database()
++        seed_member()
++
++    async def _stalled(self, legacy):
++        import cogs.shop as shop_mod
++        from test_timed_ownership import shop_item as tto_shop_item
++        item_id = tto_shop_item(kind='custom', name='P1 Relic', price=300, stock=2, duration_hours=24)
++        inter, _, _, _ = purchase_ctx()
++        entered, release = asyncio.Event(), asyncio.Event()
++        async def stalled(*args, **kwargs):
++            entered.set()
++            await release.wait()
++            return await shop_mod._deliver_purchase_effects(*args, **kwargs)
++        return shop_mod, item_id, inter, entered, release, stalled
++
++    async def test_new_protocol_operator_cannot_refund_live_delivery(self):
++        shop_mod, item_id, inter, entered, release, stalled = await self._stalled(False)
++        with patch.object(shop_mod, '_deliver_purchase', side_effect=stalled):
++            task = asyncio.create_task(process_purchase(inter, item_id))
++            try:
++                await asyncio.wait_for(entered.wait(), 5)
++                op_id = rows('SELECT op_id FROM shop_purchase_operations')[0][0]
++                self.assertTrue(TO.is_live_delivery(op_id))
++
++                execute("UPDATE shop_purchase_operations SET created_at=datetime('now','-30 minutes'), "
++                        "updated_at=datetime('now','-30 minutes')")
++                self.assertEqual((await TO.reconcile_purchases(older_than_minutes=15))['stranded'], 0)
++                self.assertFalse((await TO.refund_purchase(op_id))['complete'])
++                self.assertFalse((await TO.resolve_purchase_operation(op_id, action='refund', confirmed=True))['success'])
++                with self.assertRaises(sqlite3.IntegrityError):
++                    execute('UPDATE shop_purchase_operations SET refunded=1')
++            finally:
++                release.set()
++                await asyncio.wait_for(task, 5)
++        self.assertEqual((await TO.get_purchase(op_id))['status'], TO.PURCHASE_DELIVERED)
++        self.assertFalse(TO.is_live_delivery(op_id))
++        self.assertEqual(rows('SELECT COUNT(*) FROM purchase_history'), [(1,)])
++        self.assertEqual(rows('SELECT balance FROM economy'), [(8700,)])
++
++    async def test_legacy_worker_refund_during_delivery_is_still_rolled_back(self):
++        """The original P1 scenario, for a record created by the pre-`delivering` protocol."""
++        shop_mod, item_id, inter, entered, release, stalled = await self._stalled(True)
++        with patch.object(shop_mod, '_deliver_purchase', side_effect=stalled):
++            task = asyncio.create_task(process_purchase(inter, item_id))
++            await asyncio.wait_for(entered.wait(), 5)
++            op_id = rows('SELECT op_id FROM shop_purchase_operations')[0][0]
++            # A legacy worker never wrote the delivering state, an intent or the marker.
++            execute("UPDATE shop_purchase_operations SET status='pending', delivery_intent=NULL, "
++                    "provenance_tracked=0, created_at=datetime('now','-30 minutes') WHERE op_id=?", (op_id,))
++            self.assertEqual((await TO.reconcile_purchases(older_than_minutes=15))['uncertain'], 1)
++            resolved = await TO.resolve_purchase_operation(op_id, action='refund', confirmed=True, note='stalled')
++            self.assertTrue(resolved['success'], resolved)
++            self.assertEqual(rows('SELECT balance FROM economy'), [(9000,)])
++            release.set()
++            await asyncio.wait_for(task, 5)
++        final = await TO.get_purchase(op_id)
++        self.assertEqual((final['status'], final['refunded'], final['stock_returned']), ('refunded', 1, 1))
++        self.assertIsNone(final['history_id'])
++        self.assertEqual(rows('SELECT COUNT(*) FROM purchase_history'), [(0,)])
++        self.assertEqual(rows('SELECT COUNT(*) FROM timed_holdings'), [(0,)], 'late holding must be cleaned up')
++        self.assertIn('Purchase needs a check', reply_text(inter))
++        self.assertEqual(rows('SELECT balance FROM economy'), [(9000,)])
++        self.assertTrue((await TO.refund_purchase(op_id))['complete'])  # idempotent
++        self.assertEqual(rows('SELECT balance FROM economy'), [(9000,)])
+diff --git a/test_timed_ownership.py b/test_timed_ownership.py
+index f2a9699..cdb7371 100644
+--- a/test_timed_ownership.py
++++ b/test_timed_ownership.py
+@@ -1124,7 +1124,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+     async def test_section_4_uncertain_purchase_inspection_and_operator_recovery(self):
+         listing = shop_item("color", price=550, name="MysteryHue",
+                             role_id=990, duration_hours=3, stock=2)
+-        itx, person, bot, _ = purchase_ctx(granted_role=role_stub(990, "MysteryHue"))
++        itx, person, bot, guild_stub = purchase_ctx(granted_role=role_stub(990, "MysteryHue"))
+         before_bal = rows("SELECT balance FROM economy")[0][0]
+ 
+         with patch.object(TO, "grant_timed_holding",
+@@ -1156,7 +1156,24 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+         self.assertEqual((await TO.get_purchase(op_id))["status"],
+                          TO.PURCHASE_UNCERTAIN)
+ 
+-        # 3. Resolve via refund (--yes): refunds balance + restores stock once,
++        # 3a. The role was applied and is still on the member: an operator's
++        # note is not evidence. The refund is refused until Discord shows the
++        # role absent.
++        role_stub_990 = role_stub(990, "MysteryHue")
++        person.roles.append(role_stub_990)  # the applied role, as Discord reports it
++        blocked = await TO.resolve_purchase_operation(
++            op_id, action="refund", confirmed=True, note="verified role removed manually")
++        self.assertFalse(blocked["success"], blocked)
++        self.assertEqual(rows("SELECT balance FROM economy")[0][0], before_bal - 550)
++
++        # 3b. The operator really removes the role; the reconciler observes the
++        # absence with an authoritative fetch (after the settle window).
++        person.roles.remove(role_stub_990)
++        guild_stub.fetch_member = AsyncMock(return_value=person)
++        observed = await TO.reconcile_delivery_intents(bot, settle_seconds=0)
++        self.assertEqual(observed["settled"], 1, observed)
++
++        # 3c. Resolve via refund (--yes): refunds balance + restores stock once,
+         # transitions to refunded, and preserves audit trail.
+         cli_ok = await TO._cli_async([
+             "--op-id", op_id, "--resolve", "refund", "--yes",
+@@ -1329,7 +1346,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             "SELECT status, stock_reserved, charged, stock_returned "
+             "FROM shop_purchase_operations WHERE op_id != ? "
+             "ORDER BY rowid DESC LIMIT 1", (op_tx,))[0]
+-        self.assertEqual(latest_op, (TO.PURCHASE_FAILED, 1, 0, 1))
++        self.assertEqual(latest_op, (TO.PURCHASE_FAILED, 0, 0, 0))
+ 
+         # 3. Interruption after stock_returned=1 before operator finalizes
+         # status=refunded: resolve_purchase_operation(action='refund') finalizes
+@@ -1846,110 +1863,46 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+         self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
+ 
+     async def test_p1_paused_process_purchase_cannot_overwrite_operator_refund(self):
+-        """P1 regression: a paused `process_purchase` that resumes after an
+-        operator refund must not overwrite `status='refunded'` into `delivered`
+-        or leave a `purchase_history` receipt.
++        """A live delivery owns the operation; timeout and refund cannot win.
++
++        The old contract refunded during a live delivery and compensated later.
++        Legacy late-delivery paths are still tested separately below.
+         """
+         import asyncio
+         import cogs.shop as shop_mod
+-
+-        item_id = shop_item(
+-            kind="custom", name="P1 Race Relic", price=300, stock=2,
+-            duration_hours=24)
++        item_id = shop_item(kind="custom", name="P1 Race Relic", price=300,
++                            stock=2, duration_hours=24)
+         inter, _, _, _ = purchase_ctx()
+-
+-        entered_delivery = asyncio.Event()
+-        release_delivery = asyncio.Event()
++        entered, release = asyncio.Event(), asyncio.Event()
+         real_deliver = shop_mod._deliver_purchase
+-
+-        async def _slow_deliver(*args, **kwargs):
+-            entered_delivery.set()
+-            await release_delivery.wait()
++        async def slow_delivery(*args, **kwargs):
++            entered.set()
++            await release.wait()
+             return await real_deliver(*args, **kwargs)
+-
+-        with patch.object(shop_mod, "_deliver_purchase", side_effect=_slow_deliver):
+-            purchase_task = asyncio.create_task(
+-                process_purchase(inter, item_id))
+-            await asyncio.wait_for(entered_delivery.wait(), timeout=5.0)
+-
+-            # While delivery is in flight, charge and stock reservation are committed.
+-            op_rows = rows("SELECT op_id, status, charged, stock_reserved "
+-                           "FROM shop_purchase_operations")
+-            self.assertEqual(len(op_rows), 1)
+-            op_id, init_status, init_charged, init_reserved = op_rows[0]
+-            self.assertEqual(init_status, TO.PURCHASE_PENDING)
+-            self.assertEqual((init_charged, init_reserved), (1, 1))
+-            self.assertEqual(
+-                rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+-                     (GUILD, USER)), [(8700,)])
+-            self.assertEqual(
+-                rows("SELECT current_stock FROM shop_items WHERE id=?",
+-                     (item_id,)), [(1,)])
+-
+-            # Timeout reconciliation parks the stale pending operation as `uncertain`,
+-            # and an operator resolves it via `refund` before `_deliver_purchase` finishes.
+-            execute("UPDATE shop_purchase_operations "
+-                    "SET created_at = datetime('now', '-30 minutes') "
+-                    "WHERE op_id=?", (op_id,))
+-            rec = await TO.reconcile_purchases(older_than_minutes=15)
+-            self.assertEqual(rec["uncertain"], 1)
+-            self.assertEqual((await TO.get_purchase(op_id))["status"],
+-                             TO.PURCHASE_UNCERTAIN)
+-
+-            resolved = await TO.resolve_purchase_operation(
+-                op_id, action="refund", confirmed=True,
+-                note="operator refunded while delivery was stalled")
+-            self.assertTrue(resolved["success"], str(resolved))
+-            self.assertEqual(resolved["status"], TO.PURCHASE_REFUNDED)
+-            self.assertEqual(
+-                rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+-                     (GUILD, USER)), [(9000,)])
+-            self.assertEqual(
+-                rows("SELECT current_stock FROM shop_items WHERE id=?",
+-                     (item_id,)), [(2,)])
+-
+-            # Release the stalled delivery coroutine so `process_purchase` tries
+-            # to write `purchase_history` and mark the operation `delivered`.
+-            release_delivery.set()
+-            await asyncio.wait_for(purchase_task, timeout=5.0)
+-
+-        # Direct database-level guards must also reject any attempt to force
+-        # `status='delivered'` or `status='uncertain'` on the refunded operation.
+-        self.assertFalse(await TO.update_purchase(
+-            op_id, status=TO.PURCHASE_DELIVERED, history_id=999,
+-            detail="stale direct update"))
+-        self.assertFalse(await TO.update_purchase(
+-            op_id, status=TO.PURCHASE_UNCERTAIN, detail="stale uncertain update"))
+-        self.assertFalse(await TO.claim_purchase_transition(
+-            op_id,
+-            from_statuses=(TO.PURCHASE_PENDING, TO.PURCHASE_UNCERTAIN,
+-                           TO.PURCHASE_REFUNDED),
+-            to_status=TO.PURCHASE_DELIVERED,
+-            detail="stale transition"))
+-
+-        final_op = await TO.get_purchase(op_id)
+-        self.assertEqual(final_op["status"], TO.PURCHASE_REFUNDED)
+-        self.assertEqual(final_op["refunded"], 1)
+-        self.assertEqual(final_op["stock_returned"], 1)
+-        self.assertIsNone(final_op["history_id"])
+-        self.assertEqual(rows("SELECT COUNT(*) FROM purchase_history"), [(0,)],
+-                         "refunded purchase must not leave a purchase_history receipt")
+-        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)],
+-                         "late timed holding for an already-refunded purchase must be cleaned up")
+-
+-        text = reply_text(inter)
+-        self.assertIn("Purchase needs a check", text)
+-        self.assertNotIn("Purchase successful", text)
+-
+-        # Subsequent refund/reconcile passes must be complete no-ops.
+-        again = await TO.refund_purchase(op_id)
+-        self.assertTrue(again["complete"])
+-        self.assertEqual(
+-            rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+-                 (GUILD, USER)), [(9000,)])
+-        self.assertEqual(
+-            rows("SELECT current_stock FROM shop_items WHERE id=?",
+-                 (item_id,)), [(2,)])
++        with patch.object(shop_mod, "_deliver_purchase", side_effect=slow_delivery):
++            task = asyncio.create_task(process_purchase(inter, item_id))
++            try:
++                await asyncio.wait_for(entered.wait(), 5)
++                op_id, status, charged, reserved = rows(
++                    "SELECT op_id,status,charged,stock_reserved FROM shop_purchase_operations")[0]
++                self.assertEqual((status, charged, reserved), (TO.PURCHASE_DELIVERING,1,1))
++                execute("UPDATE shop_purchase_operations SET created_at=datetime('now','-30 minutes') WHERE op_id=?", (op_id,))
++                rec = await TO.reconcile_purchases(older_than_minutes=15)
++                self.assertEqual(rec["uncertain"], 0)
++                self.assertEqual((await TO.get_purchase(op_id))["status"], TO.PURCHASE_DELIVERING)
++                direct = await TO.refund_purchase(op_id)
++                self.assertFalse(direct["complete"], direct)
++                result = await TO.resolve_purchase_operation(op_id, action="refund", confirmed=True)
++                self.assertFalse(result["success"], result)
++                self.assertEqual(rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (GUILD, USER)), [(8700,)])
++                self.assertEqual(rows("SELECT current_stock FROM shop_items WHERE id=?", (item_id,)), [(1,)])
++            finally:
++                release.set()
++                await asyncio.wait_for(task, 5)
++        final = await TO.get_purchase(op_id)
++        self.assertEqual(final["status"], TO.PURCHASE_DELIVERED)
++        self.assertEqual(rows("SELECT COUNT(*) FROM purchase_history"), [(1,)])
++        self.assertFalse((await TO.refund_purchase(op_id))["complete"])
+ 
+     async def test_p2_ambiguous_vs_definite_discord_role_grant_in_helper_and_shop(self):
+         """P2 regression: ambiguous `member.add_roles()` outcomes (timeout/transport
+@@ -2406,13 +2359,18 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+             )[0]
+             op_id = op_row[0]
++            # Model an in-flight worker from the pre-delivering protocol: it wrote
++            # neither a delivery intent nor the provenance marker. Late-delivery
++            # recovery remains required for such legacy operations.
++            execute("UPDATE shop_purchase_operations SET status='pending', "
++                    "delivery_intent=NULL, provenance_tracked=0 WHERE op_id=?", (op_id,))
+             await TO.claim_purchase_transition(
+                 op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                 to_status=TO.PURCHASE_UNCERTAIN, detail="operator timeout")
+             await TO.resolve_purchase_operation(
+                 op_id, action="refund", confirmed=True,
+                 note="refunded before late delivery returned")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         shop_mod._deliver_purchase = _deliver_then_operator_refund
+@@ -2867,13 +2825,18 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             op_id = rows(
+                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+             )[0][0]
++            # Model an in-flight worker from the pre-delivering protocol: it wrote
++            # neither a delivery intent nor the provenance marker. Late-delivery
++            # recovery remains required for such legacy operations.
++            execute("UPDATE shop_purchase_operations SET status='pending', "
++                    "delivery_intent=NULL, provenance_tracked=0 WHERE op_id=?", (op_id,))
+             await TO.claim_purchase_transition(
+                 op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                 to_status=TO.PURCHASE_UNCERTAIN, detail="operator timeout")
+             await TO.resolve_purchase_operation(
+                 op_id, action="refund", confirmed=True,
+                 note="operator refunded before late delivery finalized")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         shop_mod._deliver_purchase = _deliver_then_refund
+@@ -2991,12 +2954,17 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             op_id = rows(
+                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+             )[0][0]
++            # Model an in-flight worker from the pre-delivering protocol: it wrote
++            # neither a delivery intent nor the provenance marker. Late-delivery
++            # recovery remains required for such legacy operations.
++            execute("UPDATE shop_purchase_operations SET status='pending', "
++                    "delivery_intent=NULL, provenance_tracked=0 WHERE op_id=?", (op_id,))
+             await TO.claim_purchase_transition(
+                 op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                 to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
+             await TO.resolve_purchase_operation(
+                 op_id, action="refund", confirmed=True, note="refunded")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         shop_mod._deliver_purchase = _deliver_then_refund
+@@ -3021,12 +2989,17 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             op_id = rows(
+                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+             )[0][0]
++            # Model an in-flight worker from the pre-delivering protocol: it wrote
++            # neither a delivery intent nor the provenance marker. Late-delivery
++            # recovery remains required for such legacy operations.
++            execute("UPDATE shop_purchase_operations SET status='pending', "
++                    "delivery_intent=NULL, provenance_tracked=0 WHERE op_id=?", (op_id,))
+             await TO.claim_purchase_transition(
+                 op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                 to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
+             await TO.resolve_purchase_operation(
+                 op_id, action="refund", confirmed=True, note="refunded")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             # Independent admin grant arrives after the delayed Shop delivery.
+             await set_quantity(
+                 GUILD, USER, "SolarCrown", 1,
+@@ -3073,12 +3046,17 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             op_id = rows(
+                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+             )[0][0]
++            # Model an in-flight worker from the pre-delivering protocol: it wrote
++            # neither a delivery intent nor the provenance marker. Late-delivery
++            # recovery remains required for such legacy operations.
++            execute("UPDATE shop_purchase_operations SET status='pending', "
++                    "delivery_intent=NULL, provenance_tracked=0 WHERE op_id=?", (op_id,))
+             await TO.claim_purchase_transition(
+                 op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                 to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
+             await TO.resolve_purchase_operation(
+                 op_id, action="refund", confirmed=True, note="refunded")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             # Quest grants two independent units after the Shop unit.
+             await give_item(GUILD, USER, "StarVoyager", 2, item_type="title", source="quest")
+             return res
+@@ -3130,12 +3108,17 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             op_id = rows(
+                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+             )[0][0]
++            # Model an in-flight worker from the pre-delivering protocol: it wrote
++            # neither a delivery intent nor the provenance marker. Late-delivery
++            # recovery remains required for such legacy operations.
++            execute("UPDATE shop_purchase_operations SET status='pending', "
++                    "delivery_intent=NULL, provenance_tracked=0 WHERE op_id=?", (op_id,))
+             await TO.claim_purchase_transition(
+                 op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                 to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
+             await TO.resolve_purchase_operation(
+                 op_id, action="refund", confirmed=True, note="refunded")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         shop_mod._deliver_purchase = _deliver_then_refund
+@@ -3253,12 +3236,17 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             op_id = rows(
+                 "SELECT op_id FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+             )[0][0]
++            # Model an in-flight worker from the pre-delivering protocol: it wrote
++            # neither a delivery intent nor the provenance marker. Late-delivery
++            # recovery remains required for such legacy operations.
++            execute("UPDATE shop_purchase_operations SET status='pending', "
++                    "delivery_intent=NULL, provenance_tracked=0 WHERE op_id=?", (op_id,))
+             await TO.claim_purchase_transition(
+                 op_id, from_statuses=(TO.PURCHASE_PENDING,),
+                 to_status=TO.PURCHASE_UNCERTAIN, detail="timeout")
+             await TO.resolve_purchase_operation(
+                 op_id, action="refund", confirmed=True, note="refunded")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         shop_mod._deliver_purchase = _deliver_then_refund
+@@ -3415,7 +3403,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             await TO.resolve_purchase_operation(
+                 last_op, action="refund", confirmed=True,
+                 note="late refund with separate interaction.user vs guild.get_member")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         def _make_split_member_ctx(granted_role):
+@@ -3640,7 +3628,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             await TO.resolve_purchase_operation(
+                 last_op, action="refund", confirmed=True,
+                 note="refund before finalize")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         real_rollback_role = re_mod.rollback_role_inventory_grant
+@@ -3814,7 +3802,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             await TO.resolve_purchase_operation(
+                 last_op, action="refund", confirmed=True,
+                 note="late refund of permanent Color re-buy")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         shop_mod._deliver_purchase = _deliver_then_refund
+@@ -4029,7 +4017,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             await TO.resolve_purchase_operation(
+                 last_op, action="refund", confirmed=True,
+                 note="refunded after member left guild")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             active_flag["ref"]["left"] = True
+             return res
+ 
+@@ -4119,7 +4107,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             await TO.resolve_purchase_operation(
+                 last_op, action="refund", confirmed=True,
+                 note="late refund for N2 test")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         async def _failing_update_delivery_rollback(op_id, **kwargs):
+@@ -4267,7 +4255,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             await TO.resolve_purchase_operation(
+                 last_op, action="refund", confirmed=True,
+                 note="simulated timeout before finalization")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         clear_attempts = {"count": 0}
+@@ -4414,7 +4402,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             await TO.resolve_purchase_operation(
+                 last_op, action="refund", confirmed=True,
+                 note="simulated timeout before finalization")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         tx_progress_fail_once = {"failed": False}
+@@ -4532,7 +4520,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             await TO.resolve_purchase_operation(
+                 last_op, action="refund", confirmed=True,
+                 note="simulated timeout before finalization")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         shop_mod._deliver_purchase = _deliver_then_refund
+@@ -4721,7 +4709,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
+             await TO.resolve_purchase_operation(
+                 last_op, action="refund", confirmed=True,
+                 note="simulated timeout before finalization")
+-            res = await real_deliver(*args, **kwargs)
++            res = await shop_mod._deliver_purchase_effects(*args, **kwargs)
+             return res
+ 
+         async def _defer_initial_compensation(op_id, spec=None, **kwargs):
+diff --git a/utils/timed_ownership.py b/utils/timed_ownership.py
+index 3bdcea8..fc898e1 100644
+--- a/utils/timed_ownership.py
++++ b/utils/timed_ownership.py
+@@ -44,8 +44,11 @@ edited or deleted later.
+ """
+ from __future__ import annotations
+ 
++import contextlib
++import contextvars
+ import functools
+ import json
++import sqlite3
+ import uuid
+ from datetime import datetime, timedelta, timezone
+ 
+@@ -2490,12 +2493,35 @@ async def cleanup_expired_holdings(bot, *, limit: int = 200) -> dict:
+ # ── Purchase saga journal ───────────────────────────────────────────────
+ 
+ PURCHASE_PENDING = "pending"
++PURCHASE_DELIVERING = "delivering"
+ PURCHASE_DELIVERED = "delivered"
+ PURCHASE_REFUNDED = "refunded"
+ PURCHASE_UNCERTAIN = "uncertain"
+ PURCHASE_FAILED = "failed"
+ 
++# A `delivering` row older than this, and not owned by a live delivery in this
++# process, is "stranded": the worker that claimed it is presumed dead. Age alone
++# NEVER refunds it - it is only parked as `uncertain` with an evidence-based
++# classification (see `reconcile_stranded_deliveries`).
++STRANDED_DELIVERY_LEASE_MINUTES = 30
++# A Discord role grant whose result was lost is only observed as "absent" after
++# this much time has passed since the request was started, so a request that was
++# merely slow cannot still be applied after we declared it absent. This is a
++# bound on a distributed-systems race, not a proof (see MANIFEST.md).
++INTENT_SETTLE_SECONDS = 600
++
++INTENT_KIND_DISCORD_ROLE = "discord_role"
++INTENT_STARTED = "started"      # request may or may not have reached Discord
++INTENT_PRESENT = "present"      # observed on the member (applied or independent)
++INTENT_RECORDED = "recorded"    # delivery reported success
++INTENT_ABSENT = "absent"        # proven not applied: refund no longer blocked
++
+ _LAST_BOT = None
++# Operations being delivered by THIS process right now. Process-local on
++# purpose: a restarted process has, by definition, no live deliveries.
++_LIVE_DELIVERIES: set[str] = set()
++_LIVE_SCOPE: contextvars.ContextVar = contextvars.ContextVar(
++    "nilive_live_purchase_scope", default=None)
+ _PENDING_DELIVERY_ROLLBACKS: dict[str, dict] = {}
+ # Per-process attempt counter used only to keep the limited reconciliation
+ # window fair. Durable ordering (`updated_at`) remains the cross-process signal.
+@@ -2547,8 +2573,32 @@ _PURCHASE_EXTRA_COLUMNS = (
+     # window needs a persisted attempt count to rotate away from rows that keep
+     # failing closed instead of re-selecting them forever.
+     ("delivery_rollback_attempts", "INTEGER NOT NULL DEFAULT 0"),
++    # Write-ahead record of an external (Discord) side effect, written and
++    # committed BEFORE the request is sent. NULL = no external effect was ever
++    # started for this operation.
++    ("delivery_intent", "TEXT"),
++    # 1 = the operation was claimed under the `delivering` protocol, in which
++    # every good the delivery creates carries this operation's id
++    # (`origin_op_id` / reward-grant ledger). Only then can a good WITHOUT an
++    # id be proven independent of this purchase.
++    ("provenance_tracked", "INTEGER NOT NULL DEFAULT 0"),
+ )
+ 
++# Database-level backstop for callers that do not run this module's guards
++# (an older worker, a script, a manual UPDATE): while an operation is
++# `delivering`, neither compensation flag may change. Compensation requires the
++# owner's explicit `delivering -> failed/uncertain` transition first.
++_DELIVERING_COMPENSATION_TRIGGER = """
++    CREATE TRIGGER IF NOT EXISTS trg_shop_ops_delivering_no_compensation
++    BEFORE UPDATE OF refunded, stock_returned ON shop_purchase_operations
++    WHEN OLD.status = 'delivering'
++     AND (NEW.refunded IS NOT OLD.refunded
++          OR NEW.stock_returned IS NOT OLD.stock_returned)
++    BEGIN
++        SELECT RAISE(ABORT, 'delivering purchase operation cannot be compensated');
++    END
++"""
++
+ 
+ async def ensure_purchase_journal_schema(db) -> None:
+     for statement in PURCHASE_SCHEMA:
+@@ -2557,6 +2607,7 @@ async def ensure_purchase_journal_schema(db) -> None:
+     from database import add_column_if_missing
+     for name, ddl in _PURCHASE_EXTRA_COLUMNS:
+         await add_column_if_missing(db, "shop_purchase_operations", name, ddl)
++    await db.execute(_DELIVERING_COMPENSATION_TRIGGER)
+     await db.commit()
+ 
+ 
+@@ -2582,9 +2633,39 @@ async def open_purchase(guild_id: int, user_id: int, *, item_id: int | None,
+         async with aiosqlite.connect(DB_PATH) as connection:
+             await connection.execute(sql, params)
+             await connection.commit()
++    _mark_live_delivery(op_id)
+     return op_id
+ 
+ 
++@contextlib.contextmanager
++def live_purchase_scope():
++    """Mark every operation opened inside this scope as live in this process.
++
++    `reconcile_stranded_deliveries` never touches a live operation, so a slow
++    delivery is not mistaken for a dead one. The scope is per asyncio task
++    (contextvar), and always releases its operations, even on cancellation.
++    """
++    ops: list[str] = []
++    token = _LIVE_SCOPE.set(ops)
++    try:
++        yield ops
++    finally:
++        _LIVE_SCOPE.reset(token)
++        for live_op in ops:
++            _LIVE_DELIVERIES.discard(live_op)
++
++
++def _mark_live_delivery(op_id: str) -> None:
++    scope = _LIVE_SCOPE.get()
++    if scope is not None:
++        scope.append(op_id)
++        _LIVE_DELIVERIES.add(op_id)
++
++
++def is_live_delivery(op_id) -> bool:
++    return str(op_id) in _LIVE_DELIVERIES
++
++
+ _UNSET = object()
+ 
+ 
+@@ -2656,6 +2737,11 @@ async def update_purchase(op_id: str, *, status: str | None = None,
+             " AND COALESCE(stock_returned, 0) = 0"
+         )
+         params.extend((PURCHASE_PENDING, PURCHASE_UNCERTAIN))
++    if status is not None:
++        # Only the delivery owner's conditional transition may release an
++        # in-flight operation. The generic updater must not overwrite it.
++        where_extra += " AND status != ?"
++        params.append(PURCHASE_DELIVERING)
+     completed_guard = ""
+     if delivery_rollback not in (None, ""):
+         # Database-enforced guard: a non-empty descriptor write must never
+@@ -2942,6 +3028,141 @@ async def claim_purchase_transition(op_id: str, *,
+         return cursor.rowcount == 1
+ 
+ 
++# ── Write-ahead intent for external (Discord) side effects ──────────────
++#
++# SQLite and Discord cannot be committed together. A role grant is therefore
++# journalled BEFORE the request is sent: if the process dies, the request times
++# out, or the coroutine is cancelled, the durable intent survives and says "a
++# role may have been applied". A timeout is never proof of absence.
++
++def _parse_intent(raw) -> tuple[str, dict | None]:
++    """`("none", None)` | `("ok", intent)` | `("malformed", None)`."""
++    if raw is None or raw == "":
++        return "none", None
++    try:
++        parsed = json.loads(raw)
++    except (TypeError, ValueError):
++        return "malformed", None
++    if not isinstance(parsed, dict) or not parsed.get("state"):
++        return "malformed", None
++    return "ok", parsed
++
++
++async def _op_journal_extras(db, op_id) -> dict:
++    """`delivery_intent` / `provenance_tracked`, tolerant of an older schema."""
++    try:
++        cursor = await db.execute(
++            "SELECT delivery_intent, COALESCE(provenance_tracked, 0) "
++            "FROM shop_purchase_operations WHERE op_id=?", (str(op_id),))
++        row = await cursor.fetchone()
++    except sqlite3.OperationalError as exc:
++        if "no such column" not in str(exc).lower():
++            raise
++        # Columns not migrated yet: no intent can exist; provenance unproven.
++        return {"delivery_intent": None, "provenance_tracked": 0}
++    if row is None:
++        return {"delivery_intent": None, "provenance_tracked": 0}
++    return {"delivery_intent": row[0], "provenance_tracked": int(row[1] or 0)}
++
++
++async def begin_delivery_intent(op_id: str, *, kind: str, guild_id: int,
++                                user_id: int, role_id: int,
++                                role_present_before: bool | None = None,
++                                note: str | None = None) -> str:
++    """Durably record, and commit, that an external effect is about to start.
++
++    Returns:
++      * `"written"`        - the intent is committed; the caller may proceed.
++      * `"not_applicable"` - no journal row exists for `op_id` (a caller outside
++        the purchase saga); there is nothing to protect.
++      * `"refused"`        - the operation is no longer deliverable (already
++        compensated, failed, or otherwise settled); the caller must NOT start
++        the effect.
++    Raises on a database error: the caller treats that as "nothing started".
++    """
++    intent = {
++        "kind": kind, "state": INTENT_STARTED,
++        "guild_id": int(guild_id), "user_id": int(user_id),
++        "role_id": int(role_id), "started_at": iso(),
++        "role_present_before": role_present_before,
++    }
++    if note:
++        intent["note"] = note
++    async with aiosqlite.connect(DB_PATH) as db:
++        await db.execute("BEGIN IMMEDIATE")
++        try:
++            cursor = await db.execute(
++                "SELECT status, COALESCE(refunded, 0), COALESCE(stock_returned, 0) "
++                "FROM shop_purchase_operations WHERE op_id=?", (str(op_id),))
++            row = await cursor.fetchone()
++            if row is None:
++                await db.execute("ROLLBACK")
++                return "not_applicable"
++            status, refunded, returned = row
++            if (status not in (PURCHASE_PENDING, PURCHASE_DELIVERING)
++                    or refunded or returned):
++                await db.execute("ROLLBACK")
++                return "refused"
++            await db.execute(
++                "UPDATE shop_purchase_operations SET delivery_intent=?, "
++                "updated_at=CURRENT_TIMESTAMP WHERE op_id=?",
++                (json.dumps(intent, sort_keys=True), str(op_id)))
++            await db.commit()
++            return "written"
++        except Exception:
++            try:
++                await db.execute("ROLLBACK")
++            except Exception:
++                pass
++            raise
++
++
++async def settle_delivery_intent(op_id: str, state: str, *, note: str | None = None,
++                                 only_from: tuple[str, ...] = (INTENT_STARTED,)
++                                 ) -> bool:
++    """Compare-and-swap an intent's state. True only when this call changed it."""
++    async with aiosqlite.connect(DB_PATH) as db:
++        await db.execute("BEGIN IMMEDIATE")
++        try:
++            cursor = await db.execute(
++                "SELECT delivery_intent FROM shop_purchase_operations WHERE op_id=?",
++                (str(op_id),))
++            row = await cursor.fetchone()
++            kind, intent = _parse_intent(row[0] if row else None)
++            if kind != "ok" or intent.get("state") not in only_from:
++                await db.execute("ROLLBACK")
++                return False
++            intent["state"] = state
++            intent["settled_at"] = iso()
++            if note:
++                intent["settle_note"] = str(note)[:300]
++            cursor = await db.execute(
++                "UPDATE shop_purchase_operations SET delivery_intent=?, "
++                "updated_at=CURRENT_TIMESTAMP WHERE op_id=? AND delivery_intent IS ?",
++                (json.dumps(intent, sort_keys=True), str(op_id), row[0]))
++            ok = cursor.rowcount == 1
++            await db.commit() if ok else await db.execute("ROLLBACK")
++            return ok
++        except Exception:
++            try:
++                await db.execute("ROLLBACK")
++            except Exception:
++                pass
++            raise
++
++
++async def mark_provenance_tracked(op_id: str, *, db: aiosqlite.Connection) -> bool:
++    """Flag the operation as running under the id-carrying delivery protocol.
++
++    Joins the caller's transaction (the same one that claims `delivering`), so
++    the flag and the claim commit or roll back together.
++    """
++    cursor = await db.execute(
++        "UPDATE shop_purchase_operations SET provenance_tracked=1 "
++        "WHERE op_id=? AND status=?", (str(op_id), PURCHASE_PENDING))
++    return cursor.rowcount == 1
++
++
+ # ── Compensation ────────────────────────────────────────────────────────
+ 
+ async def restore_stock(item_id, *,
+@@ -2982,17 +3203,64 @@ async def restore_stock(item_id, *,
+         return applied
+ 
+ 
+-async def _manual_refund_goods_problem(db, op):
+-    """Check operation-linked goods while holding the caller's SQLite write lock."""
++async def _purchase_linked_effects(db, op) -> list[str]:
++    """Everything that PROVES goods (or a possible external effect) of this
++    operation still exist. Each entry is a reason a refund must not proceed.
++
++    Only evidence tied to `op["op_id"]` belongs here. Ownership that merely
++    looks similar (same name, no provenance) is `_legacy_unprovable_problem`.
++    """
+     from utils.level_ops import purchase_grant
++    reasons: list[str] = []
+     grant = await purchase_grant(str(op["op_id"]), db=db)
+     if grant and not grant.get("reversed_at"):
+-        return "Purchase grant has not been reversed"
++        reasons.append("Purchase grant has not been reversed")
+     if await _boosts_for_origin(db, op["guild_id"], op["user_id"], op["op_id"]):
+-        return "Purchase-linked XP boost still exists"
+-    if op.get("item_id") is not None:
+-        cursor = await db.execute("SELECT type FROM shop_items WHERE id=? AND guild_id=?",
+-                                  (op["item_id"], op["guild_id"]))
++        reasons.append("Purchase-linked XP boost still exists")
++    cursor = await db.execute(
++        "SELECT id, metadata FROM timed_holdings WHERE guild_id=? "
++        "AND user_id=? AND item_type != ?",
++        (op["guild_id"], op["user_id"], RETENTION_ITEM_TYPE))
++    for holding_id, raw in await cursor.fetchall():
++        try:
++            metadata = json.loads(raw) if raw else {}
++        except (ValueError, TypeError):
++            continue
++        if (isinstance(metadata, dict)
++                and str(metadata.get("origin_op_id") or "") == str(op["op_id"])):
++            reasons.append(f"Purchase-linked holding {holding_id} still exists")
++    extras = await _op_journal_extras(db, op["op_id"])
++    state, intent = _parse_intent(extras["delivery_intent"])
++    if state == "malformed":
++        reasons.append("Delivery intent is unreadable; the Discord outcome "
++                       "cannot be established")
++    elif state == "ok" and intent.get("state") in (INTENT_STARTED, INTENT_PRESENT):
++        # `recorded` (delivery reported success) and `absent` do not block here:
++        # a recorded delivery is compensated by the late-rollback machinery,
++        # which removes the role itself.
++        reasons.append(
++            f"Discord role {intent.get('role_id')} grant is unresolved "
++            f"(intent state {intent.get('state')!r}): a timeout does not prove "
++            f"the role was not applied")
++    return reasons
++
++
++async def _legacy_unprovable_problem(db, op) -> str | None:
++    """Ownership that cannot be tied to, or separated from, this purchase.
++
++    A row WITHOUT an `origin_op_id` is only provably independent of this
++    operation when the operation ran under the id-carrying protocol
++    (`provenance_tracked`): every good such a delivery creates records the
++    operation's id, so an unlabelled row cannot be its product. For an
++    operation that did not (older protocol) it stays unprovable and the refund
++    fails closed. Names, timestamps and ids are never used as proof.
++    """
++    extras = await _op_journal_extras(db, op["op_id"])
++    tracked = bool(extras["provenance_tracked"])
++    if op.get("item_id") is not None and not tracked:
++        cursor = await db.execute(
++            "SELECT type FROM shop_items WHERE id=? AND guild_id=?",
++            (op["item_id"], op["guild_id"]))
+         listing = await cursor.fetchone()
+         if listing and listing[0] == "xp_boost":
+             cursor = await db.execute(
+@@ -3003,24 +3271,33 @@ async def _manual_refund_goods_problem(db, op):
+                 return "Legacy Shop boost has unprovable purchase provenance"
+     cursor = await db.execute(
+         "SELECT id, metadata, item_name FROM timed_holdings WHERE guild_id=? "
+-        "AND user_id=? AND item_type != ?", (op["guild_id"], op["user_id"], RETENTION_ITEM_TYPE))
++        "AND user_id=? AND item_type != ?",
++        (op["guild_id"], op["user_id"], RETENTION_ITEM_TYPE))
+     for holding_id, raw, item_name in await cursor.fetchall():
+         try:
+             metadata = json.loads(raw) if raw else {}
+         except (ValueError, TypeError):
+             metadata = None
+         if not isinstance(metadata, dict):
++            # Unreadable even for a tracked operation: cannot be shown to be
++            # independent, so a same-named row blocks.
+             if item_name == op["item_name"]:
+                 return f"Holding {holding_id} has unreadable provenance"
+             continue
+-        origin = metadata.get("origin_op_id")
+-        if str(origin or "") == str(op["op_id"]):
+-            return f"Purchase-linked holding {holding_id} still exists"
+-        if origin is None and item_name == op["item_name"]:
++        if (metadata.get("origin_op_id") is None and item_name == op["item_name"]
++                and not tracked):
+             return f"Holding {holding_id} has unprovable purchase provenance"
+     return None
+ 
+ 
++async def _manual_refund_goods_problem(db, op):
++    """Check operation-linked goods while holding the caller's SQLite write lock."""
++    reasons = await _purchase_linked_effects(db, op)
++    if reasons:
++        return reasons[0]
++    return await _legacy_unprovable_problem(db, op)
++
++
+ async def refund_purchase(op_id: str) -> dict:
+     """Return what a failed purchase took, at most once per effect.
+ 
+@@ -3037,6 +3314,9 @@ async def refund_purchase(op_id: str) -> dict:
+     if op is None:
+         return {"refunded": False, "stock_returned": False,
+                 "complete": False, "error": "Unknown purchase operation"}
++    if op["status"] == PURCHASE_DELIVERING:
++        return {"refunded": False, "stock_returned": False,
++                "complete": False, "error": "Cannot refund a delivering purchase operation"}
+     if op["status"] == PURCHASE_DELIVERED:
+         # Delivered means the member got the goods; anything after that is a
+         # support decision, never an automatic refund.
+@@ -3064,12 +3344,15 @@ async def refund_purchase(op_id: str) -> dict:
+                             "complete": False,
+                             "error": "Unknown purchase operation"}
+                 cur_status, cur_charged, cur_refunded = cur_row
+-                if cur_status == PURCHASE_DELIVERED:
++                if cur_status in (PURCHASE_DELIVERED, PURCHASE_DELIVERING):
+                     await db.execute("ROLLBACK")
+                     return {"refunded": False, "stock_returned": False,
+                             "complete": False,
+-                            "error": "Cannot refund a delivered purchase operation"}
++                            "error": f"Cannot refund a {cur_status} purchase operation"}
+                 if cur_charged and not cur_refunded:
++                    # Refund credit and its ledger entry must commit together;
++                    # safe_credit otherwise tolerates a missing legacy ledger.
++                    await db.execute("SELECT id FROM transaction_ledger LIMIT 0")
+                     credit_res = await safe_credit(
+                         op["guild_id"], op["user_id"],
+                         int(op["amount"] or 0),
+@@ -3111,12 +3394,12 @@ async def refund_purchase(op_id: str) -> dict:
+                             "complete": False,
+                             "error": "Unknown purchase operation"}
+                 cur_status, cur_reserved, cur_returned = cur_row
+-                if cur_status == PURCHASE_DELIVERED:
++                if cur_status in (PURCHASE_DELIVERED, PURCHASE_DELIVERING):
+                     await db.execute("ROLLBACK")
+                     return {"refunded": bool(op["refunded"]),
+                             "stock_returned": False,
+                             "complete": False,
+-                            "error": "Cannot refund a delivered purchase operation"}
++                            "error": f"Cannot refund a {cur_status} purchase operation"}
+                 if cur_reserved and not cur_returned:
+                     await restore_stock(op["item_id"], db=db)
+                     await update_purchase(op_id, stock_returned=1, db=db)
+@@ -3611,9 +3894,9 @@ async def _complete_linked_rollback(linked_op_id, *, db=None) -> tuple[str, str
+         if state == "absent":
+             # Never create a descriptor here: only the delivery path may do that.
+             return "malformed", "no durable descriptor to complete"
+-        if str(status) == PURCHASE_DELIVERED:
++        if str(status) in (PURCHASE_DELIVERED, PURCHASE_DELIVERING):
+             return "refused", (
+-                f"operation {linked_op_id} is delivered; its goods were kept, so "
++                f"operation {linked_op_id} is {status}; its goods may be kept, so "
+                 f"a holding retirement cannot complete its compensation"
+             )
+         if state == "malformed":
+@@ -4078,6 +4361,11 @@ async def compensate_late_delivery(
+             "error": f"Purchase operation {op_id} not found for late-delivery rollback",
+         }
+ 
++    if op_row.get("status") == PURCHASE_DELIVERING:
++        return {"complete": False, "durable_persisted": False,
++                "inventory_rolled_back": False, "equip_reconciled": False,
++                "role_reconciled": False,
++                "error": f"Cannot roll back delivering operation {op_id}"}
+     if op_row.get("status") == PURCHASE_DELIVERED:
+         _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+         return {
+@@ -4752,10 +5040,10 @@ async def compensate_late_delivery(
+                 )
+                 return "abort" if phase == "pre" else False
+             db_status, db_raw = row
+-            if db_status == PURCHASE_DELIVERED:
++            if db_status in (PURCHASE_DELIVERED, PURCHASE_DELIVERING):
+                 role_guard["outcome"] = "abort"
+                 role_guard["reason"] = (
+-                    f"Cannot roll back role for delivered operation {op_id}"
++                    f"Cannot roll back role for {db_status} operation {op_id}"
+                 )
+                 return "abort" if phase == "pre" else False
+ 
+@@ -5145,10 +5433,11 @@ async def compensate_late_delivery(
+                                 ),
+                             }
+                         db_status_b, db_raw_b = op_row_boost
+-                        if db_status_b == PURCHASE_DELIVERED:
++                        if db_status_b in (PURCHASE_DELIVERED, PURCHASE_DELIVERING):
+                             await cleanup_db.execute("ROLLBACK")
+                             boost_in_tx = False
+-                            _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
++                            if db_status_b == PURCHASE_DELIVERED:
++                                _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+                             return {
+                                 "complete": False,
+                                 "durable_persisted": False,
+@@ -5156,7 +5445,7 @@ async def compensate_late_delivery(
+                                 "equip_reconciled": False,
+                                 "role_reconciled": False,
+                                 "error": (
+-                                    f"Cannot roll back XP boost for delivered "
++                                    f"Cannot roll back XP boost for {db_status_b} "
+                                     f"operation {op_id}"
+                                 ),
+                             }
+@@ -5447,17 +5736,18 @@ async def compensate_late_delivery(
+                                 "error": f"Purchase operation {op_id} not found for item rollback",
+                             }
+                         db_status, db_raw_spec = op_row_db
+-                        if db_status == PURCHASE_DELIVERED:
++                        if db_status in (PURCHASE_DELIVERED, PURCHASE_DELIVERING):
+                             await rb_db.execute("ROLLBACK")
+                             in_tx = False
+-                            _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
++                            if db_status == PURCHASE_DELIVERED:
++                                _PENDING_DELIVERY_ROLLBACKS.pop(str(op_id), None)
+                             return {
+                                 "complete": False,
+                                 "durable_persisted": False,
+                                 "inventory_rolled_back": False,
+                                 "equip_reconciled": False,
+                                 "role_reconciled": False,
+-                                "error": f"Cannot roll back item for delivered operation {op_id}",
++                                "error": f"Cannot roll back item for {db_status} operation {op_id}",
+                             }
+                         if db_raw_spec == "":
+                             await rb_db.execute("ROLLBACK")
+@@ -5895,6 +6185,213 @@ async def reconcile_purchases(*, older_than_minutes: int = 15,
+              f"-{int(older_than_minutes)} minutes"))
+         await db.commit()
+         stats["uncertain"] = cursor.rowcount or 0
++
++    # `delivering` operations are invisible to everything above. Park the
++    # stranded ones (never refund them) and settle lost Discord outcomes.
++    stats["stranded"] = 0
++    stats["intents_settled"] = 0
++    try:
++        stranded = await reconcile_stranded_deliveries(limit=limit)
++        stats["stranded"] = int(stranded.get("parked") or 0)
++        stats["errors"] += int(stranded.get("errors") or 0)
++    except Exception as exc:  # pragma: no cover - defensive
++        print(f"[SHOP] Stranded delivery reconciliation failed: {exc}")
++        stats["errors"] += 1
++    try:
++        intents = await reconcile_delivery_intents(bot=bot or _LAST_BOT, limit=limit)
++        stats["intents_settled"] = int(intents.get("settled") or 0)
++        stats["errors"] += int(intents.get("errors") or 0)
++    except Exception as exc:  # pragma: no cover - defensive
++        print(f"[SHOP] Delivery intent reconciliation failed: {exc}")
++        stats["errors"] += 1
++    return stats
++
++
++async def classify_delivery_evidence(db, op: dict) -> tuple[str, list[str]]:
++    """Classify what is known about a delivery whose result was never recorded.
++
++    Four outcomes, deliberately distinct (and never "safe to refund" by age):
++
++    * `goods_present`       - durable, operation-linked goods exist: the delivery
++      (at least partly) happened. Finish it or reverse it; never refund over it.
++    * `external_unresolved` - a Discord request was started and its outcome is
++      unknown: it may have succeeded.
++    * `undeterminable`      - the evidence itself is unreadable.
++    * `never_started`       - no operation-linked goods and no external effect
++      was ever begun. Delivery left no durable trace; a refund still goes
++      through the same goods guard as any other and is an operator decision.
++    """
++    raw_rb = op.get("_raw_delivery_rollback", op.get("delivery_rollback"))
++    extras = await _op_journal_extras(db, op["op_id"])
++    intent_kind, intent = _parse_intent(extras["delivery_intent"])
++    if intent_kind == "malformed":
++        return "undeterminable", ["delivery intent is unreadable"]
++    try:
++        reasons = await _purchase_linked_effects(db, op)
++    except Exception as exc:
++        return "undeterminable", [f"evidence query failed: {exc}"]
++    intent_reasons = [r for r in reasons if r.startswith("Discord role")]
++    goods = [r for r in reasons if not r.startswith("Discord role")]
++    if raw_rb not in (None, ""):
++        goods.append("a delivery rollback descriptor is present")
++    if goods:
++        return "goods_present", goods + intent_reasons
++    if intent_reasons:
++        return "external_unresolved", intent_reasons
++    return "never_started", ["no operation-linked goods and no external effect recorded"]
++
++
++async def reconcile_stranded_deliveries(
++        *, lease_minutes: int = STRANDED_DELIVERY_LEASE_MINUTES,
++        limit: int = 100) -> dict:
++    """Park `delivering` operations whose worker is presumed dead.
++
++    A `delivering` row is owned by exactly one live delivery. It is "stranded"
++    only when ALL of: older than the lease (measured from when delivery was
++    claimed or last made progress), not a live delivery in this process, and
++    still wholly uncompensated. A stranded row moves to `uncertain` with the
++    classification written into `detail`. It is NEVER refunded here: money is
++    only returned by the guarded operator/`failed` paths, which re-check goods.
++    """
++    stats = {"parked": 0, "skipped_live": 0, "errors": 0,
++             "by_class": {}}
++    async with aiosqlite.connect(DB_PATH) as db:
++        cursor = await db.execute(
++            "SELECT op_id FROM shop_purchase_operations WHERE status=? "
++            "AND updated_at <= datetime('now', ?) ORDER BY updated_at ASC LIMIT ?",
++            (PURCHASE_DELIVERING, f"-{int(lease_minutes)} minutes", int(limit)))
++        candidates = [r[0] for r in await cursor.fetchall()]
++    for op_id in candidates:
++        if is_live_delivery(op_id):
++            stats["skipped_live"] += 1
++            continue
++        try:
++            async with aiosqlite.connect(DB_PATH) as db:
++                await db.execute("BEGIN IMMEDIATE")
++                try:
++                    cursor = await db.execute(
++                        "SELECT op_id, guild_id, user_id, item_id, item_name, "
++                        "status, delivery_rollback FROM shop_purchase_operations "
++                        "WHERE op_id=?", (op_id,))
++                    row = await cursor.fetchone()
++                    if not row or row[5] != PURCHASE_DELIVERING:
++                        await db.execute("ROLLBACK")
++                        continue
++                    op = {"op_id": row[0], "guild_id": row[1], "user_id": row[2],
++                          "item_id": row[3], "item_name": row[4],
++                          "delivery_rollback": row[6]}
++                    code, why = await classify_delivery_evidence(db, op)
++                    detail = (f"Stranded delivering ({code}): " + "; ".join(why)
++                              + " | parked for operator review, not refunded")
++                    won = await claim_purchase_transition(
++                        op_id, from_statuses=(PURCHASE_DELIVERING,),
++                        to_status=PURCHASE_UNCERTAIN, detail=detail[:1500],
++                        require_uncompensated=True, db=db)
++                    if won:
++                        await db.commit()
++                        stats["parked"] += 1
++                        stats["by_class"][code] = stats["by_class"].get(code, 0) + 1
++                    else:
++                        await db.execute("ROLLBACK")
++                except Exception:
++                    try:
++                        await db.execute("ROLLBACK")
++                    except Exception:
++                        pass
++                    raise
++        except Exception as exc:
++            stats["errors"] += 1
++            print(f"[SHOP] Could not park stranded delivery {op_id}: {exc}")
++    return stats
++
++
++async def _observe_role_presence(bot, guild_id: int, user_id: int,
++                                 role_id: int) -> tuple[str, str]:
++    """`("present"|"absent"|"unknown", reason)` from an AUTHORITATIVE fetch.
++
++    The member cache is not trusted: it can lag the API in either direction.
++    """
++    guild = bot.get_guild(int(guild_id)) if bot is not None else None
++    if guild is None:
++        return "unknown", "guild not available"
++    try:
++        member = await guild.fetch_member(int(user_id))
++    except discord.NotFound as exc:
++        if getattr(exc, "code", None) == 10007:  # Unknown Member
++            return "absent", "member is no longer in the guild"
++        return "unknown", f"not found (code {getattr(exc, 'code', None)})"
++    except Exception as exc:
++        return "unknown", f"member fetch failed: {type(exc).__name__}: {exc}"
++    held = {int(getattr(r, "id", r)) for r in (getattr(member, "roles", None) or ())}
++    return ("present" if int(role_id) in held else "absent"), "fetched member"
++
++
++async def reconcile_delivery_intents(
++        bot=None, *, settle_seconds: int = INTENT_SETTLE_SECONDS,
++        lease_minutes: int = STRANDED_DELIVERY_LEASE_MINUTES,
++        limit: int = 100) -> dict:
++    """Observe the live Discord state of unresolved role-grant intents.
++
++    Observation only - this never grants or removes a role and never moves
++    money. It moves an intent to `absent` (unblocking a refund) only when an
++    authoritative fetch shows the role missing, and only after the request is
++    old enough that it can no longer be merely in flight. A role that IS present
++    is recorded as `present` and keeps the refund blocked: it may be the
++    purchase's role or one the member holds independently, and the database
++    cannot tell which. Resolving that is an explicit operator decision.
++    """
++    stats = {"settled": 0, "present": 0, "kept": 0, "errors": 0}
++    if bot is None:
++        return stats
++    async with aiosqlite.connect(DB_PATH) as db:
++        cursor = await db.execute(
++            "SELECT op_id, status, updated_at, delivery_intent "
++            "FROM shop_purchase_operations WHERE delivery_intent IS NOT NULL "
++            "AND delivery_intent != '' AND status IN (?, ?, ?) "
++            "AND COALESCE(refunded, 0) = 0 ORDER BY updated_at ASC LIMIT ?",
++            (PURCHASE_UNCERTAIN, PURCHASE_FAILED, PURCHASE_DELIVERING,
++             int(limit) * 5))
++        rows = await cursor.fetchall()
++        cursor = await db.execute(
++            "SELECT datetime('now', ?)", (f"-{int(lease_minutes)} minutes",))
++        lease_cutoff = (await cursor.fetchone())[0]
++    now = utcnow()
++    handled = 0
++    for op_id, status, updated_at, raw in rows:
++        kind, intent = _parse_intent(raw)
++        if kind != "ok" or intent.get("kind") != INTENT_KIND_DISCORD_ROLE:
++            continue
++        if intent.get("state") not in (INTENT_STARTED, INTENT_PRESENT):
++            continue
++        if handled >= limit:
++            break
++        if status == PURCHASE_DELIVERING and (
++                is_live_delivery(op_id) or str(updated_at) > str(lease_cutoff)):
++            stats["kept"] += 1
++            continue
++        started = parse_time(intent.get("started_at"))
++        if started is None or (now - started).total_seconds() < settle_seconds:
++            stats["kept"] += 1
++            continue
++        handled += 1
++        try:
++            verdict, reason = await _observe_role_presence(
++                bot, intent["guild_id"], intent["user_id"], intent["role_id"])
++        except Exception as exc:
++            stats["errors"] += 1
++            print(f"[SHOP] Role intent observation failed for {op_id}: {exc}")
++            continue
++        if verdict == "unknown":
++            stats["kept"] += 1
++            continue
++        target = INTENT_ABSENT if verdict == "absent" else INTENT_PRESENT
++        if target == intent.get("state"):
++            stats["kept"] += 1
++            continue
++        if await settle_delivery_intent(
++                op_id, target, note=f"observed {verdict}: {reason}",
++                only_from=(INTENT_STARTED, INTENT_RECORDED, INTENT_PRESENT)):
++            stats["settled" if target == INTENT_ABSENT else "present"] += 1
+     return stats
+ 
+ 
+@@ -6380,6 +6877,19 @@ async def inspect_purchase_operation(op_id: str) -> dict | None:
+ 
+     from utils.level_ops import purchase_grant
+     evidence["purchase_grant"] = await purchase_grant(str(op_id))
++    async with aiosqlite.connect(DB_PATH) as extras_db:
++        extras = await _op_journal_extras(extras_db, op_id)
++        intent_kind, intent = _parse_intent(extras["delivery_intent"])
++        evidence["delivery_intent"] = (
++            intent if intent_kind == "ok"
++            else ("unreadable" if intent_kind == "malformed" else None))
++        evidence["provenance_tracked"] = bool(extras["provenance_tracked"])
++        evidence["delivery_classification"] = None
++        if op["status"] in (PURCHASE_DELIVERING, PURCHASE_UNCERTAIN):
++            code, why = await classify_delivery_evidence(extras_db, op)
++            evidence["delivery_classification"] = {
++                "class": code, "reasons": why,
++                "live_in_this_process": is_live_delivery(op_id)}
+     role_id_candidate: int | None = None
+     async with aiosqlite.connect(DB_PATH) as db:
+         if item_id is not None:
+@@ -6707,13 +7217,20 @@ async def resolve_purchase_operation(op_id: str, *, action: str,
+ 
+     current_status = op["status"]
+     if current_status not in (PURCHASE_UNCERTAIN, PURCHASE_FAILED):
++        hint = ""
++        if current_status == PURCHASE_DELIVERING:
++            hint = (" A delivering operation belongs to a live delivery; if its "
++                    f"worker died it is parked as 'uncertain' after "
++                    f"{STRANDED_DELIVERY_LEASE_MINUTES} minutes and can then be "
++                    "resolved. It is never refunded because it is old.")
+         return {
+             "success": False,
+             "op_id": op_id,
+             "action": normalized,
+             "status": current_status,
+             "error": (f"Cannot resolve operation in status {current_status!r}; "
+-                      "only 'uncertain' or 'failed' operations may be resolved."),
++                      "only 'uncertain' or 'failed' operations may be resolved."
++                      + hint),
+         }
+ 
+     operator_note = (note or "").strip()
+@@ -7018,6 +7535,29 @@ def format_purchase_inspection(evidence: dict) -> str:
+             lines.append(f"  Descriptor   : {json.dumps(parsed_rb, sort_keys=True)}")
+         else:
+             lines.append(f"Delivery Rollback: PENDING (unreadable) {raw_rb!r}")
++    intent = evidence.get("delivery_intent")
++    if intent == "unreadable":
++        lines.append("Delivery Intent: UNREADABLE (refund blocked)")
++    elif intent:
++        lines.append(
++            f"Delivery Intent: {intent.get('kind')} role_id={intent.get('role_id')} "
++            f"state={intent.get('state')} started_at={intent.get('started_at')} "
++            f"role_present_before={intent.get('role_present_before')}")
++        if intent.get("settle_note"):
++            lines.append(f"  Observation  : {intent['settle_note']}")
++        if intent.get("state") in (INTENT_STARTED, INTENT_PRESENT):
++            lines.append(
++                "  Refund is BLOCKED until the role is observed absent. A "
++                "timeout does not prove the role was not applied.")
++    lines.append(
++        f"Provenance     : {'tracked (goods carry this operation id)' if evidence.get('provenance_tracked') else 'NOT tracked (older protocol)'}")
++    classification = evidence.get("delivery_classification")
++    if classification:
++        lines.append(
++            f"Delivery Class : {classification['class']} "
++            f"(live in this process: {classification['live_in_this_process']})")
++        for reason in classification["reasons"]:
++            lines.append(f"  - {reason}")
+     wallet = evidence.get("member_wallet")
+     if wallet is not None:
+         lines.append(
+@@ -7114,7 +7654,9 @@ async def _cli_async(argv: list[str] | None = None) -> int:
+         help=("Filter operations by status when listing. By default the listing "
+               "shows uncertain operations, pending delivery rollbacks, and "
+               "failed/refunded operations with incomplete compensation. "
+-              "Use 'any' for no status filter."))
++              "Use 'delivering' to inspect in-flight or stranded deliveries, "
++              "or 'any' for no status filter. A delivering operation must not "
++              "be refunded merely because it is old."))
+     parser.add_argument(
+         "--pending-rollbacks", action="store_true",
+         help=("List only operations whose delivery_rollback descriptor is still "
