@@ -2538,8 +2538,10 @@ async def get_member_blacklist_entries(guild_id: int) -> list[dict]:
     return [{
         "id": r[0],
         "user_id": r[1],
+        "user_id_str": str(r[1]),
         "reason": r[2] or "",
         "created_by": r[3] or 0,
+        "created_by_str": str(r[3]) if r[3] else "",
         "created_at": str(r[4])
     } for r in rows]
 
@@ -2755,7 +2757,7 @@ async def unblacklist_member(guild_id: int, user_id: int, *,
     restored_now = False
     if member is not None:
         reconciled_result = await restore_reached_level_roles(member, guild_id, user_id)
-        restored_now = not reconciled_result.get("failed") or bool(reconciled_result.get("blocked"))
+        restored_now = not reconciled_result.get("failed")
         if restored_now:
             await _clear_restore(guild_id, user_id)
 
@@ -2900,7 +2902,7 @@ async def process_blacklist_roles(bot) -> dict:
                 continue
             if member is not None:
                 result = await restore_reached_level_roles(member, guild_id, user_id)
-                if result.get("failed") and not result.get("blocked"):
+                if result.get("failed"):
                     continue
                 summary["restored"] += len(result.get("restored", []))
             await _clear_restore(guild_id, user_id)
