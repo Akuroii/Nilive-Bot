@@ -201,6 +201,84 @@ class TestBlacklistBotSweep(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gone.get_json()["role_restore"], "deferred")
         self.assertEqual(self.queue(), [(GUILD, USER)])
 
+    async def test_17_real_restore_503_keeps_queue_and_recovers_on_retry(self):
+        """Real reconcile_role_progression sets blocked=True on add_roles 503; queue must stay and retry."""
+        import discord
+        claim(USER, 10, L10)
+        self.member.roles = [self.r5, self.r10]
+        await blacklist_member(GUILD, USER)
+        await process_blacklist_roles(self.bot)
+        self.assertEqual(self.member.roles, [])
+
+        res = await unblacklist_member(GUILD, USER)  # dashboard queues restoration
+        self.assertEqual(res["role_restore"], "deferred")
+        self.assertEqual(self.queue(), [(GUILD, USER)])
+
+        orig_add = self.member.add_roles
+
+        async def add_503(*roles, **kwargs):
+            raise discord.HTTPException(
+                mock.Mock(status=503, reason="Service Unavailable"), "Discord 503"
+            )
+
+        self.member.add_roles = add_503
+        failed_sweep = await process_blacklist_roles(self.bot)
+        self.assertEqual(failed_sweep["restored"], 0)
+        self.assertEqual(self.member.roles, [])
+        self.assertEqual(self.queue(), [(GUILD, USER)])
+
+        self.member.add_roles = orig_add
+        retry_sweep = await process_blacklist_roles(self.bot)
+        self.assertEqual(retry_sweep["restored"], 2)
+        self.assertIn(self.r5, self.member.roles)
+        self.assertIn(self.r10, self.member.roles)
+        self.assertEqual(self.queue(), [])
+
+    async def test_18_immediate_unblacklist_with_member_keeps_queue_on_failed_restore(self):
+        """Immediate unblacklist_member(..., member=member) must keep queue when add_roles fails."""
+        import discord
+        await blacklist_member(GUILD, USER)
+        self.member.roles = []
+        orig_add = self.member.add_roles
+
+        async def add_503(*roles, **kwargs):
+            raise discord.HTTPException(
+                mock.Mock(status=503, reason="Service Unavailable"), "Discord 503"
+            )
+
+        self.member.add_roles = add_503
+        res = await unblacklist_member(GUILD, USER, member=self.member)
+        self.assertTrue(res["success"])
+        self.assertTrue(res["reconciled"]["blocked"])
+        self.assertTrue(bool(res["reconciled"]["failed"]))
+        self.assertEqual(res["role_restore"], "deferred")
+        self.assertNotIn(self.r5, self.member.roles)
+        self.assertEqual(self.queue(), [(GUILD, USER)])
+
+        self.member.add_roles = orig_add
+        retry_sweep = await process_blacklist_roles(self.bot)
+        self.assertEqual(retry_sweep["restored"], 1)
+        self.assertIn(self.r5, self.member.roles)
+        self.assertEqual(self.queue(), [])
+
+    async def test_19_stale_restore_queue_for_reblacklisted_member_does_not_restore_roles(self):
+        """Concurrent/stale restore row for a re-blacklisted member never restores roles and is cleared."""
+        await blacklist_member(GUILD, USER)
+        await process_blacklist_roles(self.bot)
+        self.assertNotIn(self.r5, self.member.roles)
+
+        # Simulate a stale restore row surviving alongside an active blacklist row.
+        execute(
+            "INSERT OR IGNORE INTO leveling_blacklist_restores (guild_id, user_id) VALUES (?, ?)",
+            (GUILD, USER),
+        )
+        self.assertEqual(self.queue(), [(GUILD, USER)])
+
+        summary = await process_blacklist_roles(self.bot)
+        self.assertEqual(summary["restored"], 0)
+        self.assertNotIn(self.r5, self.member.roles)
+        self.assertEqual(self.queue(), [])
+
 
 class TestCogWiring(unittest.IsolatedAsyncioTestCase):
     async def test_15_leveling_cog_runs_and_stops_the_sweep(self):
