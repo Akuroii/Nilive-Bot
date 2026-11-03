@@ -831,8 +831,11 @@ def add_member_blacklist_api():
     raw_uid  = data.get("user_id")
     reason   = str(data.get("reason", "") or "").strip()
     try:
-        user_id = int(str(raw_uid).strip())
-        if user_id <= 0:
+        uid_str = str(raw_uid).strip()
+        if not uid_str.isascii() or not uid_str.isdigit():
+            raise ValueError
+        user_id = int(uid_str)
+        if not 0 < user_id <= 2**63 - 1:
             raise ValueError
     except (TypeError, ValueError):
         return jsonify({"success": False, "error": "Invalid user_id"}), 400
@@ -851,6 +854,8 @@ def add_member_blacklist_api():
 @api_bp.route("/leveling/member-blacklist/<int:user_id>", methods=["DELETE"])
 @require_api_permission(LEVEL_ADMIN)
 def remove_member_blacklist_api(user_id: int):
+    if not 0 < user_id <= 2**63 - 1:
+        return jsonify({"success": False, "error": "Invalid user_id"}), 400
     guild_id = get_session_guild_id()
     actor_id = current_user_id()
     from utils.level_claims import unblacklist_member
@@ -870,8 +875,11 @@ def retry_member_blacklist_roles_api():
     data     = request.json or {}
     raw_uid  = data.get("user_id")
     try:
-        user_id = int(str(raw_uid).strip())
-        if user_id <= 0:
+        uid_str = str(raw_uid).strip()
+        if not uid_str.isascii() or not uid_str.isdigit():
+            raise ValueError
+        user_id = int(uid_str)
+        if not 0 < user_id <= 2**63 - 1:
             raise ValueError
     except (TypeError, ValueError):
         return jsonify({"success": False, "error": "Invalid user_id"}), 400

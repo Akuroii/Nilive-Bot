@@ -19,6 +19,15 @@
     </div>
 </div>
 
+<noscript>
+    <div class="card"><div class="card-title">Your dashboard access</div>
+    {% for g in guilds %}<p><a href="{{ url_for('select_guild', guild_id=g.id) }}">{{ g.name }}</a></p>
+    {% else %}<p>No dashboard servers available.</p>{% endfor %}
+    </div>
+</noscript>
+<script id="accessible-server-data" type="application/json">[
+{% for g in guilds %}{{ {'id': g.id|string, 'name': g.name, 'icon': g.icon, 'level': g.level}|tojson }}{{ ',' if not loop.last else '' }}{% endfor %}
+]</script>
 <script>
 (function () {
 var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
@@ -29,7 +38,7 @@ __neroGlobal.selectServerPost = selectServerPost;
 __neroGlobal.inviteBot = inviteBot;
 
 function iconUrl(guildId, icon) {
-    if (!icon) return null;
+    if (!/^\d{1,19}$/.test(String(guildId)) || !/^(?:a_)?[a-f0-9]+$/i.test(String(icon || ''))) return null;
     const ext = icon.startsWith('a_') ? 'gif' : 'png';
     return `https://cdn.discordapp.com/icons/${guildId}/${icon}.${ext}`;
 }
@@ -39,7 +48,7 @@ function serverIconHtml(s) {
     const fallback = `<div style="width:42px;height:42px;border-radius:50%;background:var(--accent);
                           display:flex;align-items:center;justify-content:center;
                           font-weight:700;font-size:16px;color:#fff;flex-shrink:0;">
-                      ${(s.name || '?').charAt(0).toUpperCase()}
+                      ${escapeHtml(String(s.name || '?').charAt(0).toUpperCase())}
                    </div>`;
     if (!url) return fallback;
     return `<div style="width:42px;height:42px;flex-shrink:0;position:relative;">
@@ -48,12 +57,13 @@ function serverIconHtml(s) {
                 <div style="width:42px;height:42px;border-radius:50%;background:var(--accent);
                             display:none;align-items:center;justify-content:center;
                             font-weight:700;font-size:16px;color:#fff;">
-                    ${(s.name || '?').charAt(0).toUpperCase()}
+                    ${escapeHtml(String(s.name || '?').charAt(0).toUpperCase())}
                 </div>
             </div>`;
 }
 
 function selectServerPost(guildId) {
+    if (!/^\d{1,19}$/.test(String(guildId))) return;
     const form = document.createElement('form');
     form.method = 'POST';
     form.action = `/select-guild/${guildId}`;
@@ -71,9 +81,67 @@ async function loadUnifiedServers() {
     if (!container) return;
 
     try {
-        const res = await fetch('/api/user/servers');
-        const data = await res.json();
-        const servers = data.servers || [];
+        // Server-rendered grants remain an authoritative fallback if /api/user/servers fails,
+        // while /api/user/servers enriches with all 4 categories using exact id_str snowflakes.
+        const grantedEl = document.getElementById('accessible-server-data');
+        const granted = grantedEl ? JSON.parse(grantedEl.textContent || '[]') : [];
+        let discovered = [], discoveryFailed = false;
+        try {
+            const res = await fetch('/api/user/servers');
+            if (!res.ok) throw new Error('Server discovery failed');
+            const data = await res.json();
+            discovered = Array.isArray(data.servers) ? data.servers : [];
+        } catch (e) {
+            discoveryFailed = true;
+        }
+
+        const validCategories = new Set(['active', 'invite', 'access_required', 'dangling']);
+        const serversById = new Map();
+        for (const g of granted) {
+            const rawId = g.id_str != null ? g.id_str : (typeof g.id === 'string' || Number.isSafeInteger(g.id) ? g.id : '');
+            const id = String(rawId);
+            if (!/^\d{1,19}$/.test(id)) continue;
+            serversById.set(id, {
+                id,
+                name: g.name,
+                icon: g.icon,
+                permission_level: g.level,
+                is_owner: Boolean(g.is_owner),
+                can_manage: Boolean(g.can_manage),
+                category: 'active',
+            });
+        }
+        for (const g of discovered) {
+            // id_str avoids JavaScript IEEE-754 float64 rounding of Discord snowflakes.
+            const rawId = g.id_str != null ? g.id_str : (typeof g.id === 'string' || Number.isSafeInteger(g.id) ? g.id : '');
+            const id = String(rawId);
+            if (!/^\d{1,19}$/.test(id)) continue;
+            const explicitCat = validCategories.has(g.category) ? g.category : null;
+            const existing = serversById.get(id);
+            if (existing) {
+                existing.name = g.name || existing.name;
+                existing.icon = g.icon || existing.icon;
+                if (g.permission_level) existing.permission_level = g.permission_level;
+                if (g.is_owner !== undefined) existing.is_owner = Boolean(g.is_owner);
+                if (g.can_manage !== undefined) existing.can_manage = Boolean(g.can_manage);
+                if (explicitCat) {
+                    existing.category = explicitCat;
+                }
+            } else {
+                serversById.set(id, {
+                    id,
+                    name: g.name,
+                    icon: g.icon,
+                    permission_level: g.permission_level || null,
+                    is_owner: Boolean(g.is_owner),
+                    can_manage: Boolean(g.can_manage),
+                    category: explicitCat || (g.is_bot_member ? 'access_required' : 'invite'),
+                });
+            }
+        }
+
+        const servers = Array.from(serversById.values());
+        if (discoveryFailed && !servers.length) throw new Error('Server discovery failed');
 
         if (!servers.length) {
             container.innerHTML = `
@@ -95,7 +163,7 @@ async function loadUnifiedServers() {
         const accessReqServers = servers.filter(s => s.category === 'access_required');
         const danglingServers = servers.filter(s => s.category === 'dangling');
 
-        let html = '';
+        let html = discoveryFailed ? `<div class="card" role="alert">Couldn't load server discovery. Your dashboard grants are still available. <button type="button" class="btn btn-sm btn-secondary" onclick="loadUnifiedServers()">Retry</button></div>` : '';
 
         // 1. Active Servers
         if (activeServers.length > 0) {
@@ -106,7 +174,7 @@ async function loadUnifiedServers() {
                 </div>
                 <div style="display:flex;flex-direction:column;gap:10px;">
                     ${activeServers.map(s => `
-                    <div onclick="selectServerPost(${s.id})"
+                    <div onclick="selectServerPost('${s.id}')" onkeydown="if(event.key === 'Enter' || event.key === ' '){event.preventDefault();selectServerPost('${s.id}')}"
                        style="display:flex;align-items:center;gap:12px;padding:12px 14px;
                               background:var(--bg3);border:1px solid var(--border);
                               border-radius:10px;text-decoration:none;color:var(--text);
@@ -120,7 +188,7 @@ async function loadUnifiedServers() {
                                 ${escapeHtml(s.name)}
                             </div>
                             <div style="font-size:11px;color:var(--text3);margin-top:2px;">
-                                Role: <span style="text-transform:capitalize;color:var(--text2);font-weight:500;">${s.permission_level || 'Member'}</span>
+                                Role: <span style="text-transform:capitalize;color:var(--text2);font-weight:500;">${escapeHtml(s.permission_level || 'Member')}</span>
                                 ${s.is_owner ? ' • Server Owner' : ''}
                             </div>
                         </div>
@@ -155,7 +223,7 @@ async function loadUnifiedServers() {
                             </div>
                         </div>
                         <button type="button" class="btn btn-sm btn-primary" style="flex-shrink:0;"
-                                onclick="inviteBot(${s.id}, this)">Invite Nero <svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:12px;height:12px;vertical-align:-1px;display:inline-block;" aria-hidden="true"><use href="#nero-i-external"></use></svg></button>
+                                onclick="inviteBot('${s.id}', this)">Invite Nero <svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:12px;height:12px;vertical-align:-1px;display:inline-block;" aria-hidden="true"><use href="#nero-i-external"></use></svg></button>
                     </div>`).join('')}
                 </div>
                 <div style="margin-top:12px;padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:8px;font-size:11px;color:var(--text3);line-height:1.5;">
@@ -225,8 +293,8 @@ async function loadUnifiedServers() {
                             </div>
                         </div>
                         <div style="display:flex;gap:6px;">
-                            ${s.can_manage ? `<button type="button" class="btn btn-sm btn-primary" onclick="inviteBot(${s.id}, this)">Re-invite <svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:12px;height:12px;vertical-align:-1px;display:inline-block;" aria-hidden="true"><use href="#nero-i-external"></use></svg></button>` : ''}
-                            <button type="button" class="btn btn-sm btn-secondary" onclick="selectServerPost(${s.id})">Review Logs ›</button>
+                            ${s.can_manage ? `<button type="button" class="btn btn-sm btn-primary" onclick="inviteBot('${s.id}', this)">Re-invite <svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:12px;height:12px;vertical-align:-1px;display:inline-block;" aria-hidden="true"><use href="#nero-i-external"></use></svg></button>` : ''}
+                            <button type="button" class="btn btn-sm btn-secondary" onclick="selectServerPost('${s.id}')">Review Logs ›</button>
                         </div>
                     </div>`).join('')}
                 </div>
@@ -248,10 +316,11 @@ async function loadUnifiedServers() {
 
 function escapeHtml(str) {
     if (!str) return '';
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 async function inviteBot(guildId, btn) {
+    if (!/^\d{1,19}$/.test(String(guildId))) return;
     btn.disabled = true;
     const orig = btn.textContent;
     btn.textContent = '...';

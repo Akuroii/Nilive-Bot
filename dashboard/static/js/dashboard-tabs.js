@@ -47,7 +47,9 @@
     }
 
     function panelIsVisible(panel) {
-        if (!panel || panel.hidden || panel.getAttribute('aria-hidden') === 'true') return false;
+        // aria-hidden is maintained by this script, so it cannot be used to
+        // infer visibility after a page handler switches to a hidden panel.
+        if (!panel || panel.hidden) return false;
         return window.getComputedStyle(panel).display !== 'none';
     }
 

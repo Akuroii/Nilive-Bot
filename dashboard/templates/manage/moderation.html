@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Moderation{% endblock %}
 {% block content %}
+{% set tab = tab if tab in ['logs', 'punishments', 'warnings', 'thresholds'] else 'logs' %}
 <span data-page-title="Moderation"></span>
 
 <!-- Stats row -->
@@ -391,7 +392,7 @@ window.switchTab = switchTab;
 if (window.__neroGlobal) window.__neroGlobal.switchTab = switchTab;
 
 (function() {
-    const initTab = "{{ tab|e }}" || 'logs';
+    const initTab = {{ tab|tojson }} || 'logs';
     switchTab(initTab);
 })();
 
@@ -617,21 +618,6 @@ async function toggleAutoEscalation(enabled) {
         showToast(data.error || 'Failed to update auto-escalation', 'error');
     }
 }
-
-// Close edit reason modal on overlay click
-document.getElementById('edit-reason-modal') && document.getElementById('edit-reason-modal').addEventListener('click', function(e) {
-    if (e.target === this) this.style.display = 'none';
-});
-
-// Hide duration field initially if not needed
-(function() {
-    const actionEl = document.getElementById('qa-action');
-    const wrap = document.getElementById('qa-duration-wrap');
-    if (actionEl && wrap && !['timeout','temp_ban'].includes(actionEl.value)) {
-        wrap.style.display = 'none';
-    }
-})();
-</script>
 
 // Close edit reason modal on overlay click
 document.getElementById('edit-reason-modal') && document.getElementById('edit-reason-modal').addEventListener('click', function(e) {

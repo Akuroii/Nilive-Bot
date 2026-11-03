@@ -114,12 +114,16 @@ def fetch_discord_user(access_token: str) -> dict | None:
 
 
 def fetch_discord_guilds(access_token: str) -> list:
-    r = requests.get(
-        f"{DISCORD_API}/users/@me/guilds",
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=10,
-    )
-    return r.json() if r.status_code == 200 else []
+    try:
+        r = requests.get(
+            f"{DISCORD_API}/users/@me/guilds",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        return r.json() if r.status_code == 200 else []
+    except requests.RequestException as e:
+        print(f"[AUTH] fetch_discord_guilds error: {e}")
+        return []
 
 
 def guild_permissions_can_manage_server(permissions) -> bool:
@@ -132,7 +136,7 @@ def guild_permissions_can_manage_server(permissions) -> bool:
         perm_int = int(permissions)
     except (TypeError, ValueError):
         return False
-    return bool(perm_int & (DISCORD_PERMISSION_ADMINISTRATOR | DISCORD_PERMISSION_MANAGE_GUILD))
+    return perm_int >= 0 and bool(perm_int & (DISCORD_PERMISSION_ADMINISTRATOR | DISCORD_PERMISSION_MANAGE_GUILD))
 
 
 def guild_permissions_include_admin(permissions) -> bool:
@@ -144,7 +148,7 @@ def guild_permissions_include_admin(permissions) -> bool:
         perm_int = int(permissions)
     except (TypeError, ValueError):
         return False
-    return bool(perm_int & DISCORD_PERMISSION_ADMINISTRATOR)
+    return perm_int >= 0 and bool(perm_int & DISCORD_PERMISSION_ADMINISTRATOR)
 
 
 def fetch_discord_bot_guilds() -> set[int]:

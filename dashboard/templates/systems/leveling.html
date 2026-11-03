@@ -1195,19 +1195,24 @@ async function loadMemberBlacklist() {
         list.innerHTML = '<span class="text-muted text-sm">No blacklisted members.</span>';
         return;
     }
-    list.innerHTML = data.members.map(m => `
+    list.innerHTML = data.members.map(m => {
+        const rawUid = m.user_id_str != null ? m.user_id_str : (typeof m.user_id === 'string' || Number.isSafeInteger(m.user_id) ? m.user_id : '');
+        const uid = String(rawUid);
+        if (!/^\d{1,19}$/.test(uid)) return '';
+        return `
         <div style="display:flex;align-items:center;justify-content:space-between;
                     padding:9px 0;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:8px;">
             <div>
-                <code>${m.user_id}</code>
+                <code>${escapeHtml(uid)}</code>
                 ${m.reason ? `<span class="text-muted text-sm" style="margin-left:8px;">${escapeHtml(m.reason)}</span>` : ''}
-                <span class="text-muted text-xs" style="margin-left:8px;">(${m.created_at})</span>
+                <span class="text-muted text-xs" style="margin-left:8px;">(${escapeHtml(String(m.created_at || ''))})</span>
             </div>
             <div style="display:flex;gap:6px;">
-                <button class="btn btn-sm btn-secondary" onclick="retryMemberBlacklistRoles('${m.user_id}')">Retry Roles</button>
-                <button class="btn btn-sm btn-danger" onclick="removeMemberBlacklist('${m.user_id}')">Unblacklist</button>
+                <button class="btn btn-sm btn-secondary" onclick="retryMemberBlacklistRoles('${uid}')">Retry Roles</button>
+                <button class="btn btn-sm btn-danger" onclick="removeMemberBlacklist('${uid}')">Unblacklist</button>
             </div>
-        </div>`).join('');
+        </div>`;
+    }).join('');
 }
 
 async function addMemberBlacklist() {
@@ -1216,6 +1221,7 @@ async function addMemberBlacklist() {
     const user_id = uInput ? uInput.value.trim() : '';
     const reason  = rInput ? rInput.value.trim() : '';
     if (!user_id) { showToast('Enter a Discord User ID', 'warning'); return; }
+    if (!/^\d{1,19}$/.test(user_id)) { showToast('Invalid Discord User ID', 'error'); return; }
     const res = await fetch('/api/leveling/member-blacklist', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1239,6 +1245,7 @@ async function addMemberBlacklist() {
 }
 
 async function removeMemberBlacklist(userId) {
+    if (!/^\d{1,19}$/.test(String(userId))) return;
     const res = await fetch(`/api/leveling/member-blacklist/${userId}`, { method: 'DELETE' });
     const data = await res.json();
     if (data.success) {
@@ -1252,10 +1259,11 @@ async function removeMemberBlacklist(userId) {
 }
 
 async function retryMemberBlacklistRoles(userId) {
+    if (!/^\d{1,19}$/.test(String(userId))) return;
     const res = await fetch('/api/leveling/member-blacklist/retry-roles', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ user_id: userId }),
+        body: JSON.stringify({ user_id: String(userId) }),
     });
     const data = await res.json();
     if (data.success) {

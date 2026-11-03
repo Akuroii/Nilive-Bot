@@ -2538,8 +2538,10 @@ async def get_member_blacklist_entries(guild_id: int) -> list[dict]:
     return [{
         "id": r[0],
         "user_id": r[1],
+        "user_id_str": str(r[1]),
         "reason": r[2] or "",
         "created_by": r[3] or 0,
+        "created_by_str": str(r[3]) if r[3] else "",
         "created_at": str(r[4])
     } for r in rows]
 

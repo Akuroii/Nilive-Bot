@@ -123,31 +123,24 @@ def _enforce_csrf_and_guild_context():
 
     raw_client_gid = request.headers.get("X-Guild-ID")
     if raw_client_gid is not None:
-        raw_client_gid = raw_client_gid.strip()
-        if raw_client_gid:
-            try:
-                client_gid = int(raw_client_gid)
-            except (TypeError, ValueError):
-                return jsonify({
-                    "success": False,
-                    "error": "Malformed guild context header",
-                    "code": "MALFORMED_GUILD_CONTEXT"
-                }), 400
-
-            session_gid = session.get("guild_id")
-            try:
-                session_gid_int = int(session_gid) if session_gid else None
-            except (TypeError, ValueError):
-                session_gid_int = None
-
-            if session_gid_int and client_gid != session_gid_int:
-                return jsonify({
-                    "success": False,
-                    "error": "Active server changed in another window.",
-                    "code": "GUILD_CONTEXT_MISMATCH",
-                    "expected_guild_id": client_gid,
-                    "active_guild_id": session_gid,
-                }), 409
+        client_gid_str = raw_client_gid.strip()
+        if (not client_gid_str.isascii() or not client_gid_str.isdigit()
+                or len(client_gid_str) > 19 or not 0 < int(client_gid_str) <= 2**63 - 1):
+            return jsonify({
+                "success": False,
+                "error": "Malformed guild context header",
+                "code": "MALFORMED_GUILD_CONTEXT",
+            }), 400
+        client_gid = int(client_gid_str)
+        active_gid = session.get("guild_id")
+        if active_gid is not None and str(active_gid) != str(client_gid):
+            return jsonify({
+                "success": False,
+                "error": "Active server changed in another window.",
+                "code": "GUILD_CONTEXT_MISMATCH",
+                "expected_guild_id": client_gid,
+                "active_guild_id": active_gid,
+            }), 409
 
 
 def render(template, **ctx):
@@ -459,12 +452,17 @@ def server_select():
 @app.route("/select-guild/<int:guild_id>", methods=["GET", "POST"])
 @login_required
 def select_guild(guild_id: int):
-    user_id = current_user_id()
+    if not 0 < guild_id <= 2**63 - 1:
+        abort(400)
 
     if request.method == "POST":
-        token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
-        if not token or token != session.get("csrf_token"):
+        import secrets
+        token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token", "")
+        expected = session.get("csrf_token", "")
+        if not token or not expected or not secrets.compare_digest(token.encode(), expected.encode()):
             abort(403)
+
+    user_id = current_user_id()
 
     async def check():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -489,6 +487,23 @@ def select_guild(guild_id: int):
     if not level:
         abort(403)
 
+    # Preserve old links (<noscript>, bookmarks), but never mutate the active
+    # guild on a safe GET/HEAD request: require an explicit CSRF-protected POST.
+    if request.method in ("GET", "HEAD"):
+        ctx = get_current_user_context()
+        curr_gid = session.get("guild_id")
+        guild_map = session.get("guild_name_map", {})
+        return render_template(
+            "context_switch.html",
+            target_guild_id=guild_id,
+            target_guild_name=guild_map.get(str(guild_id), str(guild_id)),
+            current_guild_id=curr_gid,
+            current_guild_name=(ctx.get("guild_name") or str(curr_gid)) if curr_gid else None,
+            next_url="",
+            switch_confirmation=True,
+            **ctx,
+        )
+
     set_session_guild(guild_id)
     session["user_level"] = level
 
@@ -511,9 +526,10 @@ def select_guild(guild_id: int):
     guild_map[str(guild_id)] = session["guild_name"]
     session["guild_name_map"] = guild_map
 
-    # Open-redirect safe return destination
-    next_url = request.args.get("next") or request.form.get("next")
-    if next_url and next_url.startswith("/") and not next_url.startswith("//") and not next_url.startswith("/\\"):
+    # Open-redirect safe return destination (POST form only)
+    next_url = request.form.get("next", "") if request.method == "POST" else ""
+    if (next_url.startswith("/") and not next_url.startswith("//")
+            and "\\" not in next_url and not any(ord(c) < 32 or ord(c) == 127 for c in next_url)):
         return redirect(next_url)
 
     return redirect(url_for("index"))
@@ -559,6 +575,7 @@ def api_user_servers():
             bdata = bot_guilds.get(gid)
             guild_dict[gid] = {
                 "id": gid,
+                "id_str": str(gid),
                 "name": (bdata or g).get("name", "Unknown Server"),
                 "icon": (bdata or g).get("icon"),
                 "is_bot_member": is_bot,
@@ -575,6 +592,7 @@ def api_user_servers():
             if grant:
                 guild_dict[gid] = {
                     "id": gid,
+                    "id_str": str(gid),
                     "name": bdata.get("name", "Unknown Server"),
                     "icon": bdata.get("icon"),
                     "is_bot_member": True,
@@ -589,6 +607,7 @@ def api_user_servers():
         if gid not in guild_dict:
             guild_dict[gid] = {
                 "id": gid,
+                "id_str": str(gid),
                 "name": f"Server {gid}",
                 "icon": None,
                 "is_bot_member": False,
@@ -603,10 +622,10 @@ def api_user_servers():
     for gid, s in guild_dict.items():
         if s["has_dashboard_access"] and s["is_bot_member"]:
             s["category"] = "active"
-        elif s["can_manage"] and not s["is_bot_member"]:
-            s["category"] = "invite"
         elif s["has_dashboard_access"] and not s["is_bot_member"]:
             s["category"] = "dangling"
+        elif s["can_manage"] and not s["is_bot_member"]:
+            s["category"] = "invite"
         else:
             s["category"] = "access_required"
         servers.append(s)
@@ -625,6 +644,8 @@ def api_user_servers():
 @app.route("/api/invite-bot/<int:guild_id>")
 @login_required
 def api_invite_bot(guild_id: int):
+    if not 0 < guild_id <= 2**63 - 1:
+        abort(400)
     from dashboard.auth import get_bot_invite_url
     return jsonify({"url": get_bot_invite_url(guild_id)})
 
