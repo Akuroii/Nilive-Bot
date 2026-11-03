@@ -6,7 +6,7 @@
 {% if not row %}
 <div class="card">
     <div class="empty-state">
-        <div class="empty-icon">🩺</div>
+        <div class="empty-icon"><svg style="width:40px;height:40px;stroke:var(--text3);fill:none;stroke-width:1.5;" aria-hidden="true"><use href="#nero-i-pulse"></use></svg></div>
         <div class="empty-text">
             No health data yet — the bot hasn't reported in.<br>
             Make sure <code>cogs.health</code> is loaded and the bot process is running.
@@ -47,7 +47,7 @@
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
 
     <div class="card">
-        <div class="card-title">🧩 Loaded Cogs ({{ loaded_cogs|length }})</div>
+        <div class="card-title"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-box"></use></svg> Loaded Cogs ({{ loaded_cogs|length }})</div>
         <div style="display:flex;flex-wrap:wrap;gap:6px;">
             {% for c in loaded_cogs %}
             <span class="badge badge-success">{{ c.replace('cogs.', '') }}</span>
@@ -58,7 +58,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">⚠️ Failed Cogs ({{ failed_cogs|length }})</div>
+        <div class="card-title"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-alert"></use></svg> Failed Cogs ({{ failed_cogs|length }})</div>
         {% if failed_cogs %}
         <div class="table-wrap">
             <table class="table">
@@ -79,28 +79,30 @@
     </div>
 
     <div class="card">
-        <div class="card-title">💾 Database</div>
-        <table class="table">
-            <tbody>
-                <tr><td>Path</td><td class="text-muted"><code>{{ db_path }}</code></td></tr>
-                <tr><td>Exists</td><td>
-                    <span class="badge {% if db_exists %}badge-success{% else %}badge-danger{% endif %}">
-                        {% if db_exists %}Yes{% else %}No{% endif %}
-                    </span>
-                </td></tr>
-                <tr><td>Size</td><td>
-                    {% if db_size_bytes %}
-                        {{ "%.2f"|format(db_size_bytes / 1024 / 1024) }} MB
-                    {% else %}—{% endif %}
-                </td></tr>
-                <tr><td>Python</td><td class="text-muted">{{ row.python_version or '—' }}</td></tr>
-                <tr><td>discord.py</td><td class="text-muted">{{ row.discord_py_version or '—' }}</td></tr>
-            </tbody>
-        </table>
+        <div class="card-title"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-database"></use></svg> Database</div>
+        <div class="table-wrap">
+            <table class="table">
+                <tbody>
+                    <tr><td>Path</td><td class="text-muted"><code>{{ db_path }}</code></td></tr>
+                    <tr><td>Exists</td><td>
+                        <span class="badge {% if db_exists %}badge-success{% else %}badge-danger{% endif %}">
+                            {% if db_exists %}Yes{% else %}No{% endif %}
+                        </span>
+                    </td></tr>
+                    <tr><td>Size</td><td>
+                        {% if db_size_bytes %}
+                            {{ "%.2f"|format(db_size_bytes / 1024 / 1024) }} MB
+                        {% else %}—{% endif %}
+                    </td></tr>
+                    <tr><td>Python</td><td class="text-muted">{{ row.python_version or '—' }}</td></tr>
+                    <tr><td>discord.py</td><td class="text-muted">{{ row.discord_py_version or '—' }}</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 
     <div class="card">
-        <div class="card-title">🐛 Last Error</div>
+        <div class="card-title"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-alert"></use></svg> Last Error</div>
         {% if row.last_error %}
         <div class="text-muted text-sm" style="margin-bottom:8px;">{{ row.last_error_at[:19] if row.last_error_at else '' }}</div>
         <pre style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;

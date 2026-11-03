@@ -6,7 +6,7 @@
 
 <!-- TABS -->
 <div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--border);padding-bottom:0;">
-    {% for tab, label in [('leaderboard','⭐ Leaderboard'),('config','⚙️ Config'),('rewards','🎁 Rewards'),('bonuses','✨ Bonus Roles'),('prestige','🏵️ Prestige')] %}
+    {% for tab, label in [('leaderboard','Leaderboard'),('config','Config'),('rewards','Rewards'),('bonuses','Bonus Roles'),('prestige','Prestige')] %}
     <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
         style="padding:10px 18px;border:none;background:transparent;
                color:var(--text2);font-size:13px;font-weight:500;
@@ -19,7 +19,7 @@
 <!-- LEADERBOARD TAB -->
 <div id="tab-content-leaderboard" class="tab-content">
     <div class="card">
-        <div class="card-title">⭐ XP Leaderboard</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-trophy"></use></svg> XP Leaderboard</div>
         <div class="table-wrap">
             <table class="table">
                 <thead>
@@ -63,18 +63,24 @@
 
 <!-- CONFIG TAB -->
 <div id="tab-content-config" class="tab-content" style="display:none;">
-    <form id="leveling-config-form">
+    <form id="leveling-config-form" data-ux-track-dirty>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Configure chat message and voice XP earnings. XP from chat messages and voice activity operate independently. Disabling either toggle does not affect the other, nor does it disable independent reward sources such as missions, minigames, tags, or events.
+        </p>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
 
             <div class="card">
-                <div class="card-title">💬 Message XP</div>
-                <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-message"></use></svg> Message XP</div>
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
                     <label class="toggle">
                         <input type="checkbox" name="message_xp_enabled" id="cfg-message-enabled">
                         <span class="toggle-slider"></span>
                     </label>
-                    <span style="font-size:13px;color:var(--text2);">Message XP enabled</span>
+                    <span style="font-size:13px;font-weight:500;color:var(--text1);">Enable chat message XP</span>
                 </div>
+                <p class="text-muted text-sm" style="margin-bottom:16px;line-height:1.5;">
+                    Controls XP earned from ordinary chat messages in text channels. When disabled, members earn no XP from chatting, but voice XP, missions, minigames, events, and other reward sources remain active.
+                </p>
                 <div class="form-row">
                     <div class="form-group">
                         <label class="form-label">XP per word</label>
@@ -96,14 +102,17 @@
             </div>
 
             <div class="card">
-                <div class="card-title">🎙️ Voice XP</div>
-                <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">
+                <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-speaker"></use></svg> Voice XP</div>
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
                     <label class="toggle">
                         <input type="checkbox" name="voice_xp_enabled" id="cfg-voice-enabled">
                         <span class="toggle-slider"></span>
                     </label>
-                    <span style="font-size:13px;color:var(--text2);">Voice XP enabled</span>
+                    <span style="font-size:13px;font-weight:500;color:var(--text1);">Enable voice channel XP</span>
                 </div>
+                <p class="text-muted text-sm" style="margin-bottom:16px;line-height:1.5;">
+                    Controls XP earned from eligible voice channel activity. When disabled, members earn no XP in voice, but voice minutes continue to be tracked in server stats (subject to anti-farming rules), and chat message XP and independent reward sources remain active.
+                </p>
                 <div class="form-group">
                     <label class="form-label">XP per minute in voice</label>
                     <input class="form-input" type="number" name="voice_xp_per_minute" id="cfg-voice-xp" min="0">
@@ -120,7 +129,7 @@
             </div>
 
             <div class="card">
-                <div class="card-title">🚫 Anti-Spam</div>
+                <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-shield"></use></svg> Anti-Spam</div>
                 <label class="form-check" style="margin-bottom:16px;">
                     <input type="checkbox" name="spam_detection_enabled" id="cfg-spam">
                     Enable spam detection
@@ -144,7 +153,7 @@
             </div>
 
             <div class="card">
-                <div class="card-title">📢 Level Up Announcements</div>
+                <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-announcements"></use></svg> Level Up Announcements</div>
                 <label class="form-check" style="margin-bottom:16px;">
                     <input type="checkbox" name="levelup_announce" id="cfg-announce">
                     Announce level ups
@@ -169,8 +178,8 @@
                     Level rewards are never touched.</div>
             </div>
 
-            <div class="card">
-                <div class="card-title">🔄 Leaderboard Resets</div>
+            <div class="card" data-ux-ignore-dirty>
+                <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-clock"></use></svg> Leaderboard Resets</div>
                 <p class="text-muted text-sm" style="margin-bottom:16px;">
                     On a schedule, archives the full current leaderboard (visible after
                     reset as a completed cycle) then zeroes everyone's XP/level for
@@ -205,6 +214,7 @@
         <div style="margin-top:4px;">
             <button type="button" class="btn btn-primary" id="cfg-save-btn"
                     onclick="saveConfig(this)">Save Config</button>
+            <span class="form-save-state" data-ux-save-state aria-live="polite"></span>
         </div>
     </form>
 </div>
@@ -219,7 +229,7 @@
                         onchange="applyRewardFilter()">
                     <option value="">All audiences</option>
                     <option value="everyone">Member Rewards</option>
-                    <option value="boosters">⭐ Booster Rewards</option>
+                    <option value="boosters">Booster Rewards</option>
                 </select>
             </div>
             <div class="form-group" style="margin-bottom:0;">
@@ -238,7 +248,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">➕ Add Level Reward — Role</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> Add Level Reward — Role</div>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Level required</label>
@@ -247,13 +257,13 @@
             </div>
             <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px;">
                 <label class="form-label">Role</label>
-                <select class="nero-role-picker form-input" id="reward-role-picker"></select>
+                <select class="nero-role-picker form-input" id="reward-role-picker" data-assignable-only="true"></select>
             </div>
             <div class="form-group" style="margin-bottom:0;">
                 <label class="form-label">Audience</label>
                 <select class="form-input" id="reward-audience" style="width:150px;">
                     <option value="everyone">Member Rewards</option>
-                    <option value="boosters">⭐ Booster Rewards</option>
+                    <option value="boosters">Booster Rewards</option>
                 </select>
             </div>
             <button class="btn btn-primary" onclick="addReward()">Add Reward</button>
@@ -261,14 +271,14 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🎁 Level Rewards - Roles <span class="badge badge-source" id="count-roles">{{ rewards|length }}</span></div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-gift"></use></svg> Level Rewards - Roles <span class="badge badge-source" id="count-roles">{{ rewards|length }}</span></div>
         <div class="table-wrap">
             <table class="table">
                 <thead><tr><th>Level</th><th>Role ID</th><th></th></tr></thead>
                 <tbody id="rewards-tbody">
                     {% for r in rewards %}
                     <tr class="reward-row" data-id="{{ r[0] }}" data-level="{{ r[1] }}" data-audience="{{ r[3] }}">
-                        <td><span class="badge badge-accent">Level {{ r[1] }}</span>{% if r[3] == 'boosters' %} <span class="badge badge-booster">⭐ Booster Reward</span>{% endif %}</td>
+                        <td><span class="badge badge-accent">Level {{ r[1] }}</span>{% if r[3] == 'boosters' %} <span class="badge badge-booster">Booster Reward</span>{% endif %}</td>
                         <td><span class="reward-role" data-role-id="{{ r[2] }}"><code>{{ r[2] }}</code></span></td>
                         <td>
                             <button class="btn btn-sm btn-danger"
@@ -315,7 +325,7 @@
                 <label class="form-label">Audience</label>
                 <select class="form-input" id="currency-reward-audience" style="width:150px;">
                     <option value="everyone">Member Rewards</option>
-                    <option value="boosters">⭐ Booster Rewards</option>
+                    <option value="boosters">Booster Rewards</option>
                 </select>
             </div>
             <button class="btn btn-primary" onclick="addCurrencyReward()">Add Reward</button>
@@ -323,7 +333,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🎁 Level Rewards - Currency <span class="badge badge-source" id="count-currency">0</span></div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-gift"></use></svg> Level Rewards - Currency <span class="badge badge-source" id="count-currency">0</span></div>
         <div class="table-wrap">
             <table class="table">
                 <thead><tr><th>Level</th><th>Currency</th><th>Amount</th><th></th></tr></thead>
@@ -335,7 +345,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">⚡ Add Level Reward — XP Boost</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-zap"></use></svg> Add Level Reward — XP Boost</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Claimed from /level. One boost per level. Does not change earn rates.
         </p>
@@ -360,7 +370,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">⚡ Level Rewards - XP Boost <span class="badge badge-source" id="count-boost">0</span></div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-zap"></use></svg> Level Rewards - XP Boost <span class="badge badge-source" id="count-boost">0</span></div>
         <p class="text-muted text-sm" style="margin:-8px 0 14px;">
             XP boosts are earned by every member who claims them. They are not part of the
             Member / Booster reward system, so the audience filter never hides them.
@@ -376,7 +386,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🛒 Add Level Reward — Shop</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-shop"></use></svg> Add Level Reward — Shop</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Claimed from /level. Does not charge, write a purchase, or consume stock.
             Custom, title, potion, and temporary role products only.
@@ -402,7 +412,7 @@
                 <label class="form-label">Audience</label>
                 <select class="form-input" id="shop-reward-audience" style="width:150px;">
                     <option value="everyone">Member Rewards</option>
-                    <option value="boosters">⭐ Booster Rewards</option>
+                    <option value="boosters">Booster Rewards</option>
                 </select>
             </div>
             <button class="btn btn-primary" onclick="addShopReward()">Add Reward</button>
@@ -410,7 +420,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🎁 Level Rewards - Shop <span class="badge badge-source" id="count-shop">0</span></div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-shop"></use></svg> Level Rewards - Shop <span class="badge badge-source" id="count-shop">0</span></div>
         <div class="table-wrap">
             <table class="table">
                 <thead><tr><th>Level</th><th>Product</th><th>Quantity</th><th></th></tr></thead>
@@ -425,7 +435,7 @@
 <!-- BONUS ROLES TAB -->
 <div id="tab-content-bonuses" class="tab-content" style="display:none;">
     <div class="card">
-        <div class="card-title">✨ XP Multiplier Roles</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-sparkles"></use></svg> XP Multiplier Roles</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Roles with an XP multiplier. Multipliers do NOT stack — the highest one wins.
         </p>
@@ -446,7 +456,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🚫 XP Blacklist Roles</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-shield"></use></svg> XP Blacklist Roles</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">Members with these roles earn 0 XP.</p>
         <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px;">
             <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px;">
@@ -457,12 +467,31 @@
         </div>
         <div id="blacklist-list"><span class="text-muted text-sm">Loading…</span></div>
     </div>
+
+    <div class="card">
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-shield"></use></svg> Member Blacklist (D3)</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Blacklisted members earn 0 XP across all sources (chat, voice, missions, minigames, events), have Level reward claims blocked, and have Level reward roles withheld until unblacklisted.
+        </p>
+        <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px;">
+            <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px;">
+                <label class="form-label">User ID</label>
+                <input class="form-input" id="blacklist-user-id" type="text" placeholder="Discord User ID">
+            </div>
+            <div class="form-group" style="margin-bottom:0;flex:2;min-width:240px;">
+                <label class="form-label">Reason (optional)</label>
+                <input class="form-input" id="blacklist-member-reason" type="text" placeholder="Reason for blacklist">
+            </div>
+            <button class="btn btn-danger" onclick="addMemberBlacklist()">Blacklist Member</button>
+        </div>
+        <div id="member-blacklist-list"><span class="text-muted text-sm">Loading…</span></div>
+    </div>
 </div>
 
 <!-- PRESTIGE TAB (finalized Prestige system) -->
 <div id="tab-content-prestige" class="tab-content" style="display:none;">
     <div class="card">
-        <div class="card-title">🏵️ Prestige Settings</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-trophy"></use></svg> Prestige Settings</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Prestige tiers I–V are purchased from the Shop with {{ currency.coins.name }} (sequential, no
             skipping). Purchasing resets the buyer's {{ currency.coins.name }} to 0 and never touches
@@ -481,7 +510,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🎚️ Prestige Multipliers</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-sliders"></use></svg> Prestige Multipliers</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             {{ currency.coins.name }} / {{ currency.diamonds.name }} multipliers per effective Prestige tier. Applied at
             earn-time only; never applied to transfers, conversions, admin grants or
@@ -493,7 +522,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">➕ Add Prestige Tier Role</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> Add Prestige Tier Role</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             One role per tier. Roles are cosmetic representations only — they never
             grant Prestige or its multiplier. On a tier change the previous tier's role
@@ -508,14 +537,14 @@
             </div>
             <div class="form-group" style="margin-bottom:0;flex:1;min-width:220px;">
                 <label class="form-label">Role</label>
-                <select class="nero-role-picker form-input" id="prestige-role-picker"></select>
+                <select class="nero-role-picker form-input" id="prestige-role-picker" data-assignable-only="true"></select>
             </div>
             <button class="btn btn-primary" onclick="addPrestigeRole()">Add Tier Role</button>
         </div>
     </div>
 
     <div class="card">
-        <div class="card-title">🎖️ Prestige Tier Roles</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-trophy"></use></svg> Prestige Tier Roles</div>
         <div class="table-wrap">
             <table class="table">
                 <thead><tr><th>Tier</th><th>Role ID</th><th></th></tr></thead>
@@ -556,6 +585,10 @@ __neroGlobal.deleteBonus = deleteBonus;
 __neroGlobal.loadBlacklist = loadBlacklist;
 __neroGlobal.addBlacklist = addBlacklist;
 __neroGlobal.deleteBlacklist = deleteBlacklist;
+__neroGlobal.loadMemberBlacklist = loadMemberBlacklist;
+__neroGlobal.addMemberBlacklist = addMemberBlacklist;
+__neroGlobal.removeMemberBlacklist = removeMemberBlacklist;
+__neroGlobal.retryMemberBlacklistRoles = retryMemberBlacklistRoles;
 __neroGlobal.renderPrestigeMultipliers = renderPrestigeMultipliers;
 __neroGlobal.loadPrestigeConfig = loadPrestigeConfig;
 __neroGlobal.savePrestigeConfig = savePrestigeConfig;
@@ -1151,6 +1184,94 @@ async function deleteBlacklist(id) {
     loadBlacklist();
 }
 
+// ── MEMBER BLACKLIST (Phase D3) ──────────────────────────────
+async function loadMemberBlacklist() {
+    const res = await fetch('/api/leveling/member-blacklist');
+    if (!res.ok) return;
+    const data = await res.json();
+    const list = document.getElementById('member-blacklist-list');
+    if (!list) return;
+    if (!data.members || !data.members.length) {
+        list.innerHTML = '<span class="text-muted text-sm">No blacklisted members.</span>';
+        return;
+    }
+    list.innerHTML = data.members.map(m => `
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    padding:9px 0;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:8px;">
+            <div>
+                <code>${m.user_id}</code>
+                ${m.reason ? `<span class="text-muted text-sm" style="margin-left:8px;">${escapeHtml(m.reason)}</span>` : ''}
+                <span class="text-muted text-xs" style="margin-left:8px;">(${m.created_at})</span>
+            </div>
+            <div style="display:flex;gap:6px;">
+                <button class="btn btn-sm btn-secondary" onclick="retryMemberBlacklistRoles('${m.user_id}')">Retry Roles</button>
+                <button class="btn btn-sm btn-danger" onclick="removeMemberBlacklist('${m.user_id}')">Unblacklist</button>
+            </div>
+        </div>`).join('');
+}
+
+async function addMemberBlacklist() {
+    const uInput = document.getElementById('blacklist-user-id');
+    const rInput = document.getElementById('blacklist-member-reason');
+    const user_id = uInput ? uInput.value.trim() : '';
+    const reason  = rInput ? rInput.value.trim() : '';
+    if (!user_id) { showToast('Enter a Discord User ID', 'warning'); return; }
+    const res = await fetch('/api/leveling/member-blacklist', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ user_id, reason }),
+    });
+    const data = await res.json();
+    if (data.success) {
+        if (data.partial) {
+            showToast('Member blacklisted (some roles could not be removed)', 'warning');
+        } else {
+            showToast(data.role_cleanup === 'deferred'
+                ? 'Member blacklisted. The bot will remove their Level roles within a couple of minutes.'
+                : 'Member blacklisted successfully!', 'success');
+        }
+        if (uInput) uInput.value = '';
+        if (rInput) rInput.value = '';
+        loadMemberBlacklist();
+    } else {
+        showToast(data.error || 'Failed to blacklist member', 'error');
+    }
+}
+
+async function removeMemberBlacklist(userId) {
+    const res = await fetch(`/api/leveling/member-blacklist/${userId}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) {
+        showToast(data.role_restore === 'deferred'
+            ? 'Member unblacklisted. The bot will restore their Level roles within a couple of minutes.'
+            : 'Member unblacklisted and roles reconciled!', 'success');
+        loadMemberBlacklist();
+    } else {
+        showToast(data.error || 'Failed to unblacklist member', 'error');
+    }
+}
+
+async function retryMemberBlacklistRoles(userId) {
+    const res = await fetch('/api/leveling/member-blacklist/retry-roles', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ user_id: userId }),
+    });
+    const data = await res.json();
+    if (data.success) {
+        if (data.partial) {
+            showToast('Role removal partially completed', 'warning');
+        } else {
+            showToast(data.deferred
+                ? 'Role cleanup queued. The bot applies it within a couple of minutes.'
+                : 'Roles removed successfully', 'success');
+        }
+        loadMemberBlacklist();
+    } else {
+        showToast(data.error || 'Failed to retry role cleanup', 'error');
+    }
+}
+
 // ── PRESTIGE (finalized Prestige system) ─────────────────────────
 const PRESTIGE_TIER_NAMES = {1:'I', 2:'II', 3:'III', 4:'IV', 5:'V', 6:'VI'};
 
@@ -1420,6 +1541,7 @@ loadShopRewards();
 syncRewardCounts();
 loadBonusRoles();
 loadBlacklist();
+loadMemberBlacklist();
 loadPrestigeRoles();
 
 })();

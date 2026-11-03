@@ -6,7 +6,7 @@
 <div class="card">
     <div class="card-header">
         <div class="card-title" style="margin:0;display:flex;align-items:center;gap:10px;">
-            🪪 Custom Bot Profile
+            <svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-id"></use></svg> Custom Bot Profile
             <span class="badge badge-success">Live via Discord API</span>
         </div>
         <button class="btn btn-secondary" onclick="resetBotProfile()">Reset to Default</button>
@@ -31,7 +31,7 @@
                     <img id="bp-avatar-img" class="bp-avatar" alt=""
                          onload="document.getElementById('bp-avatar-fallback').style.display='none';this.classList.add('is-loaded');"
                          onerror="this.classList.remove('is-loaded');this.removeAttribute('src');document.getElementById('bp-avatar-fallback').style.display='flex';">
-                    <div id="bp-avatar-fallback" class="bp-avatar-fallback">🤖</div>
+                    <div id="bp-avatar-fallback" class="bp-avatar-fallback"><svg viewBox="0 0 24 24" style="width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2;"><use href="#nero-i-terminal"></use></svg></div>
                 </div>
             </div>
             <div class="bp-card-footer">
@@ -70,15 +70,17 @@
 </div>
 
 <div class="card">
-    <div class="card-title">👁️ Current Live State (from Discord, right now)</div>
-    <table class="table">
-        <tbody>
-            <tr><td style="width:200px;">Nickname (this server)</td><td id="bp-live-nick" class="text-muted">Loading…</td></tr>
-            <tr><td>Bio (this server)</td><td id="bp-live-bio" class="text-muted">Loading…</td></tr>
-            <tr><td>Global bot name</td><td id="bp-live-username" class="text-muted">Loading…</td></tr>
-            <tr><td>Global avatar (fallback everywhere else)</td><td id="bp-live-global-avatar" class="text-muted">Loading…</td></tr>
-        </tbody>
-    </table>
+    <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-eye"></use></svg> Current Live State (from Discord, right now)</div>
+    <div class="table-wrap">
+        <table class="table">
+            <tbody>
+                <tr><td style="width:40%;min-width:140px;">Nickname (this server)</td><td id="bp-live-nick" class="text-muted">Loading…</td></tr>
+                <tr><td>Bio (this server)</td><td id="bp-live-bio" class="text-muted">Loading…</td></tr>
+                <tr><td>Global bot name</td><td id="bp-live-username" class="text-muted">Loading…</td></tr>
+                <tr><td>Global avatar (fallback everywhere else)</td><td id="bp-live-global-avatar" class="text-muted">Loading…</td></tr>
+            </tbody>
+        </table>
+    </div>
 </div>
 
 <style>

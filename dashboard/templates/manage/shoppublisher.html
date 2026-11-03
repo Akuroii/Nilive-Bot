@@ -54,7 +54,7 @@
          implies publication. This is an integration into the transitional
          selection card — NOT the future three-region Shop Designer. -->
     <div class="card">
-        <div class="card-title">🛍️ Shop Publisher</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-bag"></use></svg> Shop Publisher</div>
         <p class="sp-intro">
             Pick a presentation template and a product. The fixed token catalog
             resolves server-side, and the preview below is exactly the message
@@ -113,9 +113,9 @@
             </div>
         </div>
         <div class="sp-design-row sp-design-actions">
-            <button type="button" class="btn btn-primary" id="sp-design-save">💾 Save design</button>
-            <button type="button" class="btn btn-secondary" id="sp-design-load">📂 Load</button>
-            <button type="button" class="btn btn-secondary" id="sp-design-delete">🗑 Delete</button>
+            <button type="button" class="btn btn-primary" id="sp-design-save"><svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="#nero-i-save"></use></svg>Save design</button>
+            <button type="button" class="btn btn-secondary" id="sp-design-load"><svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="#nero-i-folder"></use></svg>Load</button>
+            <button type="button" class="btn btn-secondary" id="sp-design-delete"><svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="#nero-i-trash"></use></svg>Delete</button>
             <span id="sp-dirty" class="sp-dirty" hidden>· unsaved changes</span>
         </div>
         <div id="sp-status" class="sp-status" role="status" aria-live="polite"></div>
@@ -125,7 +125,7 @@
          The resolved product presentation. embed/preview.js owns every
          node inside the mount. -->
     <div class="card">
-        <div class="card-title">👁️ Publisher preview</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-eye"></use></svg> Publisher preview</div>
         <div class="sp-preview-frame">
             <div id="sp-preview-mount" class="sp-preview-mount eb-preview-box"></div>
             <div id="sp-purchase" class="sp-purchase" hidden></div>
@@ -134,7 +134,7 @@
 
     <!-- ── WARNINGS ──────────────────────────────────────────────────── -->
     <div class="card">
-        <div class="card-title">⚠️ Preview warnings</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" style="color:var(--warning);" aria-hidden="true"><use href="#nero-i-alert"></use></svg> Preview warnings</div>
         <div id="sp-warnings" class="sp-warnings" role="status" aria-live="polite">
             <div class="sp-muted">Select a template and product to see warnings.</div>
         </div>
@@ -142,7 +142,7 @@
 
     <!-- ── RESOLVED TOKENS ───────────────────────────────────────────── -->
     <div class="card">
-        <div class="card-title">🔤 Resolved tokens</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-file"></use></svg> Resolved tokens</div>
         <div id="sp-tokens" class="sp-tokens">
             <div class="sp-muted">No resolution yet.</div>
         </div>
@@ -150,7 +150,7 @@
 
     <!-- ── FIXED TOKEN CATALOG ───────────────────────────────────────── -->
     <div class="card">
-        <div class="card-title">📖 Token catalog (fixed)</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-book"></use></svg> Token catalog (fixed)</div>
         <div id="sp-token-catalog" class="sp-token-catalog">
             <div class="sp-muted">Loading…</div>
         </div>

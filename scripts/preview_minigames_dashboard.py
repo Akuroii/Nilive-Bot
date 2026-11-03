@@ -47,6 +47,7 @@ os.environ["OWNER_ID"] = str(DEMO_USER)          # guild-blind dev bypass
 os.environ.setdefault("SECRET_KEY",
                       "preview-only-not-for-production-0123456789abcdef")
 os.environ["DASHBOARD_DEMO_LOGIN"] = "1"
+os.environ["DASHBOARD_FORCE_HTTP"] = "1"
 os.environ["DASHBOARD_DEMO_USER_ID"] = str(DEMO_USER)
 os.environ["DASHBOARD_DEMO_GUILD_ID"] = str(DEMO_GUILD)
 

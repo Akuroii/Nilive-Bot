@@ -10,7 +10,7 @@
         {{ keep_backups }} are kept and older ones are pruned.
     </p>
     <button class="btn btn-primary" id="trigger-backup-btn" onclick="triggerBackup()">
-        💾 Trigger Backup Now
+        <svg class="btn-icon-svg" aria-hidden="true"><use href="#nero-i-database"></use></svg> Trigger Backup Now
     </button>
 </div>
 
@@ -36,10 +36,10 @@
 </div>
 
 <div class="card">
-    <div class="card-title">💾 Backup History</div>
+    <div class="card-title"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-database"></use></svg> Backup History</div>
     {% if not backups %}
     <div class="empty-state">
-        <div class="empty-icon">💾</div>
+        <div class="empty-icon"><svg style="width:40px;height:40px;stroke:var(--text3);fill:none;stroke-width:1.5;" aria-hidden="true"><use href="#nero-i-database"></use></svg></div>
         <div class="empty-text">
             No backups yet — the daily automated backup hasn't run, or
             <code>cogs.backup</code> isn't loaded. Trigger one manually above.

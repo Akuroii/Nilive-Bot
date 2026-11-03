@@ -5,7 +5,7 @@
 
 <div style="display:flex;gap:4px;margin-bottom:20px;
             border-bottom:1px solid var(--border);padding-bottom:0;">
-    {% for tab, label in [('config','⚙️ Config'),('cats','🗂️ Categories & Templates'),('history','📜 History')] %}
+    {% for tab, label in [('config','Config'),('cats','Categories & Templates'),('history','History')] %}
     <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
         style="padding:10px 18px;border:none;background:transparent;
                color:var(--text2);font-size:13px;font-weight:500;
@@ -19,7 +19,7 @@
 <div id="tab-content-config" class="tab-content">
     <div class="card">
         <div class="card-header">
-            <div class="card-title" style="margin:0;">🎲 Weekly Spawn Settings</div>
+            <div class="card-title" style="margin:0;"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-clock"></use></svg> Weekly Spawn Settings</div>
             <div style="display:flex;align-items:center;gap:10px;">
                 <label class="toggle">
                     <input type="checkbox" id="mg-enabled">
@@ -54,7 +54,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🎁 Global Default Reward Preset</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-gift"></use></svg> Global Default Reward Preset</div>
         <p class="text-muted text-sm" style="margin-bottom:14px;">
             When a new game is created without its own reward pool (and its
             category has no preset), it starts with <b>this</b> pool. Each winner
@@ -80,7 +80,7 @@
 
     <!-- create / edit category form (shared, inline) -->
     <div class="card" id="mg-cat-form-card" style="display:none;margin-bottom:14px;">
-        <div class="card-title" id="mg-cat-form-title">➕ New Category</div>
+        <div class="card-title" id="mg-cat-form-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> New Category</div>
         <input type="hidden" id="mg-cat-edit-id">
         <div class="form-row">
             <div class="form-group">
@@ -127,7 +127,7 @@
 <div id="tab-content-history" class="tab-content" style="display:none;">
     <div class="card">
         <div class="card-header">
-            <div class="card-title" style="margin:0;">📜 Game History</div>
+            <div class="card-title" style="margin:0;"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-file"></use></svg> Game History</div>
             <div style="display:flex;align-items:center;gap:10px;">
                 <select class="form-input" id="mg-hist-filter" style="width:auto;">
                     <option value="">All categories</option>

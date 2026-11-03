@@ -8,8 +8,8 @@
             border-bottom:1px solid var(--border);padding-bottom:0;">
     {% for tab, label in [('coins', currency_icon(currency.coins.emoji) ~ ' ' ~ currency.coins.name),
                           ('diamonds', currency_icon(currency.diamonds.emoji) ~ ' ' ~ currency.diamonds.name),
-                          ('currency','🎨 Currency'),
-                          ('exchange','💱 Exchange Rate')] %}
+                          ('currency','Currency'),
+                          ('exchange','Exchange Rate')] %}
     <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
         style="padding:10px 18px;border:none;background:transparent;
                color:var(--text2);font-size:13px;font-weight:500;
@@ -98,7 +98,7 @@
             the default. Any name works, including non-English text.
         </p>
 
-        <form id="currency-form" style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+        <form id="currency-form" data-ux-track-dirty style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
             <div class="card" style="margin:0;">
                 <div class="card-title">Primary Currency</div>
                 <div class="form-group">
@@ -154,7 +154,7 @@
                         onclick="saveCurrency(this)">Save Currency</button>
                 <button type="button" class="btn btn-secondary"
                         onclick="resetCurrency()">Reset to Defaults</button>
-                <span id="cur-status" style="font-size:13px;"></span>
+                <span id="cur-status" class="form-save-state" data-ux-save-state aria-live="polite" style="font-size:13px;"></span>
             </div>
 
             <div style="grid-column:1/-1;">
@@ -170,7 +170,7 @@
 <!-- EXCHANGE RATE TAB -->
 <div id="tab-content-exchange" class="tab-content" style="display:none;">
     <div class="card">
-        <div class="card-title">💱 {{ currency.coins.name }} ↔ {{ currency.diamonds.name }} Exchange Rate</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-sliders"></use></svg> {{ currency.coins.name }} ↔ {{ currency.diamonds.name }} Exchange Rate</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Members convert {{ currency.coins.name }} into {{ currency.diamonds.name }} in
             Discord with <code>/convert</code>, using this rate.

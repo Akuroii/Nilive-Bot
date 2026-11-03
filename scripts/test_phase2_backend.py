@@ -321,7 +321,8 @@ class AdditionalRuntimeTests(unittest.IsolatedAsyncioTestCase):
         cog_ast = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Leveling")
         for name in ("leaderboard_reset_task", "before_reset_task"):
             self.assertEqual(sum(getattr(node, "name", None) == name for node in cog_ast.body), 1)
-        execute("INSERT INTO leveling_reset_config (guild_id,enabled,period) VALUES (?,1,'daily')", (GUILD,))
+        self.bot._ready = asyncio.Event()
+        execute("INSERT INTO leveling_reset_config (guild_id,enabled,period,last_reset) VALUES (?,1,'daily','2020-01-01T00:00:00')", (GUILD,))
         await self.bot.load_extension("cogs.leveling")
         # load_extension creates a fresh module: instrument the loaded instance.
         leveling = importlib.import_module("cogs.leveling")

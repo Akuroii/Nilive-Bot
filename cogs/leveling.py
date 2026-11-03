@@ -1824,6 +1824,10 @@ async def _apply_admin_xp(guild_id: int, member, xp: int, bot, *,
                         f"command again.")
                 lease_held = True
             else:
+                from utils.xp_calculator import is_member_blacklisted
+                if await is_member_blacklisted(guild_id, member.id, db=db):
+                    raise ops.LevelOpsError(
+                        "Member is blacklisted from receiving positive XP grants.")
                 # An UPWARD change is not a correction, but it is still an XP
                 # write to the same member and must not land inside somebody
                 # else's sweep: the sweep's whole decision is "what is above the
@@ -1958,9 +1962,11 @@ class Leveling(commands.Cog):
         # its own poll loop, so there's no task to start/cancel here
         # anymore.
         self.leaderboard_reset_task.start()
+        self.blacklist_role_task.start()
 
     def cog_unload(self):
         self.leaderboard_reset_task.cancel()
+        self.blacklist_role_task.cancel()
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
@@ -2255,6 +2261,11 @@ class Leveling(commands.Cog):
             # same blacklist gate; voice XP still does NOT apply
             # bonus-role multipliers, matching its existing (separate)
             # design.
+            # Member Blacklist (D3): blacklisted members earn no Voice XP.
+            from utils.xp_calculator import is_member_blacklisted
+            if await is_member_blacklisted(guild.id, member.id):
+                return
+
             role_ids = [r.id for r in member.roles]
             if await is_role_blacklisted(guild.id, role_ids):
                 return
@@ -2398,6 +2409,22 @@ class Leveling(commands.Cog):
 
     @leaderboard_reset_task.before_loop
     async def before_reset_task(self):
+        await self.bot.wait_until_ready()
+
+    # ─── MEMBER BLACKLIST ROLE SWEEP ────────────────────────────────
+    # The dashboard has no Discord cache, so blacklisting/unblacklisting from it
+    # only writes the database. This loop applies the role side: strip Level-only
+    # roles from blacklisted members, restore roles after an unblacklist.
+    @tasks.loop(minutes=2)
+    async def blacklist_role_task(self):
+        try:
+            from utils.level_claims import process_blacklist_roles
+            await process_blacklist_roles(self.bot)
+        except Exception as e:
+            print(f"[BLACKLIST SWEEP] sweep failed: {e!r}")
+
+    @blacklist_role_task.before_loop
+    async def before_blacklist_role_task(self):
         await self.bot.wait_until_ready()
 
     # ─── LEADERBOARD ────────────────────────────────────

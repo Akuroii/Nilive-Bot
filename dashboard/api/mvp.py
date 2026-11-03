@@ -81,7 +81,20 @@ def get_mvp_config_api():
 @require_api_permission(LEVEL_ADMIN)
 def save_mvp_config_api():
     guild_id = get_session_guild_id()
-    data     = request.json
+    data     = request.json or {}
+
+    new_role = data.get("mvp_role_id")
+    if new_role:
+        async def get_curr():
+            async with aiosqlite.connect(DB_PATH) as db:
+                c = await db.execute("SELECT mvp_role_id FROM mvp_config WHERE guild_id = ?", (guild_id,))
+                row = await c.fetchone()
+                return row[0] if row else None
+        curr_role = run_async(get_curr())
+        from dashboard.utils.role_validation import validate_assignable_role
+        valid, err = validate_assignable_role(guild_id, new_role, curr_role)
+        if not valid:
+            return jsonify({"success": False, "error": f"Invalid MVP Role: {err}"}), 400
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:

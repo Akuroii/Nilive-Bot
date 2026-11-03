@@ -90,20 +90,51 @@ window.NeroSelect = (function () {
         const text = optText(opt);
         if (!opt || opt.id == null || opt.id === '') return el('span', 'ns-role-name', text);
         const color = readField(opt, 'color', 'color', 'color') || '#99aab5';
+        const unassignable = readField(opt, 'unassignable', 'unassignable', 'unassignable');
+        const reason = readField(opt, 'reason', 'reason', 'reason');
         const root = el('span', 'ns-role-option');
         const dot = el('span', 'ns-color-dot');
         dot.style.background = color;
         root.appendChild(dot);
         root.appendChild(el('span', 'ns-role-name', text));
+        if (unassignable === '1' && reason) {
+            root.appendChild(el('span', 'ns-role-badge', reason));
+        }
         return $(root);
     }
 
     function formatChannel(opt) {
         const text = optText(opt);
         if (!opt || opt.id == null || opt.id === '') return el('span', 'ns-ch-name', text);
-        const icon = readField(opt, 'typeIcon', 'type_icon', 'type-icon') || '💬';
+        const iconKey = readField(opt, 'typeIcon', 'type_icon', 'type-icon') || '#';
         const root = el('span', 'ns-ch-option');
-        root.appendChild(el('span', 'ns-ch-icon', icon));
+        const iconSpan = el('span', 'ns-ch-icon');
+
+        if (iconKey === '#' || iconKey === 'text' || !iconKey) {
+            iconSpan.textContent = '#';
+            iconSpan.classList.add('ns-ch-icon-hash');
+        } else {
+            const spriteMap = {
+                'speaker': 'nero-i-speaker',
+                'voice': 'nero-i-speaker',
+                'megaphone': 'nero-i-megaphone',
+                'announcement': 'nero-i-megaphone',
+                'mic': 'nero-i-mic',
+                'stage': 'nero-i-mic',
+                'forum': 'nero-i-file',
+                'file': 'nero-i-file',
+                'thread': 'nero-i-message',
+                'message': 'nero-i-message',
+            };
+            const symbolId = spriteMap[iconKey];
+            if (symbolId) {
+                iconSpan.innerHTML = `<svg class="ns-ch-svg" viewBox="0 0 24 24" aria-hidden="true"><use href="#${symbolId}"></use></svg>`;
+            } else {
+                iconSpan.textContent = iconKey;
+            }
+        }
+
+        root.appendChild(iconSpan);
         root.appendChild(el('span', 'ns-ch-name', text));
         return $(root);
     }
@@ -112,15 +143,62 @@ window.NeroSelect = (function () {
     // content and the custom display fields are stamped on as data-* attrs
     // (see the note above) so the templates can read them back off
     // opt.element.
-    function makeOption(r, selected) {
+    function makeOption(r, selected, assignableOnly) {
         const id = r.id != null ? String(r.id) : '';
         const name = r.text != null ? String(r.text)
             : (r.name != null ? String(r.name) : id);
         const color = r.color != null ? String(r.color) : '';
         const icon = (r.type_icon != null ? r.type_icon
                     : (r.typeIcon != null ? r.typeIcon : '')) || '';
-        return `<option value="${esc(id)}" ${selected ? 'selected' : ''} ` +
-            `data-color="${esc(color)}" data-type-icon="${esc(icon)}">${esc(name)}</option>`;
+        const isUnassignable = (r.assignable === false);
+        const reason = r.unassignable_label || '';
+
+        // In role-assignment pickers (assignableOnly), unassignable roles are
+        // disabled to prevent new invalid bindings. However, if an unassignable
+        // role is already the current stored value (selected), we keep it enabled
+        // so existing configurations remain visible and are never wiped out.
+        const shouldDisable = (assignableOnly && isUnassignable && !selected);
+        const disabledAttr = shouldDisable ? 'disabled="disabled"' : '';
+        const unassignableAttr = isUnassignable ? 'data-unassignable="1"' : 'data-unassignable="0"';
+        const reasonAttr = reason ? `data-reason="${esc(reason)}"` : '';
+
+        return `<option value="${esc(id)}" ${selected ? 'selected' : ''} ${disabledAttr} ` +
+            `data-color="${esc(color)}" data-type-icon="${esc(icon)}" ${unassignableAttr} ${reasonAttr}>${esc(name)}</option>`;
+    }
+
+    // Populate <option> and <optgroup> tags into the select element. Channels
+    // are organized by their parent category hierarchy if present.
+    function populateOptions($el, kind, results, isSelectedFn, assignableOnly) {
+        if (kind === 'channel') {
+            const groups = new Map();
+            results.forEach(r => {
+                const cat = (r.category && String(r.category).trim()) || 'Uncategorized';
+                if (!groups.has(cat)) groups.set(cat, []);
+                groups.get(cat).push(r);
+            });
+
+            // If all channels are uncategorized, render a flat list without a superfluous single group
+            if (groups.size <= 1 && groups.has('Uncategorized')) {
+                results.forEach(r => {
+                    const selected = isSelectedFn(r.id);
+                    $el.append(makeOption(r, selected, assignableOnly));
+                });
+            } else {
+                for (const [catName, chList] of groups.entries()) {
+                    const $grp = $('<optgroup>').attr('label', catName);
+                    chList.forEach(r => {
+                        const selected = isSelectedFn(r.id);
+                        $grp.append(makeOption(r, selected, assignableOnly));
+                    });
+                    $el.append($grp);
+                }
+            }
+        } else {
+            results.forEach(r => {
+                const selected = isSelectedFn(r.id);
+                $el.append(makeOption(r, selected, assignableOnly));
+            });
+        }
     }
 
     async function initOne(el, kind) {
@@ -130,14 +208,12 @@ window.NeroSelect = (function () {
         const $el = $(el);
         const results = await fetchOptions(kind);
         const preselect = el.dataset.value || '';
+        const assignableOnly = (el.dataset.assignableOnly === 'true' || el.classList.contains('nero-assignable-role-picker'));
 
         // Build <option> tags so a plain value (no JS) still works
         $el.empty();
         $el.append('<option value=""></option>');
-        results.forEach(r => {
-            const selected = String(r.id) === String(preselect);
-            $el.append(makeOption(r, selected));
-        });
+        populateOptions($el, kind, results, id => String(id) === String(preselect), assignableOnly);
 
         try {
             $el.select2({
@@ -164,34 +240,6 @@ window.NeroSelect = (function () {
     }
 
     // ── Lazy multi-select (Commands → per-command Edit panel) ──────────
-    //
-    // Deliberately NOT scanned by initAll()/DOMContentLoaded — a page
-    // like Commands can render 90+ command rows, and every row's Edit
-    // panel carries 4 of these (enabled/disabled roles, enabled/disabled
-    // channels). Auto-initializing all of them on load would fire
-    // ~350+ /api/guild/roles + /api/guild/channels requests before the
-    // user ever opens a single panel. Callers (commands.html) invoke
-    // this explicitly the first time a given panel is expanded, so the
-    // cost is paid once per command a Dark actually edits, not once per
-    // command that merely exists.
-    //
-    // `preselect` is an array of ID strings (already parsed from the
-    // stored JSON column) rather than a single data-value string, since
-    // these pickers are multi-select. Same dedupe guard
-    // (dataset.nsInit) as initOne so re-opening an already-initialized
-    // panel doesn't refetch or re-wrap Select2 around itself.
-    //
-    // IMPORTANT: this must never reject. commands.html's
-    // loadCommandSettings() awaits several of these via
-    // Promise.allSettled and needs to always be able to reveal the panel
-    // afterward — the earlier version let a select2 failure propagate as
-    // a rejection, which silently killed the whole panel (stuck on
-    // "Loading settings…" forever, Save button never reachable, since it
-    // lives inside the still-hidden fields container). The select2 call
-    // is now wrapped so a broken/missing select2 degrades to a plain
-    // native <select multiple> instead of taking the panel down with it —
-    // getMultiValues() below reads via jQuery .val(), which works on a
-    // plain <select> exactly the same as a select2-enhanced one.
     async function initMulti(el, kind, preselect) {
         if (!el || el.dataset.nsInit === '1') return;
         el.dataset.nsInit = '1';
@@ -200,12 +248,10 @@ window.NeroSelect = (function () {
         const $el = $(el);
         const results = await fetchOptions(kind);
         const preselectStr = (preselect || []).map(String);
+        const assignableOnly = (el.dataset.assignableOnly === 'true' || el.classList.contains('nero-assignable-role-picker'));
 
         $el.empty();
-        results.forEach(r => {
-            const selected = preselectStr.includes(String(r.id));
-            $el.append(makeOption(r, selected));
-        });
+        populateOptions($el, kind, results, id => preselectStr.includes(String(id)), assignableOnly);
 
         try {
             $el.select2({
@@ -243,7 +289,15 @@ window.NeroSelect = (function () {
         return !!(el && el.dataset && el.dataset.nsInit === '1');
     }
 
-    return { initAll, initMulti, getMultiValues, isReady };
+    return {
+        initAll,
+        initMulti,
+        initOne,
+        getMultiValues,
+        isReady,
+        _populateOptions: populateOptions,
+        _makeOption: makeOption,
+    };
 })();
 
 document.addEventListener('DOMContentLoaded', () => window.NeroSelect.initAll(document));

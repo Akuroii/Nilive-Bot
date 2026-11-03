@@ -50,22 +50,19 @@ function reportApiReadFailure(status) {
                 init.headers = Object.assign({}, init.headers, { 'X-CSRF-Token': token });
             }
         }
-        // Do not send guild context to third parties or global server-picker
-        // endpoints. A stale tab's id is checked against the active session.
-        const rawUrl = typeof input === 'string' ? input : (input && input.url) || String(input);
-        try {
-            const url = new URL(rawUrl, window.location.href);
-            if (window.__GUILD_ID__ && url.origin === window.location.origin &&
-                url.pathname.startsWith('/api/') && url.pathname !== '/api/user/servers' &&
-                !url.pathname.startsWith('/api/invite-bot/')) {
-                const headers = new Headers(init.headers || (input && input.headers) || {});
-                headers.set('X-Guild-ID', String(window.__GUILD_ID__));
-                init.headers = headers;
+
+        const guildId = window.__GUILD_ID__;
+        if (guildId) {
+            if (init.headers instanceof Headers) {
+                init.headers.set('X-Guild-ID', String(guildId));
+            } else {
+                init.headers = Object.assign({}, init.headers, { 'X-Guild-ID': String(guildId) });
             }
-        } catch (e) { /* A malformed URL is handled by fetch itself. */ }
-        const result = originalFetch(input, init);
-        if (!apiRead) return result;
-        return result.then(function(response) {
+        }
+
+        const request = originalFetch(input, init);
+        if (!apiRead) return request;
+        return request.then(function(response) {
             if (response.status >= 500) reportApiReadFailure(response.status);
             return response;
         }, function(error) {

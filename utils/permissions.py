@@ -57,14 +57,88 @@ async def can_moderate(actor, target, guild_id: int) -> tuple[bool, str]:
 
 
 def check_bot_role_position(guild, role) -> tuple[bool, str]:
-    bot_member = guild.me
+    """
+    Validate whether Nero can assign or remove `role` in `guild`.
+
+    Checks:
+    1. Guild and role exist.
+    2. Bot member exists in guild (`guild.me`).
+    3. Bot has MANAGE_ROLES or ADMINISTRATOR permission.
+    4. Role is not @everyone (role.id == guild.id or role.is_default()).
+    5. Role is not managed by an integration (role.managed).
+    6. Guild owner bypass (guild.owner_id == bot_member.id).
+    7. Hierarchy comparison using role.is_assignable() when available,
+       or Discord's hierarchy comparison (bot_member.top_role > role).
+    """
+    if guild is None or role is None:
+        return False, "⚠️ Role or guild context missing"
+
+    bot_member = getattr(guild, "me", None)
     if bot_member is None:
         return False, "⚠️ Could not find Nero in this server"
-    if role.position >= bot_member.top_role.position:
-        return False, (
-            f"⚠️ Nero's role must be above @{role.name} to assign it. "
-            f"Go to Server Settings > Roles and drag Nero above @{role.name}."
-        )
+
+    # Effective permissions check (MANAGE_ROLES or ADMINISTRATOR)
+    perms = getattr(bot_member, "guild_permissions", None)
+    if perms is not None:
+        has_manage_roles = getattr(perms, "administrator", False) or getattr(perms, "manage_roles", False)
+        if not has_manage_roles:
+            return False, "⚠️ Nero lacks the 'Manage Roles' permission in this server."
+
+    # If the Role object supports discord.py's native `is_assignable()`, use it
+    # as the authoritative check for default role, managed role, owner bypass, and hierarchy.
+    if hasattr(role, "is_assignable") and callable(role.is_assignable):
+        try:
+            assignable_val = role.is_assignable()
+            if isinstance(assignable_val, bool):
+                if not assignable_val:
+                    if hasattr(role, "is_default") and role.is_default():
+                        return False, "⚠️ The @everyone role cannot be assigned."
+                    if getattr(role, "managed", False):
+                        return False, f"⚠️ Role @{getattr(role, 'name', role.id)} is managed by an integration and cannot be assigned."
+                    top_name = getattr(getattr(bot_member, "top_role", None), "name", "Nero's role")
+                    return False, (
+                        f"⚠️ Nero's role must be strictly above @{getattr(role, 'name', role.id)} to assign it. "
+                        f"Go to Server Settings > Roles and drag @{top_name} above @{getattr(role, 'name', role.id)}."
+                    )
+                return True, "OK"
+        except Exception:
+            pass  # Fall back to explicit checks below if mock/custom role object
+
+    # Fallback explicit checks (for mocks, dict-like roles, or legacy objects):
+    guild_id = getattr(guild, "id", None)
+    role_id = getattr(role, "id", None)
+    if guild_id and role_id and str(role_id) == str(guild_id):
+        return False, "⚠️ The @everyone role cannot be assigned."
+
+    if getattr(role, "managed", False):
+        return False, f"⚠️ Role @{getattr(role, 'name', role_id)} is managed by an integration and cannot be assigned."
+
+    # Guild owner bypass
+    if getattr(guild, "owner_id", None) and getattr(bot_member, "id", None) and guild.owner_id == bot_member.id:
+        return True, "OK"
+
+    # Top role comparison
+    bot_top = getattr(bot_member, "top_role", None)
+    if bot_top is not None:
+        # If bot_top and role can be compared with > (discord.py Role object)
+        try:
+            if not (bot_top > role):
+                top_name = getattr(bot_top, "name", "Nero's role")
+                return False, (
+                    f"⚠️ Nero's role must be strictly above @{getattr(role, 'name', role_id)} to assign it. "
+                    f"Go to Server Settings > Roles and drag @{top_name} above @{getattr(role, 'name', role_id)}."
+                )
+        except Exception:
+            # Fallback if position comparison
+            role_pos = getattr(role, "position", 0)
+            bot_pos = getattr(bot_top, "position", 0)
+            if role_pos >= bot_pos:
+                top_name = getattr(bot_top, "name", "Nero's role")
+                return False, (
+                    f"⚠️ Nero's role must be strictly above @{getattr(role, 'name', role_id)} to assign it. "
+                    f"Go to Server Settings > Roles and drag @{top_name} above @{getattr(role, 'name', role_id)}."
+                )
+
     return True, "OK"
 
 

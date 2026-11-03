@@ -48,22 +48,22 @@
 
 {% if is_admin %}
 <div class="card">
-    <div class="card-title">✏️ Edit Stats</div>
+    <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-sliders"></use></svg> Edit Stats</div>
     <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;">
         <div class="form-group" style="margin-bottom:0;">
-            <label class="form-label">XP</label>
+            <label class="form-label" for="edit-xp">XP</label>
             <input class="form-input" id="edit-xp"
                    value="{{ profile.xp }}" type="number" min="0"
                    style="width:160px;">
         </div>
         <div class="form-group" style="margin-bottom:0;">
-            <label class="form-label">{{ currency.coins.name }}</label>
+            <label class="form-label" for="edit-coins">{{ currency.coins.name }}</label>
             <input class="form-input" id="edit-coins"
                    value="{{ profile.coins }}" type="number" min="0"
                    style="width:160px;">
         </div>
         <div class="form-group" style="margin-bottom:0;">
-            <label class="form-label">{{ currency.diamonds.name }}</label>
+            <label class="form-label" for="edit-diamonds">{{ currency.diamonds.name }}</label>
             <input class="form-input" id="edit-diamonds"
                    value="{{ profile.diamonds }}" type="number" min="0"
                    style="width:160px;">
@@ -78,7 +78,7 @@
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
 
     <div class="card">
-        <div class="card-title">⚠️ Warnings</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-alert"></use></svg> Warnings</div>
         {% if profile.warnings %}
         <div class="table-wrap">
             <table class="table">
@@ -105,7 +105,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🛡️ Moderation History</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-shield"></use></svg> Moderation History</div>
         {% if profile.mod_logs %}
         <div class="table-wrap">
             <table class="table">
@@ -137,7 +137,7 @@
     </div>
 
     <div class="card" style="grid-column:1/-1;">
-        <div class="card-title">🛒 Purchase History</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-shop"></use></svg> Purchase History</div>
         {% if profile.purchases %}
         <div class="table-wrap">
             <table class="table">
@@ -157,7 +157,7 @@
         </div>
         {% else %}
         <div class="empty-state">
-            <div class="empty-icon">🛒</div>
+            <div class="empty-icon"><svg style="width:40px;height:40px;stroke:var(--text3);fill:none;stroke-width:1.5;" aria-hidden="true"><use href="#nero-i-shop"></use></svg></div>
             <div class="empty-text">No purchases yet</div>
         </div>
         {% endif %}
@@ -200,7 +200,7 @@ async function saveProfile() {
         // reward correction); show the server's explanation instead of a
         // generic failure so the administrator knows to use /setlevel.
         const message = data.error || 'Error saving';
-        status.textContent = '❌ ' + message;
+        status.textContent = message;
         status.style.color = 'var(--danger)';
         showToast(message, 'error');
     }

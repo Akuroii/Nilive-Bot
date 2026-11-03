@@ -169,9 +169,22 @@ def main():
         check(f"{label}: the refused GET changes nothing", snapshot() == before)
 
     # 5. The page's real add -> refresh -> delete -> refresh sequence.
+    from unittest.mock import patch
     headers = {"X-CSRF-Token": CSRF}
-    added = admin.post("/api/leveling/reward", headers=headers,
-                       json={"level": 5, "role_id": "1234567890123456791", "audience": "everyone"})
+    mock_roles = [
+        {"id": str(GUILD), "name": "@everyone", "position": 0, "color": 0, "managed": False, "permissions": "0"},
+        {"id": "1234567890123456791", "name": "Reward Role", "position": 1, "color": 0x10b981, "managed": False, "permissions": "0"},
+        {"id": "999999999999999999", "name": "Nero", "position": 10, "color": 0x8b5cf6, "managed": True, "permissions": str(0x10000000)},
+    ]
+    mock_bot_member = {
+        "user": {"id": "888888888888888888"},
+        "roles": ["999999999999999999"],
+        "permissions": str(0x10000000),
+    }
+    with patch("dashboard.utils.role_validation.fetch_guild_roles_and_bot_member",
+               return_value=(mock_roles, mock_bot_member, None)):
+        added = admin.post("/api/leveling/reward", headers=headers,
+                           json={"level": 5, "role_id": "1234567890123456791", "audience": "everyone"})
     check("add succeeds (unchanged existing route)", added.status_code == 200,
           f"{added.status_code} {added.get_data(as_text=True)[:120]!r}")
     listed = admin.get(URL)

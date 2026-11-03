@@ -1,7 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Moderation{% endblock %}
 {% block content %}
-{% set tab = tab if tab in ['logs', 'punishments', 'warnings', 'thresholds'] else 'logs' %}
 <span data-page-title="Moderation"></span>
 
 <!-- Stats row -->
@@ -392,7 +391,7 @@ window.switchTab = switchTab;
 if (window.__neroGlobal) window.__neroGlobal.switchTab = switchTab;
 
 (function() {
-    const initTab = {{ tab|tojson }} || 'logs';
+    const initTab = "{{ tab|e }}" || 'logs';
     switchTab(initTab);
 })();
 
@@ -523,19 +522,64 @@ async function clearWarnings(userId) {
 
 // ── Thresholds ────────────────────────────────────────────────────────────────
 async function addThreshold() {
+    const countEl = document.getElementById('th-count');
+    const actEl = document.getElementById('th-action');
+    const durEl = document.getElementById('th-duration');
+    const btn = document.getElementById('th-add-btn');
+
+    const warnCount = parseInt(countEl ? countEl.value : '3', 10);
+    const action = actEl ? actEl.value : 'timeout';
+    const duration = durEl && durEl.value ? parseInt(durEl.value, 10) : null;
+
     const payload = {
-        warn_count: parseInt(document.getElementById('th-count').value),
-        action: document.getElementById('th-action').value,
-        duration_minutes: document.getElementById('th-duration').value || null
+        warn_count: warnCount,
+        action: action,
+        duration_minutes: duration
     };
-    const res = await fetch('/api/moderation/warning-thresholds', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (data.success) { showToast('Threshold added', 'success'); setTimeout(() => location.reload(), 600); }
-    else showToast(data.error || 'Failed', 'error');
+
+    if (btn) btn.disabled = true;
+    try {
+        const res = await fetch('/api/moderation/warning-thresholds', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast('Threshold added', 'success');
+            // Refresh threshold list smoothly
+            const listRes = await fetch('/api/moderation/warning-thresholds');
+            const thresholds = await listRes.json();
+            const tbody = document.getElementById('thresholds-tbody');
+            if (tbody && Array.isArray(thresholds)) {
+                if (!thresholds.length) {
+                    tbody.innerHTML = '<tr id="thresh-empty-row"><td colspan="5" class="empty">No thresholds configured</td></tr>';
+                } else {
+                    tbody.innerHTML = thresholds.map(t => `
+                        <tr id="thresh-row-${t.id}">
+                            <td><strong>${t.warn_count}</strong></td>
+                            <td><span class="badge badge-warning">${t.action}</span></td>
+                            <td class="text-muted">${t.duration_minutes || '—'}</td>
+                            <td>
+                                <span class="badge ${t.enabled ? 'badge-success' : 'badge-danger'}">
+                                    ${t.enabled ? 'Active' : 'Off'}
+                                </span>
+                            </td>
+                            <td>
+                                <button class="btn btn-sm btn-danger" onclick="deleteThreshold(${t.id})">Delete</button>
+                            </td>
+                        </tr>
+                    `).join('');
+                }
+            }
+        } else {
+            showToast(data.error || 'Failed', 'error');
+        }
+    } catch (e) {
+        showToast('Connection error', 'error');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
 }
 
 async function deleteThreshold(id) {
@@ -573,6 +617,21 @@ async function toggleAutoEscalation(enabled) {
         showToast(data.error || 'Failed to update auto-escalation', 'error');
     }
 }
+
+// Close edit reason modal on overlay click
+document.getElementById('edit-reason-modal') && document.getElementById('edit-reason-modal').addEventListener('click', function(e) {
+    if (e.target === this) this.style.display = 'none';
+});
+
+// Hide duration field initially if not needed
+(function() {
+    const actionEl = document.getElementById('qa-action');
+    const wrap = document.getElementById('qa-duration-wrap');
+    if (actionEl && wrap && !['timeout','temp_ban'].includes(actionEl.value)) {
+        wrap.style.display = 'none';
+    }
+})();
+</script>
 
 // Close edit reason modal on overlay click
 document.getElementById('edit-reason-modal') && document.getElementById('edit-reason-modal').addEventListener('click', function(e) {

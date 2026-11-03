@@ -126,11 +126,21 @@ class RulesView(discord.ui.View):
                 "You already accepted the rules.", ephemeral=True)
             return
 
-        await interaction.user.add_roles(
-            role, reason="Accepted rules")
-        await interaction.response.send_message(
-            f"{CHECK_EMOJI} Welcome! You've been given the {role.name} role.",
-            ephemeral=True)
+        try:
+            await interaction.user.add_roles(
+                role, reason="Accepted rules")
+            await interaction.response.send_message(
+                f"{CHECK_EMOJI} Welcome! You've been given the {role.name} role.",
+                ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "⚠️ Nero lacks permission to assign this role. Please notify an administrator.",
+                ephemeral=True)
+        except Exception as e:
+            print(f"[WELCOME] Failed to give rules role: {e}")
+            await interaction.response.send_message(
+                "⚠️ An error occurred while assigning the role.",
+                ephemeral=True)
 
 
 class Welcome(commands.Cog):

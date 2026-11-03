@@ -4,7 +4,7 @@
 <span data-page-title="Tag Missions"></span>
 
 <div class="card">
-    <div class="card-title">🏷️ Create Mission</div>
+    <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> Create Mission</div>
     <p class="text-muted text-sm" style="margin-bottom:16px;">
         Members confirm by pressing a button while wearing this server's own Discord
         tag. The reward only pays out if they're still wearing it when the mission
@@ -92,21 +92,23 @@
 </div>
 
 <div class="card">
-    <div class="card-title">Missions</div>
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Title</th>
-                <th>Status</th>
-                <th>Window (UTC)</th>
-                <th>Participants</th>
-                <th></th>
-            </tr>
-        </thead>
-        <tbody id="tm-list-body">
-            <tr><td colspan="5" class="empty">Loading...</td></tr>
-        </tbody>
-    </table>
+    <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-target"></use></svg> Missions</div>
+    <div class="table-wrap">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Title</th>
+                    <th>Status</th>
+                    <th>Window (UTC)</th>
+                    <th>Participants</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody id="tm-list-body">
+                <tr><td colspan="5" class="empty">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
 </div>
 
 <script>

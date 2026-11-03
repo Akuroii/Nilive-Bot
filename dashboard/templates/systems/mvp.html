@@ -6,27 +6,37 @@
 
 <div style="display:flex;gap:4px;margin-bottom:20px;
             border-bottom:1px solid var(--border);padding-bottom:0;">
-    {% for tab, label in [('scores','🏆 Today'),('history','📜 History'),('config','⚙️ Config')] %}
-    <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
+    <button onclick="switchTab('scores')" id="tab-scores"
         style="padding:10px 18px;border:none;background:transparent;
                color:var(--text2);font-size:13px;font-weight:500;
                cursor:pointer;border-bottom:2px solid transparent;
                transition:all .15s;margin-bottom:-1px;min-height:44px;"
-        class="tab-btn">{{ label }}</button>
-    {% endfor %}
+        class="tab-btn"><svg class="tab-icon" aria-hidden="true"><use href="#nero-i-trophy"></use></svg> Today</button>
+    <button onclick="switchTab('history')" id="tab-history"
+        style="padding:10px 18px;border:none;background:transparent;
+               color:var(--text2);font-size:13px;font-weight:500;
+               cursor:pointer;border-bottom:2px solid transparent;
+               transition:all .15s;margin-bottom:-1px;min-height:44px;"
+        class="tab-btn"><svg class="tab-icon" aria-hidden="true"><use href="#nero-i-file"></use></svg> History</button>
+    <button onclick="switchTab('config')" id="tab-config"
+        style="padding:10px 18px;border:none;background:transparent;
+               color:var(--text2);font-size:13px;font-weight:500;
+               cursor:pointer;border-bottom:2px solid transparent;
+               transition:all .15s;margin-bottom:-1px;min-height:44px;"
+        class="tab-btn"><svg class="tab-icon" aria-hidden="true"><use href="#nero-i-settings"></use></svg> Config</button>
 </div>
 
 <!-- TODAY TAB -->
 <div id="tab-content-scores" class="tab-content">
     <div class="card">
         <div class="card-header">
-            <div class="card-title" style="margin:0">🏆 Today's MVP Scores</div>
+            <div class="card-title" style="margin:0"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-trophy"></use></svg> Today's MVP Scores</div>
             <button class="btn btn-secondary"
                     hx-get="/api/mvp/scores"
                     hx-target="#mvp-scores-tbody"
                     hx-swap="innerHTML"
                     hx-boost="false">
-                🔄 Refresh
+                <svg class="btn-icon-svg" aria-hidden="true"><use href="#nero-i-refresh"></use></svg> Refresh
             </button>
         </div>
         <div class="table-wrap">
@@ -46,7 +56,11 @@
                     {% for s in scores %}
                     {% set u = user_map.get(s[0], {}) %}
                     <tr>
-                        <td>{% if loop.index == 1 %}🥇{% elif loop.index == 2 %}🥈{% elif loop.index == 3 %}🥉{% else %}#{{ loop.index }}{% endif %}</td>
+                        <td>
+                            <div class="rank-badge {% if loop.index == 1 %}rank-1{% elif loop.index == 2 %}rank-2{% elif loop.index == 3 %}rank-3{% else %}rank-n{% endif %}">
+                                {{ loop.index }}
+                            </div>
+                        </td>
                         <td>{{ user_identity(s[0], u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
                         <td>{{ "%.1f"|format(s[1]) }}</td>
                         <td>{{ "%.1f"|format(s[2]) }}</td>
@@ -64,7 +78,7 @@
 <!-- HISTORY TAB -->
 <div id="tab-content-history" class="tab-content" style="display:none;">
     <div class="card">
-        <div class="card-title">📜 MVP History</div>
+        <div class="card-title"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-file"></use></svg> MVP History</div>
         <div class="table-wrap">
             <table class="table">
                 <thead>
@@ -92,8 +106,8 @@
 
 <!-- CONFIG TAB -->
 <div id="tab-content-config" class="tab-content" style="display:none;">
-    <div class="card">
-        <div class="card-title">⚙️ MVP Configuration</div>
+    <div class="card" data-ux-track-dirty>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-settings"></use></svg> MVP Configuration</div>
         <div class="form-row">
             <div class="form-group">
                 <label class="form-label">Cycle hours (how often MVP resets)</label>
@@ -103,7 +117,7 @@
             </div>
             <div class="form-group">
                 <label class="form-label">MVP role</label>
-                <select class="nero-role-picker form-input" id="mvp-role-picker"></select>
+                <select class="nero-role-picker form-input" id="mvp-role-picker" data-assignable-only="true"></select>
             </div>
             <div class="form-group">
                 <label class="form-label">Announce channel</label>
@@ -122,6 +136,7 @@
         </div>
         <button class="btn btn-primary" id="mvp-save-btn"
                 onclick="saveMVPConfig(this)">Save Config</button>
+        <span class="form-save-state" data-ux-save-state aria-live="polite"></span>
     </div>
 </div>
 
